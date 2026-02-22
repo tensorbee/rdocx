@@ -66,12 +66,9 @@ impl CT_HdrFtr {
                             if (key.starts_with(b"xmlns:") || key == b"xmlns")
                                 && !known_ns.contains(&key)
                             {
-                                let key_str = std::str::from_utf8(key)
-                                    .unwrap_or("")
-                                    .to_string();
-                                let val_str = std::str::from_utf8(&attr.value)
-                                    .unwrap_or("")
-                                    .to_string();
+                                let key_str = std::str::from_utf8(key).unwrap_or("").to_string();
+                                let val_str =
+                                    std::str::from_utf8(&attr.value).unwrap_or("").to_string();
                                 extra_namespaces.push((key_str, val_str));
                             }
                         }

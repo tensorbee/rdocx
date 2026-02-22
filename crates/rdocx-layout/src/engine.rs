@@ -12,7 +12,10 @@ use crate::error::Result;
 use crate::font::FontManager;
 use crate::input::LayoutInput;
 use crate::line::{self, InlineItem, LineBreakParams, LineItem, TextSegment};
-use crate::output::{Color, DocumentMetadata, FieldKind, GlyphRun, LayoutResult, PageFrame, Point, PositionedElement, Rect};
+use crate::output::{
+    Color, DocumentMetadata, FieldKind, GlyphRun, LayoutResult, PageFrame, Point,
+    PositionedElement, Rect,
+};
 use crate::paginator::{self, HeaderFooterContent, PageGeometry};
 use crate::style_resolver::{self, NumberingState};
 use crate::table;
@@ -63,10 +66,7 @@ impl Engine {
             match content {
                 BodyContent::Paragraph(para) => {
                     // Check if this paragraph ends a section (has sect_pr)
-                    let para_sect_pr = para
-                        .properties
-                        .as_ref()
-                        .and_then(|p| p.sect_pr.clone());
+                    let para_sect_pr = para.properties.as_ref().and_then(|p| p.sect_pr.clone());
 
                     let sect_pr_for_layout = para_sect_pr
                         .as_ref()
@@ -153,7 +153,12 @@ impl Engine {
         let total_pages = pages.len();
         for page in &mut pages {
             let page_num = page.page_number;
-            substitute_fields(&mut page.elements, page_num, total_pages, &mut self.font_manager);
+            substitute_fields(
+                &mut page.elements,
+                page_num,
+                total_pages,
+                &mut self.font_manager,
+            );
         }
 
         // Post-pagination pass: apply page background color
@@ -252,8 +257,8 @@ fn extract_background_color(xml: &str) -> Option<Color> {
 /// For `behind_doc=true` images: inserts at the START of page elements (renders underneath).
 /// For `behind_doc=false` images: inserts at the END (renders on top).
 fn resolve_anchor_images(pages: &mut [PageFrame], input: &LayoutInput) {
-    use rdocx_oxml::text::RunContent;
     use crate::output::Rect;
+    use rdocx_oxml::text::RunContent;
 
     // Collect all anchor drawings from body content
     let mut anchor_images: Vec<(bool, f64, f64, f64, f64, String)> = Vec::new();
@@ -549,10 +554,7 @@ pub fn layout_paragraph(
     num_state: &mut NumberingState,
 ) -> Result<ParagraphBlock> {
     // Resolve paragraph properties
-    let para_style_id = para
-        .properties
-        .as_ref()
-        .and_then(|p| p.style_id.as_deref());
+    let para_style_id = para.properties.as_ref().and_then(|p| p.style_id.as_deref());
 
     let resolved_ppr = style_resolver::resolve_paragraph_properties(para_style_id, styles);
 
@@ -563,24 +565,15 @@ pub fn layout_paragraph(
     }
 
     // Convert paragraph properties to layout values
-    let space_before = effective_ppr
-        .space_before
-        .map(|t| t.to_pt())
-        .unwrap_or(0.0);
-    let space_after = effective_ppr
-        .space_after
-        .map(|t| t.to_pt())
-        .unwrap_or(0.0);
+    let space_before = effective_ppr.space_before.map(|t| t.to_pt()).unwrap_or(0.0);
+    let space_after = effective_ppr.space_after.map(|t| t.to_pt()).unwrap_or(0.0);
     let ind_left = effective_ppr.ind_left.map(|t| t.to_pt()).unwrap_or(0.0);
     let ind_right = effective_ppr.ind_right.map(|t| t.to_pt()).unwrap_or(0.0);
     let ind_first_line = effective_ppr
         .ind_first_line
         .map(|t| t.to_pt())
         .unwrap_or(0.0);
-    let ind_hanging = effective_ppr
-        .ind_hanging
-        .map(|t| t.to_pt())
-        .unwrap_or(0.0);
+    let ind_hanging = effective_ppr.ind_hanging.map(|t| t.to_pt()).unwrap_or(0.0);
 
     let keep_next = effective_ppr.keep_next.unwrap_or(false);
     let keep_lines = effective_ppr.keep_lines.unwrap_or(false);
@@ -609,20 +602,15 @@ pub fn layout_paragraph(
     // Handle numbering marker
     if let (Some(num_id), Some(numbering)) = (effective_ppr.num_id, input.numbering.as_ref()) {
         let ilvl = effective_ppr.num_ilvl.unwrap_or(0);
-        if let Some(marker) =
-            style_resolver::generate_marker(num_id, ilvl, numbering, num_state)
-        {
+        if let Some(marker) = style_resolver::generate_marker(num_id, ilvl, numbering, num_state) {
             // Shape the marker text
             let marker_rpr = marker.marker_rpr;
-            let marker_font_size = marker_rpr
-                .sz
-                .map(|hp| hp.to_pt())
-                .unwrap_or_else(|| {
-                    style_resolver::resolve_run_properties(para_style_id, None, styles)
-                        .sz
-                        .map(|hp| hp.to_pt())
-                        .unwrap_or(11.0)
-                });
+            let marker_font_size = marker_rpr.sz.map(|hp| hp.to_pt()).unwrap_or_else(|| {
+                style_resolver::resolve_run_properties(para_style_id, None, styles)
+                    .sz
+                    .map(|hp| hp.to_pt())
+                    .unwrap_or(11.0)
+            });
             let marker_bold = marker_rpr.bold.unwrap_or(false);
             let marker_italic = marker_rpr.italic.unwrap_or(false);
             let marker_font_family = marker_rpr.font_ascii.as_deref();
@@ -666,7 +654,8 @@ pub fn layout_paragraph(
     }
 
     // Build hyperlink URL map: run index → URL
-    let mut run_hyperlink_url: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+    let mut run_hyperlink_url: std::collections::HashMap<usize, String> =
+        std::collections::HashMap::new();
     for hl in &para.hyperlinks {
         if let Some(ref rel_id) = hl.rel_id {
             if let Some(url) = input.hyperlink_urls.get(rel_id) {
@@ -681,10 +670,7 @@ pub fn layout_paragraph(
     for (run_idx, run) in para.runs.iter().enumerate() {
         let current_hyperlink_url = run_hyperlink_url.get(&run_idx).cloned();
 
-        let run_style_id = run
-            .properties
-            .as_ref()
-            .and_then(|p| p.style_id.as_deref());
+        let run_style_id = run.properties.as_ref().and_then(|p| p.style_id.as_deref());
 
         let resolved_rpr =
             style_resolver::resolve_run_properties(para_style_id, run_style_id, styles);
@@ -714,9 +700,7 @@ pub fn layout_paragraph(
         let underline = effective_rpr.underline;
         let strike = effective_rpr.strike.unwrap_or(false);
         let dstrike = effective_rpr.dstrike.unwrap_or(false);
-        let highlight = effective_rpr
-            .highlight
-            .and_then(highlight_to_color);
+        let highlight = effective_rpr.highlight.and_then(highlight_to_color);
 
         // Superscript/subscript handling
         let mut baseline_offset = 0.0;
@@ -968,38 +952,14 @@ fn merge_direct_ppr(effective: &mut CT_PPr, direct: &CT_PPr) {
 /// Convert section properties to page geometry.
 fn sect_pr_to_geometry(sect_pr: &CT_SectPr) -> PageGeometry {
     PageGeometry {
-        page_width: sect_pr
-            .page_width
-            .map(|t| t.to_pt())
-            .unwrap_or(612.0),
-        page_height: sect_pr
-            .page_height
-            .map(|t| t.to_pt())
-            .unwrap_or(792.0),
-        margin_top: sect_pr
-            .margin_top
-            .map(|t| t.to_pt())
-            .unwrap_or(72.0),
-        margin_right: sect_pr
-            .margin_right
-            .map(|t| t.to_pt())
-            .unwrap_or(72.0),
-        margin_bottom: sect_pr
-            .margin_bottom
-            .map(|t| t.to_pt())
-            .unwrap_or(72.0),
-        margin_left: sect_pr
-            .margin_left
-            .map(|t| t.to_pt())
-            .unwrap_or(72.0),
-        header_distance: sect_pr
-            .header_distance
-            .map(|t| t.to_pt())
-            .unwrap_or(36.0),
-        footer_distance: sect_pr
-            .footer_distance
-            .map(|t| t.to_pt())
-            .unwrap_or(36.0),
+        page_width: sect_pr.page_width.map(|t| t.to_pt()).unwrap_or(612.0),
+        page_height: sect_pr.page_height.map(|t| t.to_pt()).unwrap_or(792.0),
+        margin_top: sect_pr.margin_top.map(|t| t.to_pt()).unwrap_or(72.0),
+        margin_right: sect_pr.margin_right.map(|t| t.to_pt()).unwrap_or(72.0),
+        margin_bottom: sect_pr.margin_bottom.map(|t| t.to_pt()).unwrap_or(72.0),
+        margin_left: sect_pr.margin_left.map(|t| t.to_pt()).unwrap_or(72.0),
+        header_distance: sect_pr.header_distance.map(|t| t.to_pt()).unwrap_or(36.0),
+        footer_distance: sect_pr.footer_distance.map(|t| t.to_pt()).unwrap_or(36.0),
     }
 }
 
@@ -1121,22 +1081,102 @@ fn resolve_run_color(
 fn highlight_to_color(h: ST_HighlightColor) -> Option<Color> {
     match h {
         ST_HighlightColor::None => None,
-        ST_HighlightColor::Black => Some(Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }),
-        ST_HighlightColor::Blue => Some(Color { r: 0.0, g: 0.0, b: 1.0, a: 1.0 }),
-        ST_HighlightColor::Cyan => Some(Color { r: 0.0, g: 1.0, b: 1.0, a: 1.0 }),
-        ST_HighlightColor::DarkBlue => Some(Color { r: 0.0, g: 0.0, b: 0.545, a: 1.0 }),
-        ST_HighlightColor::DarkCyan => Some(Color { r: 0.0, g: 0.545, b: 0.545, a: 1.0 }),
-        ST_HighlightColor::DarkGray => Some(Color { r: 0.663, g: 0.663, b: 0.663, a: 1.0 }),
-        ST_HighlightColor::DarkGreen => Some(Color { r: 0.0, g: 0.392, b: 0.0, a: 1.0 }),
-        ST_HighlightColor::DarkMagenta => Some(Color { r: 0.545, g: 0.0, b: 0.545, a: 1.0 }),
-        ST_HighlightColor::DarkRed => Some(Color { r: 0.545, g: 0.0, b: 0.0, a: 1.0 }),
-        ST_HighlightColor::DarkYellow => Some(Color { r: 0.545, g: 0.545, b: 0.0, a: 1.0 }),
-        ST_HighlightColor::Green => Some(Color { r: 0.0, g: 1.0, b: 0.0, a: 1.0 }),
-        ST_HighlightColor::LightGray => Some(Color { r: 0.827, g: 0.827, b: 0.827, a: 1.0 }),
-        ST_HighlightColor::Magenta => Some(Color { r: 1.0, g: 0.0, b: 1.0, a: 1.0 }),
-        ST_HighlightColor::Red => Some(Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
-        ST_HighlightColor::White => Some(Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }),
-        ST_HighlightColor::Yellow => Some(Color { r: 1.0, g: 1.0, b: 0.0, a: 1.0 }),
+        ST_HighlightColor::Black => Some(Color {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        }),
+        ST_HighlightColor::Blue => Some(Color {
+            r: 0.0,
+            g: 0.0,
+            b: 1.0,
+            a: 1.0,
+        }),
+        ST_HighlightColor::Cyan => Some(Color {
+            r: 0.0,
+            g: 1.0,
+            b: 1.0,
+            a: 1.0,
+        }),
+        ST_HighlightColor::DarkBlue => Some(Color {
+            r: 0.0,
+            g: 0.0,
+            b: 0.545,
+            a: 1.0,
+        }),
+        ST_HighlightColor::DarkCyan => Some(Color {
+            r: 0.0,
+            g: 0.545,
+            b: 0.545,
+            a: 1.0,
+        }),
+        ST_HighlightColor::DarkGray => Some(Color {
+            r: 0.663,
+            g: 0.663,
+            b: 0.663,
+            a: 1.0,
+        }),
+        ST_HighlightColor::DarkGreen => Some(Color {
+            r: 0.0,
+            g: 0.392,
+            b: 0.0,
+            a: 1.0,
+        }),
+        ST_HighlightColor::DarkMagenta => Some(Color {
+            r: 0.545,
+            g: 0.0,
+            b: 0.545,
+            a: 1.0,
+        }),
+        ST_HighlightColor::DarkRed => Some(Color {
+            r: 0.545,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        }),
+        ST_HighlightColor::DarkYellow => Some(Color {
+            r: 0.545,
+            g: 0.545,
+            b: 0.0,
+            a: 1.0,
+        }),
+        ST_HighlightColor::Green => Some(Color {
+            r: 0.0,
+            g: 1.0,
+            b: 0.0,
+            a: 1.0,
+        }),
+        ST_HighlightColor::LightGray => Some(Color {
+            r: 0.827,
+            g: 0.827,
+            b: 0.827,
+            a: 1.0,
+        }),
+        ST_HighlightColor::Magenta => Some(Color {
+            r: 1.0,
+            g: 0.0,
+            b: 1.0,
+            a: 1.0,
+        }),
+        ST_HighlightColor::Red => Some(Color {
+            r: 1.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        }),
+        ST_HighlightColor::White => Some(Color {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 1.0,
+        }),
+        ST_HighlightColor::Yellow => Some(Color {
+            r: 1.0,
+            g: 1.0,
+            b: 0.0,
+            a: 1.0,
+        }),
     }
 }
 

@@ -44,11 +44,17 @@ pub enum RunContent {
     Break(BreakType),
     Drawing(CT_Drawing),
     /// A simple field (from `<w:fldSimple>`).
-    Field { field_type: FieldType },
+    Field {
+        field_type: FieldType,
+    },
     /// A footnote reference (`<w:footnoteReference w:id="..."/>`).
-    FootnoteRef { id: i32 },
+    FootnoteRef {
+        id: i32,
+    },
     /// An endnote reference (`<w:endnoteReference w:id="..."/>`).
-    EndnoteRef { id: i32 },
+    EndnoteRef {
+        id: i32,
+    },
 }
 
 /// Types of breaks.
@@ -110,7 +116,10 @@ impl CT_R {
                     } else if matches_local_name(name.as_ref(), b"t") {
                         let preserve = e.attributes().any(|a| {
                             a.ok()
-                                .map(|a| a.key.as_ref() == b"xml:space" && a.value.as_ref() == b"preserve")
+                                .map(|a| {
+                                    a.key.as_ref() == b"xml:space"
+                                        && a.value.as_ref() == b"preserve"
+                                })
                                 .unwrap_or(false)
                         });
                         let text = reader
@@ -199,8 +208,7 @@ impl CT_R {
                         e.push_attribute(("xml:space", "preserve"));
                     }
                     writer.write_event(Event::Start(e))?;
-                    writer
-                        .write_event(Event::Text(BytesText::new(&t.text)))?;
+                    writer.write_event(Event::Text(BytesText::new(&t.text)))?;
                     writer.write_event(Event::End(BytesEnd::new("w:t")))?;
                 }
                 RunContent::Tab => {
@@ -316,15 +324,11 @@ impl CT_P {
                             let key = attr.key.as_ref();
                             if matches_local_name(key, b"id") {
                                 rel_id = Some(
-                                    std::str::from_utf8(&attr.value)
-                                        .unwrap_or("")
-                                        .to_string(),
+                                    std::str::from_utf8(&attr.value).unwrap_or("").to_string(),
                                 );
                             } else if matches_local_name(key, b"anchor") {
                                 anchor = Some(
-                                    std::str::from_utf8(&attr.value)
-                                        .unwrap_or("")
-                                        .to_string(),
+                                    std::str::from_utf8(&attr.value).unwrap_or("").to_string(),
                                 );
                             }
                         }
@@ -368,9 +372,7 @@ impl CT_P {
                         let mut instr = String::new();
                         for attr in e.attributes().flatten() {
                             if matches_local_name(attr.key.as_ref(), b"instr") {
-                                instr = std::str::from_utf8(&attr.value)
-                                    .unwrap_or("")
-                                    .to_string();
+                                instr = std::str::from_utf8(&attr.value).unwrap_or("").to_string();
                             }
                         }
 
@@ -422,7 +424,8 @@ impl CT_P {
         }
 
         // Build a set of run indices that are inside hyperlinks
-        let mut hyperlink_runs: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+        let mut hyperlink_runs: std::collections::HashMap<usize, usize> =
+            std::collections::HashMap::new();
         for (hl_idx, hl) in self.hyperlinks.iter().enumerate() {
             for run_idx in hl.run_start..hl.run_end {
                 hyperlink_runs.insert(run_idx, hl_idx);
@@ -430,7 +433,8 @@ impl CT_P {
         }
 
         // Build index of extra_xml elements by position for interleaving
-        let mut extras_by_pos: std::collections::HashMap<usize, Vec<&Vec<u8>>> = std::collections::HashMap::new();
+        let mut extras_by_pos: std::collections::HashMap<usize, Vec<&Vec<u8>>> =
+            std::collections::HashMap::new();
         for (pos, raw) in &self.extra_xml {
             extras_by_pos.entry(*pos).or_default().push(raw);
         }
@@ -538,11 +542,7 @@ mod tests {
         let mut buf = Vec::new();
         loop {
             match reader.read_event_into(&mut buf) {
-                Ok(Event::Start(ref e))
-                    if matches_local_name(e.name().as_ref(), b"p") =>
-                {
-                    break
-                }
+                Ok(Event::Start(ref e)) if matches_local_name(e.name().as_ref(), b"p") => break,
                 _ => {}
             }
             buf.clear();
@@ -572,9 +572,7 @@ mod tests {
 
     #[test]
     fn parse_run_with_formatting() {
-        let p = parse_paragraph(
-            r#"<w:r><w:rPr><w:b/><w:i/></w:rPr><w:t>Bold Italic</w:t></w:r>"#,
-        );
+        let p = parse_paragraph(r#"<w:r><w:rPr><w:b/><w:i/></w:rPr><w:t>Bold Italic</w:t></w:r>"#);
         let run = &p.runs[0];
         let rpr = run.properties.as_ref().unwrap();
         assert_eq!(rpr.bold, Some(true));
@@ -583,9 +581,7 @@ mod tests {
 
     #[test]
     fn parse_multiple_runs() {
-        let p = parse_paragraph(
-            r#"<w:r><w:t>Hello </w:t></w:r><w:r><w:t>World</w:t></w:r>"#,
-        );
+        let p = parse_paragraph(r#"<w:r><w:t>Hello </w:t></w:r><w:r><w:t>World</w:t></w:r>"#);
         assert_eq!(p.runs.len(), 2);
         assert_eq!(p.text(), "Hello World");
     }
@@ -665,7 +661,9 @@ mod tests {
         assert_eq!(p.runs[0].content.len(), 1);
         assert!(matches!(
             p.runs[0].content[0],
-            RunContent::Field { field_type: FieldType::Page }
+            RunContent::Field {
+                field_type: FieldType::Page
+            }
         ));
     }
 
@@ -677,7 +675,9 @@ mod tests {
         assert_eq!(p.runs.len(), 1);
         assert!(matches!(
             p.runs[0].content[0],
-            RunContent::Field { field_type: FieldType::NumPages }
+            RunContent::Field {
+                field_type: FieldType::NumPages
+            }
         ));
     }
 
@@ -690,11 +690,15 @@ mod tests {
         assert_eq!(p.text(), "Page  of ");
         assert!(matches!(
             p.runs[1].content[0],
-            RunContent::Field { field_type: FieldType::Page }
+            RunContent::Field {
+                field_type: FieldType::Page
+            }
         ));
         assert!(matches!(
             p.runs[3].content[0],
-            RunContent::Field { field_type: FieldType::NumPages }
+            RunContent::Field {
+                field_type: FieldType::NumPages
+            }
         ));
     }
 
@@ -704,7 +708,9 @@ mod tests {
         p.add_run("Page ");
         p.runs.push(CT_R {
             properties: None,
-            content: vec![RunContent::Field { field_type: FieldType::Page }],
+            content: vec![RunContent::Field {
+                field_type: FieldType::Page,
+            }],
             extra_xml: Vec::new(),
         });
 
@@ -722,7 +728,9 @@ mod tests {
         assert_eq!(parsed.runs.len(), 2);
         assert!(matches!(
             parsed.runs[1].content[0],
-            RunContent::Field { field_type: FieldType::Page }
+            RunContent::Field {
+                field_type: FieldType::Page
+            }
         ));
     }
 
@@ -768,9 +776,7 @@ mod tests {
 
     #[test]
     fn parse_endnote_reference() {
-        let p = parse_paragraph(
-            r#"<w:r><w:endnoteReference w:id="3"/></w:r>"#,
-        );
+        let p = parse_paragraph(r#"<w:r><w:endnoteReference w:id="3"/></w:r>"#);
         assert_eq!(p.runs.len(), 1);
         assert!(matches!(
             p.runs[0].content[0],

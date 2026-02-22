@@ -43,15 +43,18 @@ fn generate_header_banner_doc(path: &Path) {
     let logo_img = create_logo_png(220, 48);
 
     // ── Dark blue banner ──
-    let banner = build_header_banner_xml("rId1", &BannerOpts {
-        bg_color: "1A3C6E",
-        banner_width: 7772400,   // full page width in EMU (~8.5")
-        banner_height: 969026,   // banner height in EMU (~1.06")
-        logo_width: 2011680,     // logo display width (~2.2")
-        logo_height: 438912,     // logo display height (~0.48")
-        logo_x_offset: 295125,   // left padding
-        logo_y_offset: 265057,   // vertical centering
-    });
+    let banner = build_header_banner_xml(
+        "rId1",
+        &BannerOpts {
+            bg_color: "1A3C6E",
+            banner_width: 7772400, // full page width in EMU (~8.5")
+            banner_height: 969026, // banner height in EMU (~1.06")
+            logo_width: 2011680,   // logo display width (~2.2")
+            logo_height: 438912,   // logo display height (~0.48")
+            logo_x_offset: 295125, // left padding
+            logo_y_offset: 265057, // vertical centering
+        },
+    );
 
     doc.set_raw_header_with_images(
         banner.clone(),
@@ -61,15 +64,18 @@ fn generate_header_banner_doc(path: &Path) {
 
     // Use a different first page header (same banner, different color)
     doc.set_different_first_page(true);
-    let first_page_banner = build_header_banner_xml("rId1", &BannerOpts {
-        bg_color: "2E75B6",      // lighter blue for cover
-        banner_width: 7772400,
-        banner_height: 969026,
-        logo_width: 2011680,
-        logo_height: 438912,
-        logo_x_offset: 295125,
-        logo_y_offset: 265057,
-    });
+    let first_page_banner = build_header_banner_xml(
+        "rId1",
+        &BannerOpts {
+            bg_color: "2E75B6", // lighter blue for cover
+            banner_width: 7772400,
+            banner_height: 969026,
+            logo_width: 2011680,
+            logo_height: 438912,
+            logo_x_offset: 295125,
+            logo_y_offset: 265057,
+        },
+    );
     doc.set_raw_header_with_images(
         first_page_banner,
         &[("rId1", &logo_img, "logo.png")],
@@ -80,13 +86,12 @@ fn generate_header_banner_doc(path: &Path) {
     doc.set_footer("Confidential — Internal Use Only");
 
     // ── Page 1: Cover ──
-    doc.add_paragraph("Company Report")
-        .style("Heading1");
+    doc.add_paragraph("Company Report").style("Heading1");
 
     doc.add_paragraph(
         "This document demonstrates a custom header banner built with DrawingML \
          group shapes. The banner uses a colored rectangle with a logo image overlaid, \
-         positioned at the top of each page."
+         positioned at the top of each page.",
     );
 
     doc.add_paragraph("");
@@ -97,55 +102,64 @@ fn generate_header_banner_doc(path: &Path) {
     doc.add_paragraph(
         "The header banner is built using set_raw_header_with_images(), which \
          accepts raw XML and a list of (rel_id, image_data, filename) tuples. \
-         The XML uses a DrawingML group shape (wpg:wgp) containing:"
+         The XML uses a DrawingML group shape (wpg:wgp) containing:",
     );
 
-    doc.add_bullet_list_item("A wps:wsp rectangle shape with a solid color fill (the background bar)", 0);
-    doc.add_bullet_list_item("A pic:pic image element positioned within the group (the logo)", 0);
-    doc.add_bullet_list_item("The group is wrapped in a wp:anchor element for absolute page positioning", 0);
+    doc.add_bullet_list_item(
+        "A wps:wsp rectangle shape with a solid color fill (the background bar)",
+        0,
+    );
+    doc.add_bullet_list_item(
+        "A pic:pic image element positioned within the group (the logo)",
+        0,
+    );
+    doc.add_bullet_list_item(
+        "The group is wrapped in a wp:anchor element for absolute page positioning",
+        0,
+    );
 
     doc.add_paragraph("");
 
-    doc.add_paragraph("Customization")
-        .style("Heading2");
+    doc.add_paragraph("Customization").style("Heading2");
 
     doc.add_paragraph(
         "All dimensions are in EMU (English Metric Units) where 914400 EMU = 1 inch. \
-         You can customize:"
+         You can customize:",
     );
 
     doc.add_bullet_list_item("bg_color — any hex color for the rectangle background", 0);
     doc.add_bullet_list_item("banner_width / banner_height — size of the full banner", 0);
     doc.add_bullet_list_item("logo_width / logo_height — display size of the logo", 0);
-    doc.add_bullet_list_item("logo_x_offset / logo_y_offset — logo position within the banner", 0);
+    doc.add_bullet_list_item(
+        "logo_x_offset / logo_y_offset — logo position within the banner",
+        0,
+    );
 
     doc.add_paragraph("");
 
-    doc.add_paragraph("Different First Page")
-        .style("Heading2");
+    doc.add_paragraph("Different First Page").style("Heading2");
 
     doc.add_paragraph(
         "This page uses a lighter blue banner (first page header). \
          Subsequent pages use a darker blue banner (default header). \
-         Use set_different_first_page(true) to enable this."
+         Use set_different_first_page(true) to enable this.",
     );
 
     // ── Page 2 ──
     doc.add_paragraph("").page_break_before(true);
 
-    doc.add_paragraph("Second Page")
-        .style("Heading1");
+    doc.add_paragraph("Second Page").style("Heading1");
 
     doc.add_paragraph(
         "This page shows the default header banner (dark blue). The first page \
-         had a lighter blue banner because we set a different first-page header."
+         had a lighter blue banner because we set a different first-page header.",
     );
 
     doc.add_paragraph("");
 
     doc.add_paragraph(
         "The banner repeats on every page because it is placed in the header part. \
-         You can have different banners for default, first-page, and even-page headers."
+         You can have different banners for default, first-page, and even-page headers.",
     );
 
     doc.set_title("Header Banner Example");
@@ -174,16 +188,52 @@ struct BannerOpts<'a> {
 fn build_header_banner_xml(image_rel_id: &str, opts: &BannerOpts) -> Vec<u8> {
     let mut xml = String::with_capacity(2048);
 
-    write!(xml, r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#).unwrap();
+    write!(
+        xml,
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#
+    )
+    .unwrap();
     write!(xml, r#"<w:hdr "#).unwrap();
-    write!(xml, r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" "#).unwrap();
-    write!(xml, r#"xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" "#).unwrap();
-    write!(xml, r#"xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" "#).unwrap();
-    write!(xml, r#"xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" "#).unwrap();
-    write!(xml, r#"xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" "#).unwrap();
-    write!(xml, r#"xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" "#).unwrap();
-    write!(xml, r#"xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" "#).unwrap();
-    write!(xml, r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">"#).unwrap();
+    write!(
+        xml,
+        r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" "#
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" "#
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" "#
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" "#
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" "#
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" "#
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" "#
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">"#
+    )
+    .unwrap();
 
     write!(xml, r#"<w:p><w:pPr><w:pStyle w:val="Header"/></w:pPr>"#).unwrap();
     write!(xml, r#"<w:r><w:rPr><w:noProof/></w:rPr>"#).unwrap();
@@ -191,14 +241,31 @@ fn build_header_banner_xml(image_rel_id: &str, opts: &BannerOpts) -> Vec<u8> {
     write!(xml, r#"<w:drawing>"#).unwrap();
 
     // Anchor at top-left of page
-    write!(xml, r#"<wp:anchor distT="0" distB="0" distL="0" distR="0" "#).unwrap();
+    write!(
+        xml,
+        r#"<wp:anchor distT="0" distB="0" distL="0" distR="0" "#
+    )
+    .unwrap();
     write!(xml, r#"simplePos="0" relativeHeight="251658240" "#).unwrap();
     write!(xml, r#"behindDoc="0" locked="0" layoutInCell="1" "#).unwrap();
     write!(xml, r#"hidden="0" allowOverlap="1">"#).unwrap();
     write!(xml, r#"<wp:simplePos x="0" y="0"/>"#).unwrap();
-    write!(xml, r#"<wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH>"#).unwrap();
-    write!(xml, r#"<wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV>"#).unwrap();
-    write!(xml, r#"<wp:extent cx="{}" cy="{}"/>"#, opts.banner_width, opts.banner_height).unwrap();
+    write!(
+        xml,
+        r#"<wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH>"#
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"<wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV>"#
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"<wp:extent cx="{}" cy="{}"/>"#,
+        opts.banner_width, opts.banner_height
+    )
+    .unwrap();
     write!(xml, r#"<wp:effectExtent l="0" t="0" r="0" b="0"/>"#).unwrap();
     write!(xml, r#"<wp:wrapNone/>"#).unwrap();
     write!(xml, r#"<wp:docPr id="1" name="Header Banner"/>"#).unwrap();
@@ -206,27 +273,70 @@ fn build_header_banner_xml(image_rel_id: &str, opts: &BannerOpts) -> Vec<u8> {
 
     // Group shape containing rect + image
     write!(xml, r#"<a:graphic>"#).unwrap();
-    write!(xml, r#"<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup">"#).unwrap();
+    write!(
+        xml,
+        r#"<a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup">"#
+    )
+    .unwrap();
     write!(xml, r#"<wpg:wgp><wpg:cNvGrpSpPr/><wpg:grpSpPr><a:xfrm>"#).unwrap();
-    write!(xml, r#"<a:off x="0" y="0"/><a:ext cx="{w}" cy="{h}"/>"#, w=opts.banner_width, h=opts.banner_height).unwrap();
-    write!(xml, r#"<a:chOff x="0" y="0"/><a:chExt cx="{w}" cy="{h}"/>"#, w=opts.banner_width, h=opts.banner_height).unwrap();
+    write!(
+        xml,
+        r#"<a:off x="0" y="0"/><a:ext cx="{w}" cy="{h}"/>"#,
+        w = opts.banner_width,
+        h = opts.banner_height
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"<a:chOff x="0" y="0"/><a:chExt cx="{w}" cy="{h}"/>"#,
+        w = opts.banner_width,
+        h = opts.banner_height
+    )
+    .unwrap();
     write!(xml, r#"</a:xfrm></wpg:grpSpPr>"#).unwrap();
 
     // Background rectangle
-    write!(xml, r#"<wps:wsp><wps:cNvPr id="2" name="Background"/><wps:cNvSpPr/><wps:spPr>"#).unwrap();
-    write!(xml, r#"<a:xfrm><a:off x="0" y="0"/><a:ext cx="{w}" cy="{h}"/></a:xfrm>"#, w=opts.banner_width, h=opts.banner_height).unwrap();
+    write!(
+        xml,
+        r#"<wps:wsp><wps:cNvPr id="2" name="Background"/><wps:cNvSpPr/><wps:spPr>"#
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"<a:xfrm><a:off x="0" y="0"/><a:ext cx="{w}" cy="{h}"/></a:xfrm>"#,
+        w = opts.banner_width,
+        h = opts.banner_height
+    )
+    .unwrap();
     write!(xml, r#"<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>"#).unwrap();
-    write!(xml, r#"<a:solidFill><a:srgbClr val="{}"/></a:solidFill>"#, opts.bg_color).unwrap();
+    write!(
+        xml,
+        r#"<a:solidFill><a:srgbClr val="{}"/></a:solidFill>"#,
+        opts.bg_color
+    )
+    .unwrap();
     write!(xml, r#"<a:ln><a:noFill/></a:ln>"#).unwrap();
     write!(xml, r#"</wps:spPr><wps:bodyPr/></wps:wsp>"#).unwrap();
 
     // Logo image
-    write!(xml, r#"<pic:pic><pic:nvPicPr><pic:cNvPr id="3" name="Logo"/><pic:cNvPicPr/></pic:nvPicPr>"#).unwrap();
+    write!(
+        xml,
+        r#"<pic:pic><pic:nvPicPr><pic:cNvPr id="3" name="Logo"/><pic:cNvPicPr/></pic:nvPicPr>"#
+    )
+    .unwrap();
     write!(xml, r#"<pic:blipFill><a:blip r:embed="{}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>"#, image_rel_id).unwrap();
-    write!(xml, r#"<pic:spPr><a:xfrm><a:off x="{}" y="{}"/><a:ext cx="{}" cy="{}"/></a:xfrm>"#,
-        opts.logo_x_offset, opts.logo_y_offset, opts.logo_width, opts.logo_height).unwrap();
+    write!(
+        xml,
+        r#"<pic:spPr><a:xfrm><a:off x="{}" y="{}"/><a:ext cx="{}" cy="{}"/></a:xfrm>"#,
+        opts.logo_x_offset, opts.logo_y_offset, opts.logo_width, opts.logo_height
+    )
+    .unwrap();
     write!(xml, r#"<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>"#).unwrap();
-    write!(xml, r#"<a:noFill/><a:ln><a:noFill/></a:ln></pic:spPr></pic:pic>"#).unwrap();
+    write!(
+        xml,
+        r#"<a:noFill/><a:ln><a:noFill/></a:ln></pic:spPr></pic:pic>"#
+    )
+    .unwrap();
 
     // Close all
     write!(xml, r#"</wpg:wgp></a:graphicData></a:graphic>"#).unwrap();
@@ -247,8 +357,8 @@ fn create_logo_png(width: u32, height: u32) -> Vec<u8> {
     for y in 0..height {
         for x in 0..width {
             // White rectangle in the center area (simulates logo text)
-            let in_text_area = x > width / 8 && x < width * 7 / 8
-                && y > height / 4 && y < height * 3 / 4;
+            let in_text_area =
+                x > width / 8 && x < width * 7 / 8 && y > height / 4 && y < height * 3 / 4;
             if in_text_area {
                 pixels.extend_from_slice(&[255, 255, 255, 255]);
             } else {
@@ -296,13 +406,21 @@ fn crc32(ct: &[u8], data: &[u8]) -> u32 {
         let mut t = [0u32; 256];
         for n in 0..256u32 {
             let mut c = n;
-            for _ in 0..8 { c = if c & 1 != 0 { 0xEDB88320 ^ (c >> 1) } else { c >> 1 }; }
+            for _ in 0..8 {
+                c = if c & 1 != 0 {
+                    0xEDB88320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
+            }
             t[n as usize] = c;
         }
         t
     });
     let mut c = 0xFFFFFFFF_u32;
-    for &b in ct.iter().chain(data) { c = T[((c ^ b as u32) & 0xFF) as usize] ^ (c >> 8); }
+    for &b in ct.iter().chain(data) {
+        c = T[((c ^ b as u32) & 0xFF) as usize] ^ (c >> 8);
+    }
     c ^ 0xFFFFFFFF
 }
 
@@ -317,7 +435,10 @@ fn zlib_store(data: &[u8]) -> Vec<u8> {
         out.extend_from_slice(chunk);
     }
     let (mut a, mut b) = (1u32, 0u32);
-    for &byte in data { a = (a + byte as u32) % 65521; b = (b + a) % 65521; }
+    for &byte in data {
+        a = (a + byte as u32) % 65521;
+        b = (b + a) % 65521;
+    }
     out.extend_from_slice(&((b << 16) | a).to_be_bytes());
     out
 }

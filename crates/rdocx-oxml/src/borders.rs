@@ -126,9 +126,7 @@ impl CT_PBdr {
                         bdr.bar = Some(edge);
                     }
                 }
-                Ok(Event::End(ref e))
-                    if matches_local_name(e.name().as_ref(), b"pBdr") =>
-                {
+                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"pBdr") => {
                     break;
                 }
                 Ok(Event::Eof) => break,
@@ -244,14 +242,10 @@ impl CT_Tabs {
 
         loop {
             match reader.read_event_into(&mut buf) {
-                Ok(Event::Empty(ref e))
-                    if matches_local_name(e.name().as_ref(), b"tab") =>
-                {
+                Ok(Event::Empty(ref e)) if matches_local_name(e.name().as_ref(), b"tab") => {
                     tabs.push(CT_TabStop::from_xml_attrs(e)?);
                 }
-                Ok(Event::End(ref e))
-                    if matches_local_name(e.name().as_ref(), b"tabs") =>
-                {
+                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"tabs") => {
                     break;
                 }
                 Ok(Event::Eof) => break,
@@ -321,9 +315,7 @@ mod tests {
         // Skip to pBdr start
         loop {
             match reader.read_event_into(&mut buf) {
-                Ok(Event::Start(ref e))
-                    if matches_local_name(e.name().as_ref(), b"pBdr") =>
-                {
+                Ok(Event::Start(ref e)) if matches_local_name(e.name().as_ref(), b"pBdr") => {
                     break;
                 }
                 _ => {}
@@ -370,9 +362,7 @@ mod tests {
         let mut buf = Vec::new();
         loop {
             match reader.read_event_into(&mut buf) {
-                Ok(Event::Start(ref e))
-                    if matches_local_name(e.name().as_ref(), b"tabs") =>
-                {
+                Ok(Event::Start(ref e)) if matches_local_name(e.name().as_ref(), b"tabs") => {
                     break;
                 }
                 _ => {}
@@ -424,9 +414,7 @@ mod tests {
             let mut buf = Vec::new();
             loop {
                 match reader.read_event_into(&mut buf) {
-                    Ok(Event::Start(ref e))
-                        if matches_local_name(e.name().as_ref(), b"pBdr") =>
-                    {
+                    Ok(Event::Start(ref e)) if matches_local_name(e.name().as_ref(), b"pBdr") => {
                         break;
                     }
                     _ => {}
@@ -435,7 +423,10 @@ mod tests {
             }
             let parsed = CT_PBdr::from_xml(&mut reader).unwrap();
             let top = parsed.top.as_ref().unwrap();
-            assert_eq!(top.val, style, "Border style round-trip failed for {style:?}");
+            assert_eq!(
+                top.val, style,
+                "Border style round-trip failed for {style:?}"
+            );
             assert_eq!(top.sz, Some(8));
             assert_eq!(top.color.as_deref(), Some("FF00FF"));
         }

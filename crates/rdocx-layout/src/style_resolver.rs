@@ -80,10 +80,7 @@ impl NumberingState {
 }
 
 /// Resolve paragraph properties by walking the style inheritance chain.
-pub fn resolve_paragraph_properties(
-    style_id: Option<&str>,
-    styles: &CT_Styles,
-) -> CT_PPr {
+pub fn resolve_paragraph_properties(style_id: Option<&str>, styles: &CT_Styles) -> CT_PPr {
     let mut effective = CT_PPr::default();
 
     // 1. Start from docDefaults
@@ -258,11 +255,7 @@ fn to_roman(mut n: u32, upper: bool) -> String {
             n -= value;
         }
     }
-    if upper {
-        result
-    } else {
-        result.to_lowercase()
-    }
+    if upper { result } else { result.to_lowercase() }
 }
 
 fn to_letter(n: u32, upper: bool) -> String {

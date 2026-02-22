@@ -6,7 +6,7 @@ use rdocx_oxml::document::{BodyContent, CT_Body};
 use rdocx_oxml::numbering::CT_Numbering;
 use rdocx_oxml::properties::CT_PPr;
 use rdocx_oxml::styles::CT_Styles;
-use rdocx_oxml::table::{CellContent, CT_Tbl};
+use rdocx_oxml::table::{CT_Tbl, CellContent};
 use rdocx_oxml::text::{BreakType, CT_P, CT_R, RunContent};
 
 /// Emit the full body content as Markdown.

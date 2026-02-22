@@ -4,9 +4,9 @@ use std::collections::HashMap;
 use std::io::{Read, Seek, Write};
 use std::path::Path;
 
+use zip::ZipWriter;
 use zip::read::ZipArchive;
 use zip::write::SimpleFileOptions;
-use zip::ZipWriter;
 
 use crate::content_types::ContentTypes;
 use crate::error::{OpcError, Result};
@@ -94,10 +94,7 @@ impl OpcPackage {
         // Build parts map with leading "/" normalized
         let mut parts = HashMap::new();
         for (name, data) in &raw_parts {
-            if name == "[Content_Types].xml"
-                || name == "_rels/.rels"
-                || name.ends_with(".rels")
-            {
+            if name == "[Content_Types].xml" || name == "_rels/.rels" || name.ends_with(".rels") {
                 continue;
             }
             let normalized = if name.starts_with('/') {
@@ -125,8 +122,8 @@ impl OpcPackage {
     /// Write the OPC package to any writer.
     pub fn write_to<W: Write + Seek>(&self, writer: W) -> Result<()> {
         let mut zip = ZipWriter::new(writer);
-        let options = SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
+        let options =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
         // Write [Content_Types].xml
         let ct_xml = self.content_types.to_xml()?;
@@ -175,9 +172,7 @@ impl OpcPackage {
 
     /// Get or create the relationships for a specific part.
     pub fn get_or_create_part_rels(&mut self, part_name: &str) -> &mut Relationships {
-        self.part_rels
-            .entry(part_name.to_string())
-            .or_default()
+        self.part_rels.entry(part_name.to_string()).or_default()
     }
 
     /// Resolve the target URI of a relationship relative to its source part.

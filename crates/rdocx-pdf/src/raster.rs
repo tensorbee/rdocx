@@ -84,7 +84,10 @@ fn render_page_to_pixmap(
                         (color.a * 255.0) as u8,
                     );
                     paint.anti_alias = true;
-                    let stroke = Stroke { width: *line_width as f32, ..Stroke::default() };
+                    let stroke = Stroke {
+                        width: *line_width as f32,
+                        ..Stroke::default()
+                    };
                     pixmap.stroke_path(&path, &paint, &stroke, transform, None);
                 }
             }
@@ -96,7 +99,10 @@ fn render_page_to_pixmap(
                 }
             }
             PositionedElement::Image {
-                rect, data, content_type, ..
+                rect,
+                data,
+                content_type,
+                ..
             } => {
                 if !data.is_empty() {
                     render_image(&mut pixmap, rect, data, content_type, transform);
@@ -263,14 +269,13 @@ fn render_image(
         Transform::identity(),
     );
 
-    let paint = Paint { shader: pattern, ..Paint::default() };
+    let paint = Paint {
+        shader: pattern,
+        ..Paint::default()
+    };
 
-    let fill_rect = tiny_skia::Rect::from_xywh(
-        0.0,
-        0.0,
-        decoded.width as f32,
-        decoded.height as f32,
-    );
+    let fill_rect =
+        tiny_skia::Rect::from_xywh(0.0, 0.0, decoded.width as f32, decoded.height as f32);
     if let Some(fill_rect) = fill_rect {
         pixmap.fill_rect(fill_rect, &paint, img_transform, None);
     }

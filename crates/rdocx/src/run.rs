@@ -263,10 +263,7 @@ impl<'a> RunRef<'a> {
 
     /// Get character spacing in twips, if set.
     pub fn character_spacing(&self) -> Option<Twips> {
-        self.inner
-            .properties
-            .as_ref()
-            .and_then(|rpr| rpr.spacing)
+        self.inner.properties.as_ref().and_then(|rpr| rpr.spacing)
     }
 
     /// Get vertical alignment (superscript/subscript), if set.

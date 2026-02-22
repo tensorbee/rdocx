@@ -239,7 +239,13 @@ pub fn break_into_lines(
                     if let InlineItem::Text(seg) | InlineItem::Marker(seg) = item {
                         font_ctx = Some((seg.font_id, seg.font_size));
                     }
-                    current_items.push(inline_to_line_item(item, current_width, &params.tab_stops, fm, font_ctx));
+                    current_items.push(inline_to_line_item(
+                        item,
+                        current_width,
+                        &params.tab_stops,
+                        fm,
+                        font_ctx,
+                    ));
                 }
             }
             BreakableSegment::ForcedBreak(break_type) => {
@@ -351,9 +357,7 @@ fn build_breakable_segments(items: &[InlineItem]) -> Vec<BreakableSegment> {
                     }
 
                     // If this chunk starts with whitespace, treat as a break opportunity
-                    if !current_group.is_empty()
-                        && chunk.starts_with(|c: char| c.is_whitespace())
-                    {
+                    if !current_group.is_empty() && chunk.starts_with(|c: char| c.is_whitespace()) {
                         segments.push(BreakableSegment::Items(std::mem::take(&mut current_group)));
                     }
 
@@ -413,7 +417,8 @@ fn split_text_subsegment(seg: &TextSegment, byte_start: usize, byte_end: usize) 
         // Non-1:1 mapping (ligatures, complex scripts) — proportional estimate
         let byte_frac = (byte_end - byte_start) as f64 / seg.text.len() as f64;
         let est_glyphs = (seg.glyph_ids.len() as f64 * byte_frac).round() as usize;
-        let glyph_start = (seg.glyph_ids.len() as f64 * byte_start as f64 / seg.text.len() as f64).round() as usize;
+        let glyph_start = (seg.glyph_ids.len() as f64 * byte_start as f64 / seg.text.len() as f64)
+            .round() as usize;
         let glyph_end = (glyph_start + est_glyphs).min(seg.glyph_ids.len());
         let glyphs = seg.glyph_ids[glyph_start..glyph_end].to_vec();
         let advances = seg.advances[glyph_start..glyph_end].to_vec();
@@ -468,7 +473,10 @@ fn split_text_at_break_opportunities(seg: &TextSegment) -> Vec<TextBreakInfo> {
             continue;
         }
 
-        let is_break = matches!(opportunity, BreakOpportunity::Allowed | BreakOpportunity::Mandatory);
+        let is_break = matches!(
+            opportunity,
+            BreakOpportunity::Allowed | BreakOpportunity::Mandatory
+        );
 
         breaks.push(TextBreakInfo {
             start: last_start,
@@ -523,10 +531,11 @@ fn inline_to_line_item(
         InlineItem::Marker(seg) => LineItem::Marker(seg.clone()),
         InlineItem::Tab => {
             let (tab_width, leader_char) = resolve_tab_width(current_x, tab_stops);
-            let leader = leader_char.and_then(|ch| {
-                shape_leader(fm, font_ctx, ch, tab_width)
-            });
-            LineItem::Tab { width: tab_width, leader }
+            let leader = leader_char.and_then(|ch| shape_leader(fm, font_ctx, ch, tab_width));
+            LineItem::Tab {
+                width: tab_width,
+                leader,
+            }
         }
         InlineItem::Image {
             width,
@@ -537,9 +546,10 @@ fn inline_to_line_item(
             height: *height,
             embed_id: embed_id.clone(),
         },
-        InlineItem::LineBreak | InlineItem::PageBreak | InlineItem::ColumnBreak => {
-            LineItem::Tab { width: 0.0, leader: None }
-        }
+        InlineItem::LineBreak | InlineItem::PageBreak | InlineItem::ColumnBreak => LineItem::Tab {
+            width: 0.0,
+            leader: None,
+        },
     }
 }
 

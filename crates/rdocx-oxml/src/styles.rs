@@ -23,9 +23,7 @@ impl StyleType {
             "character" => Ok(StyleType::Character),
             "table" => Ok(StyleType::Table),
             "numbering" => Ok(StyleType::Numbering),
-            _ => Err(OxmlError::InvalidValue(format!(
-                "invalid style type: {s}"
-            ))),
+            _ => Err(OxmlError::InvalidValue(format!("invalid style type: {s}"))),
         }
     }
 
@@ -66,8 +64,7 @@ impl CT_Style {
             if matches_local_name(key, b"styleId") {
                 style_id = std::str::from_utf8(&attr.value)?.to_string();
             } else if matches_local_name(key, b"type") {
-                style_type =
-                    StyleType::from_str(std::str::from_utf8(&attr.value)?)?;
+                style_type = StyleType::from_str(std::str::from_utf8(&attr.value)?)?;
             } else if matches_local_name(key, b"default") {
                 is_default = std::str::from_utf8(&attr.value)? == "1"
                     || std::str::from_utf8(&attr.value)? == "true";
@@ -103,9 +100,7 @@ impl CT_Style {
                         reader.read_to_end_into(ename, &mut Vec::new())?;
                     }
                 }
-                Ok(Event::End(ref e))
-                    if matches_local_name(e.name().as_ref(), b"style") =>
-                {
+                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"style") => {
                     break;
                 }
                 Ok(Event::Eof) => break,
@@ -193,9 +188,7 @@ impl CT_DocDefaults {
                         reader.read_to_end_into(name, &mut Vec::new())?;
                     }
                 }
-                Ok(Event::End(ref e))
-                    if matches_local_name(e.name().as_ref(), b"docDefaults") =>
-                {
+                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"docDefaults") => {
                     break;
                 }
                 Ok(Event::Eof) => break,
@@ -222,9 +215,7 @@ impl CT_DocDefaults {
                         reader.read_to_end_into(name, &mut Vec::new())?;
                     }
                 }
-                Ok(Event::End(ref e))
-                    if matches_local_name(e.name().as_ref(), end_tag) =>
-                {
+                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), end_tag) => {
                     break;
                 }
                 Ok(Event::Eof) => break,
@@ -251,9 +242,7 @@ impl CT_DocDefaults {
                         reader.read_to_end_into(name, &mut Vec::new())?;
                     }
                 }
-                Ok(Event::End(ref e))
-                    if matches_local_name(e.name().as_ref(), b"pPrDefault") =>
-                {
+                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"pPrDefault") => {
                     break;
                 }
                 Ok(Event::Eof) => break,
@@ -317,13 +306,9 @@ impl CT_Styles {
                 Ok(Event::Start(ref e)) => {
                     let name = e.name();
                     if matches_local_name(name.as_ref(), b"docDefaults") {
-                        doc_defaults =
-                            Some(CT_DocDefaults::from_xml(&mut reader)?);
+                        doc_defaults = Some(CT_DocDefaults::from_xml(&mut reader)?);
                     } else if matches_local_name(name.as_ref(), b"style") {
-                        styles.push(CT_Style::from_xml(
-                            &mut reader,
-                            e,
-                        )?);
+                        styles.push(CT_Style::from_xml(&mut reader, e)?);
                     } else if matches_local_name(name.as_ref(), b"styles") {
                         // Root element, continue
                     } else {

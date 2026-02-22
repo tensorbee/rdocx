@@ -29,7 +29,10 @@ fn main() {
         .join("samples");
     std::fs::create_dir_all(&samples_dir).unwrap();
 
-    println!("Generating all sample documents in {}\n", samples_dir.display());
+    println!(
+        "Generating all sample documents in {}\n",
+        samples_dir.display()
+    );
 
     let generators: Vec<(&str, fn(&Path) -> Document)> = vec![
         ("feature_showcase", generate_feature_showcase),
@@ -109,23 +112,32 @@ fn generate_feature_showcase(_samples_dir: &Path) -> Document {
     let bg = create_sample_png(612, 792, [20, 45, 90]);
     doc.add_background_image(&bg, "cover_bg.png");
 
-    for _ in 0..3 { doc.add_paragraph(""); }
+    for _ in 0..3 {
+        doc.add_paragraph("");
+    }
     {
         let mut p = doc.add_paragraph("").alignment(Alignment::Center);
         p.add_run("rdocx").bold(true).size(72.0).color("FFFFFF");
     }
     {
         let mut p = doc.add_paragraph("").alignment(Alignment::Center);
-        p.add_run("Complete Feature Showcase").size(28.0).color("FFFFFF").italic(true);
+        p.add_run("Complete Feature Showcase")
+            .size(28.0)
+            .color("FFFFFF")
+            .italic(true);
     }
     doc.add_paragraph("");
     {
         let mut p = doc.add_paragraph("").alignment(Alignment::Center);
-        p.add_run("Every feature of the rdocx Rust library").size(13.0).color("B0C4DE");
+        p.add_run("Every feature of the rdocx Rust library")
+            .size(13.0)
+            .color("B0C4DE");
     }
     {
         let mut p = doc.add_paragraph("").alignment(Alignment::Center);
-        p.add_run("demonstrated in a single document.").size(13.0).color("B0C4DE");
+        p.add_run("demonstrated in a single document.")
+            .size(13.0)
+            .color("B0C4DE");
     }
 
     // ── TABLE OF CONTENTS ──
@@ -137,14 +149,19 @@ fn generate_feature_showcase(_samples_dir: &Path) -> Document {
     doc.add_paragraph("1. Text Formatting").style("Heading1");
 
     // Paragraph Alignment
-    doc.add_paragraph("1.1 Paragraph Alignment").style("Heading2");
-    doc.add_paragraph("Left-aligned paragraph (default).").alignment(Alignment::Left);
-    doc.add_paragraph("Center-aligned paragraph.").alignment(Alignment::Center);
-    doc.add_paragraph("Right-aligned paragraph.").alignment(Alignment::Right);
+    doc.add_paragraph("1.1 Paragraph Alignment")
+        .style("Heading2");
+    doc.add_paragraph("Left-aligned paragraph (default).")
+        .alignment(Alignment::Left);
+    doc.add_paragraph("Center-aligned paragraph.")
+        .alignment(Alignment::Center);
+    doc.add_paragraph("Right-aligned paragraph.")
+        .alignment(Alignment::Right);
     doc.add_paragraph(
         "Justified paragraph — this text is long enough to demonstrate how justified alignment \
-         distributes extra space across word gaps so lines fill the full width of the text area."
-    ).alignment(Alignment::Justify);
+         distributes extra space across word gaps so lines fill the full width of the text area.",
+    )
+    .alignment(Alignment::Justify);
 
     doc.add_paragraph("");
 
@@ -217,22 +234,32 @@ fn generate_feature_showcase(_samples_dir: &Path) -> Document {
     doc.add_paragraph("1.3 Underline Styles").style("Heading2");
     {
         let mut p = doc.add_paragraph("");
-        p.add_run("Single ").underline_style(rdocx::UnderlineStyle::Single);
-        p.add_run("Double ").underline_style(rdocx::UnderlineStyle::Double);
-        p.add_run("Thick ").underline_style(rdocx::UnderlineStyle::Thick);
-        p.add_run("Dotted ").underline_style(rdocx::UnderlineStyle::Dotted);
-        p.add_run("Dash ").underline_style(rdocx::UnderlineStyle::Dash);
-        p.add_run("Wave ").underline_style(rdocx::UnderlineStyle::Wave);
+        p.add_run("Single ")
+            .underline_style(rdocx::UnderlineStyle::Single);
+        p.add_run("Double ")
+            .underline_style(rdocx::UnderlineStyle::Double);
+        p.add_run("Thick ")
+            .underline_style(rdocx::UnderlineStyle::Thick);
+        p.add_run("Dotted ")
+            .underline_style(rdocx::UnderlineStyle::Dotted);
+        p.add_run("Dash ")
+            .underline_style(rdocx::UnderlineStyle::Dash);
+        p.add_run("Wave ")
+            .underline_style(rdocx::UnderlineStyle::Wave);
     }
 
     // ── SECTION 2: PARAGRAPH FORMATTING ──
     doc.add_paragraph("").page_break_before(true);
-    doc.add_paragraph("2. Paragraph Formatting").style("Heading1");
+    doc.add_paragraph("2. Paragraph Formatting")
+        .style("Heading1");
 
     doc.add_paragraph("2.1 Shading & Borders").style("Heading2");
-    doc.add_paragraph("Paragraph with light green shading").shading("E2EFDA");
-    doc.add_paragraph("Paragraph with bottom border").border_bottom(BorderStyle::Single, 6, "2E75B6");
-    doc.add_paragraph("Paragraph with all borders (red)").border_all(BorderStyle::Single, 4, "FF0000");
+    doc.add_paragraph("Paragraph with light green shading")
+        .shading("E2EFDA");
+    doc.add_paragraph("Paragraph with bottom border")
+        .border_bottom(BorderStyle::Single, 6, "2E75B6");
+    doc.add_paragraph("Paragraph with all borders (red)")
+        .border_all(BorderStyle::Single, 4, "FF0000");
 
     doc.add_paragraph("2.2 Indentation").style("Heading2");
     doc.add_paragraph("1-inch left indent + 0.5-inch hanging indent")
@@ -244,18 +271,21 @@ fn generate_feature_showcase(_samples_dir: &Path) -> Document {
         .indent_left(Length::inches(0.75))
         .indent_right(Length::inches(0.75));
 
-    doc.add_paragraph("2.3 Spacing & Line Height").style("Heading2");
+    doc.add_paragraph("2.3 Spacing & Line Height")
+        .style("Heading2");
     doc.add_paragraph("Extra space before (24pt) and after (12pt)")
         .space_before(Length::pt(24.0))
         .space_after(Length::pt(12.0));
     doc.add_paragraph(
         "Double line spacing paragraph. This text should have extra vertical space between \
-         lines to demonstrate line_spacing_multiple(2.0)."
-    ).line_spacing_multiple(2.0);
+         lines to demonstrate line_spacing_multiple(2.0).",
+    )
+    .line_spacing_multiple(2.0);
     doc.add_paragraph("Exact 20pt line spacing (fixed height).")
         .line_spacing(20.0);
 
-    doc.add_paragraph("2.4 Pagination Controls").style("Heading2");
+    doc.add_paragraph("2.4 Pagination Controls")
+        .style("Heading2");
     doc.add_paragraph("keep_with_next — this paragraph stays with the next")
         .keep_with_next(true);
     doc.add_paragraph("(This paragraph was kept with the one above.)");
@@ -307,7 +337,11 @@ fn generate_feature_showcase(_samples_dir: &Path) -> Document {
         .add_tab_stop_with_leader(TabAlignment::Right, Length::inches(5.0), TabLeader::None);
     doc.add_paragraph("Gadget\t\t$249.50")
         .add_tab_stop_with_leader(TabAlignment::Left, Length::inches(0.0), TabLeader::None)
-        .add_tab_stop_with_leader(TabAlignment::Right, Length::inches(4.0), TabLeader::Underscore)
+        .add_tab_stop_with_leader(
+            TabAlignment::Right,
+            Length::inches(4.0),
+            TabLeader::Underscore,
+        )
         .add_tab_stop_with_leader(TabAlignment::Right, Length::inches(5.0), TabLeader::None);
 
     // ── SECTION 5: TABLES ──
@@ -316,7 +350,8 @@ fn generate_feature_showcase(_samples_dir: &Path) -> Document {
 
     doc.add_paragraph("5.1 Basic Table").style("Heading2");
     {
-        let mut tbl = doc.add_table(4, 3)
+        let mut tbl = doc
+            .add_table(4, 3)
             .borders(BorderStyle::Single, 4, "000000");
         for col in 0..3 {
             tbl.cell(0, col).unwrap().shading("2E75B6");
@@ -337,9 +372,11 @@ fn generate_feature_showcase(_samples_dir: &Path) -> Document {
 
     doc.add_paragraph("");
 
-    doc.add_paragraph("5.2 Column Span & Cell Shading").style("Heading2");
+    doc.add_paragraph("5.2 Column Span & Cell Shading")
+        .style("Heading2");
     {
-        let mut tbl = doc.add_table(3, 4)
+        let mut tbl = doc
+            .add_table(3, 4)
             .borders(BorderStyle::Single, 4, "000000")
             .width_pct(100.0);
         tbl.cell(0, 0).unwrap().set_text("Quarterly Report");
@@ -362,7 +399,8 @@ fn generate_feature_showcase(_samples_dir: &Path) -> Document {
 
     doc.add_paragraph("5.3 Vertical Merge").style("Heading2");
     {
-        let mut tbl = doc.add_table(4, 3)
+        let mut tbl = doc
+            .add_table(4, 3)
             .borders(BorderStyle::Single, 4, "000000");
         tbl.cell(0, 0).unwrap().set_text("Category");
         tbl.cell(0, 0).unwrap().shading("E2EFDA");
@@ -386,7 +424,8 @@ fn generate_feature_showcase(_samples_dir: &Path) -> Document {
 
     doc.add_paragraph("5.4 Nested Table").style("Heading2");
     {
-        let mut tbl = doc.add_table(2, 2)
+        let mut tbl = doc
+            .add_table(2, 2)
             .borders(BorderStyle::Single, 6, "2E75B6");
         tbl.cell(0, 0).unwrap().set_text("Outer (0,0)");
         tbl.cell(0, 1).unwrap().set_text("Outer (0,1)");
@@ -394,7 +433,8 @@ fn generate_feature_showcase(_samples_dir: &Path) -> Document {
         {
             let mut cell = tbl.cell(1, 1).unwrap();
             cell.set_text("Nested table below:");
-            let mut nested = cell.add_table(2, 2)
+            let mut nested = cell
+                .add_table(2, 2)
                 .borders(BorderStyle::Single, 2, "FF6600");
             nested.cell(0, 0).unwrap().set_text("A");
             nested.cell(0, 1).unwrap().set_text("B");
@@ -405,17 +445,28 @@ fn generate_feature_showcase(_samples_dir: &Path) -> Document {
 
     doc.add_paragraph("");
 
-    doc.add_paragraph("5.5 Vertical Alignment & Row Properties").style("Heading2");
+    doc.add_paragraph("5.5 Vertical Alignment & Row Properties")
+        .style("Heading2");
     {
-        let mut tbl = doc.add_table(2, 3)
+        let mut tbl = doc
+            .add_table(2, 3)
             .borders(BorderStyle::Single, 4, "666666");
         tbl.row(0).unwrap().height(Length::pt(50.0)).header();
         tbl.cell(0, 0).unwrap().set_text("Top");
-        tbl.cell(0, 0).unwrap().vertical_alignment(VerticalAlignment::Top).shading("FFF2CC");
+        tbl.cell(0, 0)
+            .unwrap()
+            .vertical_alignment(VerticalAlignment::Top)
+            .shading("FFF2CC");
         tbl.cell(0, 1).unwrap().set_text("Center");
-        tbl.cell(0, 1).unwrap().vertical_alignment(VerticalAlignment::Center).shading("D9E2F3");
+        tbl.cell(0, 1)
+            .unwrap()
+            .vertical_alignment(VerticalAlignment::Center)
+            .shading("D9E2F3");
         tbl.cell(0, 2).unwrap().set_text("Bottom");
-        tbl.cell(0, 2).unwrap().vertical_alignment(VerticalAlignment::Bottom).shading("E2EFDA");
+        tbl.cell(0, 2)
+            .unwrap()
+            .vertical_alignment(VerticalAlignment::Bottom)
+            .shading("E2EFDA");
         tbl.row(1).unwrap().cant_split();
         tbl.cell(1, 0).unwrap().set_text("No-wrap cell");
         tbl.cell(1, 0).unwrap().no_wrap();
@@ -436,7 +487,12 @@ fn generate_feature_showcase(_samples_dir: &Path) -> Document {
     doc.add_paragraph("");
     doc.add_paragraph("6.2 Header Image").style("Heading2");
     let hdr_img = create_sample_png(400, 40, [40, 40, 40]);
-    doc.set_header_image(&hdr_img, "header_logo.png", Length::inches(2.0), Length::inches(0.2));
+    doc.set_header_image(
+        &hdr_img,
+        "header_logo.png",
+        Length::inches(2.0),
+        Length::inches(0.2),
+    );
     doc.add_paragraph("The header now contains an inline image (check the top of this page).");
 
     doc.add_paragraph("");
@@ -444,14 +500,17 @@ fn generate_feature_showcase(_samples_dir: &Path) -> Document {
 
     // ── SECTION 7: CONTENT MANIPULATION ──
     doc.add_paragraph("").page_break_before(true);
-    doc.add_paragraph("7. Content Manipulation").style("Heading1");
+    doc.add_paragraph("7. Content Manipulation")
+        .style("Heading1");
 
-    doc.add_paragraph("7.1 Placeholder Replacement").style("Heading2");
+    doc.add_paragraph("7.1 Placeholder Replacement")
+        .style("Heading2");
     doc.add_paragraph("Customer: {{customer}}");
     doc.add_paragraph("Date: {{date}}");
     doc.add_paragraph("Reference: {{ref_number}}");
     {
-        let mut tbl = doc.add_table(2, 2)
+        let mut tbl = doc
+            .add_table(2, 2)
             .borders(BorderStyle::Single, 4, "000000");
         tbl.cell(0, 0).unwrap().set_text("Project");
         tbl.cell(0, 0).unwrap().shading("D6E4F0");
@@ -483,17 +542,21 @@ fn generate_feature_showcase(_samples_dir: &Path) -> Document {
     doc.add_paragraph("Section A: First content.");
     doc.add_paragraph("Section C: Third content.");
     if let Some(idx) = doc.find_content_index("Section C") {
-        doc.insert_paragraph(idx, "Section B: Inserted between A and C via find_content_index().");
+        doc.insert_paragraph(
+            idx,
+            "Section B: Inserted between A and C via find_content_index().",
+        );
     }
 
     // ── SECTION 8: SECTION BREAKS & ORIENTATION ──
-    doc.add_paragraph("")
-        .section_break(SectionBreak::NextPage);
-    doc.add_paragraph("8. Section Breaks & Orientation").style("Heading1");
+    doc.add_paragraph("").section_break(SectionBreak::NextPage);
+    doc.add_paragraph("8. Section Breaks & Orientation")
+        .style("Heading1");
     doc.add_paragraph("This page is LANDSCAPE. Useful for wide tables and charts.");
 
     {
-        let mut tbl = doc.add_table(3, 7)
+        let mut tbl = doc
+            .add_table(3, 7)
             .borders(BorderStyle::Single, 4, "2E75B6");
         let headers = ["Region", "Jan", "Feb", "Mar", "Apr", "May", "Total"];
         for (c, h) in headers.iter().enumerate() {
@@ -501,8 +564,12 @@ fn generate_feature_showcase(_samples_dir: &Path) -> Document {
             tbl.cell(0, c).unwrap().shading("2E75B6");
         }
         let data = [
-            ["Americas", "$1.2M", "$1.3M", "$1.4M", "$1.5M", "$1.6M", "$7.0M"],
-            ["Europe", "$0.8M", "$0.9M", "$0.9M", "$1.0M", "$1.1M", "$4.7M"],
+            [
+                "Americas", "$1.2M", "$1.3M", "$1.4M", "$1.5M", "$1.6M", "$7.0M",
+            ],
+            [
+                "Europe", "$0.8M", "$0.9M", "$0.9M", "$1.0M", "$1.1M", "$4.7M",
+            ],
         ];
         for (r, row) in data.iter().enumerate() {
             for (c, v) in row.iter().enumerate() {
@@ -542,7 +609,8 @@ fn generate_feature_showcase(_samples_dir: &Path) -> Document {
     doc.add_paragraph("");
 
     // ── SECTION 10: DOCUMENT INTELLIGENCE ──
-    doc.add_paragraph("10. Document Intelligence API").style("Heading1");
+    doc.add_paragraph("10. Document Intelligence API")
+        .style("Heading1");
 
     let wc = doc.word_count();
     let hc = doc.headings().len();
@@ -574,7 +642,8 @@ fn generate_feature_showcase(_samples_dir: &Path) -> Document {
     doc.add_paragraph("");
 
     // ── SUMMARY ──
-    doc.add_paragraph("Summary of Demonstrated Features").style("Heading1");
+    doc.add_paragraph("Summary of Demonstrated Features")
+        .style("Heading1");
     let features = [
         "Page setup: size, margins, header/footer distance, gutter",
         "Document metadata: title, author, subject, keywords",
@@ -621,7 +690,12 @@ fn generate_proposal(_samples_dir: &Path) -> Document {
 
     // Colors: Navy #1B2A4A, Gold #C5922E, Light #F4F1EB
     doc.set_page_size(Length::inches(8.5), Length::inches(11.0));
-    doc.set_margins(Length::inches(1.0), Length::inches(1.0), Length::inches(1.0), Length::inches(1.0));
+    doc.set_margins(
+        Length::inches(1.0),
+        Length::inches(1.0),
+        Length::inches(1.0),
+        Length::inches(1.0),
+    );
     doc.set_title("AI Platform Modernization Proposal");
     doc.set_author("Walter White");
     doc.set_subject("Technology Proposal");
@@ -629,30 +703,36 @@ fn generate_proposal(_samples_dir: &Path) -> Document {
 
     // Banner header
     let logo_img = create_logo_png(220, 48);
-    let banner = build_header_banner_xml("rId1", &BannerOpts {
-        bg_color: "1B2A4A",
-        banner_width: 7772400,
-        banner_height: 914400,
-        logo_width: 2011680,
-        logo_height: 438912,
-        logo_x_offset: 295125,
-        logo_y_offset: 237744,
-    });
+    let banner = build_header_banner_xml(
+        "rId1",
+        &BannerOpts {
+            bg_color: "1B2A4A",
+            banner_width: 7772400,
+            banner_height: 914400,
+            logo_width: 2011680,
+            logo_height: 438912,
+            logo_x_offset: 295125,
+            logo_y_offset: 237744,
+        },
+    );
     doc.set_raw_header_with_images(
         banner,
         &[("rId1", &logo_img, "logo.png")],
         rdocx_oxml::header_footer::HdrFtrType::Default,
     );
     doc.set_different_first_page(true);
-    let cover_banner = build_header_banner_xml("rId1", &BannerOpts {
-        bg_color: "C5922E",
-        banner_width: 7772400,
-        banner_height: 914400,
-        logo_width: 2011680,
-        logo_height: 438912,
-        logo_x_offset: 295125,
-        logo_y_offset: 237744,
-    });
+    let cover_banner = build_header_banner_xml(
+        "rId1",
+        &BannerOpts {
+            bg_color: "C5922E",
+            banner_width: 7772400,
+            banner_height: 914400,
+            logo_width: 2011680,
+            logo_height: 438912,
+            logo_x_offset: 295125,
+            logo_y_offset: 237744,
+        },
+    );
     doc.set_raw_header_with_images(
         cover_banner,
         &[("rId1", &logo_img, "logo.png")],
@@ -676,24 +756,34 @@ fn generate_proposal(_samples_dir: &Path) -> Document {
                 rpr.bold = Some(true);
                 rpr.font_ascii = Some("Georgia".to_string());
                 rpr.font_hansi = Some("Georgia".to_string());
-                rpr.sz = Some(rdocx_oxml::HalfPoint(56));  // half-points → 28pt
+                rpr.sz = Some(rdocx_oxml::HalfPoint(56)); // half-points → 28pt
                 rpr.color = Some("1B2A4A".to_string());
                 rpr
             }),
     );
 
     // ── Cover Page ──
-    for _ in 0..4 { doc.add_paragraph(""); }
-    doc.add_paragraph("AI Platform Modernization").style("ProposalTitle").alignment(Alignment::Center);
-    doc.add_paragraph("").alignment(Alignment::Center)
+    for _ in 0..4 {
+        doc.add_paragraph("");
+    }
+    doc.add_paragraph("AI Platform Modernization")
+        .style("ProposalTitle")
+        .alignment(Alignment::Center);
+    doc.add_paragraph("")
+        .alignment(Alignment::Center)
         .border_bottom(BorderStyle::Single, 8, "C5922E");
     {
         let mut p = doc.add_paragraph("").alignment(Alignment::Center);
-        p.add_run("Prepared for Global Financial Corp.").size(14.0).color("666666").italic(true);
+        p.add_run("Prepared for Global Financial Corp.")
+            .size(14.0)
+            .color("666666")
+            .italic(true);
     }
     {
         let mut p = doc.add_paragraph("").alignment(Alignment::Center);
-        p.add_run("Prepared by: Walter White, CEO — Tensorbee").size(12.0).color("888888");
+        p.add_run("Prepared by: Walter White, CEO — Tensorbee")
+            .size(12.0)
+            .color("888888");
     }
     {
         let mut p = doc.add_paragraph("").alignment(Alignment::Center);
@@ -702,8 +792,7 @@ fn generate_proposal(_samples_dir: &Path) -> Document {
 
     // ── TOC ──
     doc.add_paragraph("").page_break_before(true);
-    doc.add_paragraph("Table of Contents")
-        .style("Heading1");
+    doc.add_paragraph("Table of Contents").style("Heading1");
     // We'll add a manual-style TOC since the insert_toc goes at a specific position
     doc.insert_toc(doc.content_count(), 2);
 
@@ -714,18 +803,21 @@ fn generate_proposal(_samples_dir: &Path) -> Document {
         "Tensorbee proposes a comprehensive modernization of Global Financial Corp's AI platform, \
          transitioning from legacy batch-processing systems to a real-time inference architecture. \
          This transformation will reduce model deployment time from weeks to hours, improve \
-         prediction accuracy by an estimated 23%, and deliver $4.2M in annual operational savings."
-    ).first_line_indent(Length::inches(0.3));
+         prediction accuracy by an estimated 23%, and deliver $4.2M in annual operational savings.",
+    )
+    .first_line_indent(Length::inches(0.3));
     doc.add_paragraph(
         "The project spans three phases over 18 months, with a total investment of $2.8M. \
          Tensorbee brings deep expertise in ML infrastructure, having successfully completed \
-         similar transformations for three Fortune 500 financial institutions."
-    ).first_line_indent(Length::inches(0.3));
+         similar transformations for three Fortune 500 financial institutions.",
+    )
+    .first_line_indent(Length::inches(0.3));
 
     // Key metrics table
     doc.add_paragraph("");
     {
-        let mut tbl = doc.add_table(5, 2)
+        let mut tbl = doc
+            .add_table(5, 2)
             .borders(BorderStyle::Single, 4, "1B2A4A")
             .width_pct(80.0);
         tbl.cell(0, 0).unwrap().set_text("Key Metric");
@@ -740,9 +832,13 @@ fn generate_proposal(_samples_dir: &Path) -> Document {
         ];
         for (i, (k, v)) in rows.iter().enumerate() {
             tbl.cell(i + 1, 0).unwrap().set_text(k);
-            if i % 2 == 0 { tbl.cell(i + 1, 0).unwrap().shading("F4F1EB"); }
+            if i % 2 == 0 {
+                tbl.cell(i + 1, 0).unwrap().shading("F4F1EB");
+            }
             tbl.cell(i + 1, 1).unwrap().set_text(v);
-            if i % 2 == 0 { tbl.cell(i + 1, 1).unwrap().shading("F4F1EB"); }
+            if i % 2 == 0 {
+                tbl.cell(i + 1, 1).unwrap().shading("F4F1EB");
+            }
         }
     }
 
@@ -750,7 +846,7 @@ fn generate_proposal(_samples_dir: &Path) -> Document {
     doc.add_paragraph("").page_break_before(true);
     doc.add_paragraph("Problem Statement").style("Heading1");
     doc.add_paragraph(
-        "Global Financial Corp's current AI infrastructure faces three critical challenges:"
+        "Global Financial Corp's current AI infrastructure faces three critical challenges:",
     );
     doc.add_numbered_list_item("Deployment Latency — New models take 3-4 weeks to deploy to production, compared to the industry benchmark of 2-3 days.", 0);
     doc.add_numbered_list_item("Scalability Constraints — The batch processing architecture cannot handle real-time inference demands during peak trading hours.", 0);
@@ -760,25 +856,35 @@ fn generate_proposal(_samples_dir: &Path) -> Document {
     doc.add_paragraph("").page_break_before(true);
     doc.add_paragraph("Proposed Solution").style("Heading1");
 
-    doc.add_paragraph("Phase 1: Foundation (Months 1-6)").style("Heading2");
+    doc.add_paragraph("Phase 1: Foundation (Months 1-6)")
+        .style("Heading2");
     doc.add_bullet_list_item("Deploy Kubernetes-based ML serving infrastructure", 0);
     doc.add_bullet_list_item("Implement CI/CD pipeline for model deployment", 0);
     doc.add_bullet_list_item("Migrate top 5 production models to new platform", 0);
 
-    doc.add_paragraph("Phase 2: Expansion (Months 7-12)").style("Heading2");
-    doc.add_bullet_list_item("Real-time feature engineering pipeline (Apache Kafka + Flink)", 0);
+    doc.add_paragraph("Phase 2: Expansion (Months 7-12)")
+        .style("Heading2");
+    doc.add_bullet_list_item(
+        "Real-time feature engineering pipeline (Apache Kafka + Flink)",
+        0,
+    );
     doc.add_bullet_list_item("A/B testing framework for model variants", 0);
     doc.add_bullet_list_item("Automated model monitoring and drift detection", 0);
 
-    doc.add_paragraph("Phase 3: Optimization (Months 13-18)").style("Heading2");
+    doc.add_paragraph("Phase 3: Optimization (Months 13-18)")
+        .style("Heading2");
     doc.add_bullet_list_item("GPU inference optimization (TensorRT/ONNX Runtime)", 0);
     doc.add_bullet_list_item("Multi-region deployment for latency reduction", 0);
-    doc.add_bullet_list_item("Self-service model deployment portal for data science teams", 0);
+    doc.add_bullet_list_item(
+        "Self-service model deployment portal for data science teams",
+        0,
+    );
 
     // ── Budget ──
     doc.add_paragraph("Budget Breakdown").style("Heading1");
     {
-        let mut tbl = doc.add_table(6, 3)
+        let mut tbl = doc
+            .add_table(6, 3)
             .borders(BorderStyle::Single, 4, "1B2A4A")
             .width_pct(100.0);
         tbl.cell(0, 0).unwrap().set_text("Category");
@@ -788,10 +894,22 @@ fn generate_proposal(_samples_dir: &Path) -> Document {
         tbl.cell(0, 2).unwrap().set_text("Notes");
         tbl.cell(0, 2).unwrap().shading("1B2A4A");
         let items = [
-            ("Infrastructure", "$450,000", "Cloud compute + GPU instances"),
+            (
+                "Infrastructure",
+                "$450,000",
+                "Cloud compute + GPU instances",
+            ),
             ("Engineering Services", "$1,600,000", "12 FTE x 18 months"),
-            ("Software Licenses", "$350,000", "Kafka, monitoring, CI/CD tools"),
-            ("Training & Enablement", "$200,000", "Team training, documentation"),
+            (
+                "Software Licenses",
+                "$350,000",
+                "Kafka, monitoring, CI/CD tools",
+            ),
+            (
+                "Training & Enablement",
+                "$200,000",
+                "Team training, documentation",
+            ),
             ("Contingency (10%)", "$200,000", "Risk buffer"),
         ];
         for (i, (cat, cost, note)) in items.iter().enumerate() {
@@ -809,18 +927,26 @@ fn generate_proposal(_samples_dir: &Path) -> Document {
     // ── Closing ──
     doc.add_paragraph("");
     doc.add_paragraph("Next Steps").style("Heading1");
-    doc.add_numbered_list_item("Schedule technical deep-dive with GFC engineering team (Week 1)", 0);
+    doc.add_numbered_list_item(
+        "Schedule technical deep-dive with GFC engineering team (Week 1)",
+        0,
+    );
     doc.add_numbered_list_item("Finalize scope and sign SOW (Week 2-3)", 0);
     doc.add_numbered_list_item("Kick off Phase 1 with joint planning session (Week 4)", 0);
 
     doc.add_paragraph("");
     {
         let mut p = doc.add_paragraph("").alignment(Alignment::Center);
-        p.add_run("Walter White").bold(true).size(14.0).color("1B2A4A");
+        p.add_run("Walter White")
+            .bold(true)
+            .size(14.0)
+            .color("1B2A4A");
     }
     {
         let mut p = doc.add_paragraph("").alignment(Alignment::Center);
-        p.add_run("CEO, Tensorbee | walter@tensorbee.com").size(10.0).color("888888");
+        p.add_run("CEO, Tensorbee | walter@tensorbee.com")
+            .size(10.0)
+            .color("888888");
     }
 
     doc
@@ -834,7 +960,12 @@ fn generate_quote(_samples_dir: &Path) -> Document {
 
     // Colors: Teal #008B8B, Dark #1A3C3C, Orange #E07020, Light #F0F8F8
     doc.set_page_size(Length::inches(8.5), Length::inches(11.0));
-    doc.set_margins(Length::inches(0.75), Length::inches(0.75), Length::inches(0.75), Length::inches(0.75));
+    doc.set_margins(
+        Length::inches(0.75),
+        Length::inches(0.75),
+        Length::inches(0.75),
+        Length::inches(0.75),
+    );
     doc.set_title("Quotation QT-2026-0147");
     doc.set_author("Walter White");
     doc.set_keywords("quote, BOM, Tensorbee");
@@ -845,7 +976,11 @@ fn generate_quote(_samples_dir: &Path) -> Document {
     // ── Header Block ──
     {
         let mut p = doc.add_paragraph("").alignment(Alignment::Left);
-        p.add_run("TENSORBEE").bold(true).size(28.0).color("008B8B").font("Helvetica");
+        p.add_run("TENSORBEE")
+            .bold(true)
+            .size(28.0)
+            .color("008B8B")
+            .font("Helvetica");
     }
     doc.add_paragraph("123 Innovation Drive, Suite 400")
         .alignment(Alignment::Left);
@@ -857,8 +992,7 @@ fn generate_quote(_samples_dir: &Path) -> Document {
     // Quote meta
     doc.add_paragraph("");
     {
-        let mut tbl = doc.add_table(4, 4)
-            .width_pct(100.0);
+        let mut tbl = doc.add_table(4, 4).width_pct(100.0);
         tbl.cell(0, 0).unwrap().set_text("QUOTATION");
         tbl.cell(0, 0).unwrap().shading("008B8B").grid_span(2);
         tbl.cell(0, 2).unwrap().set_text("DATE");
@@ -884,32 +1018,97 @@ fn generate_quote(_samples_dir: &Path) -> Document {
     // ── Bill of Materials ──
     {
         let mut p = doc.add_paragraph("");
-        p.add_run("Bill of Materials").bold(true).size(16.0).color("1A3C3C");
+        p.add_run("Bill of Materials")
+            .bold(true)
+            .size(16.0)
+            .color("1A3C3C");
     }
     doc.add_paragraph("");
 
     {
-        let mut tbl = doc.add_table(10, 6)
+        let mut tbl = doc
+            .add_table(10, 6)
             .borders(BorderStyle::Single, 2, "008B8B")
             .width_pct(100.0)
             .layout_fixed();
         // Headers
-        let hdrs = ["#", "Part Number", "Description", "Qty", "Unit Price", "Total"];
+        let hdrs = [
+            "#",
+            "Part Number",
+            "Description",
+            "Qty",
+            "Unit Price",
+            "Total",
+        ];
         for (c, h) in hdrs.iter().enumerate() {
             tbl.cell(0, c).unwrap().set_text(h);
             tbl.cell(0, c).unwrap().shading("008B8B");
         }
 
         let items: Vec<(&str, &str, &str, &str, &str)> = vec![
-            ("TB-GPU-A100", "NVIDIA A100 80GB GPU", "4", "$12,500.00", "$50,000.00"),
-            ("TB-SRV-R750", "Dell R750xa Server Chassis", "2", "$8,200.00", "$16,400.00"),
-            ("TB-RAM-256G", "256GB DDR5 ECC Memory Module", "8", "$890.00", "$7,120.00"),
-            ("TB-SSD-3840", "3.84TB NVMe U.2 SSD", "8", "$1,150.00", "$9,200.00"),
-            ("TB-NET-CX7", "ConnectX-7 200GbE NIC", "4", "$1,800.00", "$7,200.00"),
-            ("TB-SW-48P", "48-Port 100GbE Switch", "1", "$22,000.00", "$22,000.00"),
-            ("TB-CAB-RACK", "42U Server Rack + PDU", "1", "$4,500.00", "$4,500.00"),
-            ("TB-SVC-INST", "Installation & Configuration", "1", "$8,500.00", "$8,500.00"),
-            ("TB-SVC-SUPP", "3-Year Premium Support", "1", "$15,000.00", "$15,000.00"),
+            (
+                "TB-GPU-A100",
+                "NVIDIA A100 80GB GPU",
+                "4",
+                "$12,500.00",
+                "$50,000.00",
+            ),
+            (
+                "TB-SRV-R750",
+                "Dell R750xa Server Chassis",
+                "2",
+                "$8,200.00",
+                "$16,400.00",
+            ),
+            (
+                "TB-RAM-256G",
+                "256GB DDR5 ECC Memory Module",
+                "8",
+                "$890.00",
+                "$7,120.00",
+            ),
+            (
+                "TB-SSD-3840",
+                "3.84TB NVMe U.2 SSD",
+                "8",
+                "$1,150.00",
+                "$9,200.00",
+            ),
+            (
+                "TB-NET-CX7",
+                "ConnectX-7 200GbE NIC",
+                "4",
+                "$1,800.00",
+                "$7,200.00",
+            ),
+            (
+                "TB-SW-48P",
+                "48-Port 100GbE Switch",
+                "1",
+                "$22,000.00",
+                "$22,000.00",
+            ),
+            (
+                "TB-CAB-RACK",
+                "42U Server Rack + PDU",
+                "1",
+                "$4,500.00",
+                "$4,500.00",
+            ),
+            (
+                "TB-SVC-INST",
+                "Installation & Configuration",
+                "1",
+                "$8,500.00",
+                "$8,500.00",
+            ),
+            (
+                "TB-SVC-SUPP",
+                "3-Year Premium Support",
+                "1",
+                "$15,000.00",
+                "$15,000.00",
+            ),
         ];
 
         for (i, (pn, desc, qty, unit, total)) in items.iter().enumerate() {
@@ -921,7 +1120,9 @@ fn generate_quote(_samples_dir: &Path) -> Document {
             tbl.cell(row, 4).unwrap().set_text(unit);
             tbl.cell(row, 5).unwrap().set_text(total);
             if i % 2 == 0 {
-                for c in 0..6 { tbl.cell(row, c).unwrap().shading("F0F8F8"); }
+                for c in 0..6 {
+                    tbl.cell(row, c).unwrap().shading("F0F8F8");
+                }
             }
         }
     }
@@ -930,7 +1131,8 @@ fn generate_quote(_samples_dir: &Path) -> Document {
 
     // ── Totals ──
     {
-        let mut tbl = doc.add_table(4, 2)
+        let mut tbl = doc
+            .add_table(4, 2)
             .borders(BorderStyle::Single, 2, "008B8B")
             .width(Length::inches(3.5))
             .alignment(Alignment::Right);
@@ -951,17 +1153,36 @@ fn generate_quote(_samples_dir: &Path) -> Document {
     // ── Terms & Conditions ──
     {
         let mut p = doc.add_paragraph("");
-        p.add_run("Terms & Conditions").bold(true).size(14.0).color("1A3C3C");
+        p.add_run("Terms & Conditions")
+            .bold(true)
+            .size(14.0)
+            .color("1A3C3C");
     }
-    doc.add_numbered_list_item("This quotation is valid for 30 calendar days from the date of issue.", 0);
-    doc.add_numbered_list_item("All prices are in USD and exclusive of applicable taxes unless stated.", 0);
+    doc.add_numbered_list_item(
+        "This quotation is valid for 30 calendar days from the date of issue.",
+        0,
+    );
+    doc.add_numbered_list_item(
+        "All prices are in USD and exclusive of applicable taxes unless stated.",
+        0,
+    );
     doc.add_numbered_list_item("Standard lead time is 4-6 weeks from PO receipt.", 0);
-    doc.add_numbered_list_item("Payment terms: Net 30 from invoice date. 2% discount for payment within 10 days.", 0);
-    doc.add_numbered_list_item("Warranty: 3-year manufacturer warranty on all hardware components.", 0);
-    doc.add_numbered_list_item("Returns subject to 15% restocking fee if initiated after 14 days.", 0);
+    doc.add_numbered_list_item(
+        "Payment terms: Net 30 from invoice date. 2% discount for payment within 10 days.",
+        0,
+    );
+    doc.add_numbered_list_item(
+        "Warranty: 3-year manufacturer warranty on all hardware components.",
+        0,
+    );
+    doc.add_numbered_list_item(
+        "Returns subject to 15% restocking fee if initiated after 14 days.",
+        0,
+    );
 
     doc.add_paragraph("");
-    doc.add_paragraph("").border_bottom(BorderStyle::Single, 4, "008B8B");
+    doc.add_paragraph("")
+        .border_bottom(BorderStyle::Single, 4, "008B8B");
     doc.add_paragraph("");
     {
         let mut p = doc.add_paragraph("");
@@ -985,7 +1206,12 @@ fn generate_invoice(_samples_dir: &Path) -> Document {
 
     // Colors: Crimson #B22222, Charcoal #333333, Light #FAF0F0
     doc.set_page_size(Length::inches(8.5), Length::inches(11.0));
-    doc.set_margins(Length::inches(0.75), Length::inches(0.75), Length::inches(0.75), Length::inches(0.75));
+    doc.set_margins(
+        Length::inches(0.75),
+        Length::inches(0.75),
+        Length::inches(0.75),
+        Length::inches(0.75),
+    );
     doc.set_title("Invoice INV-2026-0392");
     doc.set_author("Walter White");
     doc.set_keywords("invoice, Tensorbee");
@@ -994,20 +1220,25 @@ fn generate_invoice(_samples_dir: &Path) -> Document {
 
     // ── Company & Invoice Header ──
     {
-        let mut tbl = doc.add_table(4, 2)
-            .width_pct(100.0);
+        let mut tbl = doc.add_table(4, 2).width_pct(100.0);
         // Company name left, INVOICE right
         {
             let mut cell = tbl.cell(0, 0).unwrap();
             let mut p = cell.add_paragraph("");
-            p.add_run("TENSORBEE").bold(true).size(32.0).color("B22222").font("Helvetica");
+            p.add_run("TENSORBEE")
+                .bold(true)
+                .size(32.0)
+                .color("B22222")
+                .font("Helvetica");
         }
         {
             let mut cell = tbl.cell(0, 1).unwrap();
             let mut p = cell.add_paragraph("");
             p.add_run("INVOICE").bold(true).size(32.0).color("333333");
         }
-        tbl.cell(1, 0).unwrap().set_text("123 Innovation Drive, Suite 400");
+        tbl.cell(1, 0)
+            .unwrap()
+            .set_text("123 Innovation Drive, Suite 400");
         tbl.cell(1, 1).unwrap().set_text("Invoice #: INV-2026-0392");
         tbl.cell(2, 0).unwrap().set_text("San Francisco, CA 94105");
         tbl.cell(2, 1).unwrap().set_text("Date: February 22, 2026");
@@ -1021,8 +1252,7 @@ fn generate_invoice(_samples_dir: &Path) -> Document {
 
     // ── Bill To / Ship To ──
     {
-        let mut tbl = doc.add_table(4, 2)
-            .width_pct(100.0);
+        let mut tbl = doc.add_table(4, 2).width_pct(100.0);
         tbl.cell(0, 0).unwrap().set_text("BILL TO");
         tbl.cell(0, 0).unwrap().shading("B22222");
         tbl.cell(0, 1).unwrap().set_text("SHIP TO");
@@ -1032,14 +1262,17 @@ fn generate_invoice(_samples_dir: &Path) -> Document {
         tbl.cell(2, 0).unwrap().set_text("456 Enterprise Blvd");
         tbl.cell(2, 1).unwrap().set_text("Attn: Server Room B");
         tbl.cell(3, 0).unwrap().set_text("Austin, TX 78701");
-        tbl.cell(3, 1).unwrap().set_text("456 Enterprise Blvd, Austin, TX 78701");
+        tbl.cell(3, 1)
+            .unwrap()
+            .set_text("456 Enterprise Blvd, Austin, TX 78701");
     }
 
     doc.add_paragraph("");
 
     // ── Line Items ──
     {
-        let mut tbl = doc.add_table(8, 5)
+        let mut tbl = doc
+            .add_table(8, 5)
             .borders(BorderStyle::Single, 2, "B22222")
             .width_pct(100.0);
         let hdrs = ["Description", "Qty", "Unit Price", "Tax", "Amount"];
@@ -1048,13 +1281,55 @@ fn generate_invoice(_samples_dir: &Path) -> Document {
             tbl.cell(0, c).unwrap().shading("B22222");
         }
         let items = [
-            ("ML Infrastructure Setup — Phase 1", "1", "$45,000.00", "$3,881.25", "$48,881.25"),
-            ("Data Pipeline Development (160 hrs)", "160", "$225.00", "$3,105.00", "$39,105.00"),
-            ("GPU Cluster Configuration", "1", "$12,000.00", "$1,035.00", "$13,035.00"),
-            ("API Gateway Implementation", "1", "$18,500.00", "$1,595.63", "$20,095.63"),
-            ("Load Testing & QA (80 hrs)", "80", "$195.00", "$1,345.50", "$16,945.50"),
-            ("Documentation & Training", "1", "$8,000.00", "$690.00", "$8,690.00"),
-            ("Project Management (3 months)", "3", "$6,500.00", "$1,679.63", "$21,179.63"),
+            (
+                "ML Infrastructure Setup — Phase 1",
+                "1",
+                "$45,000.00",
+                "$3,881.25",
+                "$48,881.25",
+            ),
+            (
+                "Data Pipeline Development (160 hrs)",
+                "160",
+                "$225.00",
+                "$3,105.00",
+                "$39,105.00",
+            ),
+            (
+                "GPU Cluster Configuration",
+                "1",
+                "$12,000.00",
+                "$1,035.00",
+                "$13,035.00",
+            ),
+            (
+                "API Gateway Implementation",
+                "1",
+                "$18,500.00",
+                "$1,595.63",
+                "$20,095.63",
+            ),
+            (
+                "Load Testing & QA (80 hrs)",
+                "80",
+                "$195.00",
+                "$1,345.50",
+                "$16,945.50",
+            ),
+            (
+                "Documentation & Training",
+                "1",
+                "$8,000.00",
+                "$690.00",
+                "$8,690.00",
+            ),
+            (
+                "Project Management (3 months)",
+                "3",
+                "$6,500.00",
+                "$1,679.63",
+                "$21,179.63",
+            ),
         ];
         for (i, (desc, qty, unit, tax, amt)) in items.iter().enumerate() {
             let r = i + 1;
@@ -1064,7 +1339,9 @@ fn generate_invoice(_samples_dir: &Path) -> Document {
             tbl.cell(r, 3).unwrap().set_text(tax);
             tbl.cell(r, 4).unwrap().set_text(amt);
             if i % 2 == 0 {
-                for c in 0..5 { tbl.cell(r, c).unwrap().shading("FAF0F0"); }
+                for c in 0..5 {
+                    tbl.cell(r, c).unwrap().shading("FAF0F0");
+                }
             }
         }
     }
@@ -1073,7 +1350,8 @@ fn generate_invoice(_samples_dir: &Path) -> Document {
 
     // ── Totals ──
     {
-        let mut tbl = doc.add_table(4, 2)
+        let mut tbl = doc
+            .add_table(4, 2)
             .borders(BorderStyle::Single, 2, "B22222")
             .width(Length::inches(3.0))
             .alignment(Alignment::Right);
@@ -1095,7 +1373,10 @@ fn generate_invoice(_samples_dir: &Path) -> Document {
     // ── Payment Details ──
     {
         let mut p = doc.add_paragraph("");
-        p.add_run("Payment Details").bold(true).size(14.0).color("333333");
+        p.add_run("Payment Details")
+            .bold(true)
+            .size(14.0)
+            .color("333333");
     }
     doc.add_paragraph("Bank: Silicon Valley Bank")
         .indent_left(Length::inches(0.3));
@@ -1123,7 +1404,12 @@ fn generate_report(_samples_dir: &Path) -> Document {
 
     // Colors: Forest #2D5016, Sage #6B8E23, Earth #8B7355, Cream #FFFAF0
     doc.set_page_size(Length::inches(8.5), Length::inches(11.0));
-    doc.set_margins(Length::inches(1.0), Length::inches(1.0), Length::inches(1.0), Length::inches(1.0));
+    doc.set_margins(
+        Length::inches(1.0),
+        Length::inches(1.0),
+        Length::inches(1.0),
+        Length::inches(1.0),
+    );
     doc.set_title("Q4 2025 Environmental Impact Report");
     doc.set_author("Walter White");
     doc.set_subject("Quarterly Environmental Report");
@@ -1138,23 +1424,37 @@ fn generate_report(_samples_dir: &Path) -> Document {
     let cover_bg = create_sample_png(612, 792, [20, 50, 15]);
     doc.add_background_image(&cover_bg, "report_cover.png");
 
-    for _ in 0..5 { doc.add_paragraph(""); }
-    {
-        let mut p = doc.add_paragraph("").alignment(Alignment::Center);
-        p.add_run("Q4 2025").bold(true).size(48.0).color("FFFFFF").font("Georgia");
+    for _ in 0..5 {
+        doc.add_paragraph("");
     }
     {
         let mut p = doc.add_paragraph("").alignment(Alignment::Center);
-        p.add_run("Environmental Impact Report").size(24.0).color("90EE90").font("Georgia").italic(true);
+        p.add_run("Q4 2025")
+            .bold(true)
+            .size(48.0)
+            .color("FFFFFF")
+            .font("Georgia");
+    }
+    {
+        let mut p = doc.add_paragraph("").alignment(Alignment::Center);
+        p.add_run("Environmental Impact Report")
+            .size(24.0)
+            .color("90EE90")
+            .font("Georgia")
+            .italic(true);
     }
     doc.add_paragraph("");
     {
         let mut p = doc.add_paragraph("").alignment(Alignment::Center);
-        p.add_run("Tensorbee — Sustainability Division").size(14.0).color("C0C0C0");
+        p.add_run("Tensorbee — Sustainability Division")
+            .size(14.0)
+            .color("C0C0C0");
     }
     {
         let mut p = doc.add_paragraph("").alignment(Alignment::Center);
-        p.add_run("Prepared by Walter White, Chief Sustainability Officer").size(11.0).color("AAAAAA");
+        p.add_run("Prepared by Walter White, Chief Sustainability Officer")
+            .size(11.0)
+            .color("AAAAAA");
     }
 
     // ── TOC ──
@@ -1169,33 +1469,44 @@ fn generate_report(_samples_dir: &Path) -> Document {
          sustainability initiatives have yielded a 34% reduction in carbon emissions compared \
          to Q4 2024, exceeding our target of 25%. Key achievements include the transition to \
          100% renewable energy in our primary data centers and the launch of our carbon offset \
-         marketplace."
-    ).first_line_indent(Length::inches(0.3));
+         marketplace.",
+    )
+    .first_line_indent(Length::inches(0.3));
 
     // Image: performance chart
     let chart_img = create_chart_png(400, 200);
     doc.add_paragraph("");
-    doc.add_picture(&chart_img, "performance_chart.png", Length::inches(5.0), Length::inches(2.5))
-        .alignment(Alignment::Center);
+    doc.add_picture(
+        &chart_img,
+        "performance_chart.png",
+        Length::inches(5.0),
+        Length::inches(2.5),
+    )
+    .alignment(Alignment::Center);
     {
         let mut p = doc.add_paragraph("").alignment(Alignment::Center);
-        p.add_run("Figure 1: Quarterly Carbon Emissions (tonnes CO2e)").italic(true).size(9.0).color("666666");
+        p.add_run("Figure 1: Quarterly Carbon Emissions (tonnes CO2e)")
+            .italic(true)
+            .size(9.0)
+            .color("666666");
     }
 
     // ── Section 2: Energy Consumption ──
     doc.add_paragraph("").page_break_before(true);
     doc.add_paragraph("Energy Consumption").style("Heading1");
 
-    doc.add_paragraph("Data Center Operations").style("Heading2");
+    doc.add_paragraph("Data Center Operations")
+        .style("Heading2");
     doc.add_paragraph(
         "Our three primary data centers consumed a combined 4.2 GWh in Q4 2025, \
          a 12% reduction from Q3 2025 driven by improved cooling efficiency and \
-         server consolidation."
+         server consolidation.",
     );
 
     // Data table
     {
-        let mut tbl = doc.add_table(5, 4)
+        let mut tbl = doc
+            .add_table(5, 4)
             .borders(BorderStyle::Single, 4, "2D5016")
             .width_pct(100.0);
         let hdrs = ["Data Center", "Capacity (MW)", "Usage (GWh)", "PUE"];
@@ -1215,7 +1526,9 @@ fn generate_report(_samples_dir: &Path) -> Document {
             tbl.cell(i + 1, 2).unwrap().set_text(use_);
             tbl.cell(i + 1, 3).unwrap().set_text(pue);
             if i == 3 {
-                for c in 0..4 { tbl.cell(i + 1, c).unwrap().shading("E2EFDA"); }
+                for c in 0..4 {
+                    tbl.cell(i + 1, c).unwrap().shading("E2EFDA");
+                }
             }
         }
     }
@@ -1231,18 +1544,21 @@ fn generate_report(_samples_dir: &Path) -> Document {
     doc.add_bullet_list_item("Grid (non-renewable): 8% (0.34 GWh)", 0);
 
     // ── Section 3: Water & Waste ──
-    doc.add_paragraph("Water & Waste Management").style("Heading1");
+    doc.add_paragraph("Water & Waste Management")
+        .style("Heading1");
 
     doc.add_paragraph("Water Usage").style("Heading2");
     doc.add_paragraph(
         "Total water consumption was 12.4 million gallons, a 15% reduction from Q3. \
-         Our closed-loop cooling systems now recycle 78% of water used in cooling operations."
+         Our closed-loop cooling systems now recycle 78% of water used in cooling operations.",
     );
 
     doc.add_paragraph("Waste Reduction").style("Heading2");
-    doc.add_paragraph("E-waste management results for Q4:").keep_with_next(true);
+    doc.add_paragraph("E-waste management results for Q4:")
+        .keep_with_next(true);
     {
-        let mut tbl = doc.add_table(4, 3)
+        let mut tbl = doc
+            .add_table(4, 3)
             .borders(BorderStyle::Single, 2, "6B8E23")
             .width_pct(80.0);
         tbl.cell(0, 0).unwrap().set_text("Category");
@@ -1268,7 +1584,10 @@ fn generate_report(_samples_dir: &Path) -> Document {
     doc.add_paragraph("Q1 2026 Initiatives").style("Heading1");
 
     doc.add_paragraph("Planned Programs").style("Heading2");
-    doc.add_numbered_list_item("Deploy on-site battery storage at SF data center (2 MWh capacity)", 0);
+    doc.add_numbered_list_item(
+        "Deploy on-site battery storage at SF data center (2 MWh capacity)",
+        0,
+    );
     doc.add_numbered_list_item("Pilot immersion cooling in Dublin facility", 0);
     doc.add_numbered_list_item("Launch employee commute carbon offset program", 0);
     doc.add_numbered_list_item("Achieve ISO 14001 certification for Singapore facility", 0);
@@ -1277,7 +1596,8 @@ fn generate_report(_samples_dir: &Path) -> Document {
     doc.add_paragraph("Sustainability CapEx allocation for FY2026:")
         .keep_with_next(true);
     {
-        let mut tbl = doc.add_table(5, 2)
+        let mut tbl = doc
+            .add_table(5, 2)
             .borders(BorderStyle::Single, 4, "2D5016");
         tbl.cell(0, 0).unwrap().set_text("Initiative");
         tbl.cell(0, 0).unwrap().shading("2D5016");
@@ -1302,17 +1622,27 @@ fn generate_report(_samples_dir: &Path) -> Document {
     // Image: sustainability roadmap
     let roadmap_img = create_sample_png(500, 100, [40, 80, 30]);
     doc.add_paragraph("");
-    doc.add_picture(&roadmap_img, "roadmap.png", Length::inches(6.0), Length::inches(1.2))
-        .alignment(Alignment::Center);
+    doc.add_picture(
+        &roadmap_img,
+        "roadmap.png",
+        Length::inches(6.0),
+        Length::inches(1.2),
+    )
+    .alignment(Alignment::Center);
     {
         let mut p = doc.add_paragraph("").alignment(Alignment::Center);
-        p.add_run("Figure 2: 2026 Sustainability Roadmap").italic(true).size(9.0).color("666666");
+        p.add_run("Figure 2: 2026 Sustainability Roadmap")
+            .italic(true)
+            .size(9.0)
+            .color("666666");
     }
 
     doc.add_paragraph("");
-    doc.add_paragraph("For questions about this report, contact Walter White at sustainability@tensorbee.com.")
-        .shading("FFFAF0")
-        .border_all(BorderStyle::Single, 2, "2D5016");
+    doc.add_paragraph(
+        "For questions about this report, contact Walter White at sustainability@tensorbee.com.",
+    )
+    .shading("FFFAF0")
+    .border_all(BorderStyle::Single, 2, "2D5016");
 
     doc
 }
@@ -1325,21 +1655,29 @@ fn generate_letter(_samples_dir: &Path) -> Document {
 
     // Colors: Slate #4A5568, Blue accent #3182CE
     doc.set_page_size(Length::inches(8.5), Length::inches(11.0));
-    doc.set_margins(Length::inches(1.25), Length::inches(1.25), Length::inches(1.25), Length::inches(1.25));
+    doc.set_margins(
+        Length::inches(1.25),
+        Length::inches(1.25),
+        Length::inches(1.25),
+        Length::inches(1.25),
+    );
     doc.set_title("Business Letter");
     doc.set_author("Walter White");
 
     // Banner header using raw XML
     let logo_img = create_logo_png(220, 48);
-    let banner = build_header_banner_xml("rId1", &BannerOpts {
-        bg_color: "4A5568",
-        banner_width: 7772400,
-        banner_height: 731520, // ~0.8"
-        logo_width: 2011680,
-        logo_height: 438912,
-        logo_x_offset: 295125,
-        logo_y_offset: 146304,
-    });
+    let banner = build_header_banner_xml(
+        "rId1",
+        &BannerOpts {
+            bg_color: "4A5568",
+            banner_width: 7772400,
+            banner_height: 731520, // ~0.8"
+            logo_width: 2011680,
+            logo_height: 438912,
+            logo_x_offset: 295125,
+            logo_y_offset: 146304,
+        },
+    );
     doc.set_raw_header_with_images(
         banner,
         &[("rId1", &logo_img, "logo.png")],
@@ -1354,7 +1692,9 @@ fn generate_letter(_samples_dir: &Path) -> Document {
     doc.set_header_footer_distance(Length::twips(720), Length::twips(432));
 
     // Footer with contact
-    doc.set_footer("Tensorbee | 123 Innovation Drive, Suite 400 | San Francisco, CA 94105 | tensorbee.com");
+    doc.set_footer(
+        "Tensorbee | 123 Innovation Drive, Suite 400 | San Francisco, CA 94105 | tensorbee.com",
+    );
 
     // ── Sender Address ──
     doc.add_paragraph("Walter White");
@@ -1379,7 +1719,8 @@ fn generate_letter(_samples_dir: &Path) -> Document {
     // ── Subject ──
     {
         let mut p = doc.add_paragraph("");
-        p.add_run("Re: Strategic Technology Partnership — Phase 2 Expansion").bold(true);
+        p.add_run("Re: Strategic Technology Partnership — Phase 2 Expansion")
+            .bold(true);
     }
 
     doc.add_paragraph("");
@@ -1392,36 +1733,46 @@ fn generate_letter(_samples_dir: &Path) -> Document {
         "I am writing to express Tensorbee's enthusiasm for expanding our strategic technology \
          partnership with Meridian Dynamics. Following the successful completion of Phase 1, \
          which delivered a 40% improvement in your ML inference pipeline throughput, we believe \
-         the foundation is firmly established for an ambitious Phase 2 engagement."
-    ).first_line_indent(Length::inches(0.5));
+         the foundation is firmly established for an ambitious Phase 2 engagement.",
+    )
+    .first_line_indent(Length::inches(0.5));
 
     doc.add_paragraph(
         "During our recent executive review, your team highlighted three priority areas for \
-         the next phase of collaboration:"
-    ).first_line_indent(Length::inches(0.5));
+         the next phase of collaboration:",
+    )
+    .first_line_indent(Length::inches(0.5));
 
     doc.add_numbered_list_item(
         "Real-time anomaly detection for your financial transaction monitoring system, \
-         targeting sub-100ms latency at 50,000 transactions per second.", 0);
+         targeting sub-100ms latency at 50,000 transactions per second.",
+        0,
+    );
     doc.add_numbered_list_item(
         "Federated learning infrastructure to enable model training across your distributed \
-         data centers without centralizing sensitive financial data.", 0);
+         data centers without centralizing sensitive financial data.",
+        0,
+    );
     doc.add_numbered_list_item(
         "MLOps automation to reduce your model deployment cycle from the current 5 days \
-         to under 4 hours.", 0);
+         to under 4 hours.",
+        0,
+    );
 
     doc.add_paragraph(
         "Our engineering team has prepared a detailed technical proposal addressing each of \
          these areas. We have allocated a dedicated team of eight senior engineers, led by \
          our CTO, to ensure continuity with the Phase 1 team your organization has already \
-         built a productive working relationship with."
-    ).first_line_indent(Length::inches(0.5));
+         built a productive working relationship with.",
+    )
+    .first_line_indent(Length::inches(0.5));
 
     doc.add_paragraph(
         "I would welcome the opportunity to present our Phase 2 proposal in person. My \
          assistant will reach out to coordinate a meeting at your convenience during the \
-         first week of March."
-    ).first_line_indent(Length::inches(0.5));
+         first week of March.",
+    )
+    .first_line_indent(Length::inches(0.5));
 
     doc.add_paragraph("");
 
@@ -1438,11 +1789,16 @@ fn generate_letter(_samples_dir: &Path) -> Document {
     }
     {
         let mut p = doc.add_paragraph("");
-        p.add_run("Chief Executive Officer, Tensorbee").italic(true).size(10.0).color("666666");
+        p.add_run("Chief Executive Officer, Tensorbee")
+            .italic(true)
+            .size(10.0)
+            .color("666666");
     }
     {
         let mut p = doc.add_paragraph("");
-        p.add_run("walter@tensorbee.com | +1 (415) 555-0199").size(10.0).color("888888");
+        p.add_run("walter@tensorbee.com | +1 (415) 555-0199")
+            .size(10.0)
+            .color("888888");
     }
 
     doc
@@ -1456,7 +1812,12 @@ fn generate_contract(_samples_dir: &Path) -> Document {
 
     // Colors: Purple #5B2C6F, Plum #8E44AD, Gray #2C3E50
     doc.set_page_size(Length::inches(8.5), Length::inches(11.0));
-    doc.set_margins(Length::inches(1.25), Length::inches(1.0), Length::inches(1.0), Length::inches(1.0));
+    doc.set_margins(
+        Length::inches(1.25),
+        Length::inches(1.0),
+        Length::inches(1.0),
+        Length::inches(1.0),
+    );
     doc.set_title("Employment Agreement");
     doc.set_author("Tensorbee HR Department");
     doc.set_subject("Employment Contract — Walter White");
@@ -1470,7 +1831,11 @@ fn generate_contract(_samples_dir: &Path) -> Document {
         .border_bottom(BorderStyle::Thick, 12, "5B2C6F");
     {
         let mut p = doc.add_paragraph("").alignment(Alignment::Center);
-        p.add_run("EMPLOYMENT AGREEMENT").bold(true).size(24.0).color("5B2C6F").font("Georgia");
+        p.add_run("EMPLOYMENT AGREEMENT")
+            .bold(true)
+            .size(24.0)
+            .color("5B2C6F")
+            .font("Georgia");
     }
     doc.add_paragraph("")
         .border_bottom(BorderStyle::Thick, 12, "5B2C6F");
@@ -1479,7 +1844,7 @@ fn generate_contract(_samples_dir: &Path) -> Document {
     // ── Parties ──
     doc.add_paragraph(
         "This Employment Agreement (\"Agreement\") is entered into as of February 22, 2026 \
-         (\"Effective Date\"), by and between:"
+         (\"Effective Date\"), by and between:",
     );
 
     doc.add_paragraph("");
@@ -1487,14 +1852,18 @@ fn generate_contract(_samples_dir: &Path) -> Document {
     {
         let mut p = doc.add_paragraph("").indent_left(Length::inches(0.5));
         p.add_run("EMPLOYER: ").bold(true);
-        p.add_run("Tensorbee, Inc., a Delaware corporation with its principal place of business at \
-                   123 Innovation Drive, Suite 400, San Francisco, CA 94105 (\"Company\")");
+        p.add_run(
+            "Tensorbee, Inc., a Delaware corporation with its principal place of business at \
+                   123 Innovation Drive, Suite 400, San Francisco, CA 94105 (\"Company\")",
+        );
     }
     doc.add_paragraph("");
     {
         let mut p = doc.add_paragraph("").indent_left(Length::inches(0.5));
         p.add_run("EMPLOYEE: ").bold(true);
-        p.add_run("Walter White, residing at 308 Negra Arroyo Lane, Albuquerque, NM 87104 (\"Employee\")");
+        p.add_run(
+            "Walter White, residing at 308 Negra Arroyo Lane, Albuquerque, NM 87104 (\"Employee\")",
+        );
     }
 
     doc.add_paragraph("");
@@ -1502,12 +1871,15 @@ fn generate_contract(_samples_dir: &Path) -> Document {
     doc.add_paragraph("");
 
     // ── Article 1: Position and Duties ──
-    doc.add_paragraph("Article 1 — Position and Duties").style("Heading1");
+    doc.add_paragraph("Article 1 — Position and Duties")
+        .style("Heading1");
     {
         let mut p = doc.add_paragraph("");
         p.add_run("1.1 ").bold(true);
         p.add_run("The Company hereby employs the Employee as ");
-        p.add_run("Chief Executive Officer (CEO)").bold(true).italic(true);
+        p.add_run("Chief Executive Officer (CEO)")
+            .bold(true)
+            .italic(true);
         p.add_run(", reporting directly to the Board of Directors.");
     }
     {
@@ -1516,20 +1888,32 @@ fn generate_contract(_samples_dir: &Path) -> Document {
         p.add_run("The Employee shall devote full working time, attention, and best efforts to \
                    the performance of duties as reasonably assigned by the Board, including but not limited to:");
     }
-    doc.add_bullet_list_item("Setting and executing the Company's strategic vision and business plan", 0);
-    doc.add_bullet_list_item("Overseeing all operations, engineering, and commercial activities", 0);
-    doc.add_bullet_list_item("Representing the Company to investors, customers, and the public", 0);
+    doc.add_bullet_list_item(
+        "Setting and executing the Company's strategic vision and business plan",
+        0,
+    );
+    doc.add_bullet_list_item(
+        "Overseeing all operations, engineering, and commercial activities",
+        0,
+    );
+    doc.add_bullet_list_item(
+        "Representing the Company to investors, customers, and the public",
+        0,
+    );
     doc.add_bullet_list_item("Recruiting, developing, and retaining key talent", 0);
 
     {
         let mut p = doc.add_paragraph("");
         p.add_run("1.3 ").bold(true);
-        p.add_run("The Employee's primary work location shall be the Company's San Francisco \
-                   headquarters, with reasonable travel as required by business needs.");
+        p.add_run(
+            "The Employee's primary work location shall be the Company's San Francisco \
+                   headquarters, with reasonable travel as required by business needs.",
+        );
     }
 
     // ── Article 2: Compensation ──
-    doc.add_paragraph("Article 2 — Compensation and Benefits").style("Heading1");
+    doc.add_paragraph("Article 2 — Compensation and Benefits")
+        .style("Heading1");
     {
         let mut p = doc.add_paragraph("");
         p.add_run("2.1 Base Salary. ").bold(true);
@@ -1543,21 +1927,26 @@ fn generate_contract(_samples_dir: &Path) -> Document {
         p.add_run("2.2 Annual Bonus. ").bold(true);
         p.add_run("The Employee shall be eligible for an annual performance bonus of up to ");
         p.add_run("40%").bold(true);
-        p.add_run(" of base salary, based on achievement of mutually agreed performance objectives.");
+        p.add_run(
+            " of base salary, based on achievement of mutually agreed performance objectives.",
+        );
     }
     {
         let mut p = doc.add_paragraph("");
         p.add_run("2.3 Equity. ").bold(true);
         p.add_run("Subject to Board approval, the Employee shall receive a stock option grant of ");
         p.add_run("500,000 shares").bold(true);
-        p.add_run(" of the Company's common stock, vesting over four (4) years with a one-year cliff, \
-                   at an exercise price equal to the fair market value on the date of grant.");
+        p.add_run(
+            " of the Company's common stock, vesting over four (4) years with a one-year cliff, \
+                   at an exercise price equal to the fair market value on the date of grant.",
+        );
     }
 
     // Compensation summary table
     doc.add_paragraph("");
     {
-        let mut tbl = doc.add_table(5, 2)
+        let mut tbl = doc
+            .add_table(5, 2)
             .borders(BorderStyle::Single, 4, "5B2C6F")
             .width_pct(70.0)
             .alignment(Alignment::Center);
@@ -1587,10 +1976,15 @@ fn generate_contract(_samples_dir: &Path) -> Document {
     {
         let mut p = doc.add_paragraph("");
         p.add_run("3.1 ").bold(true);
-        p.add_run("The Employee shall be entitled to participate in all benefit programs \
-                   generally available to senior executives, including:");
+        p.add_run(
+            "The Employee shall be entitled to participate in all benefit programs \
+                   generally available to senior executives, including:",
+        );
     }
-    doc.add_bullet_list_item("Medical, dental, and vision insurance (100% premium coverage for employee and dependents)", 0);
+    doc.add_bullet_list_item(
+        "Medical, dental, and vision insurance (100% premium coverage for employee and dependents)",
+        0,
+    );
     doc.add_bullet_list_item("401(k) retirement plan with 6% company match", 0);
     doc.add_bullet_list_item("Life insurance and long-term disability coverage", 0);
     doc.add_bullet_list_item("Annual professional development allowance of $10,000", 0);
@@ -1598,17 +1992,22 @@ fn generate_contract(_samples_dir: &Path) -> Document {
     {
         let mut p = doc.add_paragraph("");
         p.add_run("3.2 Paid Time Off. ").bold(true);
-        p.add_run("The Employee shall receive 25 days of paid vacation per year, plus Company holidays, \
-                   accruing on a monthly basis.");
+        p.add_run(
+            "The Employee shall receive 25 days of paid vacation per year, plus Company holidays, \
+                   accruing on a monthly basis.",
+        );
     }
 
     // ── Article 4: Term and Termination ──
-    doc.add_paragraph("Article 4 — Term and Termination").style("Heading1");
+    doc.add_paragraph("Article 4 — Term and Termination")
+        .style("Heading1");
     {
         let mut p = doc.add_paragraph("");
         p.add_run("4.1 At-Will Employment. ").bold(true);
-        p.add_run("This Agreement is for at-will employment and may be terminated by either Party \
-                   at any time, with or without cause, subject to the notice provisions herein.");
+        p.add_run(
+            "This Agreement is for at-will employment and may be terminated by either Party \
+                   at any time, with or without cause, subject to the notice provisions herein.",
+        );
     }
     {
         let mut p = doc.add_paragraph("");
@@ -1626,24 +2025,30 @@ fn generate_contract(_samples_dir: &Path) -> Document {
     }
 
     // ── Article 5: Confidentiality ──
-    doc.add_paragraph("Article 5 — Confidentiality and IP").style("Heading1");
+    doc.add_paragraph("Article 5 — Confidentiality and IP")
+        .style("Heading1");
     {
         let mut p = doc.add_paragraph("");
         p.add_run("5.1 ").bold(true);
-        p.add_run("The Employee agrees to maintain strict confidentiality of all proprietary \
+        p.add_run(
+            "The Employee agrees to maintain strict confidentiality of all proprietary \
                    information, trade secrets, and business plans of the Company during and after \
-                   employment.");
+                   employment.",
+        );
     }
     {
         let mut p = doc.add_paragraph("");
         p.add_run("5.2 ").bold(true);
-        p.add_run("All intellectual property, inventions, and works of authorship created by the \
+        p.add_run(
+            "All intellectual property, inventions, and works of authorship created by the \
                    Employee during the term of employment and within the scope of duties shall be \
-                   the sole and exclusive property of the Company.");
+                   the sole and exclusive property of the Company.",
+        );
     }
 
     // ── Article 6: Non-Compete ──
-    doc.add_paragraph("Article 6 — Non-Competition").style("Heading1");
+    doc.add_paragraph("Article 6 — Non-Competition")
+        .style("Heading1");
     {
         let mut p = doc.add_paragraph("");
         p.add_run("6.1 ").bold(true);
@@ -1653,23 +2058,30 @@ fn generate_contract(_samples_dir: &Path) -> Document {
     }
 
     // ── Article 7: General Provisions ──
-    doc.add_paragraph("Article 7 — General Provisions").style("Heading1");
+    doc.add_paragraph("Article 7 — General Provisions")
+        .style("Heading1");
     {
         let mut p = doc.add_paragraph("");
         p.add_run("7.1 Governing Law. ").bold(true);
-        p.add_run("This Agreement shall be governed by and construed in accordance with the laws of \
-                   the State of California.");
+        p.add_run(
+            "This Agreement shall be governed by and construed in accordance with the laws of \
+                   the State of California.",
+        );
     }
     {
         let mut p = doc.add_paragraph("");
         p.add_run("7.2 Entire Agreement. ").bold(true);
-        p.add_run("This Agreement constitutes the entire agreement between the Parties and supersedes \
-                   all prior negotiations, representations, and agreements.");
+        p.add_run(
+            "This Agreement constitutes the entire agreement between the Parties and supersedes \
+                   all prior negotiations, representations, and agreements.",
+        );
     }
     {
         let mut p = doc.add_paragraph("");
         p.add_run("7.3 Amendment. ").bold(true);
-        p.add_run("This Agreement may only be amended by a written instrument signed by both Parties.");
+        p.add_run(
+            "This Agreement may only be amended by a written instrument signed by both Parties.",
+        );
     }
 
     // ── Signature Block ──
@@ -1679,8 +2091,7 @@ fn generate_contract(_samples_dir: &Path) -> Document {
 
     // Signature table
     {
-        let mut tbl = doc.add_table(6, 2)
-            .width_pct(100.0);
+        let mut tbl = doc.add_table(6, 2).width_pct(100.0);
         tbl.cell(0, 0).unwrap().set_text("FOR THE COMPANY:");
         tbl.cell(0, 0).unwrap().shading("5B2C6F");
         tbl.cell(0, 1).unwrap().set_text("EMPLOYEE:");
@@ -1690,12 +2101,22 @@ fn generate_contract(_samples_dir: &Path) -> Document {
         tbl.cell(1, 1).unwrap().set_text("");
         tbl.row(1).unwrap().height(Length::pt(40.0));
 
-        tbl.cell(2, 0).unwrap().set_text("Signature: ___________________________");
-        tbl.cell(2, 1).unwrap().set_text("Signature: ___________________________");
-        tbl.cell(3, 0).unwrap().set_text("Name: Board Representative");
+        tbl.cell(2, 0)
+            .unwrap()
+            .set_text("Signature: ___________________________");
+        tbl.cell(2, 1)
+            .unwrap()
+            .set_text("Signature: ___________________________");
+        tbl.cell(3, 0)
+            .unwrap()
+            .set_text("Name: Board Representative");
         tbl.cell(3, 1).unwrap().set_text("Name: Walter White");
-        tbl.cell(4, 0).unwrap().set_text("Title: Chair, Board of Directors");
-        tbl.cell(4, 1).unwrap().set_text("Title: Chief Executive Officer");
+        tbl.cell(4, 0)
+            .unwrap()
+            .set_text("Title: Chair, Board of Directors");
+        tbl.cell(4, 1)
+            .unwrap()
+            .set_text("Title: Chief Executive Officer");
         tbl.cell(5, 0).unwrap().set_text("Date: _______________");
         tbl.cell(5, 1).unwrap().set_text("Date: _______________");
     }
@@ -1735,8 +2156,8 @@ fn create_chart_png(width: u32, height: u32) -> Vec<u8> {
     }
     // Draw simple bars
     let bars: Vec<(u32, u32, [u8; 3])> = vec![
-        (30, 150, [45, 80, 22]),   // Q1
-        (100, 120, [45, 80, 22]),  // Q2
+        (30, 150, [45, 80, 22]),  // Q1
+        (100, 120, [45, 80, 22]), // Q2
         (170, 100, [45, 80, 22]), // Q3
         (240, 70, [45, 80, 22]),  // Q4 (best)
     ];
@@ -1763,8 +2184,8 @@ fn create_logo_png(width: u32, height: u32) -> Vec<u8> {
     let mut pixels = Vec::with_capacity((width * height * 4) as usize);
     for y in 0..height {
         for x in 0..width {
-            let in_text_area = x > width / 8 && x < width * 7 / 8
-                && y > height / 4 && y < height * 3 / 4;
+            let in_text_area =
+                x > width / 8 && x < width * 7 / 8 && y > height / 4 && y < height * 3 / 4;
             if in_text_area {
                 pixels.extend_from_slice(&[255, 255, 255, 255]);
             } else {
@@ -1817,7 +2238,11 @@ fn crc32(ct: &[u8], data: &[u8]) -> u32 {
         for n in 0..256u32 {
             let mut c = n;
             for _ in 0..8 {
-                c = if c & 1 != 0 { 0xEDB88320 ^ (c >> 1) } else { c >> 1 };
+                c = if c & 1 != 0 {
+                    0xEDB88320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
             }
             t[n as usize] = c;
         }
@@ -1866,47 +2291,163 @@ struct BannerOpts<'a> {
 
 fn build_header_banner_xml(image_rel_id: &str, opts: &BannerOpts) -> Vec<u8> {
     let mut xml = String::with_capacity(2048);
-    write!(xml, r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#).unwrap();
+    write!(
+        xml,
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#
+    )
+    .unwrap();
     write!(xml, r#"<w:hdr "#).unwrap();
-    write!(xml, r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" "#).unwrap();
-    write!(xml, r#"xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" "#).unwrap();
-    write!(xml, r#"xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" "#).unwrap();
-    write!(xml, r#"xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" "#).unwrap();
-    write!(xml, r#"xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" "#).unwrap();
-    write!(xml, r#"xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" "#).unwrap();
-    write!(xml, r#"xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" "#).unwrap();
-    write!(xml, r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">"#).unwrap();
+    write!(
+        xml,
+        r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" "#
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" "#
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" "#
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" "#
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" "#
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" "#
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" "#
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">"#
+    )
+    .unwrap();
     write!(xml, r#"<w:p><w:pPr><w:pStyle w:val="Header"/></w:pPr>"#).unwrap();
     write!(xml, r#"<w:r><w:rPr><w:noProof/></w:rPr>"#).unwrap();
-    write!(xml, r#"<mc:AlternateContent><mc:Choice Requires="wpg"><w:drawing>"#).unwrap();
-    write!(xml, r#"<wp:anchor distT="0" distB="0" distL="0" distR="0" "#).unwrap();
-    write!(xml, r#"simplePos="0" relativeHeight="251658240" behindDoc="0" "#).unwrap();
-    write!(xml, r#"locked="0" layoutInCell="1" hidden="0" allowOverlap="1">"#).unwrap();
+    write!(
+        xml,
+        r#"<mc:AlternateContent><mc:Choice Requires="wpg"><w:drawing>"#
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"<wp:anchor distT="0" distB="0" distL="0" distR="0" "#
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"simplePos="0" relativeHeight="251658240" behindDoc="0" "#
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"locked="0" layoutInCell="1" hidden="0" allowOverlap="1">"#
+    )
+    .unwrap();
     write!(xml, r#"<wp:simplePos x="0" y="0"/>"#).unwrap();
-    write!(xml, r#"<wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH>"#).unwrap();
-    write!(xml, r#"<wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV>"#).unwrap();
-    write!(xml, r#"<wp:extent cx="{}" cy="{}"/>"#, opts.banner_width, opts.banner_height).unwrap();
-    write!(xml, r#"<wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/>"#).unwrap();
-    write!(xml, r#"<wp:docPr id="1" name="Header Banner"/><wp:cNvGraphicFramePr/>"#).unwrap();
+    write!(
+        xml,
+        r#"<wp:positionH relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionH>"#
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"<wp:positionV relativeFrom="page"><wp:posOffset>0</wp:posOffset></wp:positionV>"#
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"<wp:extent cx="{}" cy="{}"/>"#,
+        opts.banner_width, opts.banner_height
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"<wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/>"#
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"<wp:docPr id="1" name="Header Banner"/><wp:cNvGraphicFramePr/>"#
+    )
+    .unwrap();
     write!(xml, r#"<a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup">"#).unwrap();
     write!(xml, r#"<wpg:wgp><wpg:cNvGrpSpPr/><wpg:grpSpPr><a:xfrm>"#).unwrap();
-    write!(xml, r#"<a:off x="0" y="0"/><a:ext cx="{w}" cy="{h}"/>"#, w=opts.banner_width, h=opts.banner_height).unwrap();
-    write!(xml, r#"<a:chOff x="0" y="0"/><a:chExt cx="{w}" cy="{h}"/>"#, w=opts.banner_width, h=opts.banner_height).unwrap();
+    write!(
+        xml,
+        r#"<a:off x="0" y="0"/><a:ext cx="{w}" cy="{h}"/>"#,
+        w = opts.banner_width,
+        h = opts.banner_height
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"<a:chOff x="0" y="0"/><a:chExt cx="{w}" cy="{h}"/>"#,
+        w = opts.banner_width,
+        h = opts.banner_height
+    )
+    .unwrap();
     write!(xml, r#"</a:xfrm></wpg:grpSpPr>"#).unwrap();
     // Background rectangle
-    write!(xml, r#"<wps:wsp><wps:cNvPr id="2" name="BG"/><wps:cNvSpPr/><wps:spPr>"#).unwrap();
-    write!(xml, r#"<a:xfrm><a:off x="0" y="0"/><a:ext cx="{w}" cy="{h}"/></a:xfrm>"#, w=opts.banner_width, h=opts.banner_height).unwrap();
+    write!(
+        xml,
+        r#"<wps:wsp><wps:cNvPr id="2" name="BG"/><wps:cNvSpPr/><wps:spPr>"#
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"<a:xfrm><a:off x="0" y="0"/><a:ext cx="{w}" cy="{h}"/></a:xfrm>"#,
+        w = opts.banner_width,
+        h = opts.banner_height
+    )
+    .unwrap();
     write!(xml, r#"<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>"#).unwrap();
-    write!(xml, r#"<a:solidFill><a:srgbClr val="{}"/></a:solidFill>"#, opts.bg_color).unwrap();
-    write!(xml, r#"<a:ln><a:noFill/></a:ln></wps:spPr><wps:bodyPr/></wps:wsp>"#).unwrap();
+    write!(
+        xml,
+        r#"<a:solidFill><a:srgbClr val="{}"/></a:solidFill>"#,
+        opts.bg_color
+    )
+    .unwrap();
+    write!(
+        xml,
+        r#"<a:ln><a:noFill/></a:ln></wps:spPr><wps:bodyPr/></wps:wsp>"#
+    )
+    .unwrap();
     // Logo image
-    write!(xml, r#"<pic:pic><pic:nvPicPr><pic:cNvPr id="3" name="Logo"/><pic:cNvPicPr/></pic:nvPicPr>"#).unwrap();
+    write!(
+        xml,
+        r#"<pic:pic><pic:nvPicPr><pic:cNvPr id="3" name="Logo"/><pic:cNvPicPr/></pic:nvPicPr>"#
+    )
+    .unwrap();
     write!(xml, r#"<pic:blipFill><a:blip r:embed="{}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>"#, image_rel_id).unwrap();
-    write!(xml, r#"<pic:spPr><a:xfrm><a:off x="{}" y="{}"/><a:ext cx="{}" cy="{}"/></a:xfrm>"#,
-        opts.logo_x_offset, opts.logo_y_offset, opts.logo_width, opts.logo_height).unwrap();
+    write!(
+        xml,
+        r#"<pic:spPr><a:xfrm><a:off x="{}" y="{}"/><a:ext cx="{}" cy="{}"/></a:xfrm>"#,
+        opts.logo_x_offset, opts.logo_y_offset, opts.logo_width, opts.logo_height
+    )
+    .unwrap();
     write!(xml, r#"<a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></pic:spPr></pic:pic>"#).unwrap();
     write!(xml, r#"</wpg:wgp></a:graphicData></a:graphic>"#).unwrap();
-    write!(xml, r#"</wp:anchor></w:drawing></mc:Choice></mc:AlternateContent>"#).unwrap();
+    write!(
+        xml,
+        r#"</wp:anchor></w:drawing></mc:Choice></mc:AlternateContent>"#
+    )
+    .unwrap();
     write!(xml, r#"</w:r></w:p></w:hdr>"#).unwrap();
     xml.into_bytes()
 }

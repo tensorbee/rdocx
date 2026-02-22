@@ -9,10 +9,7 @@ fn main() {
 
     let md = doc.to_markdown();
     std::fs::write("/tmp/feature_showcase.md", &md).expect("Failed to write Markdown");
-    println!(
-        "Markdown: {} bytes -> /tmp/feature_showcase.md",
-        md.len()
-    );
+    println!("Markdown: {} bytes -> /tmp/feature_showcase.md", md.len());
 
     // Simple document
     let mut simple = Document::new();

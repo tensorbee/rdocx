@@ -108,16 +108,10 @@ pub fn layout_table(
         .unwrap_or(0.0);
 
     // Table-level borders
-    let table_borders = tbl
-        .properties
-        .as_ref()
-        .and_then(|p| p.borders.clone());
+    let table_borders = tbl.properties.as_ref().and_then(|p| p.borders.clone());
 
     // Default cell margins
-    let default_cell_margin = tbl
-        .properties
-        .as_ref()
-        .and_then(|p| p.cell_margin.as_ref());
+    let default_cell_margin = tbl.properties.as_ref().and_then(|p| p.cell_margin.as_ref());
     let cell_margin_left = default_cell_margin
         .and_then(|m| m.left)
         .map(|t| t.to_pt())
@@ -187,24 +181,14 @@ pub fn layout_table(
             let paragraphs = if is_vmerge_continue {
                 Vec::new()
             } else {
-                layout_cell_content(
-                    &cell.content,
-                    content_width,
-                    styles,
-                    input,
-                    fm,
-                    num_state,
-                )?
+                layout_cell_content(&cell.content, content_width, styles, input, fm, num_state)?
             };
 
             let content_height: f64 = paragraphs.iter().map(|p| p.total_height()).sum::<f64>()
                 + cell_margin_top
                 + cell_margin_bottom;
 
-            let v_align = cell
-                .properties
-                .as_ref()
-                .and_then(|p| p.v_align);
+            let v_align = cell.properties.as_ref().and_then(|p| p.v_align);
 
             cells.push(TableCell {
                 paragraphs,
@@ -258,7 +242,11 @@ pub fn layout_table(
 }
 
 /// Compute column widths from CT_TblGrid, scaling to available width if needed.
-fn compute_column_widths(grid: Option<&CT_TblGrid>, available_width: f64, tbl: &CT_Tbl) -> Vec<f64> {
+fn compute_column_widths(
+    grid: Option<&CT_TblGrid>,
+    available_width: f64,
+    tbl: &CT_Tbl,
+) -> Vec<f64> {
     match grid {
         Some(g) if !g.columns.is_empty() => {
             let widths: Vec<f64> = g.columns.iter().map(|c| c.width.to_pt()).collect();
@@ -284,10 +272,7 @@ fn compute_column_widths(grid: Option<&CT_TblGrid>, available_width: f64, tbl: &
                     r.cells
                         .iter()
                         .map(|c| {
-                            c.properties
-                                .as_ref()
-                                .and_then(|p| p.grid_span)
-                                .unwrap_or(1) as usize
+                            c.properties.as_ref().and_then(|p| p.grid_span).unwrap_or(1) as usize
                         })
                         .sum::<usize>()
                 })
@@ -404,7 +389,7 @@ mod tests {
 
     #[test]
     fn nested_table_layout_dimensions() {
-        use rdocx_oxml::table::{CellContent, CT_Row, CT_Tc, CT_Tbl};
+        use rdocx_oxml::table::{CT_Row, CT_Tbl, CT_Tc, CellContent};
 
         // Build an outer table with one cell containing a nested table
         let mut outer = CT_Tbl::new();

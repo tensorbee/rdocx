@@ -90,16 +90,13 @@ impl Relationships {
                                 id = Some(val);
                             }
                             b"Type" => {
-                                rel_type =
-                                    Some(std::str::from_utf8(&attr.value)?.to_string());
+                                rel_type = Some(std::str::from_utf8(&attr.value)?.to_string());
                             }
                             b"Target" => {
-                                target =
-                                    Some(std::str::from_utf8(&attr.value)?.to_string());
+                                target = Some(std::str::from_utf8(&attr.value)?.to_string());
                             }
                             b"TargetMode" => {
-                                target_mode =
-                                    Some(std::str::from_utf8(&attr.value)?.to_string());
+                                target_mode = Some(std::str::from_utf8(&attr.value)?.to_string());
                             }
                             _ => {}
                         }
@@ -175,7 +172,10 @@ impl Relationships {
 
     /// Find all relationships matching a given type.
     pub fn get_all_by_type(&self, rel_type: &str) -> Vec<&Relationship> {
-        self.items.iter().filter(|r| r.rel_type == rel_type).collect()
+        self.items
+            .iter()
+            .filter(|r| r.rel_type == rel_type)
+            .collect()
     }
 
     /// Add a new relationship and return its generated ID.

@@ -3,12 +3,14 @@
 use rdocx_oxml::borders::{CT_BorderEdge, CT_PBdr, CT_TabStop, CT_Tabs};
 use rdocx_oxml::document::CT_SectPr;
 use rdocx_oxml::properties::{CT_PPr, CT_Shd};
-use rdocx_oxml::shared::{ST_Border, ST_Jc, ST_PageOrientation, ST_SectionType, ST_TabJc, ST_TabLeader};
+use rdocx_oxml::shared::{
+    ST_Border, ST_Jc, ST_PageOrientation, ST_SectionType, ST_TabJc, ST_TabLeader,
+};
 use rdocx_oxml::text::{CT_P, CT_R};
 use rdocx_oxml::units::Twips;
 
-use crate::run::{Run, RunRef};
 use crate::Length;
+use crate::run::{Run, RunRef};
 
 /// Paragraph alignment options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -326,7 +328,7 @@ impl<'a> Paragraph<'a> {
     pub fn section_landscape(mut self) -> Self {
         let sect = self.ensure_sect_pr();
         sect.orientation = Some(ST_PageOrientation::Landscape);
-        sect.page_width = Some(Twips(15840));  // 11"
+        sect.page_width = Some(Twips(15840)); // 11"
         sect.page_height = Some(Twips(12240)); // 8.5"
         self
     }
@@ -338,7 +340,7 @@ impl<'a> Paragraph<'a> {
     pub fn section_portrait(mut self) -> Self {
         let sect = self.ensure_sect_pr();
         sect.orientation = Some(ST_PageOrientation::Portrait);
-        sect.page_width = Some(Twips(12240));  // 8.5"
+        sect.page_width = Some(Twips(12240)); // 8.5"
         sect.page_height = Some(Twips(15840)); // 11"
         self
     }

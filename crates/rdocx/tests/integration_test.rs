@@ -3,7 +3,9 @@
 use rdocx::Document;
 use rdocx::paragraph::Alignment;
 use rdocx::table::VerticalAlignment;
-use rdocx::{BorderStyle, Length, SectionBreak, StyleBuilder, TabAlignment, TabLeader, UnderlineStyle};
+use rdocx::{
+    BorderStyle, Length, SectionBreak, StyleBuilder, TabAlignment, TabLeader, UnderlineStyle,
+};
 
 #[test]
 fn create_and_round_trip_simple_document() {
@@ -168,11 +170,7 @@ fn paragraph_tab_stops_round_trip() {
     let mut doc = Document::new();
     doc.add_paragraph("Tab text")
         .add_tab_stop(TabAlignment::Right, Length::inches(6.0))
-        .add_tab_stop_with_leader(
-            TabAlignment::Right,
-            Length::inches(6.5),
-            TabLeader::Dot,
-        );
+        .add_tab_stop_with_leader(TabAlignment::Right, Length::inches(6.5), TabLeader::Dot);
 
     let bytes = doc.to_bytes().unwrap();
     let doc2 = Document::from_bytes(&bytes).unwrap();
@@ -184,8 +182,7 @@ fn paragraph_tab_stops_round_trip() {
 #[test]
 fn paragraph_shading_round_trip() {
     let mut doc = Document::new();
-    doc.add_paragraph("Highlighted paragraph")
-        .shading("FFFF00");
+    doc.add_paragraph("Highlighted paragraph").shading("FFFF00");
 
     let bytes = doc.to_bytes().unwrap();
     let doc2 = Document::from_bytes(&bytes).unwrap();
@@ -294,12 +291,9 @@ fn custom_style_round_trip() {
             .next_style("Normal"),
     );
 
-    doc.add_style(
-        StyleBuilder::character("Emphasis", "Emphasis Style"),
-    );
+    doc.add_style(StyleBuilder::character("Emphasis", "Emphasis Style"));
 
-    doc.add_paragraph("Custom styled")
-        .style("CustomHeading");
+    doc.add_paragraph("Custom styled").style("CustomHeading");
 
     let bytes = doc.to_bytes().unwrap();
     let doc2 = Document::from_bytes(&bytes).unwrap();
@@ -397,10 +391,7 @@ fn comprehensive_document_round_trip() {
     let mut doc = Document::new();
 
     // Custom style
-    doc.add_style(
-        StyleBuilder::paragraph("BlockQuote", "Block Quote")
-            .based_on("Normal"),
-    );
+    doc.add_style(StyleBuilder::paragraph("BlockQuote", "Block Quote").based_on("Normal"));
 
     // Page setup
     doc.set_margins(
@@ -424,16 +415,12 @@ fn comprehensive_document_round_trip() {
         .color("FF0000")
         .font("Calibri")
         .size(11.0);
-    para.add_run(" text with ")
-        .font("Calibri")
-        .size(11.0);
+    para.add_run(" text with ").font("Calibri").size(11.0);
     para.add_run("underline")
         .underline(true)
         .font("Calibri")
         .size(11.0);
-    para.add_run(".")
-        .font("Calibri")
-        .size(11.0);
+    para.add_run(".").font("Calibri").size(11.0);
 
     // Block quote with indentation and shading
     doc.add_paragraph("This is a block quote.")
@@ -536,11 +523,17 @@ fn table_cell_shading_and_alignment() {
     let tables = doc2.tables();
     let cell_00 = tables[0].cell(0, 0).unwrap();
     assert_eq!(cell_00.shading_fill(), Some("4472C4"));
-    assert_eq!(cell_00.vertical_alignment(), Some(VerticalAlignment::Center));
+    assert_eq!(
+        cell_00.vertical_alignment(),
+        Some(VerticalAlignment::Center)
+    );
 
     let cell_10 = tables[0].cell(1, 0).unwrap();
     assert_eq!(cell_10.shading_fill(), Some("D9E2F3"));
-    assert_eq!(cell_10.vertical_alignment(), Some(VerticalAlignment::Bottom));
+    assert_eq!(
+        cell_10.vertical_alignment(),
+        Some(VerticalAlignment::Bottom)
+    );
 }
 
 #[test]
@@ -628,9 +621,8 @@ fn inline_image_round_trip() {
         0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // 1x1
         0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE, // 8-bit RGB
         0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, // IDAT chunk
-        0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00,
-        0x00, 0x02, 0x00, 0x01, 0xE2, 0x21, 0xBC, 0x33,
-        0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, // IEND chunk
+        0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0xE2, 0x21, 0xBC,
+        0x33, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, // IEND chunk
         0xAE, 0x42, 0x60, 0x82,
     ];
 
@@ -777,7 +769,8 @@ fn comprehensive_phase3_document() {
 
     // Table section
     doc.add_paragraph("Data Summary:").style("Heading2");
-    let mut table = doc.add_table(3, 3)
+    let mut table = doc
+        .add_table(3, 3)
         .borders(BorderStyle::Single, 4, "000000");
 
     // Header row
@@ -956,14 +949,10 @@ fn comprehensive_document_round_trip_with_nested() {
     nested.cell(1, 1).unwrap().set_text("N4");
 
     // Bullet list
-    doc.add_paragraph("Chapter 3: Lists")
-        .style("Heading1");
-    doc.add_paragraph("First bullet point")
-        .style("ListBullet");
-    doc.add_paragraph("Second bullet point")
-        .style("ListBullet");
-    doc.add_paragraph("Third bullet point")
-        .style("ListBullet");
+    doc.add_paragraph("Chapter 3: Lists").style("Heading1");
+    doc.add_paragraph("First bullet point").style("ListBullet");
+    doc.add_paragraph("Second bullet point").style("ListBullet");
+    doc.add_paragraph("Third bullet point").style("ListBullet");
 
     // Final paragraph
     doc.add_paragraph("End of document.");
@@ -1010,7 +999,10 @@ fn template_open_replace_save() {
     // Verify
     let paras = doc.paragraphs();
     assert_eq!(paras[0].text(), "Dear Alice,");
-    assert_eq!(paras[1].text(), "Welcome to Acme Corp. Your role starts on 2026-03-01.");
+    assert_eq!(
+        paras[1].text(),
+        "Welcome to Acme Corp. Your role starts on 2026-03-01."
+    );
     assert_eq!(paras[2].text(), "Your onboarding schedule is attached.");
     assert_eq!(paras[3].text(), "Please review and confirm.");
     assert_eq!(paras[4].text(), "Best regards,");
@@ -1042,15 +1034,11 @@ fn replace_all_batch_workflow() {
 fn background_image_end_to_end() {
     // Minimal 1x1 PNG
     let png_data: Vec<u8> = vec![
-        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-        0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-        0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xde,
-        0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54,
-        0x08, 0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0x00, 0x00,
-        0x00, 0x02, 0x00, 0x01, 0xe2, 0x21, 0xbc, 0x33,
-        0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44,
-        0xae, 0x42, 0x60, 0x82,
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x08, 0xd7, 0x63, 0xf8,
+        0xcf, 0xc0, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0xe2, 0x21, 0xbc, 0x33, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
     ];
 
     let mut doc = Document::new();
@@ -1070,22 +1058,19 @@ fn background_image_end_to_end() {
 fn full_phase7_workflow() {
     // Minimal PNG
     let png_data: Vec<u8> = vec![
-        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-        0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-        0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xde,
-        0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54,
-        0x08, 0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0x00, 0x00,
-        0x00, 0x02, 0x00, 0x01, 0xe2, 0x21, 0xbc, 0x33,
-        0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44,
-        0xae, 0x42, 0x60, 0x82,
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x08, 0xd7, 0x63, 0xf8,
+        0xcf, 0xc0, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0xe2, 0x21, 0xbc, 0x33, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
     ];
 
     let mut doc = Document::new();
     doc.set_title("Template Output");
     doc.set_header("{{company}} - Confidential");
 
-    doc.add_paragraph("Report for {{company}}").style("Heading1");
+    doc.add_paragraph("Report for {{company}}")
+        .style("Heading1");
     doc.add_paragraph("Date: {{date}}");
     doc.add_paragraph("{{INSERT_HERE}}");
     doc.add_paragraph("Summary: {{company}} performed well in {{date}}.");
@@ -1107,10 +1092,22 @@ fn full_phase7_workflow() {
     let paras = doc.paragraphs();
     // First paragraph is the background image paragraph, skip it
     let text_paras: Vec<_> = paras.iter().filter(|p| !p.text().is_empty()).collect();
-    assert!(text_paras.iter().any(|p| p.text() == "Report for Acme Corp"));
+    assert!(
+        text_paras
+            .iter()
+            .any(|p| p.text() == "Report for Acme Corp")
+    );
     assert!(text_paras.iter().any(|p| p.text() == "Date: 2026-02-22"));
-    assert!(text_paras.iter().any(|p| p.text() == "Revenue increased by 15%."));
-    assert!(text_paras.iter().any(|p| p.text() == "Summary: Acme Corp performed well in 2026-02-22."));
+    assert!(
+        text_paras
+            .iter()
+            .any(|p| p.text() == "Revenue increased by 15%.")
+    );
+    assert!(
+        text_paras
+            .iter()
+            .any(|p| p.text() == "Summary: Acme Corp performed well in 2026-02-22.")
+    );
 
     assert_eq!(doc.header_text().unwrap(), "Acme Corp - Confidential");
 
@@ -1181,16 +1178,22 @@ fn tab_stops_all_leader_styles() {
         .add_tab_stop(TabAlignment::Right, Length::inches(6.0));
 
     // Tab stop with dot leader
-    doc.add_paragraph("Item\t100")
-        .add_tab_stop_with_leader(TabAlignment::Right, Length::inches(6.0), TabLeader::Dot);
+    doc.add_paragraph("Item\t100").add_tab_stop_with_leader(
+        TabAlignment::Right,
+        Length::inches(6.0),
+        TabLeader::Dot,
+    );
 
     // Tab stop with hyphen leader
     doc.add_paragraph("Section\tPage 5")
         .add_tab_stop_with_leader(TabAlignment::Right, Length::inches(6.0), TabLeader::Hyphen);
 
     // Tab stop with underscore leader
-    doc.add_paragraph("Name\t")
-        .add_tab_stop_with_leader(TabAlignment::Right, Length::inches(6.0), TabLeader::Underscore);
+    doc.add_paragraph("Name\t").add_tab_stop_with_leader(
+        TabAlignment::Right,
+        Length::inches(6.0),
+        TabLeader::Underscore,
+    );
 
     // Multiple alignments
     doc.add_paragraph("A\tB\tC")
@@ -1426,7 +1429,8 @@ fn to_pdf_with_formatting() {
         .style("Heading1")
         .alignment(Alignment::Center);
     doc.add_paragraph("Normal text with ")
-        .add_run("bold").bold(true);
+        .add_run("bold")
+        .bold(true);
     doc.add_paragraph("Another paragraph");
 
     let result = doc.to_pdf();

@@ -1,7 +1,7 @@
 //! Theme parsing: extracts color scheme and font scheme from theme1.xml.
 
-use quick_xml::events::Event;
 use quick_xml::Reader;
+use quick_xml::events::Event;
 
 use crate::error::Result;
 use crate::namespace::matches_local_name;
@@ -106,8 +106,7 @@ fn parse_color_scheme(reader: &mut Reader<&[u8]>, colors: &mut ThemeColors) -> R
                 match local {
                     b"dk1" | b"dk2" | b"lt1" | b"lt2" | b"accent1" | b"accent2" | b"accent3"
                     | b"accent4" | b"accent5" | b"accent6" | b"hlink" | b"folHlink" => {
-                        current_slot =
-                            Some(std::str::from_utf8(local).unwrap_or("").to_string());
+                        current_slot = Some(std::str::from_utf8(local).unwrap_or("").to_string());
                     }
                     _ => {}
                 }

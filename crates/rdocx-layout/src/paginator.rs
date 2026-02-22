@@ -79,18 +79,27 @@ pub fn paginate_sections(
     fm: &FontManager,
 ) -> (Vec<PageFrame>, Vec<OutlineEntry>) {
     if sections.is_empty() {
-        return (vec![PageFrame {
-            page_number: 1,
-            width: 612.0,
-            height: 792.0,
-            elements: Vec::new(),
-        }], Vec::new());
+        return (
+            vec![PageFrame {
+                page_number: 1,
+                width: 612.0,
+                height: 792.0,
+                elements: Vec::new(),
+            }],
+            Vec::new(),
+        );
     }
 
     // For a single section, delegate to the existing paginate function
     if sections.len() == 1 {
         let s = &sections[0];
-        return paginate(&s.blocks, s.geometry, s.header_footer.as_ref(), s.title_pg, fm);
+        return paginate(
+            &s.blocks,
+            s.geometry,
+            s.header_footer.as_ref(),
+            s.title_pg,
+            fm,
+        );
     }
 
     // Multi-section pagination
@@ -222,7 +231,11 @@ struct Pager<'a> {
 }
 
 impl<'a> Pager<'a> {
-    fn new(geometry: PageGeometry, header_footer: Option<&'a HeaderFooterContent>, title_pg: bool) -> Self {
+    fn new(
+        geometry: PageGeometry,
+        header_footer: Option<&'a HeaderFooterContent>,
+        title_pg: bool,
+    ) -> Self {
         Pager {
             pages: Vec::new(),
             elements: Vec::new(),
@@ -405,10 +418,23 @@ fn paginate_paragraph(
         let border_y = pager.geometry.margin_top + pager.cursor_y;
         let border_w = pager.geometry.content_width() - para.indent_left - para.indent_right;
         let border_h = para.content_height();
-        render_border_edges(borders, border_x, border_y, border_w, border_h, &mut pager.elements);
+        render_border_edges(
+            borders,
+            border_x,
+            border_y,
+            border_w,
+            border_h,
+            &mut pager.elements,
+        );
     }
 
-    render_paragraph_lines(&para.lines, para, &pager.geometry, pager.cursor_y, &mut pager.elements);
+    render_paragraph_lines(
+        &para.lines,
+        para,
+        &pager.geometry,
+        pager.cursor_y,
+        &mut pager.elements,
+    );
     pager.cursor_y += para.content_height();
     pager.cursor_y += para.space_after;
     pager.mark_content();
@@ -416,12 +442,7 @@ fn paginate_paragraph(
 
 /// Split a paragraph at the given line index, rendering first part on current page
 /// and continuing the rest on a new page (recursively if needed).
-fn render_para_split(
-    para: &ParagraphBlock,
-    split_at: usize,
-    space_before: f64,
-    pager: &mut Pager,
-) {
+fn render_para_split(para: &ParagraphBlock, split_at: usize, space_before: f64, pager: &mut Pager) {
     // Render lines before split on current page
     pager.cursor_y += space_before;
     render_paragraph_lines(
@@ -465,7 +486,13 @@ fn render_para_split(
     }
 
     // Remaining fits on the new page
-    render_paragraph_lines(remaining_lines, para, &pager.geometry, 0.0, &mut pager.elements);
+    render_paragraph_lines(
+        remaining_lines,
+        para,
+        &pager.geometry,
+        0.0,
+        &mut pager.elements,
+    );
     pager.cursor_y = remaining_height + para.space_after;
     pager.mark_content();
 }
@@ -499,22 +526,21 @@ fn render_paragraph_lines(
         let remaining_width = line.available_width - text_width;
 
         // For justified text (Both), compute extra space per gap
-        let justify_extra = if para.jc == Some(ST_Jc::Both) && !line.is_last && remaining_width > 0.0 {
-            // Count inter-word gaps: spaces between items + spaces within text segments
-            let gap_count = count_word_gaps(&line.items);
-            if gap_count > 0 {
-                remaining_width / gap_count as f64
+        let justify_extra =
+            if para.jc == Some(ST_Jc::Both) && !line.is_last && remaining_width > 0.0 {
+                // Count inter-word gaps: spaces between items + spaces within text segments
+                let gap_count = count_word_gaps(&line.items);
+                if gap_count > 0 {
+                    remaining_width / gap_count as f64
+                } else {
+                    0.0
+                }
             } else {
                 0.0
-            }
-        } else {
-            0.0
-        };
+            };
 
         let x_offset = match para.jc {
-            Some(ST_Jc::Center) => {
-                geometry.margin_left + line.indent_left + remaining_width / 2.0
-            }
+            Some(ST_Jc::Center) => geometry.margin_left + line.indent_left + remaining_width / 2.0,
             Some(ST_Jc::Right) | Some(ST_Jc::End) => {
                 geometry.margin_left + line.indent_left + remaining_width
             }
@@ -564,7 +590,10 @@ fn render_paragraph_lines(
                     };
 
                     elements.push(PositionedElement::Text(GlyphRun {
-                        origin: Point { x, y: adjusted_baseline },
+                        origin: Point {
+                            x,
+                            y: adjusted_baseline,
+                        },
                         font_id: seg.font_id,
                         font_size: seg.font_size,
                         glyph_ids: seg.glyph_ids.clone(),
@@ -588,7 +617,10 @@ fn render_paragraph_lines(
                             };
                             elements.push(PositionedElement::Line {
                                 start: Point { x, y: ul_y },
-                                end: Point { x: x + effective_width, y: ul_y },
+                                end: Point {
+                                    x: x + effective_width,
+                                    y: ul_y,
+                                },
                                 width: ul_thickness,
                                 color: seg.color,
                                 dash_pattern: None,
@@ -598,7 +630,10 @@ fn render_paragraph_lines(
                                 let ul_y2 = ul_y + ul_thickness * 2.5;
                                 elements.push(PositionedElement::Line {
                                     start: Point { x, y: ul_y2 },
-                                    end: Point { x: x + effective_width, y: ul_y2 },
+                                    end: Point {
+                                        x: x + effective_width,
+                                        y: ul_y2,
+                                    },
                                     width: ul_thickness,
                                     color: seg.color,
                                     dash_pattern: None,
@@ -613,7 +648,10 @@ fn render_paragraph_lines(
                         let strike_thickness = seg.font_size / 24.0;
                         elements.push(PositionedElement::Line {
                             start: Point { x, y: strike_y },
-                            end: Point { x: x + effective_width, y: strike_y },
+                            end: Point {
+                                x: x + effective_width,
+                                y: strike_y,
+                            },
                             width: strike_thickness,
                             color: seg.color,
                             dash_pattern: None,
@@ -626,15 +664,27 @@ fn render_paragraph_lines(
                         let strike_thickness = seg.font_size / 24.0;
                         let gap = strike_thickness * 2.0;
                         elements.push(PositionedElement::Line {
-                            start: Point { x, y: strike_y - gap / 2.0 },
-                            end: Point { x: x + effective_width, y: strike_y - gap / 2.0 },
+                            start: Point {
+                                x,
+                                y: strike_y - gap / 2.0,
+                            },
+                            end: Point {
+                                x: x + effective_width,
+                                y: strike_y - gap / 2.0,
+                            },
                             width: strike_thickness,
                             color: seg.color,
                             dash_pattern: None,
                         });
                         elements.push(PositionedElement::Line {
-                            start: Point { x, y: strike_y + gap / 2.0 },
-                            end: Point { x: x + effective_width, y: strike_y + gap / 2.0 },
+                            start: Point {
+                                x,
+                                y: strike_y + gap / 2.0,
+                            },
+                            end: Point {
+                                x: x + effective_width,
+                                y: strike_y + gap / 2.0,
+                            },
                             width: strike_thickness,
                             color: seg.color,
                             dash_pattern: None,
@@ -936,18 +986,34 @@ fn render_border_edges(
             let dx = end.x - start.x;
             let dy = end.y - start.y;
             let len = (dx * dx + dy * dy).sqrt();
-            let (nx, ny) = if len > 0.0 { (-dy / len, dx / len) } else { (0.0, 1.0) };
+            let (nx, ny) = if len > 0.0 {
+                (-dy / len, dx / len)
+            } else {
+                (0.0, 1.0)
+            };
             let offset = gap / 2.0;
             elements.push(PositionedElement::Line {
-                start: Point { x: start.x + nx * offset, y: start.y + ny * offset },
-                end: Point { x: end.x + nx * offset, y: end.y + ny * offset },
+                start: Point {
+                    x: start.x + nx * offset,
+                    y: start.y + ny * offset,
+                },
+                end: Point {
+                    x: end.x + nx * offset,
+                    y: end.y + ny * offset,
+                },
                 width: thickness,
                 color,
                 dash_pattern: None,
             });
             elements.push(PositionedElement::Line {
-                start: Point { x: start.x - nx * offset, y: start.y - ny * offset },
-                end: Point { x: end.x - nx * offset, y: end.y - ny * offset },
+                start: Point {
+                    x: start.x - nx * offset,
+                    y: start.y - ny * offset,
+                },
+                end: Point {
+                    x: end.x - nx * offset,
+                    y: end.y - ny * offset,
+                },
                 width: thickness,
                 color,
                 dash_pattern: None,
@@ -968,7 +1034,10 @@ fn render_border_edges(
         render_edge(
             edge,
             Point { x, y: y - space },
-            Point { x: x + w, y: y - space },
+            Point {
+                x: x + w,
+                y: y - space,
+            },
             elements,
         );
     }
@@ -976,8 +1045,14 @@ fn render_border_edges(
         let space = edge.space.unwrap_or(0) as f64;
         render_edge(
             edge,
-            Point { x, y: y + h + space },
-            Point { x: x + w, y: y + h + space },
+            Point {
+                x,
+                y: y + h + space,
+            },
+            Point {
+                x: x + w,
+                y: y + h + space,
+            },
             elements,
         );
     }
@@ -986,7 +1061,10 @@ fn render_border_edges(
         render_edge(
             edge,
             Point { x: x - space, y },
-            Point { x: x - space, y: y + h },
+            Point {
+                x: x - space,
+                y: y + h,
+            },
             elements,
         );
     }
@@ -994,8 +1072,14 @@ fn render_border_edges(
         let space = edge.space.unwrap_or(0) as f64;
         render_edge(
             edge,
-            Point { x: x + w + space, y },
-            Point { x: x + w + space, y: y + h },
+            Point {
+                x: x + w + space,
+                y,
+            },
+            Point {
+                x: x + w + space,
+                y: y + h,
+            },
             elements,
         );
     }
@@ -1254,7 +1338,12 @@ mod tests {
             underline: None,
             strike: false,
             dstrike: false,
-            highlight: Some(Color { r: 1.0, g: 1.0, b: 0.0, a: 1.0 }),
+            highlight: Some(Color {
+                r: 1.0,
+                g: 1.0,
+                b: 0.0,
+                a: 1.0,
+            }),
             baseline_offset: 0.0,
             hyperlink_url: None,
             field_kind: None,
@@ -1348,7 +1437,12 @@ mod tests {
             space_before: 0.0,
             space_after: 0.0,
             borders: None,
-            shading: Some(Color { r: 1.0, g: 1.0, b: 0.0, a: 1.0 }),
+            shading: Some(Color {
+                r: 1.0,
+                g: 1.0,
+                b: 0.0,
+                a: 1.0,
+            }),
             indent_left: 0.0,
             indent_right: 0.0,
             jc: None,

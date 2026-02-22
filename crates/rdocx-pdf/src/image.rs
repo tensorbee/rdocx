@@ -91,7 +91,8 @@ fn decode_png(data: &[u8]) -> Option<DecodedImage> {
     let mut idat_data = Vec::new();
 
     while pos + 8 <= data.len() {
-        let chunk_len = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        let chunk_len =
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         let chunk_type = &data[pos + 4..pos + 8];
         let chunk_data_start = pos + 8;
         let chunk_data_end = chunk_data_start + chunk_len;
@@ -129,10 +130,10 @@ fn decode_png(data: &[u8]) -> Option<DecodedImage> {
 
     // Unfilter the scanlines
     let channels: usize = match color_type {
-        0 => 1,    // Grayscale
-        2 => 3,    // RGB
-        4 => 2,    // Grayscale + Alpha
-        6 => 4,    // RGBA
+        0 => 1, // Grayscale
+        2 => 3, // RGB
+        4 => 2, // Grayscale + Alpha
+        6 => 4, // RGBA
         _ => return None,
     };
 
@@ -174,7 +175,11 @@ fn decode_png(data: &[u8]) -> Option<DecodedImage> {
             3 => {
                 // Average
                 for i in 0..stride {
-                    let a = if i >= channels { out[i - channels] as u16 } else { 0 };
+                    let a = if i >= channels {
+                        out[i - channels] as u16
+                    } else {
+                        0
+                    };
                     let b = prev_row[i] as u16;
                     out[i] = raw[i].wrapping_add(((a + b) / 2) as u8);
                 }
@@ -182,9 +187,17 @@ fn decode_png(data: &[u8]) -> Option<DecodedImage> {
             4 => {
                 // Paeth
                 for i in 0..stride {
-                    let a = if i >= channels { out[i - channels] as i32 } else { 0 };
+                    let a = if i >= channels {
+                        out[i - channels] as i32
+                    } else {
+                        0
+                    };
                     let b = prev_row[i] as i32;
-                    let c = if i >= channels { prev_row[i - channels] as i32 } else { 0 };
+                    let c = if i >= channels {
+                        prev_row[i - channels] as i32
+                    } else {
+                        0
+                    };
                     out[i] = raw[i].wrapping_add(paeth_predictor(a, b, c));
                 }
             }

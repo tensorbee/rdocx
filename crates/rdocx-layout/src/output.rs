@@ -26,8 +26,18 @@ pub struct Color {
 }
 
 impl Color {
-    pub const BLACK: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
-    pub const WHITE: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+    pub const BLACK: Color = Color {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    };
+    pub const WHITE: Color = Color {
+        r: 1.0,
+        g: 1.0,
+        b: 1.0,
+        a: 1.0,
+    };
 
     /// Parse a hex color string like "FF0000" to Color.
     pub fn from_hex(hex: &str) -> Self {
@@ -98,10 +108,7 @@ pub enum PositionedElement {
         dash_pattern: Option<(f64, f64)>,
     },
     /// A filled rectangle (for shading, highlights).
-    FilledRect {
-        rect: Rect,
-        color: Color,
-    },
+    FilledRect { rect: Rect, color: Color },
     /// An inline image.
     Image {
         rect: Rect,
@@ -111,10 +118,7 @@ pub enum PositionedElement {
         embed_id: Option<String>,
     },
     /// A link annotation (hyperlink).
-    LinkAnnotation {
-        rect: Rect,
-        url: String,
-    },
+    LinkAnnotation { rect: Rect, url: String },
 }
 
 /// A single page of laid-out content.

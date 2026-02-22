@@ -40,10 +40,24 @@ pub fn replace_in_paragraph(para: &mut CT_P, placeholder: &str, replacement: &st
 
         if first_run == last_run {
             // Single-run match: simple in-place replacement on that run's text content.
-            replace_in_single_run(&mut para.runs[first_run], &char_map, match_start, match_end, replacement);
+            replace_in_single_run(
+                &mut para.runs[first_run],
+                &char_map,
+                match_start,
+                match_end,
+                replacement,
+            );
         } else {
             // Cross-run match: put replacement in first run, clear matched parts from others.
-            replace_across_runs(&mut para.runs, &char_map, match_start, match_end, first_run, last_run, replacement);
+            replace_across_runs(
+                &mut para.runs,
+                &char_map,
+                match_start,
+                match_end,
+                first_run,
+                last_run,
+                replacement,
+            );
         }
 
         // Remove runs that became completely empty (no content at all).
@@ -114,7 +128,8 @@ fn replace_in_single_run(
     };
 
     if let RunContent::Text(t) = &mut run.content[content_idx] {
-        let mut new_text = String::with_capacity(t.text.len() - (byte_end - byte_start) + replacement.len());
+        let mut new_text =
+            String::with_capacity(t.text.len() - (byte_end - byte_start) + replacement.len());
         new_text.push_str(&t.text[..byte_start]);
         new_text.push_str(replacement);
         new_text.push_str(&t.text[byte_end..]);
@@ -227,11 +242,7 @@ pub fn replace_in_table(table: &mut CT_Tbl, placeholder: &str, replacement: &str
 }
 
 /// Replace all occurrences of `placeholder` in a header or footer.
-pub fn replace_in_header_footer(
-    hf: &mut CT_HdrFtr,
-    placeholder: &str,
-    replacement: &str,
-) -> usize {
+pub fn replace_in_header_footer(hf: &mut CT_HdrFtr, placeholder: &str, replacement: &str) -> usize {
     replace_in_paragraphs(&mut hf.paragraphs, placeholder, replacement)
 }
 
@@ -245,9 +256,9 @@ pub fn replace_in_xml_part(
     placeholder: &str,
     replacement: &str,
 ) -> crate::error::Result<(Vec<u8>, usize)> {
+    use crate::namespace::matches_local_name;
     use quick_xml::events::Event;
     use quick_xml::{Reader, Writer};
-    use crate::namespace::matches_local_name;
 
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(false);
@@ -310,7 +321,11 @@ pub fn replace_in_xml_part(
                                 // Advance past the <w:p> start tag
                                 loop {
                                     match para_reader.read_event_into(&mut prbuf) {
-                                        Ok(Event::Start(ref pe)) if matches_local_name(pe.name().as_ref(), b"p") => break,
+                                        Ok(Event::Start(ref pe))
+                                            if matches_local_name(pe.name().as_ref(), b"p") =>
+                                        {
+                                            break;
+                                        }
                                         Ok(Event::Eof) => break,
                                         _ => {}
                                     }
@@ -326,7 +341,8 @@ pub fn replace_in_xml_part(
                             }
                         }
                         Ok(Event::End(ref ie)) => {
-                            if matches_local_name(ie.name().as_ref(), b"txbxContent") && depth == 1 {
+                            if matches_local_name(ie.name().as_ref(), b"txbxContent") && depth == 1
+                            {
                                 break;
                             }
                             depth -= 1;
@@ -349,7 +365,9 @@ pub fn replace_in_xml_part(
                 }
 
                 // Write closing txbxContent tag
-                writer.write_event(Event::End(quick_xml::events::BytesEnd::new("w:txbxContent")))?;
+                writer.write_event(Event::End(quick_xml::events::BytesEnd::new(
+                    "w:txbxContent",
+                )))?;
             }
             Ok(ev) => {
                 writer.write_event(ev)?;
@@ -372,9 +390,9 @@ pub fn replace_in_chart_xml(
     placeholder: &str,
     replacement: &str,
 ) -> crate::error::Result<(Vec<u8>, usize)> {
+    use crate::namespace::matches_local_name;
     use quick_xml::events::{BytesText, Event};
     use quick_xml::{Reader, Writer};
-    use crate::namespace::matches_local_name;
 
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(false);
@@ -398,7 +416,11 @@ pub fn replace_in_chart_xml(
                     // Check parent context: a:t for drawing text, c:v for chart value cache
                     let local = std::str::from_utf8(name.as_ref()).unwrap_or("");
                     // We match both "a:t" and "c:v" generically
-                    if local.ends_with(":t") || local.ends_with(":v") || local == "t" || local == "v" {
+                    if local.ends_with(":t")
+                        || local.ends_with(":v")
+                        || local == "t"
+                        || local == "v"
+                    {
                         in_text_element = true;
                         text_tag_name = Some(local.to_string());
                     }
@@ -444,11 +466,7 @@ pub fn replace_in_chart_xml(
 /// The `replacement` string supports capture group references: `$1`, `$2`, etc.
 /// Uses the same cross-run char map algorithm as literal replacement.
 /// Returns the number of replacements made.
-pub fn replace_regex_in_paragraph(
-    para: &mut CT_P,
-    re: &regex::Regex,
-    replacement: &str,
-) -> usize {
+pub fn replace_regex_in_paragraph(para: &mut CT_P, re: &regex::Regex, replacement: &str) -> usize {
     let mut total = 0;
 
     loop {
@@ -523,11 +541,7 @@ pub fn replace_regex_in_paragraphs(
 }
 
 /// Replace regex matches in a table (recursively handles nested tables).
-pub fn replace_regex_in_table(
-    table: &mut CT_Tbl,
-    re: &regex::Regex,
-    replacement: &str,
-) -> usize {
+pub fn replace_regex_in_table(table: &mut CT_Tbl, re: &regex::Regex, replacement: &str) -> usize {
     use crate::table::CellContent;
 
     let mut count = 0;
@@ -801,7 +815,8 @@ mod tests {
         let result_str = String::from_utf8(result).unwrap();
         assert!(result_str.contains("Quarter"));
 
-        let (result2, count2) = replace_in_chart_xml(result_str.as_bytes(), "{{label}}", "Q1").unwrap();
+        let (result2, count2) =
+            replace_in_chart_xml(result_str.as_bytes(), "{{label}}", "Q1").unwrap();
         assert_eq!(count2, 1);
         let result2_str = String::from_utf8(result2).unwrap();
         assert!(result2_str.contains("Q1"));

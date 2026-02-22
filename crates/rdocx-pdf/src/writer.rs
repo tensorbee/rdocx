@@ -2,9 +2,7 @@
 
 use std::collections::HashMap;
 
-use pdf_writer::types::{
-    ActionType, AnnotationType, CidFontType, FontFlags, SystemInfo,
-};
+use pdf_writer::types::{ActionType, AnnotationType, CidFontType, FontFlags, SystemInfo};
 use pdf_writer::{Content, Filter, Finish, Name, Pdf, Rect, Ref, Str, TextStr};
 use rdocx_layout::{FontId, LayoutResult, PositionedElement};
 
@@ -45,7 +43,10 @@ pub(crate) fn write_pdf(layout: &LayoutResult) -> Vec<u8> {
                 let descriptor_ref = alloc();
                 let stream_ref = alloc();
                 let cmap_ref = alloc();
-                font_refs.insert(fd.id, (type0_ref, cid_ref, descriptor_ref, stream_ref, cmap_ref));
+                font_refs.insert(
+                    fd.id,
+                    (type0_ref, cid_ref, descriptor_ref, stream_ref, cmap_ref),
+                );
                 prepared_fonts.insert(fd.id, prepared);
             }
         }
@@ -143,10 +144,13 @@ pub(crate) fn write_pdf(layout: &LayoutResult) -> Vec<u8> {
 
     // ── Write fonts ──────────────────────────────────────────────────
     for (font_id, prepared) in &prepared_fonts {
-        let (type0_ref, cid_ref, descriptor_ref, stream_ref, cmap_ref) =
-            font_refs[font_id];
+        let (type0_ref, cid_ref, descriptor_ref, stream_ref, cmap_ref) = font_refs[font_id];
 
-        let base_name = sanitize_font_name(&prepared.font_data.family, prepared.font_data.bold, prepared.font_data.italic);
+        let base_name = sanitize_font_name(
+            &prepared.font_data.family,
+            prepared.font_data.bold,
+            prepared.font_data.italic,
+        );
 
         // Type0 font (composite font)
         let mut type0 = pdf.type0_font(type0_ref);
@@ -224,8 +228,7 @@ pub(crate) fn write_pdf(layout: &LayoutResult) -> Vec<u8> {
         let compressed = miniz_oxide::deflate::compress_to_vec_zlib(&prepared.subset_bytes, 6);
         let mut stream = pdf.stream(stream_ref, &compressed);
         stream.filter(Filter::FlateDecode);
-        stream
-            .pair(Name(b"Length1"), prepared.subset_bytes.len() as i32);
+        stream.pair(Name(b"Length1"), prepared.subset_bytes.len() as i32);
         stream.finish();
 
         // ToUnicode CMap stream
@@ -282,13 +285,8 @@ pub(crate) fn write_pdf(layout: &LayoutResult) -> Vec<u8> {
         let content_id = content_ids[page_idx];
 
         // Build content stream
-        let content_bytes = build_page_content(
-            page_idx,
-            page,
-            &prepared_fonts,
-            &font_refs,
-            &image_map,
-        );
+        let content_bytes =
+            build_page_content(page_idx, page, &prepared_fonts, &font_refs, &image_map);
 
         // Compress and write content stream
         let compressed = miniz_oxide::deflate::compress_to_vec_zlib(&content_bytes, 6);
@@ -299,12 +297,7 @@ pub(crate) fn write_pdf(layout: &LayoutResult) -> Vec<u8> {
         // Write page dictionary
         let mut page_dict = pdf.page(page_id);
         page_dict.parent(page_tree_id);
-        page_dict.media_box(Rect::new(
-            0.0,
-            0.0,
-            page.width as f32,
-            page.height as f32,
-        ));
+        page_dict.media_box(Rect::new(0.0, 0.0, page.width as f32, page.height as f32));
         page_dict.contents(content_id);
 
         // Resources: fonts + images
@@ -325,7 +318,10 @@ pub(crate) fn write_pdf(layout: &LayoutResult) -> Vec<u8> {
             .iter()
             .filter(|((pi, _), _)| *pi == page_idx)
             .map(|((_, ei), img_idx)| {
-                (format!("Im{}_{}", page_idx, ei), image_entries[*img_idx].xobject_ref)
+                (
+                    format!("Im{}_{}", page_idx, ei),
+                    image_entries[*img_idx].xobject_ref,
+                )
             })
             .collect();
 
@@ -421,18 +417,11 @@ fn build_page_content(
                         );
 
                         content.begin_text();
-                        content.set_font(
-                            Name(font_name.as_bytes()),
-                            run.font_size as f32,
-                        );
+                        content.set_font(Name(font_name.as_bytes()), run.font_size as f32);
 
                         // PDF coordinate system: origin at bottom-left
                         let pdf_y = page_height - run.origin.y as f32;
-                        content.set_text_matrix([
-                            1.0, 0.0, 0.0, 1.0,
-                            run.origin.x as f32,
-                            pdf_y,
-                        ]);
+                        content.set_text_matrix([1.0, 0.0, 0.0, 1.0, run.origin.x as f32, pdf_y]);
 
                         // Remap glyph IDs and emit with TJ operator
                         emit_glyphs(
@@ -457,33 +446,19 @@ fn build_page_content(
                 dash_pattern,
             } => {
                 content.save_state();
-                content.set_stroke_rgb(
-                    color.r as f32,
-                    color.g as f32,
-                    color.b as f32,
-                );
+                content.set_stroke_rgb(color.r as f32, color.g as f32, color.b as f32);
                 content.set_line_width(*width as f32);
                 if let Some((on, off)) = dash_pattern {
                     content.set_dash_pattern([*on as f32, *off as f32], 0.0);
                 }
-                content.move_to(
-                    start.x as f32,
-                    page_height - start.y as f32,
-                );
-                content.line_to(
-                    end.x as f32,
-                    page_height - end.y as f32,
-                );
+                content.move_to(start.x as f32, page_height - start.y as f32);
+                content.line_to(end.x as f32, page_height - end.y as f32);
                 content.stroke();
                 content.restore_state();
             }
             PositionedElement::FilledRect { rect, color } => {
                 content.save_state();
-                content.set_fill_rgb(
-                    color.r as f32,
-                    color.g as f32,
-                    color.b as f32,
-                );
+                content.set_fill_rgb(color.r as f32, color.g as f32, color.b as f32);
                 content.rect(
                     rect.x as f32,
                     page_height - rect.y as f32 - rect.height as f32,
@@ -494,9 +469,7 @@ fn build_page_content(
                 content.restore_state();
             }
             PositionedElement::Image { rect, data, .. } => {
-                if !data.is_empty()
-                    && image_map.contains_key(&(page_idx, elem_idx))
-                {
+                if !data.is_empty() && image_map.contains_key(&(page_idx, elem_idx)) {
                     let img_name = format!("Im{}_{}", page_idx, elem_idx);
 
                     content.save_state();
@@ -675,11 +648,9 @@ fn write_outlines(
                 .map(|p| p.height)
                 .unwrap_or(792.0);
             let pdf_y = page_height - entry.y_position;
-            item.dest().page(page_ids[page_idx]).xyz(
-                0.0,
-                pdf_y as f32,
-                None,
-            );
+            item.dest()
+                .page(page_ids[page_idx])
+                .xyz(0.0, pdf_y as f32, None);
         }
 
         item.finish();
@@ -689,9 +660,15 @@ fn write_outlines(
 /// Set color space on an image XObject.
 fn set_color_space(img: &mut pdf_writer::writers::ImageXObject<'_>, cs: &str) {
     match cs {
-        "DeviceGray" => { img.color_space().device_gray(); }
-        "DeviceCMYK" => { img.color_space().device_cmyk(); }
-        _ => { img.color_space().device_rgb(); }
+        "DeviceGray" => {
+            img.color_space().device_gray();
+        }
+        "DeviceCMYK" => {
+            img.color_space().device_cmyk();
+        }
+        _ => {
+            img.color_space().device_rgb();
+        }
     }
 }
 

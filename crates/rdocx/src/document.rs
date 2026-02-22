@@ -5,22 +5,22 @@ use std::path::Path;
 use rdocx_opc::OpcPackage;
 use rdocx_opc::relationship::rel_types;
 use rdocx_oxml::document::{BodyContent, CT_Columns, CT_Document, CT_SectPr};
-use rdocx_oxml::properties::{CT_PPr, CT_RPr};
-use rdocx_oxml::shared::{ST_PageOrientation, ST_SectionType};
-use rdocx_oxml::styles::CT_Styles;
 use rdocx_oxml::drawing::{CT_Anchor, CT_Drawing, CT_Inline};
 use rdocx_oxml::header_footer::{CT_HdrFtr, HdrFtrRef, HdrFtrType};
 use rdocx_oxml::numbering::CT_Numbering;
+use rdocx_oxml::properties::{CT_PPr, CT_RPr};
+use rdocx_oxml::shared::{ST_PageOrientation, ST_SectionType};
+use rdocx_oxml::styles::CT_Styles;
 use rdocx_oxml::table::CT_Tbl;
 use rdocx_oxml::text::{CT_P, CT_R, RunContent};
 
 use rdocx_oxml::core_properties::CoreProperties;
 
+use crate::Length;
 use crate::error::{Error, Result};
 use crate::paragraph::{Paragraph, ParagraphRef};
 use crate::style::{self, Style, StyleBuilder};
 use crate::table::{Table, TableRef};
-use crate::Length;
 
 /// A Word document (.docx file).
 ///
@@ -75,9 +75,7 @@ impl Document {
     }
 
     fn from_package(package: OpcPackage) -> Result<Self> {
-        let doc_part_name = package
-            .main_document_part()
-            .ok_or(Error::NoDocumentPart)?;
+        let doc_part_name = package.main_document_part().ok_or(Error::NoDocumentPart)?;
 
         let doc_xml = package
             .get_part(&doc_part_name)
@@ -104,8 +102,7 @@ impl Document {
         // Try to load numbering definitions
         let numbering = if let Some(rels) = package.get_part_rels(&doc_part_name) {
             if let Some(num_rel) = rels.get_by_type(rel_types::NUMBERING) {
-                let num_part =
-                    OpcPackage::resolve_rel_target(&doc_part_name, &num_rel.target);
+                let num_part = OpcPackage::resolve_rel_target(&doc_part_name, &num_rel.target);
                 if let Some(num_xml) = package.get_part(&num_part) {
                     Some(CT_Numbering::from_xml(num_xml)?)
                 } else {
@@ -163,8 +160,7 @@ impl Document {
 
         // Serialize styles.xml
         let styles_xml = self.styles.to_xml()?;
-        self.package
-            .set_part("/word/styles.xml", styles_xml);
+        self.package.set_part("/word/styles.xml", styles_xml);
 
         // Serialize numbering.xml if we have numbering definitions
         if let Some(ref numbering) = self.numbering {
@@ -237,14 +233,16 @@ impl Document {
     /// Add a table with the specified number of rows and columns.
     /// Returns a mutable reference for further configuration.
     pub fn add_table(&mut self, rows: usize, cols: usize) -> Table<'_> {
-        use rdocx_oxml::table::{CT_Row, CT_Tc, CT_TblGrid, CT_TblGridCol, CT_TblPr, CT_TblWidth};
+        use rdocx_oxml::table::{CT_Row, CT_TblGrid, CT_TblGridCol, CT_TblPr, CT_TblWidth, CT_Tc};
         use rdocx_oxml::units::Twips;
 
         // Default column width: divide 9360tw (6.5" printable at 1" margins) evenly
         let col_width = Twips(9360 / cols as i32);
 
         let grid = CT_TblGrid {
-            columns: (0..cols).map(|_| CT_TblGridCol { width: col_width }).collect(),
+            columns: (0..cols)
+                .map(|_| CT_TblGridCol { width: col_width })
+                .collect(),
         };
 
         let mut tbl = CT_Tbl::new();
@@ -302,12 +300,14 @@ impl Document {
     /// Returns a mutable `Table` for further configuration.
     /// Panics if `index > content_count()`.
     pub fn insert_table(&mut self, index: usize, rows: usize, cols: usize) -> Table<'_> {
-        use rdocx_oxml::table::{CT_Row, CT_Tc, CT_TblGrid, CT_TblGridCol, CT_TblPr, CT_TblWidth};
+        use rdocx_oxml::table::{CT_Row, CT_TblGrid, CT_TblGridCol, CT_TblPr, CT_TblWidth, CT_Tc};
         use rdocx_oxml::units::Twips;
 
         let col_width = Twips(9360 / cols as i32);
         let grid = CT_TblGrid {
-            columns: (0..cols).map(|_| CT_TblGridCol { width: col_width }).collect(),
+            columns: (0..cols)
+                .map(|_| CT_TblGridCol { width: col_width })
+                .collect(),
         };
 
         let mut tbl = CT_Tbl::new();
@@ -362,11 +362,7 @@ impl Document {
     ) -> Paragraph<'_> {
         let rel_id = self.embed_image(image_data, image_filename);
 
-        let inline = CT_Inline::new(
-            &rel_id,
-            width.to_emu(),
-            height.to_emu(),
-        );
+        let inline = CT_Inline::new(&rel_id, width.to_emu(), height.to_emu());
 
         let drawing = CT_Drawing::inline(inline);
         let run = CT_R {
@@ -398,11 +394,23 @@ impl Document {
         let rel_id = self.embed_image(image_data, image_filename);
 
         // Get page dimensions from section properties (default US Letter)
-        let sect = self.document.body.sect_pr.as_ref()
+        let sect = self
+            .document
+            .body
+            .sect_pr
+            .as_ref()
             .cloned()
             .unwrap_or_else(CT_SectPr::default_letter);
-        let page_width_emu = sect.page_width.unwrap_or(rdocx_oxml::units::Twips(12240)).to_emu().0;
-        let page_height_emu = sect.page_height.unwrap_or(rdocx_oxml::units::Twips(15840)).to_emu().0;
+        let page_width_emu = sect
+            .page_width
+            .unwrap_or(rdocx_oxml::units::Twips(12240))
+            .to_emu()
+            .0;
+        let page_height_emu = sect
+            .page_height
+            .unwrap_or(rdocx_oxml::units::Twips(15840))
+            .to_emu()
+            .0;
 
         let anchor = CT_Anchor::background(&rel_id, page_width_emu, page_height_emu);
         let drawing = CT_Drawing::anchor(anchor);
@@ -484,9 +492,7 @@ impl Document {
         self.package.set_part(&part_name, image_data.to_vec());
 
         // Add content type override
-        self.package
-            .content_types
-            .add_default(&ext, content_type);
+        self.package.content_types.add_default(&ext, content_type);
 
         // Add relationship
         let rel_target = format!("media/image{image_num}.{ext}");
@@ -553,13 +559,19 @@ impl Document {
 
         // Serialize the header/footer
         let xml = if is_header {
-            hdr_ftr.to_xml_header().expect("header serialization failed")
+            hdr_ftr
+                .to_xml_header()
+                .expect("header serialization failed")
         } else {
-            hdr_ftr.to_xml_footer().expect("footer serialization failed")
+            hdr_ftr
+                .to_xml_footer()
+                .expect("footer serialization failed")
         };
 
         self.package.set_part(&part_name, xml);
-        self.package.content_types.add_override(&part_name, content_type);
+        self.package
+            .content_types
+            .add_override(&part_name, content_type);
 
         // Add relationship
         let rel_target = part_name.trim_start_matches("/word/");
@@ -603,7 +615,14 @@ impl Document {
         width: Length,
         height: Length,
     ) {
-        self.set_header_footer_image_part(image_data, image_filename, width, height, true, HdrFtrType::Default);
+        self.set_header_footer_image_part(
+            image_data,
+            image_filename,
+            width,
+            height,
+            true,
+            HdrFtrType::Default,
+        );
     }
 
     /// Set the default footer to an inline image.
@@ -614,7 +633,14 @@ impl Document {
         width: Length,
         height: Length,
     ) {
-        self.set_header_footer_image_part(image_data, image_filename, width, height, false, HdrFtrType::Default);
+        self.set_header_footer_image_part(
+            image_data,
+            image_filename,
+            width,
+            height,
+            false,
+            HdrFtrType::Default,
+        );
     }
 
     /// Set a header from raw XML bytes with associated images.
@@ -676,11 +702,17 @@ impl Document {
 
         // Store the raw header/footer XML
         self.package.set_part(&part_name, xml);
-        self.package.content_types.add_override(&part_name, content_type);
+        self.package
+            .content_types
+            .add_override(&part_name, content_type);
 
         // Store each image and create relationships with the specified rel_ids
         for &(rel_id, image_data, image_filename) in images {
-            let ext = image_filename.rsplit('.').next().unwrap_or("png").to_lowercase();
+            let ext = image_filename
+                .rsplit('.')
+                .next()
+                .unwrap_or("png")
+                .to_lowercase();
             let img_content_type = match ext.as_str() {
                 "png" => "image/png",
                 "jpg" | "jpeg" => "image/jpeg",
@@ -690,7 +722,9 @@ impl Document {
             let image_num = self.next_image_number();
             let img_part_name = format!("/word/media/image{image_num}.{ext}");
             self.package.set_part(&img_part_name, image_data.to_vec());
-            self.package.content_types.add_default(&ext, img_content_type);
+            self.package
+                .content_types
+                .add_default(&ext, img_content_type);
 
             // Create relationship in the header/footer part's rels with the EXACT rel_id
             let img_rel_target = format!("media/image{image_num}.{ext}");
@@ -732,8 +766,13 @@ impl Document {
         bg_color: &str,
     ) {
         self.set_header_footer_image_bg_part(
-            image_data, image_filename, width, height,
-            Some(bg_color), true, HdrFtrType::Default,
+            image_data,
+            image_filename,
+            width,
+            height,
+            Some(bg_color),
+            true,
+            HdrFtrType::Default,
         );
     }
 
@@ -746,7 +785,14 @@ impl Document {
         height: Length,
     ) {
         self.set_different_first_page(true);
-        self.set_header_footer_image_part(image_data, image_filename, width, height, true, HdrFtrType::First);
+        self.set_header_footer_image_part(
+            image_data,
+            image_filename,
+            width,
+            height,
+            true,
+            HdrFtrType::First,
+        );
     }
 
     fn set_header_footer_image_part(
@@ -781,7 +827,11 @@ impl Document {
         };
 
         // Embed the image in the package
-        let ext = image_filename.rsplit('.').next().unwrap_or("png").to_lowercase();
+        let ext = image_filename
+            .rsplit('.')
+            .next()
+            .unwrap_or("png")
+            .to_lowercase();
         let img_content_type = match ext.as_str() {
             "png" => "image/png",
             "jpg" | "jpeg" => "image/jpeg",
@@ -792,7 +842,9 @@ impl Document {
         let image_num = self.next_image_number();
         let img_part_name = format!("/word/media/image{image_num}.{ext}");
         self.package.set_part(&img_part_name, image_data.to_vec());
-        self.package.content_types.add_default(&ext, img_content_type);
+        self.package
+            .content_types
+            .add_default(&ext, img_content_type);
 
         // Create image relationship in the HEADER/FOOTER part's rels
         let img_rel_target = format!("media/image{image_num}.{ext}");
@@ -815,13 +867,19 @@ impl Document {
 
         // Serialize
         let xml = if is_header {
-            hdr_ftr.to_xml_header().expect("header serialization failed")
+            hdr_ftr
+                .to_xml_header()
+                .expect("header serialization failed")
         } else {
-            hdr_ftr.to_xml_footer().expect("footer serialization failed")
+            hdr_ftr
+                .to_xml_footer()
+                .expect("footer serialization failed")
         };
 
         self.package.set_part(&part_name, xml);
-        self.package.content_types.add_override(&part_name, content_type);
+        self.package
+            .content_types
+            .add_override(&part_name, content_type);
 
         // Add relationship from document to header/footer
         let rel_target = part_name.trim_start_matches("/word/");
@@ -877,7 +935,11 @@ impl Document {
         };
 
         // Embed the image in the package
-        let ext = image_filename.rsplit('.').next().unwrap_or("png").to_lowercase();
+        let ext = image_filename
+            .rsplit('.')
+            .next()
+            .unwrap_or("png")
+            .to_lowercase();
         let img_content_type = match ext.as_str() {
             "png" => "image/png",
             "jpg" | "jpeg" => "image/jpeg",
@@ -887,7 +949,9 @@ impl Document {
         let image_num = self.next_image_number();
         let img_part_name = format!("/word/media/image{image_num}.{ext}");
         self.package.set_part(&img_part_name, image_data.to_vec());
-        self.package.content_types.add_default(&ext, img_content_type);
+        self.package
+            .content_types
+            .add_default(&ext, img_content_type);
 
         // Create image relationship in the HEADER/FOOTER part's rels
         let img_rel_target = format!("media/image{image_num}.{ext}");
@@ -924,13 +988,19 @@ impl Document {
 
         // Serialize
         let xml = if is_header {
-            hdr_ftr.to_xml_header().expect("header serialization failed")
+            hdr_ftr
+                .to_xml_header()
+                .expect("header serialization failed")
         } else {
-            hdr_ftr.to_xml_footer().expect("footer serialization failed")
+            hdr_ftr
+                .to_xml_footer()
+                .expect("footer serialization failed")
         };
 
         self.package.set_part(&part_name, xml);
-        self.package.content_types.add_override(&part_name, content_type);
+        self.package
+            .content_types
+            .add_override(&part_name, content_type);
 
         // Add relationship from document to header/footer
         let rel_target = part_name.trim_start_matches("/word/");
@@ -954,7 +1024,11 @@ impl Document {
 
     fn get_header_footer_text(&self, is_header: bool, hdr_type: HdrFtrType) -> Option<String> {
         let sect = self.document.body.sect_pr.as_ref()?;
-        let refs = if is_header { &sect.header_refs } else { &sect.footer_refs };
+        let refs = if is_header {
+            &sect.header_refs
+        } else {
+            &sect.footer_refs
+        };
         let hdr_ref = refs.iter().find(|r| r.hdr_ftr_type == hdr_type)?;
 
         // Resolve the part
@@ -998,9 +1072,7 @@ impl Document {
                 numbering
                     .get_abstract_num_for(n.num_id)
                     .map(|a| {
-                        a.levels
-                            .first()
-                            .and_then(|l| l.num_fmt)
+                        a.levels.first().and_then(|l| l.num_fmt)
                             == Some(rdocx_oxml::numbering::ST_NumberFormat::Bullet)
                     })
                     .unwrap_or(false)
@@ -1043,9 +1115,7 @@ impl Document {
                 numbering
                     .get_abstract_num_for(n.num_id)
                     .map(|a| {
-                        a.levels
-                            .first()
-                            .and_then(|l| l.num_fmt)
+                        a.levels.first().and_then(|l| l.num_fmt)
                             == Some(rdocx_oxml::numbering::ST_NumberFormat::Decimal)
                     })
                     .unwrap_or(false)
@@ -1088,9 +1158,7 @@ impl Document {
 
     /// Find a style by its ID.
     pub fn style(&self, style_id: &str) -> Option<Style<'_>> {
-        self.styles
-            .get_by_id(style_id)
-            .map(|s| Style { inner: s })
+        self.styles.get_by_id(style_id).map(|s| Style { inner: s })
     }
 
     // ---- Style manipulation ----
@@ -1165,13 +1233,7 @@ impl Document {
     }
 
     /// Set all page margins.
-    pub fn set_margins(
-        &mut self,
-        top: Length,
-        right: Length,
-        bottom: Length,
-        left: Length,
-    ) {
+    pub fn set_margins(&mut self, top: Length, right: Length, bottom: Length, left: Length) {
         let sect = self.section_properties_mut();
         sect.margin_top = Some(top.as_twips());
         sect.margin_right = Some(right.as_twips());
@@ -1251,7 +1313,8 @@ impl Document {
     }
 
     fn ensure_core_properties(&mut self) -> &mut CoreProperties {
-        self.core_properties.get_or_insert_with(CoreProperties::default)
+        self.core_properties
+            .get_or_insert_with(CoreProperties::default)
     }
 
     // ---- Document Merging ----
@@ -1333,12 +1396,12 @@ impl Document {
             return;
         };
 
-        let numbering = self.numbering.get_or_insert_with(|| {
-            rdocx_oxml::numbering::CT_Numbering {
+        let numbering = self
+            .numbering
+            .get_or_insert_with(|| rdocx_oxml::numbering::CT_Numbering {
                 abstract_nums: Vec::new(),
                 nums: Vec::new(),
-            }
-        });
+            });
 
         // Find max existing IDs to avoid collision
         let max_abstract_id = numbering
@@ -1347,12 +1410,7 @@ impl Document {
             .map(|a| a.abstract_num_id)
             .max()
             .unwrap_or(0);
-        let max_num_id = numbering
-            .nums
-            .iter()
-            .map(|n| n.num_id)
-            .max()
-            .unwrap_or(0);
+        let max_num_id = numbering.nums.iter().map(|n| n.num_id).max().unwrap_or(0);
 
         let abstract_offset = max_abstract_id + 1;
         let num_offset = max_num_id + 1;
@@ -1595,12 +1653,21 @@ impl Document {
 
         // Replace in headers and footers
         if let Some(sect_pr) = self.document.body.sect_pr.as_ref() {
-            let hdr_rel_ids: Vec<String> = sect_pr.header_refs.iter().map(|r| r.rel_id.clone()).collect();
-            let ftr_rel_ids: Vec<String> = sect_pr.footer_refs.iter().map(|r| r.rel_id.clone()).collect();
+            let hdr_rel_ids: Vec<String> = sect_pr
+                .header_refs
+                .iter()
+                .map(|r| r.rel_id.clone())
+                .collect();
+            let ftr_rel_ids: Vec<String> = sect_pr
+                .footer_refs
+                .iter()
+                .map(|r| r.rel_id.clone())
+                .collect();
 
             for rel_id in hdr_rel_ids {
                 if let Some(mut hf) = self.load_header_footer(&rel_id) {
-                    let n = placeholder::replace_in_header_footer(&mut hf, placeholder, replacement);
+                    let n =
+                        placeholder::replace_in_header_footer(&mut hf, placeholder, replacement);
                     if n > 0 {
                         self.save_header_footer(&rel_id, &hf, true);
                         count += n;
@@ -1609,7 +1676,8 @@ impl Document {
             }
             for rel_id in ftr_rel_ids {
                 if let Some(mut hf) = self.load_header_footer(&rel_id) {
-                    let n = placeholder::replace_in_header_footer(&mut hf, placeholder, replacement);
+                    let n =
+                        placeholder::replace_in_header_footer(&mut hf, placeholder, replacement);
                     if n > 0 {
                         self.save_header_footer(&rel_id, &hf, false);
                         count += n;
@@ -1643,8 +1711,8 @@ impl Document {
     /// Searches body paragraphs, tables (including nested), headers, and footers.
     /// Returns the total number of replacements made, or an error if the regex is invalid.
     pub fn replace_regex(&mut self, pattern: &str, replacement: &str) -> Result<usize> {
-        let re = regex::Regex::new(pattern)
-            .map_err(|e| Error::Other(format!("invalid regex: {e}")))?;
+        let re =
+            regex::Regex::new(pattern).map_err(|e| Error::Other(format!("invalid regex: {e}")))?;
         Ok(self.replace_regex_compiled(&re, replacement))
     }
 
@@ -1678,10 +1746,16 @@ impl Document {
 
         // Replace in headers and footers
         if let Some(sect_pr) = self.document.body.sect_pr.as_ref() {
-            let hdr_rel_ids: Vec<String> =
-                sect_pr.header_refs.iter().map(|r| r.rel_id.clone()).collect();
-            let ftr_rel_ids: Vec<String> =
-                sect_pr.footer_refs.iter().map(|r| r.rel_id.clone()).collect();
+            let hdr_rel_ids: Vec<String> = sect_pr
+                .header_refs
+                .iter()
+                .map(|r| r.rel_id.clone())
+                .collect();
+            let ftr_rel_ids: Vec<String> = sect_pr
+                .footer_refs
+                .iter()
+                .map(|r| r.rel_id.clone())
+                .collect();
 
             for rel_id in hdr_rel_ids {
                 if let Some(mut hf) = self.load_header_footer(&rel_id) {
@@ -1719,7 +1793,7 @@ impl Document {
     ///
     /// This is called after the typed-model replacement and flush_to_package.
     fn replace_in_xml_parts(&mut self, placeholder: &str, replacement: &str) -> usize {
-        use rdocx_oxml::placeholder::{replace_in_xml_part, replace_in_chart_xml};
+        use rdocx_oxml::placeholder::{replace_in_chart_xml, replace_in_xml_part};
 
         let mut count = 0;
 
@@ -1729,12 +1803,18 @@ impl Document {
             if let Some(rels) = self.package.get_part_rels(&self.doc_part_name) {
                 for href in &sect_pr.header_refs {
                     if let Some(rel) = rels.get_by_id(&href.rel_id) {
-                        xml_parts.push(OpcPackage::resolve_rel_target(&self.doc_part_name, &rel.target));
+                        xml_parts.push(OpcPackage::resolve_rel_target(
+                            &self.doc_part_name,
+                            &rel.target,
+                        ));
                     }
                 }
                 for fref in &sect_pr.footer_refs {
                     if let Some(rel) = rels.get_by_id(&fref.rel_id) {
-                        xml_parts.push(OpcPackage::resolve_rel_target(&self.doc_part_name, &rel.target));
+                        xml_parts.push(OpcPackage::resolve_rel_target(
+                            &self.doc_part_name,
+                            &rel.target,
+                        ));
                     }
                 }
             }
@@ -1753,7 +1833,8 @@ impl Document {
         }
 
         // Collect chart part names
-        let chart_parts: Vec<String> = self.package
+        let chart_parts: Vec<String> = self
+            .package
             .get_part_rels(&self.doc_part_name)
             .map(|rels| {
                 rels.get_all_by_type(rel_types::CHART)
@@ -1877,11 +1958,7 @@ impl Document {
                         }
                     }
                     t if t == rel_types::HYPERLINK => {
-                        if rel
-                            .target_mode
-                            .as_ref()
-                            .is_some_and(|m| m == "External")
-                        {
+                        if rel.target_mode.as_ref().is_some_and(|m| m == "External") {
                             hyperlink_urls.insert(rel.id.clone(), rel.target.clone());
                         }
                     }
@@ -1969,11 +2046,7 @@ impl Document {
                         }
                     }
                     t if t == rel_types::HYPERLINK => {
-                        if rel
-                            .target_mode
-                            .as_ref()
-                            .is_some_and(|m| m == "External")
-                        {
+                        if rel.target_mode.as_ref().is_some_and(|m| m == "External") {
                             hyperlink_urls.insert(rel.id.clone(), rel.target.clone());
                         }
                     }
@@ -1981,16 +2054,14 @@ impl Document {
                         let part_name =
                             OpcPackage::resolve_rel_target(&self.doc_part_name, &rel.target);
                         if let Some(xml) = self.package.get_part(&part_name) {
-                            footnotes =
-                                rdocx_oxml::footnotes::CT_Footnotes::from_xml(xml).ok();
+                            footnotes = rdocx_oxml::footnotes::CT_Footnotes::from_xml(xml).ok();
                         }
                     }
                     t if t == rel_types::ENDNOTES => {
                         let part_name =
                             OpcPackage::resolve_rel_target(&self.doc_part_name, &rel.target);
                         if let Some(xml) = self.package.get_part(&part_name) {
-                            endnotes =
-                                rdocx_oxml::footnotes::CT_Footnotes::from_xml(xml).ok();
+                            endnotes = rdocx_oxml::footnotes::CT_Footnotes::from_xml(xml).ok();
                         }
                     }
                     _ => {}
@@ -2036,15 +2107,8 @@ impl Document {
             }
 
             // Determine font family name from the file name
-            let file_name = part_name
-                .rsplit('/')
-                .next()
-                .unwrap_or(part_name);
-            let family = file_name
-                .split('.')
-                .next()
-                .unwrap_or(file_name)
-                .to_string();
+            let file_name = part_name.rsplit('/').next().unwrap_or(part_name);
+            let family = file_name.split('.').next().unwrap_or(file_name).to_string();
 
             if lower.ends_with(".odttf") {
                 // Deobfuscate ODTTF: XOR first 32 bytes with GUID from the file name
@@ -2054,7 +2118,8 @@ impl Document {
                         data: deobfuscated,
                     });
                 }
-            } else if lower.ends_with(".ttf") || lower.ends_with(".otf") || lower.ends_with(".ttc") {
+            } else if lower.ends_with(".ttf") || lower.ends_with(".otf") || lower.ends_with(".ttc")
+            {
                 fonts.push(rdocx_layout::FontFile {
                     family,
                     data: data.clone(),
@@ -2219,10 +2284,7 @@ impl Document {
         if let Some(rels) = self.package.get_part_rels(&self.doc_part_name) {
             for rel in &rels.items {
                 if rel.rel_type == rel_types::HYPERLINK
-                    && rel
-                        .target_mode
-                        .as_ref()
-                        .is_some_and(|m| m == "External")
+                    && rel.target_mode.as_ref().is_some_and(|m| m == "External")
                 {
                     url_map.insert(rel.id.clone(), rel.target.clone());
                 }
@@ -2239,11 +2301,7 @@ impl Document {
                         .collect::<Vec<_>>()
                         .join("");
 
-                    let url = hl
-                        .rel_id
-                        .as_ref()
-                        .and_then(|id| url_map.get(id))
-                        .cloned();
+                    let url = hl.rel_id.as_ref().and_then(|id| url_map.get(id)).cloned();
 
                     result.push(LinkInfo {
                         text,
@@ -2556,11 +2614,8 @@ fn deobfuscate_odttf(data: &[u8], file_name: &str) -> Option<Vec<u8>> {
     // Per OOXML spec, the GUID bytes are reordered for XOR key:
     // bytes 0-3 reversed, 4-5 reversed, 6-7 reversed, 8-15 as-is
     let key: [u8; 16] = [
-        guid[3], guid[2], guid[1], guid[0],
-        guid[5], guid[4],
-        guid[7], guid[6],
-        guid[8], guid[9], guid[10], guid[11],
-        guid[12], guid[13], guid[14], guid[15],
+        guid[3], guid[2], guid[1], guid[0], guid[5], guid[4], guid[7], guid[6], guid[8], guid[9],
+        guid[10], guid[11], guid[12], guid[13], guid[14], guid[15],
     ];
 
     let mut result = data.to_vec();
@@ -2671,10 +2726,7 @@ mod tests {
     #[test]
     fn add_custom_style() {
         let mut doc = Document::new();
-        doc.add_style(
-            StyleBuilder::paragraph("MyCustom", "My Custom Style")
-                .based_on("Normal"),
-        );
+        doc.add_style(StyleBuilder::paragraph("MyCustom", "My Custom Style").based_on("Normal"));
         assert!(doc.style("MyCustom").is_some());
         let s = doc.style("MyCustom").unwrap();
         assert_eq!(s.name(), Some("My Custom Style"));
@@ -2876,11 +2928,10 @@ mod tests {
             0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, // PNG signature
             0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, // IHDR chunk
             0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, // 1x1
-            0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xde,
-            0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, // IDAT chunk
-            0x08, 0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0x00, 0x00,
-            0x00, 0x02, 0x00, 0x01, 0xe2, 0x21, 0xbc, 0x33,
-            0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, // IEND chunk
+            0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49,
+            0x44, 0x41, 0x54, // IDAT chunk
+            0x08, 0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0xe2, 0x21,
+            0xbc, 0x33, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, // IEND chunk
             0xae, 0x42, 0x60, 0x82,
         ];
 
@@ -2904,15 +2955,11 @@ mod tests {
     #[test]
     fn add_anchored_image() {
         let png_data: Vec<u8> = vec![
-            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-            0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-            0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xde,
-            0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54,
-            0x08, 0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0x00, 0x00,
-            0x00, 0x02, 0x00, 0x01, 0xe2, 0x21, 0xbc, 0x33,
-            0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44,
-            0xae, 0x42, 0x60, 0x82,
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x08,
+            0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0xe2, 0x21, 0xbc,
+            0x33, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
         ];
 
         let mut doc = Document::new();
@@ -3097,9 +3144,11 @@ mod tests {
         doc.add_paragraph("Skip to 3").style("Heading3");
 
         let issues = doc.audit_accessibility();
-        assert!(issues
-            .iter()
-            .any(|i| i.message.contains("Heading level gap")));
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.message.contains("Heading level gap"))
+        );
     }
 
     #[test]

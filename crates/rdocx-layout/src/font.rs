@@ -273,12 +273,7 @@ impl FontManager {
     }
 
     /// Shape a text string using rustybuzz. Returns glyph IDs and advances.
-    pub fn shape_text(
-        &self,
-        font_id: FontId,
-        text: &str,
-        size_pt: f64,
-    ) -> Result<ShapedText> {
+    pub fn shape_text(&self, font_id: FontId, text: &str, size_pt: f64) -> Result<ShapedText> {
         let font = self.get_font(font_id)?;
 
         let face = rustybuzz::Face::from_slice(&font.data, font.face_index)

@@ -4,13 +4,13 @@ use rdocx_oxml::borders::CT_BorderEdge;
 use rdocx_oxml::properties::CT_Shd;
 use rdocx_oxml::shared::ST_Jc;
 use rdocx_oxml::table::{
-    CT_Row, CT_Tbl, CT_TblBorders, CT_TblCellMar, CT_TblPr, CT_TblWidth, CT_Tc, CT_TcPr,
-    CT_TrPr, ST_VerticalJc, VMerge,
+    CT_Row, CT_Tbl, CT_TblBorders, CT_TblCellMar, CT_TblPr, CT_TblWidth, CT_Tc, CT_TcPr, CT_TrPr,
+    ST_VerticalJc, VMerge,
 };
 use rdocx_oxml::text::CT_P;
 
-use crate::paragraph::{Paragraph, ParagraphRef};
 use crate::Length;
+use crate::paragraph::{Paragraph, ParagraphRef};
 
 /// Vertical alignment within a table cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,12 +79,7 @@ impl<'a> Table<'a> {
     }
 
     /// Set borders on all edges and internal gridlines.
-    pub fn borders(
-        mut self,
-        style: crate::BorderStyle,
-        size_eighths_pt: u32,
-        color: &str,
-    ) -> Self {
+    pub fn borders(mut self, style: crate::BorderStyle, size_eighths_pt: u32, color: &str) -> Self {
         let edge = CT_BorderEdge {
             val: style.to_st_border(),
             sz: Some(size_eighths_pt),
@@ -311,7 +306,7 @@ impl<'a> Cell<'a> {
     /// Add a nested table inside this cell.
     pub fn add_table(&mut self, rows: usize, cols: usize) -> Table<'_> {
         use rdocx_oxml::table::{
-            CellContent, CT_Row, CT_Tc, CT_Tbl, CT_TblGrid, CT_TblGridCol, CT_TblPr, CT_TblWidth,
+            CT_Row, CT_Tbl, CT_TblGrid, CT_TblGridCol, CT_TblPr, CT_TblWidth, CT_Tc, CellContent,
         };
         use rdocx_oxml::units::Twips;
 
@@ -443,10 +438,7 @@ impl<'a> CellRef<'a> {
 
     /// Get the grid span, if set.
     pub fn grid_span(&self) -> Option<u32> {
-        self.inner
-            .properties
-            .as_ref()
-            .and_then(|pr| pr.grid_span)
+        self.inner.properties.as_ref().and_then(|pr| pr.grid_span)
     }
 
     /// Get the vertical merge state, if set.

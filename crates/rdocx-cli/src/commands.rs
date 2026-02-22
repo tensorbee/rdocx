@@ -93,7 +93,13 @@ pub fn text(file: &Path) -> Result<()> {
 }
 
 /// Convert a DOCX file to another format.
-pub fn convert(file: &Path, to: &str, output: Option<&Path>, dpi: u32, font_dir: Option<&Path>) -> Result<()> {
+pub fn convert(
+    file: &Path,
+    to: &str,
+    output: Option<&Path>,
+    dpi: u32,
+    font_dir: Option<&Path>,
+) -> Result<()> {
     let doc = Document::open(file)?;
 
     let default_ext = match to {
@@ -138,7 +144,10 @@ pub fn convert(file: &Path, to: &str, output: Option<&Path>, dpi: u32, font_dir:
             if pages.len() == 1 {
                 std::fs::write(&output_path, &pages[0])?;
             } else {
-                let stem = output_path.file_stem().unwrap_or_default().to_string_lossy();
+                let stem = output_path
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy();
                 let parent = output_path.parent().unwrap_or(Path::new("."));
                 for (i, page) in pages.iter().enumerate() {
                     let page_path = parent.join(format!("{stem}_{:03}.png", i + 1));
@@ -261,12 +270,7 @@ fn compute_lcs(a: &[String], b: &[String]) -> Vec<String> {
 }
 
 /// Replace a placeholder in a DOCX file and save to output.
-pub fn replace(
-    file: &Path,
-    placeholder: &str,
-    value: &str,
-    output: &Path,
-) -> Result<()> {
+pub fn replace(file: &Path, placeholder: &str, value: &str, output: &Path) -> Result<()> {
     let mut doc = Document::open(file)?;
     let count = doc.replace_text(placeholder, value);
     doc.save(output)?;

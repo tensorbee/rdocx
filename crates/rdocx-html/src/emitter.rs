@@ -7,7 +7,7 @@ use rdocx_oxml::numbering::CT_Numbering;
 use rdocx_oxml::properties::CT_PPr;
 use rdocx_oxml::shared::ST_Jc;
 use rdocx_oxml::styles::CT_Styles;
-use rdocx_oxml::table::{CellContent, CT_Tbl, VMerge};
+use rdocx_oxml::table::{CT_Tbl, CellContent, VMerge};
 use rdocx_oxml::text::{BreakType, CT_P, CT_R, RunContent};
 
 use crate::css;
@@ -141,15 +141,18 @@ fn detect_list(para: &CT_P, numbering: Option<&CT_Numbering>) -> Option<(bool, u
     let numbering = numbering?;
 
     // Look up the numbering definition to determine if ordered or bullet
-    let abstract_id = numbering.nums.iter()
+    let abstract_id = numbering
+        .nums
+        .iter()
         .find(|n| n.num_id == num_id)
         .map(|n| n.abstract_num_id)?;
 
-    let abstract_num = numbering.abstract_nums.iter()
+    let abstract_num = numbering
+        .abstract_nums
+        .iter()
         .find(|a| a.abstract_num_id == abstract_id)?;
 
-    let level = abstract_num.levels.iter()
-        .find(|l| l.ilvl == ilvl)?;
+    let level = abstract_num.levels.iter().find(|l| l.ilvl == ilvl)?;
 
     let is_ordered = !matches!(
         level.num_fmt,
@@ -533,8 +536,7 @@ fn escape_html_attr(text: &str) -> String {
 
 /// Simple base64 encoding.
 fn base64_encode(data: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
     let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
     let chunks = data.chunks(3);

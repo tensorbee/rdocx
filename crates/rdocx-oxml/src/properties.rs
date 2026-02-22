@@ -43,11 +43,7 @@ impl CT_Shd {
         Ok(CT_Shd { val, color, fill })
     }
 
-    pub fn write_xml<W: std::io::Write>(
-        &self,
-        writer: &mut Writer<W>,
-        tag: &str,
-    ) -> Result<()> {
+    pub fn write_xml<W: std::io::Write>(&self, writer: &mut Writer<W>, tag: &str) -> Result<()> {
         let mut e = BytesStart::new(tag);
         e.push_attribute(("w:val", self.val.as_str()));
         if let Some(ref c) = self.color {
@@ -172,8 +168,7 @@ impl CT_PPr {
                             let attr = attr?;
                             let key = attr.key.as_ref();
                             let val_str = std::str::from_utf8(&attr.value)?;
-                            if matches_local_name(key, b"left")
-                                || matches_local_name(key, b"start")
+                            if matches_local_name(key, b"left") || matches_local_name(key, b"start")
                             {
                                 ppr.ind_left = Some(Twips(val_str.parse()?));
                             } else if matches_local_name(key, b"right")
@@ -233,9 +228,7 @@ impl CT_PPr {
                         }
                     }
                 }
-                Ok(Event::End(ref e))
-                    if matches_local_name(e.name().as_ref(), b"numPr") =>
-                {
+                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"numPr") => {
                     break;
                 }
                 Ok(Event::Eof) => break,
@@ -415,29 +408,75 @@ impl CT_PPr {
     /// Merge another CT_PPr into this one (non-None fields override).
     /// Used for style inheritance.
     pub fn merge_from(&mut self, other: &CT_PPr) {
-        if other.style_id.is_some() { self.style_id = other.style_id.clone(); }
-        if other.jc.is_some() { self.jc = other.jc; }
-        if other.space_before.is_some() { self.space_before = other.space_before; }
-        if other.space_after.is_some() { self.space_after = other.space_after; }
-        if other.line_spacing.is_some() { self.line_spacing = other.line_spacing; }
-        if other.line_rule.is_some() { self.line_rule = other.line_rule.clone(); }
-        if other.before_autospacing.is_some() { self.before_autospacing = other.before_autospacing; }
-        if other.after_autospacing.is_some() { self.after_autospacing = other.after_autospacing; }
-        if other.ind_left.is_some() { self.ind_left = other.ind_left; }
-        if other.ind_right.is_some() { self.ind_right = other.ind_right; }
-        if other.ind_first_line.is_some() { self.ind_first_line = other.ind_first_line; }
-        if other.ind_hanging.is_some() { self.ind_hanging = other.ind_hanging; }
-        if other.keep_next.is_some() { self.keep_next = other.keep_next; }
-        if other.keep_lines.is_some() { self.keep_lines = other.keep_lines; }
-        if other.page_break_before.is_some() { self.page_break_before = other.page_break_before; }
-        if other.widow_control.is_some() { self.widow_control = other.widow_control; }
-        if other.suppress_auto_hyphens.is_some() { self.suppress_auto_hyphens = other.suppress_auto_hyphens; }
-        if other.outline_lvl.is_some() { self.outline_lvl = other.outline_lvl; }
-        if other.borders.is_some() { self.borders = other.borders.clone(); }
-        if other.tabs.is_some() { self.tabs = other.tabs.clone(); }
-        if other.shading.is_some() { self.shading = other.shading.clone(); }
-        if other.num_ilvl.is_some() { self.num_ilvl = other.num_ilvl; }
-        if other.num_id.is_some() { self.num_id = other.num_id; }
+        if other.style_id.is_some() {
+            self.style_id = other.style_id.clone();
+        }
+        if other.jc.is_some() {
+            self.jc = other.jc;
+        }
+        if other.space_before.is_some() {
+            self.space_before = other.space_before;
+        }
+        if other.space_after.is_some() {
+            self.space_after = other.space_after;
+        }
+        if other.line_spacing.is_some() {
+            self.line_spacing = other.line_spacing;
+        }
+        if other.line_rule.is_some() {
+            self.line_rule = other.line_rule.clone();
+        }
+        if other.before_autospacing.is_some() {
+            self.before_autospacing = other.before_autospacing;
+        }
+        if other.after_autospacing.is_some() {
+            self.after_autospacing = other.after_autospacing;
+        }
+        if other.ind_left.is_some() {
+            self.ind_left = other.ind_left;
+        }
+        if other.ind_right.is_some() {
+            self.ind_right = other.ind_right;
+        }
+        if other.ind_first_line.is_some() {
+            self.ind_first_line = other.ind_first_line;
+        }
+        if other.ind_hanging.is_some() {
+            self.ind_hanging = other.ind_hanging;
+        }
+        if other.keep_next.is_some() {
+            self.keep_next = other.keep_next;
+        }
+        if other.keep_lines.is_some() {
+            self.keep_lines = other.keep_lines;
+        }
+        if other.page_break_before.is_some() {
+            self.page_break_before = other.page_break_before;
+        }
+        if other.widow_control.is_some() {
+            self.widow_control = other.widow_control;
+        }
+        if other.suppress_auto_hyphens.is_some() {
+            self.suppress_auto_hyphens = other.suppress_auto_hyphens;
+        }
+        if other.outline_lvl.is_some() {
+            self.outline_lvl = other.outline_lvl;
+        }
+        if other.borders.is_some() {
+            self.borders = other.borders.clone();
+        }
+        if other.tabs.is_some() {
+            self.tabs = other.tabs.clone();
+        }
+        if other.shading.is_some() {
+            self.shading = other.shading.clone();
+        }
+        if other.num_ilvl.is_some() {
+            self.num_ilvl = other.num_ilvl;
+        }
+        if other.num_id.is_some() {
+            self.num_id = other.num_id;
+        }
     }
 }
 
@@ -780,33 +819,87 @@ impl CT_RPr {
     /// Merge another CT_RPr into this one (non-None fields override).
     /// Used for style inheritance.
     pub fn merge_from(&mut self, other: &CT_RPr) {
-        if other.style_id.is_some() { self.style_id = other.style_id.clone(); }
-        if other.font_ascii.is_some() { self.font_ascii = other.font_ascii.clone(); }
-        if other.font_hansi.is_some() { self.font_hansi = other.font_hansi.clone(); }
-        if other.font_east_asia.is_some() { self.font_east_asia = other.font_east_asia.clone(); }
-        if other.font_cs.is_some() { self.font_cs = other.font_cs.clone(); }
-        if other.font_ascii_theme.is_some() { self.font_ascii_theme = other.font_ascii_theme.clone(); }
-        if other.font_hansi_theme.is_some() { self.font_hansi_theme = other.font_hansi_theme.clone(); }
-        if other.bold.is_some() { self.bold = other.bold; }
-        if other.bold_cs.is_some() { self.bold_cs = other.bold_cs; }
-        if other.italic.is_some() { self.italic = other.italic; }
-        if other.italic_cs.is_some() { self.italic_cs = other.italic_cs; }
-        if other.underline.is_some() { self.underline = other.underline; }
-        if other.strike.is_some() { self.strike = other.strike; }
-        if other.dstrike.is_some() { self.dstrike = other.dstrike; }
-        if other.sz.is_some() { self.sz = other.sz; }
-        if other.sz_cs.is_some() { self.sz_cs = other.sz_cs; }
-        if other.color.is_some() { self.color = other.color.clone(); }
-        if other.color_theme.is_some() { self.color_theme = other.color_theme.clone(); }
-        if other.highlight.is_some() { self.highlight = other.highlight; }
-        if other.caps.is_some() { self.caps = other.caps; }
-        if other.small_caps.is_some() { self.small_caps = other.small_caps; }
-        if other.vert_align.is_some() { self.vert_align = other.vert_align.clone(); }
-        if other.spacing.is_some() { self.spacing = other.spacing; }
-        if other.width_scale.is_some() { self.width_scale = other.width_scale; }
-        if other.position.is_some() { self.position = other.position; }
-        if other.shading.is_some() { self.shading = other.shading.clone(); }
-        if other.vanish.is_some() { self.vanish = other.vanish; }
+        if other.style_id.is_some() {
+            self.style_id = other.style_id.clone();
+        }
+        if other.font_ascii.is_some() {
+            self.font_ascii = other.font_ascii.clone();
+        }
+        if other.font_hansi.is_some() {
+            self.font_hansi = other.font_hansi.clone();
+        }
+        if other.font_east_asia.is_some() {
+            self.font_east_asia = other.font_east_asia.clone();
+        }
+        if other.font_cs.is_some() {
+            self.font_cs = other.font_cs.clone();
+        }
+        if other.font_ascii_theme.is_some() {
+            self.font_ascii_theme = other.font_ascii_theme.clone();
+        }
+        if other.font_hansi_theme.is_some() {
+            self.font_hansi_theme = other.font_hansi_theme.clone();
+        }
+        if other.bold.is_some() {
+            self.bold = other.bold;
+        }
+        if other.bold_cs.is_some() {
+            self.bold_cs = other.bold_cs;
+        }
+        if other.italic.is_some() {
+            self.italic = other.italic;
+        }
+        if other.italic_cs.is_some() {
+            self.italic_cs = other.italic_cs;
+        }
+        if other.underline.is_some() {
+            self.underline = other.underline;
+        }
+        if other.strike.is_some() {
+            self.strike = other.strike;
+        }
+        if other.dstrike.is_some() {
+            self.dstrike = other.dstrike;
+        }
+        if other.sz.is_some() {
+            self.sz = other.sz;
+        }
+        if other.sz_cs.is_some() {
+            self.sz_cs = other.sz_cs;
+        }
+        if other.color.is_some() {
+            self.color = other.color.clone();
+        }
+        if other.color_theme.is_some() {
+            self.color_theme = other.color_theme.clone();
+        }
+        if other.highlight.is_some() {
+            self.highlight = other.highlight;
+        }
+        if other.caps.is_some() {
+            self.caps = other.caps;
+        }
+        if other.small_caps.is_some() {
+            self.small_caps = other.small_caps;
+        }
+        if other.vert_align.is_some() {
+            self.vert_align = other.vert_align.clone();
+        }
+        if other.spacing.is_some() {
+            self.spacing = other.spacing;
+        }
+        if other.width_scale.is_some() {
+            self.width_scale = other.width_scale;
+        }
+        if other.position.is_some() {
+            self.position = other.position;
+        }
+        if other.shading.is_some() {
+            self.shading = other.shading.clone();
+        }
+        if other.vanish.is_some() {
+            self.vanish = other.vanish;
+        }
     }
 }
 
@@ -855,11 +948,7 @@ mod tests {
         let mut buf = Vec::new();
         loop {
             match reader.read_event_into(&mut buf) {
-                Ok(Event::Start(ref e))
-                    if matches_local_name(e.name().as_ref(), b"pPr") =>
-                {
-                    break
-                }
+                Ok(Event::Start(ref e)) if matches_local_name(e.name().as_ref(), b"pPr") => break,
                 _ => {}
             }
             buf.clear();
@@ -874,11 +963,7 @@ mod tests {
         let mut buf = Vec::new();
         loop {
             match reader.read_event_into(&mut buf) {
-                Ok(Event::Start(ref e))
-                    if matches_local_name(e.name().as_ref(), b"rPr") =>
-                {
-                    break
-                }
+                Ok(Event::Start(ref e)) if matches_local_name(e.name().as_ref(), b"rPr") => break,
                 _ => {}
             }
             buf.clear();
@@ -934,9 +1019,7 @@ mod tests {
 
     #[test]
     fn parse_basic_rpr() {
-        let rpr = parse_rpr(
-            r#"<w:b/><w:i/><w:sz w:val="24"/><w:color w:val="FF0000"/>"#,
-        );
+        let rpr = parse_rpr(r#"<w:b/><w:i/><w:sz w:val="24"/><w:color w:val="FF0000"/>"#);
         assert_eq!(rpr.bold, Some(true));
         assert_eq!(rpr.italic, Some(true));
         assert_eq!(rpr.sz, Some(HalfPoint(24)));

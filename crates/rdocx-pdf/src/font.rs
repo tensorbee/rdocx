@@ -53,10 +53,7 @@ pub(crate) fn collect_glyph_usage(layout: &LayoutResult) -> HashMap<FontId, Font
 }
 
 /// Subset a font and prepare it for PDF embedding.
-pub(crate) fn prepare_font(
-    font_data: &FontData,
-    usage: &mut FontUsage,
-) -> Option<PreparedFont> {
+pub(crate) fn prepare_font(font_data: &FontData, usage: &mut FontUsage) -> Option<PreparedFont> {
     // Subset the font
     let subset_bytes =
         subsetter::subset(&font_data.data, font_data.face_index, &usage.remapper).ok()?;

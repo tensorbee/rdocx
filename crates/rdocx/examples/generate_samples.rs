@@ -19,7 +19,10 @@ fn main() {
         .join("samples");
     std::fs::create_dir_all(&samples_dir).unwrap();
 
-    println!("Generating comprehensive sample document in {}", samples_dir.display());
+    println!(
+        "Generating comprehensive sample document in {}",
+        samples_dir.display()
+    );
 
     let out = samples_dir.join("feature_showcase.docx");
     generate_feature_showcase(&out);
@@ -74,7 +77,10 @@ fn generate_feature_showcase(path: &Path) {
     }
     {
         let mut p = doc.add_paragraph("").alignment(Alignment::Center);
-        p.add_run("Feature Showcase").size(28.0).color("FFFFFF").italic(true);
+        p.add_run("Feature Showcase")
+            .size(28.0)
+            .color("FFFFFF")
+            .italic(true);
     }
 
     doc.add_paragraph(""); // spacer
@@ -82,12 +88,14 @@ fn generate_feature_showcase(path: &Path) {
     {
         let mut p = doc.add_paragraph("").alignment(Alignment::Center);
         p.add_run("A comprehensive demonstration of every feature")
-            .size(14.0).color("CCDDFF");
+            .size(14.0)
+            .color("CCDDFF");
     }
     {
         let mut p = doc.add_paragraph("").alignment(Alignment::Center);
         p.add_run("provided by the rdocx Rust crate for DOCX generation.")
-            .size(14.0).color("CCDDFF");
+            .size(14.0)
+            .color("CCDDFF");
     }
 
     // =========================================================================
@@ -95,17 +103,13 @@ fn generate_feature_showcase(path: &Path) {
     // =========================================================================
     doc.add_paragraph("").page_break_before(true);
 
-    doc.add_paragraph("1. Text Formatting")
-        .style("Heading1");
+    doc.add_paragraph("1. Text Formatting").style("Heading1");
 
-    doc.add_paragraph(
-        "This section demonstrates paragraph and run-level formatting options."
-    );
+    doc.add_paragraph("This section demonstrates paragraph and run-level formatting options.");
     doc.add_paragraph("");
 
     // --- Paragraph alignment ---
-    doc.add_paragraph("Paragraph Alignment")
-        .style("Heading2");
+    doc.add_paragraph("Paragraph Alignment").style("Heading2");
 
     doc.add_paragraph("This paragraph is left-aligned (the default).")
         .alignment(Alignment::Left);
@@ -116,14 +120,14 @@ fn generate_feature_showcase(path: &Path) {
     doc.add_paragraph(
         "This paragraph is justified. To demonstrate justified text properly, it needs \
          to be long enough to span multiple lines so the word spacing adjustment is visible \
-         across the full width of the text area on the page."
-    ).alignment(Alignment::Justify);
+         across the full width of the text area on the page.",
+    )
+    .alignment(Alignment::Justify);
 
     doc.add_paragraph("");
 
     // --- Run formatting ---
-    doc.add_paragraph("Run Formatting")
-        .style("Heading2");
+    doc.add_paragraph("Run Formatting").style("Heading2");
 
     {
         let mut p = doc.add_paragraph("");
@@ -185,14 +189,14 @@ fn generate_feature_showcase(path: &Path) {
         p.add_run(" | ");
         p.add_run("Small Caps").small_caps(true);
         p.add_run(" | ");
-        p.add_run("Expanded spacing").character_spacing(Length::twips(40));
+        p.add_run("Expanded spacing")
+            .character_spacing(Length::twips(40));
     }
 
     doc.add_paragraph("");
 
     // --- Paragraph formatting ---
-    doc.add_paragraph("Paragraph Formatting")
-        .style("Heading2");
+    doc.add_paragraph("Paragraph Formatting").style("Heading2");
 
     doc.add_paragraph("Paragraph with shading (light green background)")
         .shading("E2EFDA");
@@ -216,8 +220,9 @@ fn generate_feature_showcase(path: &Path) {
 
     doc.add_paragraph(
         "Paragraph with double line spacing. This text should have extra vertical \
-         space between lines to demonstrate the line_spacing_multiple setting."
-    ).line_spacing_multiple(2.0);
+         space between lines to demonstrate the line_spacing_multiple setting.",
+    )
+    .line_spacing_multiple(2.0);
 
     doc.add_paragraph("Paragraph with keep-with-next (won't break from the next paragraph)")
         .keep_with_next(true);
@@ -228,11 +233,9 @@ fn generate_feature_showcase(path: &Path) {
     // =========================================================================
     doc.add_paragraph("").page_break_before(true);
 
-    doc.add_paragraph("2. Lists")
-        .style("Heading1");
+    doc.add_paragraph("2. Lists").style("Heading1");
 
-    doc.add_paragraph("Bullet List")
-        .style("Heading2");
+    doc.add_paragraph("Bullet List").style("Heading2");
 
     doc.add_bullet_list_item("First bullet item", 0);
     doc.add_bullet_list_item("Second bullet item", 0);
@@ -243,8 +246,7 @@ fn generate_feature_showcase(path: &Path) {
 
     doc.add_paragraph("");
 
-    doc.add_paragraph("Numbered List")
-        .style("Heading2");
+    doc.add_paragraph("Numbered List").style("Heading2");
 
     doc.add_numbered_list_item("First numbered item", 0);
     doc.add_numbered_list_item("Second numbered item", 0);
@@ -255,8 +257,7 @@ fn generate_feature_showcase(path: &Path) {
     doc.add_paragraph("");
 
     // --- Tab stops ---
-    doc.add_paragraph("Tab Stops")
-        .style("Heading2");
+    doc.add_paragraph("Tab Stops").style("Heading2");
 
     doc.add_paragraph("Left\tCenter\tRight\tDecimal")
         .add_tab_stop(TabAlignment::Left, Length::inches(0.0))
@@ -276,7 +277,11 @@ fn generate_feature_showcase(path: &Path) {
 
     doc.add_paragraph("Gadget B\t________\t$249.50")
         .add_tab_stop_with_leader(TabAlignment::Left, Length::inches(0.0), TabLeader::None)
-        .add_tab_stop_with_leader(TabAlignment::Right, Length::inches(4.0), TabLeader::Underscore)
+        .add_tab_stop_with_leader(
+            TabAlignment::Right,
+            Length::inches(4.0),
+            TabLeader::Underscore,
+        )
         .add_tab_stop_with_leader(TabAlignment::Right, Length::inches(5.0), TabLeader::None);
 
     // =========================================================================
@@ -284,8 +289,7 @@ fn generate_feature_showcase(path: &Path) {
     // =========================================================================
     doc.add_paragraph("").page_break_before(true);
 
-    doc.add_paragraph("3. Tables")
-        .style("Heading1");
+    doc.add_paragraph("3. Tables").style("Heading1");
 
     // --- Basic table with borders ---
     doc.add_paragraph("Basic Table with Borders")
@@ -354,8 +358,12 @@ fn generate_feature_showcase(path: &Path) {
         tbl.cell(3, 3).unwrap().set_text("$3.8M");
 
         // Vertical alignment on data cells
-        tbl.cell(2, 3).unwrap().vertical_alignment(VerticalAlignment::Center);
-        tbl.cell(3, 3).unwrap().vertical_alignment(VerticalAlignment::Bottom);
+        tbl.cell(2, 3)
+            .unwrap()
+            .vertical_alignment(VerticalAlignment::Center);
+        tbl.cell(3, 3)
+            .unwrap()
+            .vertical_alignment(VerticalAlignment::Bottom);
     }
 
     doc.add_paragraph("");
@@ -394,8 +402,7 @@ fn generate_feature_showcase(path: &Path) {
     doc.add_paragraph("");
 
     // --- Nested table ---
-    doc.add_paragraph("Nested Table")
-        .style("Heading2");
+    doc.add_paragraph("Nested Table").style("Heading2");
 
     {
         let mut tbl = doc.add_table(2, 2);
@@ -423,34 +430,41 @@ fn generate_feature_showcase(path: &Path) {
     // =========================================================================
     doc.add_paragraph("").page_break_before(true);
 
-    doc.add_paragraph("4. Images")
-        .style("Heading1");
+    doc.add_paragraph("4. Images").style("Heading1");
 
-    doc.add_paragraph("Inline Image")
-        .style("Heading2");
+    doc.add_paragraph("Inline Image").style("Heading2");
 
     doc.add_paragraph("Below is an inline image (200x50 pixels, blue gradient):");
     let inline_img = create_sample_png(200, 50, [0, 80, 200]);
-    doc.add_picture(&inline_img, "inline_chart.png", Length::inches(3.0), Length::inches(0.75));
+    doc.add_picture(
+        &inline_img,
+        "inline_chart.png",
+        Length::inches(3.0),
+        Length::inches(0.75),
+    );
 
     doc.add_paragraph("");
 
-    doc.add_paragraph("Header Image")
-        .style("Heading2");
+    doc.add_paragraph("Header Image").style("Heading2");
 
     // Replace the text-only header with an image header
     let header_img = create_sample_png(400, 40, [40, 40, 40]);
-    doc.set_header_image(&header_img, "header_logo.png", Length::inches(2.0), Length::inches(0.2));
+    doc.set_header_image(
+        &header_img,
+        "header_logo.png",
+        Length::inches(2.0),
+        Length::inches(0.2),
+    );
 
     doc.add_paragraph(
         "The document header has been replaced with an inline image. \
-         Check the header area at the top of this page."
+         Check the header area at the top of this page.",
     );
 
     doc.add_paragraph("");
     doc.add_paragraph(
         "Note: The cover page uses a full-page background image behind the text, \
-         demonstrated on page 1 via add_background_image()."
+         demonstrated on page 1 via add_background_image().",
     );
 
     // =========================================================================
@@ -465,7 +479,9 @@ fn generate_feature_showcase(path: &Path) {
     doc.add_paragraph("Placeholder Replacement")
         .style("Heading2");
 
-    doc.add_paragraph("Before replacement, this document contained {{customer}} and {{date}} placeholders.");
+    doc.add_paragraph(
+        "Before replacement, this document contained {{customer}} and {{date}} placeholders.",
+    );
 
     {
         let mut p = doc.add_paragraph("");
@@ -503,40 +519,44 @@ fn generate_feature_showcase(path: &Path) {
     let replace_count = doc.replace_all(&replacements);
 
     doc.add_paragraph("");
-    doc.add_paragraph(&format!("(Replaced {} placeholders above — in body text and table cells)", replace_count));
+    doc.add_paragraph(&format!(
+        "(Replaced {} placeholders above — in body text and table cells)",
+        replace_count
+    ));
 
     doc.add_paragraph("");
 
     // --- Content insertion ---
-    doc.add_paragraph("Content Insertion")
-        .style("Heading2");
+    doc.add_paragraph("Content Insertion").style("Heading2");
 
     doc.add_paragraph("Section A: First section of content.");
     doc.add_paragraph("Section C: Third section of content.");
 
     // Insert "Section B" between A and C
     if let Some(idx) = doc.find_content_index("Section C") {
-        doc.insert_paragraph(idx, "Section B: Inserted between A and C using find_content_index().");
+        doc.insert_paragraph(
+            idx,
+            "Section B: Inserted between A and C using find_content_index().",
+        );
     }
 
     doc.add_paragraph("");
     doc.add_paragraph(
         "The paragraph above ('Section B') was inserted at a specific position \
-         using find_content_index() + insert_paragraph()."
+         using find_content_index() + insert_paragraph().",
     );
 
     // =========================================================================
     // PAGE 7: LANDSCAPE — section break, wide table
     // =========================================================================
-    doc.add_paragraph("")
-        .section_break(SectionBreak::NextPage);
+    doc.add_paragraph("").section_break(SectionBreak::NextPage);
 
     doc.add_paragraph("6. Mixed Page Orientation")
         .style("Heading1");
 
     doc.add_paragraph(
         "This page is in LANDSCAPE orientation. It was created using a section break \
-         followed by section_landscape(). This is useful for wide tables or charts."
+         followed by section_landscape(). This is useful for wide tables or charts.",
     );
 
     doc.add_paragraph("");
@@ -553,9 +573,27 @@ fn generate_feature_showcase(path: &Path) {
         }
 
         let data = [
-            ["North America", "$1.2M", "$1.3M", "$1.4M", "$1.5M", "$1.6M", "$7.0M"],
-            ["Europe",        "$0.8M", "$0.9M", "$0.9M", "$1.0M", "$1.1M", "$4.7M"],
-            ["Asia Pacific",  "$0.5M", "$0.6M", "$0.7M", "$0.7M", "$0.8M", "$3.3M"],
+            [
+                "North America",
+                "$1.2M",
+                "$1.3M",
+                "$1.4M",
+                "$1.5M",
+                "$1.6M",
+                "$7.0M",
+            ],
+            [
+                "Europe", "$0.8M", "$0.9M", "$0.9M", "$1.0M", "$1.1M", "$4.7M",
+            ],
+            [
+                "Asia Pacific",
+                "$0.5M",
+                "$0.6M",
+                "$0.7M",
+                "$0.7M",
+                "$0.8M",
+                "$3.3M",
+            ],
         ];
         for (row_idx, row_data) in data.iter().enumerate() {
             for (col, val) in row_data.iter().enumerate() {
@@ -577,24 +615,42 @@ fn generate_feature_showcase(path: &Path) {
 
     doc.add_paragraph(
         "This final page is back in portrait orientation after a section break. \
-         The document has demonstrated:"
+         The document has demonstrated:",
     );
 
-    doc.add_bullet_list_item("Page setup: size, margins, header/footer distance, gutter", 0);
+    doc.add_bullet_list_item(
+        "Page setup: size, margins, header/footer distance, gutter",
+        0,
+    );
     doc.add_bullet_list_item("Document metadata: title, author, subject, keywords", 0);
     doc.add_bullet_list_item("Headers and footers: text, images, different first page", 0);
     doc.add_bullet_list_item("Background images: full-page behind text", 0);
-    doc.add_bullet_list_item("Text formatting: bold, italic, underline, strike, color, size, font", 0);
-    doc.add_bullet_list_item("Advanced run formatting: superscript, subscript, caps, spacing", 0);
-    doc.add_bullet_list_item("Paragraph formatting: alignment, borders, shading, spacing, indentation", 0);
+    doc.add_bullet_list_item(
+        "Text formatting: bold, italic, underline, strike, color, size, font",
+        0,
+    );
+    doc.add_bullet_list_item(
+        "Advanced run formatting: superscript, subscript, caps, spacing",
+        0,
+    );
+    doc.add_bullet_list_item(
+        "Paragraph formatting: alignment, borders, shading, spacing, indentation",
+        0,
+    );
     doc.add_bullet_list_item("Bullet and numbered lists with nesting levels", 0);
     doc.add_bullet_list_item("Tab stops with dot/underscore leaders", 0);
-    doc.add_bullet_list_item("Tables: borders, shading, column spans, row spans, nesting", 0);
+    doc.add_bullet_list_item(
+        "Tables: borders, shading, column spans, row spans, nesting",
+        0,
+    );
     doc.add_bullet_list_item("Vertical alignment in table cells", 0);
     doc.add_bullet_list_item("Inline images", 0);
     doc.add_bullet_list_item("Placeholder replacement in body and table cells", 0);
     doc.add_bullet_list_item("Content insertion at specific positions", 0);
-    doc.add_bullet_list_item("Section breaks with mixed portrait/landscape orientation", 0);
+    doc.add_bullet_list_item(
+        "Section breaks with mixed portrait/landscape orientation",
+        0,
+    );
 
     doc.add_paragraph("");
     doc.add_paragraph("All features above were built entirely from scratch using the rdocx API.")
@@ -626,7 +682,9 @@ fn create_sample_png(width: u32, height: u32, base_color: [u8; 3]) -> Vec<u8> {
         use std::io::Write;
 
         // PNG Signature
-        png_data.write_all(&[137, 80, 78, 71, 13, 10, 26, 10]).unwrap();
+        png_data
+            .write_all(&[137, 80, 78, 71, 13, 10, 26, 10])
+            .unwrap();
 
         // IHDR chunk
         let mut ihdr = Vec::new();

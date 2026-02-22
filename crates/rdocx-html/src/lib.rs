@@ -2,8 +2,8 @@
 //!
 //! Works directly from semantic OXML types — no layout engine needed.
 
-mod emitter;
 mod css;
+mod emitter;
 mod markdown;
 
 use std::collections::HashMap;
@@ -55,12 +55,24 @@ pub fn to_html_document(input: &HtmlInput, options: &HtmlOptions) -> String {
 
 /// Convert a DOCX document to an HTML fragment (body content only).
 pub fn to_html_fragment(input: &HtmlInput, options: &HtmlOptions) -> String {
-    emitter::emit_body(&input.document.body, &input.styles, input.numbering.as_ref(), &input.images, &input.hyperlink_urls, options)
+    emitter::emit_body(
+        &input.document.body,
+        &input.styles,
+        input.numbering.as_ref(),
+        &input.images,
+        &input.hyperlink_urls,
+        options,
+    )
 }
 
 /// Convert a DOCX document to Markdown.
 pub fn to_markdown(input: &HtmlInput) -> String {
-    markdown::emit_markdown(&input.document.body, &input.styles, input.numbering.as_ref(), &input.hyperlink_urls)
+    markdown::emit_markdown(
+        &input.document.body,
+        &input.styles,
+        input.numbering.as_ref(),
+        &input.hyperlink_urls,
+    )
 }
 
 #[cfg(test)]

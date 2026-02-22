@@ -29,12 +29,12 @@ pub mod run;
 pub mod style;
 pub mod table;
 
-pub use document::{
-    AccessibilityIssue, Document, ImageInfo, IssueSeverity, LinkInfo, OutlineNode,
-};
+pub use document::{AccessibilityIssue, Document, ImageInfo, IssueSeverity, LinkInfo, OutlineNode};
 pub use error::{Error, Result};
 pub use length::Length;
-pub use paragraph::{Alignment, BorderStyle, Paragraph, ParagraphRef, SectionBreak, TabAlignment, TabLeader};
+pub use paragraph::{
+    Alignment, BorderStyle, Paragraph, ParagraphRef, SectionBreak, TabAlignment, TabLeader,
+};
 pub use run::{Run, RunRef, UnderlineStyle};
 pub use style::{Style, StyleBuilder};
 pub use table::{Cell, CellRef, Row, RowRef, Table, TableRef, VerticalAlignment};

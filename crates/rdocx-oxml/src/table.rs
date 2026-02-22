@@ -6,10 +6,10 @@ use quick_xml::{Reader, Writer};
 use crate::borders::CT_BorderEdge;
 use crate::error::Result;
 use crate::namespace::matches_local_name;
-use crate::properties::{get_val_attr, CT_Shd};
-use crate::shared::ST_Jc;
+use crate::properties::{CT_Shd, get_val_attr};
 #[cfg(test)]
 use crate::shared::ST_Border;
+use crate::shared::ST_Jc;
 use crate::text::CT_P;
 use crate::units::Twips;
 
@@ -70,11 +70,7 @@ impl CT_TblBorders {
         Ok(borders)
     }
 
-    pub fn to_xml<W: std::io::Write>(
-        &self,
-        writer: &mut Writer<W>,
-        tag: &str,
-    ) -> Result<()> {
+    pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>, tag: &str) -> Result<()> {
         writer.write_event(Event::Start(BytesStart::new(tag)))?;
         if let Some(ref e) = self.top {
             e.to_xml(writer, "w:top")?;
@@ -151,9 +147,7 @@ impl CT_TblCellMar {
                         mar.right = Self::parse_edge(e)?;
                     }
                 }
-                Ok(Event::End(ref e))
-                    if matches_local_name(e.name().as_ref(), b"tblCellMar") =>
-                {
+                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"tblCellMar") => {
                     break;
                 }
                 Ok(Event::Eof) => break,
@@ -251,11 +245,7 @@ impl CT_TblWidth {
         Ok(CT_TblWidth { w, width_type })
     }
 
-    pub fn write_xml<W: std::io::Write>(
-        &self,
-        writer: &mut Writer<W>,
-        tag: &str,
-    ) -> Result<()> {
+    pub fn write_xml<W: std::io::Write>(&self, writer: &mut Writer<W>, tag: &str) -> Result<()> {
         let mut buf = itoa::Buffer::new();
         let mut e = BytesStart::new(tag);
         e.push_attribute(("w:w", buf.format(self.w)));
@@ -341,9 +331,7 @@ impl CT_TblPr {
                         reader.read_to_end_into(name, &mut Vec::new())?;
                     }
                 }
-                Ok(Event::End(ref e))
-                    if matches_local_name(e.name().as_ref(), b"tblPr") =>
-                {
+                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"tblPr") => {
                     break;
                 }
                 Ok(Event::Eof) => break,
@@ -438,9 +426,7 @@ impl CT_TblGrid {
                         columns.push(CT_TblGridCol { width });
                     }
                 }
-                Ok(Event::End(ref e))
-                    if matches_local_name(e.name().as_ref(), b"tblGrid") =>
-                {
+                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"tblGrid") => {
                     break;
                 }
                 Ok(Event::Eof) => break,
@@ -525,9 +511,7 @@ impl CT_TrPr {
                         pr.cant_split = Some(true);
                     }
                 }
-                Ok(Event::End(ref e))
-                    if matches_local_name(e.name().as_ref(), b"trPr") =>
-                {
+                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"trPr") => {
                     break;
                 }
                 Ok(Event::Eof) => break,
@@ -683,9 +667,7 @@ impl CT_TcPr {
                         reader.read_to_end_into(name, &mut Vec::new())?;
                     }
                 }
-                Ok(Event::End(ref e))
-                    if matches_local_name(e.name().as_ref(), b"tcPr") =>
-                {
+                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"tcPr") => {
                     break;
                 }
                 Ok(Event::Eof) => break,
@@ -821,7 +803,11 @@ impl CT_Tc {
     }
 
     pub fn text(&self) -> String {
-        self.paragraphs().iter().map(|p| p.text()).collect::<Vec<_>>().join("\n")
+        self.paragraphs()
+            .iter()
+            .map(|p| p.text())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     pub fn from_xml(reader: &mut Reader<&[u8]>) -> Result<Self> {
@@ -843,9 +829,7 @@ impl CT_Tc {
                         reader.read_to_end_into(name, &mut Vec::new())?;
                     }
                 }
-                Ok(Event::End(ref e))
-                    if matches_local_name(e.name().as_ref(), b"tc") =>
-                {
+                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"tc") => {
                     break;
                 }
                 Ok(Event::Eof) => break,
@@ -921,9 +905,7 @@ impl CT_Row {
                         reader.read_to_end_into(name, &mut Vec::new())?;
                     }
                 }
-                Ok(Event::End(ref e))
-                    if matches_local_name(e.name().as_ref(), b"tr") =>
-                {
+                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"tr") => {
                     break;
                 }
                 Ok(Event::Eof) => break,
@@ -998,9 +980,7 @@ impl CT_Tbl {
                         reader.read_to_end_into(name, &mut Vec::new())?;
                     }
                 }
-                Ok(Event::End(ref e))
-                    if matches_local_name(e.name().as_ref(), b"tbl") =>
-                {
+                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"tbl") => {
                     break;
                 }
                 Ok(Event::Eof) => break,
@@ -1054,11 +1034,7 @@ mod tests {
         let mut buf = Vec::new();
         loop {
             match reader.read_event_into(&mut buf) {
-                Ok(Event::Start(ref e))
-                    if matches_local_name(e.name().as_ref(), b"tbl") =>
-                {
-                    break
-                }
+                Ok(Event::Start(ref e)) if matches_local_name(e.name().as_ref(), b"tbl") => break,
                 _ => {}
             }
             buf.clear();
@@ -1120,7 +1096,10 @@ mod tests {
         );
 
         // First row: horizontal merge
-        assert_eq!(tbl.rows[0].cells[0].properties.as_ref().unwrap().grid_span, Some(2));
+        assert_eq!(
+            tbl.rows[0].cells[0].properties.as_ref().unwrap().grid_span,
+            Some(2)
+        );
 
         // Second row: vertical merge start
         assert_eq!(
@@ -1170,7 +1149,13 @@ mod tests {
                </w:tr>"#,
         );
 
-        let shd = tbl.rows[0].cells[0].properties.as_ref().unwrap().shading.as_ref().unwrap();
+        let shd = tbl.rows[0].cells[0]
+            .properties
+            .as_ref()
+            .unwrap()
+            .shading
+            .as_ref()
+            .unwrap();
         assert_eq!(shd.fill, Some("FFFF00".to_string()));
     }
 
@@ -1277,15 +1262,11 @@ mod tests {
         nested_row.cells.push(nested_cell);
         nested_tbl.rows.push(nested_row);
 
-        outer_cell
-            .content
-            .push(CellContent::Table(nested_tbl));
+        outer_cell.content.push(CellContent::Table(nested_tbl));
 
         let mut after = CT_P::new();
         after.add_run("After table");
-        outer_cell
-            .content
-            .push(CellContent::Paragraph(after));
+        outer_cell.content.push(CellContent::Paragraph(after));
 
         // Serialize
         let mut output = Vec::new();

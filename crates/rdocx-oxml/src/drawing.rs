@@ -232,20 +232,25 @@ impl CT_Anchor {
                         for attr in e.attributes() {
                             let attr = attr?;
                             if attr.key.as_ref() == b"relativeFrom" {
-                                pos_h_relative_from = ST_RelativeFromH::from_str(
-                                    std::str::from_utf8(&attr.value)?
-                                );
+                                pos_h_relative_from =
+                                    ST_RelativeFromH::from_str(std::str::from_utf8(&attr.value)?);
                             }
                         }
                         // Read child <wp:posOffset>
                         let mut inner_buf = Vec::new();
                         loop {
                             match reader.read_event_into(&mut inner_buf) {
-                                Ok(Event::Start(ref ie)) if matches_local_name(ie.name().as_ref(), b"posOffset") => {
+                                Ok(Event::Start(ref ie))
+                                    if matches_local_name(ie.name().as_ref(), b"posOffset") =>
+                                {
                                     let text = reader.read_text(ie.name()).unwrap_or_default();
                                     pos_h_offset = Emu(text.trim().parse().unwrap_or(0));
                                 }
-                                Ok(Event::End(ref ie)) if matches_local_name(ie.name().as_ref(), b"positionH") => break,
+                                Ok(Event::End(ref ie))
+                                    if matches_local_name(ie.name().as_ref(), b"positionH") =>
+                                {
+                                    break;
+                                }
                                 Ok(Event::Eof) => break,
                                 Err(e) => return Err(e.into()),
                                 _ => {}
@@ -256,19 +261,24 @@ impl CT_Anchor {
                         for attr in e.attributes() {
                             let attr = attr?;
                             if attr.key.as_ref() == b"relativeFrom" {
-                                pos_v_relative_from = ST_RelativeFromV::from_str(
-                                    std::str::from_utf8(&attr.value)?
-                                );
+                                pos_v_relative_from =
+                                    ST_RelativeFromV::from_str(std::str::from_utf8(&attr.value)?);
                             }
                         }
                         let mut inner_buf = Vec::new();
                         loop {
                             match reader.read_event_into(&mut inner_buf) {
-                                Ok(Event::Start(ref ie)) if matches_local_name(ie.name().as_ref(), b"posOffset") => {
+                                Ok(Event::Start(ref ie))
+                                    if matches_local_name(ie.name().as_ref(), b"posOffset") =>
+                                {
                                     let text = reader.read_text(ie.name()).unwrap_or_default();
                                     pos_v_offset = Emu(text.trim().parse().unwrap_or(0));
                                 }
-                                Ok(Event::End(ref ie)) if matches_local_name(ie.name().as_ref(), b"positionV") => break,
+                                Ok(Event::End(ref ie))
+                                    if matches_local_name(ie.name().as_ref(), b"positionV") =>
+                                {
+                                    break;
+                                }
                                 Ok(Event::Eof) => break,
                                 Err(e) => return Err(e.into()),
                                 _ => {}
@@ -301,9 +311,7 @@ impl CT_Anchor {
                         // Continue into nested elements (graphic, graphicData, pic, etc.)
                     }
                 }
-                Ok(Event::End(ref e))
-                    if matches_local_name(e.name().as_ref(), b"anchor") =>
-                {
+                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"anchor") => {
                     break;
                 }
                 Ok(Event::Eof) => break,
@@ -358,7 +366,9 @@ impl CT_Anchor {
         pos_h.push_attribute(("relativeFrom", self.pos_h_relative_from.to_str()));
         writer.write_event(Event::Start(pos_h))?;
         writer.write_event(Event::Start(BytesStart::new("wp:posOffset")))?;
-        writer.write_event(Event::Text(BytesText::new(&self.pos_h_offset.0.to_string())))?;
+        writer.write_event(Event::Text(BytesText::new(
+            &self.pos_h_offset.0.to_string(),
+        )))?;
         writer.write_event(Event::End(BytesEnd::new("wp:posOffset")))?;
         writer.write_event(Event::End(BytesEnd::new("wp:positionH")))?;
 
@@ -367,7 +377,9 @@ impl CT_Anchor {
         pos_v.push_attribute(("relativeFrom", self.pos_v_relative_from.to_str()));
         writer.write_event(Event::Start(pos_v))?;
         writer.write_event(Event::Start(BytesStart::new("wp:posOffset")))?;
-        writer.write_event(Event::Text(BytesText::new(&self.pos_v_offset.0.to_string())))?;
+        writer.write_event(Event::Text(BytesText::new(
+            &self.pos_v_offset.0.to_string(),
+        )))?;
         writer.write_event(Event::End(BytesEnd::new("wp:posOffset")))?;
         writer.write_event(Event::End(BytesEnd::new("wp:positionV")))?;
 
@@ -390,7 +402,13 @@ impl CT_Anchor {
         writer.write_event(Event::Empty(doc_pr))?;
 
         // a:graphic (same pic:pic structure as inline)
-        write_graphic_element(writer, &self.embed_id, self.extent_cx, self.extent_cy, self.name.as_deref())?;
+        write_graphic_element(
+            writer,
+            &self.embed_id,
+            self.extent_cx,
+            self.extent_cy,
+            self.name.as_deref(),
+        )?;
 
         writer.write_event(Event::End(BytesEnd::new("wp:anchor")))?;
         Ok(())
@@ -500,9 +518,7 @@ impl CT_Inline {
                         // Continue parsing nested elements (graphic, graphicData, pic, etc.)
                     }
                 }
-                Ok(Event::End(ref e))
-                    if matches_local_name(e.name().as_ref(), b"inline") =>
-                {
+                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"inline") => {
                     break;
                 }
                 Ok(Event::Eof) => break,
@@ -554,7 +570,13 @@ impl CT_Inline {
         writer.write_event(Event::Empty(doc_pr))?;
 
         // a:graphic
-        write_graphic_element(writer, &self.embed_id, self.extent_cx, self.extent_cy, self.name.as_deref())?;
+        write_graphic_element(
+            writer,
+            &self.embed_id,
+            self.extent_cx,
+            self.extent_cy,
+            self.name.as_deref(),
+        )?;
 
         writer.write_event(Event::End(BytesEnd::new("wp:inline")))?;
 
@@ -668,7 +690,9 @@ impl CT_Drawing {
                         let mut rbuf = Vec::new();
                         loop {
                             match re_reader.read_event_into(&mut rbuf) {
-                                Ok(Event::Start(ref ie)) if matches_local_name(ie.name().as_ref(), b"inline") => {
+                                Ok(Event::Start(ref ie))
+                                    if matches_local_name(ie.name().as_ref(), b"inline") =>
+                                {
                                     let mut inl = CT_Inline::from_xml(&mut re_reader)?;
                                     inl.raw_xml = Some(raw);
                                     inline = Some(inl);
@@ -688,7 +712,9 @@ impl CT_Drawing {
                         let mut rbuf = Vec::new();
                         loop {
                             match re_reader.read_event_into(&mut rbuf) {
-                                Ok(Event::Start(ref ie)) if matches_local_name(ie.name().as_ref(), b"anchor") => {
+                                Ok(Event::Start(ref ie))
+                                    if matches_local_name(ie.name().as_ref(), b"anchor") =>
+                                {
                                     let mut anc = CT_Anchor::from_xml(&mut re_reader, ie)?;
                                     anc.raw_xml = Some(raw);
                                     anchor = Some(anc);
@@ -704,9 +730,7 @@ impl CT_Drawing {
                         reader.read_to_end_into(name, &mut Vec::new())?;
                     }
                 }
-                Ok(Event::End(ref e))
-                    if matches_local_name(e.name().as_ref(), b"drawing") =>
-                {
+                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"drawing") => {
                     break;
                 }
                 Ok(Event::Eof) => break,
@@ -745,10 +769,8 @@ mod tests {
         let mut buf = Vec::new();
         loop {
             match reader.read_event_into(&mut buf) {
-                Ok(Event::Start(ref e))
-                    if matches_local_name(e.name().as_ref(), b"drawing") =>
-                {
-                    break
+                Ok(Event::Start(ref e)) if matches_local_name(e.name().as_ref(), b"drawing") => {
+                    break;
                 }
                 _ => {}
             }

@@ -10,10 +10,7 @@ fn main() {
     match doc.to_pdf() {
         Ok(bytes) => {
             std::fs::write("/tmp/rdocx_simple.pdf", &bytes).unwrap();
-            println!(
-                "Simple PDF: {} bytes -> /tmp/rdocx_simple.pdf",
-                bytes.len()
-            );
+            println!("Simple PDF: {} bytes -> /tmp/rdocx_simple.pdf", bytes.len());
         }
         Err(e) => println!("Simple PDF failed: {e}"),
     }

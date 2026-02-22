@@ -1,7 +1,7 @@
 //! Dublin Core metadata from `docProps/core.xml`.
 
-use quick_xml::events::Event;
 use quick_xml::Reader;
+use quick_xml::events::Event;
 
 use crate::error::Result;
 
@@ -84,15 +84,22 @@ impl CoreProperties {
 
     /// Serialize to `docProps/core.xml` bytes.
     pub fn to_xml(&self) -> Result<Vec<u8>> {
-        use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText};
         use quick_xml::Writer;
+        use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText};
 
         let mut writer = Writer::new_with_indent(Vec::new(), b' ', 2);
 
-        writer.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), Some("yes"))))?;
+        writer.write_event(Event::Decl(BytesDecl::new(
+            "1.0",
+            Some("UTF-8"),
+            Some("yes"),
+        )))?;
 
         let mut root = BytesStart::new("cp:coreProperties");
-        root.push_attribute(("xmlns:cp", "http://schemas.openxmlformats.org/package/2006/metadata/core-properties"));
+        root.push_attribute((
+            "xmlns:cp",
+            "http://schemas.openxmlformats.org/package/2006/metadata/core-properties",
+        ));
         root.push_attribute(("xmlns:dc", "http://purl.org/dc/elements/1.1/"));
         root.push_attribute(("xmlns:dcterms", "http://purl.org/dc/terms/"));
         root.push_attribute(("xmlns:dcmitype", "http://purl.org/dc/dcmitype/"));

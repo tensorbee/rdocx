@@ -222,9 +222,7 @@ impl CT_AbstractNum {
                         abs.multi_level_type = get_val_attr(e)?;
                     }
                 }
-                Ok(Event::End(ref e))
-                    if matches_local_name(e.name().as_ref(), b"abstractNum") =>
-                {
+                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"abstractNum") => {
                     break;
                 }
                 Ok(Event::Eof) => break,
@@ -240,10 +238,7 @@ impl CT_AbstractNum {
     pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         let mut buf = itoa::Buffer::new();
         let mut start = BytesStart::new("w:abstractNum");
-        start.push_attribute((
-            "w:abstractNumId",
-            buf.format(self.abstract_num_id),
-        ));
+        start.push_attribute(("w:abstractNumId", buf.format(self.abstract_num_id)));
         writer.write_event(Event::Start(start))?;
 
         if let Some(ref mlt) = self.multi_level_type {
@@ -445,11 +440,7 @@ impl CT_Numbering {
             "\u{25E6}", // white bullet ◦
             "\u{25AA}", // black small square ▪
             "\u{2022}", // repeat pattern
-            "\u{25E6}",
-            "\u{25AA}",
-            "\u{2022}",
-            "\u{25E6}",
-            "\u{25AA}",
+            "\u{25E6}", "\u{25AA}", "\u{2022}", "\u{25E6}", "\u{25AA}",
         ];
 
         let mut abs = CT_AbstractNum::new(abs_id);
@@ -608,10 +599,19 @@ mod tests {
 
         let abs = &numbering.abstract_nums[0];
         // Level 0: 720tw indent, 360tw hanging
-        assert_eq!(abs.levels[0].ppr.as_ref().unwrap().ind_left, Some(Twips(720)));
-        assert_eq!(abs.levels[0].ppr.as_ref().unwrap().ind_hanging, Some(Twips(360)));
+        assert_eq!(
+            abs.levels[0].ppr.as_ref().unwrap().ind_left,
+            Some(Twips(720))
+        );
+        assert_eq!(
+            abs.levels[0].ppr.as_ref().unwrap().ind_hanging,
+            Some(Twips(360))
+        );
         // Level 2: 2160tw indent
-        assert_eq!(abs.levels[2].ppr.as_ref().unwrap().ind_left, Some(Twips(2160)));
+        assert_eq!(
+            abs.levels[2].ppr.as_ref().unwrap().ind_left,
+            Some(Twips(2160))
+        );
     }
 
     #[test]
@@ -652,7 +652,10 @@ mod tests {
         assert_eq!(abs.levels[0].start, Some(1));
         assert_eq!(abs.levels[0].num_fmt, Some(ST_NumberFormat::Decimal));
         assert_eq!(abs.levels[0].lvl_text, Some("%1.".to_string()));
-        assert_eq!(abs.levels[0].ppr.as_ref().unwrap().ind_left, Some(Twips(720)));
+        assert_eq!(
+            abs.levels[0].ppr.as_ref().unwrap().ind_left,
+            Some(Twips(720))
+        );
         assert_eq!(abs.levels[1].num_fmt, Some(ST_NumberFormat::LowerLetter));
 
         let num = &numbering.nums[0];

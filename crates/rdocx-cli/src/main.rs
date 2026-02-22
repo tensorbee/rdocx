@@ -96,7 +96,13 @@ fn main() {
     let result = match cli.command {
         Command::Inspect { file, json } => commands::inspect(&file, json),
         Command::Text { file } => commands::text(&file),
-        Command::Convert { file, to, output, dpi, font_dir } => commands::convert(&file, &to, output.as_deref(), dpi, font_dir.as_deref()),
+        Command::Convert {
+            file,
+            to,
+            output,
+            dpi,
+            font_dir,
+        } => commands::convert(&file, &to, output.as_deref(), dpi, font_dir.as_deref()),
         Command::Diff { file_a, file_b } => commands::diff(&file_a, &file_b),
         Command::Replace {
             file,
@@ -105,7 +111,12 @@ fn main() {
             output,
         } => commands::replace(&file, &placeholder, &value, &output),
         Command::Validate { file } => commands::validate(&file),
-        Command::Render { file, output_dir, dpi, page } => commands::render(&file, output_dir.as_deref(), dpi, page),
+        Command::Render {
+            file,
+            output_dir,
+            dpi,
+            page,
+        } => commands::render(&file, output_dir.as_deref(), dpi, page),
     };
 
     if let Err(e) = result {

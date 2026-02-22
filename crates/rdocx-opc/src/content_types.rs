@@ -47,14 +47,10 @@ impl ContentTypes {
                             let attr = attr?;
                             match attr.key.as_ref() {
                                 b"Extension" => {
-                                    ext = Some(
-                                        std::str::from_utf8(&attr.value)?.to_string(),
-                                    );
+                                    ext = Some(std::str::from_utf8(&attr.value)?.to_string());
                                 }
                                 b"ContentType" => {
-                                    ct = Some(
-                                        std::str::from_utf8(&attr.value)?.to_string(),
-                                    );
+                                    ct = Some(std::str::from_utf8(&attr.value)?.to_string());
                                 }
                                 _ => {}
                             }
@@ -73,14 +69,10 @@ impl ContentTypes {
                             let attr = attr?;
                             match attr.key.as_ref() {
                                 b"PartName" => {
-                                    pn = Some(
-                                        std::str::from_utf8(&attr.value)?.to_string(),
-                                    );
+                                    pn = Some(std::str::from_utf8(&attr.value)?.to_string());
                                 }
                                 b"ContentType" => {
-                                    ct = Some(
-                                        std::str::from_utf8(&attr.value)?.to_string(),
-                                    );
+                                    ct = Some(std::str::from_utf8(&attr.value)?.to_string());
                                 }
                                 _ => {}
                             }
@@ -111,7 +103,11 @@ impl ContentTypes {
     pub fn to_xml(&self) -> Result<Vec<u8>> {
         let mut writer = Writer::new_with_indent(Vec::new(), b' ', 2);
 
-        writer.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), Some("yes"))))?;
+        writer.write_event(Event::Decl(BytesDecl::new(
+            "1.0",
+            Some("UTF-8"),
+            Some("yes"),
+        )))?;
 
         let mut types_start = BytesStart::new("Types");
         types_start.push_attribute((
@@ -177,13 +173,17 @@ impl ContentTypes {
     /// Create a new ContentTypes with the standard DOCX defaults.
     pub fn new_docx() -> Self {
         let mut defaults = HashMap::new();
-        defaults.insert("rels".to_string(), "application/vnd.openxmlformats-package.relationships+xml".to_string());
+        defaults.insert(
+            "rels".to_string(),
+            "application/vnd.openxmlformats-package.relationships+xml".to_string(),
+        );
         defaults.insert("xml".to_string(), "application/xml".to_string());
 
         let mut overrides = HashMap::new();
         overrides.insert(
             "/word/document.xml".to_string(),
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml".to_string(),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
+                .to_string(),
         );
         overrides.insert(
             "/word/styles.xml".to_string(),
@@ -210,7 +210,9 @@ mod tests {
         assert_eq!(parsed.overrides.len(), ct.overrides.len());
         assert_eq!(
             parsed.content_type_for("/word/document.xml"),
-            Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml")
+            Some(
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
+            )
         );
     }
 

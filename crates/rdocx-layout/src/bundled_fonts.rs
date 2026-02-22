@@ -23,30 +23,90 @@ pub fn bundled_font_data() -> Vec<(&'static str, &'static [u8])> {
     {
         vec![
             // Carlito — metric-compatible replacement for Calibri
-            ("Carlito", include_bytes!("../fonts/Carlito-Regular.ttf").as_slice()),
-            ("Carlito", include_bytes!("../fonts/Carlito-Bold.ttf").as_slice()),
-            ("Carlito", include_bytes!("../fonts/Carlito-Italic.ttf").as_slice()),
-            ("Carlito", include_bytes!("../fonts/Carlito-BoldItalic.ttf").as_slice()),
+            (
+                "Carlito",
+                include_bytes!("../fonts/Carlito-Regular.ttf").as_slice(),
+            ),
+            (
+                "Carlito",
+                include_bytes!("../fonts/Carlito-Bold.ttf").as_slice(),
+            ),
+            (
+                "Carlito",
+                include_bytes!("../fonts/Carlito-Italic.ttf").as_slice(),
+            ),
+            (
+                "Carlito",
+                include_bytes!("../fonts/Carlito-BoldItalic.ttf").as_slice(),
+            ),
             // Caladea — metric-compatible replacement for Cambria
-            ("Caladea", include_bytes!("../fonts/Caladea-Regular.ttf").as_slice()),
-            ("Caladea", include_bytes!("../fonts/Caladea-Bold.ttf").as_slice()),
-            ("Caladea", include_bytes!("../fonts/Caladea-Italic.ttf").as_slice()),
-            ("Caladea", include_bytes!("../fonts/Caladea-BoldItalic.ttf").as_slice()),
+            (
+                "Caladea",
+                include_bytes!("../fonts/Caladea-Regular.ttf").as_slice(),
+            ),
+            (
+                "Caladea",
+                include_bytes!("../fonts/Caladea-Bold.ttf").as_slice(),
+            ),
+            (
+                "Caladea",
+                include_bytes!("../fonts/Caladea-Italic.ttf").as_slice(),
+            ),
+            (
+                "Caladea",
+                include_bytes!("../fonts/Caladea-BoldItalic.ttf").as_slice(),
+            ),
             // Liberation Sans — metric-compatible replacement for Arial
-            ("Liberation Sans", include_bytes!("../fonts/LiberationSans-Regular.ttf").as_slice()),
-            ("Liberation Sans", include_bytes!("../fonts/LiberationSans-Bold.ttf").as_slice()),
-            ("Liberation Sans", include_bytes!("../fonts/LiberationSans-Italic.ttf").as_slice()),
-            ("Liberation Sans", include_bytes!("../fonts/LiberationSans-BoldItalic.ttf").as_slice()),
+            (
+                "Liberation Sans",
+                include_bytes!("../fonts/LiberationSans-Regular.ttf").as_slice(),
+            ),
+            (
+                "Liberation Sans",
+                include_bytes!("../fonts/LiberationSans-Bold.ttf").as_slice(),
+            ),
+            (
+                "Liberation Sans",
+                include_bytes!("../fonts/LiberationSans-Italic.ttf").as_slice(),
+            ),
+            (
+                "Liberation Sans",
+                include_bytes!("../fonts/LiberationSans-BoldItalic.ttf").as_slice(),
+            ),
             // Liberation Serif — metric-compatible replacement for Times New Roman
-            ("Liberation Serif", include_bytes!("../fonts/LiberationSerif-Regular.ttf").as_slice()),
-            ("Liberation Serif", include_bytes!("../fonts/LiberationSerif-Bold.ttf").as_slice()),
-            ("Liberation Serif", include_bytes!("../fonts/LiberationSerif-Italic.ttf").as_slice()),
-            ("Liberation Serif", include_bytes!("../fonts/LiberationSerif-BoldItalic.ttf").as_slice()),
+            (
+                "Liberation Serif",
+                include_bytes!("../fonts/LiberationSerif-Regular.ttf").as_slice(),
+            ),
+            (
+                "Liberation Serif",
+                include_bytes!("../fonts/LiberationSerif-Bold.ttf").as_slice(),
+            ),
+            (
+                "Liberation Serif",
+                include_bytes!("../fonts/LiberationSerif-Italic.ttf").as_slice(),
+            ),
+            (
+                "Liberation Serif",
+                include_bytes!("../fonts/LiberationSerif-BoldItalic.ttf").as_slice(),
+            ),
             // Liberation Mono — metric-compatible replacement for Courier New
-            ("Liberation Mono", include_bytes!("../fonts/LiberationMono-Regular.ttf").as_slice()),
-            ("Liberation Mono", include_bytes!("../fonts/LiberationMono-Bold.ttf").as_slice()),
-            ("Liberation Mono", include_bytes!("../fonts/LiberationMono-Italic.ttf").as_slice()),
-            ("Liberation Mono", include_bytes!("../fonts/LiberationMono-BoldItalic.ttf").as_slice()),
+            (
+                "Liberation Mono",
+                include_bytes!("../fonts/LiberationMono-Regular.ttf").as_slice(),
+            ),
+            (
+                "Liberation Mono",
+                include_bytes!("../fonts/LiberationMono-Bold.ttf").as_slice(),
+            ),
+            (
+                "Liberation Mono",
+                include_bytes!("../fonts/LiberationMono-Italic.ttf").as_slice(),
+            ),
+            (
+                "Liberation Mono",
+                include_bytes!("../fonts/LiberationMono-BoldItalic.ttf").as_slice(),
+            ),
         ]
     }
     #[cfg(not(feature = "bundled-fonts"))]

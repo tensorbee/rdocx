@@ -25,8 +25,10 @@ fn generate_styled_tables(path: &Path) {
     let mut doc = Document::new();
     doc.set_page_size(Length::inches(8.5), Length::inches(11.0));
     doc.set_margins(
-        Length::inches(0.75), Length::inches(0.75),
-        Length::inches(0.75), Length::inches(0.75),
+        Length::inches(0.75),
+        Length::inches(0.75),
+        Length::inches(0.75),
+        Length::inches(0.75),
     );
 
     doc.add_paragraph("Styled Tables Showcase")
@@ -56,11 +58,11 @@ fn generate_styled_tables(path: &Path) {
         // Data with alternating shading
         let data = [
             ["Enterprise Suite", "$245,000", "$312,000", "+27.3%"],
-            ["Professional",     "$189,000", "$201,000", "+6.3%"],
-            ["Starter Pack",     "$67,000",  "$84,500",  "+26.1%"],
-            ["Add-ons",          "$34,000",  "$41,200",  "+21.2%"],
-            ["Training",         "$22,000",  "$28,900",  "+31.4%"],
-            ["Support Plans",    "$56,000",  "$62,300",  "+11.3%"],
+            ["Professional", "$189,000", "$201,000", "+6.3%"],
+            ["Starter Pack", "$67,000", "$84,500", "+26.1%"],
+            ["Add-ons", "$34,000", "$41,200", "+21.2%"],
+            ["Training", "$22,000", "$28,900", "+31.4%"],
+            ["Support Plans", "$56,000", "$62,300", "+11.3%"],
         ];
 
         for (i, row) in data.iter().enumerate() {
@@ -112,7 +114,9 @@ fn generate_styled_tables(path: &Path) {
 
         // Line items
         tbl.cell(2, 0).unwrap().set_text("LIC-ENT-500");
-        tbl.cell(2, 1).unwrap().set_text("Enterprise License (500 seats)");
+        tbl.cell(2, 1)
+            .unwrap()
+            .set_text("Enterprise License (500 seats)");
         tbl.cell(2, 2).unwrap().set_text("1");
         tbl.cell(2, 3).unwrap().set_text("$60,000");
 
@@ -122,7 +126,9 @@ fn generate_styled_tables(path: &Path) {
         tbl.cell(3, 3).unwrap().set_text("$25,000");
 
         tbl.cell(4, 0).unwrap().set_text("SVC-TRAIN");
-        tbl.cell(4, 1).unwrap().set_text("On-site Training (3 days)");
+        tbl.cell(4, 1)
+            .unwrap()
+            .set_text("On-site Training (3 days)");
         tbl.cell(4, 2).unwrap().set_text("1");
         tbl.cell(4, 3).unwrap().set_text("$4,500");
 
@@ -166,7 +172,9 @@ fn generate_styled_tables(path: &Path) {
         tbl.cell(1, 0).unwrap().set_text("Hardware");
         tbl.cell(1, 0).unwrap().v_merge_restart();
         tbl.cell(1, 0).unwrap().shading("E2EFDA");
-        tbl.cell(1, 0).unwrap().vertical_alignment(VerticalAlignment::Center);
+        tbl.cell(1, 0)
+            .unwrap()
+            .vertical_alignment(VerticalAlignment::Center);
         tbl.cell(1, 1).unwrap().set_text("Processor");
         tbl.cell(1, 2).unwrap().set_text("Intel Xeon E-2388G");
 
@@ -182,7 +190,9 @@ fn generate_styled_tables(path: &Path) {
         tbl.cell(4, 0).unwrap().set_text("Network");
         tbl.cell(4, 0).unwrap().v_merge_restart();
         tbl.cell(4, 0).unwrap().shading("FCE4D6");
-        tbl.cell(4, 0).unwrap().vertical_alignment(VerticalAlignment::Center);
+        tbl.cell(4, 0)
+            .unwrap()
+            .vertical_alignment(VerticalAlignment::Center);
         tbl.cell(4, 1).unwrap().set_text("Ethernet");
         tbl.cell(4, 2).unwrap().set_text("4x 10GbE SFP+");
 
@@ -194,7 +204,9 @@ fn generate_styled_tables(path: &Path) {
         tbl.cell(6, 0).unwrap().set_text("Software");
         tbl.cell(6, 0).unwrap().v_merge_restart();
         tbl.cell(6, 0).unwrap().shading("D6E4F0");
-        tbl.cell(6, 0).unwrap().vertical_alignment(VerticalAlignment::Center);
+        tbl.cell(6, 0)
+            .unwrap()
+            .vertical_alignment(VerticalAlignment::Center);
         tbl.cell(6, 1).unwrap().set_text("Operating System");
         tbl.cell(6, 2).unwrap().set_text("Ubuntu 24.04 LTS");
 
@@ -208,16 +220,17 @@ fn generate_styled_tables(path: &Path) {
     // =========================================================================
     // 4. Nested table (table inside a cell)
     // =========================================================================
-    doc.add_paragraph("4. Nested Table")
-        .style("Heading2");
+    doc.add_paragraph("4. Nested Table").style("Heading2");
 
     {
         let mut tbl = doc.add_table(2, 2);
         tbl = tbl.borders(BorderStyle::Single, 6, "2E75B6");
         tbl = tbl.width_pct(100.0);
         tbl = tbl.cell_margins(
-            Length::twips(72), Length::twips(108),
-            Length::twips(72), Length::twips(108),
+            Length::twips(72),
+            Length::twips(108),
+            Length::twips(72),
+            Length::twips(108),
         );
 
         tbl.cell(0, 0).unwrap().set_text("Project Alpha");
@@ -263,8 +276,7 @@ fn generate_styled_tables(path: &Path) {
     // =========================================================================
     // 5. Form-style table with labels
     // =========================================================================
-    doc.add_paragraph("5. Form-Style Table")
-        .style("Heading2");
+    doc.add_paragraph("5. Form-Style Table").style("Heading2");
 
     {
         let mut tbl = doc.add_table(6, 4);
@@ -272,7 +284,9 @@ fn generate_styled_tables(path: &Path) {
         tbl = tbl.width_pct(100.0);
 
         // Row 0: Full-width title
-        tbl.cell(0, 0).unwrap().set_text("Customer Registration Form");
+        tbl.cell(0, 0)
+            .unwrap()
+            .set_text("Customer Registration Form");
         tbl.cell(0, 0).unwrap().grid_span(4);
         tbl.cell(0, 0).unwrap().shading("404040");
 
@@ -301,13 +315,17 @@ fn generate_styled_tables(path: &Path) {
         // Row 4: Address (spanning)
         tbl.cell(4, 0).unwrap().set_text("Address");
         tbl.cell(4, 0).unwrap().shading("E8E8E8");
-        tbl.cell(4, 1).unwrap().set_text("123 Business Ave, Suite 400, Portland, OR 97201");
+        tbl.cell(4, 1)
+            .unwrap()
+            .set_text("123 Business Ave, Suite 400, Portland, OR 97201");
         tbl.cell(4, 1).unwrap().grid_span(3);
 
         // Row 5: Notes
         tbl.cell(5, 0).unwrap().set_text("Notes");
         tbl.cell(5, 0).unwrap().shading("E8E8E8");
-        tbl.cell(5, 0).unwrap().vertical_alignment(VerticalAlignment::Top);
+        tbl.cell(5, 0)
+            .unwrap()
+            .vertical_alignment(VerticalAlignment::Top);
         {
             let mut cell = tbl.cell(5, 1).unwrap().grid_span(3);
             cell.set_text("Premium customer since 2020. Preferred contact method: email.");
@@ -387,7 +405,9 @@ fn generate_styled_tables(path: &Path) {
         for (col, h) in headers.iter().enumerate() {
             tbl.cell(0, col).unwrap().set_text(h);
             tbl.cell(0, col).unwrap().shading("404040");
-            tbl.cell(0, col).unwrap().vertical_alignment(VerticalAlignment::Center);
+            tbl.cell(0, col)
+                .unwrap()
+                .vertical_alignment(VerticalAlignment::Center);
         }
 
         // Schedule rows with minimum height

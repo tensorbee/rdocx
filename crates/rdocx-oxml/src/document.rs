@@ -101,8 +101,8 @@ impl CT_SectPr {
     /// Default US Letter page with 1-inch margins.
     pub fn default_letter() -> Self {
         CT_SectPr {
-            page_width: Some(Twips(12240)),   // 8.5"
-            page_height: Some(Twips(15840)),  // 11"
+            page_width: Some(Twips(12240)),  // 8.5"
+            page_height: Some(Twips(15840)), // 11"
             orientation: Some(ST_PageOrientation::Portrait),
             margin_top: Some(Twips(1440)),    // 1"
             margin_right: Some(Twips(1440)),  // 1"
@@ -123,8 +123,8 @@ impl CT_SectPr {
     /// Default A4 page with 1-inch margins.
     pub fn default_a4() -> Self {
         CT_SectPr {
-            page_width: Some(Twips(11906)),   // 210mm
-            page_height: Some(Twips(16838)),  // 297mm
+            page_width: Some(Twips(11906)),  // 210mm
+            page_height: Some(Twips(16838)), // 297mm
             orientation: Some(ST_PageOrientation::Portrait),
             margin_top: Some(Twips(1440)),
             margin_right: Some(Twips(1440)),
@@ -177,8 +177,7 @@ impl CT_SectPr {
                             } else if matches_local_name(key, b"h") {
                                 sect.page_height = Some(Twips(val_str.parse()?));
                             } else if matches_local_name(key, b"orient") {
-                                sect.orientation =
-                                    Some(ST_PageOrientation::from_str(val_str)?);
+                                sect.orientation = Some(ST_PageOrientation::from_str(val_str)?);
                             }
                         }
                     } else if matches_local_name(name.as_ref(), b"pgMar") {
@@ -266,9 +265,7 @@ impl CT_SectPr {
                         sect.extra_xml.push(capture_element(reader, e)?);
                     }
                 }
-                Ok(Event::End(ref e))
-                    if matches_local_name(e.name().as_ref(), b"sectPr") =>
-                {
+                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"sectPr") => {
                     break;
                 }
                 Ok(Event::Eof) => break,
@@ -310,9 +307,7 @@ impl CT_SectPr {
 
         loop {
             match reader.read_event_into(&mut buf) {
-                Ok(Event::Empty(ref e))
-                    if matches_local_name(e.name().as_ref(), b"col") =>
-                {
+                Ok(Event::Empty(ref e)) if matches_local_name(e.name().as_ref(), b"col") => {
                     let mut width = None;
                     let mut space = None;
                     for attr in e.attributes() {
@@ -327,9 +322,7 @@ impl CT_SectPr {
                     }
                     cols.columns.push(CT_Column { width, space });
                 }
-                Ok(Event::End(ref e))
-                    if matches_local_name(e.name().as_ref(), b"cols") =>
-                {
+                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"cols") => {
                     break;
                 }
                 Ok(Event::Eof) => break,
@@ -706,12 +699,9 @@ impl CT_Document {
                             if (key.starts_with(b"xmlns:") || key == b"xmlns")
                                 && !known_ns.contains(&key)
                             {
-                                let key_str = std::str::from_utf8(key)
-                                    .unwrap_or("")
-                                    .to_string();
-                                let val_str = std::str::from_utf8(&attr.value)
-                                    .unwrap_or("")
-                                    .to_string();
+                                let key_str = std::str::from_utf8(key).unwrap_or("").to_string();
+                                let val_str =
+                                    std::str::from_utf8(&attr.value).unwrap_or("").to_string();
                                 extra_namespaces.push((key_str, val_str));
                             }
                         }
@@ -1008,8 +998,11 @@ mod tests {
             let xml = doc.to_xml().unwrap();
             let parsed = CT_Document::from_xml(&xml).unwrap();
             let sect2 = parsed.body.sect_pr.unwrap();
-            assert_eq!(sect2.section_type, Some(section_type),
-                "section type round-trip failed for {section_type:?}");
+            assert_eq!(
+                sect2.section_type,
+                Some(section_type),
+                "section type round-trip failed for {section_type:?}"
+            );
         }
     }
 

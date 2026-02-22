@@ -195,7 +195,10 @@ mod tests {
         assert_eq!(footnotes.footnotes.len(), 2);
         assert_eq!(footnotes.footnotes[0].id, 1);
         assert_eq!(footnotes.footnotes[0].paragraphs.len(), 1);
-        assert_eq!(footnotes.footnotes[0].paragraphs[0].text(), "First footnote text.");
+        assert_eq!(
+            footnotes.footnotes[0].paragraphs[0].text(),
+            "First footnote text."
+        );
         assert_eq!(footnotes.footnotes[1].id, 2);
         assert_eq!(footnotes.footnotes[1].paragraphs.len(), 2);
     }

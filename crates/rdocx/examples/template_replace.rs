@@ -44,8 +44,10 @@ fn create_template(path: &Path) {
     let mut doc = Document::new();
     doc.set_page_size(Length::inches(8.5), Length::inches(11.0));
     doc.set_margins(
-        Length::inches(1.0), Length::inches(1.0),
-        Length::inches(1.0), Length::inches(1.0),
+        Length::inches(1.0),
+        Length::inches(1.0),
+        Length::inches(1.0),
+        Length::inches(1.0),
     );
 
     doc.set_header("{{company_name}} — Confidential");
@@ -62,20 +64,18 @@ fn create_template(path: &Path) {
     doc.add_paragraph("");
 
     // ── Summary section ──
-    doc.add_paragraph("Executive Summary")
-        .style("Heading2");
+    doc.add_paragraph("Executive Summary").style("Heading2");
 
     doc.add_paragraph(
         "This proposal outlines the {{project_name}} project for {{company_name}}. \
          The primary contact is {{contact_name}} ({{contact_email}}). \
-         The proposed start date is {{start_date}} with an estimated duration of {{duration}}."
+         The proposed start date is {{start_date}} with an estimated duration of {{duration}}.",
     );
 
     doc.add_paragraph("");
 
     // ── Cross-run placeholder (bold label + normal value) ──
-    doc.add_paragraph("Key Details")
-        .style("Heading2");
+    doc.add_paragraph("Key Details").style("Heading2");
 
     {
         let mut p = doc.add_paragraph("");
@@ -96,8 +96,7 @@ fn create_template(path: &Path) {
     doc.add_paragraph("");
 
     // ── Table with placeholders ──
-    doc.add_paragraph("Team Members")
-        .style("Heading2");
+    doc.add_paragraph("Team Members").style("Heading2");
 
     {
         let mut tbl = doc.add_table(4, 3);
@@ -127,26 +126,28 @@ fn create_template(path: &Path) {
     doc.add_paragraph("");
 
     // ── Deliverables section ──
-    doc.add_paragraph("Deliverables")
-        .style("Heading2");
+    doc.add_paragraph("Deliverables").style("Heading2");
 
     doc.add_paragraph("INSERTION_POINT");
 
     doc.add_paragraph("");
 
     // ── Signature block ──
-    doc.add_paragraph("Acceptance")
-        .style("Heading2");
+    doc.add_paragraph("Acceptance").style("Heading2");
 
     doc.add_paragraph(
-        "By signing below, {{company_name}} agrees to the terms outlined in this proposal."
+        "By signing below, {{company_name}} agrees to the terms outlined in this proposal.",
     );
 
     {
         let mut tbl = doc.add_table(2, 2);
         tbl = tbl.borders(BorderStyle::Single, 4, "000000");
-        tbl.cell(0, 0).unwrap().set_text("Customer: ___________________");
-        tbl.cell(0, 1).unwrap().set_text("Provider: ___________________");
+        tbl.cell(0, 0)
+            .unwrap()
+            .set_text("Customer: ___________________");
+        tbl.cell(0, 1)
+            .unwrap()
+            .set_text("Provider: ___________________");
         tbl.cell(1, 0).unwrap().set_text("Date: {{date}}");
         tbl.cell(1, 1).unwrap().set_text("Date: {{date}}");
     }
@@ -208,19 +209,27 @@ fn fill_template(template_path: &Path, output_path: &Path) {
         tbl.cell(0, 2).unwrap().set_text("Timeline");
 
         tbl.cell(1, 0).unwrap().set_text("1. Discovery");
-        tbl.cell(1, 1).unwrap().set_text("Network assessment and asset inventory");
+        tbl.cell(1, 1)
+            .unwrap()
+            .set_text("Network assessment and asset inventory");
         tbl.cell(1, 2).unwrap().set_text("Weeks 1-3");
 
         tbl.cell(2, 0).unwrap().set_text("2. Design");
-        tbl.cell(2, 1).unwrap().set_text("Security architecture and policy design");
+        tbl.cell(2, 1)
+            .unwrap()
+            .set_text("Security architecture and policy design");
         tbl.cell(2, 2).unwrap().set_text("Weeks 4-6");
 
         tbl.cell(3, 0).unwrap().set_text("3. Implementation");
-        tbl.cell(3, 1).unwrap().set_text("Deploy monitoring and access controls");
+        tbl.cell(3, 1)
+            .unwrap()
+            .set_text("Deploy monitoring and access controls");
         tbl.cell(3, 2).unwrap().set_text("Weeks 7-10");
 
         tbl.cell(4, 0).unwrap().set_text("4. Validation");
-        tbl.cell(4, 1).unwrap().set_text("Testing, training, and handover");
+        tbl.cell(4, 1)
+            .unwrap()
+            .set_text("Testing, training, and handover");
         tbl.cell(4, 2).unwrap().set_text("Weeks 11-12");
 
         println!("  Inserted deliverables table at position {}", idx);

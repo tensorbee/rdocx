@@ -99,10 +99,7 @@ impl StyleBuilder {
 }
 
 /// Resolve the effective paragraph properties by walking the style inheritance chain.
-pub fn resolve_paragraph_properties(
-    style_id: Option<&str>,
-    styles: &CT_Styles,
-) -> CT_PPr {
+pub fn resolve_paragraph_properties(style_id: Option<&str>, styles: &CT_Styles) -> CT_PPr {
     let mut effective = CT_PPr::default();
 
     // Start from docDefaults
