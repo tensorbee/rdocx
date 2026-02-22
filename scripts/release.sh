@@ -51,13 +51,21 @@ sed -i '' "s/version = \"$CURRENT\"/version = \"$VERSION\"/g" Cargo.toml
 # Update rdocx-wasm (excluded from workspace, has its own version)
 sed -i '' "s/version = \"$CURRENT\"/version = \"$VERSION\"/" crates/rdocx-wasm/Cargo.toml
 
+# Update README.md version references (e.g. rdocx = "0.1" -> rdocx = "0.2")
+CURRENT_SHORT=$(echo "$CURRENT" | sed 's/\.[0-9]*$//')
+VERSION_SHORT=$(echo "$VERSION" | sed 's/\.[0-9]*$//')
+if [ "$CURRENT_SHORT" != "$VERSION_SHORT" ]; then
+    echo "Major.minor changed ($CURRENT_SHORT -> $VERSION_SHORT), updating README.md..."
+    sed -i '' "s/\"$CURRENT_SHORT\"/\"$VERSION_SHORT\"/g" README.md
+fi
+
 # Regenerate lockfile
 cargo check --workspace --quiet
 
 echo "Updated all crates to $VERSION"
 
 # Commit, tag, and push
-git add Cargo.toml Cargo.lock crates/rdocx-wasm/Cargo.toml
+git add Cargo.toml Cargo.lock crates/rdocx-wasm/Cargo.toml README.md
 git commit -m "Release v$VERSION"
 git tag "v$VERSION"
 git push origin main "v$VERSION"
