@@ -1,5 +1,11 @@
 # rdocx
 
+[![CI](https://github.com/tensorbee/rdocx/actions/workflows/ci.yml/badge.svg)](https://github.com/tensorbee/rdocx/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/rdocx.svg)](https://crates.io/crates/rdocx)
+[![docs.rs](https://docs.rs/rdocx/badge.svg)](https://docs.rs/rdocx)
+[![License: MIT/Apache-2.0](https://img.shields.io/crates/l/rdocx.svg)](LICENSE)
+[![MSRV: 1.85](https://img.shields.io/badge/MSRV-1.85-blue.svg)](https://blog.rust-lang.org/2025/02/20/Rust-1.85.0.html)
+
 A pure Rust DOCX library — create, read, and modify Word documents programmatically. Additionally, render pixel-identical PDFs and export to HTML and Markdown, all from the same document object. No LibreOffice, no unoconv, no C dependencies.
 
 ## Why rdocx?

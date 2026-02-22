@@ -26,12 +26,12 @@ categories = ["parser-implementations", "text-processing"]
 
 [workspace.dependencies]
 # Internal crates
-rdocx-opc = { path = "crates/rdocx-opc" }
-rdocx-oxml = { path = "crates/rdocx-oxml" }
-rdocx = { path = "crates/rdocx" }
-rdocx-layout = { path = "crates/rdocx-layout" }
-rdocx-pdf = { path = "crates/rdocx-pdf" }
-rdocx-html = { path = "crates/rdocx-html" }
+rdocx-opc = { path = "crates/rdocx-opc", version = "0.1.0" }
+rdocx-oxml = { path = "crates/rdocx-oxml", version = "0.1.0" }
+rdocx = { path = "crates/rdocx", version = "0.1.0" }
+rdocx-layout = { path = "crates/rdocx-layout", version = "0.1.0" }
+rdocx-pdf = { path = "crates/rdocx-pdf", version = "0.1.0" }
+rdocx-html = { path = "crates/rdocx-html", version = "0.1.0" }
 
 # External dependencies
 zip = "8.1"
