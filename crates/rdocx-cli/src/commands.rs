@@ -341,19 +341,18 @@ pub fn validate(file: &Path) -> Result<()> {
     // Check: Heading level gaps
     let mut prev_level: Option<u32> = None;
     for para in doc.paragraphs() {
-        if let Some(style_id) = para.style_id() {
-            if let Some(level_str) = style_id.strip_prefix("Heading") {
-                if let Ok(level) = level_str.parse::<u32>() {
-                    if let Some(prev) = prev_level {
-                        if level > prev + 1 {
-                            issues.push(format!(
-                                "Heading level gap: Heading{prev} -> Heading{level} (skipped level(s))"
-                            ));
-                        }
-                    }
-                    prev_level = Some(level);
-                }
+        if let Some(style_id) = para.style_id()
+            && let Some(level_str) = style_id.strip_prefix("Heading")
+            && let Ok(level) = level_str.parse::<u32>()
+        {
+            if let Some(prev) = prev_level
+                && level > prev + 1
+            {
+                issues.push(format!(
+                    "Heading level gap: Heading{prev} -> Heading{level} (skipped level(s))"
+                ));
             }
+            prev_level = Some(level);
         }
     }
 

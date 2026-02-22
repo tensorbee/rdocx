@@ -108,21 +108,19 @@ fn detect_heading_level(ppr: Option<&CT_PPr>, styles: &CT_Styles) -> Option<u32>
 
     // Check style_id
     let style_id = ppr.style_id.as_deref()?;
-    if let Some(level) = style_id.strip_prefix("Heading") {
-        if let Ok(n) = level.parse::<u32>() {
-            if (1..=6).contains(&n) {
-                return Some(n);
-            }
-        }
+    if let Some(level) = style_id.strip_prefix("Heading")
+        && let Ok(n) = level.parse::<u32>()
+        && (1..=6).contains(&n)
+    {
+        return Some(n);
     }
 
     // Check style's outline level
-    if let Some(style) = styles.get_by_id(style_id) {
-        if let Some(spr) = &style.ppr {
-            if let Some(lvl) = spr.outline_lvl {
-                return Some(lvl + 1);
-            }
-        }
+    if let Some(style) = styles.get_by_id(style_id)
+        && let Some(spr) = &style.ppr
+        && let Some(lvl) = spr.outline_lvl
+    {
+        return Some(lvl + 1);
     }
 
     None
@@ -207,11 +205,11 @@ fn emit_paragraph_content(
     // Build a map of which runs are inside hyperlinks
     let mut hyperlink_map: HashMap<usize, &str> = HashMap::new();
     for hl in &para.hyperlinks {
-        if let Some(rel_id) = &hl.rel_id {
-            if let Some(url) = hyperlink_urls.get(rel_id) {
-                for i in hl.run_start..hl.run_end {
-                    hyperlink_map.insert(i, url);
-                }
+        if let Some(rel_id) = &hl.rel_id
+            && let Some(url) = hyperlink_urls.get(rel_id)
+        {
+            for i in hl.run_start..hl.run_end {
+                hyperlink_map.insert(i, url);
             }
         }
     }
@@ -305,10 +303,10 @@ fn emit_run(
                         .map(|i| i.embed_id.as_str())
                         .or_else(|| drawing.anchor.as_ref().map(|a| a.embed_id.as_str()));
 
-                    if let Some(eid) = embed_id {
-                        if let Some(img_data) = images.get(eid) {
-                            emit_image(out, img_data);
-                        }
+                    if let Some(eid) = embed_id
+                        && let Some(img_data) = images.get(eid)
+                    {
+                        emit_image(out, img_data);
                     }
                 }
             }
@@ -373,16 +371,15 @@ fn emit_table(
         }
 
         // Table borders
-        if let Some(borders) = &props.borders {
-            if borders.top.is_some()
+        if let Some(borders) = &props.borders
+            && (borders.top.is_some()
                 || borders.bottom.is_some()
                 || borders.left.is_some()
                 || borders.right.is_some()
                 || borders.inside_h.is_some()
-                || borders.inside_v.is_some()
-            {
-                table_style.push_str("border:1px solid #000;");
-            }
+                || borders.inside_v.is_some())
+        {
+            table_style.push_str("border:1px solid #000;");
         }
     }
 
@@ -396,10 +393,10 @@ fn emit_table(
         out.push_str("<tr>\n");
         for cell in &row.cells {
             // Skip vmerge continue cells
-            if let Some(props) = &cell.properties {
-                if matches!(props.v_merge, Some(VMerge::Continue)) {
-                    continue;
-                }
+            if let Some(props) = &cell.properties
+                && matches!(props.v_merge, Some(VMerge::Continue))
+            {
+                continue;
             }
 
             let mut td_attrs = String::new();
@@ -407,10 +404,10 @@ fn emit_table(
 
             if let Some(props) = &cell.properties {
                 // Column span
-                if let Some(span) = props.grid_span {
-                    if span > 1 {
-                        td_attrs.push_str(&format!(" colspan=\"{span}\""));
-                    }
+                if let Some(span) = props.grid_span
+                    && span > 1
+                {
+                    td_attrs.push_str(&format!(" colspan=\"{span}\""));
                 }
 
                 // Row span (count consecutive vmerge continue cells below)
@@ -432,23 +429,21 @@ fn emit_table(
                 }
 
                 // Cell shading
-                if let Some(shd) = &props.shading {
-                    if let Some(fill) = &shd.fill {
-                        if fill != "auto" && fill != "FFFFFF" {
-                            td_style.push_str(&format!("background-color:#{fill};"));
-                        }
-                    }
+                if let Some(shd) = &props.shading
+                    && let Some(fill) = &shd.fill
+                    && fill != "auto" && fill != "FFFFFF"
+                {
+                    td_style.push_str(&format!("background-color:#{fill};"));
                 }
 
                 // Cell borders
-                if let Some(borders) = &props.borders {
-                    if borders.top.is_some()
+                if let Some(borders) = &props.borders
+                    && (borders.top.is_some()
                         || borders.bottom.is_some()
                         || borders.left.is_some()
-                        || borders.right.is_some()
-                    {
-                        td_style.push_str("border:1px solid #000;");
-                    }
+                        || borders.right.is_some())
+                {
+                    td_style.push_str("border:1px solid #000;");
                 }
             }
 
@@ -500,13 +495,12 @@ fn count_vmerge_span(
 
     let mut span = 1;
     for row in tbl.rows.iter().skip(row_idx + 1) {
-        if let Some(next_cell) = row.cells.get(col_idx) {
-            if let Some(props) = &next_cell.properties {
-                if matches!(props.v_merge, Some(VMerge::Continue)) {
-                    span += 1;
-                    continue;
-                }
-            }
+        if let Some(next_cell) = row.cells.get(col_idx)
+            && let Some(props) = &next_cell.properties
+            && matches!(props.v_merge, Some(VMerge::Continue))
+        {
+            span += 1;
+            continue;
         }
         break;
     }

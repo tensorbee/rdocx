@@ -267,16 +267,16 @@ fn resolve_anchor_images(pages: &mut [PageFrame], input: &LayoutInput) {
         if let BodyContent::Paragraph(p) = content {
             for run in &p.runs {
                 for rc in &run.content {
-                    if let RunContent::Drawing(drawing) = rc {
-                        if let Some(ref anchor) = drawing.anchor {
-                            let behind = anchor.behind_doc;
-                            // Convert EMU positions and extents to points
-                            let x = anchor.pos_h_offset.to_pt();
-                            let y = anchor.pos_v_offset.to_pt();
-                            let w = anchor.extent_cx.to_pt();
-                            let h = anchor.extent_cy.to_pt();
-                            anchor_images.push((behind, x, y, w, h, anchor.embed_id.clone()));
-                        }
+                    if let RunContent::Drawing(drawing) = rc
+                        && let Some(ref anchor) = drawing.anchor
+                    {
+                        let behind = anchor.behind_doc;
+                        // Convert EMU positions and extents to points
+                        let x = anchor.pos_h_offset.to_pt();
+                        let y = anchor.pos_v_offset.to_pt();
+                        let w = anchor.extent_cx.to_pt();
+                        let h = anchor.extent_cy.to_pt();
+                        anchor_images.push((behind, x, y, w, h, anchor.embed_id.clone()));
                     }
                 }
             }
@@ -333,13 +333,11 @@ fn resolve_inline_images(pages: &mut [PageFrame], input: &LayoutInput) {
                 embed_id: Some(eid),
                 ..
             } = element
+                && data.is_empty()
+                && let Some(img) = input.images.get(eid.as_str())
             {
-                if data.is_empty() {
-                    if let Some(img) = input.images.get(eid.as_str()) {
-                        *data = img.data.clone();
-                        *content_type = img.content_type.clone();
-                    }
-                }
+                *data = img.data.clone();
+                *content_type = img.content_type.clone();
             }
         }
     }
@@ -353,18 +351,18 @@ fn substitute_fields(
     fm: &mut crate::font::FontManager,
 ) {
     for element in elements.iter_mut() {
-        if let PositionedElement::Text(run) = element {
-            if let Some(fk) = run.field_kind {
-                let value = match fk {
-                    FieldKind::Page => page_number.to_string(),
-                    FieldKind::NumPages => total_pages.to_string(),
-                };
-                // Re-shape the text with the actual value
-                if let Ok(shaped) = fm.shape_text(run.font_id, &value, run.font_size) {
-                    run.text = value;
-                    run.glyph_ids = shaped.glyph_ids;
-                    run.advances = shaped.advances;
-                }
+        if let PositionedElement::Text(run) = element
+            && let Some(fk) = run.field_kind
+        {
+            let value = match fk {
+                FieldKind::Page => page_number.to_string(),
+                FieldKind::NumPages => total_pages.to_string(),
+            };
+            // Re-shape the text with the actual value
+            if let Ok(shaped) = fm.shape_text(run.font_id, &value, run.font_size) {
+                run.text = value;
+                run.glyph_ids = shaped.glyph_ids;
+                run.advances = shaped.advances;
             }
         }
     }
@@ -390,12 +388,11 @@ fn render_page_footnotes(
         // Collect footnote IDs referenced on this page (in order, deduplicated)
         let mut footnote_ids: Vec<i32> = Vec::new();
         for element in &page.elements {
-            if let PositionedElement::Text(run) = element {
-                if let Some(fn_id) = run.footnote_id {
-                    if !footnote_ids.contains(&fn_id) {
-                        footnote_ids.push(fn_id);
-                    }
-                }
+            if let PositionedElement::Text(run) = element
+                && let Some(fn_id) = run.footnote_id
+                && !footnote_ids.contains(&fn_id)
+            {
+                footnote_ids.push(fn_id);
             }
         }
 
@@ -472,25 +469,25 @@ fn render_page_footnotes(
                 // Render the footnote number marker as superscript
                 let marker_text = fn_id.to_string();
                 let marker_size = footnote_font_size * 0.58;
-                if let Ok(font_id) = fm.resolve_font(Some("serif"), false, false) {
-                    if let Ok(shaped) = fm.shape_text(font_id, &marker_text, marker_size) {
-                        page.elements.push(PositionedElement::Text(GlyphRun {
-                            origin: Point {
-                                x: geometry.margin_left,
-                                y: baseline_y - footnote_font_size * 0.33,
-                            },
-                            font_id,
-                            font_size: marker_size,
-                            glyph_ids: shaped.glyph_ids,
-                            advances: shaped.advances,
-                            text: marker_text,
-                            color: Color::BLACK,
-                            bold: false,
-                            italic: false,
-                            field_kind: None,
-                            footnote_id: None,
-                        }));
-                    }
+                if let Ok(font_id) = fm.resolve_font(Some("serif"), false, false)
+                    && let Ok(shaped) = fm.shape_text(font_id, &marker_text, marker_size)
+                {
+                    page.elements.push(PositionedElement::Text(GlyphRun {
+                        origin: Point {
+                            x: geometry.margin_left,
+                            y: baseline_y - footnote_font_size * 0.33,
+                        },
+                        font_id,
+                        font_size: marker_size,
+                        glyph_ids: shaped.glyph_ids,
+                        advances: shaped.advances,
+                        text: marker_text,
+                        color: Color::BLACK,
+                        bold: false,
+                        italic: false,
+                        field_kind: None,
+                        footnote_id: None,
+                    }));
                 }
 
                 // Render footnote paragraph lines
@@ -534,12 +531,11 @@ fn detect_heading_level(para: &CT_P, styles: &CT_Styles) -> Option<u32> {
         return rest.parse::<u32>().ok().filter(|n| (1..=9).contains(n));
     }
     // Also check style name in the styles definitions
-    if let Some(style_def) = styles.get_by_id(style_id) {
-        if let Some(ref name) = style_def.name {
-            if let Some(rest) = name.strip_prefix("heading ") {
-                return rest.parse::<u32>().ok().filter(|n| (1..=9).contains(n));
-            }
-        }
+    if let Some(style_def) = styles.get_by_id(style_id)
+        && let Some(ref name) = style_def.name
+        && let Some(rest) = name.strip_prefix("heading ")
+    {
+        return rest.parse::<u32>().ok().filter(|n| (1..=9).contains(n));
     }
     None
 }
@@ -615,40 +611,40 @@ pub fn layout_paragraph(
             let marker_italic = marker_rpr.italic.unwrap_or(false);
             let marker_font_family = marker_rpr.font_ascii.as_deref();
 
-            if let Ok(font_id) = fm.resolve_font(marker_font_family, marker_bold, marker_italic) {
-                if let Ok(shaped) = fm.shape_text(font_id, &marker.marker_text, marker_font_size) {
-                    let metrics = fm.metrics(font_id, marker_font_size)?;
-                    let color = marker_rpr
-                        .color
-                        .as_ref()
-                        .map(|c| Color::from_hex(c))
-                        .unwrap_or(Color::BLACK);
+            if let Ok(font_id) = fm.resolve_font(marker_font_family, marker_bold, marker_italic)
+                && let Ok(shaped) = fm.shape_text(font_id, &marker.marker_text, marker_font_size)
+            {
+                let metrics = fm.metrics(font_id, marker_font_size)?;
+                let color = marker_rpr
+                    .color
+                    .as_ref()
+                    .map(|c| Color::from_hex(c))
+                    .unwrap_or(Color::BLACK);
 
-                    inline_items.push(InlineItem::Marker(TextSegment {
-                        text: marker.marker_text,
-                        font_id,
-                        font_size: marker_font_size,
-                        glyph_ids: shaped.glyph_ids,
-                        advances: shaped.advances,
-                        width: shaped.width,
-                        ascent: metrics.ascent,
-                        descent: metrics.descent,
-                        color,
-                        bold: marker_bold,
-                        italic: marker_italic,
-                        underline: None,
-                        strike: false,
-                        dstrike: false,
-                        highlight: None,
-                        baseline_offset: 0.0,
-                        hyperlink_url: None,
-                        field_kind: None,
-                        footnote_id: None,
-                    }));
+                inline_items.push(InlineItem::Marker(TextSegment {
+                    text: marker.marker_text,
+                    font_id,
+                    font_size: marker_font_size,
+                    glyph_ids: shaped.glyph_ids,
+                    advances: shaped.advances,
+                    width: shaped.width,
+                    ascent: metrics.ascent,
+                    descent: metrics.descent,
+                    color,
+                    bold: marker_bold,
+                    italic: marker_italic,
+                    underline: None,
+                    strike: false,
+                    dstrike: false,
+                    highlight: None,
+                    baseline_offset: 0.0,
+                    hyperlink_url: None,
+                    field_kind: None,
+                    footnote_id: None,
+                }));
 
-                    // Add a space/tab after the marker
-                    inline_items.push(InlineItem::Tab);
-                }
+                // Add a space/tab after the marker
+                inline_items.push(InlineItem::Tab);
             }
         }
     }
@@ -657,11 +653,11 @@ pub fn layout_paragraph(
     let mut run_hyperlink_url: std::collections::HashMap<usize, String> =
         std::collections::HashMap::new();
     for hl in &para.hyperlinks {
-        if let Some(ref rel_id) = hl.rel_id {
-            if let Some(url) = input.hyperlink_urls.get(rel_id) {
-                for run_idx in hl.run_start..hl.run_end {
-                    run_hyperlink_url.insert(run_idx, url.clone());
-                }
+        if let Some(ref rel_id) = hl.rel_id
+            && let Some(url) = input.hyperlink_urls.get(rel_id)
+        {
+            for run_idx in hl.run_start..hl.run_end {
+                run_hyperlink_url.insert(run_idx, url.clone());
             }
         }
     }
@@ -1061,12 +1057,11 @@ fn resolve_run_color(
     theme: Option<&rdocx_oxml::theme::Theme>,
 ) -> Color {
     // If theme color is specified, resolve it from the theme
-    if let Some(ref theme_name) = rpr.color_theme {
-        if let Some(theme) = theme {
-            if let Some(hex) = theme.colors.get(theme_name) {
-                return Color::from_hex(hex);
-            }
-        }
+    if let Some(ref theme_name) = rpr.color_theme
+        && let Some(theme) = theme
+        && let Some(hex) = theme.colors.get(theme_name)
+    {
+        return Color::from_hex(hex);
     }
 
     // Fall back to literal color value

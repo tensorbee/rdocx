@@ -315,10 +315,10 @@ impl CT_TblPr {
                         pr.indent = Some(CT_TblWidth::from_xml_attrs(e)?);
                     } else if matches_local_name(name.as_ref(), b"shd") {
                         pr.shading = Some(CT_Shd::from_xml_attrs(e)?);
-                    } else if matches_local_name(name.as_ref(), b"tblLook") {
-                        if let Some(val) = get_val_attr(e)? {
-                            pr.look = Some(val);
-                        }
+                    } else if matches_local_name(name.as_ref(), b"tblLook")
+                        && let Some(val) = get_val_attr(e)?
+                    {
+                        pr.look = Some(val);
                     }
                 }
                 Ok(Event::Start(ref e)) => {
@@ -367,10 +367,10 @@ impl CT_TblPr {
             indent.write_xml(writer, "w:tblInd")?;
         }
 
-        if let Some(ref borders) = self.borders {
-            if !borders.is_empty() {
-                borders.to_xml(writer, "w:tblBorders")?;
-            }
+        if let Some(ref borders) = self.borders
+            && !borders.is_empty()
+        {
+            borders.to_xml(writer, "w:tblBorders")?;
         }
 
         if let Some(ref shd) = self.shading {
@@ -531,10 +531,10 @@ impl CT_TrPr {
 
         writer.write_event(Event::Start(BytesStart::new("w:trPr")))?;
 
-        if let Some(ref cant_split) = self.cant_split {
-            if *cant_split {
-                writer.write_event(Event::Empty(BytesStart::new("w:cantSplit")))?;
-            }
+        if let Some(ref cant_split) = self.cant_split
+            && *cant_split
+        {
+            writer.write_event(Event::Empty(BytesStart::new("w:cantSplit")))?;
         }
 
         if let Some(height) = self.height {
@@ -653,10 +653,10 @@ impl CT_TcPr {
                         pr.shading = Some(CT_Shd::from_xml_attrs(e)?);
                     } else if matches_local_name(name.as_ref(), b"noWrap") {
                         pr.no_wrap = Some(true);
-                    } else if matches_local_name(name.as_ref(), b"textDirection") {
-                        if let Some(val) = get_val_attr(e)? {
-                            pr.text_direction = Some(val);
-                        }
+                    } else if matches_local_name(name.as_ref(), b"textDirection")
+                        && let Some(val) = get_val_attr(e)?
+                    {
+                        pr.text_direction = Some(val);
                     }
                 }
                 Ok(Event::Start(ref e)) => {
@@ -691,13 +691,13 @@ impl CT_TcPr {
             width.write_xml(writer, "w:tcW")?;
         }
 
-        if let Some(grid_span) = self.grid_span {
-            if grid_span > 1 {
-                let mut buf = itoa::Buffer::new();
-                let mut e = BytesStart::new("w:gridSpan");
-                e.push_attribute(("w:val", buf.format(grid_span)));
-                writer.write_event(Event::Empty(e))?;
-            }
+        if let Some(grid_span) = self.grid_span
+            && grid_span > 1
+        {
+            let mut buf = itoa::Buffer::new();
+            let mut e = BytesStart::new("w:gridSpan");
+            e.push_attribute(("w:val", buf.format(grid_span)));
+            writer.write_event(Event::Empty(e))?;
         }
 
         if let Some(ref vm) = self.v_merge {
@@ -709,10 +709,10 @@ impl CT_TcPr {
             writer.write_event(Event::Empty(e))?;
         }
 
-        if let Some(ref borders) = self.borders {
-            if !borders.is_empty() {
-                borders.to_xml(writer, "w:tcBorders")?;
-            }
+        if let Some(ref borders) = self.borders
+            && !borders.is_empty()
+        {
+            borders.to_xml(writer, "w:tcBorders")?;
         }
 
         if let Some(ref shd) = self.shading {

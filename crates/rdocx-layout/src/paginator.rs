@@ -607,38 +607,38 @@ fn render_paragraph_lines(
                     }));
 
                     // Render underline
-                    if let Some(ul_style) = seg.underline {
-                        if ul_style != ST_Underline::None {
-                            let ul_y = adjusted_baseline + seg.descent * 0.3;
-                            let ul_thickness = match ul_style {
-                                ST_Underline::Thick => seg.font_size / 12.0,
-                                ST_Underline::Double => seg.font_size / 24.0,
-                                _ => seg.font_size / 18.0,
-                            };
+                    if let Some(ul_style) = seg.underline
+                        && ul_style != ST_Underline::None
+                    {
+                        let ul_y = adjusted_baseline + seg.descent * 0.3;
+                        let ul_thickness = match ul_style {
+                            ST_Underline::Thick => seg.font_size / 12.0,
+                            ST_Underline::Double => seg.font_size / 24.0,
+                            _ => seg.font_size / 18.0,
+                        };
+                        elements.push(PositionedElement::Line {
+                            start: Point { x, y: ul_y },
+                            end: Point {
+                                x: x + effective_width,
+                                y: ul_y,
+                            },
+                            width: ul_thickness,
+                            color: seg.color,
+                            dash_pattern: None,
+                        });
+                        // Second line for double underline
+                        if ul_style == ST_Underline::Double {
+                            let ul_y2 = ul_y + ul_thickness * 2.5;
                             elements.push(PositionedElement::Line {
-                                start: Point { x, y: ul_y },
+                                start: Point { x, y: ul_y2 },
                                 end: Point {
                                     x: x + effective_width,
-                                    y: ul_y,
+                                    y: ul_y2,
                                 },
                                 width: ul_thickness,
                                 color: seg.color,
                                 dash_pattern: None,
                             });
-                            // Second line for double underline
-                            if ul_style == ST_Underline::Double {
-                                let ul_y2 = ul_y + ul_thickness * 2.5;
-                                elements.push(PositionedElement::Line {
-                                    start: Point { x, y: ul_y2 },
-                                    end: Point {
-                                        x: x + effective_width,
-                                        y: ul_y2,
-                                    },
-                                    width: ul_thickness,
-                                    color: seg.color,
-                                    dash_pattern: None,
-                                });
-                            }
                         }
                     }
 

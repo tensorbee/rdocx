@@ -73,12 +73,11 @@ pub(crate) fn paragraph_style(ppr: Option<&CT_PPr>) -> String {
     }
 
     // Background shading
-    if let Some(shd) = &ppr.shading {
-        if let Some(fill) = &shd.fill {
-            if fill != "auto" && fill != "FFFFFF" {
-                styles.push(format!("background-color:#{fill}"));
-            }
-        }
+    if let Some(shd) = &ppr.shading
+        && let Some(fill) = &shd.fill
+        && fill != "auto" && fill != "FFFFFF"
+    {
+        styles.push(format!("background-color:#{fill}"));
     }
 
     // Line spacing
@@ -126,19 +125,18 @@ pub(crate) fn run_style(rpr: Option<&CT_RPr>) -> String {
     }
 
     // Color
-    if let Some(color) = &rpr.color {
-        if color != "auto" && color != "000000" {
-            styles.push(format!("color:#{color}"));
-        }
+    if let Some(color) = &rpr.color
+        && color != "auto" && color != "000000"
+    {
+        styles.push(format!("color:#{color}"));
     }
 
     // Background/highlight via shading
-    if let Some(shd) = &rpr.shading {
-        if let Some(fill) = &shd.fill {
-            if fill != "auto" && fill != "FFFFFF" {
-                styles.push(format!("background-color:#{fill}"));
-            }
-        }
+    if let Some(shd) = &rpr.shading
+        && let Some(fill) = &shd.fill
+        && fill != "auto" && fill != "FFFFFF"
+    {
+        styles.push(format!("background-color:#{fill}"));
     }
 
     // Character spacing

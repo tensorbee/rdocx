@@ -114,10 +114,10 @@ impl CT_Lvl {
                         }
                     } else if matches_local_name(name.as_ref(), b"lvlText") {
                         lvl.lvl_text = get_val_attr(e)?;
-                    } else if matches_local_name(name.as_ref(), b"lvlJc") {
-                        if let Some(val) = get_val_attr(e)? {
-                            lvl.lvl_jc = Some(ST_Jc::from_str(&val)?);
-                        }
+                    } else if matches_local_name(name.as_ref(), b"lvlJc")
+                        && let Some(val) = get_val_attr(e)?
+                    {
+                        lvl.lvl_jc = Some(ST_Jc::from_str(&val)?);
                     }
                 }
                 Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"lvl") => {
@@ -272,10 +272,10 @@ impl CT_Num {
         loop {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Empty(ref e)) => {
-                    if matches_local_name(e.name().as_ref(), b"abstractNumId") {
-                        if let Some(val) = get_val_attr(e)? {
-                            abstract_num_id = val.parse()?;
-                        }
+                    if matches_local_name(e.name().as_ref(), b"abstractNumId")
+                        && let Some(val) = get_val_attr(e)?
+                    {
+                        abstract_num_id = val.parse()?;
                     }
                 }
                 Ok(Event::Start(ref e)) => {

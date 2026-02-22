@@ -36,19 +36,19 @@ pub(crate) fn write_pdf(layout: &LayoutResult) -> Vec<u8> {
     let mut font_refs: HashMap<FontId, (Ref, Ref, Ref, Ref, Ref)> = HashMap::new(); // type0, cid, descriptor, stream, cmap
 
     for fd in &layout.fonts {
-        if let Some(usage) = glyph_usage.get_mut(&fd.id) {
-            if let Some(prepared) = font::prepare_font(fd, usage) {
-                let type0_ref = alloc();
-                let cid_ref = alloc();
-                let descriptor_ref = alloc();
-                let stream_ref = alloc();
-                let cmap_ref = alloc();
-                font_refs.insert(
-                    fd.id,
-                    (type0_ref, cid_ref, descriptor_ref, stream_ref, cmap_ref),
-                );
-                prepared_fonts.insert(fd.id, prepared);
-            }
+        if let Some(usage) = glyph_usage.get_mut(&fd.id)
+            && let Some(prepared) = font::prepare_font(fd, usage)
+        {
+            let type0_ref = alloc();
+            let cid_ref = alloc();
+            let descriptor_ref = alloc();
+            let stream_ref = alloc();
+            let cmap_ref = alloc();
+            font_refs.insert(
+                fd.id,
+                (type0_ref, cid_ref, descriptor_ref, stream_ref, cmap_ref),
+            );
+            prepared_fonts.insert(fd.id, prepared);
         }
     }
 
@@ -352,24 +352,24 @@ pub(crate) fn write_pdf(layout: &LayoutResult) -> Vec<u8> {
     // ── Write link annotations ───────────────────────────────────────
     for (page_idx, page) in layout.pages.iter().enumerate() {
         for (elem_idx, element) in page.elements.iter().enumerate() {
-            if let PositionedElement::LinkAnnotation { rect, url } = element {
-                if let Some(&annot_ref) = annotation_refs.get(&(page_idx, elem_idx)) {
-                    let page_height = page.height;
-                    let mut annot = pdf.annotation(annot_ref);
-                    annot.subtype(AnnotationType::Link);
-                    annot.rect(Rect::new(
-                        rect.x as f32,
-                        (page_height - rect.y - rect.height) as f32,
-                        (rect.x + rect.width) as f32,
-                        (page_height - rect.y) as f32,
-                    ));
-                    annot.border(0.0, 0.0, 0.0, None);
-                    annot
-                        .action()
-                        .action_type(ActionType::Uri)
-                        .uri(Str(url.as_bytes()));
-                    annot.finish();
-                }
+            if let PositionedElement::LinkAnnotation { rect, url } = element
+                && let Some(&annot_ref) = annotation_refs.get(&(page_idx, elem_idx))
+            {
+                let page_height = page.height;
+                let mut annot = pdf.annotation(annot_ref);
+                annot.subtype(AnnotationType::Link);
+                annot.rect(Rect::new(
+                    rect.x as f32,
+                    (page_height - rect.y - rect.height) as f32,
+                    (rect.x + rect.width) as f32,
+                    (page_height - rect.y) as f32,
+                ));
+                annot.border(0.0, 0.0, 0.0, None);
+                annot
+                    .action()
+                    .action_type(ActionType::Uri)
+                    .uri(Str(url.as_bytes()));
+                annot.finish();
             }
         }
     }
@@ -403,39 +403,39 @@ fn build_page_content(
     for (elem_idx, element) in page.elements.iter().enumerate() {
         match element {
             PositionedElement::Text(run) => {
-                if let Some(prepared) = prepared_fonts.get(&run.font_id) {
-                    if font_refs.contains_key(&run.font_id) {
-                        let font_name = format!("F{}", run.font_id.0);
+                if let Some(prepared) = prepared_fonts.get(&run.font_id)
+                    && font_refs.contains_key(&run.font_id)
+                {
+                    let font_name = format!("F{}", run.font_id.0);
 
-                        content.save_state();
+                    content.save_state();
 
-                        // Set text color
-                        content.set_fill_rgb(
-                            run.color.r as f32,
-                            run.color.g as f32,
-                            run.color.b as f32,
-                        );
+                    // Set text color
+                    content.set_fill_rgb(
+                        run.color.r as f32,
+                        run.color.g as f32,
+                        run.color.b as f32,
+                    );
 
-                        content.begin_text();
-                        content.set_font(Name(font_name.as_bytes()), run.font_size as f32);
+                    content.begin_text();
+                    content.set_font(Name(font_name.as_bytes()), run.font_size as f32);
 
-                        // PDF coordinate system: origin at bottom-left
-                        let pdf_y = page_height - run.origin.y as f32;
-                        content.set_text_matrix([1.0, 0.0, 0.0, 1.0, run.origin.x as f32, pdf_y]);
+                    // PDF coordinate system: origin at bottom-left
+                    let pdf_y = page_height - run.origin.y as f32;
+                    content.set_text_matrix([1.0, 0.0, 0.0, 1.0, run.origin.x as f32, pdf_y]);
 
-                        // Remap glyph IDs and emit with TJ operator
-                        emit_glyphs(
-                            &mut content,
-                            &run.glyph_ids,
-                            &run.advances,
-                            run.font_size,
-                            &prepared.remapper,
-                            &prepared.widths,
-                        );
+                    // Remap glyph IDs and emit with TJ operator
+                    emit_glyphs(
+                        &mut content,
+                        &run.glyph_ids,
+                        &run.advances,
+                        run.font_size,
+                        &prepared.remapper,
+                        &prepared.widths,
+                    );
 
-                        content.end_text();
-                        content.restore_state();
-                    }
+                    content.end_text();
+                    content.restore_state();
                 }
             }
             PositionedElement::Line {

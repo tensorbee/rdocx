@@ -371,10 +371,10 @@ impl CT_SectPr {
             if let Some(h) = self.page_height {
                 e.push_attribute(("w:h", buf.format(h.0)));
             }
-            if let Some(orient) = self.orientation {
-                if orient == ST_PageOrientation::Landscape {
-                    e.push_attribute(("w:orient", orient.to_str()));
-                }
+            if let Some(orient) = self.orientation
+                && orient == ST_PageOrientation::Landscape
+            {
+                e.push_attribute(("w:orient", orient.to_str()));
             }
             writer.write_event(Event::Empty(e))?;
         }
@@ -421,15 +421,15 @@ impl CT_SectPr {
                 if let Some(space) = cols.space {
                     e.push_attribute(("w:space", buf.format(space.0)));
                 }
-                if let Some(eq) = cols.equal_width {
-                    if !eq {
-                        e.push_attribute(("w:equalWidth", "0"));
-                    }
+                if let Some(eq) = cols.equal_width
+                    && !eq
+                {
+                    e.push_attribute(("w:equalWidth", "0"));
                 }
-                if let Some(sep) = cols.sep {
-                    if sep {
-                        e.push_attribute(("w:sep", "1"));
-                    }
+                if let Some(sep) = cols.sep
+                    && sep
+                {
+                    e.push_attribute(("w:sep", "1"));
                 }
                 writer.write_event(Event::Empty(e))?;
             } else {
@@ -441,10 +441,10 @@ impl CT_SectPr {
                 if let Some(eq) = cols.equal_width {
                     e.push_attribute(("w:equalWidth", if eq { "1" } else { "0" }));
                 }
-                if let Some(sep) = cols.sep {
-                    if sep {
-                        e.push_attribute(("w:sep", "1"));
-                    }
+                if let Some(sep) = cols.sep
+                    && sep
+                {
+                    e.push_attribute(("w:sep", "1"));
                 }
                 writer.write_event(Event::Start(e))?;
 

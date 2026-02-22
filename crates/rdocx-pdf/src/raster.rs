@@ -148,16 +148,16 @@ fn render_glyph_run(
 
         // Build path from glyph outline
         let mut builder = GlyphPathBuilder::new();
-        if face.outline_glyph(gid, &mut builder).is_some() {
-            if let Some(path) = builder.finish() {
-                // Transform: translate to glyph position, scale from font units to points,
-                // and flip Y (font coordinates are Y-up, pixmap is Y-down)
-                let glyph_transform = transform
-                    .pre_translate(x as f32, y as f32)
-                    .pre_scale(scale as f32, -(scale as f32));
+        if face.outline_glyph(gid, &mut builder).is_some()
+            && let Some(path) = builder.finish()
+        {
+            // Transform: translate to glyph position, scale from font units to points,
+            // and flip Y (font coordinates are Y-up, pixmap is Y-down)
+            let glyph_transform = transform
+                .pre_translate(x as f32, y as f32)
+                .pre_scale(scale as f32, -(scale as f32));
 
-                pixmap.fill_path(&path, &paint, FillRule::Winding, glyph_transform, None);
-            }
+            pixmap.fill_path(&path, &paint, FillRule::Winding, glyph_transform, None);
         }
 
         if i < glyph_run.advances.len() {

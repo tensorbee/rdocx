@@ -82,10 +82,10 @@ impl Relationships {
                             b"Id" => {
                                 let val = std::str::from_utf8(&attr.value)?.to_string();
                                 // Extract numeric suffix for next_id tracking
-                                if let Some(num_str) = val.strip_prefix("rId") {
-                                    if let Ok(n) = num_str.parse::<u32>() {
-                                        max_id = max_id.max(n);
-                                    }
+                                if let Some(num_str) = val.strip_prefix("rId")
+                                    && let Ok(n) = num_str.parse::<u32>()
+                                {
+                                    max_id = max_id.max(n);
                                 }
                                 id = Some(val);
                             }
@@ -203,10 +203,10 @@ impl Relationships {
             target: target.to_string(),
             target_mode: None,
         });
-        if let Some(num) = id.strip_prefix("rId").and_then(|s| s.parse::<u32>().ok()) {
-            if num >= self.next_id {
-                self.next_id = num + 1;
-            }
+        if let Some(num) = id.strip_prefix("rId").and_then(|s| s.parse::<u32>().ok())
+            && num >= self.next_id
+        {
+            self.next_id = num + 1;
         }
     }
 }

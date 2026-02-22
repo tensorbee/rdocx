@@ -84,10 +84,10 @@ pub fn resolve_paragraph_properties(style_id: Option<&str>, styles: &CT_Styles) 
     let mut effective = CT_PPr::default();
 
     // 1. Start from docDefaults
-    if let Some(ref defaults) = styles.doc_defaults {
-        if let Some(ref ppr) = defaults.ppr {
-            effective.merge_from(ppr);
-        }
+    if let Some(ref defaults) = styles.doc_defaults
+        && let Some(ref ppr) = defaults.ppr
+    {
+        effective.merge_from(ppr);
     }
 
     // 2. Walk the basedOn chain
@@ -101,10 +101,10 @@ pub fn resolve_paragraph_properties(style_id: Option<&str>, styles: &CT_Styles) 
         }
     } else {
         // Apply the default paragraph style
-        if let Some(default_style) = styles.get_default(StyleType::Paragraph) {
-            if let Some(ref ppr) = default_style.ppr {
-                effective.merge_from(ppr);
-            }
+        if let Some(default_style) = styles.get_default(StyleType::Paragraph)
+            && let Some(ref ppr) = default_style.ppr
+        {
+            effective.merge_from(ppr);
         }
     }
 
@@ -120,10 +120,10 @@ pub fn resolve_run_properties(
     let mut effective = CT_RPr::default();
 
     // 1. docDefaults run properties
-    if let Some(ref defaults) = styles.doc_defaults {
-        if let Some(ref rpr) = defaults.rpr {
-            effective.merge_from(rpr);
-        }
+    if let Some(ref defaults) = styles.doc_defaults
+        && let Some(ref rpr) = defaults.rpr
+    {
+        effective.merge_from(rpr);
     }
 
     // 2. paragraph style's rpr (following basedOn chain)

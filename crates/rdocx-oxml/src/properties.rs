@@ -222,10 +222,10 @@ impl CT_PPr {
                         if let Some(val) = get_val_attr(e)? {
                             ppr.num_ilvl = Some(val.parse()?);
                         }
-                    } else if matches_local_name(name.as_ref(), b"numId") {
-                        if let Some(val) = get_val_attr(e)? {
-                            ppr.num_id = Some(val.parse()?);
-                        }
+                    } else if matches_local_name(name.as_ref(), b"numId")
+                        && let Some(val) = get_val_attr(e)?
+                    {
+                        ppr.num_id = Some(val.parse()?);
                     }
                 }
                 Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"numPr") => {
@@ -271,10 +271,10 @@ impl CT_PPr {
         }
 
         // pBdr
-        if let Some(ref borders) = self.borders {
-            if !borders.is_empty() {
-                borders.to_xml(writer)?;
-            }
+        if let Some(ref borders) = self.borders
+            && !borders.is_empty()
+        {
+            borders.to_xml(writer)?;
         }
 
         // shd

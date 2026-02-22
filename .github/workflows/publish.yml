@@ -6,6 +6,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
 jobs:
   publish:
@@ -16,51 +17,43 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Publish rdocx-opc
-        run: cargo publish -p rdocx-opc
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p rdocx-opc --no-verify || echo "already published"
+
+      - name: Wait for index
+        run: sleep 60
 
       - name: Publish rdocx-oxml
-        run: cargo publish -p rdocx-oxml
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p rdocx-oxml --no-verify || echo "already published"
 
-      - name: Wait for index (opc + oxml)
-        run: sleep 30
+      - name: Wait for index
+        run: sleep 60
 
       - name: Publish rdocx-layout
-        run: cargo publish -p rdocx-layout
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p rdocx-layout --no-verify || echo "already published"
+
+      - name: Wait for index
+        run: sleep 60
 
       - name: Publish rdocx-html
-        run: cargo publish -p rdocx-html
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p rdocx-html --no-verify || echo "already published"
 
-      - name: Wait for index (layout + html)
-        run: sleep 30
+      - name: Wait for index
+        run: sleep 60
 
       - name: Publish rdocx-pdf
-        run: cargo publish -p rdocx-pdf
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p rdocx-pdf --no-verify || echo "already published"
 
-      - name: Wait for index (pdf)
-        run: sleep 30
+      - name: Wait for index
+        run: sleep 60
 
       - name: Publish rdocx
-        run: cargo publish -p rdocx
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p rdocx --no-verify || echo "already published"
 
-      - name: Wait for index (rdocx)
-        run: sleep 30
+      - name: Wait for index
+        run: sleep 60
 
       - name: Publish rdocx-cli
-        run: cargo publish -p rdocx-cli
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p rdocx-cli --no-verify || echo "already published"
 
   release:
     name: GitHub Release

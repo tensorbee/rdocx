@@ -456,41 +456,41 @@ impl CT_P {
             }
 
             // Open hyperlink if entering one
-            if let Some(hl_idx) = in_hl {
-                if current_hyperlink != in_hl {
-                    let hl = &self.hyperlinks[hl_idx];
-                    let mut e = BytesStart::new("w:hyperlink");
-                    if let Some(ref rid) = hl.rel_id {
-                        e.push_attribute(("r:id", rid.as_str()));
-                    }
-                    if let Some(ref anchor) = hl.anchor {
-                        e.push_attribute(("w:anchor", anchor.as_str()));
-                    }
-                    writer.write_event(Event::Start(e))?;
-                    current_hyperlink = in_hl;
+            if let Some(hl_idx) = in_hl
+                && current_hyperlink != in_hl
+            {
+                let hl = &self.hyperlinks[hl_idx];
+                let mut e = BytesStart::new("w:hyperlink");
+                if let Some(ref rid) = hl.rel_id {
+                    e.push_attribute(("r:id", rid.as_str()));
                 }
+                if let Some(ref anchor) = hl.anchor {
+                    e.push_attribute(("w:anchor", anchor.as_str()));
+                }
+                writer.write_event(Event::Start(e))?;
+                current_hyperlink = in_hl;
             }
 
             // Check if this run is a field run
-            if run.content.len() == 1 {
-                if let RunContent::Field { field_type } = &run.content[0] {
-                    let instr = match field_type {
-                        FieldType::Page => " PAGE ",
-                        FieldType::NumPages => " NUMPAGES ",
-                        FieldType::Other(s) => s.as_str(),
-                    };
-                    let mut fld = BytesStart::new("w:fldSimple");
-                    fld.push_attribute(("w:instr", instr));
-                    writer.write_event(Event::Start(fld))?;
-                    // Emit a default display run
-                    writer.write_event(Event::Start(BytesStart::new("w:r")))?;
-                    writer.write_event(Event::Start(BytesStart::new("w:t")))?;
-                    writer.write_event(Event::Text(BytesText::new("1")))?;
-                    writer.write_event(Event::End(BytesEnd::new("w:t")))?;
-                    writer.write_event(Event::End(BytesEnd::new("w:r")))?;
-                    writer.write_event(Event::End(BytesEnd::new("w:fldSimple")))?;
-                    continue;
-                }
+            if run.content.len() == 1
+                && let RunContent::Field { field_type } = &run.content[0]
+            {
+                let instr = match field_type {
+                    FieldType::Page => " PAGE ",
+                    FieldType::NumPages => " NUMPAGES ",
+                    FieldType::Other(s) => s.as_str(),
+                };
+                let mut fld = BytesStart::new("w:fldSimple");
+                fld.push_attribute(("w:instr", instr));
+                writer.write_event(Event::Start(fld))?;
+                // Emit a default display run
+                writer.write_event(Event::Start(BytesStart::new("w:r")))?;
+                writer.write_event(Event::Start(BytesStart::new("w:t")))?;
+                writer.write_event(Event::Text(BytesText::new("1")))?;
+                writer.write_event(Event::End(BytesEnd::new("w:t")))?;
+                writer.write_event(Event::End(BytesEnd::new("w:r")))?;
+                writer.write_event(Event::End(BytesEnd::new("w:fldSimple")))?;
+                continue;
             }
 
             run.to_xml(writer)?;

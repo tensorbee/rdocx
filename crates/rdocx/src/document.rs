@@ -1211,11 +1211,11 @@ impl Document {
         let sect = self.section_properties_mut();
         sect.orientation = Some(ST_PageOrientation::Landscape);
         // Swap width/height if portrait dimensions
-        if let (Some(w), Some(h)) = (sect.page_width, sect.page_height) {
-            if w.0 < h.0 {
-                sect.page_width = Some(h);
-                sect.page_height = Some(w);
-            }
+        if let (Some(w), Some(h)) = (sect.page_width, sect.page_height)
+            && w.0 < h.0
+        {
+            sect.page_width = Some(h);
+            sect.page_height = Some(w);
         }
     }
 
@@ -1224,11 +1224,11 @@ impl Document {
         let sect = self.section_properties_mut();
         sect.orientation = Some(ST_PageOrientation::Portrait);
         // Swap width/height if landscape dimensions
-        if let (Some(w), Some(h)) = (sect.page_width, sect.page_height) {
-            if w.0 > h.0 {
-                sect.page_width = Some(h);
-                sect.page_height = Some(w);
-            }
+        if let (Some(w), Some(h)) = (sect.page_width, sect.page_height)
+            && w.0 > h.0
+        {
+            sect.page_width = Some(h);
+            sect.page_height = Some(w);
         }
     }
 
@@ -1452,12 +1452,11 @@ impl Document {
     }
 
     fn remap_paragraph_num_id(p: &mut CT_P, offset: u32) {
-        if let Some(ppr) = &mut p.properties {
-            if let Some(num_id) = &mut ppr.num_id {
-                if *num_id > 0 {
-                    *num_id += offset;
-                }
-            }
+        if let Some(ppr) = &mut p.properties
+            && let Some(num_id) = &mut ppr.num_id
+            && *num_id > 0
+        {
+            *num_id += offset;
         }
     }
 
@@ -1509,20 +1508,19 @@ impl Document {
         let mut toc_counter = 0u32;
 
         for (idx, content) in self.document.body.content.iter().enumerate() {
-            if let BodyContent::Paragraph(p) = content {
-                if let Some(level) = Self::detect_heading_level_for_toc(p) {
-                    if level <= max_level {
-                        let text = p.text();
-                        if !text.trim().is_empty() {
-                            toc_counter += 1;
-                            headings.push(HeadingInfo {
-                                content_index: idx,
-                                level,
-                                text,
-                                bookmark_name: format!("_Toc{toc_counter}"),
-                            });
-                        }
-                    }
+            if let BodyContent::Paragraph(p) = content
+                && let Some(level) = Self::detect_heading_level_for_toc(p)
+                && level <= max_level
+            {
+                let text = p.text();
+                if !text.trim().is_empty() {
+                    toc_counter += 1;
+                    headings.push(HeadingInfo {
+                        content_index: idx,
+                        level,
+                        text,
+                        bookmark_name: format!("_Toc{toc_counter}"),
+                    });
                 }
             }
         }
@@ -1799,23 +1797,23 @@ impl Document {
 
         // Collect part names for XML parts to process (text boxes/shapes)
         let mut xml_parts: Vec<String> = vec![self.doc_part_name.clone()];
-        if let Some(sect_pr) = self.document.body.sect_pr.as_ref() {
-            if let Some(rels) = self.package.get_part_rels(&self.doc_part_name) {
-                for href in &sect_pr.header_refs {
-                    if let Some(rel) = rels.get_by_id(&href.rel_id) {
-                        xml_parts.push(OpcPackage::resolve_rel_target(
-                            &self.doc_part_name,
-                            &rel.target,
-                        ));
-                    }
+        if let Some(sect_pr) = self.document.body.sect_pr.as_ref()
+            && let Some(rels) = self.package.get_part_rels(&self.doc_part_name)
+        {
+            for href in &sect_pr.header_refs {
+                if let Some(rel) = rels.get_by_id(&href.rel_id) {
+                    xml_parts.push(OpcPackage::resolve_rel_target(
+                        &self.doc_part_name,
+                        &rel.target,
+                    ));
                 }
-                for fref in &sect_pr.footer_refs {
-                    if let Some(rel) = rels.get_by_id(&fref.rel_id) {
-                        xml_parts.push(OpcPackage::resolve_rel_target(
-                            &self.doc_part_name,
-                            &rel.target,
-                        ));
-                    }
+            }
+            for fref in &sect_pr.footer_refs {
+                if let Some(rel) = rels.get_by_id(&fref.rel_id) {
+                    xml_parts.push(OpcPackage::resolve_rel_target(
+                        &self.doc_part_name,
+                        &rel.target,
+                    ));
                 }
             }
         }
@@ -1823,11 +1821,11 @@ impl Document {
         for part_name in xml_parts {
             if let Some(xml) = self.package.get_part(&part_name) {
                 let xml = xml.to_vec();
-                if let Ok((new_xml, n)) = replace_in_xml_part(&xml, placeholder, replacement) {
-                    if n > 0 {
-                        self.package.set_part(&part_name, new_xml);
-                        count += n;
-                    }
+                if let Ok((new_xml, n)) = replace_in_xml_part(&xml, placeholder, replacement)
+                    && n > 0
+                {
+                    self.package.set_part(&part_name, new_xml);
+                    count += n;
                 }
             }
         }
@@ -1847,22 +1845,21 @@ impl Document {
         for part_name in chart_parts {
             if let Some(xml) = self.package.get_part(&part_name) {
                 let xml = xml.to_vec();
-                if let Ok((new_xml, n)) = replace_in_chart_xml(&xml, placeholder, replacement) {
-                    if n > 0 {
-                        self.package.set_part(&part_name, new_xml);
-                        count += n;
-                    }
+                if let Ok((new_xml, n)) = replace_in_chart_xml(&xml, placeholder, replacement)
+                    && n > 0
+                {
+                    self.package.set_part(&part_name, new_xml);
+                    count += n;
                 }
             }
         }
 
         // Re-parse document from the (possibly modified) package XML
-        if count > 0 {
-            if let Some(doc_xml) = self.package.get_part(&self.doc_part_name) {
-                if let Ok(doc) = CT_Document::from_xml(doc_xml) {
-                    self.document = doc;
-                }
-            }
+        if count > 0
+            && let Some(doc_xml) = self.package.get_part(&self.doc_part_name)
+            && let Ok(doc) = CT_Document::from_xml(doc_xml)
+        {
+            self.document = doc;
         }
 
         count
@@ -2016,19 +2013,19 @@ impl Document {
                     t if t == rel_types::HEADER => {
                         let part_name =
                             OpcPackage::resolve_rel_target(&self.doc_part_name, &rel.target);
-                        if let Some(xml) = self.package.get_part(&part_name) {
-                            if let Ok(hf) = CT_HdrFtr::from_xml(xml) {
-                                headers.insert(rel.id.clone(), hf);
-                            }
+                        if let Some(xml) = self.package.get_part(&part_name)
+                            && let Ok(hf) = CT_HdrFtr::from_xml(xml)
+                        {
+                            headers.insert(rel.id.clone(), hf);
                         }
                     }
                     t if t == rel_types::FOOTER => {
                         let part_name =
                             OpcPackage::resolve_rel_target(&self.doc_part_name, &rel.target);
-                        if let Some(xml) = self.package.get_part(&part_name) {
-                            if let Ok(hf) = CT_HdrFtr::from_xml(xml) {
-                                footers.insert(rel.id.clone(), hf);
-                            }
+                        if let Some(xml) = self.package.get_part(&part_name)
+                            && let Ok(hf) = CT_HdrFtr::from_xml(xml)
+                        {
+                            footers.insert(rel.id.clone(), hf);
                         }
                     }
                     t if t == rel_types::IMAGE => {
@@ -2145,15 +2142,15 @@ impl Document {
                     .and_then(|e| e.to_str())
                     .unwrap_or("")
                     .to_lowercase();
-                if ext == "ttf" || ext == "otf" || ext == "ttc" {
-                    if let Ok(data) = std::fs::read(&path) {
-                        let family = path
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("Unknown")
-                            .to_string();
-                        fonts.push(rdocx_layout::FontFile { family, data });
-                    }
+                if (ext == "ttf" || ext == "otf" || ext == "ttc")
+                    && let Ok(data) = std::fs::read(&path)
+                {
+                    let family = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("Unknown")
+                        .to_string();
+                    fonts.push(rdocx_layout::FontFile { family, data });
                 }
             }
         }
@@ -2187,10 +2184,10 @@ impl Document {
     pub fn headings(&self) -> Vec<(u32, String)> {
         let mut result = Vec::new();
         for content in &self.document.body.content {
-            if let BodyContent::Paragraph(p) = content {
-                if let Some(level) = Self::detect_heading_level_for_toc(p) {
-                    result.push((level, p.text()));
-                }
+            if let BodyContent::Paragraph(p) = content
+                && let Some(level) = Self::detect_heading_level_for_toc(p)
+            {
+                result.push((level, p.text()));
             }
         }
         result
@@ -2401,16 +2398,16 @@ impl Document {
         let headings = self.headings();
         let mut prev_level: Option<u32> = None;
         for (level, text) in &headings {
-            if let Some(prev) = prev_level {
-                if *level > prev + 1 {
-                    issues.push(AccessibilityIssue {
-                        severity: IssueSeverity::Warning,
-                        message: format!(
-                            "Heading level gap: h{prev} -> h{level} (\"{}\")",
-                            truncate_str(text, 40)
-                        ),
-                    });
-                }
+            if let Some(prev) = prev_level
+                && *level > prev + 1
+            {
+                issues.push(AccessibilityIssue {
+                    severity: IssueSeverity::Warning,
+                    message: format!(
+                        "Heading level gap: h{prev} -> h{level} (\"{}\")",
+                        truncate_str(text, 40)
+                    ),
+                });
             }
             prev_level = Some(*level);
         }

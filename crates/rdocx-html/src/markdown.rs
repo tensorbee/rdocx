@@ -42,20 +42,18 @@ fn detect_heading_level(ppr: Option<&CT_PPr>, styles: &CT_Styles) -> Option<u32>
     }
 
     let style_id = ppr.style_id.as_deref()?;
-    if let Some(level) = style_id.strip_prefix("Heading") {
-        if let Ok(n) = level.parse::<u32>() {
-            if (1..=6).contains(&n) {
-                return Some(n);
-            }
-        }
+    if let Some(level) = style_id.strip_prefix("Heading")
+        && let Ok(n) = level.parse::<u32>()
+        && (1..=6).contains(&n)
+    {
+        return Some(n);
     }
 
-    if let Some(style) = styles.get_by_id(style_id) {
-        if let Some(spr) = &style.ppr {
-            if let Some(lvl) = spr.outline_lvl {
-                return Some(lvl + 1);
-            }
-        }
+    if let Some(style) = styles.get_by_id(style_id)
+        && let Some(spr) = &style.ppr
+        && let Some(lvl) = spr.outline_lvl
+    {
+        return Some(lvl + 1);
     }
 
     None
@@ -143,11 +141,11 @@ fn collect_paragraph_text(para: &CT_P, hyperlink_urls: &HashMap<String, String>)
     // Build hyperlink map
     let mut hyperlink_map: HashMap<usize, &str> = HashMap::new();
     for hl in &para.hyperlinks {
-        if let Some(rel_id) = &hl.rel_id {
-            if let Some(url) = hyperlink_urls.get(rel_id) {
-                for i in hl.run_start..hl.run_end {
-                    hyperlink_map.insert(i, url);
-                }
+        if let Some(rel_id) = &hl.rel_id
+            && let Some(url) = hyperlink_urls.get(rel_id)
+        {
+            for i in hl.run_start..hl.run_end {
+                hyperlink_map.insert(i, url);
             }
         }
     }
