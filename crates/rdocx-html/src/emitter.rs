@@ -431,7 +431,8 @@ fn emit_table(
                 // Cell shading
                 if let Some(shd) = &props.shading
                     && let Some(fill) = &shd.fill
-                    && fill != "auto" && fill != "FFFFFF"
+                    && fill != "auto"
+                    && fill != "FFFFFF"
                 {
                     td_style.push_str(&format!("background-color:#{fill};"));
                 }

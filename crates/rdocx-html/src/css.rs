@@ -75,7 +75,8 @@ pub(crate) fn paragraph_style(ppr: Option<&CT_PPr>) -> String {
     // Background shading
     if let Some(shd) = &ppr.shading
         && let Some(fill) = &shd.fill
-        && fill != "auto" && fill != "FFFFFF"
+        && fill != "auto"
+        && fill != "FFFFFF"
     {
         styles.push(format!("background-color:#{fill}"));
     }
@@ -126,7 +127,8 @@ pub(crate) fn run_style(rpr: Option<&CT_RPr>) -> String {
 
     // Color
     if let Some(color) = &rpr.color
-        && color != "auto" && color != "000000"
+        && color != "auto"
+        && color != "000000"
     {
         styles.push(format!("color:#{color}"));
     }
@@ -134,7 +136,8 @@ pub(crate) fn run_style(rpr: Option<&CT_RPr>) -> String {
     // Background/highlight via shading
     if let Some(shd) = &rpr.shading
         && let Some(fill) = &shd.fill
-        && fill != "auto" && fill != "FFFFFF"
+        && fill != "auto"
+        && fill != "FFFFFF"
     {
         styles.push(format!("background-color:#{fill}"));
     }
