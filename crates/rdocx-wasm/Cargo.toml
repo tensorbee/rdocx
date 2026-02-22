@@ -1,7 +1,7 @@
 [package]
 name = "rdocx-wasm"
 description = "WebAssembly bindings for rdocx — DOCX creation, reading, and conversion in the browser"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.93"

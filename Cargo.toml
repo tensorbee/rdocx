@@ -14,7 +14,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.93"
@@ -26,12 +26,12 @@ categories = ["parser-implementations", "text-processing"]
 
 [workspace.dependencies]
 # Internal crates
-rdocx-opc = { path = "crates/rdocx-opc", version = "0.1.0" }
-rdocx-oxml = { path = "crates/rdocx-oxml", version = "0.1.0" }
-rdocx = { path = "crates/rdocx", version = "0.1.0" }
-rdocx-layout = { path = "crates/rdocx-layout", version = "0.1.0" }
-rdocx-pdf = { path = "crates/rdocx-pdf", version = "0.1.0" }
-rdocx-html = { path = "crates/rdocx-html", version = "0.1.0" }
+rdocx-opc = { path = "crates/rdocx-opc", version = "0.1.1" }
+rdocx-oxml = { path = "crates/rdocx-oxml", version = "0.1.1" }
+rdocx = { path = "crates/rdocx", version = "0.1.1" }
+rdocx-layout = { path = "crates/rdocx-layout", version = "0.1.1" }
+rdocx-pdf = { path = "crates/rdocx-pdf", version = "0.1.1" }
+rdocx-html = { path = "crates/rdocx-html", version = "0.1.1" }
 
 # External dependencies
 zip = "8.1"
