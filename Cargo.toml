@@ -19,8 +19,8 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.85"
 authors = ["Atul Sharma"]
-repository = "https://github.com/atulsmadhugiri/rdocx"
-homepage = "https://github.com/atulsmadhugiri/rdocx"
+repository = "https://github.com/tensorbee/rdocx"
+homepage = "https://github.com/tensorbee/rdocx"
 keywords = ["docx", "word", "pdf", "ooxml", "document"]
 categories = ["parser-implementations", "text-processing"]
 
@@ -43,3 +43,9 @@ ttf-parser = "0.25"
 unicode-linebreak = "0.1"
 image = "0.25"
 itoa = "1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

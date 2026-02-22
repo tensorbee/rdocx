@@ -1,5 +1,6 @@
 # Build artifacts
 /target/
+**/target/
 
 # Generated sample outputs
 samples/*.docx
