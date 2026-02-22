@@ -1,0 +1,20 @@
+[package]
+name = "rdocx-pdf"
+description = "PDF renderer for rdocx layout output"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+rdocx-layout = { workspace = true }
+pdf-writer = "0.14"
+subsetter = "0.2"
+ttf-parser = { workspace = true }
+miniz_oxide = "0.8"
+tiny-skia = "0.11"

@@ -1,0 +1,23 @@
+[package]
+name = "rdocx-layout"
+description = "Layout engine for converting DOCX flow model to positioned frames"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+bundled-fonts = []
+
+[dependencies]
+rdocx-oxml = { workspace = true }
+thiserror = { workspace = true }
+fontdb = { workspace = true }
+rustybuzz = { workspace = true }
+ttf-parser = { workspace = true }
+unicode-linebreak = { workspace = true }

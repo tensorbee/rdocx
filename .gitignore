@@ -1,0 +1,25 @@
+# Build artifacts
+/target/
+
+# Generated sample outputs
+samples/*.docx
+samples/*.pdf
+samples/*.html
+samples/*.md
+samples/~$*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.iml
+
+# Temporary files
+/tmp/
+*.tmp

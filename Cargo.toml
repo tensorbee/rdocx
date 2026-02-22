@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rdocx-opc",
+    "crates/rdocx-oxml",
+    "crates/rdocx",
+    "crates/rdocx-layout",
+    "crates/rdocx-pdf",
+    "crates/rdocx-html",
+    "crates/rdocx-cli",
+]
+exclude = [
+    "crates/rdocx-wasm",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+authors = ["Atul Sharma"]
+repository = "https://github.com/atulsmadhugiri/rdocx"
+homepage = "https://github.com/atulsmadhugiri/rdocx"
+keywords = ["docx", "word", "pdf", "ooxml", "document"]
+categories = ["parser-implementations", "text-processing"]
+
+[workspace.dependencies]
+# Internal crates
+rdocx-opc = { path = "crates/rdocx-opc" }
+rdocx-oxml = { path = "crates/rdocx-oxml" }
+rdocx = { path = "crates/rdocx" }
+rdocx-layout = { path = "crates/rdocx-layout" }
+rdocx-pdf = { path = "crates/rdocx-pdf" }
+rdocx-html = { path = "crates/rdocx-html" }
+
+# External dependencies
+zip = "8.1"
+quick-xml = "0.37"
+thiserror = "2"
+fontdb = "0.23"
+rustybuzz = "0.20"
+ttf-parser = "0.25"
+unicode-linebreak = "0.1"
+image = "0.25"
+itoa = "1"

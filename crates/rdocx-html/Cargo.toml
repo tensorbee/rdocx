@@ -1,0 +1,15 @@
+[package]
+name = "rdocx-html"
+description = "DOCX-to-HTML and DOCX-to-Markdown conversion"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+rdocx-oxml = { workspace = true }

@@ -1,0 +1,17 @@
+[package]
+name = "rdocx-opc"
+description = "Open Packaging Convention (OPC) reader/writer for OOXML packages"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+zip = { workspace = true }
+quick-xml = { workspace = true }
+thiserror = { workspace = true }
