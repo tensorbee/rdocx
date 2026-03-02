@@ -249,6 +249,46 @@ impl<'a> Cell<'a> {
         }
     }
 
+    /// Add an inline image to the cell using a pre-embedded relationship ID.
+    ///
+    /// Obtain the `rel_id` by calling [`Document::embed_image`] first, then
+    /// pass it here along with the desired display dimensions. This matches
+    /// the python-docx `run.add_picture()` pattern.
+    pub fn add_picture(&mut self, rel_id: &str, width: Length, height: Length) {
+        use rdocx_oxml::drawing::{CT_Drawing, CT_Inline};
+        use rdocx_oxml::table::CellContent;
+        use rdocx_oxml::text::{CT_R, RunContent};
+
+        let inline = CT_Inline::new(rel_id, width.to_emu(), height.to_emu());
+        let drawing = CT_Drawing::inline(inline);
+        let run = CT_R {
+            properties: None,
+            content: vec![RunContent::Drawing(drawing)],
+            extra_xml: Vec::new(),
+        };
+        let mut p = CT_P::new();
+        p.runs.push(run);
+        self.inner.content.push(CellContent::Paragraph(p));
+    }
+
+    /// Remove the first empty paragraph from the cell.
+    ///
+    /// OOXML creates a default empty paragraph when a cell is instantiated.
+    /// Call this before adding content to avoid a spurious blank line at the
+    /// top of the cell — mirrors the `add_html_block` behaviour in python-docx.
+    pub fn remove_first_empty_paragraph(&mut self) {
+        use rdocx_oxml::table::CellContent;
+        if let Some(pos) = self.inner.content.iter().position(|c| {
+            if let CellContent::Paragraph(p) = c {
+                p.text().trim().is_empty()
+            } else {
+                false
+            }
+        }) {
+            self.inner.content.remove(pos);
+        }
+    }
+
     /// Get an iterator over immutable paragraph references.
     pub fn paragraphs(&self) -> impl Iterator<Item = ParagraphRef<'_>> {
         self.inner

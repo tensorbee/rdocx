@@ -469,7 +469,10 @@ impl Document {
     }
 
     /// Embed an image into the OPC package and return the relationship ID.
-    fn embed_image(&mut self, image_data: &[u8], filename: &str) -> String {
+    ///
+    /// Public so callers can pre-embed an image and then pass the returned
+    /// `rel_id` to [`Cell::add_picture`] for inline cell images.
+    pub fn embed_image(&mut self, image_data: &[u8], filename: &str) -> String {
         use rdocx_opc::relationship::rel_types;
 
         // Determine content type from extension
