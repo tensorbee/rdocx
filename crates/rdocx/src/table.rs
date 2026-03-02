@@ -251,7 +251,7 @@ impl<'a> Cell<'a> {
 
     /// Add an inline image to the cell using a pre-embedded relationship ID.
     ///
-    /// Obtain the `rel_id` by calling [`Document::embed_image`] first, then
+    /// Obtain the `rel_id` by calling [`crate::Document::embed_image`] first, then
     /// pass it here along with the desired display dimensions. This matches
     /// the python-docx `run.add_picture()` pattern.
     pub fn add_picture(&mut self, rel_id: &str, width: Length, height: Length) {
