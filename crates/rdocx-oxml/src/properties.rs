@@ -57,6 +57,48 @@ impl CT_Shd {
     }
 }
 
+/// `CT_FramePr` — Paragraph frame properties.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CT_FramePr {
+    /// Drop cap mode, typically "drop" or "margin".
+    pub drop_cap: Option<String>,
+    /// Number of lines occupied by the drop cap.
+    pub lines: Option<u32>,
+}
+
+impl CT_FramePr {
+    pub fn from_xml_attrs(e: &BytesStart) -> Result<Self> {
+        let mut frame_pr = CT_FramePr::default();
+
+        for attr in e.attributes() {
+            let attr = attr?;
+            let key = attr.key.as_ref();
+            let val_str = std::str::from_utf8(&attr.value)?;
+
+            if matches_local_name(key, b"dropCap") {
+                frame_pr.drop_cap = Some(val_str.to_string());
+            } else if matches_local_name(key, b"lines") {
+                frame_pr.lines = Some(val_str.parse()?);
+            }
+        }
+
+        Ok(frame_pr)
+    }
+
+    pub fn write_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+        let mut e = BytesStart::new("w:framePr");
+        if let Some(ref drop_cap) = self.drop_cap {
+            e.push_attribute(("w:dropCap", drop_cap.as_str()));
+        }
+        if let Some(lines) = self.lines {
+            let mut buf = itoa::Buffer::new();
+            e.push_attribute(("w:lines", buf.format(lines)));
+        }
+        writer.write_event(Event::Empty(e))?;
+        Ok(())
+    }
+}
+
 /// `CT_PPr` — Paragraph properties.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CT_PPr {
@@ -102,6 +144,8 @@ pub struct CT_PPr {
     pub tabs: Option<CT_Tabs>,
     /// Paragraph shading (shd)
     pub shading: Option<CT_Shd>,
+    /// Paragraph frame properties (framePr), used for features like drop caps.
+    pub frame_pr: Option<CT_FramePr>,
     /// Run properties for the paragraph mark (rPr)
     pub rpr: Option<CT_RPr>,
     /// Numbering level (numPr/ilvl)
@@ -132,6 +176,9 @@ impl CT_PPr {
                         ppr.tabs = Some(CT_Tabs::from_xml(reader)?);
                     } else if matches_local_name(name.as_ref(), b"sectPr") {
                         ppr.sect_pr = Some(CT_SectPr::from_xml(reader)?);
+                    } else if matches_local_name(name.as_ref(), b"framePr") {
+                        ppr.frame_pr = Some(CT_FramePr::from_xml_attrs(e)?);
+                        reader.read_to_end_into(name, &mut Vec::new())?;
                     } else {
                         reader.read_to_end_into(name, &mut Vec::new())?;
                     }
@@ -197,6 +244,8 @@ impl CT_PPr {
                         }
                     } else if matches_local_name(name.as_ref(), b"shd") {
                         ppr.shading = Some(CT_Shd::from_xml_attrs(e)?);
+                    } else if matches_local_name(name.as_ref(), b"framePr") {
+                        ppr.frame_pr = Some(CT_FramePr::from_xml_attrs(e)?);
                     }
                 }
                 Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"pPr") => {
@@ -370,6 +419,10 @@ impl CT_PPr {
             rpr.to_xml(writer)?;
         }
 
+        if let Some(ref frame_pr) = self.frame_pr {
+            frame_pr.write_xml(writer)?;
+        }
+
         if let Some(ref sect) = self.sect_pr {
             sect.to_xml(writer)?;
         }
@@ -399,6 +452,7 @@ impl CT_PPr {
             && self.borders.is_none()
             && self.tabs.is_none()
             && self.shading.is_none()
+            && self.frame_pr.is_none()
             && self.rpr.is_none()
             && self.num_id.is_none()
             && self.num_ilvl.is_none()
@@ -470,6 +524,9 @@ impl CT_PPr {
         }
         if other.shading.is_some() {
             self.shading = other.shading.clone();
+        }
+        if other.frame_pr.is_some() {
+            self.frame_pr = other.frame_pr.clone();
         }
         if other.num_ilvl.is_some() {
             self.num_ilvl = other.num_ilvl;
@@ -632,7 +689,9 @@ impl CT_RPr {
                         }
                     } else if matches_local_name(name.as_ref(), b"shd") {
                         rpr.shading = Some(CT_Shd::from_xml_attrs(e)?);
-                    } else if matches_local_name(name.as_ref(), b"vanish") {
+                    } else if matches_local_name(name.as_ref(), b"vanish")
+                        || matches_local_name(name.as_ref(), b"webHidden")
+                    {
                         rpr.vanish = Some(parse_toggle(e)?);
                     }
                 }
@@ -1018,6 +1077,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_frame_pr_drop_cap() {
+        let ppr = parse_ppr(r#"<w:framePr w:dropCap="drop" w:lines="3"/>"#);
+        let frame_pr = ppr.frame_pr.unwrap();
+        assert_eq!(frame_pr.drop_cap, Some("drop".to_string()));
+        assert_eq!(frame_pr.lines, Some(3));
+    }
+
+    #[test]
     fn parse_basic_rpr() {
         let rpr = parse_rpr(r#"<w:b/><w:i/><w:sz w:val="24"/><w:color w:val="FF0000"/>"#);
         assert_eq!(rpr.bold, Some(true));
@@ -1032,6 +1099,12 @@ mod tests {
         assert_eq!(rpr.spacing, Some(Twips(20)));
         assert_eq!(rpr.width_scale, Some(150));
         assert_eq!(rpr.position, Some(-4));
+    }
+
+    #[test]
+    fn parse_web_hidden_as_vanish() {
+        let rpr = parse_rpr(r#"<w:webHidden/>"#);
+        assert_eq!(rpr.vanish, Some(true));
     }
 
     #[test]

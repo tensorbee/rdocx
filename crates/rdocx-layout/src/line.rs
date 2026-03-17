@@ -114,6 +114,7 @@ pub struct LayoutLine {
 }
 
 /// Parameters for line breaking.
+#[derive(Debug, Clone)]
 pub struct LineBreakParams {
     /// Total available width (page width minus margins).
     pub available_width: f64,
@@ -133,6 +134,10 @@ pub struct LineBreakParams {
     pub line_rule: Option<String>,
     /// Paragraph justification.
     pub jc: Option<ST_Jc>,
+    /// Additional width excluded from the start of specific lines.
+    pub line_prefix_widths: Vec<f64>,
+    /// Additional width excluded from the end of specific lines.
+    pub line_suffix_widths: Vec<f64>,
 }
 
 impl Default for LineBreakParams {
@@ -147,6 +152,8 @@ impl Default for LineBreakParams {
             line_spacing: None,
             line_rule: None,
             jc: None,
+            line_prefix_widths: Vec::new(),
+            line_suffix_widths: Vec::new(),
         }
     }
 }
@@ -165,8 +172,8 @@ pub fn break_into_lines(
             ascent: 0.0,
             descent: 0.0,
             height: compute_line_height(0.0, 0.0, params),
-            indent_left: params.ind_left + params.ind_first_line,
-            available_width: params.available_width,
+            indent_left: line_indent(params, 0, true),
+            available_width: compute_line_width(params, 0, true),
             is_last: true,
         }]);
     }
@@ -176,12 +183,8 @@ pub fn break_into_lines(
     let mut current_width: f64 = 0.0;
     let mut current_ascent: f64 = 0.0;
     let mut current_descent: f64 = 0.0;
-    let mut is_first_line = true;
-
-    let first_line_width = compute_first_line_width(params);
-    let subsequent_line_width = compute_subsequent_line_width(params);
-
-    let mut line_avail = first_line_width;
+    let mut line_index = 0usize;
+    let mut line_avail = compute_line_width(params, line_index, true);
 
     // Track the most recent font context for shaping tab leaders
     let mut font_ctx: Option<(FontId, f64)> = None;
@@ -203,26 +206,21 @@ pub fn break_into_lines(
 
                 if !current_items.is_empty() && current_width + seg_width > line_avail + 0.01 {
                     // Finish current line
-                    let indent = if is_first_line {
-                        first_line_indent(params)
-                    } else {
-                        subsequent_line_indent(params)
-                    };
                     lines.push(LayoutLine {
                         items: std::mem::take(&mut current_items),
                         width: current_width,
                         ascent: current_ascent,
                         descent: current_descent,
                         height: compute_line_height(current_ascent, current_descent, params),
-                        indent_left: indent,
+                        indent_left: line_indent(params, line_index, line_index == 0),
                         available_width: line_avail,
                         is_last: false,
                     });
                     current_width = 0.0;
                     current_ascent = 0.0;
                     current_descent = 0.0;
-                    is_first_line = false;
-                    line_avail = subsequent_line_width;
+                    line_index += 1;
+                    line_avail = compute_line_width(params, line_index, false);
                 }
 
                 // Add segment items to current line
@@ -249,43 +247,33 @@ pub fn break_into_lines(
                 }
             }
             BreakableSegment::ForcedBreak(break_type) => {
-                let indent = if is_first_line {
-                    first_line_indent(params)
-                } else {
-                    subsequent_line_indent(params)
-                };
                 lines.push(LayoutLine {
                     items: std::mem::take(&mut current_items),
                     width: current_width,
                     ascent: current_ascent,
                     descent: current_descent,
                     height: compute_line_height(current_ascent, current_descent, params),
-                    indent_left: indent,
+                    indent_left: line_indent(params, line_index, line_index == 0),
                     available_width: line_avail,
                     is_last: matches!(break_type, ForcedBreakType::Page | ForcedBreakType::Column),
                 });
                 current_width = 0.0;
                 current_ascent = 0.0;
                 current_descent = 0.0;
-                is_first_line = false;
-                line_avail = subsequent_line_width;
+                line_index += 1;
+                line_avail = compute_line_width(params, line_index, false);
             }
         }
     }
 
     // Flush remaining items as the last line
-    let indent = if is_first_line {
-        first_line_indent(params)
-    } else {
-        subsequent_line_indent(params)
-    };
     lines.push(LayoutLine {
         items: current_items,
         width: current_width,
         ascent: current_ascent,
         descent: current_descent,
         height: compute_line_height(current_ascent, current_descent, params),
-        indent_left: indent,
+        indent_left: line_indent(params, line_index, line_index == 0),
         available_width: line_avail,
         is_last: true,
     });
@@ -669,6 +657,32 @@ fn compute_subsequent_line_width(params: &LineBreakParams) -> f64 {
     params.available_width - params.ind_left - params.ind_right
 }
 
+fn line_prefix_width(params: &LineBreakParams, line_index: usize) -> f64 {
+    params
+        .line_prefix_widths
+        .get(line_index)
+        .copied()
+        .unwrap_or(0.0)
+}
+
+fn line_suffix_width(params: &LineBreakParams, line_index: usize) -> f64 {
+    params
+        .line_suffix_widths
+        .get(line_index)
+        .copied()
+        .unwrap_or(0.0)
+}
+
+fn compute_line_width(params: &LineBreakParams, line_index: usize, is_first_line: bool) -> f64 {
+    let base_width = if is_first_line {
+        compute_first_line_width(params)
+    } else {
+        compute_subsequent_line_width(params)
+    };
+    (base_width - line_prefix_width(params, line_index) - line_suffix_width(params, line_index))
+        .max(0.0)
+}
+
 fn first_line_indent(params: &LineBreakParams) -> f64 {
     if params.ind_hanging > 0.0 {
         params.ind_left - params.ind_hanging
@@ -679,6 +693,15 @@ fn first_line_indent(params: &LineBreakParams) -> f64 {
 
 fn subsequent_line_indent(params: &LineBreakParams) -> f64 {
     params.ind_left
+}
+
+fn line_indent(params: &LineBreakParams, line_index: usize, is_first_line: bool) -> f64 {
+    let base_indent = if is_first_line {
+        first_line_indent(params)
+    } else {
+        subsequent_line_indent(params)
+    };
+    base_indent + line_prefix_width(params, line_index)
 }
 
 /// Compute line height based on spacing rules.
@@ -752,6 +775,19 @@ mod tests {
         let lines = break_into_lines(&items, &LineBreakParams::default(), &fm).unwrap();
         assert_eq!(lines.len(), 1);
         assert!(lines[0].is_last);
+    }
+
+    #[test]
+    fn line_prefix_width_reduces_available_width_and_increases_indent() {
+        let fm = FontManager::new();
+        let mut params = LineBreakParams::default();
+        params.available_width = 100.0;
+        params.line_prefix_widths = vec![20.0];
+
+        let items = vec![InlineItem::Text(make_text_segment("Hello", 50.0))];
+        let lines = break_into_lines(&items, &params, &fm).unwrap();
+        assert_eq!(lines[0].available_width, 80.0);
+        assert_eq!(lines[0].indent_left, 20.0);
     }
 
     #[test]

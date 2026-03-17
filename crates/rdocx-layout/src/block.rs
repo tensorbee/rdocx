@@ -1,9 +1,12 @@
 //! Block-level layout: paragraphs and tables as positioned blocks.
 
 use rdocx_oxml::borders::CT_PBdr;
+use rdocx_oxml::drawing::{
+    AnchorAlignH, AnchorAlignV, ST_RelativeFromH, ST_RelativeFromV, WrapType,
+};
 use rdocx_oxml::shared::ST_Jc;
 
-use crate::line::LayoutLine;
+use crate::line::{InlineItem, LayoutLine, LineBreakParams, TextSegment};
 use crate::output::Color;
 use crate::table::TableBlock;
 
@@ -74,6 +77,41 @@ impl LayoutBlock {
     }
 }
 
+/// A dropped capital rendered alongside the opening lines of a paragraph.
+#[derive(Debug, Clone)]
+pub struct DropCap {
+    /// The shaped initial glyph run.
+    pub segment: TextSegment,
+    /// Number of text lines wrapped around the drop cap.
+    pub line_count: usize,
+    /// Extra gap between the drop cap and wrapped text.
+    pub padding_right: f64,
+}
+
+/// A floating image anchored to a paragraph.
+#[derive(Debug, Clone)]
+pub struct AnchoredImage {
+    pub behind_doc: bool,
+    pub width: f64,
+    pub height: f64,
+    /// Horizontal extent from the image's left edge to the right-most visible pixel.
+    pub wrap_left_extent: f64,
+    /// Horizontal extent from the image's right edge to the left-most visible pixel.
+    pub wrap_right_extent: f64,
+    pub embed_id: String,
+    pub wrap: WrapType,
+    pub dist_top: f64,
+    pub dist_bottom: f64,
+    pub dist_left: f64,
+    pub dist_right: f64,
+    pub pos_h_offset: f64,
+    pub pos_h_relative_from: ST_RelativeFromH,
+    pub pos_h_align: Option<AnchorAlignH>,
+    pub pos_v_offset: f64,
+    pub pos_v_relative_from: ST_RelativeFromV,
+    pub pos_v_align: Option<AnchorAlignV>,
+}
+
 /// A laid-out paragraph with its lines and spacing.
 #[derive(Debug, Clone)]
 pub struct ParagraphBlock {
@@ -105,12 +143,24 @@ pub struct ParagraphBlock {
     pub heading_level: Option<u32>,
     /// Heading text for outline generation.
     pub heading_text: Option<String>,
+    /// Optional dropped capital rendered alongside the first lines.
+    pub drop_cap: Option<DropCap>,
+    /// Vertical offset applied before the first text line.
+    pub content_offset_top: f64,
+    /// Footnotes referenced by this paragraph and their reserved heights.
+    pub footnote_reserves: Vec<(i32, f64)>,
+    /// Floating images attached to this paragraph.
+    pub anchored_images: Vec<AnchoredImage>,
+    /// Source inline items used to reflow anchored-image paragraphs at pagination time.
+    pub inline_items: Vec<InlineItem>,
+    /// Base line-break parameters before page-position-dependent anchor wrapping is applied.
+    pub line_break_params: LineBreakParams,
 }
 
 impl ParagraphBlock {
     /// Total height of the paragraph lines (not including before/after spacing).
     pub fn content_height(&self) -> f64 {
-        self.lines.iter().map(|l| l.height).sum()
+        self.content_offset_top + self.lines.iter().map(|l| l.height).sum::<f64>()
     }
 
     /// Total height including spacing.
@@ -138,6 +188,11 @@ pub fn build_paragraph_block(
     keep_lines: bool,
     page_break_before: bool,
     widow_control: bool,
+    drop_cap: Option<DropCap>,
+    footnote_reserves: Vec<(i32, f64)>,
+    anchored_images: Vec<AnchoredImage>,
+    inline_items: Vec<InlineItem>,
+    line_break_params: LineBreakParams,
 ) -> ParagraphBlock {
     ParagraphBlock {
         lines,
@@ -154,6 +209,12 @@ pub fn build_paragraph_block(
         widow_control,
         heading_level: None,
         heading_text: None,
+        drop_cap,
+        content_offset_top: 0.0,
+        footnote_reserves,
+        anchored_images,
+        inline_items,
+        line_break_params,
     }
 }
 
@@ -199,6 +260,12 @@ mod tests {
             widow_control: true,
             heading_level: None,
             heading_text: None,
+            drop_cap: None,
+            content_offset_top: 0.0,
+            footnote_reserves: Vec::new(),
+            anchored_images: Vec::new(),
+            inline_items: Vec::new(),
+            line_break_params: LineBreakParams::default(),
         };
         assert!((block.content_height() - 26.0).abs() < 0.01);
         assert!((block.total_height() - 40.0).abs() < 0.01);

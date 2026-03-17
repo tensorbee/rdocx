@@ -80,7 +80,8 @@ impl Document {
         let doc_xml = package
             .get_part(&doc_part_name)
             .ok_or(Error::NoDocumentPart)?;
-        let document = CT_Document::from_xml(doc_xml)?;
+        let mut document = CT_Document::from_xml(doc_xml)?;
+        normalize_paragraph_frames(&mut document.body.content);
 
         // Try to load styles
         let styles = if let Some(rels) = package.get_part_rels(&doc_part_name) {
@@ -2627,10 +2628,75 @@ fn deobfuscate_odttf(data: &[u8], file_name: &str) -> Option<Vec<u8>> {
     Some(result)
 }
 
+fn normalize_paragraph_frames(content: &mut Vec<BodyContent>) {
+    let mut index = 0;
+
+    while index + 1 < content.len() {
+        let drop_cap_paragraph = match &content[index] {
+            BodyContent::Paragraph(paragraph) if is_drop_cap_paragraph(paragraph) => {
+                if paragraph.text().is_empty() {
+                    index += 1;
+                    continue;
+                }
+                paragraph.clone()
+            }
+            _ => {
+                index += 1;
+                continue;
+            }
+        };
+
+        let Some(BodyContent::Paragraph(next_paragraph)) = content.get_mut(index + 1) else {
+            index += 1;
+            continue;
+        };
+
+        transfer_drop_cap_paragraph(next_paragraph, &drop_cap_paragraph);
+        content.remove(index);
+    }
+}
+
+fn is_drop_cap_paragraph(paragraph: &CT_P) -> bool {
+    paragraph
+        .properties
+        .as_ref()
+        .and_then(|ppr| ppr.frame_pr.as_ref())
+        .and_then(|frame_pr| frame_pr.drop_cap.as_deref())
+        .is_some_and(|drop_cap| matches!(drop_cap, "drop" | "margin"))
+}
+
+fn transfer_drop_cap_paragraph(paragraph: &mut CT_P, drop_cap: &CT_P) {
+    let inserted_runs = drop_cap.runs.len();
+    if inserted_runs == 0 {
+        return;
+    }
+
+    let paragraph_ppr = paragraph.properties.get_or_insert_with(CT_PPr::default);
+    if paragraph_ppr.frame_pr.is_none() {
+        paragraph_ppr.frame_pr = drop_cap
+            .properties
+            .as_ref()
+            .and_then(|properties| properties.frame_pr.clone());
+    }
+
+    let mut merged_runs = drop_cap.runs.clone();
+    merged_runs.extend(std::mem::take(&mut paragraph.runs));
+    paragraph.runs = merged_runs;
+
+    for hyperlink in &mut paragraph.hyperlinks {
+        hyperlink.run_start += inserted_runs;
+        hyperlink.run_end += inserted_runs;
+    }
+    for (run_index, _) in &mut paragraph.extra_xml {
+        *run_index += inserted_runs;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::paragraph::Alignment;
+    use rdocx_oxml::properties::{CT_FramePr, CT_PPr};
     use rdocx_oxml::units::{HalfPoint, Twips};
 
     #[test]
@@ -3163,5 +3229,88 @@ mod tests {
         let mut doc = Document::new();
         doc.add_paragraph("Just text.");
         assert!(doc.images().is_empty());
+    }
+
+    #[test]
+    fn normalizes_drop_cap_paragraphs() {
+        let mut content = vec![
+            BodyContent::Paragraph(CT_P {
+                properties: Some(CT_PPr {
+                    frame_pr: Some(CT_FramePr {
+                        drop_cap: Some("drop".to_string()),
+                        lines: Some(3),
+                    }),
+                    ..Default::default()
+                }),
+                runs: vec![CT_R::new("D")],
+                hyperlinks: Vec::new(),
+                extra_xml: Vec::new(),
+            }),
+            BodyContent::Paragraph(CT_P {
+                properties: None,
+                runs: vec![CT_R::new("rop caps are used")],
+                hyperlinks: Vec::new(),
+                extra_xml: Vec::new(),
+            }),
+        ];
+
+        normalize_paragraph_frames(&mut content);
+
+        assert_eq!(content.len(), 1);
+        let BodyContent::Paragraph(paragraph) = &content[0] else {
+            panic!("expected paragraph");
+        };
+        assert_eq!(paragraph.text(), "Drop caps are used");
+        assert_eq!(
+            paragraph
+                .properties
+                .as_ref()
+                .and_then(|properties| properties.frame_pr.as_ref())
+                .and_then(|frame_pr| frame_pr.drop_cap.as_deref()),
+            Some("drop")
+        );
+    }
+
+    #[test]
+    fn transfers_drop_cap_runs_into_empty_paragraph() {
+        let mut paragraph = CT_P {
+            properties: None,
+            runs: Vec::new(),
+            hyperlinks: vec![rdocx_oxml::text::HyperlinkSpan {
+                rel_id: Some("rId1".to_string()),
+                anchor: None,
+                run_start: 0,
+                run_end: 0,
+            }],
+            extra_xml: vec![(0, b"<w:bookmarkStart/>".to_vec())],
+        };
+
+        let drop_cap = CT_P {
+            properties: Some(CT_PPr {
+                frame_pr: Some(CT_FramePr {
+                    drop_cap: Some("drop".to_string()),
+                    lines: Some(3),
+                }),
+                ..Default::default()
+            }),
+            runs: vec![CT_R::new("D")],
+            hyperlinks: Vec::new(),
+            extra_xml: Vec::new(),
+        };
+
+        transfer_drop_cap_paragraph(&mut paragraph, &drop_cap);
+
+        assert_eq!(paragraph.text(), "D");
+        assert_eq!(paragraph.hyperlinks[0].run_start, 1);
+        assert_eq!(paragraph.hyperlinks[0].run_end, 1);
+        assert_eq!(paragraph.extra_xml[0].0, 1);
+        assert_eq!(
+            paragraph
+                .properties
+                .as_ref()
+                .and_then(|properties| properties.frame_pr.as_ref())
+                .and_then(|frame_pr| frame_pr.lines),
+            Some(3)
+        );
     }
 }

@@ -20,7 +20,9 @@ impl ST_Jc {
             "start" | "left" => Ok(ST_Jc::Left),
             "end" | "right" => Ok(ST_Jc::Right),
             "center" => Ok(ST_Jc::Center),
-            "both" | "justify" => Ok(ST_Jc::Both),
+            "both" | "justify" | "lowKashida" | "mediumKashida" | "highKashida" => {
+                Ok(ST_Jc::Both)
+            }
             "distribute" => Ok(ST_Jc::Distribute),
             _ => Err(OxmlError::InvalidValue(format!("invalid ST_Jc: {s}"))),
         }
@@ -34,6 +36,18 @@ impl ST_Jc {
             ST_Jc::Both => "both",
             ST_Jc::Distribute => "distribute",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ST_Jc;
+
+    #[test]
+    fn kashida_justification_maps_to_both() {
+        assert_eq!(ST_Jc::from_str("lowKashida").unwrap(), ST_Jc::Both);
+        assert_eq!(ST_Jc::from_str("mediumKashida").unwrap(), ST_Jc::Both);
+        assert_eq!(ST_Jc::from_str("highKashida").unwrap(), ST_Jc::Both);
     }
 }
 
