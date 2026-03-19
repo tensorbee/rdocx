@@ -104,6 +104,54 @@ impl ST_RelativeFromV {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WrapType {
     None,
+    Square,
+    TopAndBottom,
+}
+
+/// Horizontal alignment for anchored drawings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorAlignH {
+    Left,
+    Center,
+    Right,
+    Inside,
+    Outside,
+}
+
+impl AnchorAlignH {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "left" => Some(Self::Left),
+            "center" => Some(Self::Center),
+            "right" => Some(Self::Right),
+            "inside" => Some(Self::Inside),
+            "outside" => Some(Self::Outside),
+            _ => None,
+        }
+    }
+}
+
+/// Vertical alignment for anchored drawings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorAlignV {
+    Top,
+    Center,
+    Bottom,
+    Inside,
+    Outside,
+}
+
+impl AnchorAlignV {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "top" => Some(Self::Top),
+            "center" => Some(Self::Center),
+            "bottom" => Some(Self::Bottom),
+            "inside" => Some(Self::Inside),
+            "outside" => Some(Self::Outside),
+            _ => None,
+        }
+    }
 }
 
 /// `CT_Anchor` — An anchored (floating) drawing element.
@@ -115,14 +163,26 @@ pub struct CT_Anchor {
     pub pos_h_offset: Emu,
     /// Horizontal relative-from.
     pub pos_h_relative_from: ST_RelativeFromH,
+    /// Optional horizontal alignment.
+    pub pos_h_align: Option<AnchorAlignH>,
     /// Vertical position offset in EMUs.
     pub pos_v_offset: Emu,
     /// Vertical relative-from.
     pub pos_v_relative_from: ST_RelativeFromV,
+    /// Optional vertical alignment.
+    pub pos_v_align: Option<AnchorAlignV>,
     /// Width in EMUs.
     pub extent_cx: Emu,
     /// Height in EMUs.
     pub extent_cy: Emu,
+    /// Extra distance between surrounding text and the top edge.
+    pub dist_t: Emu,
+    /// Extra distance between surrounding text and the bottom edge.
+    pub dist_b: Emu,
+    /// Extra distance between surrounding text and the left edge.
+    pub dist_l: Emu,
+    /// Extra distance between surrounding text and the right edge.
+    pub dist_r: Emu,
     /// Wrapping type.
     pub wrap: WrapType,
     /// Relationship ID referencing the image part.
@@ -145,10 +205,16 @@ impl CT_Anchor {
             behind_doc: true,
             pos_h_offset: Emu(0),
             pos_h_relative_from: ST_RelativeFromH::Page,
+            pos_h_align: None,
             pos_v_offset: Emu(0),
             pos_v_relative_from: ST_RelativeFromV::Page,
+            pos_v_align: None,
             extent_cx: Emu(page_width_emu),
             extent_cy: Emu(page_height_emu),
+            dist_t: Emu(0),
+            dist_b: Emu(0),
+            dist_l: Emu(0),
+            dist_r: Emu(0),
             wrap: WrapType::None,
             embed_id: embed_id.to_string(),
             relative_height: 0,
@@ -161,6 +227,10 @@ impl CT_Anchor {
     pub fn from_xml(reader: &mut Reader<&[u8]>, start: &BytesStart) -> Result<Self> {
         let mut behind_doc = false;
         let mut relative_height = 0u32;
+        let mut dist_t = Emu(0);
+        let mut dist_b = Emu(0);
+        let mut dist_l = Emu(0);
+        let mut dist_r = Emu(0);
 
         // Parse attributes from the <wp:anchor> start tag
         for attr in start.attributes() {
@@ -171,18 +241,29 @@ impl CT_Anchor {
                 behind_doc = val == "1" || val == "true";
             } else if key == b"relativeHeight" {
                 relative_height = val.parse().unwrap_or(0);
+            } else if key == b"distT" {
+                dist_t = Emu(val.parse().unwrap_or(0));
+            } else if key == b"distB" {
+                dist_b = Emu(val.parse().unwrap_or(0));
+            } else if key == b"distL" {
+                dist_l = Emu(val.parse().unwrap_or(0));
+            } else if key == b"distR" {
+                dist_r = Emu(val.parse().unwrap_or(0));
             }
         }
 
         let mut pos_h_offset = Emu(0);
         let mut pos_h_relative_from = ST_RelativeFromH::Page;
+        let mut pos_h_align = None;
         let mut pos_v_offset = Emu(0);
         let mut pos_v_relative_from = ST_RelativeFromV::Page;
+        let mut pos_v_align = None;
         let mut extent_cx = Emu(0);
         let mut extent_cy = Emu(0);
         let mut embed_id = String::new();
         let mut description = None;
         let mut name = None;
+        let mut wrap = WrapType::None;
         let mut buf = Vec::new();
 
         loop {
@@ -224,6 +305,10 @@ impl CT_Anchor {
                         // Ignore simplePos
                     } else if matches_local_name(ename.as_ref(), b"wrapNone") {
                         // Already default
+                    } else if matches_local_name(ename.as_ref(), b"wrapSquare") {
+                        wrap = WrapType::Square;
+                    } else if matches_local_name(ename.as_ref(), b"wrapTopAndBottom") {
+                        wrap = WrapType::TopAndBottom;
                     }
                 }
                 Ok(Event::Start(ref e)) => {
@@ -245,6 +330,12 @@ impl CT_Anchor {
                                 {
                                     let text = reader.read_text(ie.name()).unwrap_or_default();
                                     pos_h_offset = Emu(text.trim().parse().unwrap_or(0));
+                                }
+                                Ok(Event::Start(ref ie))
+                                    if matches_local_name(ie.name().as_ref(), b"align") =>
+                                {
+                                    let text = reader.read_text(ie.name()).unwrap_or_default();
+                                    pos_h_align = AnchorAlignH::from_str(text.trim());
                                 }
                                 Ok(Event::End(ref ie))
                                     if matches_local_name(ie.name().as_ref(), b"positionH") =>
@@ -273,6 +364,12 @@ impl CT_Anchor {
                                 {
                                     let text = reader.read_text(ie.name()).unwrap_or_default();
                                     pos_v_offset = Emu(text.trim().parse().unwrap_or(0));
+                                }
+                                Ok(Event::Start(ref ie))
+                                    if matches_local_name(ie.name().as_ref(), b"align") =>
+                                {
+                                    let text = reader.read_text(ie.name()).unwrap_or_default();
+                                    pos_v_align = AnchorAlignV::from_str(text.trim());
                                 }
                                 Ok(Event::End(ref ie))
                                     if matches_local_name(ie.name().as_ref(), b"positionV") =>
@@ -307,6 +404,12 @@ impl CT_Anchor {
                             }
                         }
                         reader.read_to_end_into(ename, &mut Vec::new())?;
+                    } else if matches_local_name(ename.as_ref(), b"wrapSquare") {
+                        wrap = WrapType::Square;
+                        reader.read_to_end_into(ename, &mut Vec::new())?;
+                    } else if matches_local_name(ename.as_ref(), b"wrapTopAndBottom") {
+                        wrap = WrapType::TopAndBottom;
+                        reader.read_to_end_into(ename, &mut Vec::new())?;
                     } else {
                         // Continue into nested elements (graphic, graphicData, pic, etc.)
                     }
@@ -325,11 +428,17 @@ impl CT_Anchor {
             behind_doc,
             pos_h_offset,
             pos_h_relative_from,
+            pos_h_align,
             pos_v_offset,
             pos_v_relative_from,
+            pos_v_align,
             extent_cx,
             extent_cy,
-            wrap: WrapType::None,
+            dist_t,
+            dist_b,
+            dist_l,
+            dist_r,
+            wrap,
             embed_id,
             relative_height,
             description,
@@ -350,6 +459,14 @@ impl CT_Anchor {
         anchor.push_attribute(("behindDoc", if self.behind_doc { "1" } else { "0" }));
         anchor.push_attribute(("simplePos", "0"));
         anchor.push_attribute(("relativeHeight", buf.format(self.relative_height)));
+        let dist_t = self.dist_t.0.to_string();
+        let dist_b = self.dist_b.0.to_string();
+        let dist_l = self.dist_l.0.to_string();
+        let dist_r = self.dist_r.0.to_string();
+        anchor.push_attribute(("distT", dist_t.as_str()));
+        anchor.push_attribute(("distB", dist_b.as_str()));
+        anchor.push_attribute(("distL", dist_l.as_str()));
+        anchor.push_attribute(("distR", dist_r.as_str()));
         anchor.push_attribute(("locked", "0"));
         anchor.push_attribute(("layoutInCell", "1"));
         anchor.push_attribute(("allowOverlap", "1"));

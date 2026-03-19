@@ -3,15 +3,17 @@
 //! Handles page breaks, widow/orphan control, keep-with-next,
 //! keep-lines-together, and header/footer placement.
 
-use crate::block::{LayoutBlock, ParagraphBlock};
+use crate::block::{AnchoredImage, LayoutBlock, ParagraphBlock};
 use crate::font::FontManager;
-use crate::line::{LayoutLine, LineItem};
+use crate::line::{self, LayoutLine, LineItem};
 use crate::output::{Color, GlyphRun, OutlineEntry, PageFrame, Point, PositionedElement, Rect};
 
+use rdocx_oxml::drawing::{AnchorAlignH, AnchorAlignV, ST_RelativeFromH, ST_RelativeFromV};
 use rdocx_oxml::shared::{ST_Border, ST_Jc, ST_Underline};
 
 /// A resolved border edge: (thickness in pt, color, optional dash pattern as (dash, gap)).
 type BorderEdge = (f64, Color, Option<(f64, f64)>);
+const FOOTNOTE_SEPARATOR_OFFSET: f64 = 6.0;
 
 /// Page geometry derived from section properties.
 #[derive(Debug, Clone, Copy)]
@@ -144,9 +146,9 @@ pub fn paginate(
     geometry: PageGeometry,
     header_footer: Option<&HeaderFooterContent>,
     title_pg: bool,
-    _fm: &FontManager,
+    fm: &FontManager,
 ) -> (Vec<PageFrame>, Vec<OutlineEntry>) {
-    let mut pager = Pager::new(geometry, header_footer, title_pg);
+    let mut pager = Pager::new(geometry, header_footer, title_pg, fm);
 
     for (block_idx, block) in blocks.iter().enumerate() {
         // Check for page break before
@@ -228,6 +230,10 @@ struct Pager<'a> {
     is_first_page: bool,
     /// Whether this section uses different first page header/footer.
     title_pg: bool,
+    reserved_footnote_ids: Vec<i32>,
+    reserved_footnote_height: f64,
+    page_anchor_images: Vec<AnchoredImage>,
+    fm: &'a FontManager,
 }
 
 impl<'a> Pager<'a> {
@@ -235,6 +241,7 @@ impl<'a> Pager<'a> {
         geometry: PageGeometry,
         header_footer: Option<&'a HeaderFooterContent>,
         title_pg: bool,
+        fm: &'a FontManager,
     ) -> Self {
         Pager {
             pages: Vec::new(),
@@ -248,6 +255,10 @@ impl<'a> Pager<'a> {
             outlines: Vec::new(),
             is_first_page: true,
             title_pg,
+            reserved_footnote_ids: Vec::new(),
+            reserved_footnote_height: 0.0,
+            page_anchor_images: Vec::new(),
+            fm,
         }
     }
 
@@ -302,6 +313,40 @@ impl<'a> Pager<'a> {
         self.cursor_y = 0.0;
         self.has_content_flag = false;
         self.is_first_page = false;
+        self.reserved_footnote_ids.clear();
+        self.reserved_footnote_height = 0.0;
+        self.page_anchor_images.clear();
+    }
+
+    fn effective_content_height(&self) -> f64 {
+        self.content_height - self.reserved_footnote_height
+    }
+
+    fn additional_footnote_height(&self, para: &ParagraphBlock) -> f64 {
+        let mut additional = 0.0;
+        let mut adds_new_footnote = false;
+        for (footnote_id, height) in &para.footnote_reserves {
+            if !self.reserved_footnote_ids.contains(footnote_id) {
+                additional += *height;
+                adds_new_footnote = true;
+            }
+        }
+        if adds_new_footnote && self.reserved_footnote_height == 0.0 {
+            additional += FOOTNOTE_SEPARATOR_OFFSET;
+        }
+        additional
+    }
+
+    fn reserve_footnotes(&mut self, para: &ParagraphBlock) {
+        let additional = self.additional_footnote_height(para);
+        if additional > 0.0 {
+            self.reserved_footnote_height += additional;
+            for (footnote_id, _) in &para.footnote_reserves {
+                if !self.reserved_footnote_ids.contains(footnote_id) {
+                    self.reserved_footnote_ids.push(*footnote_id);
+                }
+            }
+        }
     }
 
     fn flush(mut self) -> (Vec<PageFrame>, Vec<OutlineEntry>) {
@@ -325,10 +370,20 @@ fn paginate_paragraph(
     } else {
         para.space_before
     };
+    let wrap_images = collect_page_anchor_images(para, block_idx, blocks, pager);
+    let paragraph = relayout_paragraph_for_page(
+        para,
+        &wrap_images,
+        pager.cursor_y + space_before,
+        &pager.geometry,
+        pager.fm,
+    );
+    let para = &paragraph;
+    let additional_footnote_height = pager.additional_footnote_height(para);
 
     // Check if paragraph fits on current page
     let total_needed = space_before + para.content_height();
-    let remaining = pager.content_height - pager.cursor_y;
+    let remaining = pager.effective_content_height() - additional_footnote_height - pager.cursor_y;
 
     if total_needed > remaining && pager.has_content() {
         // Paragraph doesn't fit. Decide: move whole or split.
@@ -339,7 +394,7 @@ fn paginate_paragraph(
             return;
         }
 
-        let available_for_lines = remaining - space_before;
+        let available_for_lines = remaining - space_before - para.content_offset_top;
         let lines_that_fit = count_lines_that_fit(&para.lines, available_for_lines);
 
         if para.widow_control && lines_that_fit < 2 {
@@ -353,11 +408,13 @@ fn paginate_paragraph(
         if para.widow_control && lines_remaining < 2 && lines_that_fit >= 3 {
             // Would leave orphan — move one line to next page
             let split_at = lines_that_fit - 1;
+            pager.reserve_footnotes(para);
             render_para_split(para, split_at, space_before, pager);
             return;
         }
 
         if lines_that_fit > 0 {
+            pager.reserve_footnotes(para);
             render_para_split(para, lines_that_fit, space_before, pager);
             return;
         }
@@ -372,8 +429,12 @@ fn paginate_paragraph(
     // If it doesn't fit and we're at the top, we must split line by line
     if total_needed > pager.content_height && pager.cursor_y == 0.0 {
         // Paragraph is taller than a page; split line by line
-        let lines_that_fit = count_lines_that_fit(&para.lines, pager.content_height);
+        let lines_that_fit = count_lines_that_fit(
+            &para.lines,
+            pager.content_height - additional_footnote_height - para.content_offset_top,
+        );
         if lines_that_fit > 0 && lines_that_fit < para.lines.len() {
+            pager.reserve_footnotes(para);
             render_para_split(para, lines_that_fit, 0.0, pager);
             return;
         }
@@ -385,12 +446,15 @@ fn paginate_paragraph(
             LayoutBlock::Paragraph(p) => p.lines.first().map(|l| l.height).unwrap_or(0.0),
             LayoutBlock::Table(t) => t.rows.first().map(|r| r.height).unwrap_or(0.0),
         };
-        if pager.cursor_y + space_before + para.content_height() + next_first > pager.content_height
+        if pager.cursor_y + space_before + para.content_height() + next_first
+            > pager.effective_content_height()
             && pager.has_content()
         {
             pager.finish_page();
         }
     }
+
+    pager.reserve_footnotes(para);
 
     // Render the paragraph
     let space = if pager.cursor_y == 0.0 {
@@ -435,6 +499,7 @@ fn paginate_paragraph(
         pager.cursor_y,
         &mut pager.elements,
     );
+    pager.page_anchor_images.extend(para.anchored_images.iter().cloned());
     pager.cursor_y += para.content_height();
     pager.cursor_y += para.space_after;
     pager.mark_content();
@@ -479,6 +544,12 @@ fn render_para_split(para: &ParagraphBlock, split_at: usize, space_before: f64, 
                 widow_control: para.widow_control,
                 heading_level: None,
                 heading_text: None,
+                drop_cap: None,
+                content_offset_top: 0.0,
+                footnote_reserves: Vec::new(),
+                anchored_images: Vec::new(),
+                inline_items: Vec::new(),
+                line_break_params: line::LineBreakParams::default(),
             };
             render_para_split(&temp_para, lines_that_fit, 0.0, pager);
             return;
@@ -509,6 +580,147 @@ fn count_lines_that_fit(lines: &[LayoutLine], available: f64) -> usize {
     lines.len()
 }
 
+fn relayout_paragraph_for_page(
+    para: &ParagraphBlock,
+    wrap_images: &[AnchoredImage],
+    start_y: f64,
+    geometry: &PageGeometry,
+    fm: &FontManager,
+) -> ParagraphBlock {
+    if wrap_images.is_empty() || para.inline_items.is_empty() {
+        return para.clone();
+    }
+
+    let mut adjusted = para.clone();
+    let mut lines = adjusted.lines.clone();
+    let mut content_offset_top = para.content_offset_top;
+
+    for _ in 0..2 {
+        let paragraph_height = content_offset_top + lines.iter().map(|line| line.height).sum::<f64>();
+        let (top_offset, line_prefix_widths, line_suffix_widths) =
+            compute_anchor_line_adjustments(wrap_images, &lines, geometry, start_y, paragraph_height);
+
+        let mut line_break_params = adjusted.line_break_params.clone();
+        merge_line_widths(&mut line_break_params.line_prefix_widths, &line_prefix_widths);
+        line_break_params.line_suffix_widths = line_suffix_widths;
+
+        let Ok(reflowed_lines) = line::break_into_lines(&adjusted.inline_items, &line_break_params, fm) else {
+            break;
+        };
+
+        lines = reflowed_lines;
+        content_offset_top = top_offset;
+        adjusted.line_break_params = line_break_params;
+    }
+
+    adjusted.lines = lines;
+    adjusted.content_offset_top = content_offset_top;
+    adjusted
+}
+
+fn collect_page_anchor_images(
+    para: &ParagraphBlock,
+    block_idx: usize,
+    blocks: &[LayoutBlock],
+    pager: &Pager<'_>,
+) -> Vec<AnchoredImage> {
+    let mut images = pager.page_anchor_images.clone();
+    images.extend(para.anchored_images.iter().cloned());
+
+    let mut cursor_y = pager.cursor_y;
+    let current_space_before = if cursor_y == 0.0 { 0.0 } else { para.space_before };
+    cursor_y += current_space_before + para.content_height() + para.space_after;
+
+    for block in blocks.iter().skip(block_idx + 1) {
+        if block.page_break_before() {
+            break;
+        }
+
+        let block_space_before = if cursor_y == 0.0 { 0.0 } else { block.space_before() };
+        let block_total = block_space_before + block.content_height() + block.space_after();
+        if cursor_y + block_total > pager.effective_content_height() {
+            break;
+        }
+
+        if let LayoutBlock::Paragraph(next_para) = block {
+            images.extend(next_para.anchored_images.iter().cloned());
+        }
+
+        cursor_y += block_total;
+    }
+
+    images
+}
+
+fn merge_line_widths(base: &mut Vec<f64>, extra: &[f64]) {
+    if base.len() < extra.len() {
+        base.resize(extra.len(), 0.0);
+    }
+    for (idx, width) in extra.iter().enumerate() {
+        base[idx] += *width;
+    }
+}
+
+fn compute_anchor_line_adjustments(
+    images: &[AnchoredImage],
+    lines: &[LayoutLine],
+    geometry: &PageGeometry,
+    start_y: f64,
+    paragraph_height: f64,
+) -> (f64, Vec<f64>, Vec<f64>) {
+    let paragraph_top = geometry.margin_top + start_y;
+    let mut top_offset = 0.0;
+    let mut prefix = Vec::new();
+    let mut suffix = Vec::new();
+
+    for image in images {
+        let image_top = resolve_anchor_y(image, geometry, paragraph_top, paragraph_height) - paragraph_top;
+        let image_bottom = image_top + image.height;
+
+        if image.wrap == rdocx_oxml::drawing::WrapType::TopAndBottom {
+            if image_top <= top_offset + 1.0 {
+                top_offset = top_offset.max(image_bottom + image.dist_bottom);
+            }
+            continue;
+        }
+
+        if image.wrap != rdocx_oxml::drawing::WrapType::Square {
+            continue;
+        }
+
+        let reserve = match image.pos_h_align {
+            Some(AnchorAlignH::Left | AnchorAlignH::Inside) => image.wrap_left_extent,
+            Some(AnchorAlignH::Right | AnchorAlignH::Outside) => image.wrap_right_extent,
+            _ => continue,
+        };
+
+        let mut line_top = top_offset;
+        for (line_idx, line) in lines.iter().enumerate() {
+            let line_bottom = line_top + line.height;
+            if line_bottom > image_top - image.dist_top && line_top < image_bottom + image.dist_bottom {
+                match image.pos_h_align {
+                    Some(AnchorAlignH::Left | AnchorAlignH::Inside) => {
+                        if prefix.len() <= line_idx {
+                            prefix.resize(line_idx + 1, 0.0);
+                        }
+                        prefix[line_idx] += reserve;
+                    }
+                    Some(AnchorAlignH::Right | AnchorAlignH::Outside) => {
+                        if suffix.len() <= line_idx {
+                            suffix.resize(line_idx + 1, 0.0);
+                        }
+                        suffix[line_idx] += reserve;
+                    }
+                    _ => {}
+                }
+            }
+            line_top = line_bottom;
+        }
+    }
+
+    (top_offset, prefix, suffix)
+}
+
 /// Render paragraph lines as positioned elements.
 fn render_paragraph_lines(
     lines: &[LayoutLine],
@@ -517,7 +729,36 @@ fn render_paragraph_lines(
     start_y: f64,
     elements: &mut Vec<PositionedElement>,
 ) {
-    let mut y = start_y;
+    render_anchor_images(
+        &para.anchored_images,
+        para,
+        geometry,
+        start_y,
+        elements,
+        true,
+    );
+
+    if let Some(drop_cap) = &para.drop_cap {
+        elements.push(PositionedElement::Text(GlyphRun {
+            origin: Point {
+                x: geometry.margin_left + para.indent_left,
+                y: geometry.margin_top + start_y + drop_cap.segment.ascent
+                    - drop_cap.segment.baseline_offset,
+            },
+            font_id: drop_cap.segment.font_id,
+            font_size: drop_cap.segment.font_size,
+            glyph_ids: drop_cap.segment.glyph_ids.clone(),
+            advances: drop_cap.segment.advances.clone(),
+            text: drop_cap.segment.text.clone(),
+            color: drop_cap.segment.color,
+            bold: drop_cap.segment.bold,
+            italic: drop_cap.segment.italic,
+            field_kind: drop_cap.segment.field_kind,
+            footnote_id: drop_cap.segment.footnote_id,
+        }));
+    }
+
+    let mut y = start_y + para.content_offset_top;
     for line in lines {
         let baseline_y = geometry.margin_top + y + line.ascent;
 
@@ -750,6 +991,99 @@ fn render_paragraph_lines(
         }
 
         y += line.height;
+    }
+
+    render_anchor_images(
+        &para.anchored_images,
+        para,
+        geometry,
+        start_y,
+        elements,
+        false,
+    );
+}
+
+fn render_anchor_images(
+    images: &[AnchoredImage],
+    para: &ParagraphBlock,
+    geometry: &PageGeometry,
+    start_y: f64,
+    elements: &mut Vec<PositionedElement>,
+    behind_doc: bool,
+) {
+    let paragraph_top = geometry.margin_top + start_y;
+    let paragraph_height = para.content_height();
+
+    for image in images.iter().filter(|image| image.behind_doc == behind_doc) {
+        let element = PositionedElement::Image {
+            rect: Rect {
+                x: resolve_anchor_x(image, geometry),
+                y: resolve_anchor_y(image, geometry, paragraph_top, paragraph_height),
+                width: image.width,
+                height: image.height,
+            },
+            data: Vec::new(),
+            content_type: String::new(),
+            embed_id: Some(image.embed_id.clone()),
+        };
+
+        if behind_doc {
+            elements.insert(0, element);
+        } else {
+            elements.push(element);
+        }
+    }
+}
+
+fn resolve_anchor_x(image: &AnchoredImage, geometry: &PageGeometry) -> f64 {
+    let (base_left, base_width) = match image.pos_h_relative_from {
+        ST_RelativeFromH::Page => (0.0, geometry.page_width),
+        ST_RelativeFromH::Margin
+        | ST_RelativeFromH::Column
+        | ST_RelativeFromH::Character
+        | ST_RelativeFromH::LeftMargin
+        | ST_RelativeFromH::RightMargin
+        | ST_RelativeFromH::InsideMargin
+        | ST_RelativeFromH::OutsideMargin => (
+            geometry.margin_left,
+            geometry.page_width - geometry.margin_left - geometry.margin_right,
+        ),
+    };
+
+    match image.pos_h_align {
+        Some(AnchorAlignH::Left | AnchorAlignH::Inside) => base_left,
+        Some(AnchorAlignH::Center) => base_left + (base_width - image.width) / 2.0,
+        Some(AnchorAlignH::Right | AnchorAlignH::Outside) => base_left + base_width - image.width,
+        None => base_left + image.pos_h_offset,
+    }
+}
+
+fn resolve_anchor_y(
+    image: &AnchoredImage,
+    geometry: &PageGeometry,
+    paragraph_top: f64,
+    paragraph_height: f64,
+) -> f64 {
+    let (base_top, base_height) = match image.pos_v_relative_from {
+        ST_RelativeFromV::Page => (0.0, geometry.page_height),
+        ST_RelativeFromV::Margin
+        | ST_RelativeFromV::TopMargin
+        | ST_RelativeFromV::BottomMargin
+        | ST_RelativeFromV::InsideMargin
+        | ST_RelativeFromV::OutsideMargin => (
+            geometry.margin_top,
+            geometry.page_height - geometry.margin_top - geometry.margin_bottom,
+        ),
+        ST_RelativeFromV::Paragraph | ST_RelativeFromV::Line => {
+            (paragraph_top, paragraph_height.max(image.height))
+        }
+    };
+
+    match image.pos_v_align {
+        Some(AnchorAlignV::Top | AnchorAlignV::Inside) => base_top,
+        Some(AnchorAlignV::Center) => base_top + (base_height - image.height) / 2.0,
+        Some(AnchorAlignV::Bottom | AnchorAlignV::Outside) => base_top + base_height - image.height,
+        None => base_top + image.pos_v_offset,
     }
 }
 
@@ -1178,6 +1512,12 @@ mod tests {
             widow_control: true,
             heading_level: None,
             heading_text: None,
+            drop_cap: None,
+            content_offset_top: 0.0,
+            footnote_reserves: Vec::new(),
+            anchored_images: Vec::new(),
+            inline_items: Vec::new(),
+            line_break_params: line::LineBreakParams::default(),
         }
     }
 
@@ -1278,6 +1618,12 @@ mod tests {
             widow_control: true,
             heading_level: None,
             heading_text: None,
+            drop_cap: None,
+            content_offset_top: 0.0,
+            footnote_reserves: Vec::new(),
+            anchored_images: Vec::new(),
+            inline_items: Vec::new(),
+            line_break_params: line::LineBreakParams::default(),
         };
         let blocks = vec![LayoutBlock::Paragraph(para)];
         let (pages, _outlines) = paginate(&blocks, PageGeometry::default(), None, false, &fm);
@@ -1308,6 +1654,12 @@ mod tests {
             widow_control: true,
             heading_level: None,
             heading_text: None,
+            drop_cap: None,
+            content_offset_top: 0.0,
+            footnote_reserves: Vec::new(),
+            anchored_images: Vec::new(),
+            inline_items: Vec::new(),
+            line_break_params: line::LineBreakParams::default(),
         };
         let blocks = vec![LayoutBlock::Paragraph(para)];
         let (pages, _outlines) = paginate(&blocks, PageGeometry::default(), None, false, &fm);
@@ -1374,6 +1726,12 @@ mod tests {
             widow_control: true,
             heading_level: None,
             heading_text: None,
+            drop_cap: None,
+            content_offset_top: 0.0,
+            footnote_reserves: Vec::new(),
+            anchored_images: Vec::new(),
+            inline_items: Vec::new(),
+            line_break_params: line::LineBreakParams::default(),
         };
         let blocks = vec![LayoutBlock::Paragraph(para)];
         let (pages, _outlines) = paginate(&blocks, PageGeometry::default(), None, false, &fm);
@@ -1418,6 +1776,12 @@ mod tests {
             widow_control: true,
             heading_level: None,
             heading_text: None,
+            drop_cap: None,
+            content_offset_top: 0.0,
+            footnote_reserves: Vec::new(),
+            anchored_images: Vec::new(),
+            inline_items: Vec::new(),
+            line_break_params: line::LineBreakParams::default(),
         };
         let blocks = vec![LayoutBlock::Paragraph(para)];
         let (pages, _outlines) = paginate(&blocks, PageGeometry::default(), None, false, &fm);
@@ -1452,6 +1816,12 @@ mod tests {
             widow_control: true,
             heading_level: None,
             heading_text: None,
+            drop_cap: None,
+            content_offset_top: 0.0,
+            footnote_reserves: Vec::new(),
+            anchored_images: Vec::new(),
+            inline_items: Vec::new(),
+            line_break_params: line::LineBreakParams::default(),
         };
         let blocks = vec![LayoutBlock::Paragraph(para)];
         let (pages, _outlines) = paginate(&blocks, PageGeometry::default(), None, false, &fm);
@@ -1481,6 +1851,12 @@ mod tests {
             widow_control: true,
             heading_level: None,
             heading_text: None,
+            drop_cap: None,
+            content_offset_top: 0.0,
+            footnote_reserves: Vec::new(),
+            anchored_images: Vec::new(),
+            inline_items: Vec::new(),
+            line_break_params: line::LineBreakParams::default(),
         };
         let blocks = vec![LayoutBlock::Paragraph(para)];
         let (pages, _outlines) = paginate(&blocks, PageGeometry::default(), None, false, &fm);
@@ -1577,6 +1953,12 @@ mod tests {
             widow_control: true,
             heading_level: None,
             heading_text: None,
+            drop_cap: None,
+            content_offset_top: 0.0,
+            footnote_reserves: Vec::new(),
+            anchored_images: Vec::new(),
+            inline_items: Vec::new(),
+            line_break_params: line::LineBreakParams::default(),
         };
         let blocks = vec![LayoutBlock::Paragraph(para)];
         let (pages, _outlines) = paginate(&blocks, PageGeometry::default(), None, false, &fm);
@@ -1613,6 +1995,12 @@ mod tests {
             widow_control: true,
             heading_level: None,
             heading_text: None,
+            drop_cap: None,
+            content_offset_top: 0.0,
+            footnote_reserves: Vec::new(),
+            anchored_images: Vec::new(),
+            inline_items: Vec::new(),
+            line_break_params: line::LineBreakParams::default(),
         };
 
         let blocks = vec![LayoutBlock::Paragraph(para)];
@@ -1657,6 +2045,12 @@ mod tests {
             widow_control: true,
             heading_level: None,
             heading_text: None,
+            drop_cap: None,
+            content_offset_top: 0.0,
+            footnote_reserves: Vec::new(),
+            anchored_images: Vec::new(),
+            inline_items: Vec::new(),
+            line_break_params: line::LineBreakParams::default(),
         };
 
         let blocks = vec![LayoutBlock::Paragraph(para)];
@@ -1706,6 +2100,12 @@ mod tests {
             widow_control: true,
             heading_level: None,
             heading_text: None,
+            drop_cap: None,
+            content_offset_top: 0.0,
+            footnote_reserves: Vec::new(),
+            anchored_images: Vec::new(),
+            inline_items: Vec::new(),
+            line_break_params: line::LineBreakParams::default(),
         };
 
         let blocks = vec![LayoutBlock::Paragraph(para)];
@@ -1726,5 +2126,45 @@ mod tests {
             (total_advance - 100.0).abs() < 0.1,
             "single word should not be stretched: {total_advance}"
         );
+    }
+
+    #[test]
+    fn square_wrap_reserve_uses_image_extent() {
+        let geometry = PageGeometry::default();
+        let image = AnchoredImage {
+            behind_doc: false,
+            width: 76.8,
+            height: 76.8,
+            wrap_left_extent: 69.6,
+            wrap_right_extent: 69.6,
+            embed_id: "arrow".to_string(),
+            wrap: rdocx_oxml::drawing::WrapType::Square,
+            dist_top: 0.0,
+            dist_bottom: 0.0,
+            dist_left: 9.0,
+            dist_right: 9.0,
+            pos_h_offset: 0.0,
+            pos_h_relative_from: ST_RelativeFromH::Margin,
+            pos_h_align: Some(AnchorAlignH::Left),
+            pos_v_offset: 0.0,
+            pos_v_relative_from: ST_RelativeFromV::Margin,
+            pos_v_align: Some(AnchorAlignV::Top),
+        };
+        let lines = vec![LayoutLine {
+            items: vec![],
+            width: 0.0,
+            ascent: 10.0,
+            descent: 3.0,
+            height: 13.0,
+            indent_left: 0.0,
+            available_width: 468.0,
+            is_last: true,
+        }];
+
+        let (_, prefix, suffix) =
+            compute_anchor_line_adjustments(&[image], &lines, &geometry, 0.0, 13.0);
+
+        assert_eq!(prefix, vec![69.6]);
+        assert!(suffix.is_empty());
     }
 }

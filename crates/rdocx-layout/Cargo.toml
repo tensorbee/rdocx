@@ -21,3 +21,4 @@ fontdb = { workspace = true }
 rustybuzz = { workspace = true }
 ttf-parser = { workspace = true }
 unicode-linebreak = { workspace = true }
+image = { workspace = true }

@@ -1,5 +1,6 @@
 //! Layout engine orchestrator: ties all phases together.
 
+use image::ImageReader;
 use rdocx_oxml::document::{BodyContent, CT_SectPr};
 use rdocx_oxml::header_footer::HdrFtrType;
 use rdocx_oxml::properties::CT_PPr;
@@ -7,7 +8,7 @@ use rdocx_oxml::shared::ST_HighlightColor;
 use rdocx_oxml::styles::CT_Styles;
 use rdocx_oxml::text::{BreakType, CT_P, FieldType, RunContent};
 
-use crate::block::{self, LayoutBlock, ParagraphBlock};
+use crate::block::{self, AnchoredImage, DropCap, LayoutBlock, ParagraphBlock};
 use crate::error::Result;
 use crate::font::FontManager;
 use crate::input::LayoutInput;
@@ -164,9 +165,6 @@ impl Engine {
         // Post-pagination pass: apply page background color
         apply_page_background(&mut pages, input);
 
-        // Post-pagination pass: resolve anchor (background) images
-        resolve_anchor_images(&mut pages, input);
-
         // Post-pagination pass: resolve inline image data
         resolve_inline_images(&mut pages, input);
 
@@ -250,74 +248,6 @@ fn extract_background_color(xml: &str) -> Option<Color> {
         }
     }
     None
-}
-
-/// Resolve anchor (floating) images from the document and inject them into page frames.
-///
-/// For `behind_doc=true` images: inserts at the START of page elements (renders underneath).
-/// For `behind_doc=false` images: inserts at the END (renders on top).
-fn resolve_anchor_images(pages: &mut [PageFrame], input: &LayoutInput) {
-    use crate::output::Rect;
-    use rdocx_oxml::text::RunContent;
-
-    // Collect all anchor drawings from body content
-    let mut anchor_images: Vec<(bool, f64, f64, f64, f64, String)> = Vec::new();
-
-    for content in &input.document.body.content {
-        if let BodyContent::Paragraph(p) = content {
-            for run in &p.runs {
-                for rc in &run.content {
-                    if let RunContent::Drawing(drawing) = rc
-                        && let Some(ref anchor) = drawing.anchor
-                    {
-                        let behind = anchor.behind_doc;
-                        // Convert EMU positions and extents to points
-                        let x = anchor.pos_h_offset.to_pt();
-                        let y = anchor.pos_v_offset.to_pt();
-                        let w = anchor.extent_cx.to_pt();
-                        let h = anchor.extent_cy.to_pt();
-                        anchor_images.push((behind, x, y, w, h, anchor.embed_id.clone()));
-                    }
-                }
-            }
-        }
-    }
-
-    if anchor_images.is_empty() {
-        return;
-    }
-
-    // For each anchor image, resolve image data and add to pages
-    for (behind, x, y, w, h, embed_id) in &anchor_images {
-        let (data, content_type) = if let Some(img) = input.images.get(embed_id) {
-            (img.data.clone(), img.content_type.clone())
-        } else {
-            continue;
-        };
-
-        let element = PositionedElement::Image {
-            rect: Rect {
-                x: *x,
-                y: *y,
-                width: *w,
-                height: *h,
-            },
-            data,
-            content_type,
-            embed_id: None, // Already resolved
-        };
-
-        if *behind {
-            // Behind-doc images go on the first page only
-            // (proper page association would require paragraph-to-page mapping)
-            if let Some(page) = pages.first_mut() {
-                page.elements.insert(0, element);
-            }
-        } else if let Some(page) = pages.first_mut() {
-            // Foreground anchor images go on the first page only
-            page.elements.push(element);
-        }
-    }
 }
 
 /// Resolve inline image data from input.images by embed_id.
@@ -494,11 +424,12 @@ fn render_page_footnotes(
                 let indent = 12.0; // Indent after marker
                 for line in &pb.lines {
                     let line_baseline = cursor_y + line.ascent;
+                    let mut x = geometry.margin_left + indent;
                     for item in &line.items {
                         if let LineItem::Text(seg) | LineItem::Marker(seg) = item {
                             page.elements.push(PositionedElement::Text(GlyphRun {
                                 origin: Point {
-                                    x: geometry.margin_left + indent,
+                                    x,
                                     y: line_baseline - seg.baseline_offset,
                                 },
                                 font_id: seg.font_id,
@@ -512,6 +443,7 @@ fn render_page_footnotes(
                                 field_kind: None,
                                 footnote_id: None,
                             }));
+                            x += seg.width;
                         }
                     }
                     cursor_y += line.height;
@@ -594,6 +526,20 @@ pub fn layout_paragraph(
 
     // Convert runs to inline items
     let mut inline_items = Vec::new();
+    let mut drop_cap = None;
+    let mut anchored_images = Vec::new();
+    let drop_cap_line_count = effective_ppr
+        .frame_pr
+        .as_ref()
+        .and_then(|frame_pr| frame_pr.drop_cap.as_deref())
+        .filter(|mode| matches!(*mode, "drop" | "margin"))
+        .map(|_| {
+            effective_ppr
+                .frame_pr
+                .as_ref()
+                .and_then(|frame_pr| frame_pr.lines)
+                .unwrap_or(2) as usize
+        });
 
     // Handle numbering marker
     if let (Some(num_id), Some(numbering)) = (effective_ppr.num_id, input.numbering.as_ref()) {
@@ -671,8 +617,12 @@ pub fn layout_paragraph(
         let resolved_rpr =
             style_resolver::resolve_run_properties(para_style_id, run_style_id, styles);
 
-        // Merge direct run properties
+        // Paragraph-level run properties apply to all runs in the paragraph
+        // unless the run overrides them explicitly.
         let mut effective_rpr = resolved_rpr;
+        if let Some(ref para_rpr) = effective_ppr.rpr {
+            effective_rpr.merge_from(para_rpr);
+        }
         if let Some(ref direct_rpr) = run.properties {
             effective_rpr.merge_from(direct_rpr);
         }
@@ -739,6 +689,88 @@ pub fn layout_paragraph(
                         continue;
                     }
 
+                    if drop_cap.is_none()
+                        && let Some(line_count) = drop_cap_line_count
+                    {
+                        let mut chars = text.chars();
+                        if let Some(initial) = chars.next() {
+                            let initial = initial.to_string();
+                            let mut shaped = fm.shape_text(font_id, &initial, font_size)?;
+
+                            if let Some(spacing) = effective_rpr.spacing {
+                                let extra = spacing.to_pt();
+                                for advance in &mut shaped.advances {
+                                    *advance += extra;
+                                }
+                                shaped.width += extra * shaped.advances.len() as f64;
+                            }
+
+                            drop_cap = Some(DropCap {
+                                segment: TextSegment {
+                                    text: initial,
+                                    font_id,
+                                    font_size,
+                                    glyph_ids: shaped.glyph_ids,
+                                    advances: shaped.advances,
+                                    width: shaped.width,
+                                    ascent: metrics.ascent,
+                                    descent: metrics.descent,
+                                    color,
+                                    bold,
+                                    italic,
+                                    underline,
+                                    strike,
+                                    dstrike,
+                                    highlight,
+                                    baseline_offset,
+                                    hyperlink_url: None,
+                                    field_kind: None,
+                                    footnote_id: None,
+                                },
+                                line_count,
+                                padding_right: 4.0,
+                            });
+
+                            let remainder = chars.collect::<String>();
+                            if remainder.is_empty() {
+                                continue;
+                            }
+
+                            let mut shaped = fm.shape_text(font_id, &remainder, font_size)?;
+
+                            if let Some(spacing) = effective_rpr.spacing {
+                                let extra = spacing.to_pt();
+                                for advance in &mut shaped.advances {
+                                    *advance += extra;
+                                }
+                                shaped.width += extra * shaped.advances.len() as f64;
+                            }
+
+                            inline_items.push(InlineItem::Text(TextSegment {
+                                text: remainder,
+                                font_id,
+                                font_size,
+                                glyph_ids: shaped.glyph_ids,
+                                advances: shaped.advances,
+                                width: shaped.width,
+                                ascent: metrics.ascent,
+                                descent: metrics.descent,
+                                color,
+                                bold,
+                                italic,
+                                underline,
+                                strike,
+                                dstrike,
+                                highlight,
+                                baseline_offset,
+                                hyperlink_url: current_hyperlink_url.clone(),
+                                field_kind: None,
+                                footnote_id: None,
+                            }));
+                            continue;
+                        }
+                    }
+
                     let mut shaped = fm.shape_text(font_id, &text, font_size)?;
 
                     // Apply character spacing from run properties (in twips)
@@ -788,6 +820,28 @@ pub fn layout_paragraph(
                             width,
                             height,
                             embed_id: inline.embed_id.clone(),
+                        });
+                    } else if let Some(ref anchor) = drawing.anchor {
+                        let (wrap_left_extent, wrap_right_extent) =
+                            anchored_image_wrap_extents(anchor.embed_id.as_str(), anchor.extent_cx.to_pt(), input);
+                        anchored_images.push(AnchoredImage {
+                            behind_doc: anchor.behind_doc,
+                            width: anchor.extent_cx.to_pt(),
+                            height: anchor.extent_cy.to_pt(),
+                            wrap_left_extent,
+                            wrap_right_extent,
+                            embed_id: anchor.embed_id.clone(),
+                            wrap: anchor.wrap,
+                            dist_top: anchor.dist_t.to_pt(),
+                            dist_bottom: anchor.dist_b.to_pt(),
+                            dist_left: anchor.dist_l.to_pt(),
+                            dist_right: anchor.dist_r.to_pt(),
+                            pos_h_offset: anchor.pos_h_offset.to_pt(),
+                            pos_h_relative_from: anchor.pos_h_relative_from,
+                            pos_h_align: anchor.pos_h_align,
+                            pos_v_offset: anchor.pos_v_offset.to_pt(),
+                            pos_v_relative_from: anchor.pos_v_relative_from,
+                            pos_v_align: anchor.pos_v_align,
                         });
                     }
                 }
@@ -856,6 +910,16 @@ pub fn layout_paragraph(
     }
 
     // Line breaking
+    let mut line_prefix_widths = Vec::new();
+    if let Some(drop_cap) = &drop_cap {
+        if line_prefix_widths.len() < drop_cap.line_count {
+            line_prefix_widths.resize(drop_cap.line_count, 0.0);
+        }
+        for width in line_prefix_widths.iter_mut().take(drop_cap.line_count) {
+            *width += drop_cap.segment.width + drop_cap.padding_right;
+        }
+    }
+
     let line_params = LineBreakParams {
         available_width,
         ind_left,
@@ -866,9 +930,13 @@ pub fn layout_paragraph(
         line_spacing: effective_ppr.line_spacing,
         line_rule: effective_ppr.line_rule,
         jc,
+        line_prefix_widths,
+        line_suffix_widths: Vec::new(),
     };
 
     let lines = line::break_into_lines(&inline_items, &line_params, fm)?;
+    let footnote_reserves =
+        collect_footnote_reserves(&inline_items, available_width, styles, input, fm, num_state);
 
     Ok(block::build_paragraph_block(
         lines,
@@ -883,7 +951,104 @@ pub fn layout_paragraph(
         keep_lines,
         page_break_before,
         widow_control,
+        drop_cap,
+        footnote_reserves,
+        anchored_images,
+        inline_items,
+        line_params,
     ))
+}
+
+fn anchored_image_wrap_extents(embed_id: &str, width: f64, input: &LayoutInput) -> (f64, f64) {
+    const WRAP_ALPHA_THRESHOLD: u8 = 32;
+
+    let Some(image) = input.images.get(embed_id) else {
+        return (width, width);
+    };
+    if image.content_type != "image/png" {
+        return (width, width);
+    }
+    let Ok(reader) = ImageReader::new(std::io::Cursor::new(&image.data)).with_guessed_format() else {
+        return (width, width);
+    };
+    let Ok(decoded) = reader.decode() else {
+        return (width, width);
+    };
+    let rgba = decoded.to_rgba8();
+    let (img_width, img_height) = rgba.dimensions();
+    if img_width == 0 || img_height == 0 {
+        return (width, width);
+    }
+
+    let mut min_x = img_width;
+    let mut max_x = 0;
+    let mut found = false;
+    for y in 0..img_height {
+        for x in 0..img_width {
+            if rgba.get_pixel(x, y)[3] >= WRAP_ALPHA_THRESHOLD {
+                min_x = min_x.min(x);
+                max_x = max_x.max(x + 1);
+                found = true;
+            }
+        }
+    }
+    if !found {
+        return (width, width);
+    }
+
+    let scale = width / img_width as f64;
+    (max_x as f64 * scale, (img_width - min_x) as f64 * scale)
+}
+
+fn collect_footnote_reserves(
+    inline_items: &[InlineItem],
+    available_width: f64,
+    styles: &CT_Styles,
+    input: &LayoutInput,
+    fm: &mut FontManager,
+    num_state: &mut NumberingState,
+) -> Vec<(i32, f64)> {
+    let mut footnote_ids = Vec::new();
+    for item in inline_items {
+        if let InlineItem::Text(seg) | InlineItem::Marker(seg) = item
+            && let Some(footnote_id) = seg.footnote_id
+            && !footnote_ids.contains(&footnote_id)
+        {
+            footnote_ids.push(footnote_id);
+        }
+    }
+
+    let mut reserves = Vec::new();
+    for footnote_id in footnote_ids {
+        let Some(footnote) = input
+            .footnotes
+            .as_ref()
+            .and_then(|footnotes| footnotes.get_by_id(footnote_id))
+            .or_else(|| {
+                input
+                    .endnotes
+                    .as_ref()
+                    .and_then(|endnotes| endnotes.get_by_id(footnote_id))
+            })
+        else {
+            continue;
+        };
+
+        let mut total_height = 0.0;
+        for paragraph in &footnote.paragraphs {
+            if let Ok(block) =
+                layout_paragraph(paragraph, available_width, styles, input, fm, num_state)
+            {
+                total_height += block.content_height();
+            }
+        }
+
+        if total_height > 0.0 {
+            reserves.push((footnote_id, total_height));
+        }
+    }
+
+    reserves
 }
 
 /// Merge direct paragraph properties (only fields explicitly set in the XML).
@@ -936,6 +1101,13 @@ fn merge_direct_ppr(effective: &mut CT_PPr, direct: &CT_PPr) {
     }
     if direct.shading.is_some() {
         effective.shading = direct.shading.clone();
+    }
+    if direct.rpr.is_some() {
+        match (&mut effective.rpr, &direct.rpr) {
+            (Some(current), Some(incoming)) => current.merge_from(incoming),
+            (None, Some(incoming)) => effective.rpr = Some(incoming.clone()),
+            _ => {}
+        }
     }
     if direct.num_id.is_some() {
         effective.num_id = direct.num_id;
