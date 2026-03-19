@@ -528,6 +528,13 @@ impl CT_PPr {
         if other.frame_pr.is_some() {
             self.frame_pr = other.frame_pr.clone();
         }
+        if other.rpr.is_some() {
+            match (&mut self.rpr, &other.rpr) {
+                (Some(current), Some(incoming)) => current.merge_from(incoming),
+                (None, Some(incoming)) => self.rpr = Some(incoming.clone()),
+                _ => {}
+            }
+        }
         if other.num_ilvl.is_some() {
             self.num_ilvl = other.num_ilvl;
         }

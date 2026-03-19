@@ -617,8 +617,12 @@ pub fn layout_paragraph(
         let resolved_rpr =
             style_resolver::resolve_run_properties(para_style_id, run_style_id, styles);
 
-        // Merge direct run properties
+        // Paragraph-level run properties apply to all runs in the paragraph
+        // unless the run overrides them explicitly.
         let mut effective_rpr = resolved_rpr;
+        if let Some(ref para_rpr) = effective_ppr.rpr {
+            effective_rpr.merge_from(para_rpr);
+        }
         if let Some(ref direct_rpr) = run.properties {
             effective_rpr.merge_from(direct_rpr);
         }
@@ -1097,6 +1101,13 @@ fn merge_direct_ppr(effective: &mut CT_PPr, direct: &CT_PPr) {
     }
     if direct.shading.is_some() {
         effective.shading = direct.shading.clone();
+    }
+    if direct.rpr.is_some() {
+        match (&mut effective.rpr, &direct.rpr) {
+            (Some(current), Some(incoming)) => current.merge_from(incoming),
+            (None, Some(incoming)) => effective.rpr = Some(incoming.clone()),
+            _ => {}
+        }
     }
     if direct.num_id.is_some() {
         effective.num_id = direct.num_id;

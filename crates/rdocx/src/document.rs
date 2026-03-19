@@ -2653,6 +2653,7 @@ fn normalize_paragraph_frames(content: &mut Vec<BodyContent>) {
 
         transfer_drop_cap_paragraph(next_paragraph, &drop_cap_paragraph);
         content.remove(index);
+        index += 1;
     }
 }
 
