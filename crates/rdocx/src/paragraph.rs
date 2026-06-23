@@ -415,6 +415,15 @@ impl<'a> ParagraphRef<'a> {
             .map(Alignment::from_st_jc)
     }
 
+    /// Check if this paragraph has a page break before it.
+    pub fn is_page_break_before(&self) -> bool {
+        self.inner
+            .properties
+            .as_ref()
+            .and_then(|ppr| ppr.page_break_before)
+            .unwrap_or(false)
+    }
+
     /// Get an iterator over immutable run references.
     pub fn runs(&self) -> impl Iterator<Item = RunRef<'_>> {
         self.inner.runs.iter().map(|r| RunRef { inner: r })
