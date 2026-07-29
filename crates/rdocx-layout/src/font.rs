@@ -37,6 +37,13 @@ pub struct ShapedText {
     pub glyph_ids: Vec<u16>,
     /// Per-glyph advances in points.
     pub advances: Vec<f64>,
+    /// Byte offset into the shaped text that each glyph came from.
+    ///
+    /// Shaping is not one glyph per character. A ligature turns several
+    /// characters into one glyph, so glyph index and character index drift
+    /// apart. This is the shaper's own mapping back to the source, and it is
+    /// the only reliable way to slice a shaped run.
+    pub clusters: Vec<u32>,
     /// Total width in points.
     pub width: f64,
 }
@@ -545,6 +552,7 @@ impl FontManager {
             return Ok(ShapedText {
                 glyph_ids: Vec::new(),
                 advances: Vec::new(),
+                clusters: Vec::new(),
                 width: 0.0,
             });
         }
@@ -571,10 +579,12 @@ impl FontManager {
 
         let mut glyph_ids = Vec::with_capacity(infos.len());
         let mut advances = Vec::with_capacity(positions.len());
+        let mut clusters = Vec::with_capacity(infos.len());
         let mut total_width = 0.0;
 
         for (info, pos) in infos.iter().zip(positions.iter()) {
             glyph_ids.push(info.glyph_id as u16);
+            clusters.push(info.cluster);
             let advance = pos.x_advance as f64 * scale;
             advances.push(advance);
             total_width += advance;
@@ -583,6 +593,7 @@ impl FontManager {
         Ok(ShapedText {
             glyph_ids,
             advances,
+            clusters,
             width: total_width,
         })
     }
