@@ -1,6 +1,6 @@
 {
   "entries": {
-    "contract:page1.png": "504977f2017680736254709429370708554166410856873fd5c38a1d5283b98a",
+    "contract:page1.png": "5b25f35ca837a7632f201aa91e2441968b763587d4c66923830111b6764e77c9",
     "contract:word/document.xml": "1ecd9138e09122a5980ca80451ddd8f93d4e6d3af8bb80e582dc8cb697277dfe",
     "contract:word/numbering.xml": "01d6cb0aa0ecc30b3d2a77c4df062b1c727d70ff9cbc0824910f049daf878a26",
     "contract:word/styles.xml": "0dc0b047b6019b798b83bfe4d66eb91d14b03caea3f6bdb0934d48fbb863fba4",
@@ -8,11 +8,11 @@
     "feature_showcase:word/document.xml": "b5c4efbb49263060558242bad0cca79d4b03a43b62d72feed66789b4926b44f5",
     "feature_showcase:word/numbering.xml": "2aa0599486d98573be0b7febb04ec63c08d3dfc5341b0f722b93cae113803bbc",
     "feature_showcase:word/styles.xml": "b815acd04cc89189d5b2b0caf822435d941c8cc70077f34932e4a2b3ce1b6595",
-    "invoice:page1.png": "7693aab43aaf6971edc2b0fab6b50e978db1192c18811a8e2649113339348d49",
+    "invoice:page1.png": "850572f788d246ac8beceec0a68ac5da63d4904327315a712140cea977fe1bcd",
     "invoice:word/document.xml": "bb2d71711f6a613044dfabc166ae340354345666a98687e02df815efa220c655",
     "invoice:word/numbering.xml": null,
     "invoice:word/styles.xml": "0dc0b047b6019b798b83bfe4d66eb91d14b03caea3f6bdb0934d48fbb863fba4",
-    "letter:page1.png": "d3a00cf6c37a1eb6c1897e36b062c10e8b0fdc8c2a6f26c1034026f83578d1c0",
+    "letter:page1.png": "79b23d965cd43bbdbb3cf2128df8f51b5d2d53d4a8934aaa34ed00b2aef8821e",
     "letter:word/document.xml": "54f74a133887b1b93da1070517f9d7f687dbdc27b1307f1696c4b41f66d5fc05",
     "letter:word/numbering.xml": "c6511604704117eb00ad2faffb9173e4f48d22f62557ca72a51d60b7907c8058",
     "letter:word/styles.xml": "0dc0b047b6019b798b83bfe4d66eb91d14b03caea3f6bdb0934d48fbb863fba4",
@@ -20,14 +20,14 @@
     "proposal:word/document.xml": "1f8222a2d0785f6cc33b868274aaf53796ccbcea254f62b102dc51cc075dee6b",
     "proposal:word/numbering.xml": "061e20beb3409ce0f3feda1a99793956124a2967dd23afe1b528dd8fdeb82182",
     "proposal:word/styles.xml": "dae1d6c1083bba6bb4b29ba2ab748a713f5da60b8c2cd4d52224c6f0a8f21bef",
-    "quote:page1.png": "6f69877633a4d09e80cb9172ba8f2d4d220cf7776260fcaa21c5be84362be103",
+    "quote:page1.png": "e969347efaf9973367195736ed1eeeec2f61e600bd5c55363ea6ef398569e01b",
     "quote:word/document.xml": "dd3b7c8bae85d8e22a8c08f12fc4a1ec4829b00a84fbe8cf13f9204213b4cf68",
     "quote:word/numbering.xml": "c6511604704117eb00ad2faffb9173e4f48d22f62557ca72a51d60b7907c8058",
     "quote:word/styles.xml": "0dc0b047b6019b798b83bfe4d66eb91d14b03caea3f6bdb0934d48fbb863fba4",
-    "report:page1.png": "9bfaa63b0b14482ad765d9e6528077e96e574a037e701e3d60ea32bdd96d7d32",
+    "report:page1.png": "792f1fdc032c7ec1b6a3e451aa7f94fc45e8ea810d12b9815ced82d2fa7fbd82",
     "report:word/document.xml": "5a834b2ebe01156c082f25ea05483c135d3718beae7d80b2224e0a02f9b93365",
     "report:word/numbering.xml": "2aa0599486d98573be0b7febb04ec63c08d3dfc5341b0f722b93cae113803bbc",
     "report:word/styles.xml": "0dc0b047b6019b798b83bfe4d66eb91d14b03caea3f6bdb0934d48fbb863fba4"
   },
-  "reason": "List levels now apply their own w:pPr indent (#13), so page-one PNGs for letter and contract shift. Verified by rendering both before and after: the only visual change is list markers moving to their level indent with correct hanging indent. No other content moved."
+  "reason": "Glyphs are now selected by shaper cluster instead of a proportional guess (#23), so neighbouring chunks no longer overlap and letters are no longer drawn twice. Page-one PNGs change for letter, contract, invoice, quote and report. Verified by rendering letter and invoice before and after: doubled letters such as SSuite, fifinancial and 778701 are gone and nothing else moved."
 }
