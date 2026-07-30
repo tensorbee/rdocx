@@ -132,5 +132,8 @@ consuming builders for formatting so calls chain, `&mut self` methods for adding
 content that return a nested handle, and index-based `Option`-returning
 accessors that never panic.
 
-From M1 onward every consuming builder also has a non-consuming `set_*` twin,
-because a `mut self -> Self` builder cannot back a Python property setter.
+Every consuming formatting builder on `Paragraph`, `Run`, `Table`, `Row`, and
+`Cell` has a non-consuming `set_*` twin because a `mut self -> Self` builder
+cannot back a Python property setter. The 61 consuming builders delegate to
+their setter twins, so Rust callers retain chaining while borrowed handles and
+Python properties use in-place mutation.

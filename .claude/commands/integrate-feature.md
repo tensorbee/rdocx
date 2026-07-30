@@ -104,6 +104,8 @@ push to the end of the sprint run.
 - **Auto-resolving a semantic conflict.** Two plausible merges of a parser and
   a renderer produce a file that compiles and renders the wrong thing.
 - **Deleting the worker branch or worktree.** Report both as retained cleanup
-  targets. The human removes them once they have confirmed the integration.
+  targets. `/close-sprint` removes them after the integrated sprint passes its
+  gates and is pushed.
 - **Pushing in `--batch`.**
-- **Merging to `main` or tagging.** Only `/close-sprint` does that.
+- **Merging to `main` or tagging.** `/close-sprint` owns `main` and sprint
+  tags. `/release` owns release tags.

@@ -48,25 +48,46 @@ pub struct Table<'a> {
 impl<'a> Table<'a> {
     /// Set the table style by ID.
     pub fn style(mut self, style_id: &str) -> Self {
-        self.ensure_tbl_pr().style_id = Some(style_id.to_string());
+        self.set_style(style_id);
         self
+    }
+
+    /// Set the table style by ID in place.
+    pub fn set_style(&mut self, style_id: &str) {
+        self.ensure_tbl_pr().style_id = Some(style_id.to_string());
     }
 
     /// Set the table width in twips (dxa).
     pub fn width(mut self, length: Length) -> Self {
-        self.ensure_tbl_pr().width = Some(CT_TblWidth::dxa(length.as_twips().0));
+        self.set_width(length);
         self
+    }
+
+    /// Set the table width in place.
+    pub fn set_width(&mut self, length: Length) {
+        self.ensure_tbl_pr().width = Some(CT_TblWidth::dxa(length.as_twips().0));
     }
 
     /// Set the table width as a percentage (0–100).
     pub fn width_pct(mut self, percent: f64) -> Self {
+        self.set_width_pct(percent);
+        self
+    }
+
+    /// Set the table width as a percentage in place.
+    pub fn set_width_pct(&mut self, percent: f64) {
         // OOXML uses 50ths of a percent
         self.ensure_tbl_pr().width = Some(CT_TblWidth::pct((percent * 50.0) as i32));
-        self
     }
 
     /// Set table alignment.
     pub fn alignment(mut self, jc: crate::paragraph::Alignment) -> Self {
+        self.set_alignment(jc);
+        self
+    }
+
+    /// Set table alignment in place.
+    pub fn set_alignment(&mut self, jc: crate::paragraph::Alignment) {
         use crate::paragraph::Alignment;
         let st_jc = match jc {
             Alignment::Left => ST_Jc::Left,
@@ -75,11 +96,16 @@ impl<'a> Table<'a> {
             Alignment::Justify => ST_Jc::Both,
         };
         self.ensure_tbl_pr().jc = Some(st_jc);
-        self
     }
 
     /// Set borders on all edges and internal gridlines.
     pub fn borders(mut self, style: crate::BorderStyle, size_eighths_pt: u32, color: &str) -> Self {
+        self.set_borders(style, size_eighths_pt, color);
+        self
+    }
+
+    /// Set borders on all edges and internal gridlines in place.
+    pub fn set_borders(&mut self, style: crate::BorderStyle, size_eighths_pt: u32, color: &str) {
         let edge = CT_BorderEdge {
             val: style.to_st(),
             sz: Some(size_eighths_pt),
@@ -94,7 +120,6 @@ impl<'a> Table<'a> {
             inside_h: Some(edge.clone()),
             inside_v: Some(edge),
         });
-        self
     }
 
     /// Set default cell margins.
@@ -105,19 +130,29 @@ impl<'a> Table<'a> {
         bottom: Length,
         left: Length,
     ) -> Self {
+        self.set_cell_margins(top, right, bottom, left);
+        self
+    }
+
+    /// Set default cell margins in place.
+    pub fn set_cell_margins(&mut self, top: Length, right: Length, bottom: Length, left: Length) {
         self.ensure_tbl_pr().cell_margin = Some(CT_TblCellMar {
             top: Some(top.as_twips()),
             right: Some(right.as_twips()),
             bottom: Some(bottom.as_twips()),
             left: Some(left.as_twips()),
         });
-        self
     }
 
     /// Set the table layout to fixed or auto.
     pub fn layout_fixed(mut self) -> Self {
-        self.ensure_tbl_pr().layout = Some("fixed".to_string());
+        self.set_layout_fixed();
         self
+    }
+
+    /// Set the table layout to fixed in place.
+    pub fn set_layout_fixed(&mut self) {
+        self.ensure_tbl_pr().layout = Some("fixed".to_string());
     }
 
     /// Get the number of rows.
@@ -154,30 +189,50 @@ pub struct Row<'a> {
 impl<'a> Row<'a> {
     /// Set the row height.
     pub fn height(mut self, length: Length) -> Self {
+        self.set_height(length);
+        self
+    }
+
+    /// Set the row height in place.
+    pub fn set_height(&mut self, length: Length) {
         let pr = self.ensure_tr_pr();
         pr.height = Some(length.as_twips());
         pr.height_rule = Some("atLeast".to_string());
-        self
     }
 
     /// Set exact row height.
     pub fn height_exact(mut self, length: Length) -> Self {
+        self.set_height_exact(length);
+        self
+    }
+
+    /// Set exact row height in place.
+    pub fn set_height_exact(&mut self, length: Length) {
         let pr = self.ensure_tr_pr();
         pr.height = Some(length.as_twips());
         pr.height_rule = Some("exact".to_string());
-        self
     }
 
     /// Mark this row as a header row (repeats on each page).
     pub fn header(mut self) -> Self {
-        self.ensure_tr_pr().header = Some(true);
+        self.set_header();
         self
+    }
+
+    /// Mark this row as a header row in place.
+    pub fn set_header(&mut self) {
+        self.ensure_tr_pr().header = Some(true);
     }
 
     /// Prevent this row from splitting across pages.
     pub fn cant_split(mut self) -> Self {
-        self.ensure_tr_pr().cant_split = Some(true);
+        self.set_cant_split();
         self
+    }
+
+    /// Prevent this row from splitting across pages in place.
+    pub fn set_cant_split(&mut self) {
+        self.ensure_tr_pr().cant_split = Some(true);
     }
 
     /// Get a mutable reference to a cell by index.
@@ -300,48 +355,83 @@ impl<'a> Cell<'a> {
 
     /// Set cell width.
     pub fn width(mut self, length: Length) -> Self {
-        self.ensure_tc_pr().width = Some(CT_TblWidth::dxa(length.as_twips().0));
+        self.set_width(length);
         self
+    }
+
+    /// Set cell width in place.
+    pub fn set_width(&mut self, length: Length) {
+        self.ensure_tc_pr().width = Some(CT_TblWidth::dxa(length.as_twips().0));
     }
 
     /// Set cell background shading color.
     pub fn shading(mut self, fill_color: &str) -> Self {
+        self.set_shading(fill_color);
+        self
+    }
+
+    /// Set cell background shading color in place.
+    pub fn set_shading(&mut self, fill_color: &str) {
         self.ensure_tc_pr().shading = Some(CT_Shd {
             val: "clear".to_string(),
             color: Some("auto".to_string()),
             fill: Some(fill_color.to_string()),
         });
-        self
     }
 
     /// Set vertical alignment within the cell.
     pub fn vertical_alignment(mut self, align: VerticalAlignment) -> Self {
-        self.ensure_tc_pr().v_align = Some(align.to_st());
+        self.set_vertical_alignment(align);
         self
+    }
+
+    /// Set vertical alignment within the cell in place.
+    pub fn set_vertical_alignment(&mut self, align: VerticalAlignment) {
+        self.ensure_tc_pr().v_align = Some(align.to_st());
     }
 
     /// Set horizontal merge (gridSpan). This cell spans `span` columns.
     pub fn grid_span(mut self, span: u32) -> Self {
-        self.ensure_tc_pr().grid_span = Some(span);
+        self.set_grid_span(span);
         self
+    }
+
+    /// Set horizontal merge span in place.
+    pub fn set_grid_span(&mut self, span: u32) {
+        self.ensure_tc_pr().grid_span = Some(span);
     }
 
     /// Start a vertical merge group (this cell is the top of the merged range).
     pub fn v_merge_restart(mut self) -> Self {
-        self.ensure_tc_pr().v_merge = Some(VMerge::Restart);
+        self.set_v_merge_restart();
         self
+    }
+
+    /// Start a vertical merge group in place.
+    pub fn set_v_merge_restart(&mut self) {
+        self.ensure_tc_pr().v_merge = Some(VMerge::Restart);
     }
 
     /// Continue a vertical merge group (this cell merges with the one above).
     pub fn v_merge_continue(mut self) -> Self {
-        self.ensure_tc_pr().v_merge = Some(VMerge::Continue);
+        self.set_v_merge_continue();
         self
+    }
+
+    /// Continue a vertical merge group in place.
+    pub fn set_v_merge_continue(&mut self) {
+        self.ensure_tc_pr().v_merge = Some(VMerge::Continue);
     }
 
     /// Set no-wrap for text in this cell.
     pub fn no_wrap(mut self) -> Self {
-        self.ensure_tc_pr().no_wrap = Some(true);
+        self.set_no_wrap();
         self
+    }
+
+    /// Set no-wrap for text in this cell in place.
+    pub fn set_no_wrap(&mut self) {
+        self.ensure_tc_pr().no_wrap = Some(true);
     }
 
     /// Add a nested table inside this cell.

@@ -107,22 +107,33 @@ oxml-core -> oxml-opc -> oxml-media -> oxml-drawing -> oxml-layout -> oxml-pdf
   -> rpptx-oxml -> rpptx-layout -> rpptx-render -> rpptx-chart -> rpptx -> rpptx-cli
 ```
 
-`publish.yml` currently sleeps 60 seconds between each of seven crates, which is
-six minutes of unconditional waiting that is **still racy**. At twenty crates it
-is twenty minutes. Replace with `cargo publish --workspace`, which handles
-ordering and index propagation and is available at the pinned toolchain.
+The fourteen future crates.io names in this graph are reserved at version
+0.0.0 under the owner `mantissaman`: `oxml-core`, `oxml-opc`, `oxml-media`,
+`oxml-drawing`, `oxml-layout`, `oxml-pdf`, `oxml-sml`, `oxml-cli-support`,
+`rpptx-oxml`, `rpptx-layout`, `rpptx-render`, `rpptx-chart`, `rpptx`, and
+`rpptx-cli`. Each placeholder is dependency-free and exposes no usable API.
 
-Also narrow `|| echo "already published"`. It currently swallows authentication
-failures, network errors and genuine compile errors identically to a real
-duplicate. Match on the actual "already exists" message and re-raise everything
-else.
+`oxml-py-support`, `rpptx-py`, and `rpptx-wasm` are not reserved on crates.io.
+The binding crates are not published there, and the WASM packages use the npm
+publication path.
+
+`publish.yml` explicitly publishes the seven released rdocx packages in
+dependency order. It does not use workspace-wide publication. Archive
+verification is not skipped. Authentication, network, compilation and
+duplicate-version failures all fail the job instead of being relabelled as
+success.
+
+The `oxml-*` and `rpptx*` placeholders remain at 0.0.0 until PowerPoint
+development is complete. A normal `v*` release must not publish a later version
+of any package in those families. Their eventual publication requires its own
+reviewed release plan and explicit approval.
 
 Two tag namespaces:
 
 | Tag | Workflow | Publishes |
 |---|---|---|
 | `v*` | `publish.yml` | crates.io, the lockstep family |
-| `rpptx-v*` | `publish.yml` | crates.io, the incubating family |
+| `rpptx-v*` | none until development is complete | no publication |
 | `py-v*` | `wheels.yml` | PyPI via OIDC trusted publishing |
 
 Wheels are separate so a Rust patch release does not rebuild twelve wheels, and
@@ -130,35 +141,23 @@ a binding-only fix does not force a crates.io release.
 
 ## Release process
 
-`scripts/release.sh` is deleted. It is BSD-`sed` only, its version replacement
-is an unanchored global substitution, and its README rewrite globally replaces
-the bare string `"0.2"` across the whole file, silently corrupting anything else
-that happens to be quoted that way.
+The unsafe `scripts/release.sh` is deleted. Version changes are targeted F-ID
+edits to `[workspace.package]`, the internal pins in
+`[workspace.dependencies]`, and `Cargo.lock`. They are reviewed before a tag is
+possible and never rewrite README prose by pattern.
 
-`cargo-release` replaces it:
+`/release vX.Y.Z` is the only command allowed to create or push a `v*` release
+tag or start crates.io publication. It requires a clean sprint branch, a full
+verification and clean sprint review recorded at the exact HEAD, passing
+package dry-runs, an absent local and remote tag, and a separate final approval
+immediately before the push. `/close-sprint` remains the only command allowed
+to merge `main` or create an `sNN` tag.
 
-```toml
-# release.toml
-consolidate-commits = true
-pre-release-commit-message = "Release v{{version}}"
-tag-name = "v{{version}}"
-tag = true
-push = true
-publish = false          # publishing is publish.yml's job, on the tag
-```
-
-```toml
-# crates/rpptx*/Cargo.toml, during incubation
-[package.metadata.release]
-shared-version = false
-tag-name = "rpptx-v{{version}}"
-```
-
-```bash
-cargo release 0.3.0 --workspace --exclude rpptx --exclude rpptx-oxml \
-                    --exclude rpptx-layout --exclude rpptx-render --exclude rpptx-chart --execute
-cargo release 0.1.4 -p rpptx-oxml -p rpptx-layout -p rpptx-render -p rpptx --execute
-```
+The tag starts `publish.yml`. Its Linux runner reproduces the deterministic hash
+baseline before crates.io publication begins. Publication succeeds only after
+all seven current crates and the GitHub release are externally verified.
+`rdocx-wasm` inherits the workspace version but stays `publish = false` because
+its distribution path is npm.
 
 The Python package version tracks the Rust train through a
 `pre-release-replacements` entry so the wheel version and the crate version

@@ -58,8 +58,11 @@ that has to come first. The rules that make it safe:
 - **Never resolve a semantic conflict automatically.** Reconcile against both
   approved design plans, then re-review.
 
-Worker branches and worktrees are **retained** after integration. The human
-removes them once they have confirmed the result.
+Worker branches and worktrees are **retained** through integration, full
+verification and sprint review. After `/close-sprint` has merged and pushed
+both `main` and the sprint tag, it removes the clean worktrees and local
+branches for completed workers recorded in the sprint state. It never removes
+an uncommitted worktree, a carried worker or an unrelated worktree.
 
 ## The command surface
 
@@ -80,7 +83,8 @@ reading it.
 | `/run-sprint` | The whole sprint, design through review loop | yes |
 | `/sync-sprint` | Open a sprint, create its branch | no |
 | `/sprint-review` | Review the integrated sprint delta | no |
-| `/close-sprint` | **The only command that merges to `main` or tags** | no |
+| `/release` | **The only command that creates `v*` release tags or starts publication** | no |
+| `/close-sprint` | **The only command that merges to `main` or creates `sNN` tags** | no |
 | `/sync-status` | Audit the trackers against each other | `--fix` only |
 | `/audit-spec` | Audit the spec set against the code | no |
 | `/realign-docs` | Repair accumulated documentation drift | no |
@@ -221,18 +225,23 @@ the active sprint branch, never directly on `main`.
 
 Parallel work adds `work/<fid-lower>-<agent>` branches, cut from the sprint
 branch head at claim time and squashed back by `/integrate-feature`. They are
-retained after integration, and never pushed unless asked.
+retained until `/close-sprint` has pushed the integrated sprint, then removed
+locally. They are never pushed unless asked.
 
 - `/sync-sprint SNN` creates the branch off the latest `main`.
 - `/claim-feature` cuts a worker branch from the sprint branch head.
 - `/complete-feature` commits to the sprint branch.
 - `/integrate-feature` squashes a worker branch onto the sprint branch.
+- `/release vX.Y.Z` tags an already reviewed sprint SHA and starts publication.
 - `/close-sprint SNN --next SMM` validates readiness, merges to `main` with an
-  explicit merge commit, creates the annotated `sNN` tag, pushes both, then runs
-  `/sync-sprint` for the next sprint.
+  explicit merge commit, creates the annotated `sNN` tag, pushes both, removes
+  completed worker worktrees and local branches, then runs `/sync-sprint` for
+  the next sprint.
 
-**Only `/close-sprint` may touch `main` or create a tag.** No other command
-merges or tags, and none does so implicitly.
+Only `/close-sprint` may touch `main` or create an `sNN` sprint tag. Only
+`/release` may create or push a `v*` release tag or start crates.io
+publication. `/spec-bump` may create a local `spec-v*` tag but never pushes it.
+No command crosses those namespaces implicitly.
 
 Commit message format, set by `/complete-feature`:
 

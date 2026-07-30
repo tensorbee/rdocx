@@ -117,6 +117,22 @@ Report the branch, the head sha, and the exact integration command:
 /integrate-feature F-XXX work/<fid-lower>-<agent>
 ```
 
+### Release preparation
+
+A release F-ID whose gate requires real publication has one narrow exception.
+Its worker may prepare the reviewed release machinery before the irreversible
+approval and publication checklist items are complete. All implementation
+items, workflow tests, `/verify`, the hash harness and `/microscope` must still
+pass. Leave the plan `approved`, record the handoff test gate as
+`deferred to /release vX.Y.Z`, and integrate it in batch as `reviewed` rather
+than `completed`.
+
+After the integrated sprint passes `/verify --full` and `/sprint-review`,
+`/release` obtains the separate final approval and proves the external gate.
+Only then tick the remaining checklist items, set the plan to completed and
+write the delivery ledgers. This exception does not apply to a dry-run-only
+test gate or to any non-release F-ID.
+
 ## Refused situations
 
 - **Any precondition in step 1 fails.** Name it and stop.
@@ -133,3 +149,5 @@ Report the branch, the head sha, and the exact integration command:
   worker branch. Run the normal command instead.
 - **A `--prepare` handoff that records a `--fast` verify.** `--fast` is the
   inner loop. `validate-handoff` refuses it, and so should you.
+- **Using release preparation to claim publication succeeded.** The F-ID stays
+  reviewed until `/release` verifies the registry and GitHub release.

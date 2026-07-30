@@ -28,7 +28,7 @@ plan or lowers the `/verify` floor.
 | A new feature flag or a change to `default` | `CLAUDE.md` structural rules | A named consumer that exists today. `cargo test -p oxml-layout --no-default-features` is the only thing exercising bundled fonts being off |
 | A new trait, generic parameter, crate, module or file | `CLAUDE.md` structural rules | Name the second implementer or the second instantiation that exists **today**. A new crate, module or file needs an explicit ask first |
 | An external oracle comparison | `.claude/skills/differential-testing.md` | Pin the oracle version and record it. An unpinned oracle turns its upgrade into your regression |
-| Release scripting, version strings | `scripts/release.sh` | The script globally replaces the bare string `"0.2"` across the README. Check what it actually rewrote before tagging |
+| Release scripting, version strings | `.claude/commands/release.md`, `docs/hld/15-build-and-toolchain.md` | Inspect every manifest, lockfile and README version diff. Require a clean full gate and a separate final approval before tagging |
 | A file move or rename with no behaviour change | `.claude/WORKFLOW.md`, the hash harness section | The harness must be byte-identical across the move. Never fold a behaviour change into a file move |
 
 ## Recording the result

@@ -52,7 +52,7 @@ both of which alter output silently. Without a byte-level baseline, every later
 step is unverifiable.
 
 **End-of-milestone gate**: `cargo test --workspace` green, the hash harness
-records a baseline that reproduces on a second machine, and `v0.3.1` is tagged.
+records a baseline that reproduces on a second machine, and `v0.4.1` is tagged.
 
 ### F-001, Deterministic font mode (M)
 Add `FontManager::new_deterministic()` using bundled fonts only, bypassing
@@ -100,12 +100,15 @@ with its metadata intact.
 ### F-008, Non-consuming setter twins (M)
 Add `set_*` siblings for every consuming builder in `paragraph.rs`, `run.rs`,
 `table.rs`, with the builders delegating.
-**Test gate**: `doc.paragraph_mut(0).unwrap().set_bold(true)` compiles and has the
-same effect as the builder form.
+**Test gate**:
+`doc.paragraph_mut(0).unwrap().add_run("text").set_bold(true)` compiles and has
+the same effect as the builder form.
 
 ### F-009, Cache the layout result (M)
-`RefCell<Option<Rc<LayoutResult>>>` on `Document`, invalidated on mutation, plus
-a `layout_page` entry point. `render_page_to_png` is currently O(n squared).
+Separate `Mutex<Option<Arc<LayoutResult>>>` caches for normal and deterministic
+font modes on `Document`, invalidated before public mutation and mutable access,
+plus a cloned `layout_page` entry point. Caller-supplied font layouts remain
+uncached.
 **Test gate**: rendering all pages of a 20-page document performs exactly one
 layout, asserted with a counter.
 
@@ -118,9 +121,9 @@ Tests locking the current `as i64` truncation in every `Length`, `Twips` and
 `Emu` constructor, before anyone changes it to rounding.
 **Test gate**: the pinning tests, which must fail if truncation becomes rounding.
 
-### F-012, Tag v0.3.1 (S)
+### F-012, Tag v0.4.1 (S)
 A known-good published state immediately before the churn.
-**Depends on**: F-003 through F-009.
+**Depends on**: F-003 through F-011.
 **Test gate**: the release tag builds and publishes from a clean clone.
 
 ---
@@ -384,14 +387,14 @@ the `.crate` sizes are under the limit.
 **Test gate**: `cargo package --list` contains every TTF and the licence files,
 and the archive is under 10 MiB.
 
-### F-048, Replace release.sh with cargo-release (M)
-Delete the script. Add `release.toml` with the two tag namespaces.
+### F-048, Automate split-family release preparation (M)
+Add `cargo-release` preparation for the stable and incubating tag namespaces.
 **Test gate**: a dry-run bump of the workspace version updates
 `[workspace.package]` and every `[workspace.dependencies]` pin, and touches no
 README prose.
 
-### F-049, Rework publish.yml (M)
-`cargo publish --workspace`, narrowed error swallowing, both tag namespaces.
+### F-049, Extend publish.yml to the extracted workspace (M)
+Publish the expanded dependency graph and support both release tag namespaces.
 **Depends on**: F-048.
 **Test gate**: a dry-run publish of the full workspace succeeds in dependency
 order.

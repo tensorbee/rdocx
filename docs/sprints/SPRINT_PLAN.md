@@ -46,7 +46,7 @@ known-good published state is tagged immediately before the extraction begins.
 | F-009 | Cache the layout result                      | M |
 | F-010 | Reserve crate names                          | S |
 | F-011 | Pin unit truncation behaviour                | S |
-| F-012 | Tag v0.3.1                                   | S |
+| F-012 | Tag v0.4.1                                   | S |
 
 F-008 is required by M13 and improves the Rust API independently. F-011 must
 land before anyone is tempted to change truncation to rounding.

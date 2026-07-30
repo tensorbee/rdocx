@@ -7,6 +7,8 @@ use crate::error::{OpcError, Result};
 
 /// Well-known OOXML relationship types.
 pub mod rel_types {
+    pub const CORE_PROPERTIES: &str =
+        "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties";
     pub const DOCUMENT: &str =
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument";
     pub const STYLES: &str =

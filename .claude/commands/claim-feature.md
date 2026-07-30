@@ -86,6 +86,8 @@ exact command the worker runs first:
 - **Unrelated dirt in the tree.** The design-plan exception is the only one.
 - **An unapproved or draft design plan.** Run `/design F-XXX` to completion.
 - **Reusing an existing branch or worktree.** A stale worktree from a previous
-  attempt is removed by the human, deliberately, after they have looked at it.
+  attempt is not reused. Completed workers are removed by `/close-sprint` after
+  the integrated sprint is pushed. Any other stale worker requires an explicit
+  recovery decision.
 - **Claiming an F-ID whose dependencies are not `done`.** `/design` already
   refused that. If the state changed since, stop.

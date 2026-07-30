@@ -69,9 +69,9 @@ Refuse unless stage 1 has just run clean against the current HEAD.
 
 - `v0.x` while the set is pre-v1. A major bump signals a scope change, a minor
   bump signals revisions.
-- The spec version is **not** the crate version. `rdocx` is at 0.2.0 on
-  crates.io and moves on its own schedule. `scripts/release.sh` owns that, and
-  it has a known defect worth reading before you touch it.
+- The spec version is **not** the crate version. The Rust crates move on their
+  own schedule through `/release`, after a version F-ID prepares and verifies
+  the exact release commit.
 - After the workspace reaches v1, follow semver on the set: patch for
   clarifications, minor for additive scope, major for a breaking change to a
   documented contract.

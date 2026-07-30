@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -11,6 +12,77 @@ from scripts import sprint_workflow as workflow
 
 
 class SprintWorkflowTests(unittest.TestCase):
+    def test_workspace_release_versions_move_in_lockstep(self) -> None:
+        root = tomllib.loads((workflow.REPO / "Cargo.toml").read_text(encoding="utf-8"))
+        workspace = root["workspace"]
+        version = workspace["package"]["version"]
+
+        for name in (
+            "rdocx-opc",
+            "rdocx-oxml",
+            "rdocx",
+            "rdocx-layout",
+            "rdocx-pdf",
+            "rdocx-html",
+        ):
+            self.assertEqual(workspace["dependencies"][name]["version"], version)
+
+        wasm = tomllib.loads(
+            (workflow.REPO / "crates/rdocx-wasm/Cargo.toml").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(wasm["package"]["version"], {"workspace": True})
+        self.assertFalse(wasm["package"]["publish"])
+
+    def test_release_command_is_the_only_release_tag_authority(self) -> None:
+        release = (workflow.REPO / ".claude/commands/release.md").read_text(
+            encoding="utf-8"
+        )
+        run_sprint = (workflow.REPO / ".claude/commands/run-sprint.md").read_text(
+            encoding="utf-8"
+        )
+        close_sprint = (workflow.REPO / ".claude/commands/close-sprint.md").read_text(
+            encoding="utf-8"
+        )
+        complete_feature = (
+            workflow.REPO / ".claude/commands/complete-feature.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("only command", release)
+        self.assertIn("v*", release)
+        self.assertIn("/release", run_sprint)
+        self.assertIn("Leave it\n`reviewed`", run_sprint)
+        self.assertIn("/release", close_sprint)
+        self.assertIn("deferred to /release", complete_feature)
+
+    def test_publish_workflow_verifies_and_propagates_failures(self) -> None:
+        publish = (workflow.REPO / ".github/workflows/publish.yml").read_text(
+            encoding="utf-8"
+        )
+
+        release_crates = (
+            "rdocx-opc",
+            "rdocx-oxml",
+            "rdocx-layout",
+            "rdocx-html",
+            "rdocx-pdf",
+            "rdocx",
+            "rdocx-cli",
+        )
+        for crate_name in release_crates:
+            self.assertEqual(publish.count(f"cargo publish -p {crate_name}\n"), 1)
+
+        self.assertNotIn("cargo publish --workspace", publish)
+        self.assertNotIn("cargo publish -p oxml-", publish)
+        self.assertNotIn("cargo publish -p rpptx", publish)
+        self.assertLess(
+            publish.index("python3 scripts/hash_harness.py --check"),
+            publish.index("cargo publish -p rdocx-opc"),
+        )
+        self.assertNotIn("--no-verify", publish)
+        self.assertNotIn("|| echo", publish)
+
     def test_review_and_verification_evidence_is_bound_to_head(self) -> None:
         data = {
             "reviews": [{"pass": 4, "blocking": 0, "head": "current"}],

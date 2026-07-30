@@ -84,9 +84,14 @@ truth for what must pass.
   `/integrate-feature`. `/run-sprint` drives all of it for a whole sprint.
 - Sprint branches are `sprint/sNN` off `main`. Worker branches are
   `work/<fid-lower>-<agent>`.
+- Worker branches and worktrees remain available through sprint verification
+  and review. `/close-sprint` removes clean completed workers after pushing
+  `main` and the sprint tag.
 - **Editing a command or skill means regenerating `.agents/skills/`.** `/verify`
   fails on drift.
-- **Only `/close-sprint` may merge to `main` or create a tag.**
+- **Only `/close-sprint` may merge to `main` or create an `sNN` sprint tag.**
+- **Only `/release` may create or push a `v*` release tag or start crates.io
+  publication.** It requires a separate final approval at the reviewed SHA.
 - The design plan is a machine-consumed contract. Its `## HLD impact` section is
   a file list that `/complete-feature` executes against, which is what keeps the
   spec set from rotting.
@@ -164,5 +169,3 @@ Each has a story in M1. Do not rediscover them:
 - `crates/rdocx-wasm`'s `to_docx_bytes` rebuilds a minimal package, silently
   discarding every part except `document.xml` and `styles.xml`.
 - `Document::render_page_to_png` re-lays out the whole document per call.
-- `scripts/release.sh` globally replaces the bare string `"0.2"` across the
-  README.

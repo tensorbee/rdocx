@@ -122,7 +122,8 @@ cover the cases that matter now.
 - New unit round-trips: `Centipoints::from_pt(18.0).0 == 1800`,
   `Angle::from_degrees(90.0).0 == 5_400_000`,
   `Percent1000::from_percent(75.0).to_fraction() == 0.75`.
-- **Truncation-pinning tests**, written before anyone touches the conversions.
+- Existing `Length`, `Twips` and `Emu` constructors have positive and negative
+  truncation-pinning tests that move with the units into `oxml-core`.
 - `xml_text` becomes public API, so add CDATA, mixed content, nested elements,
   unknown entities, and the `GeneralRef` split case.
 - `AppProperties` parses a Word `app.xml` **and** a PowerPoint one, leaving the

@@ -225,3 +225,198 @@ new trailing-data regression.
 
 **Notes for future sessions.** SOF still has to appear before EOI. Trailing
 bytes after a completed JPEG cannot supply dimensions.
+
+### F-007, Resolve core properties through the relationship
+
+**Sprint.** S02
+**Completed.** 2026-07-30
+**Size.** S, estimated 1 day, actual 1 day
+
+**What was built.** Document metadata now resolves through the package-level
+core-properties relationship, preserves a custom part target across load and
+save, and creates the conventional target only when the relationship is
+missing. `rdocx-opc` exposes the standard relationship type publicly.
+
+**Non-obvious choices.** The facade retains a private copy of the stable
+relationship URI so the `rdocx 0.3.0` package can still verify against the
+published `rdocx-opc 0.3.0` dependency before both move to 0.4.1.
+
+**Deviations from the design plan.** The full packaging gate exposed the
+published-dependency compatibility issue after workspace tests passed. An
+independent microscope pass approved the private URI because both integration
+gates cross-check it against the public constant.
+
+**Spec sections touched.** `docs/hld/04-opc-and-packaging.md`, "Relationship
+types" and "Part naming".
+
+**Tests.** `core_properties_at_relationship_target_round_trip_in_place`,
+`metadata_round_trip`, focused rdocx and OPC suites, and the clean package
+dry-run.
+
+**Hash harness.** Unchanged. All 28 integrated entries match.
+
+**Notes for future sessions.** A non-standard target is authoritative. Saving
+must not create an orphaned `/docProps/core.xml` part.
+
+### F-008, Non-consuming setter twins
+
+**Sprint.** S02
+**Completed.** 2026-07-30
+**Size.** M, estimated 2 days, actual 1 day
+
+**What was built.** All 61 consuming builders across `Paragraph`, `Run`,
+`Table`, `Row`, and `Cell` now delegate to non-consuming `set_*` twins.
+
+**Non-obvious choices.** Action builders receive literal `set_*` names as the
+story required. Existing builder names and chaining behavior remain unchanged.
+
+**Deviations from the design plan.** The backlog's paragraph-level bold gate
+was corrected to obtain a `Run`, where bold formatting belongs. Integration
+with F-007 required retaining two independent additions to the shared test
+file, followed by a clean microscope pass.
+
+**Spec sections touched.** `docs/hld/03-architecture.md`, "Facade conventions",
+`docs/hld/10-bindings-spec.md`, "Two supporting decisions", and
+`docs/hld/14-development-backlog.md`, "F-008, Non-consuming setter twins (M)".
+
+**Tests.** `non_consuming_setters_mutate_borrowed_wrappers` and
+`non_consuming_setters_match_consuming_builders`, plus all 68 integrated rdocx
+integration tests.
+
+**Hash harness.** Unchanged. All 28 integrated entries match.
+
+**Notes for future sessions.** Keep mutation bodies in the in-place setters so
+builder and binding behavior remain single-sourced.
+
+### F-009, Cache the layout result
+
+**Sprint.** S02
+**Completed.** 2026-07-30
+**Size.** M, estimated 2 days, actual 1 day
+
+**What was built.** `Document` caches normal and deterministic layout results
+in separate thread-safe slots, exposes cloned page layout access, and clears
+both caches across direct mutations and mutable-accessor paths.
+
+**Non-obvious choices.** `Mutex<Option<Arc<LayoutResult>>>` preserves the
+`Document: Send + Sync` binding contract. Caller-supplied font layouts remain
+uncached because their inputs are not part of a stable document cache key.
+
+**Deviations from the design plan.** None. The approved plan had already
+replaced the backlog's thread-local `RefCell<Option<Rc<_>>>` proposal.
+
+**Spec sections touched.** `docs/hld/08-rendering-spec.md`, "Performance",
+`docs/hld/10-bindings-spec.md`, "Two supporting decisions",
+`docs/hld/13-risks-and-open-questions.md`, "Known defects being carried", and
+`docs/hld/14-development-backlog.md`, "F-009, Cache the layout result (M)".
+
+**Tests.** `rendering_all_pages_performs_one_layout`,
+`document_mutation_invalidates_cached_layout`,
+`mutable_accessor_invalidates_cached_layout`,
+`font_modes_use_isolated_layout_caches`, and
+`document_remains_send_and_sync`.
+
+**Hash harness.** Unchanged. All 28 integrated entries match.
+
+**Notes for future sessions.** Any new mutable accessor must invalidate both
+layout modes before returning the borrow.
+
+### F-010, Reserve crate names
+
+**Sprint.** S02
+**Completed.** 2026-07-30
+**Size.** S, estimated 1 day, actual 1 day
+
+**What was built.** Fourteen approved `oxml-*` and `rpptx*` names were
+published as dependency-free `0.0.0` placeholders and verified as owned by
+`mantissaman`.
+
+**Non-obvious choices.** Python and wasm binding names were excluded because
+their documented distribution channels are PyPI and npm. Publications ran
+sequentially through crates.io's rolling new-crate rate limit.
+
+**Deviations from the design plan.** None. The registry required repeated
+cooldown windows, and the workflow stopped after every HTTP 429 before
+resuming at the exact rejected name.
+
+**Spec sections touched.** `docs/hld/13-risks-and-open-questions.md`,
+"Q2, PyPI name availability", and `docs/hld/15-build-and-toolchain.md`,
+"Publishing".
+
+**Tests.** Exact `cargo info <name>@0.0.0` and owner checks for all fourteen
+names, package inspection, publish dry-runs, and archive-size checks.
+
+**Hash harness.** Unchanged. All 28 integrated entries match.
+
+**Notes for future sessions.** The placeholders reserve names only. They expose
+no implementation API and do not change any existing `rdocx 0.3.0` crate.
+
+### F-011, Pin unit truncation behaviour
+
+**Sprint.** S02
+**Completed.** 2026-07-30
+**Size.** S, estimated 1 day, actual 1 day
+
+**What was built.** Fractional positive and negative tests now pin truncation
+toward zero for every float constructor on `Length`, `Twips`, and `Emu`.
+
+**Non-obvious choices.** The vectors cross the half-unit boundary so temporary
+rounding mutations fail while the existing production casts remain unchanged.
+
+**Deviations from the design plan.** Microscope pass 1 corrected one invalid
+HLD heading citation. Pass 2 found no defects or smells.
+
+**Spec sections touched.** `docs/hld/11-migration-plan.md`, "Preserve
+behaviour, do not improve it", and `docs/hld/12-testing-strategy.md`, "New
+tests the extracted crates need".
+
+**Tests.** `length_float_constructors_truncate_toward_zero`,
+`twips_float_constructors_truncate_toward_zero`, and
+`emu_float_constructors_truncate_toward_zero`, including temporary rounding
+mutations that made every gate fail.
+
+**Hash harness.** Unchanged. All 28 integrated entries match.
+
+**Notes for future sessions.** A change from casts to rounding is a behavior
+change even when whole-unit conversion tests continue to pass.
+
+### F-012, Tag v0.4.1
+
+**Sprint.** S02
+**Completed.** 2026-07-30
+**Size.** S, estimated 1 day, actual 1 day
+
+**What was built.** The workspace was published as seven lockstep rdocx crates
+at 0.4.1 from the reviewed S02 SHA. A dedicated `/release` command now owns
+`v*` tags and publication, while the tag workflow verifies the deterministic
+hash baseline and publishes only the approved rdocx allowlist.
+
+**Non-obvious choices.** The published `v0.4.0` mainline was merged into S02
+before release, preserving its contract changes and retargeting the planned
+0.3.1 release to 0.4.1. The fourteen `oxml-*` and `rpptx*` placeholders remain
+at 0.0.0 until PowerPoint development is complete.
+
+**Deviations from the design plan.** The original plan targeted 0.3.1 before
+the separate 0.4.0 release appeared. The reconciled plan and release evidence
+target 0.4.1. The publication workflow retains deliberate registry-index waits
+because real publication is explicitly allowlisted instead of workspace-wide.
+
+**Spec sections touched.** `docs/hld/11-migration-plan.md`, release boundary,
+`docs/hld/13-risks-and-open-questions.md`, release risks,
+`docs/hld/14-development-backlog.md`, M1 gate and F-012, and
+`docs/hld/15-build-and-toolchain.md`, "Publishing" and "Release process".
+
+**Tests.** `/verify --full` passed at
+`6e02a4b6417c9bb0c245237bdf8168dd06310c39`. The package dry-run produced
+exactly seven archives below 10 MiB, including all 20 TTFs and required licence
+files in `rdocx-layout`. GitHub Actions run 30522998328 passed, every exact
+`cargo info <crate>@0.4.1` lookup succeeded, all owners were `mantissaman`, and
+the GitHub release tag peeled to the reviewed SHA.
+
+**Hash harness.** Unchanged. All 28 entries matched locally and on the Linux
+publication runner.
+
+**Notes for future sessions.** The release workflow must remain restricted to
+the seven rdocx crates until PowerPoint development is complete. After S02 is
+merged, forward-merge `main` into `feature/release-0.5.0` before that release
+branch continues.

@@ -56,7 +56,9 @@ a gate and not a warning.
 - Do not run `cargo clean`. Iterate scoped.
 - **Do not commit or push unless the invoked workflow explicitly includes that
   action.** Never add an agent co-author trailer.
-- Only `/close-sprint` may merge to `main` or create a tag.
+- Only `/close-sprint` may merge to `main` or create an `sNN` sprint tag.
+- Only `/release` may create or push a `v*` release tag or start crates.io
+  publication. It requires a separate final approval at the reviewed SHA.
 
 ## Commands
 
@@ -142,6 +144,9 @@ a file list that `/complete-feature` executes against.
 - The hash-harness baseline is exclusive. One story per sprint wave may move it.
 - Verification that decides anything runs once over the integrated result, not
   per worker.
+- Worker branches and worktrees remain available through sprint verification
+  and review. `/close-sprint` removes clean completed workers after pushing
+  `main` and the sprint tag.
 
 ## Review tasks
 

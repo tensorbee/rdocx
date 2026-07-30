@@ -482,7 +482,7 @@ dependencies = [
 
 [[package]]
 name = "rdocx"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "rdocx-html",
  "rdocx-layout",
@@ -495,7 +495,7 @@ dependencies = [
 
 [[package]]
 name = "rdocx-cli"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "clap",
  "rdocx",
@@ -506,14 +506,14 @@ dependencies = [
 
 [[package]]
 name = "rdocx-html"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "rdocx-oxml",
 ]
 
 [[package]]
 name = "rdocx-layout"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "fontdb",
  "harfrust",
@@ -525,7 +525,7 @@ dependencies = [
 
 [[package]]
 name = "rdocx-opc"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "quick-xml",
  "thiserror",
@@ -534,7 +534,7 @@ dependencies = [
 
 [[package]]
 name = "rdocx-oxml"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "itoa",
  "quick-xml",
@@ -544,7 +544,7 @@ dependencies = [
 
 [[package]]
 name = "rdocx-pdf"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "miniz_oxide 0.9.1",
  "pdf-writer",
@@ -556,7 +556,7 @@ dependencies = [
 
 [[package]]
 name = "rdocx-wasm"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "js-sys",
  "rdocx-html",

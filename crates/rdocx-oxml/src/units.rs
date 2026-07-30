@@ -118,4 +118,24 @@ mod tests {
         let t2 = e.to_twips();
         assert_eq!(t, t2);
     }
+
+    #[test]
+    fn twips_float_constructors_truncate_toward_zero() {
+        assert_eq!(Twips::from_inches(1.75 / 1440.0).0, 1);
+        assert_eq!(Twips::from_inches(-1.75 / 1440.0).0, -1);
+        assert_eq!(Twips::from_cm(1.75 / 567.0).0, 1);
+        assert_eq!(Twips::from_cm(-1.75 / 567.0).0, -1);
+        assert_eq!(Twips::from_pt(1.75 / 20.0).0, 1);
+        assert_eq!(Twips::from_pt(-1.75 / 20.0).0, -1);
+    }
+
+    #[test]
+    fn emu_float_constructors_truncate_toward_zero() {
+        assert_eq!(Emu::from_inches(1.75 / 914400.0).0, 1);
+        assert_eq!(Emu::from_inches(-1.75 / 914400.0).0, -1);
+        assert_eq!(Emu::from_cm(1.75 / 360000.0).0, 1);
+        assert_eq!(Emu::from_cm(-1.75 / 360000.0).0, -1);
+        assert_eq!(Emu::from_pt(1.75 / 12700.0).0, 1);
+        assert_eq!(Emu::from_pt(-1.75 / 12700.0).0, -1);
+    }
 }

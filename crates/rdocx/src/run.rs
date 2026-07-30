@@ -62,135 +62,230 @@ impl<'a> Run<'a> {
 
     /// Set bold formatting.
     pub fn bold(mut self, val: bool) -> Self {
+        self.set_bold(val);
+        self
+    }
+
+    /// Set bold formatting in place.
+    pub fn set_bold(&mut self, val: bool) {
         let rpr = self.ensure_rpr();
         rpr.bold = Some(val);
         rpr.bold_cs = Some(val);
-        self
     }
 
     /// Set italic formatting.
     pub fn italic(mut self, val: bool) -> Self {
+        self.set_italic(val);
+        self
+    }
+
+    /// Set italic formatting in place.
+    pub fn set_italic(&mut self, val: bool) {
         let rpr = self.ensure_rpr();
         rpr.italic = Some(val);
         rpr.italic_cs = Some(val);
-        self
     }
 
     /// Set underline formatting (simple on/off).
     pub fn underline(mut self, val: bool) -> Self {
+        self.set_underline(val);
+        self
+    }
+
+    /// Set underline formatting in place.
+    pub fn set_underline(&mut self, val: bool) {
         self.ensure_rpr().underline = Some(if val {
             ST_Underline::Single
         } else {
             ST_Underline::None
         });
-        self
     }
 
     /// Set underline with a specific style.
     pub fn underline_style(mut self, style: UnderlineStyle) -> Self {
-        self.ensure_rpr().underline = Some(style.to_st());
+        self.set_underline_style(style);
         self
+    }
+
+    /// Set an underline style in place.
+    pub fn set_underline_style(&mut self, style: UnderlineStyle) {
+        self.ensure_rpr().underline = Some(style.to_st());
     }
 
     /// Set font size in points.
     pub fn size(mut self, pt: f64) -> Self {
+        self.set_size(pt);
+        self
+    }
+
+    /// Set font size in place.
+    pub fn set_size(&mut self, pt: f64) {
         let hp = HalfPoint::from_pt(pt);
         let rpr = self.ensure_rpr();
         rpr.sz = Some(hp);
         rpr.sz_cs = Some(hp);
-        self
     }
 
     /// Set the font name.
     pub fn font(mut self, name: &str) -> Self {
+        self.set_font(name);
+        self
+    }
+
+    /// Set the font name in place.
+    pub fn set_font(&mut self, name: &str) {
         let rpr = self.ensure_rpr();
         rpr.font_ascii = Some(name.to_string());
         rpr.font_hansi = Some(name.to_string());
         rpr.font_east_asia = Some(name.to_string());
         rpr.font_cs = Some(name.to_string());
-        self
     }
 
     /// Set text color as a hex string (e.g., "FF0000" for red).
     pub fn color(mut self, hex: &str) -> Self {
-        self.ensure_rpr().color = Some(hex.to_string());
+        self.set_color(hex);
         self
+    }
+
+    /// Set text color in place.
+    pub fn set_color(&mut self, hex: &str) {
+        self.ensure_rpr().color = Some(hex.to_string());
     }
 
     /// Set highlight color as a hex fill value.
     pub fn highlight(mut self, color: &str) -> Self {
+        self.set_highlight(color);
+        self
+    }
+
+    /// Set highlight color in place.
+    pub fn set_highlight(&mut self, color: &str) {
         self.ensure_rpr().shading = Some(CT_Shd {
             val: "clear".to_string(),
             color: Some("auto".to_string()),
             fill: Some(color.to_string()),
         });
-        self
     }
 
     /// Set strikethrough formatting.
     pub fn strike(mut self, val: bool) -> Self {
-        self.ensure_rpr().strike = Some(val);
+        self.set_strike(val);
         self
+    }
+
+    /// Set strikethrough formatting in place.
+    pub fn set_strike(&mut self, val: bool) {
+        self.ensure_rpr().strike = Some(val);
     }
 
     /// Set double strikethrough.
     pub fn double_strike(mut self, val: bool) -> Self {
-        self.ensure_rpr().dstrike = Some(val);
+        self.set_double_strike(val);
         self
+    }
+
+    /// Set double strikethrough in place.
+    pub fn set_double_strike(&mut self, val: bool) {
+        self.ensure_rpr().dstrike = Some(val);
     }
 
     /// Set all caps.
     pub fn all_caps(mut self, val: bool) -> Self {
-        self.ensure_rpr().caps = Some(val);
+        self.set_all_caps(val);
         self
+    }
+
+    /// Set all caps in place.
+    pub fn set_all_caps(&mut self, val: bool) {
+        self.ensure_rpr().caps = Some(val);
     }
 
     /// Set small caps.
     pub fn small_caps(mut self, val: bool) -> Self {
-        self.ensure_rpr().small_caps = Some(val);
+        self.set_small_caps(val);
         self
+    }
+
+    /// Set small caps in place.
+    pub fn set_small_caps(&mut self, val: bool) {
+        self.ensure_rpr().small_caps = Some(val);
     }
 
     /// Set superscript.
     pub fn superscript(mut self) -> Self {
-        self.ensure_rpr().vert_align = Some("superscript".to_string());
+        self.set_superscript();
         self
+    }
+
+    /// Set superscript in place.
+    pub fn set_superscript(&mut self) {
+        self.ensure_rpr().vert_align = Some("superscript".to_string());
     }
 
     /// Set subscript.
     pub fn subscript(mut self) -> Self {
-        self.ensure_rpr().vert_align = Some("subscript".to_string());
+        self.set_subscript();
         self
+    }
+
+    /// Set subscript in place.
+    pub fn set_subscript(&mut self) {
+        self.ensure_rpr().vert_align = Some("subscript".to_string());
     }
 
     /// Set character spacing (positive = expanded, negative = condensed).
     pub fn character_spacing(mut self, spacing: Length) -> Self {
-        self.ensure_rpr().spacing = Some(spacing.as_twips());
+        self.set_character_spacing(spacing);
         self
+    }
+
+    /// Set character spacing in place.
+    pub fn set_character_spacing(&mut self, spacing: Length) {
+        self.ensure_rpr().spacing = Some(spacing.as_twips());
     }
 
     /// Set character width scale in percent (100 = normal).
     pub fn width_scale(mut self, percent: u32) -> Self {
-        self.ensure_rpr().width_scale = Some(percent);
+        self.set_width_scale(percent);
         self
+    }
+
+    /// Set character width scale in place.
+    pub fn set_width_scale(&mut self, percent: u32) {
+        self.ensure_rpr().width_scale = Some(percent);
     }
 
     /// Set text position (positive = raised, negative = lowered) in half-points.
     pub fn position(mut self, half_points: i32) -> Self {
-        self.ensure_rpr().position = Some(half_points);
+        self.set_position(half_points);
         self
+    }
+
+    /// Set text position in place.
+    pub fn set_position(&mut self, half_points: i32) {
+        self.ensure_rpr().position = Some(half_points);
     }
 
     /// Set hidden/vanish text.
     pub fn hidden(mut self, val: bool) -> Self {
-        self.ensure_rpr().vanish = Some(val);
+        self.set_hidden(val);
         self
+    }
+
+    /// Set hidden/vanish text in place.
+    pub fn set_hidden(&mut self, val: bool) {
+        self.ensure_rpr().vanish = Some(val);
     }
 
     /// Set the character style by ID.
     pub fn style(mut self, style_id: &str) -> Self {
-        self.ensure_rpr().style_id = Some(style_id.to_string());
+        self.set_style(style_id);
         self
+    }
+
+    /// Set the character style by ID in place.
+    pub fn set_style(&mut self, style_id: &str) {
+        self.ensure_rpr().style_id = Some(style_id.to_string());
     }
 
     fn ensure_rpr(&mut self) -> &mut CT_RPr {

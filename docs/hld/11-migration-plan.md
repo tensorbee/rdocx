@@ -99,9 +99,10 @@ Three things are deliberately left wrong during the move, because correcting
 them mid-extraction would produce hash deltas indistinguishable from migration
 bugs:
 
-- **Unit truncation.** Every constructor uses `as i64` truncation. Pin it with
-  tests *before* anyone changes it to rounding, because a rounding change shifts
-  every twip, which shifts layout, which moves the regression tests' output.
+- **Unit truncation.** Float constructors truncate toward zero with `as i64` or
+  `as i32`. Positive and negative fractional tests pin every `Length`, `Twips`
+  and `Emu` constructor. A rounding change shifts every twip, which shifts
+  layout, which moves the regression tests' output.
 - **`apply_tint_shade`.** Keep Word's 0-255 convention and its naive sRGB
   interpolation, byte for byte. `oxml-drawing` adds spec-correct functions
   alongside under different names.
@@ -153,21 +154,12 @@ types change, and `PositionedElement` becomes `#[non_exhaustive]`.
 
 ## Release tooling
 
-`scripts/release.sh` is deleted in favour of `cargo-release`. It has three
-defects and the third is actively dangerous: it is BSD-`sed` only so it runs on
-macOS alone, its version replacement is an unanchored global substitution across
-the root manifest, and **its README rewrite is an unanchored global replace of
-the bare string `"0.2"` across a 267-line file**, so any unrelated quoted `"0.2"`
-is silently corrupted.
+The unsafe `scripts/release.sh` is gone. Version changes are prepared as
+reviewable F-ID commits with targeted manifest and lockfile edits. `/release`
+then tags the exact fully verified commit after a separate final approval. It
+owns the `v*` release namespace, while `/close-sprint` owns `sNN` tags and
+`/spec-bump` owns local `spec-v*` tags.
 
-`cargo-release` understands `[workspace.package].version` and the version pins
-inside `[workspace.dependencies]`, and supports the split cadence natively
-through `shared-version = false` on the `rpptx-*` members, giving the two tag
-namespaces `v*` and `rpptx-v*`.
-
-`publish.yml` drops its `sleep 60` ladder in favour of `cargo publish
---workspace`, available at the pinned toolchain. Six minutes of unconditional
-sleeping that is still racy becomes twenty at the eventual crate count. It also
-drops `--no-verify` and narrows `|| echo "already published"`, which currently
-swallows authentication failures, network errors and genuine compile errors
-identically.
+`publish.yml` uses `cargo publish --workspace`, available at the pinned
+toolchain. It performs archive verification and propagates authentication,
+network, compilation and duplicate-version failures without relabelling them.

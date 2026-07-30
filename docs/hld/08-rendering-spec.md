@@ -253,13 +253,17 @@ table is applied **before** font resolution.
 
 ## Performance
 
-`Document::render_page_to_png` re-runs the entire layout on every call, so
-looping pages is **O(n squared)**. Fatal at deck scale and already wasteful for
-documents.
+`Document` keeps normal-font and deterministic `LayoutResult` values in
+separate `Mutex<Option<Arc<_>>>` caches. `render_page_to_png`,
+`render_all_pages`, `to_pdf` and `layout_page` share the normal result. The
+deterministic page renderer uses its own result, while caller-supplied font
+layouts remain uncached because those fonts are not part of a stable cache key.
 
-Both facades cache a `LayoutResult` behind a `RefCell` invalidated on mutation,
-and both render crates expose a single-page entry point so rendering one page
-costs one page.
+Every public document mutation and mutable-accessor entry point clears both
+caches before changing or exposing content. Rendering every page through the
+single-page entry point therefore performs one layout per font mode instead of
+one layout per page. The presentation facade follows the same ownership model
+when it is added.
 
 ```rust
 pub fn layout_presentation(input: &RenderInput) -> Result<LayoutResult>;

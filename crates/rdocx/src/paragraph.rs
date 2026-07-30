@@ -146,105 +146,186 @@ impl<'a> Paragraph<'a> {
 
     /// Set the paragraph alignment.
     pub fn alignment(mut self, align: Alignment) -> Self {
-        self.ensure_ppr().jc = Some(align.to_st_jc());
+        self.set_alignment(align);
         self
+    }
+
+    /// Set the paragraph alignment in place.
+    pub fn set_alignment(&mut self, align: Alignment) {
+        self.ensure_ppr().jc = Some(align.to_st_jc());
     }
 
     /// Set the paragraph style by ID.
     pub fn style(mut self, style_id: &str) -> Self {
-        self.ensure_ppr().style_id = Some(style_id.to_string());
+        self.set_style(style_id);
         self
+    }
+
+    /// Set the paragraph style by ID in place.
+    pub fn set_style(&mut self, style_id: &str) {
+        self.ensure_ppr().style_id = Some(style_id.to_string());
     }
 
     /// Set space before the paragraph.
     pub fn space_before(mut self, length: Length) -> Self {
-        self.ensure_ppr().space_before = Some(length.as_twips());
+        self.set_space_before(length);
         self
+    }
+
+    /// Set space before the paragraph in place.
+    pub fn set_space_before(&mut self, length: Length) {
+        self.ensure_ppr().space_before = Some(length.as_twips());
     }
 
     /// Set space after the paragraph.
     pub fn space_after(mut self, length: Length) -> Self {
-        self.ensure_ppr().space_after = Some(length.as_twips());
+        self.set_space_after(length);
         self
+    }
+
+    /// Set space after the paragraph in place.
+    pub fn set_space_after(&mut self, length: Length) {
+        self.ensure_ppr().space_after = Some(length.as_twips());
     }
 
     /// Set left indentation.
     pub fn indent_left(mut self, length: Length) -> Self {
-        self.ensure_ppr().ind_left = Some(length.as_twips());
+        self.set_indent_left(length);
         self
+    }
+
+    /// Set left indentation in place.
+    pub fn set_indent_left(&mut self, length: Length) {
+        self.ensure_ppr().ind_left = Some(length.as_twips());
     }
 
     /// Set right indentation.
     pub fn indent_right(mut self, length: Length) -> Self {
-        self.ensure_ppr().ind_right = Some(length.as_twips());
+        self.set_indent_right(length);
         self
+    }
+
+    /// Set right indentation in place.
+    pub fn set_indent_right(&mut self, length: Length) {
+        self.ensure_ppr().ind_right = Some(length.as_twips());
     }
 
     /// Set first line indent.
     pub fn first_line_indent(mut self, length: Length) -> Self {
-        self.ensure_ppr().ind_first_line = Some(length.as_twips());
+        self.set_first_line_indent(length);
         self
+    }
+
+    /// Set first line indent in place.
+    pub fn set_first_line_indent(&mut self, length: Length) {
+        self.ensure_ppr().ind_first_line = Some(length.as_twips());
     }
 
     /// Set hanging indent.
     pub fn hanging_indent(mut self, length: Length) -> Self {
-        self.ensure_ppr().ind_hanging = Some(length.as_twips());
+        self.set_hanging_indent(length);
         self
+    }
+
+    /// Set hanging indent in place.
+    pub fn set_hanging_indent(&mut self, length: Length) {
+        self.ensure_ppr().ind_hanging = Some(length.as_twips());
     }
 
     /// Set keep with next paragraph.
     pub fn keep_with_next(mut self, val: bool) -> Self {
-        self.ensure_ppr().keep_next = Some(val);
+        self.set_keep_with_next(val);
         self
+    }
+
+    /// Set keep with next paragraph in place.
+    pub fn set_keep_with_next(&mut self, val: bool) {
+        self.ensure_ppr().keep_next = Some(val);
     }
 
     /// Set keep lines together.
     pub fn keep_together(mut self, val: bool) -> Self {
-        self.ensure_ppr().keep_lines = Some(val);
+        self.set_keep_together(val);
         self
+    }
+
+    /// Set keep lines together in place.
+    pub fn set_keep_together(&mut self, val: bool) {
+        self.ensure_ppr().keep_lines = Some(val);
     }
 
     /// Set page break before.
     pub fn page_break_before(mut self, val: bool) -> Self {
-        self.ensure_ppr().page_break_before = Some(val);
+        self.set_page_break_before(val);
         self
+    }
+
+    /// Set page break before in place.
+    pub fn set_page_break_before(&mut self, val: bool) {
+        self.ensure_ppr().page_break_before = Some(val);
     }
 
     /// Set widow/orphan control.
     pub fn widow_control(mut self, val: bool) -> Self {
-        self.ensure_ppr().widow_control = Some(val);
+        self.set_widow_control(val);
         self
+    }
+
+    /// Set widow/orphan control in place.
+    pub fn set_widow_control(&mut self, val: bool) {
+        self.ensure_ppr().widow_control = Some(val);
     }
 
     /// Set line spacing in points with "exact" rule.
     pub fn line_spacing(mut self, pt: f64) -> Self {
+        self.set_line_spacing(pt);
+        self
+    }
+
+    /// Set exact line spacing in place.
+    pub fn set_line_spacing(&mut self, pt: f64) {
         let ppr = self.ensure_ppr();
         ppr.line_spacing = Some(Twips::from_pt(pt));
         ppr.line_rule = Some("exact".to_string());
-        self
     }
 
     /// Set line spacing with a multiplier (1.0 = single, 1.5, 2.0 = double, etc.).
     pub fn line_spacing_multiple(mut self, multiple: f64) -> Self {
+        self.set_line_spacing_multiple(multiple);
+        self
+    }
+
+    /// Set multiplied line spacing in place.
+    pub fn set_line_spacing_multiple(&mut self, multiple: f64) {
         let ppr = self.ensure_ppr();
         // In "auto" mode, line spacing is in 240ths of a line (240 = single)
         ppr.line_spacing = Some(Twips((multiple * 240.0) as i32));
         ppr.line_rule = Some("auto".to_string());
-        self
     }
 
     /// Set a background/shading fill color (hex string, e.g. "FFFF00").
     pub fn shading(mut self, fill_color: &str) -> Self {
+        self.set_shading(fill_color);
+        self
+    }
+
+    /// Set a background/shading fill color in place.
+    pub fn set_shading(&mut self, fill_color: &str) {
         self.ensure_ppr().shading = Some(CT_Shd {
             val: "clear".to_string(),
             color: Some("auto".to_string()),
             fill: Some(fill_color.to_string()),
         });
-        self
     }
 
     /// Add a border to all sides.
     pub fn border_all(mut self, style: BorderStyle, size_eighths_pt: u32, color: &str) -> Self {
+        self.set_border_all(style, size_eighths_pt, color);
+        self
+    }
+
+    /// Add a border to all sides in place.
+    pub fn set_border_all(&mut self, style: BorderStyle, size_eighths_pt: u32, color: &str) {
         let edge = CT_BorderEdge {
             val: style.to_st(),
             sz: Some(size_eighths_pt),
@@ -259,11 +340,16 @@ impl<'a> Paragraph<'a> {
             between: None,
             bar: None,
         });
-        self
     }
 
     /// Add a bottom border only.
     pub fn border_bottom(mut self, style: BorderStyle, size_eighths_pt: u32, color: &str) -> Self {
+        self.set_border_bottom(style, size_eighths_pt, color);
+        self
+    }
+
+    /// Add a bottom border in place.
+    pub fn set_border_bottom(&mut self, style: BorderStyle, size_eighths_pt: u32, color: &str) {
         let edge = CT_BorderEdge {
             val: style.to_st(),
             sz: Some(size_eighths_pt),
@@ -275,11 +361,16 @@ impl<'a> Paragraph<'a> {
             .borders
             .get_or_insert_with(CT_PBdr::default);
         borders.bottom = Some(edge);
-        self
     }
 
     /// Add a tab stop.
     pub fn add_tab_stop(mut self, alignment: TabAlignment, position: Length) -> Self {
+        self.set_add_tab_stop(alignment, position);
+        self
+    }
+
+    /// Add a tab stop in place.
+    pub fn set_add_tab_stop(&mut self, alignment: TabAlignment, position: Length) {
         let tabs = self
             .ensure_ppr()
             .tabs
@@ -289,7 +380,6 @@ impl<'a> Paragraph<'a> {
             pos: position.as_twips(),
             leader: None,
         });
-        self
     }
 
     /// Add a tab stop with a leader character.
@@ -299,6 +389,17 @@ impl<'a> Paragraph<'a> {
         position: Length,
         leader: TabLeader,
     ) -> Self {
+        self.set_add_tab_stop_with_leader(alignment, position, leader);
+        self
+    }
+
+    /// Add a tab stop with a leader character in place.
+    pub fn set_add_tab_stop_with_leader(
+        &mut self,
+        alignment: TabAlignment,
+        position: Length,
+        leader: TabLeader,
+    ) {
         let tabs = self
             .ensure_ppr()
             .tabs
@@ -308,13 +409,17 @@ impl<'a> Paragraph<'a> {
             pos: position.as_twips(),
             leader: Some(leader.to_st()),
         });
-        self
     }
 
     /// Set outline level (0–8, used for TOC generation).
     pub fn outline_level(mut self, level: u32) -> Self {
-        self.ensure_ppr().outline_lvl = Some(level);
+        self.set_outline_level(level);
         self
+    }
+
+    /// Set outline level in place.
+    pub fn set_outline_level(&mut self, level: u32) {
+        self.ensure_ppr().outline_lvl = Some(level);
     }
 
     /// Add a section break after this paragraph.
@@ -322,9 +427,14 @@ impl<'a> Paragraph<'a> {
     /// This creates a `<w:sectPr>` inside the paragraph's properties,
     /// ending the current section at this paragraph.
     pub fn section_break(mut self, break_type: SectionBreak) -> Self {
+        self.set_section_break(break_type);
+        self
+    }
+
+    /// Add a section break after this paragraph in place.
+    pub fn set_section_break(&mut self, break_type: SectionBreak) {
         let sect = self.ensure_sect_pr();
         sect.section_type = Some(break_type.to_st());
-        self
     }
 
     /// Set the section ending at this paragraph to landscape orientation.
@@ -332,11 +442,16 @@ impl<'a> Paragraph<'a> {
     /// Sets page dimensions to 11" x 8.5" (US Letter landscape).
     /// Must be combined with `section_break()` to create a section break.
     pub fn section_landscape(mut self) -> Self {
+        self.set_section_landscape();
+        self
+    }
+
+    /// Set the section ending at this paragraph to landscape in place.
+    pub fn set_section_landscape(&mut self) {
         let sect = self.ensure_sect_pr();
         sect.orientation = Some(ST_PageOrientation::Landscape);
         sect.page_width = Some(Twips(15840)); // 11"
         sect.page_height = Some(Twips(12240)); // 8.5"
-        self
     }
 
     /// Set the section ending at this paragraph to portrait orientation.
@@ -344,19 +459,29 @@ impl<'a> Paragraph<'a> {
     /// Sets page dimensions to 8.5" x 11" (US Letter portrait).
     /// Must be combined with `section_break()` to create a section break.
     pub fn section_portrait(mut self) -> Self {
+        self.set_section_portrait();
+        self
+    }
+
+    /// Set the section ending at this paragraph to portrait in place.
+    pub fn set_section_portrait(&mut self) {
         let sect = self.ensure_sect_pr();
         sect.orientation = Some(ST_PageOrientation::Portrait);
         sect.page_width = Some(Twips(12240)); // 8.5"
         sect.page_height = Some(Twips(15840)); // 11"
-        self
     }
 
     /// Set custom page dimensions for the section ending at this paragraph.
     pub fn section_page_size(mut self, width: crate::Length, height: crate::Length) -> Self {
+        self.set_section_page_size(width, height);
+        self
+    }
+
+    /// Set custom page dimensions for the section in place.
+    pub fn set_section_page_size(&mut self, width: crate::Length, height: crate::Length) {
         let sect = self.ensure_sect_pr();
         sect.page_width = Some(width.as_twips());
         sect.page_height = Some(height.as_twips());
-        self
     }
 
     fn ensure_ppr(&mut self) -> &mut CT_PPr {

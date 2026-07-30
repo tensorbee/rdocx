@@ -101,4 +101,19 @@ mod tests {
         let twelve_pt = Length::pt(12.0);
         assert_eq!(twelve_pt.as_half_points().0, 24);
     }
+
+    #[test]
+    fn length_float_constructors_truncate_toward_zero() {
+        assert_eq!(Length::inches(1.75 / 914400.0).to_emu(), 1);
+        assert_eq!(Length::inches(-1.75 / 914400.0).to_emu(), -1);
+        assert_eq!(Length::cm(1.75 / 360000.0).to_emu(), 1);
+        assert_eq!(Length::cm(-1.75 / 360000.0).to_emu(), -1);
+        assert_eq!(Length::pt(1.75 / 12700.0).to_emu(), 1);
+        assert_eq!(Length::pt(-1.75 / 12700.0).to_emu(), -1);
+
+        assert_eq!(Length::emu(7).to_emu(), 7);
+        assert_eq!(Length::emu(-7).to_emu(), -7);
+        assert_eq!(Length::twips(7).to_emu(), 4445);
+        assert_eq!(Length::twips(-7).to_emu(), -4445);
+    }
 }

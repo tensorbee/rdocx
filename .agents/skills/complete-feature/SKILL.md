@@ -7,6 +7,6 @@ description: "Finish a feature. Updates every tracker, the HLD, and commits to t
 
 Canonical source: `.claude/commands/complete-feature.md`.
 
-Source SHA-256: `3a8f6be73f0f428603fbb9eebe8170961861e24bc887929ef37b4848e2c7950d`.
+Source SHA-256: `281752938486ec23a474f4c0d0cc3ba9b9f77389ba623227c3d05c8df2253873`.
 
 Read the canonical source in full before acting, and follow it with whatever tools this host provides. Treat any invocation arguments as arguments to that workflow. Where it names another slash command, follow the repository skill of the same name. Where it says to ask with `AskUserQuestion`, ask through this host's own question mechanism. `.claude/WORKFLOW.md` wins on any process question. Do not edit this generated adapter.

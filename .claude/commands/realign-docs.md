@@ -60,8 +60,6 @@ sign it is rotting into one.
 6. **Realign `README.md` separately.** It is the front door and its audience is
    someone who has never read the HLD. Check the crate list, the feature list
    against `docs/hld/02-scope-and-non-goals.md`, and every version string.
-   `scripts/release.sh` globally replaces the bare string `"0.2"` across this
-   file, so check what it actually rewrote rather than what it meant to.
 
 7. **Do not touch `14-development-backlog.md` story status.** That is
    `/complete-feature` and `/sync-status` territory. Fixing a story's *shape*,

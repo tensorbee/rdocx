@@ -19,10 +19,11 @@ this lands.
 
 ### Q2, PyPI name availability
 
-`rdocx` and `rpptx` are free on crates.io. PyPI has not been checked. If either
-is taken, maturin's `module-name` allows shipping distribution `rdocx-python`
-while keeping `import rdocx`. Claim both names as soon as the decision to ship
-wheels is confirmed.
+The future crates.io names in the publishing graph are controlled by
+`mantissaman` through 0.0.0 placeholders. PyPI has not been checked. If either
+`rdocx` or `rpptx` is taken there, maturin's `module-name` allows shipping a
+distribution such as `rdocx-python` while keeping `import rdocx`. Claim both
+PyPI names as soon as the decision to ship wheels is confirmed.
 
 ### Q3, the deck corpus
 
@@ -136,15 +137,6 @@ Found during the audit that produced this plan, and each has a story in M1.
 
 `to_docx_bytes` rebuilds a minimal package, silently discarding every part
 except `document.xml` and `styles.xml`. Detailed in `10-bindings-spec.md`.
-
-### `render_page_to_png` is O(n squared)
-
-Re-runs the entire layout per call.
-
-### `release.sh`
-
-Its README rewrite is an unanchored global replace of the bare string `"0.2"`
-across the whole file. Anything else quoted `"0.2"` is silently corrupted.
 
 ## Assumptions that would invalidate the plan if wrong
 

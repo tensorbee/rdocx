@@ -7,6 +7,6 @@ description: "Bring README.md and docs/hld/ back into line with what was actuall
 
 Canonical source: `.claude/commands/realign-docs.md`.
 
-Source SHA-256: `6e5dd2fdf5aa739fbc6391036c168a85438513cccbeee132d3e530b32d5bc407`.
+Source SHA-256: `26b0c7e96b22d4dcc558fa4076160862f481c7c022576b00637d92918a1f9487`.
 
 Read the canonical source in full before acting, and follow it with whatever tools this host provides. Treat any invocation arguments as arguments to that workflow. Where it names another slash command, follow the repository skill of the same name. Where it says to ask with `AskUserQuestion`, ask through this host's own question mechanism. `.claude/WORKFLOW.md` wins on any process question. Do not edit this generated adapter.

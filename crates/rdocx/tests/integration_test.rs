@@ -6,6 +6,14 @@ use rdocx::table::VerticalAlignment;
 use rdocx::{
     BorderStyle, Length, SectionBreak, StyleBuilder, TabAlignment, TabLeader, UnderlineStyle,
 };
+use rdocx_opc::OpcPackage;
+use rdocx_opc::relationship::rel_types;
+
+fn document_xml(document: &mut Document) -> Vec<u8> {
+    let bytes = document.to_bytes().unwrap();
+    let package = OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+    package.get_part("/word/document.xml").unwrap().to_vec()
+}
 
 #[test]
 fn create_and_round_trip_simple_document() {
@@ -840,11 +848,63 @@ fn metadata_round_trip() {
 
     // Round-trip through DOCX bytes
     let bytes = doc.to_bytes().unwrap();
+    let package = OpcPackage::from_reader(std::io::Cursor::new(&bytes)).unwrap();
+    let relationship = package
+        .package_rels
+        .get_by_type(rel_types::CORE_PROPERTIES)
+        .unwrap();
+    assert_eq!(relationship.target, "docProps/core.xml");
+
     let doc2 = Document::from_bytes(&bytes).unwrap();
     assert_eq!(doc2.title(), Some("Test Title"));
     assert_eq!(doc2.author(), Some("Test Author"));
     assert_eq!(doc2.subject(), Some("Test Subject"));
     assert_eq!(doc2.keywords(), Some("rust, docx, test"));
+}
+
+#[test]
+fn core_properties_at_relationship_target_round_trip_in_place() {
+    let mut source = Document::new();
+    source.set_title("Original title");
+    source.set_author("Original author");
+
+    let bytes = source.to_bytes().unwrap();
+    let mut package = OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+    let core_xml = package.parts.remove("/docProps/core.xml").unwrap();
+    package.set_part("/custom/metadata.xml", core_xml);
+    package.content_types.overrides.remove("/docProps/core.xml");
+    package.content_types.add_override(
+        "/custom/metadata.xml",
+        "application/vnd.openxmlformats-package.core-properties+xml",
+    );
+    package
+        .package_rels
+        .items
+        .retain(|rel| rel.rel_type != rel_types::CORE_PROPERTIES);
+    package
+        .package_rels
+        .add(rel_types::CORE_PROPERTIES, "custom/metadata.xml");
+
+    let mut custom_package = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut custom_package).unwrap();
+    let mut document = Document::from_bytes(custom_package.get_ref()).unwrap();
+    assert_eq!(document.title(), Some("Original title"));
+    assert_eq!(document.author(), Some("Original author"));
+
+    document.set_title("Updated title");
+    let saved = document.to_bytes().unwrap();
+    let saved_package = OpcPackage::from_reader(std::io::Cursor::new(&saved)).unwrap();
+    assert!(saved_package.get_part("/docProps/core.xml").is_none());
+    assert!(saved_package.get_part("/custom/metadata.xml").is_some());
+    let relationship = saved_package
+        .package_rels
+        .get_by_type(rel_types::CORE_PROPERTIES)
+        .unwrap();
+    assert_eq!(relationship.target, "custom/metadata.xml");
+
+    let reopened = Document::from_bytes(&saved).unwrap();
+    assert_eq!(reopened.title(), Some("Updated title"));
+    assert_eq!(reopened.author(), Some("Original author"));
 }
 
 #[test]
@@ -1503,4 +1563,96 @@ fn line_spacing_multiple_round_trips() {
     let paras = doc2.paragraphs();
     let p = paras.first().unwrap();
     assert_eq!(p.line_spacing_multiple(), Some(2.0));
+}
+
+#[test]
+fn non_consuming_setters_mutate_borrowed_wrappers() {
+    let mut doc = Document::new();
+    doc.add_paragraph("Borrowed paragraph");
+
+    doc.paragraph_mut(0)
+        .unwrap()
+        .set_alignment(Alignment::Right);
+    doc.paragraph_mut(0)
+        .unwrap()
+        .add_run(" borrowed run")
+        .set_bold(true);
+
+    {
+        let mut table = doc.add_table(1, 1);
+        table.set_layout_fixed();
+        table.row(0).unwrap().set_header();
+        table
+            .cell(0, 0)
+            .unwrap()
+            .set_vertical_alignment(VerticalAlignment::Center);
+    }
+
+    let bytes = doc.to_bytes().unwrap();
+    let reopened = Document::from_bytes(&bytes).unwrap();
+    let paragraphs = reopened.paragraphs();
+    assert_eq!(paragraphs[0].alignment(), Some(Alignment::Right));
+    assert!(paragraphs[0].runs().last().unwrap().is_bold());
+    let tables = reopened.tables();
+    assert!(tables[0].row(0).unwrap().is_header());
+    assert_eq!(
+        tables[0].cell(0, 0).unwrap().vertical_alignment(),
+        Some(VerticalAlignment::Center)
+    );
+}
+
+#[test]
+fn non_consuming_setters_match_consuming_builders() {
+    let mut builders = Document::new();
+    {
+        let mut paragraph = builders
+            .add_paragraph("Paragraph")
+            .alignment(Alignment::Center)
+            .space_after(Length::pt(6.0));
+        paragraph
+            .add_run(" run")
+            .bold(true)
+            .font("Arial")
+            .color("123456");
+    }
+    {
+        let mut table = builders
+            .add_table(1, 1)
+            .style("TableGrid")
+            .alignment(Alignment::Center)
+            .layout_fixed();
+        table.row(0).unwrap().height(Length::pt(18.0)).header();
+        table
+            .cell(0, 0)
+            .unwrap()
+            .width(Length::inches(2.0))
+            .shading("D9EAF7")
+            .vertical_alignment(VerticalAlignment::Center);
+    }
+
+    let mut setters = Document::new();
+    {
+        let mut paragraph = setters.add_paragraph("Paragraph");
+        paragraph.set_alignment(Alignment::Center);
+        paragraph.set_space_after(Length::pt(6.0));
+        let mut run = paragraph.add_run(" run");
+        run.set_bold(true);
+        run.set_font("Arial");
+        run.set_color("123456");
+    }
+    {
+        let mut table = setters.add_table(1, 1);
+        table.set_style("TableGrid");
+        table.set_alignment(Alignment::Center);
+        table.set_layout_fixed();
+        let mut row = table.row(0).unwrap();
+        row.set_height(Length::pt(18.0));
+        row.set_header();
+        let mut cell = row.cell(0).unwrap();
+        cell.set_width(Length::inches(2.0));
+        cell.set_shading("D9EAF7");
+        cell.set_vertical_alignment(VerticalAlignment::Center);
+    }
+
+    assert_eq!(document_xml(&mut setters), document_xml(&mut builders));
 }

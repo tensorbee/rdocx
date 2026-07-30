@@ -14,8 +14,9 @@ Defaults are three review passes and as many workers as the wave allows.
 resumable through `.claude/scratch/SNN-run.json`. Reuse it rather than starting
 over.
 
-**This command never merges to `main` and never creates a tag.** It ends by
-telling you the exact `/close-sprint` invocation.
+**This command never merges to `main`.** It normally creates no tag and ends by
+telling you the exact `/close-sprint` invocation. A release F-ID is the one
+exception described below, and it delegates the release tag to `/release`.
 
 ## 1. Initialise
 
@@ -33,8 +34,8 @@ telling you the exact `/close-sprint` invocation.
 
 5. Audit for leftovers from an interrupted run. `git worktree list` and
    `git branch --list 'work/*'` against the run state. Report anything the state
-   does not know about. **Do not delete a worktree or branch**, report it and let
-   the human decide.
+   does not know about. **Do not delete a worktree or branch.** Worker cleanup
+   belongs to `/close-sprint` after the integrated sprint is pushed.
 6. Report every F-ID that is not `completed`, with its state, its dependencies,
    and the skills its diff will trigger.
 
@@ -156,15 +157,22 @@ Only after every branch is integrated:
 
 After verification passes:
 
-1. For each integrated F-ID, apply the `/complete-feature` documentation steps:
+First identify any release F-ID whose gate requires real publication. Leave it
+`reviewed` in run state and `in-progress` in the delivery trackers, retain its
+owner and approved plan, and defer its delivery ledgers until step 9. It still
+participates in the integrated full verification and sprint review.
+
+For every other integrated F-ID:
+
+1. Apply the `/complete-feature` documentation steps:
    update exactly the HLD files its plan listed, append its `AS_BUILT.md` entry
    with the consolidated evidence, and append its `SPRINT_TRACKER.md` row.
-2. Set `done` in `BACKLOG.md` and `CURRENT_SPRINT.md`, clear each `Owner` cell,
+2. Set `done` in `BACKLOG.md` and `CURRENT_SPRINT.md`, clear its `Owner` cell,
    and regenerate the AUTOGEN counts.
-3. Set every design plan to `**Status**: completed`.
-4. Delete each `.claude/scratch/F-XXX-progress.md`. Its durable facts are in
+3. Set its design plan to `**Status**: completed`.
+4. Delete its `.claude/scratch/F-XXX-progress.md`. Its durable facts are in
    AS_BUILT now.
-5. `mark-feature SNN F-XXX completed --clear-owner` for each.
+5. `mark-feature SNN F-XXX completed --clear-owner`.
 6. Commit the ledgers as one `SNN, sprint ledgers` commit. Do not push.
 7. `set-phase SNN review`.
 
@@ -194,6 +202,14 @@ push, and report what is outstanding. Closure stays forbidden.
 
 When the latest pass is clean:
 
+0. If an unfinished release F-ID requires a real publication gate, pause at the
+   reviewed and fully verified SHA. Report the exact `/release vX.Y.Z` command
+   and follow it. `/release` performs its own separate final approval before
+   any external mutation. After the release is verified, create that F-ID's
+   delivery records, set its plan and state to completed, clear its owner,
+   re-run the affected checks and the bounded sprint review, then continue
+   here.
+
 1. Run `close-preflight SNN`. It refuses on an unconsumed handoff, a feature
    that is neither completed nor carried, a blocking review finding, a missing
    full verify, or a tracker that disagrees with the run state.
@@ -204,8 +220,8 @@ When the latest pass is clean:
    - Integrated F-IDs, and anything blocked or carried.
    - The verification evidence, especially the harness result.
    - Review passes and their verdicts.
-   - **Retained worker branches and worktrees**, as cleanup targets for the
-     human.
+   - **Retained worker branches and worktrees**, which `/close-sprint` will
+     remove after the sprint merge and tag are pushed.
    - The exact next command:
 
      ```text
@@ -218,6 +234,8 @@ When the latest pass is clean:
 - **Verifying per worker instead of once over the integrated result.** That is
   precisely the failure `/sprint-review` exists to catch.
 - **Re-recording the hash baseline to make step 6 pass.**
-- **Deleting a worker branch or worktree.**
+- **Deleting a worker branch or worktree.** `/close-sprint` owns cleanup after
+  the sprint is safely pushed.
 - **Running a confirmation pass after a clean review pass.**
-- **Merging to `main`, tagging, or pushing anything other than `sprint/sNN`.**
+- **Merging to `main` or creating a tag directly.** `/close-sprint` owns the
+  merge and sprint tag. `/release` owns release tags.

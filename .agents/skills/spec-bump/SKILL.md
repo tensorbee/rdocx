@@ -7,6 +7,6 @@ description: "Version the spec set. Two stages, audit then apply, so a tagged sp
 
 Canonical source: `.claude/commands/spec-bump.md`.
 
-Source SHA-256: `cd92364963243a6aff95250a706bb290c361563b53f2de68c4df04860edd813d`.
+Source SHA-256: `b5020899897bc1a3c2d496cfef1d8ca8e91a19908c47b5c500cb1da049eb49ce`.
 
 Read the canonical source in full before acting, and follow it with whatever tools this host provides. Treat any invocation arguments as arguments to that workflow. Where it names another slash command, follow the repository skill of the same name. Where it says to ask with `AskUserQuestion`, ask through this host's own question mechanism. `.claude/WORKFLOW.md` wins on any process question. Do not edit this generated adapter.

@@ -84,10 +84,11 @@ PRES_PROPS, VIEW_PROPS, TABLE_STYLES, HANDOUT_MASTER
 A `content_types` constants module is added alongside, so neither format crate
 hand-types the long MIME strings.
 
-**One existing bug to fix while adding these.** rdocx hardcodes
-`get_part("/docProps/core.xml")` instead of resolving through the relationship,
-which fails on a package that stores core properties elsewhere. The constant now
-exists, so resolve through it.
+rdocx resolves core properties through the package-level `CORE_PROPERTIES`
+relationship and retains its normalized target. Metadata is written back to
+that part with its content-type override. A document that creates metadata
+without an existing relationship uses `/docProps/core.xml` and adds the missing
+package relationship.
 
 ## Part naming
 

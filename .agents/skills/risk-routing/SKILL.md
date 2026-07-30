@@ -7,6 +7,6 @@ description: "Route a design plan to the mandatory reading and the extra verific
 
 Canonical source: `.claude/skills/risk-routing.md`.
 
-Source SHA-256: `7be3d03b942cbfecb85273622e1f0283b02c04d9d942bf5519e80928678f5a35`.
+Source SHA-256: `2349bd11d4d480683fb6701907b695baa05c447eb982c96a37a88174d5d3ff0e`.
 
 Read the canonical source in full before acting, and follow it with whatever tools this host provides. Treat any invocation arguments as arguments to that workflow. Where it names another slash command, follow the repository skill of the same name. Where it says to ask with `AskUserQuestion`, ask through this host's own question mechanism. `.claude/WORKFLOW.md` wins on any process question. Do not edit this generated adapter.

@@ -13,47 +13,51 @@ jobs:
     name: Publish to crates.io
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verify output stability
+        run: python3 scripts/hash_harness.py --check
 
       - name: Publish rdocx-opc
-        run: cargo publish -p rdocx-opc --no-verify || echo "already published"
+        run: cargo publish -p rdocx-opc
 
-      - name: Wait for index
+      - name: Wait for registry index
         run: sleep 60
 
       - name: Publish rdocx-oxml
-        run: cargo publish -p rdocx-oxml --no-verify || echo "already published"
+        run: cargo publish -p rdocx-oxml
 
-      - name: Wait for index
+      - name: Wait for registry index
         run: sleep 60
 
       - name: Publish rdocx-layout
-        run: cargo publish -p rdocx-layout --no-verify || echo "already published"
+        run: cargo publish -p rdocx-layout
 
-      - name: Wait for index
+      - name: Wait for registry index
         run: sleep 60
 
       - name: Publish rdocx-html
-        run: cargo publish -p rdocx-html --no-verify || echo "already published"
+        run: cargo publish -p rdocx-html
 
-      - name: Wait for index
+      - name: Wait for registry index
         run: sleep 60
 
       - name: Publish rdocx-pdf
-        run: cargo publish -p rdocx-pdf --no-verify || echo "already published"
+        run: cargo publish -p rdocx-pdf
 
-      - name: Wait for index
+      - name: Wait for registry index
         run: sleep 60
 
       - name: Publish rdocx
-        run: cargo publish -p rdocx --no-verify || echo "already published"
+        run: cargo publish -p rdocx
 
-      - name: Wait for index
+      - name: Wait for registry index
         run: sleep 60
 
       - name: Publish rdocx-cli
-        run: cargo publish -p rdocx-cli --no-verify || echo "already published"
+        run: cargo publish -p rdocx-cli
 
   release:
     name: GitHub Release
@@ -62,7 +66,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Create GitHub Release
         run: gh release create "${{ github.ref_name }}" --generate-notes
         env:
