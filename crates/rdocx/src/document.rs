@@ -1596,7 +1596,7 @@ impl Document {
     pub fn numbering_is_bullet(&self, num_id: u32) -> Option<bool> {
         let numbering = self.numbering.as_ref()?;
         let abstract_num = numbering.get_abstract_num_for(num_id)?;
-        let fmt = abstract_num.levels.first()?.num_fmt?;
+        let fmt = abstract_num.levels.first()?.num_fmt.clone()?;
         Some(fmt == rdocx_oxml::numbering::ST_NumberFormat::Bullet)
     }
 
@@ -2253,8 +2253,8 @@ impl Document {
                 numbering
                     .get_abstract_num_for(n.num_id)
                     .map(|a| {
-                        a.levels.first().and_then(|l| l.num_fmt)
-                            == Some(rdocx_oxml::numbering::ST_NumberFormat::Bullet)
+                        a.levels.first().and_then(|l| l.num_fmt.as_ref())
+                            == Some(&rdocx_oxml::numbering::ST_NumberFormat::Bullet)
                     })
                     .unwrap_or(false)
             });
@@ -2297,8 +2297,8 @@ impl Document {
                 numbering
                     .get_abstract_num_for(n.num_id)
                     .map(|a| {
-                        a.levels.first().and_then(|l| l.num_fmt)
-                            == Some(rdocx_oxml::numbering::ST_NumberFormat::Decimal)
+                        a.levels.first().and_then(|l| l.num_fmt.as_ref())
+                            == Some(&rdocx_oxml::numbering::ST_NumberFormat::Decimal)
                     })
                     .unwrap_or(false)
             });

@@ -2063,7 +2063,7 @@ fn write_level_property<W: std::io::Write>(
 }
 
 /// `ST_NumberFormat` — Numbering format type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ST_NumberFormat {
     Decimal,
     UpperRoman,
@@ -2073,6 +2073,8 @@ pub enum ST_NumberFormat {
     Ordinal,
     Bullet,
     None,
+    /// A producer-defined format value that rdocx does not model.
+    Other(String),
 }
 
 /// The character or layout item that follows a numbering level marker.
@@ -2113,11 +2115,11 @@ impl ST_NumberFormat {
             "ordinal" => Self::Ordinal,
             "bullet" => Self::Bullet,
             "none" => Self::None,
-            _ => Self::Decimal,
+            _ => Self::Other(s.to_owned()),
         }
     }
 
-    pub fn to_str(self) -> &'static str {
+    pub fn to_str(&self) -> &str {
         match self {
             Self::Decimal => "decimal",
             Self::UpperRoman => "upperRoman",
@@ -2127,6 +2129,7 @@ impl ST_NumberFormat {
             Self::Ordinal => "ordinal",
             Self::Bullet => "bullet",
             Self::None => "none",
+            Self::Other(value) => value,
         }
     }
 }
@@ -2350,7 +2353,7 @@ impl CT_Lvl {
         }
 
         write_extras_at(writer, &self.extra_xml, 1)?;
-        if let Some(fmt) = self.num_fmt {
+        if let Some(fmt) = &self.num_fmt {
             let name = qualified(word_prefix, "numFmt");
             let val_name = qualified(word_prefix, "val");
             let mut e = BytesStart::new(name.as_str());
@@ -2961,10 +2964,10 @@ impl CT_Numbering {
         for i in 0..9u32 {
             let (num_fmt, start) = match levels.get(i as usize) {
                 Some((fmt, start)) => {
-                    last_specified = *fmt;
-                    (*fmt, start.unwrap_or(1))
+                    last_specified = fmt.clone();
+                    (fmt.clone(), start.unwrap_or(1))
                 }
-                None => (level_fill_format(last_specified, i), 1),
+                None => (level_fill_format(&last_specified, i), 1),
             };
 
             abs.levels.push(build_level(i, num_fmt, start));
@@ -3076,10 +3079,10 @@ const NUMBERED_FORMATS: [ST_NumberFormat; 9] = [
 /// Template format for an unspecified level, keyed on the last format the
 /// caller did specify: bullets stay bullets; anything numeric continues the
 /// numbered rotation.
-fn level_fill_format(last_specified: ST_NumberFormat, ilvl: u32) -> ST_NumberFormat {
+fn level_fill_format(last_specified: &ST_NumberFormat, ilvl: u32) -> ST_NumberFormat {
     match last_specified {
         ST_NumberFormat::Bullet => ST_NumberFormat::Bullet,
-        _ => NUMBERED_FORMATS[ilvl as usize % NUMBERED_FORMATS.len()],
+        _ => NUMBERED_FORMATS[ilvl as usize % NUMBERED_FORMATS.len()].clone(),
     }
 }
 
@@ -3088,11 +3091,11 @@ fn level_fill_format(last_specified: ST_NumberFormat, ilvl: u32) -> ST_NumberFor
 fn build_level(ilvl: u32, num_fmt: ST_NumberFormat, start: u32) -> CT_Lvl {
     let mut lvl = CT_Lvl::new(ilvl);
     lvl.start = Some(start);
-    lvl.num_fmt = Some(num_fmt);
     lvl.lvl_text = Some(match num_fmt {
         ST_NumberFormat::Bullet => BULLET_CHARS[ilvl as usize % BULLET_CHARS.len()].to_string(),
         _ => format!("%{}.", ilvl + 1),
     });
+    lvl.num_fmt = Some(num_fmt);
     lvl.lvl_jc = Some(ST_Jc::Left);
 
     // Standard indentation: 720tw per level
@@ -3146,6 +3149,23 @@ mod tests {
         assert_eq!(abs.levels[0].num_fmt, Some(ST_NumberFormat::Decimal));
         assert_eq!(abs.levels[0].lvl_text, Some("%1.".to_string()));
         assert_eq!(abs.levels[1].num_fmt, Some(ST_NumberFormat::LowerLetter));
+    }
+
+    #[test]
+    fn producer_defined_number_format_round_trips_without_substitution() {
+        let xml = br#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:numFmt w:val="chicago"/></w:lvl></w:abstractNum></w:numbering>"#;
+
+        let numbering = CT_Numbering::from_xml(xml).unwrap();
+        assert_eq!(
+            numbering.abstract_nums[0].levels[0].num_fmt,
+            Some(ST_NumberFormat::Other("chicago".to_owned()))
+        );
+
+        let output = String::from_utf8(numbering.to_xml().unwrap()).unwrap();
+        assert!(
+            output.contains(r#"<w:numFmt w:val="chicago"/>"#),
+            "{output}"
+        );
     }
 
     #[test]

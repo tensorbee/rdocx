@@ -1246,9 +1246,9 @@ impl<'a> RtfWriter<'a> {
                     .iter()
                     .find(|level| level.ilvl == level_index);
                 let format = level
-                    .and_then(|level| level.num_fmt)
+                    .and_then(|level| level.num_fmt.clone())
                     .and_then(public_number_format);
-                if level.and_then(|level| level.num_fmt).is_some() && format.is_none() {
+                if level.and_then(|level| level.num_fmt.as_ref()).is_some() && format.is_none() {
                     self.diagnose(
                         &format!("numbering[numId={num_id}]/level[{level_index}]/numFmt"),
                         "unsupported numbering format was dropped during RTF export",
