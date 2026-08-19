@@ -42,6 +42,7 @@ use crate::paragraph::{Paragraph, ParagraphRef};
 use crate::revision::RevisionRef;
 use crate::style::{self, Style, StyleBuilder};
 use crate::table::{Table, TableRef};
+use crate::unsupported_xml::{UnsupportedXmlRef, WORD_NAMESPACE};
 
 /// Options that select a native document render projection.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -60,6 +61,16 @@ pub enum BodyItemRef<'a> {
     ContentControl(ContentControlRef<'a>),
     /// A preserved body child that rdocx does not model.
     UnsupportedXml(&'a [u8]),
+}
+
+/// One body child exposed through the compatibility reader facade.
+pub enum BodyContentRef<'a> {
+    /// A body paragraph.
+    Paragraph(ParagraphRef<'a>),
+    /// A body table.
+    Table(TableRef<'a>),
+    /// Content that the compatibility facade does not model.
+    UnsupportedXml(UnsupportedXmlRef<'a>),
 }
 
 /// A Word document (.docx file).
@@ -1084,6 +1095,24 @@ impl Document {
                 BodyItemRef::ContentControl(ContentControlRef { inner: control })
             }
             BodyContent::RawXml(raw) => BodyItemRef::UnsupportedXml(raw),
+        })
+    }
+
+    /// Iterate over paragraphs, tables, and unsupported content in body order.
+    ///
+    /// This compatibility facade deliberately reports content controls as an
+    /// unsupported WordprocessingML fact. It therefore cannot silently erase a
+    /// construct that older readers did not model.
+    pub fn body_content(&self) -> impl Iterator<Item = BodyContentRef<'_>> {
+        self.document.body.content.iter().map(|item| match item {
+            BodyContent::Paragraph(paragraph) => {
+                BodyContentRef::Paragraph(ParagraphRef { inner: paragraph })
+            }
+            BodyContent::Table(table) => BodyContentRef::Table(TableRef { inner: table }),
+            BodyContent::ContentControl(_) => {
+                BodyContentRef::UnsupportedXml(UnsupportedXmlRef::modeled(WORD_NAMESPACE, "sdt"))
+            }
+            BodyContent::RawXml(raw) => BodyContentRef::UnsupportedXml(UnsupportedXmlRef::new(raw)),
         })
     }
 
@@ -5397,6 +5426,28 @@ mod tests {
                 "table",
                 "raw:<w:custom/>",
                 "control:inside",
+                "paragraph:last",
+            ]
+        );
+
+        let compatibility_items = doc
+            .body_content()
+            .map(|item| match item {
+                BodyContentRef::Paragraph(paragraph) => format!("paragraph:{}", paragraph.text()),
+                BodyContentRef::Table(_) => "table".to_owned(),
+                BodyContentRef::UnsupportedXml(xml) => {
+                    format!("unsupported:{}", xml.local_name())
+                }
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            compatibility_items,
+            [
+                "paragraph:first",
+                "table",
+                "unsupported:custom",
+                "unsupported:sdt",
                 "paragraph:last",
             ]
         );

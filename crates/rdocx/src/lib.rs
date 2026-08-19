@@ -35,13 +35,14 @@ pub mod run;
 pub mod style;
 pub mod table;
 mod template;
+mod unsupported_xml;
 
 pub use comments::{BookmarkRef, CommentRef, RunPosition, RunRange};
 pub use comparison::ComparisonDiagnostic;
 pub use content_control::ContentControlRef;
 pub use document::{
-    AccessibilityIssue, BodyItemRef, Document, ImageInfo, IssueSeverity, LinkInfo, ListLevel,
-    ListNumberFormat, OutlineNode, RenderOptions,
+    AccessibilityIssue, BodyContentRef, BodyItemRef, Document, ImageInfo, IssueSeverity, LinkInfo,
+    ListLevel, ListNumberFormat, OutlineNode, RenderOptions,
 };
 pub use error::{Error, Result};
 pub use field::{FieldDateTime, FieldEvaluation, FieldEvaluationContext, FieldOutcome};
@@ -67,6 +68,7 @@ pub use rtf::{RtfDiagnostic, RtfReadResult, RtfWriteResult};
 pub use run::{Run, RunRef, UnderlineStyle};
 pub use style::{Style, StyleBuilder};
 pub use table::{Cell, CellRef, Row, RowRef, Table, TableRef, VerticalAlignment};
+pub use unsupported_xml::UnsupportedXmlRef;
 
 #[cfg(test)]
 mod tests {
