@@ -1696,7 +1696,11 @@ impl CT_Tc {
                 Ok(Event::Empty(ref e)) => {
                     let name = e.name();
                     let prefixes = word_prefixes_at(e, word_prefixes)?;
-                    if !is_word_element(name.as_ref(), b"tcPr", &prefixes) {
+                    if is_word_element(name.as_ref(), b"p", &prefixes) {
+                        content.push(CellContent::Paragraph(CT_P::new()));
+                    } else if is_word_element(name.as_ref(), b"tbl", &prefixes) {
+                        content.push(CellContent::Table(CT_Tbl::new()));
+                    } else if !is_word_element(name.as_ref(), b"tcPr", &prefixes) {
                         extra_xml.push((
                             content.len(),
                             crate::text::raw_with_external_bindings(
