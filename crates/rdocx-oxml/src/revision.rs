@@ -53,14 +53,22 @@ pub struct CT_Revision {
 
 impl CT_Revision {
     pub(crate) fn from_raw(raw_xml: Vec<u8>, word_prefixes: &[String]) -> Option<Self> {
-        Self::try_from_raw(raw_xml, word_prefixes).ok()
+        Self::try_from_raw(raw_xml, word_prefixes, true).ok()
+    }
+
+    pub(crate) fn from_raw_content(raw_xml: Vec<u8>, word_prefixes: &[String]) -> Option<Self> {
+        Self::try_from_raw(raw_xml, word_prefixes, false).ok()
     }
 
     pub(crate) fn into_raw_xml(self) -> Vec<u8> {
         self.raw_xml
     }
 
-    fn try_from_raw(raw_xml: Vec<u8>, word_prefixes: &[String]) -> crate::Result<Self> {
+    fn try_from_raw(
+        raw_xml: Vec<u8>,
+        word_prefixes: &[String],
+        require_author: bool,
+    ) -> crate::Result<Self> {
         validate_revision_nesting_depth(&raw_xml, word_prefixes)?;
         let mut reader = Reader::from_reader(raw_xml.as_slice());
         reader.config_mut().trim_text(false);
@@ -76,7 +84,12 @@ impl CT_Revision {
                             )
                         })?;
                     let id = required_word_attribute(&start, b"id", &prefixes)?.parse()?;
-                    let author = required_word_attribute(&start, b"author", &prefixes)?;
+                    let author = optional_word_attribute(&start, b"author", &prefixes)?;
+                    let author = match (author, require_author) {
+                        (Some(author), _) => author,
+                        (None, true) => required_word_attribute(&start, b"author", &prefixes)?,
+                        (None, false) => String::new(),
+                    };
                     let timestamp = optional_word_attribute(&start, b"date", &prefixes)?;
                     break ((kind, id, author, timestamp), prefixes);
                 }
@@ -89,7 +102,12 @@ impl CT_Revision {
                             )
                         })?;
                     let id = required_word_attribute(&start, b"id", &prefixes)?.parse()?;
-                    let author = required_word_attribute(&start, b"author", &prefixes)?;
+                    let author = optional_word_attribute(&start, b"author", &prefixes)?;
+                    let author = match (author, require_author) {
+                        (Some(author), _) => author,
+                        (None, true) => required_word_attribute(&start, b"author", &prefixes)?,
+                        (None, false) => String::new(),
+                    };
                     let timestamp = optional_word_attribute(&start, b"date", &prefixes)?;
                     return Ok(Self {
                         kind,
@@ -443,22 +461,25 @@ fn collect_revision<'a>(revision: &'a CT_Revision, revisions: &mut Vec<&'a CT_Re
         collect_paragraph(paragraph, revisions);
         return;
     }
-    if let RevisionContent::Runs(runs) = revision.content() {
-        for boundary in 0..=runs.len() {
-            for (_, nested) in revision
-                .nested_revisions
-                .iter()
-                .filter(|(at, _)| *at == boundary)
-            {
-                collect_revision(nested, revisions);
-            }
-            if let Some(run) = runs.get(boundary) {
-                collect_run(run, revisions);
+    match revision.content() {
+        RevisionContent::Runs(runs) => {
+            for boundary in 0..=runs.len() {
+                for (_, nested) in revision
+                    .nested_revisions
+                    .iter()
+                    .filter(|(at, _)| *at == boundary)
+                {
+                    collect_revision(nested, revisions);
+                }
+                if let Some(run) = runs.get(boundary) {
+                    collect_run(run, revisions);
+                }
             }
         }
-    } else {
-        for (_, nested) in &revision.nested_revisions {
-            collect_revision(nested, revisions);
+        _ => {
+            for (_, nested) in &revision.nested_revisions {
+                collect_revision(nested, revisions);
+            }
         }
     }
 }
