@@ -312,7 +312,43 @@ impl CT_SectPr {
                 Ok(Event::Start(ref e)) => {
                     let name = e.name();
                     let prefixes = word_prefixes_at(e, word_prefixes)?;
-                    if is_word_element(name.as_ref(), b"cols", &prefixes) {
+                    if is_word_element(name.as_ref(), b"pgSz", &prefixes) {
+                        Self::parse_pg_sz_attrs(&mut sect, e, &prefixes)?;
+                        let raw = crate::text::raw_with_external_bindings(
+                            &capture_element(reader, e)?,
+                            owner_bindings,
+                        )?;
+                        if raw_has_child_content(&raw) {
+                            sect.extra_xml.push(raw);
+                        }
+                    } else if is_word_element(name.as_ref(), b"pgMar", &prefixes) {
+                        Self::parse_pg_mar_attrs(&mut sect, e, &prefixes)?;
+                        let raw = crate::text::raw_with_external_bindings(
+                            &capture_element(reader, e)?,
+                            owner_bindings,
+                        )?;
+                        if raw_has_child_content(&raw) {
+                            sect.extra_xml.push(raw);
+                        }
+                    } else if is_word_element(name.as_ref(), b"headerReference", &prefixes) {
+                        Self::parse_header_reference(&mut sect, e, &prefixes)?;
+                        let raw = crate::text::raw_with_external_bindings(
+                            &capture_element(reader, e)?,
+                            owner_bindings,
+                        )?;
+                        if raw_has_child_content(&raw) {
+                            sect.extra_xml.push(raw);
+                        }
+                    } else if is_word_element(name.as_ref(), b"footerReference", &prefixes) {
+                        Self::parse_footer_reference(&mut sect, e, &prefixes)?;
+                        let raw = crate::text::raw_with_external_bindings(
+                            &capture_element(reader, e)?,
+                            owner_bindings,
+                        )?;
+                        if raw_has_child_content(&raw) {
+                            sect.extra_xml.push(raw);
+                        }
+                    } else if is_word_element(name.as_ref(), b"cols", &prefixes) {
                         sect.columns = Some(Self::parse_cols_start(reader, e, &prefixes)?);
                     } else if is_word_element(name.as_ref(), b"sectPrChange", &prefixes) {
                         let raw = crate::text::raw_with_external_bindings(
@@ -347,6 +383,107 @@ impl CT_SectPr {
         }
 
         Ok(sect)
+    }
+
+    fn parse_pg_sz_attrs(
+        sect: &mut Self,
+        element: &BytesStart,
+        word_prefixes: &[String],
+    ) -> Result<()> {
+        for attribute in element.attributes() {
+            let attribute = attribute?;
+            let value = std::str::from_utf8(&attribute.value)?;
+            if is_word_attribute(attribute.key.as_ref(), b"w", word_prefixes) {
+                sect.page_width = Some(Twips(value.parse()?));
+            } else if is_word_attribute(attribute.key.as_ref(), b"h", word_prefixes) {
+                sect.page_height = Some(Twips(value.parse()?));
+            } else if is_word_attribute(attribute.key.as_ref(), b"orient", word_prefixes) {
+                sect.orientation = ST_PageOrientation::from_str(value).ok();
+            }
+        }
+        Ok(())
+    }
+
+    fn parse_pg_mar_attrs(
+        sect: &mut Self,
+        element: &BytesStart,
+        word_prefixes: &[String],
+    ) -> Result<()> {
+        for attribute in element.attributes() {
+            let attribute = attribute?;
+            let value = Twips(std::str::from_utf8(&attribute.value)?.parse()?);
+            let key = attribute.key.as_ref();
+            if is_word_attribute(key, b"top", word_prefixes) {
+                sect.margin_top = Some(value);
+            } else if is_word_attribute(key, b"right", word_prefixes)
+                || is_word_attribute(key, b"end", word_prefixes)
+            {
+                sect.margin_right = Some(value);
+            } else if is_word_attribute(key, b"bottom", word_prefixes) {
+                sect.margin_bottom = Some(value);
+            } else if is_word_attribute(key, b"left", word_prefixes)
+                || is_word_attribute(key, b"start", word_prefixes)
+            {
+                sect.margin_left = Some(value);
+            } else if is_word_attribute(key, b"gutter", word_prefixes) {
+                sect.gutter = Some(value);
+            } else if is_word_attribute(key, b"header", word_prefixes) {
+                sect.header_distance = Some(value);
+            } else if is_word_attribute(key, b"footer", word_prefixes) {
+                sect.footer_distance = Some(value);
+            }
+        }
+        Ok(())
+    }
+
+    fn parse_header_reference(
+        sect: &mut Self,
+        element: &BytesStart,
+        word_prefixes: &[String],
+    ) -> Result<()> {
+        let mut hdr_type = HdrFtrType::Default;
+        let mut rel_id = String::new();
+        for attribute in element.attributes() {
+            let attribute = attribute?;
+            let value = std::str::from_utf8(&attribute.value)?;
+            if is_word_attribute(attribute.key.as_ref(), b"type", word_prefixes) {
+                hdr_type = HdrFtrType::from_str(value);
+            } else if matches_local_name(attribute.key.as_ref(), b"id") {
+                rel_id = value.to_owned();
+            }
+        }
+        if !rel_id.is_empty() {
+            sect.header_refs.push(HdrFtrRef {
+                hdr_ftr_type: hdr_type,
+                rel_id,
+            });
+        }
+        Ok(())
+    }
+
+    fn parse_footer_reference(
+        sect: &mut Self,
+        element: &BytesStart,
+        word_prefixes: &[String],
+    ) -> Result<()> {
+        let mut ftr_type = HdrFtrType::Default;
+        let mut rel_id = String::new();
+        for attribute in element.attributes() {
+            let attribute = attribute?;
+            let value = std::str::from_utf8(&attribute.value)?;
+            if is_word_attribute(attribute.key.as_ref(), b"type", word_prefixes) {
+                ftr_type = HdrFtrType::from_str(value);
+            } else if matches_local_name(attribute.key.as_ref(), b"id") {
+                rel_id = value.to_owned();
+            }
+        }
+        if !rel_id.is_empty() {
+            sect.footer_refs.push(HdrFtrRef {
+                hdr_ftr_type: ftr_type,
+                rel_id,
+            });
+        }
+        Ok(())
     }
 
     fn parse_cols_attrs(e: &BytesStart, word_prefixes: &[String]) -> Result<CT_Columns> {
@@ -561,6 +698,20 @@ impl CT_SectPr {
     }
 }
 
+fn raw_has_child_content(raw: &[u8]) -> bool {
+    let Some(start_end) = raw.iter().position(|byte| *byte == b'>') else {
+        return true;
+    };
+    let mut content = raw[start_end + 1..]
+        .iter()
+        .skip_while(|byte| byte.is_ascii_whitespace());
+    match content.next() {
+        None => false,
+        Some(byte) if *byte != b'<' => true,
+        Some(_) => !content.next().is_some_and(|byte| *byte == b'/'),
+    }
+}
+
 /// `CT_Body` — The document body containing paragraphs, tables, and section properties.
 #[derive(Debug, Clone, PartialEq)]
 #[allow(non_snake_case)]
@@ -749,11 +900,14 @@ impl CT_Body {
                         let local_bindings = local_namespace_overrides(e, word_prefixes)?;
                         let section_bindings =
                             merged_owner_bindings(owner_bindings, &local_bindings);
-                        sect_pr = Some(CT_SectPr::from_xml_with_prefixes_and_owner_bindings(
+                        let parsed = CT_SectPr::from_xml_with_prefixes_and_owner_bindings(
                             reader,
                             &prefixes,
                             &section_bindings,
-                        )?);
+                        )?;
+                        if sect_pr.is_none() {
+                            sect_pr = Some(parsed);
+                        }
                     } else {
                         // Capture unknown elements as raw XML
                         content.push(BodyContent::RawXml(
@@ -772,8 +926,10 @@ impl CT_Body {
                     } else if is_word_element(name.as_ref(), b"tbl", &prefixes) {
                         content.push(BodyContent::Table(CT_Tbl::new()));
                     } else if is_word_element(name.as_ref(), b"sectPr", &prefixes) {
-                        sect_pr = Some(CT_SectPr::empty());
-                    } else {
+                        if sect_pr.is_none() {
+                            sect_pr = Some(CT_SectPr::empty());
+                        }
+                    } else if !matches_local_name(name.as_ref(), b"body") {
                         content.push(BodyContent::RawXml(
                             crate::text::raw_with_external_bindings(
                                 &capture_empty_element(e)?,
@@ -1074,6 +1230,50 @@ mod tests {
         assert_eq!(paragraph.properties.as_ref().unwrap().jc, None);
     }
     use super::*;
+
+    #[test]
+    fn parses_empty_body_paragraph_and_section_properties_as_modeled_content() {
+        let xml = concat!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#,
+            "<w:body><w:p/><w:sectPr/></w:body></w:document>"
+        );
+
+        let document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+        assert!(matches!(
+            document.body.content.as_slice(),
+            [BodyContent::Paragraph(_)]
+        ));
+        assert!(document.body.sect_pr.is_some());
+    }
+
+    #[test]
+    fn expanded_section_children_preserve_modeled_facts_and_references() {
+        let xml = format!(
+            r#"<w:document xmlns:w="{W_NS}" xmlns:r="{}"><w:body><w:sectPr><w:headerReference w:type="default" r:id="rId1"></w:headerReference><w:pgSz w:w="12240" w:h="15840"></w:pgSz><x:pgMar xmlns:x="urn:foreign"/></w:sectPr><w:sectPr/></w:body></w:document>"#,
+            crate::namespace::R_NS,
+        );
+        let document = CT_Document::from_xml(xml.as_bytes()).expect("document parses");
+        let section = document.body.sect_pr.expect("first section is retained");
+        assert_eq!(section.page_width, Some(Twips(12240)));
+        assert_eq!(section.page_height, Some(Twips(15840)));
+        assert_eq!(section.header_refs[0].rel_id, "rId1");
+        assert_eq!(section.extra_xml.len(), 1);
+    }
+
+    #[test]
+    fn rejects_truncated_and_multiple_document_roots() {
+        let truncated = concat!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#,
+            "<w:body><w:p/>"
+        );
+        assert!(CT_Document::from_xml(truncated.as_bytes()).is_err());
+
+        let multiple_roots = concat!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>"#,
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>"#,
+        );
+        assert!(CT_Document::from_xml(multiple_roots.as_bytes()).is_err());
+    }
 
     #[test]
     fn round_trip_document() {
