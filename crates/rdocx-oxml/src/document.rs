@@ -4,7 +4,7 @@ use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, Event};
 use quick_xml::{Reader, Writer, XmlVersion};
 
 use crate::content_control::{CT_Sdt, SdtOwner};
-use crate::error::Result;
+use crate::error::{OxmlError, Result};
 use crate::header_footer::{HdrFtrRef, HdrFtrType};
 use crate::namespace::{W_NS, matches_local_name};
 use crate::numbering::{local_namespace_overrides, merged_owner_bindings, word_prefixes_at};
@@ -941,7 +941,9 @@ impl CT_Body {
                 Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"body") => {
                     break;
                 }
-                Ok(Event::Eof) => break,
+                Ok(Event::Eof) => {
+                    return Err(OxmlError::MissingElement("w:body end".to_owned()));
+                }
                 Err(e) => return Err(e.into()),
                 _ => {}
             }
@@ -1017,6 +1019,8 @@ impl CT_Document {
         let mut background_extra_xml = Vec::new();
         let mut buf = Vec::new();
         let mut word_prefixes = Vec::new();
+        let mut document_open = false;
+        let mut document_closed = false;
 
         // Known namespace prefixes that we always emit ourselves
         let known_ns: &[&[u8]] = &[b"xmlns:w", b"xmlns:r", b"xmlns:mc", b"xmlns"];
@@ -1026,14 +1030,10 @@ impl CT_Document {
                 Ok(Event::Start(ref e)) => {
                     let name = e.name();
                     let prefixes = word_prefixes_at(e, &word_prefixes)?;
-                    if matches_local_name(name.as_ref(), b"body") {
-                        let owner_bindings = local_namespace_overrides(e, &word_prefixes)?;
-                        body = Some(CT_Body::from_xml_with_prefixes_and_owner_bindings(
-                            &mut reader,
-                            &prefixes,
-                            &owner_bindings,
-                        )?);
-                    } else if matches_local_name(name.as_ref(), b"document") {
+                    if matches_local_name(name.as_ref(), b"document") {
+                        if document_open || document_closed {
+                            return Err(OxmlError::UnexpectedElement("w:document".to_owned()));
+                        }
                         // Capture extra namespace declarations from the document element
                         for attr in e.attributes().flatten() {
                             let key = attr.key.as_ref();
@@ -1050,8 +1050,18 @@ impl CT_Document {
                                 extra_namespaces.push((key_str, val_str));
                             }
                         }
-                        // Continue into document element
+                        document_open = true;
                         word_prefixes = prefixes;
+                    } else if matches_local_name(name.as_ref(), b"body") {
+                        if !document_open || document_closed || body.is_some() {
+                            return Err(OxmlError::UnexpectedElement("w:body".to_owned()));
+                        }
+                        let owner_bindings = local_namespace_overrides(e, &word_prefixes)?;
+                        body = Some(CT_Body::from_xml_with_prefixes_and_owner_bindings(
+                            &mut reader,
+                            &prefixes,
+                            &owner_bindings,
+                        )?);
                     } else if is_word_element(name.as_ref(), b"background", &prefixes) {
                         background_xml = Some(capture_element(&mut reader, e)?);
                     } else if matches_local_name(name.as_ref(), b"background") {
@@ -1068,7 +1078,19 @@ impl CT_Document {
                         background_extra_xml.push(capture_empty_element(e)?);
                     }
                 }
-                Ok(Event::Eof) => break,
+                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"document") => {
+                    if !document_open {
+                        return Err(OxmlError::UnexpectedElement("w:document end".to_owned()));
+                    }
+                    document_open = false;
+                    document_closed = true;
+                }
+                Ok(Event::Eof) => {
+                    if document_open || !document_closed {
+                        return Err(OxmlError::MissingElement("w:document end".to_owned()));
+                    }
+                    break;
+                }
                 Err(e) => return Err(e.into()),
                 _ => {}
             }
@@ -1076,7 +1098,7 @@ impl CT_Document {
         }
 
         Ok(CT_Document {
-            body: body.unwrap_or_default(),
+            body: body.ok_or_else(|| OxmlError::MissingElement("w:body".to_owned()))?,
             extra_namespaces,
             background_xml,
             background_extra_xml,

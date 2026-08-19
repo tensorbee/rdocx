@@ -23369,6 +23369,41 @@ mod tests {
     }
 
     #[test]
+    fn reader_reports_list_paragraph_presentation_separately_from_unknown_xml() {
+        let mut doc = Document::new();
+        let num_id = doc.add_list_definition(&[ListLevel::decimal()]);
+        let level = &mut doc.numbering.as_mut().unwrap().abstract_nums[0].levels[0];
+        level.ppr = Some(CT_PPr {
+            ind_left: Some(Twips(360)),
+            ..CT_PPr::default()
+        });
+
+        let level = doc.numbering_level(num_id, 0).expect("numbering level");
+        assert!(level.has_paragraph_presentation);
+        assert!(!level.has_unmodeled_properties);
+    }
+
+    #[test]
+    fn reader_exposes_background_and_section_completeness_facts() {
+        let mut doc = Document::new();
+        assert!(!doc.has_document_background());
+        assert!(doc.has_section_layout_formatting());
+        assert!(!doc.has_unmodeled_section_properties());
+
+        doc.document.background_xml = Some(b"<w:background/>".to_vec());
+        doc.document
+            .body
+            .sect_pr
+            .as_mut()
+            .unwrap()
+            .extra_xml
+            .push(b"<w:printerSettings r:id=\"rId1\"/>".to_vec());
+
+        assert!(doc.has_document_background());
+        assert!(doc.has_unmodeled_section_properties());
+    }
+
+    #[test]
     fn reader_resolves_concrete_paragraph_and_run_properties() {
         let mut doc = Document::new();
         let num_id = doc.add_list_definition(&[ListLevel::decimal()]);
