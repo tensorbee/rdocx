@@ -579,10 +579,11 @@ impl CT_R {
                         });
                         // `read_text` returns the raw markup span, so entity
                         // references in it still need resolving.
-                        let text = reader
-                            .read_text(name)
-                            .map(|t| crate::xml_text::decode_escaped(&t))
-                            .unwrap_or_default();
+                        let encoded = reader.read_text(name)?;
+                        encoded
+                            .decode()
+                            .map_err(|error| crate::OxmlError::InvalidValue(error.to_string()))?;
+                        let text = crate::xml_text::decode_escaped(&encoded);
                         content.push(RunContent::Text(CT_Text {
                             text,
                             preserve_space: preserve,
@@ -594,10 +595,11 @@ impl CT_R {
                                 a.key.as_ref() == b"xml:space" && a.value.as_ref() == b"preserve"
                             })
                         });
-                        let text = reader
-                            .read_text(name)
-                            .map(|t| crate::xml_text::decode_escaped(&t))
-                            .unwrap_or_default();
+                        let encoded = reader.read_text(name)?;
+                        encoded
+                            .decode()
+                            .map_err(|error| crate::OxmlError::InvalidValue(error.to_string()))?;
+                        let text = crate::xml_text::decode_escaped(&encoded);
                         content.push(RunContent::DeletedText(CT_Text {
                             text,
                             preserve_space: preserve,
@@ -4726,6 +4728,18 @@ mod tests {
         let p = parse_paragraph(r#"<w:r><w:t>Hello World</w:t></w:r>"#);
         assert_eq!(p.text(), "Hello World");
         assert_eq!(p.runs.len(), 1);
+    }
+
+    #[test]
+    fn parse_paragraph_rejects_undecodable_visible_text() {
+        let xml = b"<w:p><w:r><w:t>before\xff</w:t></w:r></w:p>";
+        let mut reader = Reader::from_reader(xml.as_slice());
+        let mut buffer = Vec::new();
+        assert!(matches!(
+            reader.read_event_into(&mut buffer),
+            Ok(Event::Start(_))
+        ));
+        assert!(CT_P::from_xml(&mut reader).is_err());
     }
 
     #[test]
