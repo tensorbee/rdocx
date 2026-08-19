@@ -1,11 +1,153 @@
 //! Run — a contiguous stretch of text with uniform formatting.
 
+use rdocx_oxml::drawing::CT_Drawing;
 use rdocx_oxml::properties::{CT_RPr, CT_Shd};
 use rdocx_oxml::shared::ST_Underline;
-use rdocx_oxml::text::{CT_R, CT_Text, RunContent};
+use rdocx_oxml::text::{BreakType, CT_R, CT_Text, RunContent};
 use rdocx_oxml::units::{HalfPoint, Twips};
 
 use crate::Length;
+
+/// A break embedded in a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BreakKind {
+    /// A line break within the current paragraph.
+    Line,
+    /// A page break.
+    Page,
+    /// A column break.
+    Column,
+}
+
+/// The instruction of a simple Word field embedded in a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldKind<'a> {
+    /// The current page number.
+    Page,
+    /// The document's total page count.
+    NumPages,
+    /// Any other field instruction.
+    Other(&'a str),
+}
+
+/// An immutable drawing embedded in a run.
+#[derive(Debug, Clone, Copy)]
+pub struct DrawingRef<'a> {
+    inner: &'a CT_Drawing,
+}
+
+impl<'a> DrawingRef<'a> {
+    /// Whether this drawing is inline with the surrounding text.
+    pub fn is_inline(&self) -> bool {
+        self.inner.inline.is_some()
+    }
+
+    /// Whether this drawing is floating or anchored.
+    pub fn is_anchor(&self) -> bool {
+        self.inner.anchor.is_some()
+    }
+
+    /// The relationship ID for the drawing's embedded image, when present.
+    pub fn relationship_id(&self) -> Option<&str> {
+        self.inner
+            .inline
+            .as_ref()
+            .map(|inline| inline.embed_id.as_str())
+            .or_else(|| {
+                self.inner
+                    .anchor
+                    .as_ref()
+                    .map(|anchor| anchor.embed_id.as_str())
+            })
+            .filter(|id| !id.is_empty())
+    }
+
+    /// The drawing description, commonly used as image alt text.
+    pub fn description(&self) -> Option<&str> {
+        self.inner
+            .inline
+            .as_ref()
+            .and_then(|inline| inline.description.as_deref())
+            .or_else(|| {
+                self.inner
+                    .anchor
+                    .as_ref()
+                    .and_then(|anchor| anchor.description.as_deref())
+            })
+    }
+
+    /// The drawing name from its non-visual properties.
+    pub fn name(&self) -> Option<&str> {
+        self.inner
+            .inline
+            .as_ref()
+            .and_then(|inline| inline.name.as_deref())
+            .or_else(|| {
+                self.inner
+                    .anchor
+                    .as_ref()
+                    .and_then(|anchor| anchor.name.as_deref())
+            })
+    }
+
+    /// The drawing width.
+    pub fn width(&self) -> Option<Length> {
+        self.inner
+            .inline
+            .as_ref()
+            .map(|inline| Length::emu(inline.extent_cx.0))
+            .or_else(|| {
+                self.inner
+                    .anchor
+                    .as_ref()
+                    .map(|anchor| Length::emu(anchor.extent_cx.0))
+            })
+    }
+
+    /// The drawing height.
+    pub fn height(&self) -> Option<Length> {
+        self.inner
+            .inline
+            .as_ref()
+            .map(|inline| Length::emu(inline.extent_cy.0))
+            .or_else(|| {
+                self.inner
+                    .anchor
+                    .as_ref()
+                    .map(|anchor| Length::emu(anchor.extent_cy.0))
+            })
+    }
+}
+
+/// One direct child of a run, in source order.
+#[derive(Debug, Clone, Copy)]
+pub enum RunItemRef<'a> {
+    /// Literal text.
+    Text(&'a str),
+    /// Text in a deleted revision.
+    DeletedText(&'a str),
+    /// A tab character.
+    Tab,
+    /// A line, page, or column break.
+    Break(BreakKind),
+    /// An inline or anchored drawing.
+    Drawing(DrawingRef<'a>),
+    /// A simple Word field with its cached display text.
+    Field {
+        /// The parsed field instruction.
+        kind: FieldKind<'a>,
+        /// The field's cached display text.
+        display: &'a str,
+    },
+    /// A footnote reference ID.
+    FootnoteReference(i32),
+    /// An endnote reference ID.
+    EndnoteReference(i32),
+    /// A comment reference ID.
+    CommentReference(i32),
+    /// A preserved run child that rdocx does not model.
+    UnsupportedXml(&'a [u8]),
+}
 
 /// Underline style for runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -408,6 +550,53 @@ impl<'a> RunRef<'a> {
         self.inner.text()
     }
 
+    /// Iterate over direct run items in source order.
+    ///
+    /// This retains deleted text, comments, controls, drawings, fields, note
+    /// references, and preserved unmodelled XML at their original boundaries.
+    pub fn items(&self) -> impl Iterator<Item = RunItemRef<'_>> {
+        let property_boundary = usize::from(self.inner.properties.is_some());
+        let mut items = Vec::with_capacity(self.inner.content.len() + self.inner.extra_xml.len());
+        for index in 0..=self.inner.content.len() {
+            let boundary = property_boundary + index;
+            items.extend(
+                self.inner
+                    .extra_xml_positions
+                    .iter()
+                    .zip(&self.inner.extra_xml)
+                    .filter(|(position, _)| **position == boundary)
+                    .map(|(_, raw)| RunItemRef::UnsupportedXml(raw.as_slice())),
+            );
+            if let Some(content) = self.inner.content.get(index) {
+                items.push(match content {
+                    RunContent::Text(text) => RunItemRef::Text(&text.text),
+                    RunContent::DeletedText(text) => RunItemRef::DeletedText(&text.text),
+                    RunContent::Tab => RunItemRef::Tab,
+                    RunContent::Break(kind) => RunItemRef::Break(match kind {
+                        BreakType::Line => BreakKind::Line,
+                        BreakType::Page => BreakKind::Page,
+                        BreakType::Column => BreakKind::Column,
+                    }),
+                    RunContent::Drawing(drawing) => {
+                        RunItemRef::Drawing(DrawingRef { inner: drawing })
+                    }
+                    RunContent::Field(field) => RunItemRef::Field {
+                        kind: match field.instruction.name.as_str() {
+                            "PAGE" => FieldKind::Page,
+                            "NUMPAGES" => FieldKind::NumPages,
+                            _ => FieldKind::Other(&field.instruction.raw),
+                        },
+                        display: &field.cached_result,
+                    },
+                    RunContent::FootnoteRef { id } => RunItemRef::FootnoteReference(*id),
+                    RunContent::EndnoteRef { id } => RunItemRef::EndnoteReference(*id),
+                    RunContent::CommentReference { id, .. } => RunItemRef::CommentReference(*id),
+                });
+            }
+        }
+        items.into_iter()
+    }
+
     /// The footnote id referenced by this run, if it holds a
     /// `<w:footnoteReference/>`.
     pub fn footnote_id(&self) -> Option<i32> {
@@ -536,5 +725,79 @@ impl<'a> RunRef<'a> {
             .properties
             .as_ref()
             .and_then(|rpr| rpr.style_id.as_deref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rdocx_oxml::text::{CT_R, Field};
+
+    #[test]
+    fn run_items_preserve_typed_and_raw_child_order() {
+        let xml = br#"<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:x="urn:foreign"><w:rPr/><w:t>first</w:t><x:before-comment/><w:commentReference w:id="4"/><x:before-tab/><w:tab/><w:delText>removed</w:delText><w:footnoteReference w:id="7"/><w:endnoteReference w:id="8"/><w:br w:type="page"/></w:r>"#;
+        let mut reader = quick_xml::Reader::from_reader(xml.as_slice());
+        let mut buffer = Vec::new();
+        let run = match reader.read_event_into(&mut buffer).unwrap() {
+            quick_xml::events::Event::Start(_) => CT_R::from_xml(&mut reader).unwrap(),
+            event => panic!("expected run start, got {event:?}"),
+        };
+        let run = RunRef { inner: &run };
+
+        let items = run
+            .items()
+            .map(|item| match item {
+                RunItemRef::Text(text) => format!("text:{text}"),
+                RunItemRef::DeletedText(text) => format!("deleted:{text}"),
+                RunItemRef::Tab => "tab".to_owned(),
+                RunItemRef::Break(BreakKind::Page) => "break:page".to_owned(),
+                RunItemRef::FootnoteReference(id) => format!("footnote:{id}"),
+                RunItemRef::EndnoteReference(id) => format!("endnote:{id}"),
+                RunItemRef::CommentReference(id) => format!("comment:{id}"),
+                RunItemRef::UnsupportedXml(raw) => {
+                    format!("raw:{}", std::str::from_utf8(raw).unwrap())
+                }
+                item => panic!("unexpected item: {item:?}"),
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            items,
+            [
+                "text:first",
+                "raw:<x:before-comment/>",
+                "comment:4",
+                "raw:<x:before-tab/>",
+                "tab",
+                "deleted:removed",
+                "footnote:7",
+                "endnote:8",
+                "break:page",
+            ]
+        );
+    }
+
+    #[test]
+    fn run_items_expose_simple_fields() {
+        let run = CT_R {
+            properties: None,
+            content: vec![RunContent::Field(Field::new(
+                " REF target \\h ",
+                "Target text",
+            ))],
+            extra_xml: Vec::new(),
+            extra_xml_positions: Vec::new(),
+            alt_drawings: Vec::new(),
+        };
+        let run = RunRef { inner: &run };
+
+        let items = run.items().collect::<Vec<_>>();
+        assert!(matches!(
+            items.as_slice(),
+            [RunItemRef::Field {
+                kind: FieldKind::Other("REF target \\h"),
+                display: "Target text",
+            }]
+        ));
     }
 }
