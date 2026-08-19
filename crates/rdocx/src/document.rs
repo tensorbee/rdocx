@@ -5111,7 +5111,7 @@ fn has_consistent_sfnt_header(data: &[u8]) -> bool {
 mod tests {
     use super::*;
     use crate::FieldEvaluationContext;
-    use crate::paragraph::Alignment;
+    use crate::paragraph::{Alignment, HyperlinkItemRef, ParagraphItemRef, ParagraphRef};
     use oxml_chart::{
         Axis, AxisData, AxisId, AxisKind, AxisPosition, BarDirection, BarGrouping, CT_PlotArea,
         ChartData, ChartKind, NumericData, Plot, Series, StringRef,
@@ -5127,6 +5127,69 @@ mod tests {
     const WORD_BUILD: &str = "16.104.25121423";
     const WORD_CHART_CANDIDATE_SHA256: &str =
         "79e9b9ff9e7557dbd09a365bb8c189806e700ed48ca768b27d7158cf2b41370b";
+
+    #[test]
+    fn paragraph_items_preserve_container_and_boundary_order() {
+        let xml = br#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:x="urn:foreign"><w:r><w:t>first</w:t></w:r><x:raw/><w:commentRangeStart w:id="2"/><w:sdt><w:sdtContent><w:r><w:t>control</w:t></w:r></w:sdtContent></w:sdt><w:hyperlink r:id="rId3"><w:r><w:t>link</w:t></w:r><x:inside/></w:hyperlink><w:ins w:id="4" w:author="Ada"><w:r><w:t>inserted</w:t></w:r></w:ins><w:bookmarkStart w:id="5" w:name="target"/><w:r><w:t>last</w:t></w:r></w:p>"#;
+        let mut reader = quick_xml::Reader::from_reader(xml.as_slice());
+        let mut buffer = Vec::new();
+        let paragraph = match reader.read_event_into(&mut buffer).unwrap() {
+            quick_xml::events::Event::Start(_) => CT_P::from_xml(&mut reader).unwrap(),
+            event => panic!("expected paragraph start, got {event:?}"),
+        };
+        let paragraph = ParagraphRef { inner: &paragraph };
+
+        let items = paragraph
+            .items()
+            .map(|item| match item {
+                ParagraphItemRef::Run(run) => format!("run:{}", run.text()),
+                ParagraphItemRef::Hyperlink(link) => {
+                    let children = link
+                        .items()
+                        .map(|child| match child {
+                            HyperlinkItemRef::Run(run) => format!("run:{}", run.text()),
+                            HyperlinkItemRef::UnsupportedXml(raw) => {
+                                format!("raw:{}", std::str::from_utf8(raw).unwrap())
+                            }
+                            HyperlinkItemRef::Revision(revision) => {
+                                format!("revision:{}", revision.id())
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    format!(
+                        "hyperlink:{}:{}",
+                        link.relationship_id().unwrap(),
+                        children.join(",")
+                    )
+                }
+                ParagraphItemRef::ContentControl(control) => format!("control:{}", control.text()),
+                ParagraphItemRef::Revision(revision) => format!("revision:{}", revision.id()),
+                ParagraphItemRef::CommentRangeStart(id) => format!("comment-start:{id}"),
+                ParagraphItemRef::CommentRangeEnd(id) => format!("comment-end:{id}"),
+                ParagraphItemRef::BookmarkStart { id, name } => {
+                    format!("bookmark-start:{}:{}", id.unwrap(), name.unwrap())
+                }
+                ParagraphItemRef::BookmarkEnd { id } => format!("bookmark-end:{}", id.unwrap()),
+                ParagraphItemRef::UnsupportedXml(raw) => {
+                    format!("raw:{}", std::str::from_utf8(raw).unwrap())
+                }
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            items,
+            [
+                "run:first",
+                "raw:<x:raw/>",
+                "comment-start:2",
+                "control:control",
+                "hyperlink:rId3:run:link,raw:<x:inside/>",
+                "revision:4",
+                "bookmark-start:5:target",
+                "run:last",
+            ]
+        );
+    }
 
     fn minimal_chart_workbook() -> Workbook {
         Workbook::new(

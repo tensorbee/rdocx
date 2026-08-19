@@ -6,11 +6,13 @@ use rdocx_oxml::properties::{CT_PPr, CT_Shd};
 use rdocx_oxml::shared::{
     ST_Border, ST_Jc, ST_PageOrientation, ST_SectionType, ST_TabJc, ST_TabLeader,
 };
-use rdocx_oxml::text::{BreakType, CT_P, CT_R, HyperlinkSpan, RunContent};
+use rdocx_oxml::text::{
+    BreakType, CT_P, CT_R, CommentRangeMarker, HyperlinkSpan, RunContent, hyperlink_revision_index,
+};
 use rdocx_oxml::units::Twips;
 
-use crate::Length;
 use crate::run::{Run, RunRef};
+use crate::{ContentControlRef, Length, RevisionRef};
 
 /// Paragraph alignment options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -19,6 +21,116 @@ pub enum Alignment {
     Center,
     Right,
     Justify,
+}
+
+/// One direct child of a paragraph, in source order.
+pub enum ParagraphItemRef<'a> {
+    /// A direct run.
+    Run(RunRef<'a>),
+    /// A hyperlink and the runs or preserved XML it contains.
+    Hyperlink(HyperlinkRef<'a>),
+    /// A paragraph-level content control.
+    ContentControl(ContentControlRef<'a>),
+    /// A tracked insertion, deletion, or move.
+    Revision(RevisionRef<'a>),
+    /// The start of a comment range.
+    CommentRangeStart(i32),
+    /// The end of a comment range.
+    CommentRangeEnd(i32),
+    /// The start of a bookmark.
+    BookmarkStart {
+        /// The bookmark ID, when present.
+        id: Option<i32>,
+        /// The bookmark name, when present.
+        name: Option<&'a str>,
+    },
+    /// The end of a bookmark.
+    BookmarkEnd {
+        /// The bookmark ID, when present.
+        id: Option<i32>,
+    },
+    /// A preserved paragraph child that rdocx does not model.
+    UnsupportedXml(&'a [u8]),
+}
+
+/// One child within a hyperlink, in source order.
+pub enum HyperlinkItemRef<'a> {
+    /// A run in the hyperlink.
+    Run(RunRef<'a>),
+    /// A tracked insertion, deletion, or move in the hyperlink.
+    Revision(RevisionRef<'a>),
+    /// A preserved hyperlink child that rdocx does not model.
+    UnsupportedXml(&'a [u8]),
+}
+
+/// An immutable paragraph-level hyperlink.
+#[derive(Clone, Copy)]
+pub struct HyperlinkRef<'a> {
+    paragraph: &'a CT_P,
+    index: usize,
+}
+
+impl<'a> HyperlinkRef<'a> {
+    fn inner(&self) -> &'a HyperlinkSpan {
+        &self.paragraph.hyperlinks[self.index]
+    }
+
+    /// The relationship ID for this hyperlink, when it has an external target.
+    pub fn relationship_id(&self) -> Option<&'a str> {
+        self.inner().rel_id.as_deref()
+    }
+
+    /// The bookmark anchor for this hyperlink, when it has an internal target.
+    pub fn anchor(&self) -> Option<&'a str> {
+        self.inner().anchor.as_deref()
+    }
+
+    /// Get the combined text of the hyperlink runs.
+    pub fn text(&self) -> String {
+        let hyperlink = self.inner();
+        self.paragraph.runs[hyperlink.run_start..hyperlink.run_end]
+            .iter()
+            .map(CT_R::text)
+            .collect()
+    }
+
+    /// Iterate over hyperlink children in source order.
+    pub fn items(&self) -> impl Iterator<Item = HyperlinkItemRef<'a>> {
+        let hyperlink = self.inner();
+        let mut items = Vec::new();
+        for relative_index in 0..=hyperlink.run_end - hyperlink.run_start {
+            let run_index = hyperlink.run_start + relative_index;
+            let revisions = self
+                .paragraph
+                .revisions
+                .iter()
+                .filter(|(at, slot, _)| {
+                    *at == run_index && hyperlink_revision_index(*slot) == Some(self.index)
+                })
+                .map(|(_, _, revision)| revision)
+                .collect::<Vec<_>>();
+            for revision_index in 0..=revisions.len() {
+                items.extend(
+                    hyperlink
+                        .extra_xml
+                        .iter()
+                        .filter(|(at, before, _)| {
+                            *at == relative_index
+                                && (*before).min(revisions.len()) == revision_index
+                        })
+                        .map(|(_, _, raw)| HyperlinkItemRef::UnsupportedXml(raw.as_slice())),
+                );
+                if let Some(revision) = revisions.get(revision_index) {
+                    items.push(HyperlinkItemRef::Revision(RevisionRef { inner: revision }));
+                }
+            }
+            if relative_index < hyperlink.run_end - hyperlink.run_start {
+                let run = &self.paragraph.runs[run_index];
+                items.push(HyperlinkItemRef::Run(RunRef { inner: run }));
+            }
+        }
+        items.into_iter()
+    }
 }
 
 impl Alignment {
@@ -791,6 +903,135 @@ impl<'a> ParagraphRef<'a> {
     /// Get the combined text of all runs.
     pub fn text(&self) -> String {
         self.inner.text()
+    }
+
+    /// Iterate over direct paragraph items in source order.
+    ///
+    /// Unlike [`Self::runs`], this retains hyperlinks, content controls,
+    /// revisions, comment ranges, bookmarks, and preserved unmodelled XML.
+    pub fn items(&self) -> impl Iterator<Item = ParagraphItemRef<'_>> {
+        let mut items = Vec::new();
+        let mut run_index = 0;
+        while run_index <= self.inner.runs.len() {
+            let extras = self
+                .inner
+                .extra_xml
+                .iter()
+                .filter(|(at, _)| *at == run_index)
+                .map(|(_, raw)| raw)
+                .collect::<Vec<_>>();
+            for raw_index in 0..=extras.len() {
+                let markers = self
+                    .inner
+                    .comment_ranges
+                    .iter()
+                    .filter(|marker| match marker {
+                        CommentRangeMarker::Start {
+                            run_index: at,
+                            raw_before,
+                            ..
+                        }
+                        | CommentRangeMarker::End {
+                            run_index: at,
+                            raw_before,
+                            ..
+                        } => *at == run_index && (*raw_before).min(extras.len()) == raw_index,
+                    })
+                    .collect::<Vec<_>>();
+                for marker_index in 0..=markers.len() {
+                    items.extend(
+                        self.inner
+                            .content_controls
+                            .iter()
+                            .filter(|(at, raw_before, markers_before, _)| {
+                                *at == run_index
+                                    && (*raw_before).min(extras.len()) == raw_index
+                                    && (*markers_before).min(markers.len()) == marker_index
+                            })
+                            .map(|(_, _, _, control)| {
+                                ParagraphItemRef::ContentControl(ContentControlRef {
+                                    inner: control,
+                                })
+                            }),
+                    );
+                    if let Some(marker) = markers.get(marker_index) {
+                        items.push(match marker {
+                            CommentRangeMarker::Start { id, .. } => {
+                                ParagraphItemRef::CommentRangeStart(*id)
+                            }
+                            CommentRangeMarker::End { id, .. } => {
+                                ParagraphItemRef::CommentRangeEnd(*id)
+                            }
+                        });
+                    }
+                }
+                if let Some(raw) = extras.get(raw_index) {
+                    let revision =
+                        self.inner
+                            .revisions
+                            .iter()
+                            .find_map(|(at, before, revision)| {
+                                (*at == run_index
+                                    && hyperlink_revision_index(*before).is_none()
+                                    && *before == raw_index)
+                                    .then_some(revision)
+                            });
+                    let bookmark = self.inner.bookmark_markers.iter().find(|bookmark| {
+                        bookmark.run_index() == run_index && bookmark.raw_before() == raw_index
+                    });
+                    let empty_hyperlink =
+                        self.inner.hyperlinks.iter().enumerate().find(|(_, link)| {
+                            link.run_start == run_index
+                                && link.run_end == run_index
+                                && link.preserved_raw_before == Some(raw_index)
+                        });
+                    items.push(if let Some(revision) = revision {
+                        ParagraphItemRef::Revision(RevisionRef { inner: revision })
+                    } else if let Some(bookmark) = bookmark {
+                        if bookmark.is_start() {
+                            ParagraphItemRef::BookmarkStart {
+                                id: bookmark.id(),
+                                name: bookmark.name(),
+                            }
+                        } else {
+                            ParagraphItemRef::BookmarkEnd { id: bookmark.id() }
+                        }
+                    } else if let Some((index, _)) = empty_hyperlink {
+                        ParagraphItemRef::Hyperlink(HyperlinkRef {
+                            paragraph: self.inner,
+                            index,
+                        })
+                    } else {
+                        ParagraphItemRef::UnsupportedXml(raw.as_slice())
+                    });
+                }
+            }
+
+            if run_index == self.inner.runs.len() {
+                break;
+            }
+            if let Some((index, hyperlink)) =
+                self.inner
+                    .hyperlinks
+                    .iter()
+                    .enumerate()
+                    .find(|(_, hyperlink)| {
+                        hyperlink.run_start == run_index && hyperlink.run_end > run_index
+                    })
+            {
+                items.push(ParagraphItemRef::Hyperlink(HyperlinkRef {
+                    paragraph: self.inner,
+                    index,
+                }));
+                run_index = hyperlink.run_end;
+            } else {
+                items.push(ParagraphItemRef::Run(RunRef {
+                    inner: &self.inner.runs[run_index],
+                }));
+                run_index += 1;
+            }
+        }
+        items.into_iter()
     }
 
     /// Get the number of runs in this paragraph.
