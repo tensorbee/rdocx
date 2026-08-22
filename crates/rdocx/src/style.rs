@@ -48,6 +48,8 @@ impl StyleBuilder {
                 is_default: false,
                 ppr: None,
                 rpr: None,
+                tbl_pr_xml: None,
+                table_borders: None,
             },
         }
     }
@@ -64,6 +66,8 @@ impl StyleBuilder {
                 is_default: false,
                 ppr: None,
                 rpr: None,
+                tbl_pr_xml: None,
+                table_borders: None,
             },
         }
     }
@@ -219,6 +223,8 @@ mod tests {
                 color: Some("2E74B5".to_string()),
                 ..Default::default()
             }),
+            tbl_pr_xml: None,
+            table_borders: None,
         });
 
         styles

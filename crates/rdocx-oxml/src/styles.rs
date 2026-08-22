@@ -51,6 +51,13 @@ pub struct CT_Style {
     pub is_default: bool,
     pub ppr: Option<CT_PPr>,
     pub rpr: Option<CT_RPr>,
+    /// Verbatim `<w:tblPr>` bytes of a table style, written back on save so
+    /// table-style formatting is no longer dropped by the round trip.
+    pub tbl_pr_xml: Option<Vec<u8>>,
+    /// Parsed view of the table style's `w:tblBorders` (from `tbl_pr_xml`),
+    /// used by layout to resolve borders for tables that reference the
+    /// style instead of carrying direct borders.
+    pub table_borders: Option<crate::table::CT_TblBorders>,
 }
 
 #[allow(non_snake_case)]
@@ -87,6 +94,8 @@ impl CT_Style {
         let mut next_style = None;
         let mut ppr = None;
         let mut rpr = None;
+        let mut tbl_pr_xml = None;
+        let mut table_borders = None;
         let mut buf = Vec::new();
 
         loop {
@@ -109,6 +118,10 @@ impl CT_Style {
                         ppr = Some(parse_scoped_ppr(&raw, word_prefixes)?);
                     } else if matches_local_name(ename.as_ref(), b"rPr") {
                         rpr = Some(CT_RPr::from_xml(reader)?);
+                    } else if is_word_element(ename.as_ref(), b"tblPr", &prefixes) {
+                        let raw = capture_element(reader, e)?;
+                        table_borders = parse_style_table_borders(&raw);
+                        tbl_pr_xml = Some(raw);
                     } else {
                         reader.read_to_end_into(ename, &mut Vec::new())?;
                     }
@@ -132,6 +145,8 @@ impl CT_Style {
             is_default,
             ppr,
             rpr,
+            tbl_pr_xml,
+            table_borders,
         })
     }
 
@@ -167,6 +182,9 @@ impl CT_Style {
         }
         if let Some(ref rpr) = self.rpr {
             rpr.to_xml(writer)?;
+        }
+        if let Some(ref raw) = self.tbl_pr_xml {
+            writer.get_mut().write_all(raw)?;
         }
 
         writer.write_event(Event::End(BytesEnd::new("w:style")))?;
@@ -416,6 +434,8 @@ impl CT_Styles {
             is_default: true,
             ppr: None,
             rpr: None,
+            tbl_pr_xml: None,
+            table_borders: None,
         };
 
         let heading1 = CT_Style {
@@ -440,6 +460,8 @@ impl CT_Styles {
                 color: Some("2F5496".to_string()),
                 ..Default::default()
             }),
+            tbl_pr_xml: None,
+            table_borders: None,
         };
 
         let doc_defaults = CT_DocDefaults {
@@ -474,6 +496,24 @@ impl Default for CT_Styles {
 }
 
 /// Extract the `w:val` attribute from an element.
+/// Parse the `w:tblBorders` inside a table style's raw `w:tblPr` bytes.
+fn parse_style_table_borders(raw: &[u8]) -> Option<crate::table::CT_TblBorders> {
+    let mut reader = Reader::from_reader(raw);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e))
+                if matches_local_name(e.name().as_ref(), b"tblBorders") =>
+            {
+                return crate::table::CT_TblBorders::from_xml(&mut reader).ok();
+            }
+            Ok(Event::Eof) | Err(_) => return None,
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
 fn get_val_attr(e: &BytesStart) -> Result<Option<String>> {
     for attr in e.attributes() {
         let attr = attr?;
