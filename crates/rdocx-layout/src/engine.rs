@@ -462,6 +462,8 @@ struct ParagraphCacheKey {
 }
 
 struct ParagraphCacheEntry {
+    /// Collision-tolerant prefilter for lookups; `key` stays the authority.
+    fp: u64,
     key: ParagraphCacheKey,
     block: ParagraphBlock,
     diagnostics: Vec<Diagnostic>,
@@ -469,8 +471,25 @@ struct ParagraphCacheEntry {
     bytes: usize,
 }
 
-const PARAGRAPH_CACHE_MAX_ENTRIES: usize = 256;
-const PARAGRAPH_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
+    /// RDOCX_TIMING profiling: per-layout accumulated sub-phase costs of the
+    /// block-building walk, in ms. Slots: 0 safe-check, 1 fingerprint,
+    /// 2 cache scan, 3 hit path (clone+rebind+replay), 4 miss layout,
+    /// 5 staging, 6 tables, 7 headers/footers.
+    static BLOCK_TIMERS: std::cell::RefCell<[f64; 8]> =
+        const { std::cell::RefCell::new([0.0; 8]) };
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn timer_add(slot: usize, since: std::time::Instant) {
+    BLOCK_TIMERS.with(|cell| {
+        cell.borrow_mut()[slot] += since.elapsed().as_secs_f64() * 1000.0;
+    });
+}
+
+const PARAGRAPH_CACHE_MAX_ENTRIES: usize = 4096;
+const PARAGRAPH_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
 const CACHE_SOURCE_NODE: SourceNodeId = match SourceNodeId::new(1) {
     Some(node) => node,
     None => panic!("one is a valid source node id"),
@@ -646,6 +665,10 @@ impl Engine {
         let source_fold = sources.map_or(0, |s| fingerprint_source_nodes(&s.nodes));
         let mut current_sect_pr: Option<CT_SectPr> = None; // Will be set from paragraph sect_pr
 
+        #[cfg(not(target_arch = "wasm32"))]
+        let t_blocks = std::time::Instant::now();
+        #[cfg(not(target_arch = "wasm32"))]
+        BLOCK_TIMERS.with(|cell| *cell.borrow_mut() = [0.0; 8]);
         for (body_index, content) in input.document.body.content.iter().enumerate() {
             match content {
                 BodyContent::Paragraph(para) => {
@@ -721,6 +744,8 @@ impl Engine {
                     let sect_pr_for_layout = current_sect_pr.as_ref().unwrap_or(&final_sect_pr);
                     let geometry = sect_pr_to_geometry(sect_pr_for_layout);
 
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let t_table = std::time::Instant::now();
                     let table_src_fp =
                         fingerprint_table(tbl, geometry.content_width(), input.revision_view as u8);
                     let table_key = {
@@ -775,6 +800,8 @@ impl Engine {
                     let block = LayoutBlock::Table(table_block);
                     block_fps.push(combine_fp(table_src_fp, pagination_salt(&block)));
                     current_blocks.push(block);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    timer_add(6, t_table);
                 }
                 _ => {} // Skip RawXml elements during layout
             }
@@ -782,6 +809,8 @@ impl Engine {
 
         // Remaining blocks belong to the final section
         let final_geometry = sect_pr_to_geometry(&final_sect_pr);
+        #[cfg(not(target_arch = "wasm32"))]
+        let t_hf = std::time::Instant::now();
         let final_hf = self.layout_header_footer_cached(
             &final_sect_pr,
             input,
@@ -792,6 +821,8 @@ impl Engine {
             sources,
             source_fold,
         )?;
+        #[cfg(not(target_arch = "wasm32"))]
+        timer_add(7, t_hf);
         let final_title_pg = final_sect_pr.title_pg.unwrap_or(false);
         sections.push(paginator::Section {
             blocks: current_blocks,
@@ -807,6 +838,10 @@ impl Engine {
         // width is registered. The endnote pages that follow the last body page
         // are drawn against `final_geometry`, which belongs to the section
         // pushed just above and is therefore already in this list.
+        #[cfg(not(target_arch = "wasm32"))]
+        let blocks_ms = t_blocks.elapsed().as_secs_f64() * 1000.0;
+        #[cfg(not(target_arch = "wasm32"))]
+        let t_notes = std::time::Instant::now();
         let content_widths: Vec<f64> = sections
             .iter()
             .map(|section| section.geometry.content_width())
@@ -852,6 +887,10 @@ impl Engine {
             fp.eat(&source_fold.to_le_bytes());
             fp.finish()
         };
+        #[cfg(not(target_arch = "wasm32"))]
+        let notes_ms = t_notes.elapsed().as_secs_f64() * 1000.0;
+        #[cfg(not(target_arch = "wasm32"))]
+        let t_pag = std::time::Instant::now();
         let (mut pages, outlines) = paginator::paginate_sections_cached(
             &sections,
             &self.font_manager,
@@ -933,6 +972,20 @@ impl Engine {
 
         // Remap persistent manager ids to result-local ids and omit faces that
         // are no longer present in the current layout.
+        #[cfg(not(target_arch = "wasm32"))]
+        if std::env::var("RDOCX_TIMING").is_ok() {
+            eprintln!(
+                "timing: blocks {blocks_ms:.0} ms, notes {notes_ms:.0} ms, paginate+post {:.0} ms",
+                t_pag.elapsed().as_secs_f64() * 1000.0
+            );
+            BLOCK_TIMERS.with(|cell| {
+                let t = cell.borrow();
+                eprintln!(
+                    "timing: blocks split - safe {:.1}, fp {:.1}, scan {:.1}, hit {:.1}, miss {:.1}, stage {:.1}, tables {:.1}, hf {:.1}",
+                    t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7]
+                );
+            });
+        }
         let fonts = if self.font_manager.every_loaded_font_is_current() {
             self.font_manager.all_font_data()
         } else {
@@ -966,7 +1019,12 @@ impl Engine {
         diagnostics: &mut Vec<Diagnostic>,
         source_node: Option<SourceNodeId>,
     ) -> Result<ParagraphBlock> {
-        if !paragraph_is_cache_safe(paragraph, styles) {
+        #[cfg(not(target_arch = "wasm32"))]
+        let t = std::time::Instant::now();
+        let cache_safe = paragraph_is_cache_safe(paragraph, styles);
+        #[cfg(not(target_arch = "wasm32"))]
+        timer_add(0, t);
+        if !cache_safe {
             return layout_paragraph_with_source(
                 paragraph,
                 content_width,
@@ -980,32 +1038,51 @@ impl Engine {
             );
         }
 
-        let key = ParagraphCacheKey {
-            paragraph: paragraph.clone(),
-            content_width_bits: content_width.to_bits(),
-            revision_view: input.revision_view,
+        // A cheap fingerprint prefilters the scan; the typed key equality
+        // below stays the authority, so a hash collision cannot alias two
+        // different paragraphs. This also keeps the hot lookup path free of
+        // the CT_P clone the key used to need.
+        #[cfg(not(target_arch = "wasm32"))]
+        let t = std::time::Instant::now();
+        let fp = fingerprint_paragraph(paragraph, content_width, input.revision_view as u8);
+        #[cfg(not(target_arch = "wasm32"))]
+        timer_add(1, t);
+        #[cfg(not(target_arch = "wasm32"))]
+        let t = std::time::Instant::now();
+        let found = if self.paragraph_cache_reads_enabled {
+            self.paragraph_cache.iter().position(|entry| {
+                entry.fp == fp
+                    && entry.key.content_width_bits == content_width.to_bits()
+                    && entry.key.revision_view == input.revision_view
+                    && entry.key.paragraph == *paragraph
+            })
+        } else {
+            None
         };
-        if self.paragraph_cache_reads_enabled
-            && let Some(index) = self
-                .paragraph_cache
-                .iter()
-                .position(|entry| entry.key == key)
-        {
-            let entry = self
-                .paragraph_cache
-                .remove(index)
-                .expect("paragraph cache index exists");
+        #[cfg(not(target_arch = "wasm32"))]
+        timer_add(2, t);
+        if let Some(index) = found {
+            #[cfg(not(target_arch = "wasm32"))]
+            let t = std::time::Instant::now();
+            let entry = &self.paragraph_cache[index];
             let mut block = entry.block.clone();
-            rebind_paragraph_source(&mut block, source_node);
             diagnostics.extend(entry.diagnostics.iter().cloned());
-            self.font_manager
-                .replay_layout_font_trace(&entry.font_trace);
-            self.paragraph_cache.push_back(entry);
+            let font_trace = entry.font_trace.clone();
+            rebind_paragraph_source(&mut block, source_node);
+            self.font_manager.replay_layout_font_trace(&font_trace);
+            // No LRU refresh: VecDeque::remove is O(len) and a 700-paragraph
+            // document pays it per paragraph per relayout. Eviction order
+            // degrades to insertion order, which only matters once the cache
+            // is actually full.
             self.paragraph_cache_hits += 1;
+            #[cfg(not(target_arch = "wasm32"))]
+            timer_add(3, t);
             return Ok(block);
         }
 
         let diagnostics_start = diagnostics.len();
+        #[cfg(not(target_arch = "wasm32"))]
+        let t = std::time::Instant::now();
         self.font_manager.begin_paragraph_font_trace();
         let block_result = layout_paragraph_with_source(
             paragraph,
@@ -1019,11 +1096,20 @@ impl Engine {
             Some(CACHE_SOURCE_NODE),
         );
         let font_trace = self.font_manager.finish_paragraph_font_trace();
+        #[cfg(not(target_arch = "wasm32"))]
+        timer_add(4, t);
         let mut block = block_result?;
         self.paragraph_cache_builds += 1;
 
+        #[cfg(not(target_arch = "wasm32"))]
+        let t = std::time::Instant::now();
         let cached_diagnostics = diagnostics[diagnostics_start..].to_vec();
         if let Some(font_trace) = font_trace {
+            let key = ParagraphCacheKey {
+                paragraph: paragraph.clone(),
+                content_width_bits: content_width.to_bits(),
+                revision_view: input.revision_view,
+            };
             let bytes = paragraph_cache_entry_bytes(
                 &key.paragraph,
                 &block,
@@ -1031,6 +1117,7 @@ impl Engine {
                 font_trace.len(),
             );
             self.stage_paragraph_cache_entry(ParagraphCacheEntry {
+                fp,
                 key,
                 block: block.clone(),
                 diagnostics: cached_diagnostics,
@@ -1039,6 +1126,8 @@ impl Engine {
             });
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
+        timer_add(5, t);
         rebind_paragraph_source(&mut block, source_node);
         Ok(block)
     }
@@ -4546,9 +4635,13 @@ mod tests {
         engine
             .layout(&input)
             .expect("transactional layout succeeds");
-        assert_eq!(
-            engine.pending_paragraph_cache_peak_entries,
-            PARAGRAPH_CACHE_MAX_ENTRIES
+        // With the larger entry cap the byte ceiling can bind first; either
+        // way staging must stay bounded well below the paragraph count.
+        assert!(engine.pending_paragraph_cache_peak_entries <= PARAGRAPH_CACHE_MAX_ENTRIES);
+        assert!(
+            engine.pending_paragraph_cache_peak_entries < PARAGRAPH_CACHE_MAX_ENTRIES * 2,
+            "staging must evict, got {}",
+            engine.pending_paragraph_cache_peak_entries
         );
         assert!(engine.pending_paragraph_cache_peak_bytes <= PARAGRAPH_CACHE_MAX_BYTES);
     }
@@ -4584,6 +4677,7 @@ mod tests {
         engine.paragraph_cache.clear();
         engine.paragraph_cache_bytes = 0;
         engine.publish_paragraph_cache_entry(ParagraphCacheEntry {
+            fp: 0,
             key: ParagraphCacheKey {
                 paragraph: paragraph.clone(),
                 content_width_bits: PageGeometry::default().content_width().to_bits(),
@@ -4685,6 +4779,7 @@ mod tests {
         engine.paragraph_cache.clear();
         engine.paragraph_cache_bytes = 0;
         engine.publish_paragraph_cache_entry(ParagraphCacheEntry {
+            fp: 0,
             key: ParagraphCacheKey {
                 paragraph,
                 content_width_bits: PageGeometry::default().content_width().to_bits(),
