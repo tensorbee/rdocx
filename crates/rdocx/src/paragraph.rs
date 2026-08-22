@@ -167,6 +167,24 @@ impl<'a> Paragraph<'a> {
         }
     }
 
+    /// SVG PoC patch: append a text run that inherits the paragraph mark's
+    /// run properties (pPr/rPr) — what Word gives to text typed into an
+    /// empty paragraph, so a form cell designed at 7pt does not sprout
+    /// default-sized text.
+    pub fn add_run_inheriting_mark(&mut self, text: &str) -> Run<'_> {
+        let props = self
+            .inner
+            .properties
+            .as_ref()
+            .and_then(|p| p.rpr.clone());
+        let mut r = CT_R::new(text);
+        r.properties = props;
+        self.inner.runs.push(r);
+        Run {
+            inner: self.inner.runs.last_mut().unwrap(),
+        }
+    }
+
     /// Add a line break in its own run.
     pub fn add_line_break(&mut self) {
         let mut run = CT_R::new("");
