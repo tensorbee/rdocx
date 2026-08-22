@@ -301,8 +301,10 @@ pub struct FontData {
     pub id: FontId,
     /// Font family name.
     pub family: String,
-    /// Raw TTF/OTF bytes for PDF embedding.
-    pub data: Vec<u8>,
+    /// Raw TTF/OTF bytes for PDF embedding. Shared, so producing a
+    /// `LayoutResult` does not copy every loaded face (tens of MB with CJK
+    /// fallbacks resident) on each layout. Pre-1.0 type break.
+    pub data: std::sync::Arc<[u8]>,
     /// Face index within a font collection.
     pub face_index: u32,
     /// Whether this is a bold variant.

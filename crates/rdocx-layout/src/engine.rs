@@ -4621,7 +4621,7 @@ mod tests {
                     .layout
                     .fonts
                     .iter()
-                    .any(|font| font.data == input.fonts[0].data),
+                    .any(|font| font.data.as_ref() == input.fonts[0].data.as_slice()),
                 "the caller-provided font bytes shaped the result"
             );
             let runs = result

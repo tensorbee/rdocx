@@ -3308,6 +3308,24 @@ impl Document {
         Ok(rdocx_layout::layout_document_with_caller_fonts_and_provenance(&input)?)
     }
 
+    /// SVG PoC patch: like [`Self::layout_with_fonts`], but the injected
+    /// fonts sit on top of the bundled metric-compatible set, so a wasm
+    /// editor that only injects a Korean font still resolves Calibri/Times.
+    /// Separate from the strictly isolated caller-fonts path on purpose.
+    pub fn layout_with_fonts_and_bundled_fallback(
+        &self,
+        font_files: &[(&str, &[u8])],
+    ) -> Result<rdocx_layout::WordLayoutResult> {
+        let mut input = self.build_layout_input();
+        for (family, data) in font_files {
+            input.fonts.push(rdocx_layout::FontFile {
+                family: family.to_string(),
+                data: data.to_vec(),
+            });
+        }
+        Ok(rdocx_layout::layout_document_with_fallback_fonts_and_provenance(&input)?)
+    }
+
     /// Render the document to PDF bytes.
     ///
     /// This performs a full layout pass (font shaping, line breaking, pagination)
@@ -5081,7 +5099,7 @@ mod tests {
                     .find(|font| font.id == run.font_id)
                     .expect("caller-font glyph run should resolve its font id");
                 assert_eq!(font.family, family);
-                assert_eq!(font.data, bytes);
+                assert_eq!(font.data.as_ref(), bytes.as_slice());
                 let source = run
                     .source
                     .expect("caller-font text should retain source provenance");
@@ -6142,7 +6160,7 @@ mod tests {
             assert!(
                 bundled_fonts
                     .iter()
-                    .any(|(_family, data)| *data == font.data.as_slice()),
+                    .any(|(_family, data)| *data == font.data.as_ref()),
                 "resolved font '{}' did not come from the bundled font set",
                 font.family
             );

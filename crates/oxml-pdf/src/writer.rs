@@ -2264,7 +2264,7 @@ mod tests {
             font_data: FontData {
                 id: font_id,
                 family: "Test".to_owned(),
-                data: Vec::new(),
+                data: Vec::new().into(),
                 face_index: 0,
                 bold: false,
                 italic: false,
