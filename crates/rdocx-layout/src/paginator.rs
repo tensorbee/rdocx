@@ -2775,13 +2775,26 @@ fn render_cell_borders(
     suppress_bottom: bool,
     elements: &mut Vec<PositionedElement>,
 ) {
-    // Determine effective border for each edge (cell overrides table)
+    // Determine effective border for each edge (cell overrides table).
+    // At the table's OUTER boundary a cell border of none/nil yields to the
+    // table-level border instead of erasing it — matching how Word renders
+    // form documents whose first-row cells say `<w:top w:val="nil"/>` while
+    // the table style supplies the box outline. Between cells (insideH/V),
+    // an explicit none still suppresses the line.
     let get_edge = |cell_edge: Option<&rdocx_oxml::borders::CT_BorderEdge>,
-                    table_edge: Option<&rdocx_oxml::borders::CT_BorderEdge>|
+                    table_edge: Option<&rdocx_oxml::borders::CT_BorderEdge>,
+                    outer: bool|
      -> Option<BorderEdge> {
-        let edge = cell_edge.or(table_edge)?;
+        let mut edge = cell_edge.or(table_edge)?;
         if edge.val == ST_Border::None {
-            return None;
+            if outer && cell_edge.is_some() {
+                edge = table_edge?;
+                if edge.val == ST_Border::None {
+                    return None;
+                }
+            } else {
+                return None;
+            }
         }
         let thickness = edge.sz.unwrap_or(4) as f64 / 8.0; // sz is in 1/8 pt
         let color = edge
@@ -2803,7 +2816,7 @@ fn render_cell_borders(
         }
     });
     let cell_top = cell_borders.as_ref().and_then(|b| b.top.as_ref());
-    if let Some((thickness, color, dash_pattern)) = get_edge(cell_top, table_top)
+    if let Some((thickness, color, dash_pattern)) = get_edge(cell_top, table_top, is_first_row)
         && !suppress_top
     {
         elements.push(PositionedElement::Line {
@@ -2824,7 +2837,7 @@ fn render_cell_borders(
         }
     });
     let cell_bottom = cell_borders.as_ref().and_then(|b| b.bottom.as_ref());
-    if let Some((thickness, color, dash_pattern)) = get_edge(cell_bottom, table_bottom)
+    if let Some((thickness, color, dash_pattern)) = get_edge(cell_bottom, table_bottom, is_last_row)
         && !suppress_bottom
     {
         elements.push(PositionedElement::Line {
@@ -2845,7 +2858,7 @@ fn render_cell_borders(
         }
     });
     let cell_left = cell_borders.as_ref().and_then(|b| b.left.as_ref());
-    if let Some((thickness, color, dash_pattern)) = get_edge(cell_left, table_left) {
+    if let Some((thickness, color, dash_pattern)) = get_edge(cell_left, table_left, cell_idx == 0) {
         elements.push(PositionedElement::Line {
             start: Point { x, y },
             end: Point { x, y: y + h },
@@ -2864,7 +2877,7 @@ fn render_cell_borders(
         }
     });
     let cell_right = cell_borders.as_ref().and_then(|b| b.right.as_ref());
-    if let Some((thickness, color, dash_pattern)) = get_edge(cell_right, table_right) {
+    if let Some((thickness, color, dash_pattern)) = get_edge(cell_right, table_right, cell_idx == num_cells - 1) {
         elements.push(PositionedElement::Line {
             start: Point { x: x + w, y },
             end: Point { x: x + w, y: y + h },
