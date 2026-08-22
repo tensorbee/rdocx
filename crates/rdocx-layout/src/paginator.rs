@@ -667,6 +667,7 @@ fn paginate_pass_resumable(
                                     pager.page_number,
                                     tbl_borders,
                                     &mut pager.elements,
+                                    &mut pager.behind_elements,
                                     pager.media,
                                 );
                                 pager.cursor_y += hdr_row.height;
@@ -684,6 +685,7 @@ fn paginate_pass_resumable(
                         pager.page_number,
                         tbl_borders,
                         &mut pager.elements,
+                        &mut pager.behind_elements,
                         pager.media,
                     );
                     pager.cursor_y += row.height;
@@ -2552,9 +2554,17 @@ fn place_cell_anchored(
     cell_geometry: &PageGeometry,
     para_top_abs: f64,
     elements: &mut Vec<PositionedElement>,
+    behind_elements: &mut Vec<PositionedElement>,
     media: &HashMap<MediaId, ImageData>,
 ) {
     for a in anchored {
+        // behindDoc watermarks go to the page's behind layer so they stay
+        // under every cell's text and borders, not just this cell's own.
+        let sink: &mut Vec<PositionedElement> = if a.behind_doc {
+            &mut *behind_elements
+        } else {
+            &mut *elements
+        };
         let x = resolve_anchor_h(a.rel_h, a.off_h, a.align_h, a.width, cell_geometry, 0.0);
         let y = resolve_anchor_v(
             a.rel_v,
@@ -2573,7 +2583,7 @@ fn place_cell_anchored(
         match &a.content {
             AnchoredContent::Image { media_id } => {
                 let image = media.get(media_id);
-                elements.push(PositionedElement::Image {
+                sink.push(PositionedElement::Image {
                     rect,
                     data: image.map_or_else(Vec::new, |image| image.data.clone()),
                     content_type: image
@@ -2588,15 +2598,15 @@ fn place_cell_anchored(
                     f: rect.y,
                     ..oxml_layout::Transform::IDENTITY
                 });
-                elements.push(PositionedElement::Group(positioned));
+                sink.push(PositionedElement::Group(positioned));
             }
             AnchoredContent::Shape { preset, fill, text } => {
                 match (preset, fill) {
                     (ShapePreset::Rect, Some(color)) => {
-                        elements.push(PositionedElement::FilledRect { rect, color: *color });
+                        sink.push(PositionedElement::FilledRect { rect, color: *color });
                     }
                     (ShapePreset::Line, Some(color)) => {
-                        elements.push(PositionedElement::Line {
+                        sink.push(PositionedElement::Line {
                             start: Point { x, y },
                             end: Point {
                                 x: x + a.width,
@@ -2609,7 +2619,7 @@ fn place_cell_anchored(
                     }
                     _ => {}
                 }
-                elements.extend(render_shape_text(text, cell_geometry, rect, media));
+                sink.extend(render_shape_text(text, cell_geometry, rect, media));
             }
         }
     }
@@ -2624,6 +2634,7 @@ fn render_table_row(
     page_number: usize,
     table_borders: Option<&rdocx_oxml::table::CT_TblBorders>,
     elements: &mut Vec<PositionedElement>,
+    behind_elements: &mut Vec<PositionedElement>,
     media: &HashMap<MediaId, ImageData>,
 ) {
     let mut cell_x = table_x;
@@ -2697,7 +2708,10 @@ fn render_table_row(
             // Paragraphs and nested tables interleave in document order:
             // a nested entry at position i renders before paragraphs[i].
             let mut para_y = row_y - geometry.margin_top + cell_margin_top + v_offset;
-            let mut render_nested_at = |pos: usize, para_y: &mut f64, elements: &mut Vec<PositionedElement>| {
+            let mut render_nested_at = |pos: usize,
+                                        para_y: &mut f64,
+                                        elements: &mut Vec<PositionedElement>,
+                                        behind_elements: &mut Vec<PositionedElement>| {
                 for (at, block) in &cell.nested {
                     if *at != pos {
                         continue;
@@ -2713,6 +2727,7 @@ fn render_table_row(
                             page_number,
                             block.borders.as_ref(),
                             elements,
+                            behind_elements,
                             media,
                         );
                         nested_row_y += nested_row.height;
@@ -2721,7 +2736,7 @@ fn render_table_row(
                 }
             };
             for (i, para) in cell.paragraphs.iter().enumerate() {
-                render_nested_at(i, &mut para_y, elements);
+                render_nested_at(i, &mut para_y, elements, behind_elements);
                 let cell_geometry = PageGeometry {
                     margin_left: cell_x + cell_margin_left,
                     ..*geometry
@@ -2732,6 +2747,7 @@ fn render_table_row(
                         &cell_geometry,
                         geometry.margin_top + para_y,
                         elements,
+                        behind_elements,
                         media,
                     );
                 }
@@ -2753,7 +2769,7 @@ fn render_table_row(
                 );
                 para_y += para.total_height();
             }
-            render_nested_at(cell.paragraphs.len(), &mut para_y, elements);
+            render_nested_at(cell.paragraphs.len(), &mut para_y, elements, behind_elements);
         }
         cell_x += cell.width;
     }
