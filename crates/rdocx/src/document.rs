@@ -3541,7 +3541,10 @@ impl Document {
     /// Return a cloned positioned page from the cached normal-font layout.
     ///
     /// `page_index` is zero-based. An index beyond the document returns `None`.
-    pub fn layout_page(&self, page_index: usize) -> Result<Option<oxml_layout::PageFrame>> {
+    pub fn layout_page(
+        &self,
+        page_index: usize,
+    ) -> Result<Option<std::sync::Arc<oxml_layout::PageFrame>>> {
         self.layout_page_with_options(page_index, RenderOptions::default())
     }
 
@@ -3550,7 +3553,7 @@ impl Document {
         &self,
         page_index: usize,
         options: RenderOptions,
-    ) -> Result<Option<oxml_layout::PageFrame>> {
+    ) -> Result<Option<std::sync::Arc<oxml_layout::PageFrame>>> {
         let layout = self.layout_with_options(options)?;
         Ok(layout.layout.pages.get(page_index).cloned())
     }

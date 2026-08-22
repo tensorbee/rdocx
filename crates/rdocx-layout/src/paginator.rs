@@ -5,6 +5,7 @@
 
 use crate::block::{AnchoredContent, AnchoredDrawing, LayoutBlock, ParagraphBlock, ShapePreset};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use oxml_layout::{
     Align, Color, FontManager, GlyphRun, LayoutLine, LineItem, MediaId, NoteRef, NoteStream,
@@ -127,11 +128,11 @@ pub fn paginate_sections(
     fm: &FontManager,
     media: &MediaRegistry,
     notes: &NoteRegistry,
-) -> (Vec<PageFrame>, Vec<OutlineEntry>) {
+) -> (Vec<Arc<PageFrame>>, Vec<OutlineEntry>) {
     let media = media.media();
     if sections.is_empty() {
         return (
-            vec![PageFrame::new(1, 612.0, 792.0, Vec::new())],
+            vec![Arc::new(PageFrame::new(1, 612.0, 792.0, Vec::new()))],
             Vec::new(),
         );
     }
@@ -183,7 +184,7 @@ pub fn paginate_sections(
     // If a section produced no pages (empty blocks), we might have duplicates
     // Renumber pages sequentially
     for (i, page) in all_pages.iter_mut().enumerate() {
-        page.page_number = i + 1;
+        Arc::make_mut(page).page_number = i + 1;
     }
 
     (all_pages, all_outlines)
@@ -198,7 +199,7 @@ pub fn paginate(
     _fm: &FontManager,
     media: &MediaRegistry,
     notes: &NoteRegistry,
-) -> (Vec<PageFrame>, Vec<OutlineEntry>) {
+) -> (Vec<Arc<PageFrame>>, Vec<OutlineEntry>) {
     paginate_with_media(
         blocks,
         geometry,
@@ -251,7 +252,7 @@ fn paginate_with_media(
     notes: &NoteRegistry,
     first_page_number: usize,
     first_header_page_number: usize,
-) -> (Vec<PageFrame>, Vec<OutlineEntry>) {
+) -> (Vec<Arc<PageFrame>>, Vec<OutlineEntry>) {
     let context = PassContext {
         geometry,
         header_footer,
@@ -283,7 +284,7 @@ fn paginate_with_media(
 
 /// One pagination pass, and what it learned about paragraph-relative wraps.
 struct PassResult {
-    pages: Vec<PageFrame>,
+    pages: Vec<Arc<PageFrame>>,
     outlines: Vec<OutlineEntry>,
     resolved: ResolvedWraps,
 }
@@ -399,7 +400,7 @@ fn paginate_pass(
 
 /// Helper struct to track page state during pagination.
 struct Pager<'a> {
-    pages: Vec<PageFrame>,
+    pages: Vec<Arc<PageFrame>>,
     elements: Vec<PositionedElement>,
     /// Anchored drawings marked behindDoc. Held apart from the normal element
     /// list so they can be emitted before everything else on the page, which
@@ -987,12 +988,12 @@ impl<'a> Pager<'a> {
             }
         }
 
-        self.pages.push(PageFrame::new(
+        self.pages.push(Arc::new(PageFrame::new(
             self.page_number,
             self.geometry.page_width,
             self.geometry.page_height,
             all_elements,
-        ));
+        )));
         self.page_number += 1;
         self.header_page_number += 1;
         self.cursor_y = 0.0;
@@ -1002,7 +1003,7 @@ impl<'a> Pager<'a> {
         self.is_first_page = false;
     }
 
-    fn flush(mut self) -> (Vec<PageFrame>, Vec<OutlineEntry>) {
+    fn flush(mut self) -> (Vec<Arc<PageFrame>>, Vec<OutlineEntry>) {
         // Always create at least one page
         if self.has_content() || self.pages.is_empty() {
             self.finish_page();
@@ -1209,7 +1210,7 @@ fn draw_note(
 /// the top of a fresh page and carry no separator rule. There is no body text
 /// on these pages for a rule to divide them from.
 pub fn append_endnote_pages(
-    pages: &mut Vec<PageFrame>,
+    pages: &mut Vec<Arc<PageFrame>>,
     notes: &NoteRegistry,
     geometry: PageGeometry,
 ) {
@@ -1239,12 +1240,12 @@ pub fn append_endnote_pages(
     let mut page_number = pages.len() + 1;
 
     let mut flush = |elements: &mut Vec<PositionedElement>, page_number: &mut usize| {
-        pages.push(PageFrame::new(
+        pages.push(Arc::new(PageFrame::new(
             *page_number,
             geometry.page_width,
             geometry.page_height,
             std::mem::take(elements),
-        ));
+        )));
         *page_number += 1;
     };
 

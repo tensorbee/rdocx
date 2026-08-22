@@ -100,7 +100,6 @@ pub fn layout_document_with_caller_fonts_and_provenance(
     })
 }
 
-
 /// SVG PoC patch: lay out with caller fonts on top of the bundled
 /// metric-compatible set — for wasm editors that inject one or two fonts
 /// and still need Calibri/Times to resolve. A separate entry point so the

@@ -734,6 +734,16 @@ impl Engine {
             })
             .collect::<HashMap<_, _>>();
         for page in &mut pages {
+            // Pages are shared with the relayout caches; only unshare the
+            // ones substitution would actually rewrite, so field-free pages
+            // stay a pointer copy across relayouts.
+            let has_field = page.elements.iter().any(|element| {
+                matches!(element, PositionedElement::Text(run) if run.field_kind.is_some())
+            });
+            if !has_field {
+                continue;
+            }
+            let page = std::sync::Arc::make_mut(page);
             let page_num = page.page_number;
             substitute_fields(
                 &mut page.elements,
@@ -765,7 +775,7 @@ impl Engine {
             creator: Some("rdocx".to_string()),
         });
 
-        let mut result = LayoutResult::new(pages, fonts, metadata, outlines);
+        let mut result = LayoutResult::from_shared(pages, fonts, metadata, outlines);
         result.diagnostics = diagnostics;
         Ok(result)
     }
@@ -968,7 +978,7 @@ fn paragraph_is_cache_safe(paragraph: &CT_P, styles: &CT_Styles) -> bool {
 }
 
 fn canonicalize_layout_fonts(
-    pages: &mut [PageFrame],
+    pages: &mut [std::sync::Arc<PageFrame>],
     font_manager: &FontManager,
     current_fonts: &[FontId],
 ) -> Result<Vec<oxml_layout::FontData>> {
@@ -1024,8 +1034,13 @@ fn canonicalize_layout_fonts(
         font.id = remap[&persistent_id];
         fonts.push(font);
     }
-    for page in pages {
-        rewrite(&mut page.elements, &remap);
+    // Pages are shared with the relayout caches; when the remap is the
+    // identity (persistent ids already dense and in order, the usual case
+    // for a retained engine) leave them shared instead of unsharing all.
+    if remap.iter().any(|(persistent, local)| persistent != local) {
+        for page in pages {
+            rewrite(&mut std::sync::Arc::make_mut(page).elements, &remap);
+        }
     }
     Ok(fonts)
 }
@@ -1267,7 +1282,7 @@ fn paragraph_cache_entry_bytes(
 }
 
 /// Apply page background color from `w:background` element to all pages.
-fn apply_page_background(pages: &mut [PageFrame], input: &LayoutInput) {
+fn apply_page_background(pages: &mut [std::sync::Arc<PageFrame>], input: &LayoutInput) {
     let bg_xml = match &input.document.background_xml {
         Some(xml) => xml,
         None => return,
@@ -1283,6 +1298,7 @@ fn apply_page_background(pages: &mut [PageFrame], input: &LayoutInput) {
 
     // Insert a full-page FilledRect at position 0 on every page (renders underneath everything)
     for page in pages.iter_mut() {
+        let page = std::sync::Arc::make_mut(page);
         page.elements.insert(
             0,
             PositionedElement::FilledRect {
@@ -4587,6 +4603,7 @@ mod tests {
             .expect("provenance layout")
             .into_layout_result();
         for page in &mut sourced.pages {
+            let page = std::sync::Arc::make_mut(page);
             for element in &mut page.elements {
                 if let PositionedElement::Text(run) = element {
                     run.source = None;
@@ -5720,7 +5737,7 @@ mod tests {
         let all: String = output
             .pages
             .iter()
-            .map(page_text)
+            .map(|page| page_text(page))
             .collect::<Vec<_>>()
             .join(" | ");
         assert!(

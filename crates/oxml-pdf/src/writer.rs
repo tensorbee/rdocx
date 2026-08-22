@@ -28,10 +28,13 @@ struct AlphaStates {
 }
 
 impl AlphaStates {
-    fn new(pages: &[oxml_layout::PageFrame], alloc: &mut impl FnMut() -> Ref) -> Self {
+    fn new(
+        pages: &[impl std::borrow::Borrow<oxml_layout::PageFrame>],
+        alloc: &mut impl FnMut() -> Ref,
+    ) -> Self {
         let mut keys = BTreeSet::new();
         for page in pages {
-            collect_alpha_keys(&page.elements, &mut keys);
+            collect_alpha_keys(&page.borrow().elements, &mut keys);
         }
 
         let entries: Vec<AlphaEntry> = keys
@@ -140,13 +143,17 @@ struct GradientRegistry {
 }
 
 impl GradientRegistry {
-    fn new(pages: &[oxml_layout::PageFrame], alloc: &mut impl FnMut() -> Ref) -> Self {
+    fn new(
+        pages: &[impl std::borrow::Borrow<oxml_layout::PageFrame>],
+        alloc: &mut impl FnMut() -> Ref,
+    ) -> Self {
         let mut registry = Self {
             entries: Vec::new(),
             by_occurrence: HashMap::new(),
         };
 
         for (page_idx, page) in pages.iter().enumerate() {
+            let page = page.borrow();
             let mut leaf_idx = 0;
             let page_flip = Transform {
                 a: 1.0,

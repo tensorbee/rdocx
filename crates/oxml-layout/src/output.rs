@@ -345,8 +345,10 @@ pub struct OutlineEntry {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct LayoutResult {
-    /// Laid-out pages.
-    pub pages: Vec<PageFrame>,
+    /// Laid-out pages, shared: an interactive caller relayouting per edit
+    /// keeps unchanged pages alive across results instead of deep-copying
+    /// them. Pre-1.0 type break, like `FontData.data`.
+    pub pages: Vec<std::sync::Arc<PageFrame>>,
     /// Font data for all fonts used.
     pub fonts: Vec<FontData>,
     /// Optional document metadata for PDF output.
@@ -368,6 +370,21 @@ impl LayoutResult {
     /// ```
     pub fn new(
         pages: Vec<PageFrame>,
+        fonts: Vec<FontData>,
+        metadata: Option<DocumentMetadata>,
+        outlines: Vec<OutlineEntry>,
+    ) -> Self {
+        Self::from_shared(
+            pages.into_iter().map(std::sync::Arc::new).collect(),
+            fonts,
+            metadata,
+            outlines,
+        )
+    }
+
+    /// Construct a result from pages that are already shared.
+    pub fn from_shared(
+        pages: Vec<std::sync::Arc<PageFrame>>,
         fonts: Vec<FontData>,
         metadata: Option<DocumentMetadata>,
         outlines: Vec<OutlineEntry>,
