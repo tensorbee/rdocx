@@ -2542,6 +2542,79 @@ fn render_hf_blocks(
 }
 
 /// Render a table row.
+/// Floating drawings anchored to a paragraph inside a table cell (stamps,
+/// seals, watermarks on forms). The cell's text area stands in for the
+/// anchor's "column"/"margin" reference, wrapping is ignored (such drawings
+/// overlap or sit behind the form), and elements are pushed before the
+/// cell's text so the text paints on top.
+fn place_cell_anchored(
+    anchored: &[AnchoredDrawing],
+    cell_geometry: &PageGeometry,
+    para_top_abs: f64,
+    elements: &mut Vec<PositionedElement>,
+    media: &HashMap<MediaId, ImageData>,
+) {
+    for a in anchored {
+        let x = resolve_anchor_h(a.rel_h, a.off_h, a.align_h, a.width, cell_geometry, 0.0);
+        let y = resolve_anchor_v(
+            a.rel_v,
+            a.off_v,
+            a.align_v,
+            a.height,
+            cell_geometry,
+            para_top_abs - cell_geometry.margin_top,
+        );
+        let rect = Rect {
+            x,
+            y,
+            width: a.width,
+            height: a.height,
+        };
+        match &a.content {
+            AnchoredContent::Image { media_id } => {
+                let image = media.get(media_id);
+                elements.push(PositionedElement::Image {
+                    rect,
+                    data: image.map_or_else(Vec::new, |image| image.data.clone()),
+                    content_type: image
+                        .map_or_else(String::new, |image| image.content_type.clone()),
+                    media_id: *media_id,
+                });
+            }
+            AnchoredContent::Group(group) => {
+                let mut positioned = group.clone();
+                positioned.transform = positioned.transform.then(oxml_layout::Transform {
+                    e: rect.x,
+                    f: rect.y,
+                    ..oxml_layout::Transform::IDENTITY
+                });
+                elements.push(PositionedElement::Group(positioned));
+            }
+            AnchoredContent::Shape { preset, fill, text } => {
+                match (preset, fill) {
+                    (ShapePreset::Rect, Some(color)) => {
+                        elements.push(PositionedElement::FilledRect { rect, color: *color });
+                    }
+                    (ShapePreset::Line, Some(color)) => {
+                        elements.push(PositionedElement::Line {
+                            start: Point { x, y },
+                            end: Point {
+                                x: x + a.width,
+                                y: y + a.height,
+                            },
+                            width: 1.0,
+                            color: *color,
+                            dash_pattern: None,
+                        });
+                    }
+                    _ => {}
+                }
+                elements.extend(render_shape_text(text, cell_geometry, rect, media));
+            }
+        }
+    }
+}
+
 fn render_table_row(
     row: &crate::table::TableRow,
     _col_widths: &[f64],
@@ -2557,14 +2630,25 @@ fn render_table_row(
     let num_cells = row.cells.len();
 
     for (cell_idx, cell) in row.cells.iter().enumerate() {
+        // A merge-starting cell paints shading/side borders over its whole
+        // span; continue cells suppress top borders (and bottom while the
+        // merge keeps going) so no line crosses the merged region.
+        let draw_height = if cell.starts_vmerge {
+            cell.merged_height
+        } else {
+            cell.height
+        };
+
         // Render cell shading
-        if let Some(ref shading) = cell.shading {
+        if !cell.is_vmerge_continue
+            && let Some(ref shading) = cell.shading
+        {
             elements.push(PositionedElement::FilledRect {
                 rect: Rect {
                     x: cell_x,
                     y: row_y,
                     width: cell.width,
-                    height: cell.height,
+                    height: draw_height,
                 },
                 color: *shading,
             });
@@ -2575,13 +2659,15 @@ fn render_table_row(
             cell_x,
             row_y,
             cell.width,
-            cell.height,
+            draw_height,
             &cell.borders,
             table_borders,
             cell_idx,
             num_cells,
             cell.is_first_row,
             cell.is_last_row,
+            cell.is_vmerge_continue,
+            cell.merge_with_below,
             elements,
         );
 
@@ -2590,27 +2676,69 @@ fn render_table_row(
             let cell_margin_top = cell.margin_top;
             let cell_margin_left = cell.margin_left;
 
-            // Compute vertical alignment offset
-            let content_height: f64 = cell.paragraphs.iter().map(|p| p.total_height()).sum();
+            // Compute vertical alignment offset (over the merged span for
+            // a merge-starting cell).
+            let content_height: f64 = cell.paragraphs.iter().map(|p| p.total_height()).sum::<f64>()
+                + cell
+                    .nested
+                    .iter()
+                    .map(|(_, t)| t.total_height())
+                    .sum::<f64>();
             let v_offset = match cell.v_align {
                 Some(rdocx_oxml::table::ST_VerticalJc::Center) => {
-                    ((cell.height - cell_margin_top - content_height) / 2.0).max(0.0)
+                    ((draw_height - cell_margin_top - content_height) / 2.0).max(0.0)
                 }
                 Some(rdocx_oxml::table::ST_VerticalJc::Bottom) => {
-                    (cell.height - cell_margin_top - content_height).max(0.0)
+                    (draw_height - cell_margin_top - content_height).max(0.0)
                 }
                 _ => 0.0, // Top or unspecified
             };
 
+            // Paragraphs and nested tables interleave in document order:
+            // a nested entry at position i renders before paragraphs[i].
             let mut para_y = row_y - geometry.margin_top + cell_margin_top + v_offset;
-            for para in &cell.paragraphs {
+            let mut render_nested_at = |pos: usize, para_y: &mut f64, elements: &mut Vec<PositionedElement>| {
+                for (at, block) in &cell.nested {
+                    if *at != pos {
+                        continue;
+                    }
+                    let mut nested_row_y = geometry.margin_top + *para_y;
+                    for nested_row in &block.rows {
+                        render_table_row(
+                            nested_row,
+                            &block.col_widths,
+                            cell_x + cell_margin_left + block.table_indent,
+                            nested_row_y,
+                            geometry,
+                            page_number,
+                            block.borders.as_ref(),
+                            elements,
+                            media,
+                        );
+                        nested_row_y += nested_row.height;
+                    }
+                    *para_y += block.total_height();
+                }
+            };
+            for (i, para) in cell.paragraphs.iter().enumerate() {
+                render_nested_at(i, &mut para_y, elements);
+                let cell_geometry = PageGeometry {
+                    margin_left: cell_x + cell_margin_left,
+                    ..*geometry
+                };
+                if !para.anchored.is_empty() {
+                    place_cell_anchored(
+                        &para.anchored,
+                        &cell_geometry,
+                        geometry.margin_top + para_y,
+                        elements,
+                        media,
+                    );
+                }
                 render_paragraph_lines(
                     &para.lines,
                     para,
-                    &PageGeometry {
-                        margin_left: cell_x + cell_margin_left,
-                        ..*geometry
-                    },
+                    &cell_geometry,
                     para_y,
                     elements,
                     media,
@@ -2625,6 +2753,7 @@ fn render_table_row(
                 );
                 para_y += para.total_height();
             }
+            render_nested_at(cell.paragraphs.len(), &mut para_y, elements);
         }
         cell_x += cell.width;
     }
@@ -2642,6 +2771,8 @@ fn render_cell_borders(
     num_cells: usize,
     is_first_row: bool,
     is_last_row: bool,
+    suppress_top: bool,
+    suppress_bottom: bool,
     elements: &mut Vec<PositionedElement>,
 ) {
     // Determine effective border for each edge (cell overrides table)
@@ -2672,7 +2803,9 @@ fn render_cell_borders(
         }
     });
     let cell_top = cell_borders.as_ref().and_then(|b| b.top.as_ref());
-    if let Some((thickness, color, dash_pattern)) = get_edge(cell_top, table_top) {
+    if let Some((thickness, color, dash_pattern)) = get_edge(cell_top, table_top)
+        && !suppress_top
+    {
         elements.push(PositionedElement::Line {
             start: Point { x, y },
             end: Point { x: x + w, y },
@@ -2691,7 +2824,9 @@ fn render_cell_borders(
         }
     });
     let cell_bottom = cell_borders.as_ref().and_then(|b| b.bottom.as_ref());
-    if let Some((thickness, color, dash_pattern)) = get_edge(cell_bottom, table_bottom) {
+    if let Some((thickness, color, dash_pattern)) = get_edge(cell_bottom, table_bottom)
+        && !suppress_bottom
+    {
         elements.push(PositionedElement::Line {
             start: Point { x, y: y + h },
             end: Point { x: x + w, y: y + h },

@@ -1774,10 +1774,41 @@ pub(crate) fn layout_paragraph_with_source(
     diagnostics: &mut Vec<Diagnostic>,
     source_node: Option<SourceNodeId>,
 ) -> Result<ParagraphBlock> {
+    layout_paragraph_with_source_in_table(
+        para,
+        available_width,
+        styles,
+        input,
+        media,
+        fm,
+        num_state,
+        diagnostics,
+        source_node,
+        None,
+    )
+}
+
+/// [`layout_paragraph_with_source`] with the table-style paragraph
+/// properties of the enclosing table, merged between docDefaults and the
+/// paragraph style per the OOXML cascade.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn layout_paragraph_with_source_in_table(
+    para: &CT_P,
+    available_width: f64,
+    styles: &CT_Styles,
+    input: &LayoutInput,
+    media: &MediaRegistry,
+    fm: &mut FontManager,
+    num_state: &mut NumberingState,
+    diagnostics: &mut Vec<Diagnostic>,
+    source_node: Option<SourceNodeId>,
+    table_ppr: Option<&rdocx_oxml::properties::CT_PPr>,
+) -> Result<ParagraphBlock> {
     // Resolve paragraph properties
     let para_style_id = para.properties.as_ref().and_then(|p| p.style_id.as_deref());
 
-    let resolved_ppr = style_resolver::resolve_paragraph_properties(para_style_id, styles);
+    let resolved_ppr =
+        style_resolver::resolve_paragraph_properties_in_table(para_style_id, styles, table_ppr);
 
     let mut effective_ppr = resolved_ppr;
 
@@ -2366,7 +2397,23 @@ pub(crate) fn layout_paragraph_with_source(
         && let Some(line) = lines.first_mut()
         && line.items.is_empty()
     {
-        let default_rpr = style_resolver::resolve_run_properties(para_style_id, None, styles);
+        let mut default_rpr = style_resolver::resolve_run_properties(para_style_id, None, styles);
+        // The paragraph mark's own run properties (pPr/rPr) size an empty
+        // paragraph in Word — a 7pt mark makes a ~8.4pt line, not 11pt.
+        if let Some(mark_rpr) = para.properties.as_ref().and_then(|p| p.rpr.as_ref()) {
+            if mark_rpr.sz.is_some() {
+                default_rpr.sz = mark_rpr.sz;
+            }
+            if mark_rpr.bold.is_some() {
+                default_rpr.bold = mark_rpr.bold;
+            }
+            if mark_rpr.italic.is_some() {
+                default_rpr.italic = mark_rpr.italic;
+            }
+            if mark_rpr.font_ascii.is_some() {
+                default_rpr.font_ascii = mark_rpr.font_ascii.clone();
+            }
+        }
         let font_size = default_rpr.sz.map(|hp| hp.to_pt()).unwrap_or(11.0);
         let bold = default_rpr.bold.unwrap_or(false);
         let italic = default_rpr.italic.unwrap_or(false);
@@ -2401,7 +2448,15 @@ pub(crate) fn layout_paragraph_with_source(
                 field_kind: None,
                 note: None,
             }));
+            // The line was sized before this segment existed, so it still
+            // carries the 12pt no-metrics fallback; give it the real font
+            // metrics (an empty 7pt paragraph is ~8.4pt tall, not 12).
+            line.ascent = metrics.ascent;
+            line.descent = metrics.descent;
         }
+    }
+    if inline_items.is_empty() {
+        convert::restore_word_line_heights(&mut lines, &effective_ppr);
     }
 
     let mut result = block::build_paragraph_block(

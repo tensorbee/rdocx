@@ -87,12 +87,30 @@ impl NumberingState {
 
 /// Resolve paragraph properties by walking the style inheritance chain.
 pub fn resolve_paragraph_properties(style_id: Option<&str>, styles: &CT_Styles) -> CT_PPr {
+    resolve_paragraph_properties_in_table(style_id, styles, None)
+}
+
+/// Like [`resolve_paragraph_properties`], with an optional table-style
+/// paragraph-property layer. OOXML cascades docDefaults → table style →
+/// paragraph style → direct formatting for paragraphs inside a table;
+/// table styles routinely carry `spacing after=0`, and skipping this layer
+/// doubles every row of a dense form.
+pub fn resolve_paragraph_properties_in_table(
+    style_id: Option<&str>,
+    styles: &CT_Styles,
+    table_ppr: Option<&CT_PPr>,
+) -> CT_PPr {
     let mut effective = CT_PPr::default();
 
     // 1. Start from docDefaults
     if let Some(ref defaults) = styles.doc_defaults
         && let Some(ref ppr) = defaults.ppr
     {
+        effective.merge_from(ppr);
+    }
+
+    // 1.5 Table-style paragraph properties (for paragraphs inside a table)
+    if let Some(ppr) = table_ppr {
         effective.merge_from(ppr);
     }
 
@@ -340,6 +358,8 @@ mod tests {
                 color: Some("2E74B5".to_string()),
                 ..Default::default()
             }),
+                    tbl_pr_xml: None,
+            table_borders: None,
         });
         styles
     }

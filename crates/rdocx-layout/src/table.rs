@@ -55,6 +55,10 @@ pub struct TableRow {
 pub struct TableCell {
     /// Cell content (paragraph blocks).
     pub paragraphs: Vec<ParagraphBlock>,
+    /// Nested tables laid out inside this cell, as
+    /// `(paragraph position, block)`: the block renders after that many of
+    /// `paragraphs` (document order is preserved for mixed content).
+    pub nested: Vec<(usize, TableBlock)>,
     /// Cell width in points (may span multiple grid columns).
     pub width: f64,
     /// Cell height in points (set to row height).
@@ -63,6 +67,16 @@ pub struct TableCell {
     pub grid_span: u32,
     /// Whether this cell is part of a vertical merge continuation (render no content).
     pub is_vmerge_continue: bool,
+    /// Whether this cell starts a vertical merge (vMerge=restart).
+    pub starts_vmerge: bool,
+    /// Total height this cell spans: the sum of the spanned row heights for
+    /// a merge-starting cell, otherwise equal to `height`. The renderer
+    /// draws shading, side borders, and vertically-aligned content over
+    /// this span.
+    pub merged_height: f64,
+    /// The same grid column continues a vertical merge in the next row —
+    /// the renderer suppresses this cell's bottom border.
+    pub merge_with_below: bool,
     /// Column index in the grid.
     pub col_index: usize,
     /// Cell-level borders.
@@ -166,8 +180,51 @@ fn layout_table_inner(
         })
         .unwrap_or(0.0);
 
-    // Table-level borders
-    let table_borders = tbl.properties.as_ref().and_then(|p| p.borders.clone());
+    // Table-level borders: direct properties first, then the referenced
+    // table style (following basedOn up a bounded chain) — receipts and
+    // forms commonly carry all their grid lines in the style.
+    let table_borders = tbl
+        .properties
+        .as_ref()
+        .and_then(|p| p.borders.clone())
+        .or_else(|| {
+            let mut id = tbl.properties.as_ref()?.style_id.as_deref()?;
+            for _ in 0..8 {
+                let style = styles.get_by_id(id)?;
+                if let Some(borders) = &style.table_borders {
+                    return Some(borders.clone());
+                }
+                id = style.based_on.as_deref()?;
+            }
+            None
+        });
+
+    // Table-style paragraph properties, merged base-first along the
+    // basedOn chain: they cascade onto every paragraph inside the table
+    // (styles like Table Grid carry `spacing after=0` here).
+    let table_style_ppr: Option<rdocx_oxml::properties::CT_PPr> = {
+        let mut merged: Option<rdocx_oxml::properties::CT_PPr> = None;
+        if let Some(start) = tbl.properties.as_ref().and_then(|p| p.style_id.as_deref()) {
+            let mut chain = Vec::new();
+            let mut id = start;
+            for _ in 0..8 {
+                let Some(style) = styles.get_by_id(id) else { break };
+                chain.push(style);
+                match style.based_on.as_deref() {
+                    Some(next) => id = next,
+                    None => break,
+                }
+            }
+            for style in chain.iter().rev() {
+                if let Some(ppr) = &style.ppr {
+                    merged
+                        .get_or_insert_with(rdocx_oxml::properties::CT_PPr::default)
+                        .merge_from(ppr);
+                }
+            }
+        }
+        merged
+    };
 
     // Default cell margins
     let default_cell_margin = tbl.properties.as_ref().and_then(|p| p.cell_margin.as_ref());
@@ -191,6 +248,7 @@ fn layout_table_inner(
     let num_rows = tbl.rows.len();
     let mut header_row_indices = Vec::new();
     let mut rows = Vec::new();
+    let mut exact_rows: Vec<bool> = Vec::new();
 
     for (row_idx, row) in tbl.rows.iter().enumerate() {
         let is_header = row
@@ -218,6 +276,12 @@ fn layout_table_inner(
                 .and_then(|p| p.v_merge)
                 .map(|vm| vm == VMerge::Continue)
                 .unwrap_or(false);
+            let starts_vmerge = cell
+                .properties
+                .as_ref()
+                .and_then(|p| p.v_merge)
+                .map(|vm| vm == VMerge::Restart)
+                .unwrap_or(false);
 
             // Cell-level borders and shading
             let cell_borders = cell.properties.as_ref().and_then(|p| p.borders.clone());
@@ -237,8 +301,8 @@ fn layout_table_inner(
             let content_width = (cell_width - cell_margin_left - cell_margin_right).max(0.0);
 
             // Layout cell content (paragraphs and nested tables)
-            let paragraphs = if is_vmerge_continue {
-                Vec::new()
+            let (paragraphs, nested) = if is_vmerge_continue {
+                (Vec::new(), Vec::new())
             } else {
                 layout_cell_content(
                     &cell.content,
@@ -254,10 +318,15 @@ fn layout_table_inner(
                     path,
                     row_idx,
                     cell_index,
+                    table_style_ppr.as_ref(),
                 )?
             };
 
             let content_height: f64 = paragraphs.iter().map(|p| p.total_height()).sum::<f64>()
+                + nested
+                    .iter()
+                    .map(|(_, t)| t.total_height())
+                    .sum::<f64>()
                 + cell_margin_top
                 + cell_margin_bottom;
 
@@ -265,10 +334,14 @@ fn layout_table_inner(
 
             cells.push(TableCell {
                 paragraphs,
+                nested,
                 width: cell_width,
                 height: content_height,
                 grid_span,
                 is_vmerge_continue,
+                starts_vmerge,
+                merged_height: content_height,
+                merge_with_below: false,
                 col_index,
                 borders: cell_borders,
                 shading: cell_shading,
@@ -282,26 +355,98 @@ fn layout_table_inner(
             col_index += grid_span as usize;
         }
 
-        // Row height is max of all cell heights and any specified height
-        let max_cell_height = cells.iter().map(|c| c.height).fold(0.0f64, f64::max);
+        // Row height from cells that do NOT start a vertical merge — a
+        // merge-starting cell's content spans several rows, so counting it
+        // here would balloon this row; its needs are distributed below.
+        let max_cell_height = cells
+            .iter()
+            .filter(|c| !c.starts_vmerge)
+            .map(|c| c.height)
+            .fold(0.0f64, f64::max);
+        let fallback_height = cells.iter().map(|c| c.height).fold(0.0f64, f64::max);
         let specified_height = row
             .properties
             .as_ref()
             .and_then(|p| p.height)
             .map(|h| h.to_pt())
             .unwrap_or(0.0);
-        let row_height = max_cell_height.max(specified_height);
+        // hRule="exact" pins the row height regardless of content (Word
+        // clips overflow) — dense forms rely on it row by row.
+        let exact = row
+            .properties
+            .as_ref()
+            .and_then(|p| p.height_rule.as_deref())
+            == Some("exact");
+        exact_rows.push(exact && specified_height > 0.0);
+        let row_height = if exact && specified_height > 0.0 {
+            specified_height
+        } else if max_cell_height > 0.0 || specified_height > 0.0 {
+            max_cell_height.max(specified_height)
+        } else {
+            // Every cell starts a merge (or the row is empty): fall back so
+            // the row is not zero-height.
+            fallback_height
+        };
 
-        // Set all cell heights to match row height
-        for cell in &mut cells {
-            cell.height = row_height;
-        }
-
+        // Cell heights are frozen after the vertical-merge pass below.
         rows.push(TableRow {
             cells,
             height: row_height,
             is_header,
         });
+    }
+
+    // Vertical merges: find each merge-starting cell's span (continue cells
+    // at the same grid column in the following rows), grow the last spanned
+    // row when the merged content needs more room than the span offers,
+    // then freeze cell heights and the merge geometry for the renderer.
+    let row_count = rows.len();
+    let mut spans: Vec<(usize, usize, usize)> = Vec::new(); // (row, cell, last_row)
+    for r in 0..row_count {
+        for ci in 0..rows[r].cells.len() {
+            if !rows[r].cells[ci].starts_vmerge {
+                continue;
+            }
+            let col = rows[r].cells[ci].col_index;
+            let mut last = r;
+            while last + 1 < row_count
+                && rows[last + 1]
+                    .cells
+                    .iter()
+                    .any(|c| c.col_index == col && c.is_vmerge_continue)
+            {
+                last += 1;
+            }
+            let needed = rows[r].cells[ci].height; // content height, unforced
+            let have: f64 = (r..=last).map(|i| rows[i].height).sum();
+            // Exact-height rows never grow (Word clips merged content too).
+            if needed > have && !exact_rows.get(last).copied().unwrap_or(false) {
+                rows[last].height += needed - have;
+            }
+            spans.push((r, ci, last));
+        }
+    }
+    let heights: Vec<f64> = rows.iter().map(|x| x.height).collect();
+    for r in 0..row_count {
+        let next_continue_cols: Vec<usize> = if r + 1 < row_count {
+            rows[r + 1]
+                .cells
+                .iter()
+                .filter(|c| c.is_vmerge_continue)
+                .map(|c| c.col_index)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for cell in &mut rows[r].cells {
+            cell.height = heights[r];
+            cell.merged_height = heights[r];
+            cell.merge_with_below =
+                cell.merge_with_below || next_continue_cols.contains(&cell.col_index);
+        }
+    }
+    for &(r, ci, last) in &spans {
+        rows[r].cells[ci].merged_height = heights[r..=last].iter().sum();
     }
 
     Ok(TableBlock {
@@ -379,18 +524,20 @@ fn layout_cell_content(
     table_path: &[usize],
     row_index: usize,
     cell_index: usize,
-) -> Result<Vec<ParagraphBlock>> {
+    table_ppr: Option<&rdocx_oxml::properties::CT_PPr>,
+) -> Result<(Vec<ParagraphBlock>, Vec<(usize, TableBlock)>)> {
     use crate::engine;
     use rdocx_oxml::table::CellContent;
 
     let mut blocks = Vec::new();
+    let mut nested = Vec::new();
     for (content_index, item) in content.iter().enumerate() {
         let mut source_path = table_path.to_vec();
         source_path.extend([row_index, cell_index, content_index]);
         match item {
             CellContent::Paragraph(para) => {
                 let source = sources.and_then(|sources| sources.id(story, &source_path));
-                let block = engine::layout_paragraph_with_source(
+                let block = engine::layout_paragraph_with_source_in_table(
                     para,
                     available_width,
                     styles,
@@ -400,12 +547,16 @@ fn layout_cell_content(
                     num_state,
                     diagnostics,
                     source,
+                    table_ppr,
                 )?;
                 blocks.push(block);
             }
             CellContent::Table(tbl) => {
-                // Recursively lay out the nested table
-                let _nested = layout_table_inner(
+                // Recursively lay out the nested table and keep it as a
+                // block anchored at the current paragraph position, so the
+                // paginator renders real rows, borders, and shading instead
+                // of the old flattened paragraph stream.
+                let block = layout_table_inner(
                     tbl,
                     available_width,
                     styles,
@@ -418,20 +569,12 @@ fn layout_cell_content(
                     story,
                     &source_path,
                 )?;
-                // For now, flatten: render nested table cell content as paragraph blocks
-                // (Full nested table rendering would require the paginator to handle tables within cells)
-                for row in &_nested.rows {
-                    for cell in &row.cells {
-                        if !cell.is_vmerge_continue {
-                            blocks.extend(cell.paragraphs.iter().cloned());
-                        }
-                    }
-                }
+                nested.push((blocks.len(), block));
             }
             CellContent::ContentControl(_) => {}
         }
     }
-    Ok(blocks)
+    Ok((blocks, nested))
 }
 
 #[cfg(test)]
@@ -604,13 +747,18 @@ mod tests {
         assert_eq!(block.rows.len(), 1);
         assert_eq!(block.rows[0].cells.len(), 1);
 
-        // Cell should have paragraphs from both the outer paragraph and flattened nested content
+        // The outer paragraph stays a paragraph block; the nested table is
+        // kept as a real block anchored after it (no more flattening).
         let cell = &block.rows[0].cells[0];
-        // At least: "Before nested" + "N1" + "N2" = 3 paragraph blocks
+        assert_eq!(cell.paragraphs.len(), 1, "outer paragraph only");
+        assert_eq!(cell.nested.len(), 1, "one nested table block");
+        let (pos, nested) = &cell.nested[0];
+        assert_eq!(*pos, 1, "nested table renders after the paragraph");
+        assert_eq!(nested.rows.len(), 1);
+        assert_eq!(nested.rows[0].cells.len(), 2);
         assert!(
-            cell.paragraphs.len() >= 3,
-            "Expected at least 3 paragraph blocks from outer + nested content, got {}",
-            cell.paragraphs.len()
+            cell.height >= cell.paragraphs[0].total_height() + nested.total_height(),
+            "cell height covers paragraph + nested table"
         );
 
         // Table width should match available width
