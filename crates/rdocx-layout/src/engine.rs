@@ -2356,6 +2356,54 @@ pub(crate) fn layout_paragraph_with_source(
     let mut lines = break_into_lines(&inline_items, &line_params, fm)?;
     convert::restore_word_line_heights(&mut lines, &effective_ppr);
 
+    // An empty paragraph renders no elements, which leaves an interactive
+    // caller with no way to click into it or draw a caret there. Give its
+    // line one zero-width empty text segment carrying the paragraph's
+    // resolved default font and its source identity (char span 0..0).
+    // Emitted whether or not a source registry is in use, so ordinary and
+    // provenance layouts stay structurally identical.
+    if inline_items.is_empty()
+        && let Some(line) = lines.first_mut()
+        && line.items.is_empty()
+    {
+        let default_rpr = style_resolver::resolve_run_properties(para_style_id, None, styles);
+        let font_size = default_rpr.sz.map(|hp| hp.to_pt()).unwrap_or(11.0);
+        let bold = default_rpr.bold.unwrap_or(false);
+        let italic = default_rpr.italic.unwrap_or(false);
+        if let Ok(font_id) =
+            fm.resolve_font_for_text(default_rpr.font_ascii.as_deref(), bold, italic, " ")
+            && let Ok(metrics) = fm.metrics(font_id, font_size)
+        {
+            line.items.push(LineItem::Text(TextSegment {
+                text: String::new(),
+                source: source_node.map(|node| oxml_layout::SourceSpan {
+                    node,
+                    char_start: 0,
+                    char_end: 0,
+                }),
+                font_id,
+                font_size,
+                glyph_ids: Vec::new(),
+                advances: Vec::new(),
+                width: 0.0,
+                ascent: metrics.ascent,
+                descent: metrics.descent,
+                line_gap: 0.0,
+                color: Color::BLACK,
+                bold,
+                italic,
+                underline: None,
+                strike: false,
+                dstrike: false,
+                highlight: None,
+                baseline_offset: 0.0,
+                hyperlink_url: None,
+                field_kind: None,
+                note: None,
+            }));
+        }
+    }
+
     let mut result = block::build_paragraph_block(
         lines,
         space_before,
