@@ -115,6 +115,9 @@ pub struct Document {
     normal_layout_engine: Mutex<Option<rdocx_layout::engine::Engine>>,
     /// Bundled-font-only layout used by deterministic rendering.
     deterministic_layout_cache: Mutex<Option<Arc<rdocx_layout::WordLayoutResult>>>,
+    /// SVG PoC patch: reusable engine for the bundled-fallback caller-fonts
+    /// path (wasm editors), kept across edits like `normal_layout_engine`.
+    fallback_layout_engine: Mutex<Option<rdocx_layout::engine::Engine>>,
 }
 
 enum ChartPackageSource<'a> {
@@ -445,6 +448,7 @@ impl Document {
             layout_cache: Mutex::new(None),
             normal_layout_engine: Mutex::new(None),
             deterministic_layout_cache: Mutex::new(None),
+            fallback_layout_engine: Mutex::new(None),
         }
     }
 
@@ -476,6 +480,7 @@ impl Document {
             layout_cache: Mutex::new(None),
             normal_layout_engine: Mutex::new(None),
             deterministic_layout_cache: Mutex::new(None),
+            fallback_layout_engine: Mutex::new(None),
         }
     }
 
@@ -625,6 +630,7 @@ impl Document {
             layout_cache: Mutex::new(None),
             normal_layout_engine: Mutex::new(None),
             deterministic_layout_cache: Mutex::new(None),
+            fallback_layout_engine: Mutex::new(None),
         })
     }
 
@@ -3323,7 +3329,39 @@ impl Document {
                 data: data.to_vec(),
             });
         }
-        Ok(rdocx_layout::layout_document_with_fallback_fonts_and_provenance(&input)?)
+        let mut engine = self
+            .fallback_layout_engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let engine = match engine.as_mut() {
+            Some(engine) => engine,
+            None => {
+                *engine = Some(rdocx_layout::engine::Engine::new_deterministic()?);
+                engine.as_mut().expect("just inserted")
+            }
+        };
+        Ok(rdocx_layout::layout_document_with_fallback_fonts_engine(
+            engine, &input,
+        )?)
+    }
+
+    /// SVG PoC patch: hand the bundled-fallback engine (and its content-keyed
+    /// relayout caches) to a caller restoring an undo snapshot, so the
+    /// rebuilt Document does not go cache-cold. Interim shape until the
+    /// upstream F-X039 session/handle design lands.
+    pub fn take_layout_engine(&self) -> Option<rdocx_layout::engine::Engine> {
+        self.fallback_layout_engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    /// SVG PoC patch: counterpart of [`Self::take_layout_engine`].
+    pub fn set_layout_engine(&self, engine: rdocx_layout::engine::Engine) {
+        *self
+            .fallback_layout_engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(engine);
     }
 
     /// Render the document to PDF bytes.

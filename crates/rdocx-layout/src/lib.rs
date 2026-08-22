@@ -109,6 +109,17 @@ pub fn layout_document_with_fallback_fonts_and_provenance(
     input: &LayoutInput,
 ) -> Result<WordLayoutResult> {
     let mut engine = engine::Engine::new_deterministic()?;
+    layout_document_with_fallback_fonts_engine(&mut engine, input)
+}
+
+/// SVG PoC patch: the reusable-engine form of
+/// [`layout_document_with_fallback_fonts_and_provenance`], so an editor can
+/// keep the engine's relayout caches warm across edits (mirrors the hidden
+/// `layout_document_with_reusable_engine` facade).
+pub fn layout_document_with_fallback_fonts_engine(
+    engine: &mut engine::Engine,
+    input: &LayoutInput,
+) -> Result<WordLayoutResult> {
     let (layout, source_nodes) = engine.layout_with_provenance(input)?;
     Ok(WordLayoutResult {
         layout,
