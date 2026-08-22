@@ -402,6 +402,41 @@ pub struct Engine {
     #[cfg(test)]
     pending_paragraph_cache_peak_bytes: usize,
     paragraph_cache_reads_enabled: bool,
+    /// Pages from the previous relayout of a single-section document, so an
+    /// edit repaginates only the pages around the change. See
+    /// [`paginator::PaginationCache`].
+    pagination_cache: Option<paginator::PaginationCache>,
+    /// Bumped whenever the caller/document font set changes; folded into the
+    /// pagination environment fingerprint.
+    fonts_generation: u64,
+    /// Laid-out tables, keyed on source fingerprint, body position and the
+    /// source-node table (cached blocks carry baked source spans).
+    table_cache: HashMap<u64, TableCacheEntry>,
+    /// Laid-out header/footer content per section source, same key regime.
+    hf_cache: HashMap<u64, HfCacheEntry>,
+    /// Post-field-substitution page pairs `(pristine, substituted)` from the
+    /// previous relayout; while the field environment is unchanged, a page
+    /// that is still the same shared pristine Arc reuses its substituted
+    /// form instead of being unshared and reshaped.
+    subst_prev: Vec<(std::sync::Arc<PageFrame>, std::sync::Arc<PageFrame>)>,
+    /// Field environment of `subst_prev`: total pages + bookmark targets.
+    subst_env: u64,
+}
+
+/// A laid-out table plus what a cache hit must replay, mirroring
+/// [`ParagraphCacheEntry`]. Tables whose cells render numbering markers or
+/// note references are never stored.
+struct TableCacheEntry {
+    block: crate::table::TableBlock,
+    diagnostics: Vec<Diagnostic>,
+    font_trace: Vec<FontId>,
+}
+
+/// Laid-out header/footer content for one section source, plus replay data.
+struct HfCacheEntry {
+    content: Option<paginator::HeaderFooterContent>,
+    diagnostics: Vec<Diagnostic>,
+    font_trace: Vec<FontId>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -463,6 +498,12 @@ impl Engine {
             #[cfg(test)]
             pending_paragraph_cache_peak_bytes: 0,
             paragraph_cache_reads_enabled: false,
+            pagination_cache: None,
+            fonts_generation: 0,
+            table_cache: HashMap::new(),
+            hf_cache: HashMap::new(),
+            subst_prev: Vec::new(),
+            subst_env: 0,
         }
     }
 
@@ -514,6 +555,21 @@ impl Engine {
         let context_matches =
             !fonts_changed && self.paragraph_cache_context.as_ref() == Some(&paragraph_context);
         self.paragraph_cache_reads_enabled = context_matches;
+        if fonts_changed {
+            self.fonts_generation = self.fonts_generation.wrapping_add(1);
+        }
+        if !context_matches {
+            // Styles/theme/fonts changed (or first layout): every
+            // cross-relayout cache keyed on that context is stale. This is
+            // the styles/numbering/theme invalidation boundary F-X038 keys
+            // paragraph reuse on, applied to page and block reuse as well
+            // (numbering definitions additionally join the pagination
+            // environment fingerprint below).
+            self.pagination_cache = None;
+            self.table_cache.clear();
+            self.hf_cache.clear();
+            self.subst_prev.clear();
+        }
         self.pending_paragraph_cache = Some(VecDeque::new());
         self.pending_paragraph_cache_bytes = 0;
         #[cfg(test)]
@@ -580,6 +636,14 @@ impl Engine {
         // Build sections: each section has blocks + geometry + header/footer
         let mut sections: Vec<paginator::Section> = Vec::new();
         let mut current_blocks: Vec<LayoutBlock> = Vec::new();
+        // Pagination identity per block, aligned with the block list of a
+        // single-section document (the only shape the pagination cache
+        // accepts; a section break mid-list leaves this misaligned, unused).
+        let mut block_fps: Vec<u64> = Vec::new();
+        // Reused pages and cached table/header blocks carry baked
+        // result-local SourceSpans; they stay valid only while the whole
+        // source-node table (ids and paths) is unchanged.
+        let source_fold = sources.map_or(0, |s| fingerprint_source_nodes(&s.nodes));
         let mut current_sect_pr: Option<CT_SectPr> = None; // Will be set from paragraph sect_pr
 
         for (body_index, content) in input.document.body.content.iter().enumerate() {
@@ -618,20 +682,29 @@ impl Engine {
                             Some(projected_paragraph_text(para, input.revision_view));
                     }
 
-                    current_blocks.push(LayoutBlock::Paragraph(para_block));
+                    let block = LayoutBlock::Paragraph(para_block);
+                    block_fps.push(combine_fp(
+                        fingerprint_paragraph(
+                            para,
+                            geometry.content_width(),
+                            input.revision_view as u8,
+                        ),
+                        pagination_salt(&block),
+                    ));
+                    current_blocks.push(block);
 
                     // If this paragraph has sect_pr, it ends a section
                     if let Some(sect_pr) = para_sect_pr {
                         let geometry = sect_pr_to_geometry(&sect_pr);
-                        let header_footer = layout_header_footer(
+                        let header_footer = self.layout_header_footer_cached(
                             &sect_pr,
                             input,
                             styles,
                             &media,
-                            &mut self.font_manager,
                             &mut num_state,
                             &mut diagnostics,
                             sources,
+                            source_fold,
                         )?;
                         let title_pg = sect_pr.title_pg.unwrap_or(false);
                         sections.push(paginator::Section {
@@ -648,20 +721,60 @@ impl Engine {
                     let sect_pr_for_layout = current_sect_pr.as_ref().unwrap_or(&final_sect_pr);
                     let geometry = sect_pr_to_geometry(sect_pr_for_layout);
 
-                    let table_block = table::layout_table_with_provenance(
-                        tbl,
-                        geometry.content_width(),
-                        styles,
-                        input,
-                        &media,
-                        &mut self.font_manager,
-                        &mut num_state,
-                        &mut diagnostics,
-                        sources,
-                        &WordStory::Document,
-                        &[body_index],
-                    )?;
-                    current_blocks.push(LayoutBlock::Table(table_block));
+                    let table_src_fp =
+                        fingerprint_table(tbl, geometry.content_width(), input.revision_view as u8);
+                    let table_key = {
+                        let mut fp = Fingerprint::new();
+                        fp.eat(&table_src_fp.to_le_bytes());
+                        fp.eat(&(body_index as u64).to_le_bytes());
+                        fp.eat(&source_fold.to_le_bytes());
+                        fp.finish()
+                    };
+                    let table_block = if let Some(hit) = self.table_cache.get(&table_key) {
+                        diagnostics.extend(hit.diagnostics.iter().cloned());
+                        self.font_manager.replay_layout_font_trace(&hit.font_trace);
+                        hit.block.clone()
+                    } else {
+                        let diagnostics_start = diagnostics.len();
+                        self.font_manager.begin_paragraph_font_trace();
+                        let block = table::layout_table_with_provenance(
+                            tbl,
+                            geometry.content_width(),
+                            styles,
+                            input,
+                            &media,
+                            &mut self.font_manager,
+                            &mut num_state,
+                            &mut diagnostics,
+                            sources,
+                            &WordStory::Document,
+                            &[body_index],
+                        )?;
+                        let font_trace = self.font_manager.finish_paragraph_font_trace();
+                        // A cache hit skips layout_table, so NumberingState
+                        // would not advance through numbered cell paragraphs
+                        // and note markers would freeze: such tables stay
+                        // uncached, exactly like marker paragraphs.
+                        if let Some(font_trace) = font_trace
+                            && !table_renders_shared_state(&block)
+                        {
+                            if self.table_cache.len() >= 256 {
+                                self.table_cache.clear();
+                            }
+                            self.table_cache.insert(
+                                table_key,
+                                TableCacheEntry {
+                                    block: block.clone(),
+                                    diagnostics: diagnostics[diagnostics_start..].to_vec(),
+                                    font_trace,
+                                },
+                            );
+                        }
+                        block
+                    };
+                    let block = LayoutBlock::Table(table_block);
+                    block_fps.push(combine_fp(table_src_fp, pagination_salt(&block)));
+                    current_blocks.push(block);
                 }
                 _ => {} // Skip RawXml elements during layout
             }
@@ -669,15 +782,15 @@ impl Engine {
 
         // Remaining blocks belong to the final section
         let final_geometry = sect_pr_to_geometry(&final_sect_pr);
-        let final_hf = layout_header_footer(
+        let final_hf = self.layout_header_footer_cached(
             &final_sect_pr,
             input,
             styles,
             &media,
-            &mut self.font_manager,
             &mut num_state,
             &mut diagnostics,
             sources,
+            source_fold,
         )?;
         let final_title_pg = final_sect_pr.title_pg.unwrap_or(false);
         sections.push(paginator::Section {
@@ -710,8 +823,44 @@ impl Engine {
         )?;
 
         // Paginate across all sections
-        let (mut pages, outlines) =
-            paginator::paginate_sections(&sections, &self.font_manager, &media, &notes);
+        // Everything pagination reads besides the block stream; a change in
+        // any of it invalidates the whole pagination cache. Styles and theme
+        // invalidate via the paragraph-cache context gate in layout_inner;
+        // numbering definitions, note parts, header/footer parts, section
+        // properties, fonts, revision view and the source-node table are
+        // folded here.
+        let env_fp = {
+            let mut fp = Fingerprint::new();
+            fp.eat_debug(&final_sect_pr);
+            let mut ids: Vec<&String> = input.headers.keys().collect();
+            ids.sort();
+            for id in ids {
+                fp.eat(id.as_bytes());
+                fp.eat_hdr_ftr(&input.headers[id]);
+            }
+            let mut ids: Vec<&String> = input.footers.keys().collect();
+            ids.sort();
+            for id in ids {
+                fp.eat(id.as_bytes());
+                fp.eat_hdr_ftr(&input.footers[id]);
+            }
+            fp.eat_notes(&input.footnotes);
+            fp.eat_notes(&input.endnotes);
+            fp.eat_debug(&input.numbering);
+            fp.eat(&[input.revision_view as u8]);
+            fp.eat(&self.fonts_generation.to_le_bytes());
+            fp.eat(&source_fold.to_le_bytes());
+            fp.finish()
+        };
+        let (mut pages, outlines) = paginator::paginate_sections_cached(
+            &sections,
+            &self.font_manager,
+            &media,
+            &notes,
+            (sections.len() == 1).then_some(block_fps.as_slice()),
+            env_fp,
+            &mut self.pagination_cache,
+        );
 
         // Endnotes read at the end of the document, so they follow the last
         // body page rather than sitting at the foot of their reference's page.
@@ -733,7 +882,23 @@ impl Engine {
                 })
             })
             .collect::<HashMap<_, _>>();
-        for page in &mut pages {
+        // Everything substitution reads besides the page itself; while it is
+        // unchanged, a page that is still the same shared pristine page as
+        // last relayout substitutes to the same result.
+        let subst_env = {
+            let mut fp = Fingerprint::new();
+            fp.eat(&(total_pages as u64).to_le_bytes());
+            let mut targets: Vec<(usize, usize)> =
+                bookmark_pages.iter().map(|(t, p)| (*t, *p)).collect();
+            targets.sort_unstable();
+            for (t, p) in targets {
+                fp.eat(&(t as u64).to_le_bytes());
+                fp.eat(&(p as u64).to_le_bytes());
+            }
+            fp.finish()
+        };
+        let pristine: Vec<std::sync::Arc<PageFrame>> = pages.clone();
+        for (i, page) in pages.iter_mut().enumerate() {
             // Pages are shared with the relayout caches; only unshare the
             // ones substitution would actually rewrite, so field-free pages
             // stay a pointer copy across relayouts.
@@ -741,6 +906,13 @@ impl Engine {
                 matches!(element, PositionedElement::Text(run) if run.field_kind.is_some())
             });
             if !has_field {
+                continue;
+            }
+            if subst_env == self.subst_env
+                && let Some((old_pristine, old_subst)) = self.subst_prev.get(i)
+                && std::sync::Arc::ptr_eq(old_pristine, &pristine[i])
+            {
+                *page = std::sync::Arc::clone(old_subst);
                 continue;
             }
             let page = std::sync::Arc::make_mut(page);
@@ -753,6 +925,8 @@ impl Engine {
                 &mut self.font_manager,
             );
         }
+        self.subst_prev = pristine.into_iter().zip(pages.iter().cloned()).collect();
+        self.subst_env = subst_env;
 
         // Post-pagination pass: apply page background color
         apply_page_background(&mut pages, input);
@@ -1043,6 +1217,96 @@ fn canonicalize_layout_fonts(
         }
     }
     Ok(fonts)
+}
+
+impl Engine {
+    /// [`layout_header_footer`] behind a content-keyed cache, so a relayout
+    /// does not re-shape the same header/footer parts on every edit.
+    ///
+    /// Entries whose blocks render numbering markers or note references are
+    /// not cached: a hit skips `layout_header_footer`, which would stop
+    /// NumberingState from advancing and freeze note-marker numbering. The
+    /// key folds the source-node table because header paragraphs carry
+    /// result-local source spans.
+    #[allow(clippy::too_many_arguments)]
+    fn layout_header_footer_cached(
+        &mut self,
+        sect_pr: &CT_SectPr,
+        input: &LayoutInput,
+        styles: &CT_Styles,
+        media: &MediaRegistry,
+        num_state: &mut NumberingState,
+        diagnostics: &mut Vec<Diagnostic>,
+        sources: Option<&SourceRegistry>,
+        source_fold: u64,
+    ) -> Result<Option<paginator::HeaderFooterContent>> {
+        let key = {
+            let mut fp = Fingerprint::new();
+            fp.eat_debug(&sect_pr.header_refs);
+            fp.eat_debug(&sect_pr.footer_refs);
+            for href in &sect_pr.header_refs {
+                if let Some(part) = input.headers.get(&href.rel_id) {
+                    fp.eat_hdr_ftr(part);
+                }
+            }
+            for fref in &sect_pr.footer_refs {
+                if let Some(part) = input.footers.get(&fref.rel_id) {
+                    fp.eat_hdr_ftr(part);
+                }
+            }
+            let geometry = sect_pr_to_geometry(sect_pr);
+            fp.eat(&geometry.content_width().to_bits().to_le_bytes());
+            fp.eat(&[input.revision_view as u8]);
+            fp.eat(&source_fold.to_le_bytes());
+            fp.finish()
+        };
+        if let Some(hit) = self.hf_cache.get(&key) {
+            diagnostics.extend(hit.diagnostics.iter().cloned());
+            self.font_manager.replay_layout_font_trace(&hit.font_trace);
+            return Ok(hit.content.clone());
+        }
+        let diagnostics_start = diagnostics.len();
+        self.font_manager.begin_paragraph_font_trace();
+        let built = layout_header_footer(
+            sect_pr,
+            input,
+            styles,
+            media,
+            &mut self.font_manager,
+            num_state,
+            diagnostics,
+            sources,
+        )?;
+        let font_trace = self.font_manager.finish_paragraph_font_trace();
+        let cacheable = built.as_ref().is_none_or(|hf| {
+            ![
+                &hf.header_blocks,
+                &hf.footer_blocks,
+                &hf.first_header_blocks,
+                &hf.first_footer_blocks,
+                &hf.even_header_blocks,
+                &hf.even_footer_blocks,
+            ]
+            .iter()
+            .any(|blocks| para_blocks_render_shared_state(blocks))
+        });
+        if let Some(font_trace) = font_trace
+            && cacheable
+        {
+            if self.hf_cache.len() >= 64 {
+                self.hf_cache.clear();
+            }
+            self.hf_cache.insert(
+                key,
+                HfCacheEntry {
+                    content: built.clone(),
+                    diagnostics: diagnostics[diagnostics_start..].to_vec(),
+                    font_trace,
+                },
+            );
+        }
+        Ok(built)
+    }
 }
 
 fn rebind_text_source(text: &mut TextSegment, source_node: Option<SourceNodeId>) {
@@ -3096,6 +3360,320 @@ mod tests {
     use crate::input::ImageData;
     use oxml_layout::MediaId;
     use std::collections::HashMap;
+
+    // --- restartable pagination -------------------------------------------
+
+    fn many_paragraph_input(n: usize) -> LayoutInput {
+        let mut doc = rdocx_oxml::document::CT_Document::new();
+        for i in 0..n {
+            let mut p = CT_P::new();
+            if i % 30 == 5 {
+                p.properties.get_or_insert_with(Default::default).style_id =
+                    Some("Heading1".to_string());
+                p.add_run(&format!("Heading {i}"));
+            } else {
+                p.add_run(&format!(
+                    "Paragraph {i}: the quick brown fox jumps over the lazy dog, \
+                     again and again, until the page runs out of room and the \
+                     paginator has to start another one to hold the rest."
+                ));
+            }
+            doc.body.add_paragraph(p);
+        }
+        let mut input = make_input_with_text("");
+        input.document = doc;
+        input
+    }
+
+    fn set_paragraph_text(input: &mut LayoutInput, idx: usize, text: &str) {
+        let BodyContent::Paragraph(p) = &mut input.document.body.content[idx] else {
+            panic!("expected paragraph at {idx}");
+        };
+        *p = CT_P::new();
+        p.add_run(text);
+    }
+
+    fn pages_debug(result: &LayoutResult) -> Vec<String> {
+        result.pages.iter().map(|p| format!("{p:?}")).collect()
+    }
+
+    /// Attach a text header and a "Page {PAGE}" footer to the input's body
+    /// section, the common shape that exercises the header/footer cache and
+    /// per-page field substitution reuse.
+    fn attach_page_footer(input: &mut LayoutInput) {
+        use rdocx_oxml::header_footer::{CT_HdrFtr, HdrFtrRef, HdrFtrType};
+        use rdocx_oxml::text::{CT_R, Field, RunContent};
+
+        let mut header = CT_HdrFtr::new();
+        let mut hp = CT_P::new();
+        hp.add_run("Equivalence header");
+        header.paragraphs.push(hp);
+        input.headers.insert("rIdH1".to_string(), header);
+
+        let mut footer = CT_HdrFtr::new();
+        let mut fp = CT_P::new();
+        fp.add_run("Page ");
+        let mut run = CT_R::new("");
+        run.content = vec![RunContent::Field(Field::new(" PAGE ", "1"))];
+        fp.runs.push(run);
+        footer.paragraphs.push(fp);
+        input.footers.insert("rIdF1".to_string(), footer);
+
+        let sect_pr = input
+            .document
+            .body
+            .sect_pr
+            .get_or_insert_with(rdocx_oxml::document::CT_SectPr::default_letter);
+        sect_pr.header_refs.push(HdrFtrRef {
+            hdr_ftr_type: HdrFtrType::Default,
+            rel_id: "rIdH1".to_string(),
+        });
+        sect_pr.footer_refs.push(HdrFtrRef {
+            hdr_ftr_type: HdrFtrType::Default,
+            rel_id: "rIdF1".to_string(),
+        });
+    }
+
+    /// The invariant restartable pagination must never break: a relayout on
+    /// an engine holding cached pages produces byte-for-byte what a fresh
+    /// engine computes from scratch.
+    fn assert_cached_relayout_matches_fresh(edit: impl Fn(&mut LayoutInput)) {
+        assert_cached_relayout_matches_fresh_on(many_paragraph_input(120), edit);
+    }
+
+    fn assert_cached_relayout_matches_fresh_on(
+        input: LayoutInput,
+        edit: impl Fn(&mut LayoutInput),
+    ) {
+        let mut input = input;
+        let mut engine = Engine::new_deterministic().expect("deterministic engine");
+        let first = engine.layout(&input).expect("first layout");
+        assert!(
+            first.pages.len() >= 4,
+            "test document must span several pages, got {}",
+            first.pages.len()
+        );
+        edit(&mut input);
+        let cached = engine.layout(&input).expect("cached relayout");
+        let fresh = Engine::new_deterministic()
+            .expect("deterministic engine")
+            .layout(&input)
+            .expect("fresh layout");
+        assert_eq!(cached.pages.len(), fresh.pages.len(), "page count");
+        let (a, b) = (pages_debug(&cached), pages_debug(&fresh));
+        for (i, (a, b)) in a.iter().zip(&b).enumerate() {
+            assert_eq!(a, b, "page {} differs between cached and fresh", i + 1);
+        }
+        assert_eq!(
+            format!("{:?}", cached.outlines),
+            format!("{:?}", fresh.outlines),
+            "outlines"
+        );
+    }
+
+    #[test]
+    fn cached_repagination_matches_fresh_on_a_tail_edit() {
+        assert_cached_relayout_matches_fresh(|input| {
+            set_paragraph_text(input, 110, "changed near the end");
+        });
+    }
+
+    #[test]
+    fn cached_repagination_matches_fresh_on_a_middle_edit() {
+        assert_cached_relayout_matches_fresh(|input| {
+            set_paragraph_text(
+                input,
+                60,
+                "changed in the middle, with enough new text that this \
+                 paragraph re-breaks into a different number of lines than \
+                 it had before the edit came in and moved everything around",
+            );
+        });
+    }
+
+    #[test]
+    fn cached_repagination_matches_fresh_on_a_first_page_edit() {
+        assert_cached_relayout_matches_fresh(|input| {
+            set_paragraph_text(input, 0, "changed on page one");
+        });
+    }
+
+    #[test]
+    fn cached_repagination_matches_fresh_on_insert_and_delete() {
+        assert_cached_relayout_matches_fresh(|input| {
+            let mut p = CT_P::new();
+            p.add_run("a brand new paragraph pushed into the middle");
+            input
+                .document
+                .body
+                .content
+                .insert(60, BodyContent::Paragraph(p));
+        });
+        assert_cached_relayout_matches_fresh(|input| {
+            input.document.body.content.remove(60);
+        });
+    }
+
+    #[test]
+    fn cached_repagination_matches_fresh_without_any_edit() {
+        assert_cached_relayout_matches_fresh(|_| {});
+    }
+
+    #[test]
+    fn cached_repagination_matches_fresh_when_a_heading_moves_pages() {
+        // Outline entries are filtered by page index during reuse; growing a
+        // paragraph right before a heading exercises that filtering.
+        assert_cached_relayout_matches_fresh(|input| {
+            set_paragraph_text(
+                input,
+                64,
+                "grown just before the heading at index 65 so the heading \
+                 slides toward the next page: the quick brown fox jumps over \
+                 the lazy dog and keeps going for a good while longer, well \
+                 past where the old paragraph used to stop, adding lines",
+            );
+        });
+    }
+
+    #[test]
+    fn cached_repagination_matches_fresh_with_a_page_number_footer() {
+        // Middle edit: page numbers unchanged, so reused pages take the
+        // substituted-page shortcut — output must still be byte-identical.
+        let mut input = many_paragraph_input(120);
+        attach_page_footer(&mut input);
+        assert_cached_relayout_matches_fresh_on(input, |input| {
+            set_paragraph_text(input, 60, "changed in the middle");
+        });
+        // Insert enough text to change the page count: the substitution
+        // environment changes and every field page must be redone.
+        let mut input = many_paragraph_input(120);
+        attach_page_footer(&mut input);
+        assert_cached_relayout_matches_fresh_on(input, |input| {
+            for i in 0..6 {
+                let mut p = CT_P::new();
+                p.add_run(
+                    "a long inserted paragraph that adds real height to the \
+                     document so the total page count moves, invalidating \
+                     every page-number field after the insertion point",
+                );
+                input
+                    .document
+                    .body
+                    .content
+                    .insert(60 + i, BodyContent::Paragraph(p));
+            }
+        });
+    }
+
+    #[test]
+    fn editing_the_header_part_invalidates_cached_pages() {
+        let mut input = many_paragraph_input(120);
+        attach_page_footer(&mut input);
+        assert_cached_relayout_matches_fresh_on(input, |input| {
+            let header = input.headers.get_mut("rIdH1").expect("header part");
+            header.paragraphs[0] = {
+                let mut p = CT_P::new();
+                p.add_run("Rewritten header text");
+                p
+            };
+        });
+    }
+
+    #[test]
+    fn multi_section_documents_bypass_the_pagination_cache() {
+        let input = make_two_section_input(6 * 1440, false);
+        let mut engine = Engine::new_deterministic().expect("deterministic engine");
+        let first = engine.layout(&input).expect("first layout");
+        assert!(
+            engine.pagination_cache.is_none(),
+            "multi-section documents must not populate the pagination cache"
+        );
+        let second = engine.layout(&input).expect("second layout");
+        assert_eq!(pages_debug(&first), pages_debug(&second));
+    }
+
+    #[test]
+    fn editing_a_footnote_definition_invalidates_cached_pages() {
+        // The paragraph fingerprints do not change when only the footnote
+        // part changes, so this relies entirely on the environment
+        // fingerprint.
+        let mut input = make_input_with_footnote(&["original note text"]);
+        let mut engine = Engine::new_deterministic().expect("deterministic engine");
+        engine.layout(&input).expect("first layout");
+        let replacement = make_input_with_footnote(&["rewritten note text"]);
+        input.footnotes = replacement.footnotes.clone();
+        let cached = engine.layout(&input).expect("cached relayout");
+        let fresh = Engine::new_deterministic()
+            .expect("deterministic engine")
+            .layout(&input)
+            .expect("fresh layout");
+        assert_eq!(pages_debug(&cached), pages_debug(&fresh));
+    }
+
+    #[test]
+    fn cached_repagination_matches_fresh_with_provenance() {
+        let mut input = many_paragraph_input(120);
+        let mut engine = Engine::new_deterministic().expect("deterministic engine");
+        engine.layout_with_provenance(&input).expect("first layout");
+        set_paragraph_text(&mut input, 60, "changed in the middle");
+        let (cached, cached_nodes) = engine
+            .layout_with_provenance(&input)
+            .expect("cached relayout");
+        let (fresh, fresh_nodes) = Engine::new_deterministic()
+            .expect("deterministic engine")
+            .layout_with_provenance(&input)
+            .expect("fresh layout");
+        assert_eq!(pages_debug(&cached), pages_debug(&fresh));
+        assert_eq!(format!("{cached_nodes:?}"), format!("{fresh_nodes:?}"));
+    }
+
+    #[test]
+    fn provenance_stays_correct_when_the_paragraph_count_changes() {
+        // Inserting a paragraph shifts every later source id; the source-node
+        // fold must refuse page reuse so no stale span survives.
+        let mut input = many_paragraph_input(120);
+        let mut engine = Engine::new_deterministic().expect("deterministic engine");
+        engine.layout_with_provenance(&input).expect("first layout");
+        let mut p = CT_P::new();
+        p.add_run("a brand new paragraph pushed into the middle");
+        input
+            .document
+            .body
+            .content
+            .insert(60, BodyContent::Paragraph(p));
+        let (cached, cached_nodes) = engine
+            .layout_with_provenance(&input)
+            .expect("cached relayout");
+        let (fresh, fresh_nodes) = Engine::new_deterministic()
+            .expect("deterministic engine")
+            .layout_with_provenance(&input)
+            .expect("fresh layout");
+        assert_eq!(pages_debug(&cached), pages_debug(&fresh));
+        assert_eq!(format!("{cached_nodes:?}"), format!("{fresh_nodes:?}"));
+    }
+
+    #[test]
+    fn changing_a_style_definition_invalidates_cached_pages() {
+        // The F-X040 requirement: style/numbering/theme definitions join the
+        // reuse boundary. A doc-defaults size change must not serve pages
+        // laid out under the old definitions.
+        let mut input = many_paragraph_input(120);
+        let mut engine = Engine::new_deterministic().expect("deterministic engine");
+        engine.layout(&input).expect("first layout");
+        input.styles.doc_defaults = Some(rdocx_oxml::styles::CT_DocDefaults {
+            rpr: Some(rdocx_oxml::CT_RPr {
+                sz: Some(rdocx_oxml::HalfPoint(32)),
+                ..Default::default()
+            }),
+            ppr: None,
+        });
+        let cached = engine.layout(&input).expect("cached relayout");
+        let fresh = Engine::new_deterministic()
+            .expect("deterministic engine")
+            .layout(&input)
+            .expect("fresh layout");
+        assert_eq!(pages_debug(&cached), pages_debug(&fresh));
+    }
 
     #[test]
     fn revision_views_project_wrapped_runs_in_document_order() {
@@ -6884,4 +7462,268 @@ mod tests {
         assert!(text.iter().any(|value| value == "2"), "{text:?}");
         assert!(!text.iter().any(|value| value == "cached"), "{text:?}");
     }
+}
+
+fn fingerprint_paragraph(
+    para: &rdocx_oxml::text::CT_P,
+    content_width: f64,
+    revision_view: u8,
+) -> u64 {
+    let mut fp = Fingerprint::new();
+    fp.eat_paragraph(para);
+    fp.eat(&content_width.to_bits().to_le_bytes());
+    fp.eat(&[revision_view]);
+    fp.finish()
+}
+
+/// FNV-1a folding with a scratch buffer for the `Debug`-formatted pieces, so
+/// every fingerprint walker shares one hashing discipline.
+struct Fingerprint {
+    h: u64,
+    buf: String,
+}
+
+impl Fingerprint {
+    fn new() -> Self {
+        Fingerprint {
+            h: 0xcbf2_9ce4_8422_2325,
+            buf: String::new(),
+        }
+    }
+
+    fn eat(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.h ^= u64::from(*b);
+            self.h = self.h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+
+    fn eat_debug<T: std::fmt::Debug>(&mut self, value: &T) {
+        use std::fmt::Write as _;
+        let mut buf = std::mem::take(&mut self.buf);
+        buf.clear();
+        let _ = write!(buf, "{value:?}");
+        self.eat(buf.as_bytes());
+        self.buf = buf;
+    }
+
+    /// The paragraph walk shared by the block cache and the table
+    /// fingerprint: run text as raw bytes (the hot path), the small or
+    /// usually-empty property/projection structures via `Debug`.
+    fn eat_paragraph(&mut self, para: &rdocx_oxml::text::CT_P) {
+        use rdocx_oxml::text::RunContent;
+
+        self.eat_debug(&para.properties);
+        for run in &para.runs {
+            self.eat(b"\x01r");
+            self.eat_debug(&run.properties);
+            for content in &run.content {
+                match content {
+                    RunContent::Text(t) => {
+                        self.eat(b"\x02t");
+                        self.eat(t.text.as_bytes());
+                        self.eat(&[u8::from(t.preserve_space)]);
+                    }
+                    // A field's Debug form includes a per-parse source_id
+                    // (a global counter), so hashing it wholesale would give
+                    // the same XML a different fingerprint on every
+                    // build_input. Hash what layout actually reads instead.
+                    RunContent::Field(field) => {
+                        self.eat(b"\x02f");
+                        self.eat(field.instruction.raw.as_bytes());
+                        self.eat(field.cached_result.as_bytes());
+                        self.eat_debug(&field.dirty);
+                    }
+                    other => {
+                        self.eat(b"\x02o");
+                        self.eat_debug(other);
+                    }
+                }
+            }
+        }
+        if !(para.hyperlinks.is_empty()
+            && para.comment_ranges.is_empty()
+            && para.bookmark_markers.is_empty()
+            && para.extra_xml.is_empty()
+            && para.content_controls.is_empty()
+            && para.revisions.is_empty())
+        {
+            self.eat_debug(&para.hyperlinks);
+            self.eat_debug(&para.comment_ranges);
+            self.eat_debug(&para.bookmark_markers);
+            self.eat_debug(&para.extra_xml);
+            self.eat_debug(&para.content_controls);
+            self.eat_debug(&para.revisions);
+        }
+    }
+
+    /// A header/footer part, walked so fields inside it hash by content
+    /// (see the `RunContent::Field` arm of `eat_paragraph`).
+    fn eat_hdr_ftr(&mut self, part: &rdocx_oxml::header_footer::CT_HdrFtr) {
+        for para in &part.paragraphs {
+            self.eat(b"\x01P");
+            self.eat_paragraph(para);
+        }
+        if !(part.extra_namespaces.is_empty() && part.extra_xml.is_empty()) {
+            self.eat_debug(&part.extra_namespaces);
+            self.eat_debug(&part.extra_xml);
+        }
+    }
+
+    /// A footnotes/endnotes part, walked for the same reason.
+    fn eat_notes(&mut self, part: &Option<rdocx_oxml::footnotes::CT_Footnotes>) {
+        let Some(part) = part else {
+            self.eat(b"\x01-");
+            return;
+        };
+        for note in &part.footnotes {
+            self.eat(b"\x01N");
+            self.eat_debug(&note.id);
+            self.eat_debug(&note.note_type);
+            for para in &note.paragraphs {
+                self.eat_paragraph(para);
+            }
+        }
+    }
+
+    fn finish(&self) -> u64 {
+        self.h
+    }
+}
+
+/// Content fingerprint of a table for pagination identity, walking rows,
+/// cells and cell paragraphs the same way `fingerprint_paragraph` walks a
+/// body paragraph. Nested tables and content controls are rare enough to go
+/// through `Debug` wholesale.
+fn fingerprint_table(
+    tbl: &rdocx_oxml::table::CT_Tbl,
+    content_width: f64,
+    revision_view: u8,
+) -> u64 {
+    use rdocx_oxml::table::CellContent;
+
+    let mut fp = Fingerprint::new();
+    fp.eat_debug(&tbl.properties);
+    fp.eat_debug(&tbl.grid);
+    if !(tbl.extra_xml.is_empty() && tbl.content_controls.is_empty()) {
+        fp.eat_debug(&tbl.extra_xml);
+        fp.eat_debug(&tbl.content_controls);
+    }
+    for row in &tbl.rows {
+        fp.eat(b"\x01R");
+        fp.eat_debug(&row.properties);
+        if !(row.extra_xml.is_empty() && row.content_controls.is_empty()) {
+            fp.eat_debug(&row.extra_xml);
+            fp.eat_debug(&row.content_controls);
+        }
+        for cell in &row.cells {
+            fp.eat(b"\x02C");
+            fp.eat_debug(&cell.properties);
+            if !cell.extra_xml.is_empty() {
+                fp.eat_debug(&cell.extra_xml);
+            }
+            for content in &cell.content {
+                match content {
+                    CellContent::Paragraph(p) => {
+                        fp.eat(b"\x03p");
+                        fp.eat_paragraph(p);
+                    }
+                    other => {
+                        fp.eat(b"\x03x");
+                        fp.eat_debug(other);
+                    }
+                }
+            }
+        }
+    }
+    fp.eat(&content_width.to_bits().to_le_bytes());
+    fp.eat(&[revision_view]);
+    fp.finish()
+}
+
+/// Whether any of these paragraph blocks renders a numbering marker or a
+/// note reference — the cross-block state that makes a block unsafe to
+/// cache (a cache hit would skip the NumberingState / note-order advance
+/// that produced the marker text).
+fn para_blocks_render_shared_state(blocks: &[ParagraphBlock]) -> bool {
+    use oxml_layout::LineItem;
+    blocks.iter().any(|para| {
+        para.lines.iter().any(|line| {
+            line.items.iter().any(|item| match item {
+                LineItem::Marker(_) => true,
+                LineItem::Text(seg) => seg.note.is_some(),
+                _ => false,
+            })
+        })
+    })
+}
+
+/// Whether any cell paragraph renders a numbering marker or a note
+/// reference — the cross-block state that makes a table unsafe to cache.
+fn table_renders_shared_state(table: &crate::table::TableBlock) -> bool {
+    table.rows.iter().any(|row| {
+        row.cells
+            .iter()
+            .any(|cell| para_blocks_render_shared_state(&cell.paragraphs))
+    })
+}
+
+/// One pagination-identity value from a block's source fingerprint and its
+/// rendered-marker salt.
+fn combine_fp(source: u64, salt: u64) -> u64 {
+    source.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ salt
+}
+
+/// What a block renders from cross-block state that its source fingerprint
+/// cannot see: list numbering markers (NumberingState) and note reference
+/// markers (note numbering). Folding the rendered text of both into the
+/// pagination fingerprint makes "same fingerprint" mean "paginates AND
+/// renders identically", so inserting a numbered paragraph or a footnote
+/// reference invalidates every block whose marker text shifts.
+fn pagination_salt(block: &LayoutBlock) -> u64 {
+    use oxml_layout::LineItem;
+
+    fn eat_lines(fp: &mut Fingerprint, lines: &[oxml_layout::LayoutLine]) {
+        for line in lines {
+            for item in &line.items {
+                match item {
+                    LineItem::Marker(seg) => {
+                        fp.eat(b"\x01m");
+                        fp.eat(seg.text.as_bytes());
+                    }
+                    LineItem::Text(seg) if seg.note.is_some() => {
+                        fp.eat(b"\x01n");
+                        fp.eat(seg.text.as_bytes());
+                        fp.eat_debug(&seg.note);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let mut fp = Fingerprint::new();
+    match block {
+        LayoutBlock::Paragraph(para) => eat_lines(&mut fp, &para.lines),
+        LayoutBlock::Table(table) => {
+            for row in &table.rows {
+                for cell in &row.cells {
+                    for para in &cell.paragraphs {
+                        eat_lines(&mut fp, &para.lines);
+                    }
+                }
+            }
+        }
+    }
+    fp.finish()
+}
+
+/// Fold the result-local source-node table: reused pages carry baked
+/// `SourceSpan`s, which stay valid only while ids and paths are unchanged.
+fn fingerprint_source_nodes(nodes: &[WordSourcePath]) -> u64 {
+    let mut fp = Fingerprint::new();
+    for node in nodes {
+        fp.eat_debug(node);
+    }
+    fp.finish()
 }
