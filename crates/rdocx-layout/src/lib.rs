@@ -100,6 +100,24 @@ pub fn layout_document_with_caller_fonts_and_provenance(
     })
 }
 
+
+/// SVG PoC patch: lay out with caller fonts on top of the bundled
+/// metric-compatible set — for wasm editors that inject one or two fonts
+/// and still need Calibri/Times to resolve. A separate entry point so the
+/// strict caller-fonts isolation of
+/// [`layout_document_with_caller_fonts_and_provenance`] stays intact.
+pub fn layout_document_with_fallback_fonts_and_provenance(
+    input: &LayoutInput,
+) -> Result<WordLayoutResult> {
+    let mut engine = engine::Engine::new_deterministic()?;
+    let (layout, source_nodes) = engine.layout_with_provenance(input)?;
+    Ok(WordLayoutResult {
+        layout,
+        revision_view: input.revision_view,
+        source_nodes,
+    })
+}
+
 /// Lay out a DOCX using bundled fonts without system font discovery.
 pub fn layout_document_deterministic(input: &LayoutInput) -> Result<LayoutResult> {
     engine::Engine::new_deterministic()?.layout(input)
