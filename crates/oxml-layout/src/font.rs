@@ -211,6 +211,12 @@ pub struct FontManager {
     /// something else -- e.g. an open Korean serif registered as "\uBC14\uD0D5".
     /// Rebuilt together with `additional_fonts`.
     caller_aliases: HashMap<String, String>,
+    /// Caller-declared aliases set via [`Self::set_caller_aliases`], exactly
+    /// as passed (for cheap change detection).
+    explicit_aliases: Vec<(String, String)>,
+    /// Lowercased requested-name -> target-family view of
+    /// `explicit_aliases`, consulted before the label-derived aliases.
+    explicit_alias_map: HashMap<String, String>,
     /// Bounded exact-key shaping results.
     shaping_memo: Mutex<ShapingMemo>,
     /// Exact resolution events for one cache-candidate paragraph.
@@ -280,6 +286,8 @@ impl FontManager {
             coverage_misses: HashSet::new(),
             additional_fonts: Vec::new(),
             caller_aliases: HashMap::new(),
+            explicit_aliases: Vec::new(),
+            explicit_alias_map: HashMap::new(),
             shaping_memo: Mutex::new(ShapingMemo::new()),
             paragraph_font_trace: None,
             layout_fonts: Vec::new(),
@@ -366,6 +374,27 @@ impl FontManager {
         let mut manager = Self::from_base_database(db);
         manager.caller_aliases = aliases;
         manager
+    }
+
+    /// Replace the caller-declared requested-name -> family aliases.
+    ///
+    /// Unlike [`Self::load_additional_fonts`] this carries no font bytes, so
+    /// an arbitrarily large alias set stays cheap to pass on every layout.
+    /// An unchanged set is a no-op; a changed set clears resolution state,
+    /// because names may now resolve to different faces.
+    pub fn set_caller_aliases(&mut self, aliases: &[(String, String)]) -> bool {
+        if self.explicit_aliases == aliases {
+            return false;
+        }
+        self.explicit_aliases = aliases.to_vec();
+        self.explicit_alias_map = aliases
+            .iter()
+            .map(|(requested, target)| (requested.to_lowercase(), target.clone()))
+            .collect();
+        self.cache.clear();
+        self.coverage_fallbacks.clear();
+        self.coverage_misses.clear();
+        true
     }
 
     /// Load one caller-provided font and remember its requested family name
@@ -697,8 +726,13 @@ impl FontManager {
         let mapped = map_font_name(family_name);
 
         // A caller-provided font registered under this name wins right after
-        // the exact match (see `caller_aliases`).
-        let caller_alias = self.caller_aliases.get(&family_name.to_lowercase()).cloned();
+        // the exact match (see `caller_aliases` / `explicit_alias_map`).
+        let requested_key = family_name.to_lowercase();
+        let caller_alias = self
+            .explicit_alias_map
+            .get(&requested_key)
+            .or_else(|| self.caller_aliases.get(&requested_key))
+            .cloned();
 
         // Try the requested font, mapped alternatives, then generic fallbacks
         let mut fallbacks: Vec<&str> = Vec::with_capacity(10);
@@ -1190,6 +1224,20 @@ mod tests {
             data: caladea.to_vec(),
         }]);
         assert!(fm.caller_aliases.is_empty());
+
+        // Explicit aliases carry no bytes and resolve the same way.
+        assert!(fm.set_caller_aliases(&[(
+            "\u{bc14}\u{d0d5}".to_string(),
+            "Caladea".to_string(),
+        )]));
+        let id = fm.resolve_font(Some("\u{bc14}\u{d0d5}"), false, false).unwrap();
+        let idx = fm.index_of(id).unwrap();
+        assert_eq!(fm.fonts[idx].family, "Caladea");
+        // Unchanged set is a no-op.
+        assert!(!fm.set_caller_aliases(&[(
+            "\u{bc14}\u{d0d5}".to_string(),
+            "Caladea".to_string(),
+        )]));
     }
 
     fn font_with_family(source: &[u8], family: &str) -> Vec<u8> {

@@ -404,6 +404,9 @@ pub struct Engine {
     #[cfg(test)]
     pending_paragraph_cache_peak_bytes: usize,
     paragraph_cache_reads_enabled: bool,
+    /// Requested-name -> family aliases forwarded to the font manager on
+    /// every layout (no bytes; see FontManager::set_caller_aliases).
+    caller_font_aliases: Vec<(String, String)>,
     table_cache: VecDeque<TableCacheEntry>,
     table_cache_bytes: usize,
     table_cache_hits: usize,
@@ -633,6 +636,7 @@ impl Engine {
             #[cfg(test)]
             pending_paragraph_cache_peak_bytes: 0,
             paragraph_cache_reads_enabled: false,
+            caller_font_aliases: Vec::new(),
             table_cache: VecDeque::new(),
             table_cache_bytes: 0,
             table_cache_hits: 0,
@@ -658,6 +662,14 @@ impl Engine {
             #[cfg(test)]
             last_rebuilt_page_range: None,
         }
+    }
+
+    /// Set the requested-name -> family font aliases consulted during
+    /// resolution. Carries no font bytes, so passing a large mapping every
+    /// layout is cheap; a change invalidates font-derived caches on the
+    /// next layout.
+    pub fn set_caller_font_aliases(&mut self, aliases: Vec<(String, String)>) {
+        self.caller_font_aliases = aliases;
     }
 
     pub fn new() -> Self {
@@ -710,7 +722,10 @@ impl Engine {
     ) -> Result<LayoutResult> {
         // Load user-provided / DOCX-embedded fonts (highest priority). An exact
         // unchanged set is a no-op in a reusable engine.
-        let fonts_changed = self.font_manager.load_additional_fonts(&input.fonts);
+        let fonts_changed = self.font_manager.load_additional_fonts(&input.fonts)
+            | self
+                .font_manager
+                .set_caller_aliases(&self.caller_font_aliases);
         self.font_manager.begin_layout();
 
         let paragraph_context = ReusableEngineContext::for_input(input);

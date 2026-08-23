@@ -3456,6 +3456,38 @@ impl Document {
         )?)
     }
 
+    /// Like [`Self::layout_with_fonts_and_bundled_fallback`], plus
+    /// requested-name -> family font aliases. Aliases carry no font bytes:
+    /// a caller can register one open font and point many document-facing
+    /// family names (e.g. 바탕, 굴림) at it without duplicating data on
+    /// every layout.
+    pub fn layout_with_fonts_aliases_and_bundled_fallback(
+        &self,
+        font_files: &[(&str, &[u8])],
+        font_aliases: &[(&str, &str)],
+    ) -> Result<rdocx_layout::WordLayoutResult> {
+        let input = self.build_layout_input_with_fonts(font_files, RenderOptions::default());
+        #[cfg(test)]
+        record_layout_invocation();
+        let mut engine = self
+            .bundled_fallback_layout_engine
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let engine = match engine.as_mut() {
+            Some(engine) => engine,
+            None => engine.insert(rdocx_layout::engine::Engine::new_deterministic()?),
+        };
+        engine.set_caller_font_aliases(
+            font_aliases
+                .iter()
+                .map(|(requested, target)| (requested.to_string(), target.to_string()))
+                .collect(),
+        );
+        Ok(rdocx_layout::layout_document_with_reusable_engine(
+            engine, &input,
+        )?)
+    }
+
     fn build_layout_input_with_fonts(
         &self,
         font_files: &[(&str, &[u8])],
