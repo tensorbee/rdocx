@@ -202,6 +202,15 @@ pub struct FontManager {
     coverage_misses: HashSet<char>,
     /// Exact additional font set currently loaded into `db`.
     additional_fonts: Vec<FontFile>,
+    /// Requested-name -> real-family aliases for caller-provided fonts.
+    ///
+    /// Callers hand fonts over as `(family_name, bytes)` pairs, but fontdb
+    /// only knows a face by the family recorded inside the file. Remembering
+    /// the caller's label (lowercased) lets a document that asks for that
+    /// name resolve to the supplied face even though the file calls itself
+    /// something else -- e.g. an open Korean serif registered as "\uBC14\uD0D5".
+    /// Rebuilt together with `additional_fonts`.
+    caller_aliases: HashMap<String, String>,
     /// Bounded exact-key shaping results.
     shaping_memo: Mutex<ShapingMemo>,
     /// Exact resolution events for one cache-candidate paragraph.
@@ -270,6 +279,7 @@ impl FontManager {
             coverage_fallbacks: HashMap::new(),
             coverage_misses: HashSet::new(),
             additional_fonts: Vec::new(),
+            caller_aliases: HashMap::new(),
             shaping_memo: Mutex::new(ShapingMemo::new()),
             paragraph_font_trace: None,
             layout_fonts: Vec::new(),
@@ -317,8 +327,14 @@ impl FontManager {
         }
 
         self.db = self.base_db.clone();
+        self.caller_aliases.clear();
         for font_file in font_files {
-            self.db.load_font_data(font_file.data.clone());
+            Self::load_caller_font(
+                &mut self.db,
+                &mut self.caller_aliases,
+                &font_file.family,
+                font_file.data.clone(),
+            );
         }
         self.cache.clear();
         self.memory_face_data.clear();
@@ -343,10 +359,34 @@ impl FontManager {
     /// where system fonts are not available, such as WASM.
     pub fn new_with_fonts(fonts: Vec<(String, Vec<u8>)>) -> Self {
         let mut db = fontdb::Database::new();
-        for (_name, data) in &fonts {
-            db.load_font_data(data.clone());
+        let mut aliases = HashMap::new();
+        for (name, data) in &fonts {
+            Self::load_caller_font(&mut db, &mut aliases, name, data.clone());
         }
-        Self::from_base_database(db)
+        let mut manager = Self::from_base_database(db);
+        manager.caller_aliases = aliases;
+        manager
+    }
+
+    /// Load one caller-provided font and remember its requested family name
+    /// as an alias when the face's own family differs.
+    fn load_caller_font(
+        db: &mut fontdb::Database,
+        aliases: &mut HashMap<String, String>,
+        family: &str,
+        data: Vec<u8>,
+    ) {
+        let before = db.len();
+        db.load_font_data(data);
+        let real = db
+            .faces()
+            .skip(before)
+            .find_map(|face| face.families.first().map(|(name, _)| name.clone()));
+        if let Some(real) = real {
+            if !real.eq_ignore_ascii_case(family) {
+                aliases.insert(family.to_lowercase(), real);
+            }
+        }
     }
 
     /// Begin one complete layout attempt's exact font-usage trace.
@@ -656,9 +696,18 @@ impl FontManager {
         // Map common Word font names to metric-compatible alternatives
         let mapped = map_font_name(family_name);
 
+        // A caller-provided font registered under this name wins right after
+        // the exact match (see `caller_aliases`).
+        let caller_alias = self.caller_aliases.get(&family_name.to_lowercase()).cloned();
+
         // Try the requested font, mapped alternatives, then generic fallbacks
         let mut fallbacks: Vec<&str> = Vec::with_capacity(10);
         fallbacks.push(family_name);
+        if let Some(alias) = caller_alias.as_deref() {
+            if alias != family_name {
+                fallbacks.push(alias);
+            }
+        }
         for alt in mapped {
             if *alt != family_name {
                 fallbacks.push(alt);
@@ -1115,6 +1164,33 @@ fn map_font_name(name: &str) -> &[&str] {
 mod tests {
     use super::*;
     use crate::bundled_fonts::bundled_font_data;
+
+    #[test]
+    fn caller_font_label_becomes_an_alias() {
+        // A caller registers Caladea bytes under a Korean family name the
+        // face itself does not carry; resolving that name must pick the
+        // supplied face instead of drifting to the generic fallbacks.
+        let mut fm = FontManager::new_deterministic().unwrap();
+        let caladea = bundled_font_data()
+            .into_iter()
+            .find(|(family, _)| *family == "Caladea")
+            .expect("Caladea is bundled")
+            .1;
+        fm.load_additional_fonts(&[FontFile {
+            family: "\u{bc14}\u{d0d5}".to_string(), // 바탕
+            data: caladea.to_vec(),
+        }]);
+        let id = fm.resolve_font(Some("\u{bc14}\u{d0d5}"), false, false).unwrap();
+        let idx = fm.index_of(id).unwrap();
+        assert_eq!(fm.fonts[idx].family, "Caladea");
+
+        // A label matching the face's own family stores no alias.
+        fm.load_additional_fonts(&[FontFile {
+            family: "Caladea".to_string(),
+            data: caladea.to_vec(),
+        }]);
+        assert!(fm.caller_aliases.is_empty());
+    }
 
     fn font_with_family(source: &[u8], family: &str) -> Vec<u8> {
         assert_eq!(family.len(), 7);
