@@ -71,7 +71,10 @@ pub(crate) fn rdocx_to_pyerr(py: Python<'_>, error: rdocx::Error) -> PyErr {
         | rdocx::Error::UnavailableImageDimensions { .. } => "PackageError",
         rdocx::Error::Oxml(_) => "XmlError",
         rdocx::Error::Layout(_) | rdocx::Error::Pdf(_) | rdocx::Error::Raster(_) => "LayoutError",
-        rdocx::Error::Rtf { .. } | rdocx::Error::Other(_) => "RdocxError",
+        rdocx::Error::Rtf { .. }
+        | rdocx::Error::Html { .. }
+        | rdocx::Error::Odt { .. }
+        | rdocx::Error::Other(_) => "RdocxError",
     };
     public_error(py, class_name, error.to_string())
 }
@@ -123,6 +126,39 @@ mod tests {
             let raised = rdocx_to_pyerr(py, error);
 
             assert!(raised.get_type(py).is(&expected));
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn import_errors_map_to_the_generic_public_error_class() {
+        Python::initialize();
+        Python::attach(|py| -> PyResult<()> {
+            let package = PyModule::from_code(
+                py,
+                c_str!("class RdocxError(Exception):\n    pass\n"),
+                c_str!("rdocx_test.py"),
+                c_str!("rdocx"),
+            )?;
+            py.import("sys")?
+                .getattr("modules")?
+                .set_item("rdocx", &package)?;
+            let expected = package.getattr("RdocxError")?.cast_into::<PyType>()?;
+
+            for error in [
+                rdocx::Error::Html {
+                    location: "body[0]".to_string(),
+                    message: "invalid HTML".to_string(),
+                },
+                rdocx::Error::Odt {
+                    part: Some("content.xml".to_string()),
+                    offset: 0,
+                    message: "invalid ODT".to_string(),
+                },
+            ] {
+                assert!(rdocx_to_pyerr(py, error).get_type(py).is(&expected));
+            }
             Ok(())
         })
         .unwrap();
