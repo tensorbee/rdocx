@@ -19,6 +19,31 @@ use crate::shared::ST_Jc;
 use crate::text::CT_P;
 use crate::units::Twips;
 
+/// Parse an integer-valued OOXML table measurement.
+///
+/// Some producers serialize twips as decimal strings such as `120.0`.
+/// Accept those values only when the fractional component is zero, preserving
+/// the strict integer contract for every other spelling.
+fn parse_whole_decimal_measurement(value: &str) -> Result<i32> {
+    match value.parse() {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let Some((integer, fraction)) = value.split_once('.') else {
+                return Err(error.into());
+            };
+
+            if fraction.is_empty()
+                || fraction.contains('.')
+                || !fraction.bytes().all(|byte| byte == b'0')
+            {
+                return Err(error.into());
+            }
+
+            Ok(integer.parse()?)
+        }
+    }
+}
+
 /// Write any captured raw XML that belongs immediately before position `pos`.
 ///
 /// Table children we do not model are stored as `(position, raw)` pairs so
@@ -180,7 +205,7 @@ impl CT_TblCellMar {
         for attr in e.attributes() {
             let attr = attr?;
             if is_word_attribute(attr.key.as_ref(), b"w", word_prefixes) {
-                let val: i32 = std::str::from_utf8(&attr.value)?.parse()?;
+                let val = parse_whole_decimal_measurement(std::str::from_utf8(&attr.value)?)?;
                 return Ok(Some(Twips(val)));
             }
         }
@@ -306,7 +331,7 @@ impl CT_TblWidth {
             let key = attr.key.as_ref();
             let val = std::str::from_utf8(&attr.value)?;
             if matches_local_name(key, b"w") {
-                w = val.parse().unwrap_or(0);
+                w = parse_whole_decimal_measurement(val)?;
             } else if matches_local_name(key, b"type") {
                 width_type = val.to_string();
             }
@@ -324,7 +349,7 @@ impl CT_TblWidth {
             let key = attr.key.as_ref();
             let val = std::str::from_utf8(&attr.value)?;
             if is_word_attribute(key, b"w", word_prefixes) {
-                w = val.parse().unwrap_or(0);
+                w = parse_whole_decimal_measurement(val)?;
             } else if is_word_attribute(key, b"type", word_prefixes) {
                 width_type = val.to_string();
             }
@@ -1789,7 +1814,7 @@ impl Default for CT_Tbl {
 mod tests {
     use super::*;
 
-    fn parse_table(xml: &str) -> CT_Tbl {
+    fn parse_table_result(xml: &str) -> Result<CT_Tbl> {
         let full = format!("<w:tbl>{xml}</w:tbl>");
         let mut reader = Reader::from_str(&full);
         reader.config_mut().trim_text(true);
@@ -1801,7 +1826,11 @@ mod tests {
             }
             buf.clear();
         }
-        CT_Tbl::from_xml(&mut reader).unwrap()
+        CT_Tbl::from_xml(&mut reader)
+    }
+
+    fn parse_table(xml: &str) -> CT_Tbl {
+        parse_table_result(xml).unwrap()
     }
 
     #[test]
@@ -1829,6 +1858,54 @@ mod tests {
 
         let pr = tbl.properties.unwrap();
         assert_eq!(pr.width.as_ref().unwrap().w, 5000);
+    }
+
+    #[test]
+    fn whole_valued_decimal_table_width_and_default_cell_margins_parse_as_twips() {
+        let table = parse_table(
+            r#"<w:tblPr><w:tblW w:w="9345.0" w:type="dxa"/><w:tblCellMar>
+                 <w:top w:w="120.0" w:type="dxa"/>
+                 <w:left w:w="180.0" w:type="dxa"/>
+                 <w:bottom w:w="120.0" w:type="dxa"/>
+                 <w:right w:w="180.0" w:type="dxa"/>
+               </w:tblCellMar></w:tblPr>"#,
+        );
+
+        assert_eq!(
+            table.properties.as_ref().unwrap().width.as_ref().unwrap().w,
+            9345
+        );
+        let margins = table
+            .properties
+            .as_ref()
+            .unwrap()
+            .cell_margin
+            .as_ref()
+            .unwrap();
+        assert_eq!(margins.top, Some(Twips(120)));
+        assert_eq!(margins.left, Some(Twips(180)));
+        assert_eq!(margins.bottom, Some(Twips(120)));
+        assert_eq!(margins.right, Some(Twips(180)));
+    }
+
+    #[test]
+    fn fractional_and_out_of_range_table_measurements_are_rejected() {
+        for value in ["9345.5", "9345.", "1e3", "2147483648.0"] {
+            assert!(
+                parse_table_result(&format!(
+                    r#"<w:tblPr><w:tblW w:w="{value}" w:type="dxa"/></w:tblPr>"#
+                ))
+                .is_err(),
+                "{value} must be rejected"
+            );
+        }
+
+        assert!(
+            parse_table_result(
+                r#"<w:tblPr><w:tblCellMar><w:top w:w="120.5" w:type="dxa"/></w:tblCellMar></w:tblPr>"#,
+            )
+            .is_err()
+        );
     }
 
     #[test]
