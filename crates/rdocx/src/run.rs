@@ -1,5 +1,7 @@
 //! Run — a contiguous stretch of text with uniform formatting.
 
+use quick_xml::Reader;
+use quick_xml::events::{BytesStart, Event};
 use rdocx_oxml::drawing::CT_Drawing;
 use rdocx_oxml::properties::{CT_RPr, CT_Shd};
 use rdocx_oxml::shared::ST_Underline;
@@ -108,6 +110,23 @@ impl DrawingRef<'_> {
     }
 }
 
+/// A legacy VML horizontal rule with no other VML content.
+///
+/// This recognizes only Word's `w:pict` form containing one empty `v:rect`
+/// with `o:hr="t"`. Other VML is left as unsupported XML so consumers can
+/// continue to reject it without losing visibility-affecting content.
+#[derive(Debug, Clone, Copy)]
+pub struct LegacyHorizontalRuleRef<'a> {
+    raw: &'a [u8],
+}
+
+impl<'a> LegacyHorizontalRuleRef<'a> {
+    /// The preserved `w:pict` subtree that represented this rule.
+    pub fn raw_xml(&self) -> &'a [u8] {
+        self.raw
+    }
+}
+
 /// An immutable field embedded in a run.
 #[derive(Debug, Clone, Copy)]
 pub struct FieldRef<'a> {
@@ -150,6 +169,8 @@ pub enum RunItemRef<'a> {
     Break(BreakKind),
     /// An inline or anchored drawing.
     Drawing(DrawingRef<'a>),
+    /// A legacy VML horizontal rule.
+    LegacyHorizontalRule(LegacyHorizontalRuleRef<'a>),
     /// A simple or complex Word field.
     Field(FieldRef<'a>),
     /// A footnote reference ID.
@@ -575,7 +596,7 @@ impl<'a> RunRef<'a> {
                     .iter()
                     .zip(&self.inner.extra_xml)
                     .filter(|(position, _)| **position == 0)
-                    .map(|(_, raw)| RunItemRef::UnsupportedXml(raw.as_slice())),
+                    .map(|(_, raw)| run_item_from_raw(raw)),
             );
         }
         for index in 0..=self.inner.content.len() {
@@ -587,7 +608,7 @@ impl<'a> RunRef<'a> {
                         .iter()
                         .zip(&self.inner.extra_xml)
                         .filter(|(position, _)| **position == boundary)
-                        .map(|(_, raw)| RunItemRef::UnsupportedXml(raw.as_slice())),
+                        .map(|(_, raw)| run_item_from_raw(raw)),
                 );
             }
             if let Some(content) = self.inner.content.get(index) {
@@ -615,7 +636,7 @@ impl<'a> RunRef<'a> {
                 self.inner
                     .extra_xml
                     .iter()
-                    .map(|raw| RunItemRef::UnsupportedXml(raw.as_slice())),
+                    .map(|raw| run_item_from_raw(raw)),
             );
         }
         items.into_iter()
@@ -752,6 +773,85 @@ impl<'a> RunRef<'a> {
     }
 }
 
+fn run_item_from_raw(raw: &[u8]) -> RunItemRef<'_> {
+    if is_legacy_horizontal_rule(raw) {
+        RunItemRef::LegacyHorizontalRule(LegacyHorizontalRuleRef { raw })
+    } else {
+        RunItemRef::UnsupportedXml(raw)
+    }
+}
+
+fn is_legacy_horizontal_rule(raw: &[u8]) -> bool {
+    let mut reader = Reader::from_reader(raw);
+    reader.config_mut().trim_text(false);
+    let mut buffer = Vec::new();
+    let mut depth = 0_usize;
+    let mut found_rule = false;
+
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(element)) => {
+                if depth == 0 {
+                    if element.name().as_ref() != b"w:pict" {
+                        return false;
+                    }
+                } else if depth == 1 {
+                    if found_rule
+                        || element.name().as_ref() != b"v:rect"
+                        || !has_horizontal_rule_attribute(&element)
+                    {
+                        return false;
+                    }
+                    found_rule = true;
+                } else {
+                    return false;
+                }
+                depth += 1;
+            }
+            Ok(Event::Empty(element)) => {
+                if depth != 1
+                    || found_rule
+                    || element.name().as_ref() != b"v:rect"
+                    || !has_horizontal_rule_attribute(&element)
+                {
+                    return false;
+                }
+                found_rule = true;
+            }
+            Ok(Event::Text(text)) => {
+                let text: &[u8] = text.as_ref();
+                if !text.iter().all(u8::is_ascii_whitespace) {
+                    return false;
+                }
+            }
+            Ok(Event::End(element)) => {
+                if depth == 0 {
+                    return false;
+                }
+                depth -= 1;
+                if depth == 1 && element.name().as_ref() != b"v:rect" {
+                    return false;
+                }
+                if depth == 0 {
+                    return found_rule && element.name().as_ref() == b"w:pict";
+                }
+            }
+            Ok(Event::Eof) | Err(_) => return false,
+            Ok(_) => return false,
+        }
+        buffer.clear();
+    }
+}
+
+fn has_horizontal_rule_attribute(element: &BytesStart<'_>) -> bool {
+    element.attributes().with_checks(false).any(|attribute| {
+        attribute.is_ok_and(|attribute| {
+            attribute.key.as_ref() == b"o:hr"
+                && matches!(attribute.value.as_ref(), b"t" | b"true" | b"1")
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -769,5 +869,44 @@ mod tests {
         let items = run.items().collect::<Vec<_>>();
         assert!(matches!(items[0], RunItemRef::Text("typed")));
         assert!(matches!(items[1], RunItemRef::UnsupportedXml(b"<x:raw/>")));
+    }
+
+    #[test]
+    fn reader_classifies_word_legacy_vml_horizontal_rules() {
+        let xml = br##"<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><w:pict><v:rect style="width:0.0pt;height:1.5pt" o:hr="t" o:hrstd="t" o:hralign="center" fillcolor="#A0A0A0" stroked="f"/></w:pict></w:r>"##;
+        let mut reader = quick_xml::Reader::from_reader(xml.as_slice());
+        let mut buffer = Vec::new();
+        let run = match reader.read_event_into(&mut buffer).unwrap() {
+            quick_xml::events::Event::Start(_) => CT_R::from_xml(&mut reader).unwrap(),
+            event => panic!("expected run start, got {event:?}"),
+        };
+        let run = RunRef { inner: &run };
+
+        let items = run.items().collect::<Vec<_>>();
+        let [RunItemRef::LegacyHorizontalRule(rule)] = items.as_slice() else {
+            panic!("the Word VML horizontal-rule form is classified");
+        };
+        assert!(
+            std::str::from_utf8(rule.raw_xml())
+                .unwrap()
+                .contains(r#"o:hr="t""#)
+        );
+    }
+
+    #[test]
+    fn reader_keeps_other_vml_pictures_unsupported() {
+        let xml = br#"<w:r xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml"><w:pict><v:shape id="meaningful"/></w:pict></w:r>"#;
+        let mut reader = quick_xml::Reader::from_reader(xml.as_slice());
+        let mut buffer = Vec::new();
+        let run = match reader.read_event_into(&mut buffer).unwrap() {
+            quick_xml::events::Event::Start(_) => CT_R::from_xml(&mut reader).unwrap(),
+            event => panic!("expected run start, got {event:?}"),
+        };
+        let run = RunRef { inner: &run };
+
+        assert!(matches!(
+            run.items().collect::<Vec<_>>().as_slice(),
+            [RunItemRef::UnsupportedXml(_)]
+        ));
     }
 }

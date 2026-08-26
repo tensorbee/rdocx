@@ -71,7 +71,10 @@ pub use rdocx_oxml::settings::{
 pub use redaction::RedactionReport;
 pub use revision::{RevisionKind, RevisionRef};
 pub use rtf::{RtfDiagnostic, RtfReadResult, RtfWriteResult};
-pub use run::{BreakKind, DrawingRef, FieldRef, Run, RunItemRef, RunRef, UnderlineStyle};
+pub use run::{
+    BreakKind, DrawingRef, FieldRef, LegacyHorizontalRuleRef, Run, RunItemRef, RunRef,
+    UnderlineStyle,
+};
 pub use style::{Style, StyleBuilder};
 pub use svg::{SvgDiagnostic, SvgRenderResult};
 pub use table::{Cell, CellItemRef, CellRef, Row, RowRef, Table, TableRef, VerticalAlignment};
