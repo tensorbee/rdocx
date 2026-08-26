@@ -673,12 +673,18 @@ impl CT_TblPr {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CT_TblGrid {
     pub columns: Vec<CT_TblGridCol>,
+    /// Prior table grid captured by a tracked table-structure revision.
+    ///
+    /// The current `columns` remain the grid that readers should render. The
+    /// revision snapshot is preserved so saving does not discard it.
+    pub grid_change_xml: Option<Vec<u8>>,
 }
 
 #[allow(non_snake_case)]
 impl CT_TblGrid {
     pub fn from_xml(reader: &mut Reader<&[u8]>) -> Result<Self> {
         let mut columns = Vec::new();
+        let mut grid_change_xml = None;
         let mut buf = Vec::new();
 
         loop {
@@ -695,6 +701,15 @@ impl CT_TblGrid {
                         columns.push(CT_TblGridCol { width });
                     }
                 }
+                Ok(Event::Start(ref e))
+                    if matches_local_name(e.name().as_ref(), b"tblGridChange") =>
+                {
+                    if grid_change_xml.is_none() {
+                        grid_change_xml = Some(capture_element(reader, e)?);
+                    } else {
+                        capture_element(reader, e)?;
+                    }
+                }
                 Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"tblGrid") => {
                     break;
                 }
@@ -705,7 +720,10 @@ impl CT_TblGrid {
             buf.clear();
         }
 
-        Ok(CT_TblGrid { columns })
+        Ok(CT_TblGrid {
+            columns,
+            grid_change_xml,
+        })
     }
 
     pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
@@ -716,6 +734,9 @@ impl CT_TblGrid {
             let mut e = BytesStart::new("w:gridCol");
             e.push_attribute(("w:w", buf.format(col.width.0)));
             writer.write_event(Event::Empty(e))?;
+        }
+        if let Some(grid_change_xml) = &self.grid_change_xml {
+            writer.get_mut().write_all(grid_change_xml)?;
         }
 
         writer.write_event(Event::End(BytesEnd::new("w:tblGrid")))?;
@@ -1832,6 +1853,26 @@ mod tests {
     }
 
     #[test]
+    fn table_grid_change_is_preserved() {
+        let table = parse_table(
+            r#"<w:tblGrid><w:gridCol w:w="100"/><w:tblGridChange w:id="0"><w:tblGrid><w:gridCol w:w="80"/></w:tblGrid></w:tblGridChange></w:tblGrid><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+        );
+        let grid = table.grid.as_ref().unwrap();
+
+        assert_eq!(grid.columns, vec![CT_TblGridCol { width: Twips(100) }]);
+        assert_eq!(
+            grid.grid_change_xml.as_deref(),
+            Some(
+                br#"<w:tblGridChange w:id="0"><w:tblGrid><w:gridCol w:w="80"/></w:tblGrid></w:tblGridChange>"#
+                    .as_slice()
+            )
+        );
+        assert!(table_to_xml(&table).contains(
+            r#"<w:tblGridChange w:id="0"><w:tblGrid><w:gridCol w:w="80"/></w:tblGrid></w:tblGridChange>"#
+        ));
+    }
+
+    #[test]
     fn aliased_table_cell_paragraph_properties_keep_root_scope() {
         let xml = format!(
             r#"<q:tbl xmlns:q="{}" xmlns:ext="urn:producer"><q:tr><q:tc><ext:p><ext:pPr><ext:jc ext:val="right"/></ext:pPr></ext:p><q:p><q:pPr><ext:jc ext:val="right"/><q:jc q:val="center"/></q:pPr><q:r><q:t>Cell</q:t></q:r></q:p></q:tc></q:tr></q:tbl>"#,
@@ -2312,6 +2353,7 @@ mod tests {
                 CT_TblGridCol { width: Twips(4500) },
                 CT_TblGridCol { width: Twips(4500) },
             ],
+            grid_change_xml: None,
         });
 
         let mut row = CT_Row::new();
@@ -2362,6 +2404,7 @@ mod tests {
         let mut nested_tbl = CT_Tbl::new();
         nested_tbl.grid = Some(CT_TblGrid {
             columns: vec![CT_TblGridCol { width: Twips(2000) }],
+            grid_change_xml: None,
         });
         let mut nested_row = CT_Row::new();
         let mut nested_cell = CT_Tc::new();

@@ -879,6 +879,7 @@ mod tests {
                 CT_TblGridCol { width: Twips(2880) }, // 2 inches = 144pt
                 CT_TblGridCol { width: Twips(2880) },
             ],
+            grid_change_xml: None,
         };
 
         // 288pt total in a 468pt text column: the author asked for a narrow
@@ -898,6 +899,7 @@ mod tests {
                 CT_TblGridCol { width: Twips(7200) }, // 5 inches = 360pt
                 CT_TblGridCol { width: Twips(7200) },
             ],
+            grid_change_xml: None,
         };
 
         // 720pt total will not fit a 468pt column, so scale it down.
@@ -926,6 +928,7 @@ mod tests {
                 CT_TblGridCol { width: Twips(0) },
                 CT_TblGridCol { width: Twips(0) },
             ],
+            grid_change_xml: None,
         };
         let widths = compute_column_widths(Some(&grid), 468.0, &tbl);
         assert_eq!(widths.len(), 3);
@@ -958,6 +961,7 @@ mod tests {
         let mut outer = CT_Tbl::new();
         outer.grid = Some(CT_TblGrid {
             columns: vec![CT_TblGridCol { width: Twips(4680) }], // 3.25"
+            grid_change_xml: None,
         });
 
         let mut outer_row = CT_Row::new();
@@ -971,6 +975,7 @@ mod tests {
                 CT_TblGridCol { width: Twips(2000) },
                 CT_TblGridCol { width: Twips(2000) },
             ],
+            grid_change_xml: None,
         });
         let mut nr = CT_Row::new();
         let mut nc1 = CT_Tc::new();
@@ -1053,6 +1058,7 @@ mod tests {
                 CT_TblGridCol { width: Twips(600) },
                 CT_TblGridCol { width: Twips(600) },
             ],
+            grid_change_xml: None,
         });
 
         let mut exact_row = CT_Row::new();
@@ -1106,6 +1112,7 @@ mod tests {
         let mut minimum_merge = CT_Tbl::new();
         minimum_merge.grid = Some(CT_TblGrid {
             columns: vec![CT_TblGridCol { width: Twips(600) }],
+            grid_change_xml: None,
         });
         let mut restart_row = CT_Row::new();
         let mut restart = CT_Tc::new();
@@ -1162,6 +1169,7 @@ mod tests {
         });
         table.grid = Some(CT_TblGrid {
             columns: vec![CT_TblGridCol { width: Twips(1200) }],
+            grid_change_xml: None,
         });
         for (index, text) in ["header", "body"].into_iter().enumerate() {
             let mut row = CT_Row::new();

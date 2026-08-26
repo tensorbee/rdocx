@@ -2469,6 +2469,7 @@ impl Document {
             columns: (0..cols)
                 .map(|_| CT_TblGridCol { width: col_width })
                 .collect(),
+            grid_change_xml: None,
         };
 
         let mut tbl = CT_Tbl::new();
@@ -2544,6 +2545,7 @@ impl Document {
             columns: (0..cols)
                 .map(|_| CT_TblGridCol { width: col_width })
                 .collect(),
+            grid_change_xml: None,
         };
 
         let mut tbl = CT_Tbl::new();
@@ -9466,6 +9468,7 @@ mod tests {
                 CT_TblGridCol { width: Twips(1800) },
                 CT_TblGridCol { width: Twips(1800) },
             ],
+            grid_change_xml: None,
         });
         table.rows.push(marker_row("{% for item in items %}"));
         table

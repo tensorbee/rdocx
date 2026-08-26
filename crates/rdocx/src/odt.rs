@@ -3825,6 +3825,7 @@ impl<'a> Importer<'a> {
         });
         tbl.grid = Some(CT_TblGrid {
             columns: (0..columns).map(|_| CT_TblGridCol { width }).collect(),
+            grid_change_xml: None,
         });
         let mut active: Vec<Option<(usize, usize)>> = vec![None; columns];
         for row in rows {

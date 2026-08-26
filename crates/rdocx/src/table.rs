@@ -551,6 +551,7 @@ impl<'a> Cell<'a> {
             columns: (0..cols)
                 .map(|_| CT_TblGridCol { width: col_width })
                 .collect(),
+            grid_change_xml: None,
         };
 
         let mut tbl = CT_Tbl::new();
@@ -600,6 +601,18 @@ impl<'a> TableRef<'a> {
             .as_ref()
             .map(|g| g.columns.len())
             .unwrap_or(0)
+    }
+
+    /// Whether the table retains a prior grid from a tracked structure change.
+    ///
+    /// The current grid remains the table structure readers should use. This
+    /// reports the preserved historical snapshot separately from the current
+    /// table structure.
+    pub fn has_grid_change(&self) -> bool {
+        self.inner
+            .grid
+            .as_ref()
+            .is_some_and(|grid| grid.grid_change_xml.is_some())
     }
 
     /// Get an immutable row reference.
@@ -791,6 +804,20 @@ mod tests {
     use rdocx_oxml::units::Twips;
 
     #[test]
+    fn table_grid_change_is_a_modeled_historical_snapshot() {
+        let xml = br#"<w:tbl xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:tblGrid><w:gridCol w:w="100"/><w:tblGridChange w:id="0"><w:tblGrid><w:gridCol w:w="80"/></w:tblGrid></w:tblGridChange></w:tblGrid><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>"#;
+        let mut reader = quick_xml::Reader::from_reader(xml.as_slice());
+        let mut buffer = Vec::new();
+        let table = match reader.read_event_into(&mut buffer).unwrap() {
+            quick_xml::events::Event::Start(_) => CT_Tbl::from_xml(&mut reader).unwrap(),
+            event => panic!("expected table start, got {event:?}"),
+        };
+        let table = TableRef { inner: &table };
+
+        assert!(table.has_grid_change());
+    }
+
+    #[test]
     fn table_column_width_updates_grid_table_and_spanning_cells() {
         let mut inner = CT_Tbl::new();
         inner.grid = Some(CT_TblGrid {
@@ -805,6 +832,7 @@ mod tests {
                     width: Twips(3_000),
                 },
             ],
+            grid_change_xml: None,
         });
         let mut row = CT_Row::new();
         let mut spanning_cell = CT_Tc::new();
@@ -840,6 +868,7 @@ mod tests {
                     width: Twips(2_000),
                 },
             ],
+            grid_change_xml: None,
         });
         inner.properties = Some(CT_TblPr {
             width: Some(CT_TblWidth::dxa(3_000)),
