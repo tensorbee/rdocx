@@ -42,3 +42,5 @@ code lives in the code.
 
 A story that contradicts this set is a bug in one of them. Resolve it before
 implementing, not after.
+
+<!-- F-X031 disposable docs-only protection proof. -->
