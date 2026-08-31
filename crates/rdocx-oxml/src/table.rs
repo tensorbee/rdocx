@@ -819,13 +819,8 @@ impl CT_TblGrid {
                     if is_word_element(e.name().as_ref(), b"gridCol", &prefixes) {
                         columns.push(Self::parse_grid_column(e, &prefixes)?);
                     } else if is_word_element(e.name().as_ref(), b"tblGridChange", &prefixes) {
-                        if grid_change_xml.is_some() {
-                            return Err(OxmlError::InvalidValue(
-                                "duplicate w:tblGridChange".to_owned(),
-                            ));
-                        }
                         let raw = capture_empty_element(e)?;
-                        grid_change_xml = Some(crate::text::raw_with_external_bindings(
+                        extra_xml.push(crate::text::raw_with_external_bindings(
                             &raw,
                             &preserved_table_raw_bindings(&prefixes),
                         )?);
@@ -2466,6 +2461,17 @@ mod tests {
             reparsed.grid.unwrap().grid_change_xml.as_deref(),
             Some(historical.as_slice())
         );
+    }
+
+    #[test]
+    fn empty_table_grid_changes_remain_unmodeled() {
+        let table = parse_table(
+            r#"<w:tblGrid><w:gridCol w:w="100"/><w:tblGridChange w:id="3"/></w:tblGrid><w:tr><w:tc><w:p/></w:tc></w:tr>"#,
+        );
+        let grid = table.grid.expect("table grid parses");
+
+        assert!(grid.grid_change_xml.is_none());
+        assert_eq!(grid.extra_xml.len(), 1);
     }
 
     #[test]
