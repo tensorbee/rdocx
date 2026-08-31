@@ -3842,6 +3842,32 @@ impl CT_P {
                             word_prefixes: prefixes.clone(),
                         });
                         extra_xml.push((runs.len(), capture_empty_element(e)?));
+                    } else if is_word_element(name.as_ref(), b"fldSimple", &prefixes) {
+                        let raw = capture_empty_element(e)?;
+                        let field = optional_word_attribute(e, b"instr", &prefixes).and_then(
+                            |instruction| {
+                                let instruction = parse_field_instruction(&instruction);
+                                (!instruction.name.is_empty()).then(|| {
+                                    let dirty = optional_word_attribute(e, b"dirty", &prefixes)
+                                        .and_then(|value| parse_field_bool(&value));
+                                    Field::parsed(
+                                        instruction,
+                                        String::new(),
+                                        Vec::new(),
+                                        dirty,
+                                        FieldForm::Simple,
+                                        raw.clone(),
+                                        prefixes.clone(),
+                                    )
+                                })
+                            },
+                        );
+                        if let Some(field) = field {
+                            runs.push(field_run(field, None));
+                            run_sources.push(None);
+                        } else {
+                            extra_xml.push((runs.len(), raw));
+                        }
                     } else if !matches_local_name(name.as_ref(), b"p") {
                         let raw_before = raw_xml_count_at(&extra_xml, runs.len());
                         let raw = capture_empty_element(e)?;
@@ -7586,6 +7612,15 @@ mod tests {
         assert_eq!(p.runs.len(), 1);
         assert_eq!(p.runs[0].content.len(), 1);
         assert_eq!(parsed_field(&p, 0).instruction.name, "PAGE");
+    }
+
+    #[test]
+    fn parse_empty_fld_simple_preserves_the_field() {
+        let paragraph = parse_paragraph(r#"<w:fldSimple w:instr=" PAGE "/>"#);
+        let field = parsed_field(&paragraph, 0);
+
+        assert_eq!(field.instruction.name, "PAGE");
+        assert!(field.cached_result.is_empty());
     }
 
     #[test]
