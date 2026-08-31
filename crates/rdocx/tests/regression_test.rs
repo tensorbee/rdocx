@@ -4849,12 +4849,12 @@ fn ordered_reader_items_keep_every_direct_child_and_preserved_boundary() {
             }
             ParagraphItemRef::ContentControl(control) => format!("control:{}", control.text()),
             ParagraphItemRef::Revision(revision) => format!("revision:{}", revision.id()),
-            ParagraphItemRef::CommentRangeStart(id) => format!("comment-start:{id}"),
-            ParagraphItemRef::CommentRangeEnd(id) => format!("comment-end:{id}"),
-            ParagraphItemRef::BookmarkStart { id, name } => {
+            ParagraphItemRef::CommentRangeStart { id, .. } => format!("comment-start:{id}"),
+            ParagraphItemRef::CommentRangeEnd { id, .. } => format!("comment-end:{id}"),
+            ParagraphItemRef::BookmarkStart { id, name, .. } => {
                 format!("bookmark-start:{}:{}", id.unwrap(), name.unwrap())
             }
-            ParagraphItemRef::BookmarkEnd { id } => {
+            ParagraphItemRef::BookmarkEnd { id, .. } => {
                 format!("bookmark-end:{}", id.unwrap())
             }
             ParagraphItemRef::UnsupportedXml(raw) => {
@@ -6243,12 +6243,12 @@ fn paragraph_snapshot(paragraph: ParagraphRef<'_>, raw_subtrees: &mut Vec<Vec<u8
                 revision.author(),
                 revision.kind(),
             ),
-            ParagraphItemRef::CommentRangeStart(id) => format!("comment-start:{id}"),
-            ParagraphItemRef::CommentRangeEnd(id) => format!("comment-end:{id}"),
-            ParagraphItemRef::BookmarkStart { id, name } => {
+            ParagraphItemRef::CommentRangeStart { id, .. } => format!("comment-start:{id}"),
+            ParagraphItemRef::CommentRangeEnd { id, .. } => format!("comment-end:{id}"),
+            ParagraphItemRef::BookmarkStart { id, name, .. } => {
                 format!("bookmark-start:{id:?}:{name:?}")
             }
-            ParagraphItemRef::BookmarkEnd { id } => format!("bookmark-end:{id:?}"),
+            ParagraphItemRef::BookmarkEnd { id, .. } => format!("bookmark-end:{id:?}"),
             ParagraphItemRef::UnsupportedXml(raw) => {
                 raw_subtrees.push(raw.to_vec());
                 format!("raw:{}", std::str::from_utf8(raw).unwrap())
