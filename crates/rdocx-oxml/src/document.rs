@@ -929,7 +929,7 @@ impl CT_Body {
                         if sect_pr.is_none() {
                             sect_pr = Some(CT_SectPr::empty());
                         }
-                    } else if !matches_local_name(name.as_ref(), b"body") {
+                    } else {
                         content.push(BodyContent::RawXml(
                             crate::text::raw_with_external_bindings(
                                 &capture_empty_element(e)?,
