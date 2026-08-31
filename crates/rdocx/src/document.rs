@@ -49,7 +49,7 @@ use crate::content_control::ContentControlRef;
 use crate::error::{Error, Result};
 use crate::paragraph::{Paragraph, ParagraphRef};
 use crate::revision::RevisionRef;
-use crate::run::RunRef;
+use crate::run::{FieldDisplaySegmentRef, RunRef};
 use crate::style::{self, Style, StyleBuilder};
 use crate::table::{Table, TableRef};
 
@@ -9902,8 +9902,25 @@ impl Document {
         paragraph: &ParagraphRef<'_>,
         run: &RunRef<'_>,
     ) -> CT_RPr {
+        self.effective_run_properties_from_direct(paragraph, run.inner.properties.as_ref())
+    }
+
+    /// Resolve inherited, paragraph-mark, and direct properties for one cached
+    /// complex-field display segment.
+    pub fn effective_field_segment_properties(
+        &self,
+        paragraph: &ParagraphRef<'_>,
+        segment: &FieldDisplaySegmentRef<'_>,
+    ) -> CT_RPr {
+        self.effective_run_properties_from_direct(paragraph, segment.properties())
+    }
+
+    fn effective_run_properties_from_direct(
+        &self,
+        paragraph: &ParagraphRef<'_>,
+        direct: Option<&CT_RPr>,
+    ) -> CT_RPr {
         let paragraph_properties = paragraph.inner.properties.as_ref();
-        let direct = run.inner.properties.as_ref();
         let mut effective = style::resolve_run_properties(
             paragraph_properties.and_then(|properties| properties.style_id.as_deref()),
             direct.and_then(|properties| properties.style_id.as_deref()),
@@ -25027,6 +25044,27 @@ mod reader_fact_tests {
             panic!("expected hyperlink");
         };
         assert_eq!(link.relationship_id(), Some("rId9"));
+    }
+
+    #[test]
+    fn reader_resolves_complex_field_display_segment_properties() {
+        let xml = br#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:rPr><w:i/></w:rPr></w:pPr><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>PAGE</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>7</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#;
+        let mut document = Document::new();
+        document.document = CT_Document::from_xml(xml).expect("document parses");
+        let paragraph = document.paragraph(0).expect("paragraph");
+        let run = paragraph.runs().next().expect("field run");
+        let crate::RunItemRef::Field(field) = run.items().next().expect("field item") else {
+            panic!("expected field");
+        };
+        let segment = field
+            .cached_display_segments()
+            .into_iter()
+            .next()
+            .expect("cached segment");
+
+        let properties = document.effective_field_segment_properties(&paragraph, &segment);
+        assert_eq!(properties.bold, Some(true));
+        assert_eq!(properties.italic, Some(true));
     }
 
     #[test]
