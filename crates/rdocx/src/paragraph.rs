@@ -1046,21 +1046,17 @@ impl<'a> ParagraphRef<'a> {
                             CommentRangeMarker::Start { id, .. } => {
                                 ParagraphItemRef::CommentRangeStart {
                                     id: *id,
-                                    has_child_content: extras
-                                        .get(raw_index)
-                                        .is_some_and(|raw| {
-                                            UnsupportedXmlRef::from_bytes(raw).has_child_content()
-                                        }),
+                                    has_child_content: extras.get(raw_index).is_some_and(|raw| {
+                                        UnsupportedXmlRef::from_bytes(raw).has_child_content()
+                                    }),
                                 }
                             }
                             CommentRangeMarker::End { id, .. } => {
                                 ParagraphItemRef::CommentRangeEnd {
                                     id: *id,
-                                    has_child_content: extras
-                                        .get(raw_index)
-                                        .is_some_and(|raw| {
-                                            UnsupportedXmlRef::from_bytes(raw).has_child_content()
-                                        }),
+                                    has_child_content: extras.get(raw_index).is_some_and(|raw| {
+                                        UnsupportedXmlRef::from_bytes(raw).has_child_content()
+                                    }),
                                 }
                             }
                         });
