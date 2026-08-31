@@ -21,6 +21,8 @@ use crate::shared::ST_Jc;
 use crate::text::CT_P;
 use crate::units::Twips;
 
+const MAX_RECOGNIZED_TABLE_NESTING: usize = 32;
+
 /// Write any captured raw XML that belongs immediately before position `pos`.
 ///
 /// Table children we do not model are stored as `(position, raw)` pairs so
@@ -1636,6 +1638,20 @@ impl CT_Tc {
         word_prefixes: &[String],
         owner_bindings: &[(String, String)],
     ) -> Result<Self> {
+        Self::from_xml_with_prefixes_and_owner_bindings_at_depth(
+            reader,
+            word_prefixes,
+            owner_bindings,
+            0,
+        )
+    }
+
+    fn from_xml_with_prefixes_and_owner_bindings_at_depth(
+        reader: &mut Reader<&[u8]>,
+        word_prefixes: &[String],
+        owner_bindings: &[(String, String)],
+        table_depth: usize,
+    ) -> Result<Self> {
         let mut properties = None;
         let mut content = Vec::new();
         let mut extra_xml = Vec::new();
@@ -1663,10 +1679,11 @@ impl CT_Tc {
                         let local_bindings = local_namespace_overrides(e, word_prefixes)?;
                         let table_bindings = merged_owner_bindings(owner_bindings, &local_bindings);
                         content.push(CellContent::Table(
-                            CT_Tbl::from_xml_with_prefixes_and_owner_bindings(
+                            CT_Tbl::from_xml_with_prefixes_and_owner_bindings_at_depth(
                                 reader,
                                 &prefixes,
                                 &table_bindings,
+                                table_depth.saturating_add(1),
                             )?,
                         ));
                     } else if is_word_element(name.as_ref(), b"sdt", &prefixes) {
@@ -1827,6 +1844,20 @@ impl CT_Row {
         word_prefixes: &[String],
         owner_bindings: &[(String, String)],
     ) -> Result<Self> {
+        Self::from_xml_with_prefixes_and_owner_bindings_at_depth(
+            reader,
+            word_prefixes,
+            owner_bindings,
+            0,
+        )
+    }
+
+    fn from_xml_with_prefixes_and_owner_bindings_at_depth(
+        reader: &mut Reader<&[u8]>,
+        word_prefixes: &[String],
+        owner_bindings: &[(String, String)],
+        table_depth: usize,
+    ) -> Result<Self> {
         let mut table_property_exception = None;
         let mut properties = None;
         let mut cells = Vec::new();
@@ -1858,10 +1889,11 @@ impl CT_Row {
                     } else if is_word_element(name.as_ref(), b"tc", &prefixes) {
                         let local_bindings = local_namespace_overrides(e, word_prefixes)?;
                         let cell_bindings = merged_owner_bindings(owner_bindings, &local_bindings);
-                        cells.push(CT_Tc::from_xml_with_prefixes_and_owner_bindings(
+                        cells.push(CT_Tc::from_xml_with_prefixes_and_owner_bindings_at_depth(
                             reader,
                             &prefixes,
                             &cell_bindings,
+                            table_depth,
                         )?);
                     } else if is_word_element(name.as_ref(), b"sdt", &prefixes) {
                         let raw = crate::text::raw_with_external_bindings(
@@ -1899,6 +1931,8 @@ impl CT_Row {
                             &capture_empty_element(e)?,
                             owner_bindings,
                         )?);
+                    } else if is_word_element(name.as_ref(), b"tc", &prefixes) {
+                        cells.push(CT_Tc::new());
                     } else if !is_word_element(name.as_ref(), b"trPr", &prefixes) {
                         extra_xml.push((
                             cells.len(),
@@ -2058,6 +2092,25 @@ impl CT_Tbl {
         word_prefixes: &[String],
         owner_bindings: &[(String, String)],
     ) -> Result<Self> {
+        Self::from_xml_with_prefixes_and_owner_bindings_at_depth(
+            reader,
+            word_prefixes,
+            owner_bindings,
+            0,
+        )
+    }
+
+    fn from_xml_with_prefixes_and_owner_bindings_at_depth(
+        reader: &mut Reader<&[u8]>,
+        word_prefixes: &[String],
+        owner_bindings: &[(String, String)],
+        table_depth: usize,
+    ) -> Result<Self> {
+        if table_depth >= MAX_RECOGNIZED_TABLE_NESTING {
+            return Err(OxmlError::InvalidValue(
+                "recognized model nesting exceeds table limit".to_owned(),
+            ));
+        }
         let mut properties = None;
         let mut grid = None;
         let mut rows = Vec::new();
@@ -2084,10 +2137,11 @@ impl CT_Tbl {
                     } else if is_word_element(name.as_ref(), b"tr", &prefixes) {
                         let local_bindings = local_namespace_overrides(e, word_prefixes)?;
                         let row_bindings = merged_owner_bindings(owner_bindings, &local_bindings);
-                        rows.push(CT_Row::from_xml_with_prefixes_and_owner_bindings(
+                        rows.push(CT_Row::from_xml_with_prefixes_and_owner_bindings_at_depth(
                             reader,
                             &prefixes,
                             &row_bindings,
+                            table_depth,
                         )?);
                     } else if is_word_element(name.as_ref(), b"sdt", &prefixes) {
                         let raw = crate::text::raw_with_external_bindings(
@@ -2130,6 +2184,8 @@ impl CT_Tbl {
                     // so a self-closing one must not be re-emitted from here.
                     if is_word_element(name.as_ref(), b"tblGrid", &prefixes) {
                         grid = Some(CT_TblGrid::default());
+                    } else if is_word_element(name.as_ref(), b"tr", &prefixes) {
+                        rows.push(CT_Row::new());
                     } else if matches_local_name(name.as_ref(), b"tblGrid") {
                         let raw = capture_empty_element(e)?;
                         let raw_bindings = merged_owner_bindings(
