@@ -818,12 +818,6 @@ impl CT_TblGrid {
                     let prefixes = word_prefixes_at(e, word_prefixes)?;
                     if is_word_element(e.name().as_ref(), b"gridCol", &prefixes) {
                         columns.push(Self::parse_grid_column(e, &prefixes)?);
-                    } else if is_word_element(e.name().as_ref(), b"tblGridChange", &prefixes) {
-                        let raw = capture_empty_element(e)?;
-                        extra_xml.push(crate::text::raw_with_external_bindings(
-                            &raw,
-                            &preserved_table_raw_bindings(&prefixes),
-                        )?);
                     } else {
                         let raw = capture_empty_element(e)?;
                         extra_xml.push(crate::text::raw_with_external_bindings(
