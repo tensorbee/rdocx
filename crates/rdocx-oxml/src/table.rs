@@ -265,7 +265,10 @@ impl CT_TblCellMar {
                         mar.right = Self::parse_edge(e, &prefixes)?;
                     }
                 }
-                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"tblCellMar") => {
+                Ok(Event::End(ref e))
+                    if matches_local_name(e.name().as_ref(), b"tblCellMar")
+                        || matches_local_name(e.name().as_ref(), b"tcMar") =>
+                {
                     break;
                 }
                 Ok(Event::Eof) => break,
@@ -279,7 +282,11 @@ impl CT_TblCellMar {
     }
 
     pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
-        writer.write_event(Event::Start(BytesStart::new("w:tblCellMar")))?;
+        self.to_xml_with_tag(writer, "w:tblCellMar")
+    }
+
+    fn to_xml_with_tag<W: std::io::Write>(&self, writer: &mut Writer<W>, tag: &str) -> Result<()> {
+        writer.write_event(Event::Start(BytesStart::new(tag)))?;
 
         fn write_edge<W: std::io::Write>(
             writer: &mut Writer<W>,
@@ -307,7 +314,7 @@ impl CT_TblCellMar {
             write_edge(writer, "w:right", r)?;
         }
 
-        writer.write_event(Event::End(BytesEnd::new("w:tblCellMar")))?;
+        writer.write_event(Event::End(BytesEnd::new(tag)))?;
         Ok(())
     }
 }
@@ -1276,6 +1283,8 @@ pub struct CT_TcPr {
     pub v_align: Option<ST_VerticalJc>,
     /// No-wrap text
     pub no_wrap: Option<bool>,
+    /// Per-cell margins.
+    pub cell_margin: Option<CT_TblCellMar>,
     /// Text direction
     pub text_direction: Option<String>,
     /// `w:cnfStyle` — which conditional parts of the table style this cell is.
@@ -1339,6 +1348,10 @@ impl CT_TcPr {
                                 &prefixes,
                                 &border_bindings,
                             )?);
+                        boundary = next;
+                    } else if is_word_element(name.as_ref(), b"tcMar", &prefixes) {
+                        pr.cell_margin =
+                            Some(CT_TblCellMar::from_xml_with_prefixes(reader, &prefixes)?);
                         boundary = next;
                     } else if Self::parse_property_element(e, &mut pr, &prefixes)? {
                         reader.read_to_end_into(name, &mut Vec::new())?;
@@ -1482,8 +1495,10 @@ impl CT_TcPr {
             writer.write_event(Event::Empty(BytesStart::new("w:noWrap")))?;
         }
 
-        // Unmodelled w:tcMar is preserved at boundary 8.
         write_extras_at(writer, &self.extra_xml, 8)?;
+        if let Some(ref cell_margin) = self.cell_margin {
+            cell_margin.to_xml_with_tag(writer, "w:tcMar")?;
+        }
         write_extras_at(writer, &self.extra_xml, 9)?;
         if let Some(ref td) = self.text_direction {
             let mut e = BytesStart::new("w:textDirection");
@@ -1518,6 +1533,7 @@ impl CT_TcPr {
             && self.shading.is_none()
             && self.v_align.is_none()
             && self.no_wrap.is_none()
+            && self.cell_margin.is_none()
             && self.text_direction.is_none()
             && self.cnf_style.is_none()
             && self.extra_xml.is_empty()
@@ -2465,7 +2481,7 @@ mod tests {
                    <w:right w:w="180" w:type="dxa"/>
                  </w:tblCellMar>
                </w:tblPr>
-               <w:tr><w:tc><w:tcPr><w:tcW w:w="4675.00" w:type="dxa"/></w:tcPr><w:p/></w:tc></w:tr>"#,
+               <w:tr><w:tc><w:tcPr><w:tcW w:w="4675.00" w:type="dxa"/><w:tcMar><w:top w:w="80.0" w:type="dxa"/></w:tcMar></w:tcPr><w:p/></w:tc></w:tr>"#,
         );
 
         let properties = table.properties.as_ref().expect("table properties");
@@ -2488,6 +2504,18 @@ mod tests {
                 .map(|width| width.w),
             Some(4675)
         );
+        let cell_properties = table.rows[0].cells[0]
+            .properties
+            .as_ref()
+            .expect("cell properties");
+        assert_eq!(
+            cell_properties
+                .cell_margin
+                .as_ref()
+                .and_then(|margins| margins.top),
+            Some(Twips(80))
+        );
+        assert!(cell_properties.extra_xml.is_empty());
     }
 
     #[test]

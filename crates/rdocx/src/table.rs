@@ -964,6 +964,14 @@ impl<'a> CellRef<'a> {
             .is_some_and(|properties| properties.no_wrap.is_some())
     }
 
+    /// Whether the cell carries explicit per-cell margins.
+    pub fn has_cell_margins(&self) -> bool {
+        self.inner
+            .properties
+            .as_ref()
+            .is_some_and(|properties| properties.cell_margin.is_some())
+    }
+
     /// Whether the cell carries an explicit text direction.
     pub fn has_text_direction(&self) -> bool {
         self.inner
@@ -1052,6 +1060,7 @@ mod tests {
                 fill: Some("FFFFFF".to_owned()),
             }),
             no_wrap: Some(true),
+            cell_margin: Some(CT_TblCellMar::default()),
             text_direction: Some("btLr".to_owned()),
             cnf_style: Some("100000000000".to_owned()),
             extra_xml: vec![(0, b"<w:fitText/>".to_vec())],
@@ -1086,6 +1095,7 @@ mod tests {
         assert!(cell.has_borders());
         assert!(cell.has_shading());
         assert!(cell.has_wrapping_formatting());
+        assert!(cell.has_cell_margins());
         assert!(cell.has_text_direction());
         assert!(cell.has_conditional_formatting());
     }
