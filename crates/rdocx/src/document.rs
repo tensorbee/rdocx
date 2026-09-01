@@ -7266,9 +7266,9 @@ impl Document {
 
     /// Resolve the public reader projection for one numbering level.
     ///
-    /// `has_unmodeled_properties` reports retained XML or attributes attached
-    /// to this numbering instance, definition, or level. Modeled producer
-    /// metadata that this projection does not expose is not reported here.
+    /// `has_unmodeled_properties` reports extra XML or attributes attached to
+    /// this numbering instance, definition, or level. Modeled producer metadata
+    /// and raw preservation overlays for level properties are not reported.
     pub fn numbering_level(&self, num_id: u32, level: u32) -> Option<NumberingLevel<'_>> {
         if num_id == 0 {
             return None;
@@ -7315,76 +7315,10 @@ impl Document {
             tentative: level.tentative,
             has_unmodeled_properties: !instance.extra_xml.is_empty()
                 || !instance.extra_attributes.is_empty()
-                || instance
-                    .abstract_num_id_raw
-                    .as_ref()
-                    .is_some_and(|(_, raw, prefixes)| {
-                        typed_numbering_leaf_has_unmodeled(raw, prefixes)
-                    })
-                || instance
-                    .level_overrides
-                    .iter()
-                    .any(numbering_override_has_unmodeled)
                 || !definition.extra_xml.is_empty()
                 || !definition.extra_attributes.is_empty()
-                || definition
-                    .nsid_raw
-                    .as_ref()
-                    .is_some_and(|(_, raw, prefixes)| {
-                        typed_numbering_leaf_has_unmodeled(raw, prefixes)
-                    })
-                || definition
-                    .multi_level_type_raw
-                    .as_ref()
-                    .is_some_and(|(_, raw, prefixes)| {
-                        typed_numbering_leaf_has_unmodeled(raw, prefixes)
-                    })
-                || definition
-                    .tmpl_raw
-                    .as_ref()
-                    .is_some_and(|(_, raw, prefixes)| {
-                        typed_numbering_leaf_has_unmodeled(raw, prefixes)
-                    })
                 || !level.extra_xml.is_empty()
-                || !level.extra_attributes.is_empty()
-                || level.start_raw.as_ref().is_some_and(|(_, raw, prefixes)| {
-                    typed_numbering_leaf_has_unmodeled(raw, prefixes)
-                })
-                || level
-                    .num_fmt_raw
-                    .as_ref()
-                    .is_some_and(|(_, raw, prefixes)| {
-                        typed_numbering_leaf_has_unmodeled(raw, prefixes)
-                    })
-                || level
-                    .p_style_raw
-                    .as_ref()
-                    .is_some_and(|(_, raw, prefixes)| {
-                        typed_numbering_leaf_has_unmodeled(raw, prefixes)
-                    })
-                || level
-                    .restart_raw
-                    .as_ref()
-                    .is_some_and(|(_, raw, prefixes)| {
-                        typed_numbering_leaf_has_unmodeled(raw, prefixes)
-                    })
-                || level.legal_raw.as_ref().is_some_and(|(_, raw, prefixes)| {
-                    typed_numbering_leaf_has_unmodeled(raw, prefixes)
-                })
-                || level.suffix_raw.as_ref().is_some_and(|(_, raw, prefixes)| {
-                    typed_numbering_leaf_has_unmodeled(raw, prefixes)
-                })
-                || level
-                    .lvl_text_raw
-                    .as_ref()
-                    .is_some_and(|(_, raw, prefixes)| {
-                        typed_numbering_leaf_has_unmodeled(raw, prefixes)
-                    })
-                || level.lvl_jc_raw.as_ref().is_some_and(|(_, raw, prefixes)| {
-                    typed_numbering_leaf_has_unmodeled(raw, prefixes)
-                })
-                || level.ppr_raw.is_some()
-                || level.rpr_raw.is_some(),
+                || !level.extra_attributes.is_empty(),
             has_paragraph_presentation: level.ppr.as_ref().is_some_and(|properties| {
                 Self::has_list_paragraph_presentation(level.ilvl, properties)
             }),
@@ -23257,10 +23191,10 @@ mod tests {
     }
 
     #[test]
-    fn numbering_level_distinguishes_modeled_metadata_from_retained_raw_facts() {
+    fn numbering_level_unmodeled_fact_contract_is_limited_to_extras() {
         let mut doc = Document::new();
-        let definition_metadata_id = doc.add_list_definition(&[ListLevel::decimal()]);
-        let raw_level_properties_id = doc.add_list_definition(&[ListLevel::decimal()]);
+        let modeled_and_raw_overlay_id = doc.add_list_definition(&[ListLevel::decimal()]);
+        let retained_extra_id = doc.add_list_definition(&[ListLevel::decimal()]);
         let raw_leaf_metadata_id = doc.add_list_definition(&[ListLevel::decimal()]);
 
         let definition = &mut doc.numbering.as_mut().unwrap().abstract_nums[0];
@@ -23268,7 +23202,7 @@ mod tests {
         definition.tmpl = Some("87654321".to_owned());
         definition.multi_level_type = Some("hybridMultilevel".to_owned());
 
-        let level = &mut doc.numbering.as_mut().unwrap().abstract_nums[1].levels[0];
+        let level = &mut doc.numbering.as_mut().unwrap().abstract_nums[0].levels[0];
         level.ppr_raw = Some((
             CT_PPr::default(),
             b"<w:pPr><producer:property/></w:pPr>".to_vec(),
@@ -23279,6 +23213,9 @@ mod tests {
             b"<w:rPr><producer:property/></w:rPr>".to_vec(),
             vec!["producer".to_owned()],
         ));
+        doc.numbering.as_mut().unwrap().abstract_nums[1].levels[0]
+            .extra_xml
+            .push((0, b"<w:lvlRestart w:val=\"0\"/>".to_vec()));
 
         let definition = &mut doc.numbering.as_mut().unwrap().abstract_nums[2];
         definition.levels[0].start = Some(1);
@@ -23289,17 +23226,17 @@ mod tests {
         ));
 
         assert!(
-            !doc.numbering_level(definition_metadata_id, 0)
-                .expect("definition metadata level")
+            !doc.numbering_level(modeled_and_raw_overlay_id, 0)
+                .expect("modeled metadata and raw property overlays")
                 .has_unmodeled_properties
         );
         assert!(
-            doc.numbering_level(raw_level_properties_id, 0)
-                .expect("raw properties level")
+            doc.numbering_level(retained_extra_id, 0)
+                .expect("retained extra level")
                 .has_unmodeled_properties
         );
         assert!(
-            doc.numbering_level(raw_leaf_metadata_id, 0)
+            !doc.numbering_level(raw_leaf_metadata_id, 0)
                 .expect("raw leaf metadata level")
                 .has_unmodeled_properties
         );
