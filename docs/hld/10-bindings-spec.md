@@ -233,8 +233,11 @@ borrow inline and display equations in source order. Mutable paragraphs add
 `equation_mut` and `add_equation`, while `ParagraphItemRef::Equation` keeps the
 mixed paragraph item stream ordered. `Document::math_properties` and
 `Document::set_math_properties` expose document-wide defaults from the
-relationship-resolved settings part. The model and accessors are additive on
-the pre-1.0 Rust surface. Python, WASM, and CLI bindings remain unchanged.
+relationship-resolved settings part. Equations, expressions, arguments, and
+document-wide math properties expose a read-only `has_unsupported_content`
+query so layout and conversion can diagnose retained content without exposing
+the preservation sidecar. The model and accessors are additive on the pre-1.0
+Rust surface. Python, WASM, and CLI bindings remain unchanged.
 
 Native Rust callers can import RTF through `Document::from_rtf_bytes` and
 `Document::open_rtf`. These additive pre-1.0 APIs return an `RtfReadResult`

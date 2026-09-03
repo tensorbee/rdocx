@@ -79,6 +79,15 @@ impl CT_OMath {
         Ok(writer.into_inner())
     }
 
+    /// Whether this equation retains content outside the typed OfficeMath subset.
+    pub fn has_unsupported_content(&self) -> bool {
+        preservation_has_unsupported_content(&self.preservation)
+            || self
+                .expressions
+                .iter()
+                .any(MathExpression::has_unsupported_content)
+    }
+
     pub(crate) fn write_xml<W: Write>(
         &self,
         writer: &mut Writer<W>,
@@ -155,6 +164,13 @@ impl CT_OMathPara {
         Ok(writer.into_inner())
     }
 
+    /// Whether this display equation retains content outside the typed subset.
+    pub fn has_unsupported_content(&self) -> bool {
+        preservation_has_unsupported_content(&self.preservation)
+            || property_preservation_has_unsupported_content(&self.properties.preservation)
+            || self.equations.iter().any(CT_OMath::has_unsupported_content)
+    }
+
     pub(crate) fn write_xml<W: Write>(
         &self,
         writer: &mut Writer<W>,
@@ -168,9 +184,13 @@ impl CT_OMathPara {
         let root = math_start("oMathPara", &self.preservation, declare_math);
         writer.write_event(Event::Start(root.borrow()))?;
         let has_properties = !self.properties.is_empty();
+        let had_properties = has_preserved_modeled_child(&self.preservation, "oMathParaPr");
+        if has_properties && !had_properties {
+            self.properties.write_xml(writer)?;
+        }
         let mut modeled = 0usize;
         write_raw_slot(writer, &self.preservation, modeled)?;
-        if has_properties {
+        if has_properties && had_properties {
             self.properties.write_xml(writer)?;
             modeled += 1;
             write_raw_slot(writer, &self.preservation, modeled)?;
@@ -205,6 +225,14 @@ impl OfficeMath {
         match self {
             Self::Inline(value) => value.to_xml(),
             Self::Display(value) => value.to_xml(),
+        }
+    }
+
+    /// Whether this value retains content outside the typed OfficeMath subset.
+    pub fn has_unsupported_content(&self) -> bool {
+        match self {
+            Self::Inline(value) => value.has_unsupported_content(),
+            Self::Display(value) => value.has_unsupported_content(),
         }
     }
 
@@ -249,6 +277,74 @@ pub enum MathExpression {
 }
 
 impl MathExpression {
+    /// Whether this expression or one of its arguments retains unsupported content.
+    pub fn has_unsupported_content(&self) -> bool {
+        match self {
+            Self::Run(value) => {
+                preservation_has_unsupported_content(&value.preservation)
+                    || property_preservation_has_unsupported_content(&value.properties.preservation)
+            }
+            Self::Fraction(value) => {
+                preservation_has_unsupported_content(&value.preservation)
+                    || property_container_has_unsupported_content(&value.preservation, "fPr")
+                    || value.numerator.has_unsupported_content()
+                    || value.denominator.has_unsupported_content()
+            }
+            Self::Subscript(value) => script_has_unsupported_content(value, "sSubPr"),
+            Self::Superscript(value) => script_has_unsupported_content(value, "sSupPr"),
+            Self::SubSuperscript(value) => three_argument_script_has_unsupported_content(
+                &value.preservation,
+                "sSubSupPr",
+                &value.base,
+                &value.subscript,
+                &value.superscript,
+            ),
+            Self::PreSubSuperscript(value) => three_argument_script_has_unsupported_content(
+                &value.preservation,
+                "sPrePr",
+                &value.base,
+                &value.subscript,
+                &value.superscript,
+            ),
+            Self::Radical(value) => {
+                preservation_has_unsupported_content(&value.preservation)
+                    || property_container_has_unsupported_content(&value.preservation, "radPr")
+                    || value.degree.has_unsupported_content()
+                    || value.base.has_unsupported_content()
+            }
+            Self::Matrix(value) => {
+                preservation_has_unsupported_content(&value.preservation)
+                    || property_container_has_unsupported_content(&value.preservation, "mPr")
+                    || value.rows.iter().any(|row| {
+                        preservation_has_unsupported_content(&row.preservation)
+                            || row.cells.iter().any(MathArgument::has_unsupported_content)
+                    })
+            }
+            Self::LowerLimit(value) => limit_has_unsupported_content(value, "limLowPr"),
+            Self::UpperLimit(value) => limit_has_unsupported_content(value, "limUppPr"),
+            Self::Nary(value) => {
+                preservation_has_unsupported_content(&value.preservation)
+                    || property_container_has_unsupported_content(&value.preservation, "naryPr")
+                    || value.base.has_unsupported_content()
+                    || value.subscript.has_unsupported_content()
+                    || value.superscript.has_unsupported_content()
+            }
+            Self::Delimiter(value) => {
+                preservation_has_unsupported_content(&value.preservation)
+                    || property_container_has_unsupported_content(&value.preservation, "dPr")
+                    || value
+                        .arguments
+                        .iter()
+                        .any(MathArgument::has_unsupported_content)
+            }
+            Self::Accent(value) => {
+                preservation_has_unsupported_content(&value.preservation)
+                    || property_container_has_unsupported_content(&value.preservation, "accPr")
+                    || value.base.has_unsupported_content()
+            }
+        }
+    }
+
     fn from_raw(raw: &[u8], inherited: &[(String, String)]) -> Result<Option<Self>> {
         if !valid_expression_shape(raw, inherited)? {
             return Ok(None);
@@ -317,6 +413,15 @@ impl MathArgument {
 
     pub fn text(text: impl Into<String>) -> Self {
         Self::new(vec![MathRun::new(text).into()])
+    }
+
+    /// Whether this argument retains content outside the typed OfficeMath subset.
+    pub fn has_unsupported_content(&self) -> bool {
+        preservation_has_unsupported_content(&self.preservation)
+            || self
+                .expressions
+                .iter()
+                .any(MathExpression::has_unsupported_content)
     }
 
     fn from_raw(raw: &[u8], inherited: &[(String, String)]) -> Result<Self> {
@@ -472,9 +577,14 @@ impl MathRun {
 
     fn write_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         write_container(writer, "r", &self.preservation, |writer| {
+            let emit_properties = !self.properties.is_empty();
+            let had_properties = has_preserved_modeled_child(&self.preservation, "rPr");
+            if emit_properties && !had_properties {
+                write_run_properties(writer, &self.properties)?;
+            }
             let mut modeled = 0usize;
             write_raw_slot(writer, &self.preservation, modeled)?;
-            if !self.properties.is_empty() {
+            if emit_properties && had_properties {
                 write_run_properties(writer, &self.properties)?;
                 modeled += 1;
                 write_raw_slot(writer, &self.preservation, modeled)?;
@@ -588,18 +698,19 @@ impl MathFraction {
 
     fn write_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         write_container(writer, "f", &self.preservation, |writer| {
-            write_raw_slot(writer, &self.preservation, 0)?;
-            write_property_container_from_parent(
+            let mut modeled = write_leading_property_container(
                 writer,
                 "fPr",
                 &[Property::text("type", self.fraction_type.as_str())],
                 &self.preservation,
+                true,
             )?;
-            write_raw_slot(writer, &self.preservation, 1)?;
             self.numerator.write_xml(writer, "num")?;
-            write_raw_slot(writer, &self.preservation, 2)?;
+            modeled += 1;
+            write_raw_slot(writer, &self.preservation, modeled)?;
             self.denominator.write_xml(writer, "den")?;
-            write_raw_slot(writer, &self.preservation, 3)
+            modeled += 1;
+            write_raw_slot(writer, &self.preservation, modeled)
         })
     }
 }
@@ -667,25 +778,20 @@ impl MathScript {
         let property_tag = if tag == "sSub" { "sSubPr" } else { "sSupPr" };
         let script_tag = if tag == "sSub" { "sub" } else { "sup" };
         write_container(writer, tag, &self.preservation, |writer| {
-            let mut modeled = 0usize;
-            write_raw_slot(writer, &self.preservation, modeled)?;
-            if self.alignment.is_some()
-                || has_preserved_modeled_child(&self.preservation, property_tag)
-            {
-                let properties = self
-                    .alignment
-                    .map(|value| Property::boolean("alnScr", value))
-                    .into_iter()
-                    .collect::<Vec<_>>();
-                write_property_container_from_parent(
-                    writer,
-                    property_tag,
-                    &properties,
-                    &self.preservation,
-                )?;
-                modeled += 1;
-                write_raw_slot(writer, &self.preservation, modeled)?;
-            }
+            let properties = self
+                .alignment
+                .map(|value| Property::boolean("alnScr", value))
+                .into_iter()
+                .collect::<Vec<_>>();
+            let emit_properties = self.alignment.is_some()
+                || has_preserved_modeled_child(&self.preservation, property_tag);
+            let mut modeled = write_leading_property_container(
+                writer,
+                property_tag,
+                &properties,
+                &self.preservation,
+                emit_properties,
+            )?;
             self.base.write_xml(writer, "e")?;
             modeled += 1;
             write_raw_slot(writer, &self.preservation, modeled)?;
@@ -849,17 +955,19 @@ fn write_three_argument_script<W: Write>(
     pre: bool,
 ) -> Result<()> {
     write_container(writer, root_tag, preservation, |writer| {
-        let mut modeled = 0usize;
-        write_raw_slot(writer, preservation, modeled)?;
-        if alignment.is_some() || has_preserved_modeled_child(preservation, property_tag) {
-            let properties = alignment
-                .map(|value| Property::boolean("alnScr", value))
-                .into_iter()
-                .collect::<Vec<_>>();
-            write_property_container_from_parent(writer, property_tag, &properties, preservation)?;
-            modeled += 1;
-            write_raw_slot(writer, preservation, modeled)?;
-        }
+        let properties = alignment
+            .map(|value| Property::boolean("alnScr", value))
+            .into_iter()
+            .collect::<Vec<_>>();
+        let emit_properties =
+            alignment.is_some() || has_preserved_modeled_child(preservation, property_tag);
+        let mut modeled = write_leading_property_container(
+            writer,
+            property_tag,
+            &properties,
+            preservation,
+            emit_properties,
+        )?;
         if pre {
             subscript.write_xml(writer, "sub")?;
             modeled += 1;
@@ -949,18 +1057,19 @@ impl MathRadical {
 
     fn write_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         write_container(writer, "rad", &self.preservation, |writer| {
-            write_raw_slot(writer, &self.preservation, 0)?;
-            write_property_container_from_parent(
+            let mut modeled = write_leading_property_container(
                 writer,
                 "radPr",
                 &[Property::boolean("degHide", self.hide_degree)],
                 &self.preservation,
+                true,
             )?;
-            write_raw_slot(writer, &self.preservation, 1)?;
             self.degree.write_xml(writer, "deg")?;
-            write_raw_slot(writer, &self.preservation, 2)?;
+            modeled += 1;
+            write_raw_slot(writer, &self.preservation, modeled)?;
             self.base.write_xml(writer, "e")?;
-            write_raw_slot(writer, &self.preservation, 3)
+            modeled += 1;
+            write_raw_slot(writer, &self.preservation, modeled)
         })
     }
 }
@@ -1150,18 +1259,15 @@ impl MathMatrix {
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
-            let mut modeled = 0usize;
-            write_raw_slot(writer, &self.preservation, modeled)?;
-            if !properties.is_empty() || has_preserved_modeled_child(&self.preservation, "mPr") {
-                write_property_container_from_parent(
-                    writer,
-                    "mPr",
-                    &properties,
-                    &self.preservation,
-                )?;
-                modeled += 1;
-                write_raw_slot(writer, &self.preservation, modeled)?;
-            }
+            let emit_properties =
+                !properties.is_empty() || has_preserved_modeled_child(&self.preservation, "mPr");
+            let mut modeled = write_leading_property_container(
+                writer,
+                "mPr",
+                &properties,
+                &self.preservation,
+                emit_properties,
+            )?;
             for row in &self.rows {
                 write_container(writer, "mr", &row.preservation, |writer| {
                     write_raw_slot(writer, &row.preservation, 0)?;
@@ -1386,20 +1492,22 @@ impl MathNary {
             }
             properties.push(Property::boolean("subHide", self.hide_subscript));
             properties.push(Property::boolean("supHide", self.hide_superscript));
-            write_raw_slot(writer, &self.preservation, 0)?;
-            write_property_container_from_parent(
+            let mut modeled = write_leading_property_container(
                 writer,
                 "naryPr",
                 &properties,
                 &self.preservation,
+                true,
             )?;
-            write_raw_slot(writer, &self.preservation, 1)?;
             self.subscript.write_xml(writer, "sub")?;
-            write_raw_slot(writer, &self.preservation, 2)?;
+            modeled += 1;
+            write_raw_slot(writer, &self.preservation, modeled)?;
             self.superscript.write_xml(writer, "sup")?;
-            write_raw_slot(writer, &self.preservation, 3)?;
+            modeled += 1;
+            write_raw_slot(writer, &self.preservation, modeled)?;
             self.base.write_xml(writer, "e")?;
-            write_raw_slot(writer, &self.preservation, 4)
+            modeled += 1;
+            write_raw_slot(writer, &self.preservation, modeled)
         })
     }
 }
@@ -1490,12 +1598,17 @@ impl MathDelimiter {
             if let Some(value) = self.grow {
                 properties.push(Property::boolean("grow", value));
             }
-            write_raw_slot(writer, &self.preservation, 0)?;
-            write_property_container_from_parent(writer, "dPr", &properties, &self.preservation)?;
-            write_raw_slot(writer, &self.preservation, 1)?;
-            for (index, argument) in self.arguments.iter().enumerate() {
+            let mut modeled = write_leading_property_container(
+                writer,
+                "dPr",
+                &properties,
+                &self.preservation,
+                true,
+            )?;
+            for argument in &self.arguments {
                 argument.write_xml(writer, "e")?;
-                write_raw_slot(writer, &self.preservation, index + 2)?;
+                modeled += 1;
+                write_raw_slot(writer, &self.preservation, modeled)?;
             }
             Ok(())
         })
@@ -1557,16 +1670,16 @@ impl MathAccent {
             ));
         }
         write_container(writer, "acc", &self.preservation, |writer| {
-            write_raw_slot(writer, &self.preservation, 0)?;
-            write_property_container_from_parent(
+            let mut modeled = write_leading_property_container(
                 writer,
                 "accPr",
                 &[Property::text("chr", &self.character)],
                 &self.preservation,
+                true,
             )?;
-            write_raw_slot(writer, &self.preservation, 1)?;
             self.base.write_xml(writer, "e")?;
-            write_raw_slot(writer, &self.preservation, 2)
+            modeled += 1;
+            write_raw_slot(writer, &self.preservation, modeled)
         })
     }
 }
@@ -1593,6 +1706,11 @@ pub struct MathProperties {
 impl MathProperties {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Whether the settings subtree retains content outside the typed subset.
+    pub fn has_unsupported_content(&self) -> bool {
+        property_preservation_has_unsupported_content(&self.preservation)
     }
 
     pub(crate) fn from_raw(raw: &[u8], inherited: &[(String, String)]) -> Result<Self> {
@@ -1944,11 +2062,107 @@ fn preserve_modeled_child(
     });
 }
 
+fn preservation_has_unsupported_content(preservation: &Preservation) -> bool {
+    preservation
+        .attributes
+        .iter()
+        .any(|(name, _)| name != "xmlns" && !name.starts_with("xmlns:"))
+        || !preservation.raw_children.is_empty()
+        || !preservation.property_raw_children.is_empty()
+}
+
+fn property_preservation_has_unsupported_content(preservation: &Preservation) -> bool {
+    preservation_has_unsupported_content(preservation)
+        || preservation.modeled_children.iter().any(|child| {
+            parse_element(&child.raw, &child.bindings).map_or(true, |parsed| {
+                parsed.preservation.attributes.iter().any(|(name, _)| {
+                    if name == "xmlns" || name.starts_with("xmlns:") {
+                        return false;
+                    }
+                    expanded_attribute_name(name.as_bytes(), &parsed.bindings).is_none_or(
+                        |(namespace, local)| {
+                            namespace != M_NS
+                                || (local.as_slice() != b"val" && local.as_slice() != b"alnAt")
+                        },
+                    )
+                }) || !parsed.children.is_empty()
+            })
+        })
+}
+
+fn property_container_has_unsupported_content(preservation: &Preservation, tag: &str) -> bool {
+    let Some(source) = preservation
+        .modeled_children
+        .iter()
+        .find(|child| child.name == tag)
+    else {
+        return false;
+    };
+    preserve_property_container(
+        &source.raw,
+        &source.bindings,
+        tag,
+        supported_properties(tag),
+    )
+    .map_or(true, |value| {
+        property_preservation_has_unsupported_content(&value)
+    })
+}
+
+fn script_has_unsupported_content(value: &MathScript, property_tag: &str) -> bool {
+    preservation_has_unsupported_content(&value.preservation)
+        || property_container_has_unsupported_content(&value.preservation, property_tag)
+        || value.base.has_unsupported_content()
+        || value.script.has_unsupported_content()
+}
+
+fn three_argument_script_has_unsupported_content(
+    preservation: &Preservation,
+    property_tag: &str,
+    base: &MathArgument,
+    subscript: &MathArgument,
+    superscript: &MathArgument,
+) -> bool {
+    preservation_has_unsupported_content(preservation)
+        || property_container_has_unsupported_content(preservation, property_tag)
+        || base.has_unsupported_content()
+        || subscript.has_unsupported_content()
+        || superscript.has_unsupported_content()
+}
+
+fn limit_has_unsupported_content(value: &MathLimit, property_tag: &str) -> bool {
+    preservation_has_unsupported_content(&value.preservation)
+        || property_container_has_unsupported_content(&value.preservation, property_tag)
+        || value.base.has_unsupported_content()
+        || value.limit.has_unsupported_content()
+}
+
 fn has_preserved_modeled_child(preservation: &Preservation, name: &str) -> bool {
     preservation
         .modeled_children
         .iter()
         .any(|child| child.name == name)
+}
+
+fn write_leading_property_container<W: Write>(
+    writer: &mut Writer<W>,
+    tag: &str,
+    properties: &[Property<'_>],
+    preservation: &Preservation,
+    emit: bool,
+) -> Result<usize> {
+    let existed_in_source = has_preserved_modeled_child(preservation, tag);
+    if emit && !existed_in_source {
+        write_property_container_from_parent(writer, tag, properties, preservation)?;
+    }
+    write_raw_slot(writer, preservation, 0)?;
+    if emit && existed_in_source {
+        write_property_container_from_parent(writer, tag, properties, preservation)?;
+        write_raw_slot(writer, preservation, 1)?;
+        Ok(1)
+    } else {
+        Ok(0)
+    }
 }
 
 fn write_property_container_from_parent<W: Write>(
@@ -2997,6 +3211,98 @@ mod tests {
     }
 
     #[test]
+    fn inserted_property_containers_do_not_shift_raw_argument_slots() {
+        let cases = [
+            (
+                format!(
+                    r#"<m:oMath xmlns:m="{M_NS}" xmlns:x="urn:producer"><m:f><x:before/><m:num/><x:middle/><m:den/><x:after/></m:f></m:oMath>"#
+                ),
+                vec![
+                    "<m:fPr>",
+                    "<x:before/>",
+                    "<m:num>",
+                    "<x:middle/>",
+                    "<m:den>",
+                    "<x:after/>",
+                ],
+            ),
+            (
+                format!(
+                    r#"<m:oMath xmlns:m="{M_NS}" xmlns:x="urn:producer"><m:rad><x:before/><m:deg/><x:middle/><m:e/><x:after/></m:rad></m:oMath>"#
+                ),
+                vec![
+                    "<m:radPr>",
+                    "<x:before/>",
+                    "<m:deg>",
+                    "<x:middle/>",
+                    "<m:e>",
+                    "<x:after/>",
+                ],
+            ),
+            (
+                format!(
+                    r#"<m:oMath xmlns:m="{M_NS}" xmlns:x="urn:producer"><m:nary><x:before/><m:sub/><x:middle-one/><m:sup/><x:middle-two/><m:e/><x:after/></m:nary></m:oMath>"#
+                ),
+                vec![
+                    "<m:naryPr>",
+                    "<x:before/>",
+                    "<m:sub>",
+                    "<x:middle-one/>",
+                    "<m:sup>",
+                    "<x:middle-two/>",
+                    "<m:e>",
+                    "<x:after/>",
+                ],
+            ),
+            (
+                format!(
+                    r#"<m:oMath xmlns:m="{M_NS}" xmlns:x="urn:producer"><m:d><x:before/><m:e/><x:middle/><m:e/><x:after/></m:d></m:oMath>"#
+                ),
+                vec![
+                    "<m:dPr>",
+                    "<x:before/>",
+                    "<m:e>",
+                    "<x:middle/>",
+                    "<m:e>",
+                    "<x:after/>",
+                ],
+            ),
+            (
+                format!(
+                    r#"<m:oMath xmlns:m="{M_NS}" xmlns:x="urn:producer"><m:acc><x:before/><m:e/><x:after/></m:acc></m:oMath>"#
+                ),
+                vec!["<m:accPr>", "<x:before/>", "<m:e>", "<x:after/>"],
+            ),
+        ];
+        for (source, expected) in cases {
+            let parsed = CT_OMath::from_xml(source.as_bytes()).unwrap();
+            let first = parsed.to_xml().unwrap();
+            assert_fragments_in_order(&first, &expected);
+            let reopened = CT_OMath::from_xml(&first).unwrap();
+            assert_fragments_in_order(&reopened.to_xml().unwrap(), &expected);
+        }
+    }
+
+    #[test]
+    fn unsupported_content_is_observable_without_exposing_preservation_storage() {
+        let authored = CT_OMath::new(vec![MathRun::new("x").into()]);
+        assert!(!authored.has_unsupported_content());
+        assert!(!OfficeMath::Inline(authored).has_unsupported_content());
+
+        let source = format!(
+            r#"<m:oMath xmlns:m="{M_NS}" xmlns:x="urn:producer"><m:f><m:fPr><x:property/></m:fPr><m:num><x:argument/></m:num><m:den/></m:f></m:oMath>"#
+        );
+        let parsed = CT_OMath::from_xml(source.as_bytes()).unwrap();
+        assert!(parsed.has_unsupported_content());
+        let MathExpression::Fraction(fraction) = &parsed.expressions[0] else {
+            panic!("fraction")
+        };
+        assert!(parsed.expressions[0].has_unsupported_content());
+        assert!(fraction.numerator.has_unsupported_content());
+        assert!(!fraction.denominator.has_unsupported_content());
+    }
+
+    #[test]
     fn officemath_corpus_parses_mutates_saves_and_reopens_without_losing_supported_or_raw_siblings()
     {
         let authored = String::from_utf8(complete_corpus().to_xml().unwrap()).unwrap();
@@ -3074,6 +3380,26 @@ mod tests {
             panic!("run")
         };
         assert_eq!(run.text, "changed");
+        let reopened_serialized = String::from_utf8(reopened.to_xml().unwrap()).unwrap();
+        for raw in [
+            r#"<x:before keep="root"/>"#,
+            r#"<x:fraction keep="property"/>"#,
+            r#"<x:numerator keep="argument"/>"#,
+            r#"<x:after keep="root"/>"#,
+        ] {
+            assert!(reopened_serialized.contains(raw));
+        }
+    }
+
+    fn assert_fragments_in_order(xml: &[u8], fragments: &[&str]) {
+        let xml = std::str::from_utf8(xml).unwrap();
+        let mut offset = 0usize;
+        for fragment in fragments {
+            let position = xml[offset..]
+                .find(fragment)
+                .unwrap_or_else(|| panic!("missing {fragment:?} after byte {offset} in {xml}"));
+            offset += position + fragment.len();
+        }
     }
 
     #[test]
