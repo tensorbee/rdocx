@@ -7625,6 +7625,7 @@ fn empty_story_layout_input() -> rdocx_layout::LayoutInput {
 
     rdocx_layout::LayoutInput {
         automatic_hyphenation: false,
+        math_properties: None,
         document,
         styles: rdocx_oxml::styles::CT_Styles::new_default(),
         numbering: None,

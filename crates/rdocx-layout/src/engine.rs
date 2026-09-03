@@ -341,6 +341,63 @@ fn project_revision_runs<'a>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn push_equations_before_order(
+    paragraph: &CT_P,
+    boundary: usize,
+    order: RawOrder,
+    cursor: &mut usize,
+    inline_items: &mut Vec<InlineItem>,
+    fm: &mut FontManager,
+    font_size: f64,
+    color: Color,
+    available_width: f64,
+    math_properties: Option<&rdocx_oxml::math::MathProperties>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<()> {
+    while let Some((equation_boundary, raw_before, equation)) = paragraph.equations.get(*cursor) {
+        if *equation_boundary > boundary
+            || (*equation_boundary == boundary
+                && !match order {
+                    RawOrder::BeforeRaw => false,
+                    RawOrder::Raw(limit) => *raw_before < limit,
+                    RawOrder::AfterRaw => true,
+                })
+        {
+            break;
+        }
+        let source_path =
+            format!("paragraph/run-boundary/{equation_boundary}/raw-child/{raw_before}");
+        let (measured, display) = crate::math::layout_officemath(
+            equation,
+            fm,
+            font_size,
+            color,
+            available_width,
+            math_properties,
+            &source_path,
+            diagnostics,
+        )?;
+        if display
+            && !inline_items.is_empty()
+            && !matches!(inline_items.last(), Some(InlineItem::LineBreak))
+        {
+            inline_items.push(InlineItem::LineBreak);
+        }
+        inline_items.push(InlineItem::Group {
+            width: measured.width,
+            height: measured.height(),
+            baseline: Some(measured.ascent),
+            group: measured.group,
+        });
+        if display {
+            inline_items.push(InlineItem::LineBreak);
+        }
+        *cursor += 1;
+    }
+    Ok(())
+}
+
 fn projected_paragraph_text(para: &CT_P, view: RevisionView) -> String {
     project_paragraph_runs(para, view)
         .iter()
@@ -486,6 +543,7 @@ pub struct Engine {
 struct ReusableEngineContext {
     revision_view: RevisionView,
     automatic_hyphenation: bool,
+    math_properties: Option<rdocx_oxml::math::MathProperties>,
     has_wrapping_drawing: bool,
     styles: CT_Styles,
     numbering: Option<rdocx_oxml::numbering::CT_Numbering>,
@@ -566,6 +624,7 @@ impl ReusableEngineContext {
         Self {
             revision_view: input.revision_view,
             automatic_hyphenation: input.automatic_hyphenation,
+            math_properties: input.math_properties.clone(),
             has_wrapping_drawing,
             styles: input.styles.clone(),
             numbering: input.numbering.clone(),
@@ -620,6 +679,7 @@ impl ReusableEngineContext {
             .chain(input.document.body.sect_pr.iter()));
         self.revision_view == input.revision_view
             && self.automatic_hyphenation == input.automatic_hyphenation
+            && self.math_properties == input.math_properties
             && self.has_wrapping_drawing == has_wrapping_drawing
             && self.styles == input.styles
             && self.numbering == input.numbering
@@ -4890,6 +4950,7 @@ fn layout_paragraph_with_source_and_table(
     let mut marker_boundary = None;
     let mut marker_raw_before = None;
     let mut projection_char_offset = 0usize;
+    let mut equation_cursor = 0usize;
     for projected in project_paragraph_runs(para, input.revision_view) {
         let run = projected.run;
         let projected_run_start = projection_char_offset;
@@ -4929,6 +4990,20 @@ fn layout_paragraph_with_source_and_table(
         if let Some(ref direct_rpr) = run.properties {
             effective_rpr.merge_from(direct_rpr);
         }
+
+        push_equations_before_order(
+            para,
+            projected.boundary,
+            projected.raw_order,
+            &mut equation_cursor,
+            &mut inline_items,
+            fm,
+            effective_rpr.sz.map(|hp| hp.to_pt()).unwrap_or(11.0),
+            resolve_run_color(&effective_rpr, input.theme.as_ref()),
+            available_width,
+            input.math_properties.as_ref(),
+            diagnostics,
+        )?;
 
         // Skip hidden text
         if effective_rpr.vanish == Some(true) {
@@ -5088,6 +5163,7 @@ fn layout_paragraph_with_source_and_table(
                             InlineItem::Group {
                                 width,
                                 height,
+                                baseline: None,
                                 group: render_word_chart(
                                     relationship_id,
                                     width,
@@ -5344,6 +5420,24 @@ fn layout_paragraph_with_source_and_table(
             }
         }
     }
+
+    let mut equation_rpr = style_resolver::resolve_run_properties(para_style_id, None, styles);
+    if let Some(paragraph_mark_rpr) = direct_ppr.and_then(|ppr| ppr.rpr.as_ref()) {
+        equation_rpr.merge_from(paragraph_mark_rpr);
+    }
+    push_equations_before_order(
+        para,
+        usize::MAX,
+        RawOrder::AfterRaw,
+        &mut equation_cursor,
+        &mut inline_items,
+        fm,
+        equation_rpr.sz.map(|hp| hp.to_pt()).unwrap_or(11.0),
+        resolve_run_color(&equation_rpr, input.theme.as_ref()),
+        available_width,
+        input.math_properties.as_ref(),
+        diagnostics,
+    )?;
 
     let final_marker_lower = (marker_boundary == Some(para.runs.len()))
         .then_some(marker_raw_before)
@@ -7665,6 +7759,7 @@ mod tests {
         LayoutInput {
             revision_view: crate::input::RevisionView::Accepted,
             automatic_hyphenation: false,
+            math_properties: None,
             document: doc,
             styles: CT_Styles::new_default(),
             numbering: None,
@@ -8625,6 +8720,7 @@ mod tests {
     #[test]
     fn header_footer_media_geometry_and_context_changes_miss() {
         use rdocx_oxml::footnotes::CT_Footnotes;
+        use rdocx_oxml::math::MathProperties;
         use rdocx_oxml::numbering::CT_Numbering;
         use rdocx_oxml::theme::Theme;
         use rdocx_oxml::units::Twips;
@@ -8670,6 +8766,9 @@ mod tests {
         });
         assert_header_footer_context_miss(&base, "theme", |input| {
             input.theme = Some(Theme::default());
+        });
+        assert_header_footer_context_miss(&base, "math properties", |input| {
+            input.math_properties = Some(MathProperties::new());
         });
         assert_header_footer_context_miss(&base, "revision", |input| {
             input.revision_view = RevisionView::Tracked;
@@ -13370,6 +13469,7 @@ mod tests {
         let input = LayoutInput {
             revision_view: crate::input::RevisionView::Accepted,
             automatic_hyphenation: false,
+            math_properties: None,
             document: doc,
             styles: CT_Styles::new_default(),
             numbering: None,
@@ -13423,6 +13523,7 @@ mod tests {
                 item: Box::new(LineItem::Group {
                     width: 10.0,
                     height: 10.0,
+                    baseline: None,
                     group: GroupElement {
                         transform: oxml_layout::Transform::IDENTITY,
                         clip: None,
@@ -13816,6 +13917,7 @@ mod tests {
             items: vec![oxml_layout::LineItem::Group {
                 width: 80.0,
                 height: 40.0,
+                baseline: None,
                 group,
             }],
             width: 80.0,
@@ -13877,6 +13979,7 @@ mod tests {
         let input = LayoutInput {
             revision_view: crate::input::RevisionView::Accepted,
             automatic_hyphenation: false,
+            math_properties: None,
             document: doc,
             styles: CT_Styles::new_default(),
             numbering: None,
@@ -13939,6 +14042,7 @@ mod tests {
         let input = LayoutInput {
             revision_view: crate::input::RevisionView::Accepted,
             automatic_hyphenation: false,
+            math_properties: None,
             document: doc,
             styles: CT_Styles::new_default(),
             numbering: None,
@@ -14032,6 +14136,7 @@ mod tests {
         LayoutInput {
             revision_view: crate::input::RevisionView::Accepted,
             automatic_hyphenation: false,
+            math_properties: None,
             document: doc,
             styles: CT_Styles::new_default(),
             numbering: None,
@@ -14208,6 +14313,7 @@ mod tests {
             LayoutInput {
                 revision_view: crate::input::RevisionView::Accepted,
                 automatic_hyphenation: false,
+                math_properties: None,
                 document: doc,
                 styles: CT_Styles::new_default(),
                 numbering: None,
@@ -14336,6 +14442,7 @@ mod tests {
         LayoutInput {
             revision_view: crate::input::RevisionView::Accepted,
             automatic_hyphenation: false,
+            math_properties: None,
             document: doc,
             styles: CT_Styles::new_default(),
             numbering: None,
@@ -14628,6 +14735,7 @@ mod tests {
         LayoutInput {
             revision_view: crate::input::RevisionView::Accepted,
             automatic_hyphenation: false,
+            math_properties: None,
             document: doc,
             styles: CT_Styles::new_default(),
             numbering: None,
@@ -14771,6 +14879,7 @@ mod tests {
             LayoutInput {
                 revision_view: crate::input::RevisionView::Accepted,
                 automatic_hyphenation: false,
+                math_properties: None,
                 document: doc,
                 styles: CT_Styles::new_default(),
                 numbering: None,
@@ -14898,6 +15007,7 @@ mod tests {
         LayoutInput {
             revision_view: crate::input::RevisionView::Accepted,
             automatic_hyphenation: false,
+            math_properties: None,
             document: doc,
             styles: CT_Styles::new_default(),
             numbering: None,
@@ -15227,6 +15337,7 @@ mod tests {
         let input = LayoutInput {
             revision_view: crate::input::RevisionView::Accepted,
             automatic_hyphenation: false,
+            math_properties: None,
             document: doc,
             styles: CT_Styles::new_default(),
             numbering: None,
@@ -15310,6 +15421,7 @@ mod tests {
         let input = LayoutInput {
             revision_view: crate::input::RevisionView::Accepted,
             automatic_hyphenation: false,
+            math_properties: None,
             document: doc,
             styles: CT_Styles::new_default(),
             numbering: None,
@@ -15413,6 +15525,7 @@ mod tests {
         LayoutInput {
             revision_view: crate::input::RevisionView::Accepted,
             automatic_hyphenation: false,
+            math_properties: None,
             document: doc,
             styles: CT_Styles::new_default(),
             numbering: None,
@@ -15608,6 +15721,7 @@ mod tests {
         LayoutInput {
             revision_view: crate::input::RevisionView::Accepted,
             automatic_hyphenation: false,
+            math_properties: None,
             document: doc,
             styles: CT_Styles::new_default(),
             numbering: None,

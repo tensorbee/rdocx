@@ -1,6 +1,6 @@
 # F-229, OfficeMath layout and PDF rendering
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S65
 **Size**: M
 **Depends on**: F-228
@@ -27,6 +27,7 @@ silently discarded.
 
 - `docs/hld/03-architecture.md`, "The dependency rule", "Why these seams", and "What stays put".
 - `docs/hld/08-rendering-spec.md`, "The seam that makes this cheap", "Extending PositionedElement", "The PDF backend", "The rasteriser", and "The renderer's input".
+- `docs/hld/10-bindings-spec.md`, "Native Word facade stability" and "Packaging".
 - `docs/hld/12-testing-strategy.md`, "Test taxonomy", "The golden-PNG gate", "The Word render fidelity gate", and "What CI runs".
 - `docs/hld/14-development-backlog.md`, "F-229, OfficeMath layout and PDF rendering".
 - `docs/hld/15-build-and-toolchain.md`, the deterministic font rules.
@@ -83,17 +84,30 @@ produce one stable source-path diagnostic when they affect visible content.
 The golden uses a source-built one-page DOCX containing each supported construct
 and Caladea-family math runs. Rust renders with bundled deterministic fonts.
 Microsoft Word 16.104 build 16.104.25121423 exports the same source to PDF. The
-test records exact text tokens, page size, per-expression baseline, and glyph
-bounding boxes. Baselines and box edges have a declared 1.0 point tolerance.
-A separate deterministic PNG golden covers the complete page with a calibrated
-luminance SSIM floor and mutations that move a baseline and delimiter by more
-than the tolerance.
+test records exact text tokens, page size, and Word glyph bounding boxes. The
+harness derives each expression's ink width and vertical bounds directly from
+the Word and Rust PDFs, with fixed raster windows only for the delimiter and
+accent that Poppler coalesces into one Word token. It keeps no second set of
+normalized Rust truth. Aggregate and per-expression geometry use the 1.0 point
+tolerance. A deterministic complete-page raster comparison uses 64 by 64 pixel
+block luminance at 150 DPI with a 0.99 SSIM floor. Mutations move a baseline,
+delimiter, operator, and an actual rendered OfficeMath group by more than the
+declared 1.0 point tolerance.
 
 Add the approved source-only `scripts/officemath_oracle_harness.py` and
 `scripts/officemath_oracle_manifest.json`. The harness builds the DOCX from
 source, verifies the exact Word and Poppler identities, and revalidates the text
 manifest against caller-supplied Word PDF output. Binary oracle output remains
 untracked.
+
+Carry the F-228 document-wide defaults through the concrete optional
+`LayoutInput.math_properties: Option<MathProperties>` field. The `rdocx`
+document facade populates it from relationship-resolved settings. Existing
+layout input literals explicitly use `None`, which preserves behavior when no
+settings part or math properties are present. This is a pre-1.0 source-breaking
+addition for callers that construct `LayoutInput` with a struct literal. It
+adds no wrapper, trait, binding, WebAssembly entry point, or command-line
+surface.
 
 ## Rejected alternatives
 
@@ -130,6 +144,7 @@ fixture enters the repository.
 
 - `docs/hld/03-architecture.md`
 - `docs/hld/08-rendering-spec.md`
+- `docs/hld/10-bindings-spec.md`
 - `docs/hld/12-testing-strategy.md`
 - `docs/hld/14-development-backlog.md`
 
@@ -138,10 +153,11 @@ fixture enters the repository.
 - Layout, pagination, line breaking, and text shaping. Use bundled deterministic
   fonts for every Rust baseline, keep system font discovery out of the golden,
   and make every baseline update deliberate and mutation-sensitive.
-- Public API of a published crate. The shared `InlineItem` and `LineItem`
-  extension is a pre-1.0 public API change. Run rustdoc with warnings denied,
-  `cargo publish --dry-run` for `oxml-layout` and `rdocx-layout`, and assert both
-  package archives remain below 10 MiB.
+- Public API of published crates. The shared `InlineItem` and `LineItem`
+  extension and `LayoutInput.math_properties` addition are pre-1.0 source API
+  changes. Update affected struct literals and facade projection tests. Run
+  rustdoc with warnings denied, `cargo publish --dry-run` for `oxml-layout` and
+  `rdocx-layout`, and assert both package archives remain below 10 MiB.
 - New module or file. Obtain explicit approval for
   `crates/rdocx-layout/src/math.rs` and the source-only oracle harness and
   manifest. Add no new crate, test binary, dependency, trait, generic
@@ -157,16 +173,17 @@ PNG delta blocks the story and does not authorize a baseline update.
 
 ## Implementation checklist
 
-- [ ] Add the approved private equation layout module.
-- [ ] Add optional baseline metrics to the shared inline and line group path.
-- [ ] Measure and lower every F-228 expression through shared primitives.
-- [ ] Integrate inline and display equations with paragraph line breaking and pagination.
-- [ ] Emit stable diagnostics for visible unsupported or unrenderable content.
-- [ ] Add focused metrics, regression, integration, and mutation-sensitive golden tests.
-- [ ] Record the pinned Word PDF oracle evidence and declared tolerance.
-- [ ] Add the approved source-only oracle harness and text manifest.
-- [ ] Run deterministic font, archive, rustdoc, focused, and full verification gates.
-- [ ] Update exactly the listed HLD files.
+- [x] Add the approved private equation layout module.
+- [x] Add optional baseline metrics to the shared inline and line group path.
+- [x] Measure and lower every F-228 expression through shared primitives.
+- [x] Integrate inline and display equations with paragraph line breaking and pagination.
+- [x] Project optional document-wide math settings through `LayoutInput` and the `rdocx` document facade.
+- [x] Emit stable diagnostics for visible unsupported or unrenderable content.
+- [x] Add focused metrics, regression, integration, and mutation-sensitive golden tests.
+- [x] Record the pinned Word PDF oracle evidence and declared tolerance.
+- [x] Add the approved source-only oracle harness and text manifest.
+- [x] Run deterministic font, archive, rustdoc, focused, and full verification gates.
+- [x] Update exactly the listed HLD files.
 
 ## Open questions
 
@@ -174,4 +191,8 @@ Resolved for S65. The new layout module, shared optional baseline metrics,
 bundled Caladea fallback, source-only oracle harness and manifest, Word 16.104
 build 16.104.25121423, Poppler 26.01.0, 150 DPI, 1.0 point geometry tolerance,
 and 1.01 point negative perturbation are approved. Tagged-PDF math semantics
-remain outside F-229.
+remain outside F-229. The optional concrete `LayoutInput.math_properties`
+field, the `rdocx` document projection, affected literals and tests, pre-1.0
+source impact, HLD 10 coverage, rustdoc gate, and package dry runs are approved
+as a contract clarification required to carry F-228 global settings into
+F-229 layout.

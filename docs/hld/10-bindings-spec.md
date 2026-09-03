@@ -239,6 +239,12 @@ query so layout and conversion can diagnose retained content without exposing
 the preservation sidecar. The model and accessors are additive on the pre-1.0
 Rust surface. Python, WASM, and CLI bindings remain unchanged.
 
+The native document renderer copies those defaults into the concrete optional
+`rdocx_layout::LayoutInput::math_properties` field. This field addition is a
+pre-1.0 source break for native callers that construct `LayoutInput` with a
+struct literal. It adds no wrapper, trait, binding method, or command-line
+surface.
+
 Native Rust callers can import RTF through `Document::from_rtf_bytes` and
 `Document::open_rtf`. These additive pre-1.0 APIs return an `RtfReadResult`
 that carries both the converted `Document` and every stable diagnostic for
@@ -364,14 +370,16 @@ typed conformance error through the facade error enum. These methods are
 additive on the native pre-1.0 facades. Python, WASM, and CLI method names and
 dependency selections remain unchanged.
 
-The pre-1.0 shared layout API adds semantic types, `MarkedContent`, and
-informative `Figure` variants only through existing non-exhaustive enums.
-Existing `InlineItem` and `LineItem` image and group variant fields stay
-unchanged, so direct constructors retain source compatibility. The new figure
-variant lowers to the one backend-neutral marked-content carrier rather than
-creating a second PDF ownership representation. A backend that consumes
-`PageFrame::elements` must recurse through
-`MarkedContent::children` or use `oxml_layout::walk`.
+The pre-1.0 shared layout API carries semantic types, `MarkedContent`, and
+informative `Figure` variants through existing non-exhaustive enums. The image
+variants stay unchanged. The `InlineItem::Group` and `LineItem::Group` variants
+add an optional baseline field, which is a source break for direct variant
+construction. `None` retains the established top-aligned behavior. A finite
+baseline aligns nested output with surrounding text and is normalized before
+pagination. The figure variant lowers to the one backend-neutral
+marked-content carrier rather than creating a second PDF ownership
+representation. A backend that consumes `PageFrame::elements` must recurse
+through `MarkedContent::children` or use `oxml_layout::walk`.
 Wildcard matches remain source compatible but must not discard an unrecognized
 container, because visible content can be nested below it.
 

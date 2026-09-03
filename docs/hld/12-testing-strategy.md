@@ -665,6 +665,20 @@ display justification, settings relationships, and mutable facade reopen. The
 published-crate riders deny rustdoc warnings, dry-run both packages, and keep
 each archive below 10 MiB. The 49-entry hash harness remains unchanged.
 
+The OfficeMath layout gate is
+`officemath_baselines_and_glyph_geometry_match_the_pinned_word_pdf_oracle`.
+Its source-only harness builds one DOCX that covers all thirteen supported
+expression families and pins Microsoft Word 16.104 build 16.104.25121423,
+Poppler 26.01.0, and 150 DPI. It requires exact Word text tokens and derives
+each expression's ink width and vertical bounds directly from the Word and
+deterministic Rust PDFs. Fixed raster windows separate only the delimiter and
+accent that Poppler coalesces into one Word token. Aggregate and
+per-expression geometry use a 1.0 point tolerance. The complete-page raster
+uses 64 by 64 pixel block luminance with a 0.99 SSIM floor. A 1.01 point
+rendered-group perturbation proves the geometry and raster path is
+mutation-sensitive. The source DOCX digest and tool identities live in the
+text manifest, while both PDF outputs remain untracked.
+
 ## The hash harness
 
 The single highest-value mechanism in the plan is

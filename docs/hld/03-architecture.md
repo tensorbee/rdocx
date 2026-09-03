@@ -372,6 +372,16 @@ prefix collisions fail closed, and unsupported descendants retain their owner
 and schema slot. The settings owner projects the single document-wide
 `m:mathPr` subtree through the same source-preserving replacement path.
 
+`rdocx-layout` consumes that typed OfficeMath tree at the paragraph's retained
+raw boundaries. Its private recursive math module measures the supported
+expressions with the shared font manager and lowers them to backend-neutral
+text, line, path, and group elements. `LayoutInput::math_properties` carries an
+optional concrete copy of the document-wide defaults into that projection.
+The shared `oxml-layout` group variants carry an optional baseline through line
+breaking, while `None` retains the established top-aligned drawing behavior.
+The PDF and raster backends continue to consume only `LayoutResult` and gain no
+Word grammar dependency.
+
 The settings model owns the separate `w:settings` root and read-only
 projections for `w:documentProtection` and valid `w:docVars` entries. It reports
 the four supported editing modes, the recorded enforcement and formatting

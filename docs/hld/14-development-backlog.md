@@ -2096,10 +2096,16 @@ siblings through mutation and reopen.
 
 ### F-229, OfficeMath layout and PDF rendering (M)
 Lay out supported equations through the shared font and page-frame boundary
-with baseline, stretch, delimiter, and operator sizing.
+with baseline, stretch, delimiter, and operator sizing. The Word engine lowers
+the typed tree to shared groups, text, lines, and paths, carries optional global
+math defaults through `LayoutInput`, and keeps existing top-aligned group
+behavior when no baseline is present. Deterministic rendering uses bundled
+Caladea and a source-built Word PDF oracle. Tagged-PDF math semantics remain
+outside this story.
 **Depends on**: F-228.
 **Test gate**: golden. Equation baselines and glyph geometry match the pinned
-Word PDF oracle within the declared tolerance.
+Word 16.104 PDF oracle within 1.0 point, and the complete 150 DPI page meets the
+declared luminance SSIM floor.
 
 ### F-230, MathML and LaTeX conversion (M)
 Import and export the supported OfficeMath subset through MathML and LaTeX with
