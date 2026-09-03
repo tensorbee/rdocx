@@ -28,7 +28,7 @@ font, layout, PDF, and facade boundaries.
 
 | F-ID | Title | Size | Status | Owner |
 |------|-------|------|--------|-------|
-| F-228 | OfficeMath model and authoring | L | pending | - |
+| F-228 | OfficeMath model and authoring | L | in-progress | codex |
 | F-229 | OfficeMath layout and PDF rendering | M | pending | - |
 | F-230 | MathML and LaTeX conversion | M | pending | - |
 
