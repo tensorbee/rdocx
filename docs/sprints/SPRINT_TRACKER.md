@@ -79,6 +79,7 @@ defended.
 | S62 | M21, X | 4 | 3 | 1 | 16 | 1 | Added relationship-safe OLE, ActiveX, and VBA inventory and mutation, a bounded typed SmartArt inspection and editing model, and hardened outcomes from PRs 61 through 64. F-220 carries to S63 after the ten-pass microscope bound found two remaining exact fail-closed SmartArt validator gaps. Its worker and evidence remain intact, and F-222 waits for its clean completion. The full close gate passed with all 49 hashes unchanged and every package archive below 10 MiB |
 | S63 | M21, X | 6 | 6 | 0 | 20 | 1 | Completed authentic SmartArt rendering, bounded ODP interchange, modern presentation package variants, notes and handout export, and the fixes for Issues 65 and 66. The full close gate passed with all 49 hashes unchanged, every package archive below 10 MiB, and sprint review pass 1 clean. M21 remains open for its representative-deck gate and later import work |
 | S64 | M21, X | 5 | 5 | 0 | 12 | 2 | Completed M21 with bounded editable HTML and PDF import, the Issue 67 pagination correction, and the combined representative-deck PowerPoint gate. Published and independently verified the 15-package rpptx 0.9.0 family and seven-package rdocx 0.12.0 family. The full close gate passed with all 49 hashes unchanged, every package archive below 10 MiB, and sprint review pass 9 clean |
+| S65 | M22 | 3 | 3 | 0 | 8 | 1 | Opened M22 with typed OfficeMath authoring, deterministic layout and PDF rendering, and bounded MathML and LaTeX conversion. The full close gate passed with all 49 hashes unchanged, every package archive below 10 MiB, and sprint review pass 9 clean. M22 continues in S66 with extended field evaluation and dynamic table of contents rebuild |
 
 ## Completed features
 
@@ -456,6 +457,7 @@ five working days.
 | S62 | 3 | 1 | 15.00 |
 | S63 | 6 | 1 | 30.00 |
 | S64 | 5 | 2 | 12.50 |
+| S65 | 3 | 1 | 15.00 |
 
 ## Escalation record
 
@@ -523,3 +525,4 @@ was done about it. Empty is the expected state.
 | 2026-09-01 | Sprint estimate variance exceeded 30 percent | S62 | Record 1 actual day against 16 estimated. Three isolated workers and the contribution-integration path allowed completed work to overlap, while F-220 reached the ten-pass review bound and carried with its worker intact. The resulting 15.00 stories per week is not a sustainable forecast, so retain the dependency-defined S63 boundary and complete F-220 before F-222 |
 | 2026-09-01 | Sprint estimate variance exceeded 30 percent | S63 | Record 1 actual day against 20 estimated. Retained F-220 evidence, established interchange and rendering paths, and tightly scoped cache fixes reduced repeated investigation while the bounded reviews preserved exact behavior. The resulting 30.00 stories per week is not a sustainable forecast, so retain milestone-defined future sprint boundaries |
 | 2026-09-03 | Sprint estimate variance exceeded 30 percent | S64 | Record 2 actual days against 12 estimated. Isolated import and release worktrees, established external oracles, and retained milestone evidence allowed implementation, publication, and review to overlap safely. The resulting 12.50 stories per week is not a sustainable forecast, so retain the dependency-defined S65 boundary |
+| 2026-09-03 | Sprint estimate variance exceeded 30 percent | S65 | Record 1 actual day against 8 estimated. Isolated workers, the typed equation foundation, and established Word, Poppler, and Pandoc oracles allowed layout and conversion work to overlap after F-228. The resulting 15.00 stories per week is not a sustainable forecast, so retain the dependency-defined S66 boundary |
