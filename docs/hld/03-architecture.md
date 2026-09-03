@@ -382,6 +382,12 @@ breaking, while `None` retains the established top-aligned drawing behavior.
 The PDF and raster backends continue to consume only `LayoutResult` and gain no
 Word grammar dependency.
 
+**MathML and LaTeX conversion belongs to the `rdocx` facade.** One private
+module projects both formats directly into the `rdocx-oxml` `MathArgument`
+tree. The MathML side reuses `quick-xml` with expanded names. The LaTeX side is
+a bounded local recursive-descent parser. Pandoc is an exact-version test
+oracle only and is absent from the production dependency graph.
+
 The settings model owns the separate `w:settings` root and read-only
 projections for `w:documentProtection` and valid `w:docVars` entries. It reports
 the four supported editing modes, the recorded enforcement and formatting
@@ -748,6 +754,13 @@ equation order among runs, controls, revisions, and unsupported XML.
 `Document::math_properties` and `Document::set_math_properties` use the
 relationship-resolved settings part. These are additive pre-1.0 Rust APIs.
 Python, WASM, and CLI surfaces do not gain OfficeMath entry points implicitly.
+
+The native facade re-exports four free equation conversion functions because
+the normalized tree is owned by `rdocx-oxml`. The functions return the same
+`MathArgument` tree or canonical text together with concrete ordered
+`MathConversionDiagnostic` values. The generic result container is used for
+both `MathArgument` and `String`. No wrapper, trait, feature flag, or binding
+surface is introduced.
 
 `Document::text` traverses body paragraphs and table cells in document order.
 The WASM binding uses that additive facade accessor for its existing `getText`

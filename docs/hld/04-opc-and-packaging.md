@@ -215,6 +215,14 @@ when callers insert or reorder typed values. If callers shorten a collection,
 every now-unreached higher slot is emitted at the retained owner's tail rather
 than discarded.
 
+Presentation MathML conversion is a separate facade boundary rather than an
+OPC part. Its reader resolves the W3C MathML namespace by expanded name, rejects
+DTD and unresolved entity input, and applies byte, event, depth, node, text,
+matrix, and diagnostic limits. Its writer emits one default MathML namespace,
+stable attributes, ordered children, and explicit `mo` fences. `mfenced` is
+accepted only on input. Unsupported safe content is diagnosed, and descendants
+are retained only at the declared transparent `semantics` boundary.
+
 Logical owner identity includes exact normalized raw marker multiplicity and
 the resolved namespace facts of owner-dependent element and attribute uses.
 A same-URI declaration already local to a retained subtree remains independent

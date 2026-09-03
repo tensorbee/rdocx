@@ -1309,6 +1309,19 @@ cover the cases that matter now.
 - Inline and display equations retain paragraph item order through mutation,
   raw-boundary collapse, save, and reopen.
 
+**`rdocx` MathML and LaTeX conversion**
+- Source-built unit cases cover every supported Presentation MathML element,
+  LaTeX command family, normalization rule, limit, and ordered loss path.
+- Round trips compare the normalized `MathArgument` tree rather than format
+  bytes. Perturbations swap fraction operands, detach scripts, change delimiter
+  scope, reorder matrix cells, and remove a diagnostic.
+- The ignored live differential verifies exact Pandoc 3.10 identity and uses
+  its bundled texmath engine in both directions. Pandoc `display` and
+  `semantics` wrappers, its conversion of pre-scripts to an empty-base
+  post-script followed by a run, its insertion of explicit n-ary `\limits`,
+  and its removal of explicit delimiter scope are asserted as intentional
+  divergences.
+
 Agile encryption has a source-encoded Microsoft Word 16.104 oracle package so
 the regression gate does not depend on an opaque binary fixture. The gate opens
 that package only with its password, checks every supported AES data-key and
@@ -1642,7 +1655,7 @@ parallel, or failure-swallowing invocation.
 | Job | Command |
 |---|---|
 | changes | On pushes and pull requests, classify changed paths for the nine filtered jobs with `dorny/paths-filter` v4.0.3 pinned to reviewed commit `ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d` |
-| test | Install exact uv 0.10.2 and Poppler 26.01.0, fetch both pinned corpora, run the exact locked release-mode 1,000-page performance regression with one test thread, run `cargo test --workspace --all-features --exclude rdocx-py --exclude rpptx-py` with an isolated uv cache and 8 MiB Rust test-thread stack, run the exact locked deterministic animation golden, then run `python3 scripts/golden_png_harness.py --check` |
+| test | Install exact uv 0.10.2, Poppler 26.01.0, LibreOffice 26.2.5.2, and Pandoc 3.10, fetch both pinned corpora, run the pinned Pandoc texmath differential and exact locked release-mode 1,000-page performance regression with one test thread, run `cargo test --workspace --all-features --exclude rdocx-py --exclude rpptx-py` with an isolated uv cache and 8 MiB Rust test-thread stack, run the exact locked deterministic animation golden, then run `python3 scripts/golden_png_harness.py --check` |
 | no-default-features | `cargo test -p oxml-layout --no-default-features` |
 | wasm | Locked `wasm32-unknown-unknown` checks, `wasm-pack test --node`, and local bundler pack and fresh-install gates for `rdocx-wasm` and `rpptx-wasm` |
 | prose | `python3 scripts/prose_check.py` and `python3 scripts/sync_agent_skills.py --check` |

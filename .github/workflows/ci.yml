@@ -153,6 +153,8 @@ jobs:
           python3 scripts/install_pinned_poppler.py
       - name: Install pinned LibreOffice 26.2.5.2
         run: python3 scripts/install_pinned_libreoffice.py
+      - name: Install pinned Pandoc 3.10
+        run: python3 scripts/install_pinned_pandoc.py
       - name: Fetch pinned presentation corpus
         run: python3 scripts/fetch_pptx_corpus.py
       - name: Fetch pinned Word corpus
@@ -177,6 +179,11 @@ jobs:
           cargo test --locked -p rdocx
           epubcheck_5_3_0_accepts_the_source_built_publication
           --lib -- --ignored --nocapture
+      - name: Run pinned Pandoc texmath gate
+        run: >-
+          cargo test --locked -p rdocx
+          math::tests::mathml_and_latex_conversion_matches_pinned_pandoc_texmath_trees
+          --lib -- --ignored --exact --nocapture
       - name: Run thousand-page performance gate
         run: >-
           cargo test --locked --release -p rdocx

@@ -2108,11 +2108,17 @@ Word 16.104 PDF oracle within 1.0 point, and the complete 150 DPI page meets the
 declared luminance SSIM floor.
 
 ### F-230, MathML and LaTeX conversion (M)
-Import and export the supported OfficeMath subset through MathML and LaTeX with
-stable diagnostics for constructs that cannot round-trip.
+The native `rdocx` facade imports and exports the supported normalized
+OfficeMath subset through bounded Presentation MathML and LaTeX converters.
+Four free functions return the existing `MathArgument` tree or canonical text
+with stable ordered loss diagnostics. MathML uses expanded W3C names, accepts
+`mfenced` on input, and emits explicit fences. LaTeX uses a local bounded
+recursive-descent parser. Python, WASM, and CLI surfaces remain unchanged.
 **Depends on**: F-228.
-**Test gate**: differential. Supported source-built equations preserve their
-normalized expression tree through both conversion directions.
+**Test gate**: differential.
+`mathml_and_latex_conversion_matches_pinned_pandoc_texmath_trees` checks
+source-built equations structurally in both directions against exact Pandoc
+3.10 and records its intentional wrapper divergences.
 
 ### F-231, Extended field evaluation (L)
 Evaluate TOC, TC, formula, mail-merge control, and barcode fields while

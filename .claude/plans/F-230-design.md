@@ -1,6 +1,6 @@
 # F-230, MathML and LaTeX conversion
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S65
 **Size**: M
 **Depends on**: F-228
@@ -166,16 +166,16 @@ Any delta blocks the story and does not authorize a baseline update.
 
 ## Implementation checklist
 
-- [ ] Add the approved facade conversion module and public result surface.
-- [ ] Implement bounded namespace-aware MathML import and canonical export.
-- [ ] Implement bounded recursive-descent LaTeX import and canonical export.
-- [ ] Normalize both formats into the single F-228 expression tree.
-- [ ] Emit stable ordered diagnostics for every declared loss boundary.
-- [ ] Add source-built unit, round-trip, limit, and perturbation tests in the module.
-- [ ] Run the exact pinned Pandoc differential gate.
-- [ ] Pin and install Pandoc for the live CI differential gate.
-- [ ] Run archive, rustdoc, focused, and full verification gates.
-- [ ] Update exactly the listed HLD files.
+- [x] Add the approved facade conversion module and public result surface.
+- [x] Implement bounded namespace-aware MathML import and canonical export.
+- [x] Implement bounded recursive-descent LaTeX import and canonical export.
+- [x] Normalize both formats into the single F-228 expression tree.
+- [x] Emit stable ordered diagnostics for every declared loss boundary.
+- [x] Add source-built unit, round-trip, limit, and perturbation tests in the module.
+- [x] Run the exact pinned Pandoc differential gate.
+- [x] Pin and install Pandoc for the live CI differential gate.
+- [x] Run archive, rustdoc, focused, and full verification gates.
+- [x] Update exactly the listed HLD files.
 
 ## Open questions
 

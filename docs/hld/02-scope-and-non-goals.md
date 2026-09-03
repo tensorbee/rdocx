@@ -154,6 +154,12 @@ equations through the normalized Word model. Legacy Equation Editor, OLE, and
 pre-OOXML equation payloads remain opaque under the permanent legacy-format
 boundary.
 
+Native Rust callers can also import and export the supported normalized
+equation subset as Presentation MathML or LaTeX. Lossy format and OfficeMath
+properties remain visible through ordered diagnostics. Python, WASM, CLI,
+legacy equation formats, and a second conversion model remain outside this
+surface.
+
 ### Superseded
 
 | v1 position | Superseded by | Why it changed |

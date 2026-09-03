@@ -245,6 +245,15 @@ pre-1.0 source break for native callers that construct `LayoutInput` with a
 struct literal. It adds no wrapper, trait, binding method, or command-line
 surface.
 
+The additive native conversion surface is `equation_from_mathml`,
+`equation_to_mathml`, `equation_from_latex`, and `equation_to_latex`. Imports
+return a normalized `MathArgument`, exports return canonical text, and both
+carry ordered `MathConversionDiagnostic` records. The boundary accepts a bare
+argument, so document-wide and display-paragraph properties stay with their
+owners rather than being silently projected. Format attributes and expression
+properties that cannot survive the conversion are diagnosed. The surface is
+native Rust only and remains additive before 1.0.
+
 Native Rust callers can import RTF through `Document::from_rtf_bytes` and
 `Document::open_rtf`. These additive pre-1.0 APIs return an `RtfReadResult`
 that carries both the converted `Document` and every stable diagnostic for
