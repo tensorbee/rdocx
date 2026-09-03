@@ -283,6 +283,7 @@ impl MathExpression {
             Self::Run(value) => {
                 preservation_has_unsupported_content(&value.preservation)
                     || property_preservation_has_unsupported_content(&value.properties.preservation)
+                    || math_text_has_unsupported_content(&value.preservation)
             }
             Self::Fraction(value) => {
                 preservation_has_unsupported_content(&value.preservation)
@@ -995,6 +996,7 @@ pub struct MathRadical {
     pub degree: MathArgument,
     pub base: MathArgument,
     pub hide_degree: bool,
+    degree_present: bool,
     preservation: Preservation,
 }
 
@@ -1004,6 +1006,7 @@ impl MathRadical {
             degree: MathArgument::default(),
             base,
             hide_degree: true,
+            degree_present: false,
             preservation: Preservation::default(),
         }
     }
@@ -1013,6 +1016,7 @@ impl MathRadical {
             degree,
             base,
             hide_degree: false,
+            degree_present: true,
             preservation: Preservation::default(),
         }
     }
@@ -1022,6 +1026,7 @@ impl MathRadical {
         let mut degree = MathArgument::default();
         let mut base = MathArgument::default();
         let mut hide_degree = false;
+        let mut degree_present = false;
         let mut modeled = 0usize;
         for child in parsed.children {
             match math_local_name(&child, &parsed.bindings)?.as_deref() {
@@ -1038,6 +1043,7 @@ impl MathRadical {
                 }
                 Some("deg") => {
                     degree = MathArgument::from_raw(&child, &parsed.bindings)?;
+                    degree_present = true;
                     modeled += 1;
                 }
                 Some("e") => {
@@ -1051,21 +1057,30 @@ impl MathRadical {
             degree,
             base,
             hide_degree,
+            degree_present,
             preservation: parsed.preservation,
         })
     }
 
     fn write_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         write_container(writer, "rad", &self.preservation, |writer| {
-            let mut modeled = write_leading_property_container(
+            let mut modeled = write_leading_property_container_before_raw(
                 writer,
                 "radPr",
                 &[Property::boolean("degHide", self.hide_degree)],
                 &self.preservation,
                 true,
             )?;
-            self.degree.write_xml(writer, "deg")?;
-            modeled += 1;
+            let emit_degree = self.degree_present
+                || !self.degree.expressions.is_empty()
+                || self.degree.has_unsupported_content();
+            if self.degree_present {
+                write_raw_slot(writer, &self.preservation, modeled)?;
+                self.degree.write_xml(writer, "deg")?;
+                modeled += 1;
+            } else if emit_degree {
+                self.degree.write_xml(writer, "deg")?;
+            }
             write_raw_slot(writer, &self.preservation, modeled)?;
             self.base.write_xml(writer, "e")?;
             modeled += 1;
@@ -1412,6 +1427,8 @@ pub struct MathNary {
     pub hide_superscript: bool,
     pub grow: Option<bool>,
     pub limit_location: Option<LimitLocation>,
+    subscript_present: bool,
+    superscript_present: bool,
     preservation: Preservation,
 }
 
@@ -1426,6 +1443,8 @@ impl MathNary {
             hide_superscript: true,
             grow: None,
             limit_location: None,
+            subscript_present: false,
+            superscript_present: false,
             preservation: Preservation::default(),
         }
     }
@@ -1459,10 +1478,12 @@ impl MathNary {
                 }
                 Some("sub") => {
                     value.subscript = MathArgument::from_raw(&child, &parsed.bindings)?;
+                    value.subscript_present = true;
                     modeled += 1;
                 }
                 Some("sup") => {
                     value.superscript = MathArgument::from_raw(&child, &parsed.bindings)?;
+                    value.superscript_present = true;
                     modeled += 1;
                 }
                 Some("e") => {
@@ -1492,18 +1513,33 @@ impl MathNary {
             }
             properties.push(Property::boolean("subHide", self.hide_subscript));
             properties.push(Property::boolean("supHide", self.hide_superscript));
-            let mut modeled = write_leading_property_container(
+            let mut modeled = write_leading_property_container_before_raw(
                 writer,
                 "naryPr",
                 &properties,
                 &self.preservation,
                 true,
             )?;
-            self.subscript.write_xml(writer, "sub")?;
-            modeled += 1;
-            write_raw_slot(writer, &self.preservation, modeled)?;
-            self.superscript.write_xml(writer, "sup")?;
-            modeled += 1;
+            let emit_subscript = self.subscript_present
+                || !self.subscript.expressions.is_empty()
+                || self.subscript.has_unsupported_content();
+            if self.subscript_present {
+                write_raw_slot(writer, &self.preservation, modeled)?;
+                self.subscript.write_xml(writer, "sub")?;
+                modeled += 1;
+            } else if emit_subscript {
+                self.subscript.write_xml(writer, "sub")?;
+            }
+            let emit_superscript = self.superscript_present
+                || !self.superscript.expressions.is_empty()
+                || self.superscript.has_unsupported_content();
+            if self.superscript_present {
+                write_raw_slot(writer, &self.preservation, modeled)?;
+                self.superscript.write_xml(writer, "sup")?;
+                modeled += 1;
+            } else if emit_superscript {
+                self.superscript.write_xml(writer, "sup")?;
+            }
             write_raw_slot(writer, &self.preservation, modeled)?;
             self.base.write_xml(writer, "e")?;
             modeled += 1;
@@ -2109,6 +2145,23 @@ fn property_container_has_unsupported_content(preservation: &Preservation, tag: 
     })
 }
 
+fn math_text_has_unsupported_content(preservation: &Preservation) -> bool {
+    let Some(source) = preservation
+        .modeled_children
+        .iter()
+        .find(|child| child.name == "t")
+    else {
+        return false;
+    };
+    parse_element(&source.raw, &source.bindings).map_or(true, |parsed| {
+        parsed
+            .preservation
+            .attributes
+            .iter()
+            .any(|(name, _)| name != "xmlns" && !name.starts_with("xmlns:") && name != "xml:space")
+    })
+}
+
 fn script_has_unsupported_content(value: &MathScript, property_tag: &str) -> bool {
     preservation_has_unsupported_content(&value.preservation)
         || property_container_has_unsupported_content(&value.preservation, property_tag)
@@ -2151,16 +2204,28 @@ fn write_leading_property_container<W: Write>(
     preservation: &Preservation,
     emit: bool,
 ) -> Result<usize> {
+    let modeled =
+        write_leading_property_container_before_raw(writer, tag, properties, preservation, emit)?;
+    write_raw_slot(writer, preservation, modeled)?;
+    Ok(modeled)
+}
+
+fn write_leading_property_container_before_raw<W: Write>(
+    writer: &mut Writer<W>,
+    tag: &str,
+    properties: &[Property<'_>],
+    preservation: &Preservation,
+    emit: bool,
+) -> Result<usize> {
     let existed_in_source = has_preserved_modeled_child(preservation, tag);
-    if emit && !existed_in_source {
-        write_property_container_from_parent(writer, tag, properties, preservation)?;
-    }
-    write_raw_slot(writer, preservation, 0)?;
     if emit && existed_in_source {
+        write_raw_slot(writer, preservation, 0)?;
         write_property_container_from_parent(writer, tag, properties, preservation)?;
-        write_raw_slot(writer, preservation, 1)?;
         Ok(1)
     } else {
+        if emit {
+            write_property_container_from_parent(writer, tag, properties, preservation)?;
+        }
         Ok(0)
     }
 }
@@ -2643,10 +2708,10 @@ fn valid_expression_shape(raw: &[u8], inherited: &[(String, String)]) -> Result<
         "sSup" => sequence_matches(&sequence, "sSupPr", &["e", "sup"]),
         "sSubSup" => sequence_matches(&sequence, "sSubSupPr", &["e", "sub", "sup"]),
         "sPre" => sequence_matches(&sequence, "sPrePr", &["sub", "sup", "e"]),
-        "rad" => sequence_matches(&sequence, "radPr", &["deg", "e"]),
+        "rad" => sequence_matches_with_optional(&sequence, "radPr", &["deg"], &["e"]),
         "limLow" => sequence_matches(&sequence, "limLowPr", &["e", "lim"]),
         "limUpp" => sequence_matches(&sequence, "limUppPr", &["e", "lim"]),
-        "nary" => sequence_matches(&sequence, "naryPr", &["sub", "sup", "e"]),
+        "nary" => sequence_matches_with_optional(&sequence, "naryPr", &["sub", "sup"], &["e"]),
         "acc" => sequence_matches(&sequence, "accPr", &["e"]),
         "d" => {
             let argument_start = usize::from(sequence.first().is_some_and(|value| value == "dPr"));
@@ -2792,6 +2857,25 @@ fn sequence_matches(sequence: &[String], optional: &str, required: &[&str]) -> b
     let start = usize::from(sequence.first().is_some_and(|value| value == optional));
     sequence.len() == start + required.len()
         && sequence[start..]
+            .iter()
+            .zip(required)
+            .all(|(actual, expected)| actual == expected)
+}
+
+fn sequence_matches_with_optional(
+    sequence: &[String],
+    property: &str,
+    optional: &[&str],
+    required: &[&str],
+) -> bool {
+    let mut index = usize::from(sequence.first().is_some_and(|value| value == property));
+    for child in optional {
+        if sequence.get(index).is_some_and(|value| value == child) {
+            index += 1;
+        }
+    }
+    sequence.len() == index + required.len()
+        && sequence[index..]
             .iter()
             .zip(required)
             .all(|(actual, expected)| actual == expected)
@@ -3154,7 +3238,12 @@ mod tests {
             ])])),
             MathExpression::LowerLimit(MathLimit::new(text("lim"), text("0"))),
             MathExpression::UpperLimit(MathLimit::new(text("max"), text("n"))),
-            MathExpression::Nary(MathNary::new("∑", text("x"))),
+            MathExpression::Nary({
+                let mut nary = MathNary::new("∑", text("x"));
+                nary.subscript = text("i");
+                nary.superscript = text("n");
+                nary
+            }),
             MathExpression::Delimiter(MathDelimiter::new("(", ")", vec![text("x")])),
             MathExpression::Accent(MathAccent::new("̂", text("x"))),
         ])
@@ -3300,6 +3389,87 @@ mod tests {
         assert!(parsed.expressions[0].has_unsupported_content());
         assert!(fraction.numerator.has_unsupported_content());
         assert!(!fraction.denominator.has_unsupported_content());
+
+        let extended_text = format!(
+            r#"<m:oMath xmlns:m="{M_NS}" xmlns:x="urn:producer"><m:r><m:t x:keep="yes">x</m:t></m:r></m:oMath>"#
+        );
+        let extended_text = CT_OMath::from_xml(extended_text.as_bytes()).unwrap();
+        assert!(extended_text.expressions[0].has_unsupported_content());
+
+        let spaced_text = format!(
+            r#"<m:oMath xmlns:m="{M_NS}"><m:r><m:t xml:space="preserve"> x </m:t></m:r></m:oMath>"#
+        );
+        let spaced_text = CT_OMath::from_xml(spaced_text.as_bytes()).unwrap();
+        assert!(!spaced_text.expressions[0].has_unsupported_content());
+    }
+
+    #[test]
+    fn optional_radical_degree_and_nary_limits_remain_typed_and_omitted() {
+        let source = format!(
+            r#"<m:oMath xmlns:m="{M_NS}">
+                <m:rad><m:e/></m:rad>
+                <m:nary><m:e/></m:nary>
+                <m:nary><m:sub/><m:e/></m:nary>
+                <m:nary><m:sup/><m:e/></m:nary>
+                <m:nary><m:sub/><m:sup/><m:e/></m:nary>
+            </m:oMath>"#
+        );
+        let parsed = CT_OMath::from_xml(source.as_bytes()).unwrap();
+        assert!(matches!(parsed.expressions[0], MathExpression::Radical(_)));
+        assert!(
+            parsed.expressions[1..]
+                .iter()
+                .all(|value| matches!(value, MathExpression::Nary(_)))
+        );
+
+        let output = String::from_utf8(parsed.to_xml().unwrap()).unwrap();
+        assert!(!output.contains("<m:deg>"));
+        assert_eq!(output.matches("<m:sub>").count(), 2);
+        assert_eq!(output.matches("<m:sup>").count(), 2);
+
+        let reopened = CT_OMath::from_xml(output.as_bytes()).unwrap();
+        assert!(matches!(
+            reopened.expressions[0],
+            MathExpression::Radical(_)
+        ));
+        assert!(
+            reopened.expressions[1..]
+                .iter()
+                .all(|value| matches!(value, MathExpression::Nary(_)))
+        );
+    }
+
+    #[test]
+    fn authored_optional_arguments_precede_preserved_slots_without_rebasing_them() {
+        let source = format!(
+            r#"<m:oMath xmlns:m="{M_NS}" xmlns:x="urn:producer">
+                <m:rad><x:rad-slot/><m:e/></m:rad>
+                <m:nary><x:nary-slot/><m:e/></m:nary>
+            </m:oMath>"#
+        );
+        let mut parsed = CT_OMath::from_xml(source.as_bytes()).unwrap();
+        let MathExpression::Radical(radical) = &mut parsed.expressions[0] else {
+            panic!("radical")
+        };
+        radical.degree = MathArgument::text("3");
+        let MathExpression::Nary(nary) = &mut parsed.expressions[1] else {
+            panic!("nary")
+        };
+        nary.subscript = MathArgument::text("i");
+
+        let output = parsed.to_xml().unwrap();
+        assert_fragments_in_order(&output, &["<m:radPr>", "<m:deg>", "<x:rad-slot/>", "<m:e>"]);
+        assert_fragments_in_order(
+            &output,
+            &["<m:naryPr>", "<m:sub>", "<x:nary-slot/>", "<m:e>"],
+        );
+        let reopened = CT_OMath::from_xml(&output).unwrap();
+        let second = reopened.to_xml().unwrap();
+        assert_fragments_in_order(&second, &["<m:radPr>", "<m:deg>", "<x:rad-slot/>", "<m:e>"]);
+        assert_fragments_in_order(
+            &second,
+            &["<m:naryPr>", "<m:sub>", "<x:nary-slot/>", "<m:e>"],
+        );
     }
 
     #[test]
@@ -3389,6 +3559,33 @@ mod tests {
         ] {
             assert!(reopened_serialized.contains(raw));
         }
+        assert_fragments_in_order(
+            reopened_serialized.as_bytes(),
+            &[
+                r#"<x:before keep="root"/>"#,
+                "<m:r>",
+                "<m:f>",
+                r#"<x:after keep="root"/>"#,
+            ],
+        );
+        let fraction_start = reopened_serialized.find("<m:f>").unwrap();
+        let fraction_end = reopened_serialized[fraction_start..]
+            .find("</m:f>")
+            .map(|offset| fraction_start + offset + "</m:f>".len())
+            .unwrap();
+        let fraction = &reopened_serialized[fraction_start..fraction_end];
+        assert_fragments_in_order(
+            fraction.as_bytes(),
+            &[
+                "<m:fPr>",
+                r#"<x:fraction keep="property"/>"#,
+                "</m:fPr>",
+                "<m:num>",
+                r#"<x:numerator keep="argument"/>"#,
+                "</m:num>",
+                "<m:den>",
+            ],
+        );
     }
 
     fn assert_fragments_in_order(xml: &[u8], fragments: &[&str]) {
