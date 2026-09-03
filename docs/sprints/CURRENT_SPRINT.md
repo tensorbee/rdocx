@@ -31,7 +31,7 @@ and final page numbers without replacing unrelated field formatting.
 | F-ID | Title | Size | Status | Owner |
 |------|-------|------|--------|-------|
 | F-231 | Extended field evaluation | L | done | - |
-| F-232 | Dynamic table of contents rebuild | L | pending | - |
+| F-232 | Dynamic table of contents rebuild | L | in-progress | codex |
 
 ## Sequencing note
 
