@@ -11234,3 +11234,42 @@ https://github.com/tensorbee/rdocx/issues/67#issuecomment-5522284889.
 seven-package family. Verify each downloaded registry package, owner, annotated
 tag target, release-body bytes, unpublished carrier, contribution state, and
 notification URL before completing a release story.
+
+### F-228, OfficeMath model and authoring
+
+**Sprint.** S65
+**Completed.** 2026-09-03
+**Size.** L, estimated 4 days, actual 1 day
+
+**What was built.** `rdocx-oxml` now owns one bounded, recursive Transitional
+OfficeMath model for inline and display equations, runs, fractions, scripts,
+radicals, matrices, limits, n-ary operators, delimiters, accents, and
+document-wide math properties. The native `rdocx` facade exposes equations in
+paragraph source order with borrowed inspection, indexed mutation, and bounded
+authoring.
+
+**Non-obvious choices.** Supported children are projected into typed schema
+slots while unsupported siblings, attributes, and property content retain
+their original XML. Namespace aliases resolve by expanded name, authored math
+uses the fixed `m:` prefix, unsafe prefix collisions fail closed, and legacy
+Equation Editor objects remain opaque.
+
+**Deviations from the design plan.** None.
+
+**Spec sections touched.** `docs/hld/02-scope-and-non-goals.md`,
+`docs/hld/03-architecture.md`, `docs/hld/04-opc-and-packaging.md`,
+`docs/hld/10-bindings-spec.md`, `docs/hld/12-testing-strategy.md`, and
+`docs/hld/14-development-backlog.md`.
+
+**Tests.** The round-trip gate
+`officemath_corpus_parses_mutates_saves_and_reopens_without_losing_supported_or_raw_siblings`
+covers every supported expression, raw sibling preservation, mutation, and
+reopen. Public facade tests cover inline and display authoring, ordered access,
+and mutation. Six microscope passes ended clean, and full integrated
+verification passed.
+
+**Hash harness.** Unchanged, 49 of 49.
+
+**Notes for future sessions.** Layout and conversion must consume this public
+tree directly. They must not introduce a second equation model or weaken the
+fail-closed namespace and raw-preservation behavior.

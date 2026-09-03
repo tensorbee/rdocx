@@ -374,6 +374,7 @@ defended.
 | F-X075 | S64 | M | 2 | 1 | 2026-09-02 | Preserved complete-boundary restart pagination across page-spanning prose with exact sourced reuse and authenticated performance evidence |
 | F-X074 | S64 | S | 1 | 2 | 2026-09-03 | Published and independently verified the exact 15-package rpptx 0.9.0 family with the reviewed release body and no binding publication |
 | F-X076 | S64 | S | 1 | 1 | 2026-09-03 | Published and independently verified the exact seven-package rdocx 0.12.0 stable family with all seven reviewed contribution notifications |
+| F-228 | S65 | L | 4 | 1 | 2026-09-03 | Added a typed, source-ordered OfficeMath model with document settings, native authoring, schema-order writing, and unsupported XML preservation |
 
 ## Velocity
 
