@@ -2082,11 +2082,17 @@ comparison, inventories embedded content, and round-trips its modern package
 variant without losing unsupported XML or executable payloads.
 
 ### F-228, OfficeMath model and authoring (L)
-Typed OfficeMath equations, runs, fractions, scripts, radicals, matrices,
-limits, n-ary operators, delimiters, accents, and equation properties with
-schema-ordered authoring.
-**Test gate**: round-trip. The equation corpus parses, mutates, saves, and
-reopens without losing supported or raw sibling content.
+`rdocx-oxml` owns one Transitional OfficeMath tree for inline and display
+equations, runs, fractions, scripts, radicals, matrices, limits, n-ary
+operators, delimiters, accents, and document-wide math defaults. The native
+`rdocx` facade exposes source-ordered borrowing, indexed mutation, bounded
+authoring, and relationship-resolved settings access. Prefix aliases are read
+by expanded name, fixed `m:` output is schema ordered, unsafe namespace
+collisions fail closed, and unsupported or legacy content remains raw.
+**Test gate**: round-trip.
+`officemath_corpus_parses_mutates_saves_and_reopens_without_losing_supported_or_raw_siblings`
+covers every supported expression plus opaque root, property, and argument
+siblings through mutation and reopen.
 
 ### F-229, OfficeMath layout and PDF rendering (M)
 Lay out supported equations through the shared font and page-frame boundary

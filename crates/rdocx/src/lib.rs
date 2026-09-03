@@ -66,6 +66,13 @@ pub use paragraph::{
     ParagraphItemRef, ParagraphRef, SectionBreak, TabAlignment, TabLeader,
 };
 pub use rdocx_layout::RevisionView;
+pub use rdocx_oxml::math::{
+    CT_OMath, CT_OMathPara, FractionType, LimitLocation, MathAccent, MathArgument, MathDelimiter,
+    MathExpression, MathFraction, MathJustification, MathLimit, MathMatrix, MathMatrixProperties,
+    MathMatrixRow, MathNary, MathParagraphProperties, MathPreSubSuperscript, MathProperties,
+    MathRadical, MathRun, MathRunProperties, MathScript, MathScriptStyle, MathStyle,
+    MathSubSuperscript, MatrixBaseJustification, OfficeMath,
+};
 pub use rdocx_oxml::settings::{
     CryptAlgorithmClass, CryptAlgorithmType, CryptProviderType, DocumentProtection, ProtectionMode,
 };

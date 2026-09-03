@@ -23,6 +23,140 @@ struct OdtStructuralRecord {
     media: Vec<Vec<u8>>,
 }
 
+#[test]
+fn paragraph_items_keep_runs_equations_controls_and_raw_xml_in_source_order() {
+    let mut seed = Document::new();
+    let bytes = seed.to_bytes().unwrap();
+    let mut package = OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+    let math_namespace = "http://schemas.openxmlformats.org/officeDocument/2006/math";
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:q="{math_namespace}" xmlns:x="urn:producer"><w:body><w:p><w:r><w:t>before</w:t></w:r><q:oMath><q:r><q:t>x</q:t></q:r></q:oMath><q:oMathPara><q:oMathParaPr><q:jc q:val="centerGroup"/></q:oMathParaPr><q:oMath><q:r><q:t>display one</q:t></q:r></q:oMath><q:oMath><q:r><q:t>display two</q:t></q:r></q:oMath></q:oMathPara><w:sdt><w:sdtContent><w:r><w:t>control</w:t></w:r></w:sdtContent></w:sdt><x:raw keep="yes"/><w:r><w:t>after</w:t></w:r></w:p><w:sectPr/></w:body></w:document>"#
+    );
+    package.set_part("/word/document.xml", xml.into_bytes());
+    let mut saved = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut saved).unwrap();
+    let document = Document::from_bytes(saved.get_ref()).unwrap();
+    let paragraph = document.paragraph(0).unwrap();
+    let items = paragraph.items().collect::<Vec<_>>();
+    assert!(matches!(items[0], rdocx::ParagraphItemRef::Run(_)));
+    assert!(matches!(items[1], rdocx::ParagraphItemRef::Equation(_)));
+    assert!(matches!(items[2], rdocx::ParagraphItemRef::Equation(_)));
+    assert!(matches!(
+        items[3],
+        rdocx::ParagraphItemRef::ContentControl(_)
+    ));
+    assert!(matches!(
+        items[4],
+        rdocx::ParagraphItemRef::UnsupportedXml(_)
+    ));
+    assert!(matches!(items[5], rdocx::ParagraphItemRef::Run(_)));
+    let rdocx::OfficeMath::Display(display) = paragraph.equation(1).unwrap() else {
+        panic!("display equation")
+    };
+    assert_eq!(display.equations.len(), 2);
+    assert_eq!(
+        display.properties.justification,
+        Some(rdocx::MathJustification::CenterGroup)
+    );
+}
+
+#[test]
+fn public_equation_authoring_saves_reopens_and_remains_mutable() {
+    let mut document = Document::new();
+    let mut paragraph = document.add_paragraph("before");
+    let text = |value| rdocx::MathArgument::text(value);
+    paragraph
+        .add_equation(rdocx::OfficeMath::inline(vec![
+            rdocx::MathRun::new("x").into(),
+            rdocx::MathExpression::Fraction(rdocx::MathFraction::new(text("1"), text("2"))),
+            rdocx::MathExpression::Subscript(rdocx::MathScript::new(text("x"), text("i"))),
+            rdocx::MathExpression::Superscript(rdocx::MathScript::new(text("x"), text("2"))),
+            rdocx::MathExpression::SubSuperscript(rdocx::MathSubSuperscript::new(
+                text("x"),
+                text("i"),
+                text("2"),
+            )),
+            rdocx::MathExpression::PreSubSuperscript(rdocx::MathPreSubSuperscript::new(
+                text("x"),
+                text("i"),
+                text("2"),
+            )),
+            rdocx::MathExpression::Radical(rdocx::MathRadical::with_degree(text("3"), text("x"))),
+            rdocx::MathExpression::Matrix(rdocx::MathMatrix::new(vec![rdocx::MathMatrixRow::new(
+                vec![text("a"), text("b")],
+            )])),
+            rdocx::MathExpression::LowerLimit(rdocx::MathLimit::new(text("lim"), text("0"))),
+            rdocx::MathExpression::UpperLimit(rdocx::MathLimit::new(text("max"), text("n"))),
+            rdocx::MathExpression::Nary(rdocx::MathNary::new("∑", text("x"))),
+            rdocx::MathExpression::Delimiter(rdocx::MathDelimiter::new("(", ")", vec![text("x")])),
+            rdocx::MathExpression::Accent(rdocx::MathAccent::new("̂", text("x"))),
+        ]))
+        .unwrap();
+    let mut display = rdocx::CT_OMathPara::new(vec![
+        rdocx::CT_OMath::new(vec![rdocx::MathRun::new("display one").into()]),
+        rdocx::CT_OMath::new(vec![rdocx::MathRun::new("display two").into()]),
+    ]);
+    display.properties.justification = Some(rdocx::MathJustification::CenterGroup);
+    paragraph
+        .add_equation(rdocx::OfficeMath::Display(display))
+        .unwrap();
+    paragraph.add_run("after");
+    let mut defaults = rdocx::MathProperties::new();
+    defaults.math_font = Some("Cambria Math".to_owned());
+    defaults.justification = Some(rdocx::MathJustification::CenterGroup);
+    document.set_math_properties(defaults).unwrap();
+
+    let bytes = document.to_bytes().unwrap();
+    let mut reopened = Document::from_bytes(&bytes).unwrap();
+    assert_eq!(
+        reopened.math_properties().unwrap().math_font.as_deref(),
+        Some("Cambria Math")
+    );
+    let mut paragraph = reopened.paragraph_mut(0).unwrap();
+    let equation = paragraph.equation_mut(0).unwrap();
+    let rdocx::OfficeMath::Inline(equation) = equation else {
+        panic!("inline equation")
+    };
+    assert_eq!(equation.expressions.len(), 13);
+    let rdocx::MathExpression::Fraction(fraction) = &mut equation.expressions[1] else {
+        panic!("fraction")
+    };
+    fraction.fraction_type = rdocx::FractionType::Linear;
+    let rdocx::OfficeMath::Display(display) = paragraph.equation_mut(1).unwrap() else {
+        panic!("display equation")
+    };
+    assert_eq!(display.equations.len(), 2);
+    assert_eq!(
+        display.properties.justification,
+        Some(rdocx::MathJustification::CenterGroup)
+    );
+    let rdocx::MathExpression::Run(run) = &mut display.equations[1].expressions[0] else {
+        panic!("display math run")
+    };
+    run.text = "changed display".to_owned();
+    let mutated = reopened.to_bytes().unwrap();
+    let final_document = Document::from_bytes(&mutated).unwrap();
+    let rdocx::OfficeMath::Inline(equation) =
+        final_document.paragraph(0).unwrap().equation(0).unwrap()
+    else {
+        panic!("inline equation")
+    };
+    assert_eq!(equation.expressions.len(), 13);
+    let rdocx::MathExpression::Fraction(fraction) = &equation.expressions[1] else {
+        panic!("fraction")
+    };
+    assert_eq!(fraction.fraction_type, rdocx::FractionType::Linear);
+    let rdocx::OfficeMath::Display(display) =
+        final_document.paragraph(0).unwrap().equation(1).unwrap()
+    else {
+        panic!("display equation")
+    };
+    let rdocx::MathExpression::Run(run) = &display.equations[1].expressions[0] else {
+        panic!("display math run")
+    };
+    assert_eq!(run.text, "changed display");
+}
+
 #[derive(Debug, PartialEq)]
 struct OdtOracleParagraphRecord {
     text: String,

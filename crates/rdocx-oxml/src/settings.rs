@@ -4,8 +4,10 @@ use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, Event};
 use quick_xml::{Reader, Writer, XmlVersion};
 
 use crate::error::{OxmlError, Result};
+use crate::math::{MathProperties, fixed_math_prefix_is_safe, is_math_element};
 use crate::namespace::W_NS;
-use crate::properties::{is_word_attribute, is_word_element, word_prefixes_at};
+use crate::numbering::{namespace_bindings, word_prefixes_at};
+use crate::properties::{is_word_attribute, is_word_element};
 use crate::raw_xml::capture_element;
 
 /// The editing operation permitted by `w:documentProtection`.
@@ -141,6 +143,7 @@ pub struct CT_Settings {
     document_protection: Option<DocumentProtection>,
     document_variables: Vec<DocumentVariable>,
     automatic_hyphenation: Option<bool>,
+    math_properties: Option<MathProperties>,
     /// Parsed parts keep their complete producer bytes as the serialization
     /// source. This retains root attributes, child order, whitespace, and all
     /// unmodelled content without interpreting it.
@@ -162,6 +165,8 @@ impl CT_Settings {
         let mut document_variables = Vec::new();
         let mut automatic_hyphenation = None;
         let mut automatic_hyphenation_count = 0usize;
+        let mut math_properties = None;
+        let mut math_properties_count = 0usize;
         let mut doc_vars_depth = None;
         let mut doc_vars_prefixes = Vec::new();
         let mut saw_root = false;
@@ -185,6 +190,18 @@ impl CT_Settings {
                         saw_root = true;
                         depth = 1;
                     } else {
+                        if depth == 1
+                            && is_math_element(element.name().as_ref(), b"mathPr", &prefixes)
+                        {
+                            math_properties_count += 1;
+                            let raw = capture_element(&mut reader, &element)?;
+                            let bindings = namespace_bindings(&prefixes);
+                            if fixed_math_prefix_is_safe(&raw, &bindings)? {
+                                math_properties = Some(MathProperties::from_raw(&raw, &bindings)?);
+                            }
+                            buffer.clear();
+                            continue;
+                        }
                         if depth == 1
                             && is_word_element(
                                 element.name().as_ref(),
@@ -230,6 +247,15 @@ impl CT_Settings {
                         }
                         saw_root = true;
                     } else if depth == 1
+                        && is_math_element(element.name().as_ref(), b"mathPr", &prefixes)
+                    {
+                        math_properties_count += 1;
+                        let raw = capture_empty_element(&element)?;
+                        let bindings = namespace_bindings(&prefixes);
+                        if fixed_math_prefix_is_safe(&raw, &bindings)? {
+                            math_properties = Some(MathProperties::from_raw(&raw, &bindings)?);
+                        }
+                    } else if depth == 1
                         && is_word_element(
                             element.name().as_ref(),
                             b"documentProtection",
@@ -272,10 +298,14 @@ impl CT_Settings {
         if automatic_hyphenation_count != 1 {
             automatic_hyphenation = None;
         }
+        if math_properties_count != 1 {
+            math_properties = None;
+        }
         Ok(Self {
             document_protection: protection,
             document_variables,
             automatic_hyphenation,
+            math_properties,
             source_xml: Some(xml.to_vec()),
         })
     }
@@ -295,6 +325,20 @@ impl CT_Settings {
     /// OOXML defines omission as disabled.
     pub fn automatic_hyphenation(&self) -> bool {
         self.automatic_hyphenation.unwrap_or(false)
+    }
+
+    /// Return document-wide OfficeMath defaults, when present and valid.
+    pub fn math_properties(&self) -> Option<&MathProperties> {
+        self.math_properties.as_ref()
+    }
+
+    /// Replace the single schema-positioned OfficeMath defaults subtree.
+    pub fn set_math_properties(&mut self, properties: MathProperties) -> Result<()> {
+        if let Some(source) = &self.source_xml {
+            self.source_xml = Some(rewrite_math_properties(source, &properties)?);
+        }
+        self.math_properties = Some(properties);
+        Ok(())
     }
 
     /// Set the document automatic-hyphenation toggle.
@@ -330,9 +374,121 @@ impl CT_Settings {
         if let Some(enabled) = self.automatic_hyphenation {
             write_toggle(&mut writer, "w:autoHyphenation", enabled)?;
         }
+        if let Some(properties) = &self.math_properties {
+            properties.write_xml(&mut writer)?;
+        }
         writer.write_event(Event::End(BytesEnd::new("w:settings")))?;
         Ok(writer.into_inner())
     }
+}
+
+fn capture_empty_element(element: &BytesStart<'_>) -> Result<Vec<u8>> {
+    let mut raw = Vec::new();
+    Writer::new(&mut raw).write_event(Event::Empty(element.to_owned().into_owned()))?;
+    Ok(raw)
+}
+
+fn rewrite_math_properties(source: &[u8], properties: &MathProperties) -> Result<Vec<u8>> {
+    let mut reader = Reader::from_reader(source);
+    reader.config_mut().trim_text(false);
+    let mut writer = Writer::new(Vec::with_capacity(source.len() + 128));
+    let mut root_prefixes = Vec::new();
+    let mut depth = 0usize;
+    let mut inserted = false;
+    let mut buffer = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buffer)? {
+            Event::Start(element) if depth == 0 => {
+                root_prefixes = word_prefixes_at(&element, &[])?;
+                let mut root = element.into_owned();
+                ensure_fixed_word_prefix(&mut root)?;
+                writer.write_event(Event::Start(root))?;
+                depth = 1;
+            }
+            Event::Empty(element) if depth == 0 => {
+                let root_name = std::str::from_utf8(element.name().as_ref())?.to_owned();
+                let mut root = element.into_owned();
+                ensure_fixed_word_prefix(&mut root)?;
+                writer.write_event(Event::Start(root))?;
+                properties.write_xml(&mut writer)?;
+                writer.write_event(Event::End(BytesEnd::new(root_name)))?;
+                inserted = true;
+            }
+            Event::Start(element) if depth == 1 => {
+                let prefixes = word_prefixes_at(&element, &root_prefixes)?;
+                if is_math_element(element.name().as_ref(), b"mathPr", &prefixes) {
+                    if !inserted {
+                        properties.write_xml(&mut writer)?;
+                        inserted = true;
+                    }
+                    capture_element(&mut reader, &element)?;
+                } else {
+                    if !inserted && setting_follows_math_properties(&element, &prefixes) {
+                        properties.write_xml(&mut writer)?;
+                        inserted = true;
+                    }
+                    writer.write_event(Event::Start(element.into_owned()))?;
+                    depth += 1;
+                }
+            }
+            Event::Empty(element) if depth == 1 => {
+                let prefixes = word_prefixes_at(&element, &root_prefixes)?;
+                if is_math_element(element.name().as_ref(), b"mathPr", &prefixes) {
+                    if !inserted {
+                        properties.write_xml(&mut writer)?;
+                        inserted = true;
+                    }
+                } else {
+                    if !inserted && setting_follows_math_properties(&element, &prefixes) {
+                        properties.write_xml(&mut writer)?;
+                        inserted = true;
+                    }
+                    writer.write_event(Event::Empty(element.into_owned()))?;
+                }
+            }
+            Event::End(element) if depth == 1 => {
+                if !inserted {
+                    properties.write_xml(&mut writer)?;
+                }
+                writer.write_event(Event::End(element.into_owned()))?;
+                depth = 0;
+            }
+            Event::Start(element) => {
+                writer.write_event(Event::Start(element.into_owned()))?;
+                depth += 1;
+            }
+            Event::End(element) => {
+                writer.write_event(Event::End(element.into_owned()))?;
+                depth = depth.saturating_sub(1);
+            }
+            Event::Eof => break,
+            event => writer.write_event(event.into_owned())?,
+        }
+        buffer.clear();
+    }
+    Ok(writer.into_inner())
+}
+
+fn setting_follows_math_properties(element: &BytesStart<'_>, prefixes: &[String]) -> bool {
+    [
+        b"attachedSchema".as_slice(),
+        b"themeFontLang".as_slice(),
+        b"clrSchemeMapping".as_slice(),
+        b"doNotIncludeSubdocsInStats".as_slice(),
+        b"doNotAutoCompressPictures".as_slice(),
+        b"forceUpgrade".as_slice(),
+        b"captions".as_slice(),
+        b"readModeInkLockDown".as_slice(),
+        b"smartTagType".as_slice(),
+        b"schemaLibrary".as_slice(),
+        b"shapeDefaults".as_slice(),
+        b"doNotEmbedSmartTags".as_slice(),
+        b"decimalSymbol".as_slice(),
+        b"listSeparator".as_slice(),
+    ]
+    .iter()
+    .any(|local| is_word_element(element.name().as_ref(), local, prefixes))
 }
 
 fn parse_toggle(element: &BytesStart<'_>, prefixes: &[String]) -> Result<Option<bool>> {
@@ -740,6 +896,7 @@ mod tests {
             }),
             document_variables: Vec::new(),
             automatic_hyphenation: None,
+            math_properties: None,
             source_xml: None,
         };
         let xml = String::from_utf8(settings.to_xml().unwrap()).unwrap();
@@ -799,5 +956,49 @@ mod tests {
                 .unwrap()
                 .automatic_hyphenation()
         );
+    }
+
+    #[test]
+    fn math_properties_accept_aliases_and_replace_in_schema_order() {
+        let xml = format!(
+            r#"<q:settings xmlns:q="{W_NS}" xmlns:z="{}" xmlns:x="urn:producer"><q:rsids/><z:mathPr x:keep="yes"><z:mathFont z:val="Cambria Math"/><x:inside/></z:mathPr><x:outside/><q:attachedSchema q:val="urn:test"/></q:settings>"#,
+            crate::namespace::M_NS,
+        );
+        let mut settings = CT_Settings::from_xml(xml.as_bytes()).unwrap();
+        assert_eq!(
+            settings.math_properties().unwrap().math_font.as_deref(),
+            Some("Cambria Math")
+        );
+        let mut properties = settings.math_properties().unwrap().clone();
+        properties.math_font = Some("STIX Two Math".to_owned());
+        properties.justification = Some(crate::math::MathJustification::CenterGroup);
+        settings.set_math_properties(properties).unwrap();
+
+        let output = String::from_utf8(settings.to_xml().unwrap()).unwrap();
+        assert!(output.contains(r#"x:keep="yes""#));
+        assert!(output.contains("<x:inside/>"));
+        assert!(output.contains("<x:outside/>"));
+        assert!(output.contains(r#"<m:mathFont m:val="STIX Two Math"/>"#));
+        assert!(output.find("<q:rsids").unwrap() < output.find("<m:mathPr").unwrap());
+        assert!(output.find("<m:mathPr").unwrap() < output.find("<q:attachedSchema").unwrap());
+        assert_eq!(
+            CT_Settings::from_xml(output.as_bytes())
+                .unwrap()
+                .math_properties()
+                .unwrap()
+                .justification,
+            Some(crate::math::MathJustification::CenterGroup)
+        );
+    }
+
+    #[test]
+    fn math_properties_with_a_conflicting_m_binding_remain_untyped() {
+        let xml = format!(
+            r#"<w:settings xmlns:w="{W_NS}" xmlns:q="{}" xmlns:m="urn:producer"><q:mathPr><m:opaque/></q:mathPr></w:settings>"#,
+            crate::namespace::M_NS,
+        );
+        let settings = CT_Settings::from_xml(xml.as_bytes()).unwrap();
+        assert!(settings.math_properties().is_none());
+        assert_eq!(settings.to_xml().unwrap(), xml.as_bytes());
     }
 }

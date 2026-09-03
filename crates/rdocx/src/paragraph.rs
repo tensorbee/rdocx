@@ -2,6 +2,7 @@
 
 use rdocx_oxml::borders::{CT_BorderEdge, CT_PBdr, CT_TabStop, CT_Tabs};
 use rdocx_oxml::document::CT_SectPr;
+use rdocx_oxml::math::OfficeMath;
 use rdocx_oxml::properties::{CT_PPr, CT_Shd};
 use rdocx_oxml::shared::{
     ST_Border, ST_Jc, ST_PageOrientation, ST_SectionType, ST_TabJc, ST_TabLeader,
@@ -30,6 +31,8 @@ pub enum ParagraphItemRef<'a> {
     Run(RunRef<'a>),
     /// A hyperlink and its direct children.
     Hyperlink(HyperlinkRef<'a>),
+    /// An inline or display OfficeMath equation.
+    Equation(&'a OfficeMath),
     /// A paragraph-level content control.
     ContentControl(ContentControlRef<'a>),
     /// A tracked insertion, deletion, or move.
@@ -281,6 +284,42 @@ impl<'a> Paragraph<'a> {
     /// Get the combined text of all runs.
     pub fn text(&self) -> String {
         self.inner.text()
+    }
+
+    /// Iterate over typed equations in paragraph source order.
+    pub fn equations(&self) -> impl Iterator<Item = &OfficeMath> {
+        self.inner.equations.iter().map(|(_, _, equation)| equation)
+    }
+
+    /// Get an equation by equation index.
+    pub fn equation(&self, index: usize) -> Option<&OfficeMath> {
+        self.inner
+            .equations
+            .get(index)
+            .map(|(_, _, equation)| equation)
+    }
+
+    /// Get a mutable equation by equation index.
+    pub fn equation_mut(&mut self, index: usize) -> Option<&mut OfficeMath> {
+        self.inner
+            .equations
+            .get_mut(index)
+            .map(|(_, _, equation)| equation)
+    }
+
+    /// Append an inline or display equation at the final run boundary.
+    pub fn add_equation(&mut self, equation: OfficeMath) -> crate::Result<()> {
+        let run_index = self.inner.runs.len();
+        let raw_before = self
+            .inner
+            .extra_xml
+            .iter()
+            .filter(|(position, _)| *position == run_index)
+            .count();
+        let raw = equation.to_xml()?;
+        self.inner.extra_xml.push((run_index, raw));
+        self.inner.equations.push((run_index, raw_before, equation));
+        Ok(())
     }
 
     /// Append a footnote reference run (`<w:footnoteReference w:id="..."/>`).
@@ -926,6 +965,19 @@ impl<'a> ParagraphRef<'a> {
         self.inner.text()
     }
 
+    /// Iterate over typed equations in paragraph source order.
+    pub fn equations(&self) -> impl Iterator<Item = &'a OfficeMath> {
+        self.inner.equations.iter().map(|(_, _, equation)| equation)
+    }
+
+    /// Get an equation by equation index.
+    pub fn equation(&self, index: usize) -> Option<&'a OfficeMath> {
+        self.inner
+            .equations
+            .get(index)
+            .map(|(_, _, equation)| equation)
+    }
+
     /// Iterate over direct paragraph items in source order.
     ///
     /// Unlike [`Self::runs`], this retains hyperlinks, content controls,
@@ -987,6 +1039,13 @@ impl<'a> ParagraphRef<'a> {
                     }
                 }
                 if let Some(raw) = extras.get(raw_index) {
+                    let equation = self
+                        .inner
+                        .equations
+                        .iter()
+                        .find_map(|(at, slot, equation)| {
+                            (*at == run_index && *slot == raw_index).then_some(equation)
+                        });
                     let revision = self
                         .inner
                         .revisions
@@ -1006,7 +1065,9 @@ impl<'a> ParagraphRef<'a> {
                                 && link.run_end == run_index
                                 && link.preserved_raw_before == Some(raw_index)
                         });
-                    items.push(if let Some(revision) = revision {
+                    items.push(if let Some(equation) = equation {
+                        ParagraphItemRef::Equation(equation)
+                    } else if let Some(revision) = revision {
                         ParagraphItemRef::Revision(RevisionRef { inner: revision })
                     } else if let Some(bookmark) = bookmark {
                         if bookmark.is_start() {

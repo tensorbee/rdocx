@@ -2334,6 +2334,7 @@ fn render_paragraph_projection(paragraph: &CT_P) -> CT_P {
         extra_xml: Vec::new(),
         content_controls: Vec::new(),
         revisions: Vec::new(),
+        equations: Vec::new(),
     }
 }
 

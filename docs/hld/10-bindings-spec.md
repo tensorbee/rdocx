@@ -227,6 +227,15 @@ mutation for a larger value. `Document::set_list_level` can redefine an
 existing level without rebuilding the document. A rejected redefinition is
 side-effect free.
 
+The native facade re-exports the concrete OfficeMath tree from `rdocx-oxml`.
+`Paragraph::equations`, `Paragraph::equation`, and their read-only equivalents
+borrow inline and display equations in source order. Mutable paragraphs add
+`equation_mut` and `add_equation`, while `ParagraphItemRef::Equation` keeps the
+mixed paragraph item stream ordered. `Document::math_properties` and
+`Document::set_math_properties` expose document-wide defaults from the
+relationship-resolved settings part. The model and accessors are additive on
+the pre-1.0 Rust surface. Python, WASM, and CLI bindings remain unchanged.
+
 Native Rust callers can import RTF through `Document::from_rtf_bytes` and
 `Document::open_rtf`. These additive pre-1.0 APIs return an `RtfReadResult`
 that carries both the converted `Document` and every stable diagnostic for

@@ -1,6 +1,6 @@
 # F-228, OfficeMath model and authoring
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S65
 **Size**: L
 **Depends on**: none
@@ -176,16 +176,16 @@ existing sample delta blocks the story and does not authorize a baseline update.
 
 ## Implementation checklist
 
-- [ ] Add the approved OfficeMath grammar module and namespace binding.
-- [ ] Implement the single normalized expression tree and bounded properties.
-- [ ] Project document-wide `m:mathPr` defaults through the existing settings owner.
-- [ ] Parse and serialize every supported expression in schema order.
-- [ ] Preserve unsupported attributes and children at their owning slots.
-- [ ] Integrate inline and display equations into paragraph source order.
-- [ ] Add the bounded native paragraph authoring and reader surface.
-- [ ] Add the source-built round-trip corpus to existing test targets.
-- [ ] Run focused parser, facade, archive, rustdoc, and full verification gates.
-- [ ] Update exactly the listed HLD files.
+- [x] Add the approved OfficeMath grammar module and namespace binding.
+- [x] Implement the single normalized expression tree and bounded properties.
+- [x] Project document-wide `m:mathPr` defaults through the existing settings owner.
+- [x] Parse and serialize every supported expression in schema order.
+- [x] Preserve unsupported attributes and children at their owning slots.
+- [x] Integrate inline and display equations into paragraph source order.
+- [x] Add the bounded native paragraph authoring and reader surface.
+- [x] Add the source-built round-trip corpus to existing test targets.
+- [x] Run focused parser, facade, archive, rustdoc, and full verification gates.
+- [x] Update exactly the listed HLD files.
 
 ## Open questions
 

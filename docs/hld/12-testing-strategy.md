@@ -652,6 +652,19 @@ Repeated and concurrent focused tests preserve `Document: Send + Sync`. The
 no-default feature test, both WASM checks, committed-graph package dry-runs,
 archive-size ceiling, and reviewed 49-entry hash harness are required riders.
 
+The OfficeMath round-trip gate is
+`officemath_corpus_parses_mutates_saves_and_reopens_without_losing_supported_or_raw_siblings`.
+Its source-built corpus covers all thirteen supported expression variants and
+opaque root, property, and argument siblings through typed mutation and
+reopen. Focused grammar tests cover inline and display equations, aliases,
+fixed-prefix writes, schema child order, property defaults and domains,
+malformed sequences, XML depth, text decoding, conflicting namespace bindings,
+and legacy Equation Editor isolation. Existing integration targets cover
+paragraph item order, collapsed raw-boundary rebasing, full-corpus authoring,
+display justification, settings relationships, and mutable facade reopen. The
+published-crate riders deny rustdoc warnings, dry-run both packages, and keep
+each archive below 10 MiB. The 49-entry hash harness remains unchanged.
+
 ## The hash harness
 
 The single highest-value mechanism in the plan is
@@ -1273,6 +1286,14 @@ cover the cases that matter now.
 - Zip-slip: a part named `../../etc/passwd` and an absolute-path entry are
   normalised or rejected. The code handles it, nothing tests it, and the crate
   is about to become a public shared component.
+
+**`rdocx-oxml` OfficeMath**
+- Prefix aliases and default namespaces resolve by expanded name, while
+  unqualified attributes and conflicting fixed-prefix bindings stay untyped.
+- Every supported expression and property sequence writes in schema order and
+  reparses with opaque siblings in the same logical slots.
+- Inline and display equations retain paragraph item order through mutation,
+  raw-boundary collapse, save, and reopen.
 
 Agile encryption has a source-encoded Microsoft Word 16.104 oracle package so
 the regression gate does not depend on an opaque binary fixture. The gate opens

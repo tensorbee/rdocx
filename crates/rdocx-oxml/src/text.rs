@@ -9,6 +9,7 @@ use quick_xml::{NsReader, Reader, Writer, XmlVersion};
 use crate::content_control::CT_Sdt;
 use crate::drawing::CT_Drawing;
 use crate::error::{OxmlError, Result};
+use crate::math::OfficeMath;
 use crate::namespace::{R_NS, matches_local_name};
 use crate::numbering::{namespace_bindings, parse_scoped_ppr, word_prefixes_at};
 use crate::properties::{CT_PPr, CT_RPr, is_word_attribute, is_word_element};
@@ -1775,6 +1776,8 @@ pub struct CT_P {
     pub content_controls: Vec<(usize, usize, usize, CT_Sdt)>,
     /// Read projections of revision wrappers retained at paragraph or hyperlink boundaries.
     pub revisions: Vec<(usize, usize, CT_Revision)>,
+    /// Typed OfficeMath projections keyed by `(run boundary, raw child slot)`.
+    pub equations: Vec<(usize, usize, OfficeMath)>,
 }
 
 #[allow(non_snake_case)]
@@ -1789,6 +1792,7 @@ impl CT_P {
             extra_xml: Vec::new(),
             content_controls: Vec::new(),
             revisions: Vec::new(),
+            equations: Vec::new(),
         }
     }
 
@@ -1929,6 +1933,11 @@ impl CT_P {
             *slot = hyperlink_revision_slot(new_index);
         }
         for (position, _) in &mut self.extra_xml {
+            if *position >= run_index {
+                *position += 1;
+            }
+        }
+        for (position, _, _) in &mut self.equations {
             if *position >= run_index {
                 *position += 1;
             }
@@ -2093,6 +2102,11 @@ impl CT_P {
         }
         for (position, _) in &mut self.extra_xml {
             *position = boundary_map[(*position).min(old_run_count)];
+        }
+        for (position, raw_before, _) in &mut self.equations {
+            let old_boundary = (*position).min(old_run_count);
+            *position = boundary_map[old_boundary];
+            *raw_before = raw_prefixes[old_boundary] + (*raw_before).min(raw_counts[old_boundary]);
         }
         let old_hyperlinks = std::mem::take(&mut self.hyperlinks);
         let mut hyperlink_map = vec![None; old_hyperlinks.len()];
@@ -2440,6 +2454,21 @@ impl CT_P {
                 .retain(|(_, _, raw)| !is_xml_whitespace(raw));
         }
 
+        let inherited_bindings = namespace_bindings(word_prefixes);
+        let mut equations = Vec::new();
+        for run_index in 0..=runs.len() {
+            for (raw_before, raw) in extra_xml
+                .iter()
+                .filter(|(position, _)| *position == run_index)
+                .map(|(_, raw)| raw)
+                .enumerate()
+            {
+                if let Some(equation) = OfficeMath::from_raw(raw, &inherited_bindings)? {
+                    equations.push((run_index, raw_before, equation));
+                }
+            }
+        }
+
         Ok(CT_P {
             properties,
             runs,
@@ -2449,6 +2478,7 @@ impl CT_P {
             extra_xml,
             content_controls,
             revisions,
+            equations,
         })
     }
 
@@ -2502,11 +2532,14 @@ impl CT_P {
 
             write_paragraph_boundary(
                 writer,
-                &self.extra_xml,
-                &self.content_controls,
-                &self.comment_ranges,
-                &self.hyperlinks,
-                &self.revisions,
+                ParagraphBoundary {
+                    extra_xml: &self.extra_xml,
+                    content_controls: &self.content_controls,
+                    markers: &self.comment_ranges,
+                    hyperlinks: &self.hyperlinks,
+                    revisions: &self.revisions,
+                    equations: &self.equations,
+                },
                 run_idx,
             )?;
 
@@ -2571,11 +2604,14 @@ impl CT_P {
 
         write_paragraph_boundary(
             writer,
-            &self.extra_xml,
-            &self.content_controls,
-            &self.comment_ranges,
-            &self.hyperlinks,
-            &self.revisions,
+            ParagraphBoundary {
+                extra_xml: &self.extra_xml,
+                content_controls: &self.content_controls,
+                markers: &self.comment_ranges,
+                hyperlinks: &self.hyperlinks,
+                revisions: &self.revisions,
+                equations: &self.equations,
+            },
             self.runs.len(),
         )?;
         write_empty_hyperlinks(writer, &self.hyperlinks, &self.revisions, self.runs.len())?;
@@ -4278,22 +4314,29 @@ fn is_content_revision_element(name: &[u8], word_prefixes: &[String]) -> bool {
         || is_word_element(name, b"moveTo", word_prefixes)
 }
 
+struct ParagraphBoundary<'a> {
+    extra_xml: &'a [(usize, Vec<u8>)],
+    content_controls: &'a [(usize, usize, usize, CT_Sdt)],
+    markers: &'a [CommentRangeMarker],
+    hyperlinks: &'a [HyperlinkSpan],
+    revisions: &'a [(usize, usize, CT_Revision)],
+    equations: &'a [(usize, usize, OfficeMath)],
+}
+
 fn write_paragraph_boundary<W: std::io::Write>(
     writer: &mut Writer<W>,
-    extra_xml: &[(usize, Vec<u8>)],
-    content_controls: &[(usize, usize, usize, CT_Sdt)],
-    markers: &[CommentRangeMarker],
-    hyperlinks: &[HyperlinkSpan],
-    revisions: &[(usize, usize, CT_Revision)],
+    boundary: ParagraphBoundary<'_>,
     run_index: usize,
 ) -> Result<()> {
-    let extras = extra_xml
+    let extras = boundary
+        .extra_xml
         .iter()
         .filter(|(position, _)| *position == run_index)
         .map(|(_, raw)| raw)
         .collect::<Vec<_>>();
     for raw_index in 0..=extras.len() {
-        let boundary_markers = markers
+        let boundary_markers = boundary
+            .markers
             .iter()
             .filter(|marker| {
                 marker.run_index() == run_index
@@ -4302,7 +4345,8 @@ fn write_paragraph_boundary<W: std::io::Write>(
             .collect::<Vec<_>>();
         for marker_index in 0..=boundary_markers.len() {
             for (_, _, _, sdt) in
-                content_controls
+                boundary
+                    .content_controls
                     .iter()
                     .filter(|(at, raw_before, markers_before, _)| {
                         *at == run_index
@@ -4324,8 +4368,17 @@ fn write_paragraph_boundary<W: std::io::Write>(
             }
         }
         if let Some(raw) = extras.get(raw_index) {
-            if let Some((hyperlink_index, hyperlink)) =
-                hyperlinks.iter().enumerate().find(|(_, hyperlink)| {
+            if let Some((_, _, equation)) = boundary
+                .equations
+                .iter()
+                .find(|(at, slot, _)| *at == run_index && *slot == raw_index)
+            {
+                equation.write_xml(writer)?;
+            } else if let Some((hyperlink_index, hyperlink)) = boundary
+                .hyperlinks
+                .iter()
+                .enumerate()
+                .find(|(_, hyperlink)| {
                     hyperlink.run_start == run_index
                         && hyperlink.run_end == run_index
                         && hyperlink.preserved_raw_before == Some(raw_index)
@@ -4336,7 +4389,7 @@ fn write_paragraph_boundary<W: std::io::Write>(
                 write_hyperlink_start(&mut replacement_writer, hyperlink)?;
                 write_hyperlink_boundary(
                     &mut replacement_writer,
-                    revisions,
+                    boundary.revisions,
                     hyperlink_index,
                     hyperlink,
                     run_index,
@@ -7158,5 +7211,30 @@ mod tests {
             "<w:r><w:t>one &amp; two</w:t><w:delText>three &lt; four</w:delText></w:r>",
         );
         assert_eq!(valid.runs[0].text(), "one & twothree < four");
+    }
+
+    #[test]
+    fn collapsed_run_boundaries_rebase_equation_raw_slots() {
+        let math_namespace = crate::namespace::M_NS;
+        let mut paragraph = parse_paragraph(&format!(
+            r#"<m:oMath xmlns:m="{math_namespace}"><m:r><m:t>first</m:t></m:r></m:oMath><w:r><w:commentReference w:id="7"/></w:r><m:oMath xmlns:m="{math_namespace}"><m:r><m:t>second</m:t></m:r></m:oMath><w:r><w:t>kept</w:t></w:r>"#
+        ));
+        paragraph.remove_comment_anchors(&[7]);
+        assert_eq!(paragraph.equations.len(), 2);
+        assert_eq!(paragraph.equations[0].0, 0);
+        assert_eq!(paragraph.equations[0].1, 0);
+        assert_eq!(paragraph.equations[1].0, 0);
+        assert_eq!(paragraph.equations[1].1, 1);
+        let OfficeMath::Inline(second) = &mut paragraph.equations[1].2 else {
+            panic!("inline equation")
+        };
+        let crate::math::MathExpression::Run(run) = &mut second.expressions[0] else {
+            panic!("math run")
+        };
+        run.text = "changed".to_owned();
+
+        let output = serialized_paragraph(&paragraph);
+        assert!(output.find("first").unwrap() < output.find("changed").unwrap());
+        assert!(!output.contains("second"));
     }
 }

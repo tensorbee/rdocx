@@ -203,6 +203,15 @@ namespace URI escaping are resolved by the XML parser. Serialization fails
 closed when owner identity or a serializer prefix binding cannot be preserved
 safely, leaving the opened package bytes authoritative.
 
+Direct paragraph `m:oMath` and `m:oMathPara` children use that same owner and
+boundary discipline. The reader accepts any prefix bound to the Transitional
+OfficeMath namespace. Canonical typed writes use `m:` and replay the inherited
+bindings needed by retained raw content. A conflicting `m` binding, malformed
+grammar sequence, foreign same-local-name node, or legacy Equation Editor
+object remains unmodelled raw XML. Run-boundary collapse rebases both the raw
+child position and the equation projection so later mutation still replaces
+the correct source node.
+
 Logical owner identity includes exact normalized raw marker multiplicity and
 the resolved namespace facts of owner-dependent element and attribute uses.
 A same-URI declaration already local to a retained subtree remains independent
@@ -245,6 +254,15 @@ protection modes, unsupported algorithm enum values, and malformed numeric
 metadata remain opaque and byte-identical. A document without a settings
 relationship does not gain a settings part, relationship, or content-type
 override during an ordinary save.
+
+The settings model also projects one valid `m:mathPr` child. Typed defaults
+cover the math font, display justification, unsigned margins and spacing,
+small-fraction and display toggles, and integral and n-ary limit placement.
+Mutation replaces every existing math-properties occurrence with one
+schema-positioned subtree while preserving unrelated settings bytes. Creating
+defaults without a settings relationship allocates a collision-safe settings
+part and adds the relationship and content type through the existing package
+path.
 
 Watermark authoring follows the document-to-header graph rather than assuming
 conventional header names. The facade materializes a missing default, first, or

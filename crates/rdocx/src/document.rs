@@ -19,6 +19,7 @@ use quick_xml::XmlVersion;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::{Namespace, ResolveResult};
 use quick_xml::reader::NsReader;
+use rdocx_oxml::MathProperties;
 use rdocx_oxml::content_control::{CT_Sdt, SdtContent};
 use rdocx_oxml::document::{BodyContent, CT_Columns, CT_Document, CT_SectPr};
 use rdocx_oxml::drawing::{CT_Anchor, CT_Drawing, CT_Inline};
@@ -4113,6 +4114,26 @@ impl Document {
         self.settings
             .get_or_insert_with(CT_Settings::new)
             .set_automatic_hyphenation(enabled)?;
+        self.invalidate_layout();
+        self.settings_part_name = Some(part_name.clone());
+        self.ensure_part_relationship(&part_name, rel_types::SETTINGS, SETTINGS_CONTENT_TYPE);
+        Ok(())
+    }
+
+    /// Return document-wide OfficeMath defaults from the settings part.
+    pub fn math_properties(&self) -> Option<&MathProperties> {
+        self.settings.as_ref()?.math_properties()
+    }
+
+    /// Set document-wide OfficeMath defaults in the relationship-resolved settings part.
+    pub fn set_math_properties(&mut self, properties: MathProperties) -> Result<()> {
+        let part_name = match &self.settings_part_name {
+            Some(part_name) => part_name.clone(),
+            None => available_settings_part_name(&self.package)?,
+        };
+        self.settings
+            .get_or_insert_with(CT_Settings::new)
+            .set_math_properties(properties)?;
         self.invalidate_layout();
         self.settings_part_name = Some(part_name.clone());
         self.ensure_part_relationship(&part_name, rel_types::SETTINGS, SETTINGS_CONTENT_TYPE);
