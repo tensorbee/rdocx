@@ -10,10 +10,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use rdocx::{
-    BodyContentRef, BodyItemRef, BreakKind, CellItemRef, CellRef, ChartData, ChartKind, Document,
-    FieldDateTime, FieldEvaluationContext, FieldOutcome, HyperlinkItemRef, HyperlinkRef, Length,
-    ParagraphItemRef, ParagraphRef, RasterFormat, RasterOptions, RasterOutput, RenderOptions,
-    RevisionView, RunItemRef, RunPosition, RunRange, RunRef, TableRef, UnsupportedXmlRef,
+    BarcodeField, BarcodeKind, BodyContentRef, BodyItemRef, BreakKind, CellItemRef, CellRef,
+    ChartData, ChartKind, Document, FieldDateTime, FieldEvaluationContext, FieldOutcome,
+    HyperlinkItemRef, HyperlinkRef, Length, MailMergeControl, ParagraphItemRef, ParagraphRef,
+    RasterFormat, RasterOptions, RasterOutput, RenderOptions, RevisionView, RunItemRef,
+    RunPosition, RunRange, RunRef, TableRef, TcField, TocEntrySelection, TocField,
+    UnsupportedXmlRef,
 };
 use rdocx_oxml::CT_Document;
 use rdocx_oxml::document::{BodyContent, CT_Body};
@@ -924,6 +926,7 @@ const WORD_DENSE_FORM_ORACLE: &str = "Microsoft Word 16.104 build 16.104.2512142
 const WORD_FIELD_ORACLE_ENVIRONMENT: &str =
     "locale=en-US; calendar=Gregorian; decimal=.; grouping=,; timezone=UTC";
 const WORD_FIELD_ORACLE_INPUT: &str = "F-161-readable-field-matrix-v1";
+const EXTENDED_WORD_FIELD_ORACLE_INPUT: &str = "F-231-readable-field-matrix-v1";
 
 fn document_with_field_parts(
     document_xml: &str,
@@ -1010,6 +1013,8 @@ fn every_supported_field_matches_the_pinned_word_result() {
         file_path: Some("/templates/report.docx".to_owned()),
         merge_fields: BTreeMap::from([("Name".to_owned(), "Grace".to_owned())]),
         included_text: BTreeMap::from([("chapter.docx".to_owned(), "Included chapter".to_owned())]),
+        merge_record_number: None,
+        merge_sequence_number: None,
     };
     let actual = document
         .evaluate_fields(&context)
@@ -1035,6 +1040,238 @@ fn every_supported_field_matches_the_pinned_word_result() {
         FieldOutcome::DeferredPagination,
     ];
     assert_eq!(actual, expected, "{WORD_FIELD_ORACLE_INPUT}");
+}
+
+#[test]
+fn extended_field_families_match_the_pinned_word_result() {
+    assert_eq!(
+        WORD_FIELD_ORACLE,
+        "Microsoft Word 16.104 build 16.104.25121423"
+    );
+    assert_eq!(
+        WORD_FIELD_ORACLE_ENVIRONMENT,
+        "locale=en-US; calendar=Gregorian; decimal=.; grouping=,; timezone=UTC"
+    );
+    assert_eq!(
+        EXTENDED_WORD_FIELD_ORACLE_INPUT,
+        "F-231-readable-field-matrix-v1"
+    );
+
+    let body = r#"
+        <w:p><w:fldSimple w:instr="= 50% + 0.5"><w:r><w:t>stored formula</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="TOC \o &quot;1-3&quot; \h"><w:r><w:t>stored toc</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="TC &quot;Alpha&quot; \l 2"><w:r><w:t>stored tc</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="NEXT"><w:r><w:t>stored next</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="NEXTIF &quot;A&quot; = &quot;A&quot;"><w:r><w:t>stored nextif</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="SKIPIF &quot;A&quot; = &quot;A&quot;"><w:r><w:t>stored skipif</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="MERGEREC"><w:r><w:t>stored record</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="MERGESEQ"><w:r><w:t>stored sequence</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="DISPLAYBARCODE 0123456789012 EAN13 \x \p STD"><w:r><w:t>stored display barcode</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="MERGEBARCODE Code QR \q 3"><w:r><w:t>stored merge barcode</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="= 0.1 + 0.2"><w:r><w:t>stored decimal formula</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="TOC \o &quot;1-3&quot; \s chapter \d &quot;:&quot;"><w:r><w:t>stored sequenced toc</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="TOC \p &quot;ab&quot;"><w:r><w:t>stored invalid toc</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="TC &quot;Entry&quot; unexpected"><w:r><w:t>stored invalid tc</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="DISPLAYBARCODE value QR \s 9"><w:r><w:t>stored invalid barcode</w:t></w:r></w:fldSimple></w:p>
+    "#;
+    let document = document_with_field_parts(&wrap_word_body(body), None, None);
+    let context = FieldEvaluationContext {
+        merge_fields: BTreeMap::from([("Code".to_owned(), "https://example.test/42".to_owned())]),
+        merge_record_number: Some(10),
+        merge_sequence_number: Some(7),
+        ..Default::default()
+    };
+    assert_eq!(
+        document.evaluate_fields(&context).unwrap()[0].outcome,
+        FieldOutcome::Resolved("1".to_owned()),
+    );
+
+    let actual = document
+        .evaluate_fields(&context)
+        .unwrap()
+        .into_iter()
+        .map(|evaluation| evaluation.outcome)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual,
+        [
+            FieldOutcome::Resolved("1".to_owned()),
+            FieldOutcome::TableOfContents(TocField {
+                heading_levels: Some((1, 3)),
+                custom_styles: Vec::new(),
+                entries: TocEntrySelection::None,
+                sequence_identifier: None,
+                bookmark: None,
+                hyperlink: true,
+                use_outline_levels: false,
+                omit_page_number_levels: None,
+                page_number_separator: None,
+                entry_page_separator: None,
+            }),
+            FieldOutcome::TableOfContentsEntry(TcField {
+                entry: "Alpha".to_owned(),
+                level: 2,
+                table_identifier: None,
+                omit_page_number: false,
+            }),
+            FieldOutcome::MailMergeControl(MailMergeControl::NextRecord { record_number: 11 }),
+            FieldOutcome::MailMergeControl(MailMergeControl::NextRecordIf {
+                condition: true,
+                record_number: 12,
+            }),
+            FieldOutcome::MailMergeControl(MailMergeControl::SkipRecordIf {
+                condition: true,
+                record_number: 12,
+            }),
+            FieldOutcome::MailMergeControl(MailMergeControl::RecordNumber(12)),
+            FieldOutcome::MailMergeControl(MailMergeControl::SequenceNumber(7)),
+            FieldOutcome::Barcode(BarcodeField {
+                value: "0123456789012".to_owned(),
+                kind: BarcodeKind::Ean13,
+                height: None,
+                scale: None,
+                error_correction: None,
+                point_of_sale_style: Some(rdocx::BarcodePointOfSaleStyle::Standard),
+                case_style: None,
+                fix_check_digit: true,
+                rotation: None,
+                foreground_color: None,
+                background_color: None,
+                display_text: false,
+                add_start_stop: false,
+            }),
+            FieldOutcome::Barcode(BarcodeField {
+                value: "https://example.test/42".to_owned(),
+                kind: BarcodeKind::Qr,
+                height: None,
+                scale: None,
+                error_correction: Some(3),
+                point_of_sale_style: None,
+                case_style: None,
+                fix_check_digit: false,
+                rotation: None,
+                foreground_color: None,
+                background_color: None,
+                display_text: false,
+                add_start_stop: false,
+            }),
+            FieldOutcome::Resolved("0.3".to_owned()),
+            FieldOutcome::TableOfContents(TocField {
+                heading_levels: Some((1, 3)),
+                custom_styles: Vec::new(),
+                entries: TocEntrySelection::None,
+                sequence_identifier: Some("chapter".to_owned()),
+                bookmark: None,
+                hyperlink: false,
+                use_outline_levels: false,
+                omit_page_number_levels: None,
+                page_number_separator: None,
+                entry_page_separator: Some(":".to_owned()),
+            }),
+            FieldOutcome::KeepStored {
+                diagnostic: "TOC page-number separator must contain exactly one character, stored display retained".to_owned(),
+            },
+            FieldOutcome::KeepStored {
+                diagnostic: "field TC requires 1 positional operands, stored display retained".to_owned(),
+            },
+            FieldOutcome::KeepStored {
+                diagnostic: "DISPLAYBARCODE scale must be from 10 through 1000, stored display retained".to_owned(),
+            },
+        ],
+        "{EXTENDED_WORD_FIELD_ORACLE_INPUT}"
+    );
+}
+
+#[test]
+fn extended_field_updates_preserve_instruction_and_result_scaffolding() {
+    let body = concat!(
+        r#"<w:p xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><q:fldSimple q:instr="DISPLAYBARCODE 0123456789012 EAN13" q:dirty="0" data-token="kept"><q:r><q:rPr><q:b/></q:rPr><q:t>stored barcode</q:t><q:inside/></q:r></q:fldSimple></w:p>"#,
+        r#"<w:p>"#,
+        r#"<w:r><w:rPr><w:i/></w:rPr><w:fldChar w:fldCharType="begin" w:dirty="1"/></w:r>"#,
+        r#"<w:r><w:instrText xml:space="preserve">= </w:instrText></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+        r#"<w:r><w:instrText>MERGEFIELD Amount</w:instrText></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="separate"/><w:t>stored amount</w:t></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+        r#"<w:r><w:instrText xml:space="preserve"> + 2</w:instrText></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+        r#"<w:r><w:rPr><w:u w:val="single"/></w:rPr><w:t>stored formula</w:t></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#,
+        r#"<w:p><w:fldSimple w:instr="TOC" w:dirty="0"><w:r><w:t>stored toc</w:t></w:r></w:fldSimple></w:p>"#,
+        r#"<w:p><w:fldSimple w:instr="TC &quot;Entry&quot; \l 2" w:dirty="0"><w:r><w:t>stored tc</w:t></w:r></w:fldSimple></w:p>"#,
+        r#"<w:p><w:fldSimple w:instr="NEXT" w:dirty="0"><w:r><w:t>stored next</w:t></w:r></w:fldSimple></w:p>"#,
+        r#"<w:p><w:fldSimple w:instr="PAGE" w:dirty="0"><w:r><w:t>stored page</w:t></w:r></w:fldSimple></w:p>"#,
+        r#"<w:p><w:fldSimple w:instr="DATE" w:dirty="0"><w:r><w:t>stored date</w:t></w:r></w:fldSimple></w:p>"#,
+        r#"<w:p><w:fldSimple w:instr="UNKNOWN" w:dirty="0"><w:r><w:t>stored unknown</w:t></w:r></w:fldSimple></w:p>"#,
+    );
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+    let context = FieldEvaluationContext {
+        merge_fields: BTreeMap::from([("Amount".to_owned(), "3".to_owned())]),
+        merge_record_number: Some(4),
+        merge_sequence_number: Some(2),
+        ..Default::default()
+    };
+    assert_eq!(document.update_fields(&context).unwrap(), 9);
+    let saved = document.to_bytes().unwrap();
+    let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(&saved)).unwrap();
+    let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+    assert!(xml.contains("DISPLAYBARCODE 0123456789012 EAN13"), "{xml}");
+    assert!(xml.contains("stored barcode"), "{xml}");
+    assert!(xml.contains("data-token=\"kept\""), "{xml}");
+    assert!(xml.contains("<q:b/>"), "{xml}");
+    assert!(xml.contains("<q:inside/>"), "{xml}");
+    assert!(xml.contains("w:dirty=\"1\""), "{xml}");
+    assert_eq!(xml.matches("w:dirty=\"1\"").count(), 7, "{xml}");
+    for (instruction, cache) in [
+        ("TOC", "stored toc"),
+        ("TC &quot;Entry&quot; \\l 2", "stored tc"),
+        ("NEXT", "stored next"),
+        ("PAGE", "stored page"),
+        ("DATE", "stored date"),
+        ("UNKNOWN", "stored unknown"),
+    ] {
+        assert!(xml.contains(instruction), "missing {instruction}: {xml}");
+        assert!(xml.contains(cache), "missing {cache}: {xml}");
+    }
+    for preserved in ["MERGEFIELD Amount", "<w:i/>", "<w:u w:val=\"single\"/>"] {
+        assert!(xml.contains(preserved), "missing {preserved}: {xml}");
+    }
+
+    let reopened = Document::from_bytes(&saved).unwrap();
+    let evaluations = reopened.evaluate_fields(&context).unwrap();
+    assert_eq!(evaluations[1].cached_result, "5");
+    assert_eq!(evaluations[2].cached_result, "3");
+    assert_eq!(
+        evaluations[1].outcome,
+        FieldOutcome::Resolved("5".to_owned())
+    );
+    assert!(matches!(evaluations[0].outcome, FieldOutcome::Barcode(_)));
+    assert!(matches!(
+        evaluations[3].outcome,
+        FieldOutcome::TableOfContents(_)
+    ));
+    assert!(matches!(
+        evaluations[4].outcome,
+        FieldOutcome::TableOfContentsEntry(_)
+    ));
+    assert_eq!(
+        evaluations[5].outcome,
+        FieldOutcome::MailMergeControl(MailMergeControl::NextRecord { record_number: 5 })
+    );
+    assert_eq!(evaluations[6].outcome, FieldOutcome::DeferredPagination);
+    assert_eq!(
+        evaluations[7].outcome,
+        FieldOutcome::KeepStored {
+            diagnostic: "DATE requires an explicit date and time, stored display retained"
+                .to_owned()
+        }
+    );
+    assert_eq!(
+        evaluations[8].outcome,
+        FieldOutcome::KeepStored {
+            diagnostic: "field UNKNOWN is unsupported, stored display retained".to_owned()
+        }
+    );
 }
 
 #[test]
@@ -1961,6 +2198,8 @@ fn date_time_filename_mergefield_and_includetext_use_only_explicit_context() {
                 "Chapter summary".to_owned(),
             ),
         ]),
+        merge_record_number: None,
+        merge_sequence_number: None,
     };
     assert_eq!(
         document

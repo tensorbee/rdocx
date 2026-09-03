@@ -40,6 +40,10 @@ pub struct FieldEvaluationContext {
     pub file_path: Option<String>,
     pub merge_fields: BTreeMap<String, String>,
     pub included_text: BTreeMap<String, String>,
+    /// One-based source record number for mail-merge control fields.
+    pub merge_record_number: Option<u32>,
+    /// One-based output sequence number for mail-merge control fields.
+    pub merge_sequence_number: Option<u32>,
 }
 
 /// The result of evaluating one field in document order.
@@ -56,7 +60,106 @@ pub struct FieldEvaluation {
 pub enum FieldOutcome {
     Resolved(String),
     DeferredPagination,
+    TableOfContents(TocField),
+    TableOfContentsEntry(TcField),
+    MailMergeControl(MailMergeControl),
+    Barcode(BarcodeField),
     KeepStored { diagnostic: String },
+}
+
+/// A validated table-of-contents rebuild request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TocField {
+    pub heading_levels: Option<(u8, u8)>,
+    pub custom_styles: Vec<(String, u8)>,
+    pub entries: TocEntrySelection,
+    pub sequence_identifier: Option<String>,
+    pub bookmark: Option<String>,
+    pub hyperlink: bool,
+    pub use_outline_levels: bool,
+    pub omit_page_number_levels: Option<(u8, u8)>,
+    pub page_number_separator: Option<String>,
+    pub entry_page_separator: Option<String>,
+}
+
+/// Which TC entries contribute to a table of contents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TocEntrySelection {
+    None,
+    All,
+    Identifier(String),
+}
+
+/// A validated table-of-contents entry request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TcField {
+    pub entry: String,
+    pub level: u8,
+    pub table_identifier: Option<String>,
+    pub omit_page_number: bool,
+}
+
+/// A validated mail-merge control decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MailMergeControl {
+    NextRecord { record_number: u32 },
+    NextRecordIf { condition: bool, record_number: u32 },
+    SkipRecordIf { condition: bool, record_number: u32 },
+    RecordNumber(u32),
+    SequenceNumber(u32),
+}
+
+/// A validated generated-barcode request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BarcodeField {
+    pub value: String,
+    pub kind: BarcodeKind,
+    pub height: Option<u32>,
+    pub scale: Option<u16>,
+    pub error_correction: Option<u8>,
+    pub point_of_sale_style: Option<BarcodePointOfSaleStyle>,
+    pub case_style: Option<BarcodeCaseStyle>,
+    pub fix_check_digit: bool,
+    pub rotation: Option<u8>,
+    pub foreground_color: Option<u32>,
+    pub background_color: Option<u32>,
+    pub display_text: bool,
+    pub add_start_stop: bool,
+}
+
+/// A barcode type accepted by Word's barcode field grammar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BarcodeKind {
+    Upca,
+    Upce,
+    Jan13,
+    Jan8,
+    Ean13,
+    Ean8,
+    Case,
+    Itf14,
+    Nw7,
+    Code39,
+    Code128,
+    JpPost,
+    Qr,
+}
+
+/// A point-of-sale style accepted by `\p`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BarcodePointOfSaleStyle {
+    Standard,
+    SupplementalTwoDigit,
+    SupplementalFiveDigit,
+    Case,
+}
+
+/// An ITF14 case style accepted by `\c`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BarcodeCaseStyle {
+    Standard,
+    Extended,
+    Add,
 }
 
 impl Document {
@@ -128,12 +231,15 @@ impl Document {
                     cached_result: value.clone(),
                     dirty: false,
                 },
-                FieldOutcome::DeferredPagination | FieldOutcome::KeepStored { .. } => {
-                    CachedFieldUpdate {
-                        cached_result: evaluation.cached_result.clone(),
-                        dirty: true,
-                    }
-                }
+                FieldOutcome::DeferredPagination
+                | FieldOutcome::TableOfContents(_)
+                | FieldOutcome::TableOfContentsEntry(_)
+                | FieldOutcome::MailMergeControl(_)
+                | FieldOutcome::Barcode(_)
+                | FieldOutcome::KeepStored { .. } => CachedFieldUpdate {
+                    cached_result: evaluation.cached_result.clone(),
+                    dirty: true,
+                },
             })
             .collect::<Vec<_>>();
         if updates
@@ -253,9 +359,15 @@ impl Document {
         }
 
         let mut outputs = Vec::with_capacity(records.len());
-        for record in records {
+        for (record_index, record) in records.iter().enumerate() {
+            let record_number = u32::try_from(record_index)
+                .ok()
+                .and_then(|value| value.checked_add(1))
+                .ok_or_else(|| Error::Other("mail merge record count exceeds u32".to_owned()))?;
             let context = FieldEvaluationContext {
                 merge_fields: record.clone(),
+                merge_record_number: Some(record_number),
+                merge_sequence_number: Some(record_number),
                 ..Default::default()
             };
             let mut candidate = self.clone_for_staging();
@@ -1405,12 +1517,19 @@ struct SequenceState {
     heading_anchor: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct MailMergeStoryState {
+    record_number: Option<u32>,
+    sequence_number: Option<u32>,
+}
+
 struct Evaluator<'a> {
     document: &'a Document,
     context: &'a FieldEvaluationContext,
     bookmarks: BTreeMap<String, String>,
     results: Vec<FieldEvaluation>,
     sequences: BTreeMap<(String, String), SequenceState>,
+    mail_merge_stories: BTreeMap<String, MailMergeStoryState>,
     nested_outcomes: Vec<BTreeMap<usize, FieldOutcome>>,
     missing_merge_fields_as_empty: bool,
 }
@@ -1429,6 +1548,7 @@ impl<'a> Evaluator<'a> {
             bookmarks,
             results: Vec::new(),
             sequences: BTreeMap::new(),
+            mail_merge_stories: BTreeMap::new(),
             nested_outcomes: Vec::new(),
             missing_merge_fields_as_empty: false,
         }
@@ -1510,6 +1630,15 @@ impl<'a> Evaluator<'a> {
             "FILENAME" => self.evaluate_filename(instruction),
             "AUTHOR" => self.evaluate_author(),
             "MERGEFIELD" => self.evaluate_mergefield(instruction),
+            "=" => self.evaluate_formula(instruction, story, paragraphs, paragraph_index),
+            "TOC" => self.evaluate_toc(instruction, story, paragraphs, paragraph_index),
+            "TC" => self.evaluate_tc(instruction, story, paragraphs, paragraph_index),
+            "NEXT" | "NEXTIF" | "SKIPIF" | "MERGEREC" | "MERGESEQ" => {
+                self.evaluate_mail_merge_control(instruction, story, paragraphs, paragraph_index)
+            }
+            "DISPLAYBARCODE" | "MERGEBARCODE" => {
+                self.evaluate_barcode(instruction, story, paragraphs, paragraph_index)
+            }
             name => keep(&format!("field {name} is unsupported")),
         };
 
@@ -1635,6 +1764,12 @@ impl<'a> Evaluator<'a> {
                     FieldOutcome::Resolved(value) => Ok(value),
                     FieldOutcome::DeferredPagination => {
                         Err("nested field requires deferred pagination".to_owned())
+                    }
+                    FieldOutcome::TableOfContents(_)
+                    | FieldOutcome::TableOfContentsEntry(_)
+                    | FieldOutcome::MailMergeControl(_)
+                    | FieldOutcome::Barcode(_) => {
+                        Err("nested field produced a non-text result".to_owned())
                     }
                     FieldOutcome::KeepStored { diagnostic } => {
                         Err(format!("nested field was not resolved: {diagnostic}"))
@@ -1952,6 +2087,353 @@ impl<'a> Evaluator<'a> {
             result.push_str(suffix);
         }
         FieldOutcome::Resolved(result)
+    }
+
+    fn evaluate_formula(
+        &mut self,
+        instruction: &FieldInstruction,
+        story: &str,
+        paragraphs: &[&CT_P],
+        paragraph_index: usize,
+    ) -> FieldOutcome {
+        if instruction.arguments.is_empty() {
+            return keep("formula requires an expression");
+        }
+        let mut expression = String::new();
+        for argument in &instruction.arguments {
+            let value = match self.resolve_argument(argument, story, paragraphs, paragraph_index) {
+                Ok(value) => value,
+                Err(diagnostic) => return keep(&diagnostic),
+            };
+            if !expression.is_empty() {
+                expression.push(' ');
+            }
+            expression.push_str(&value);
+            if expression.len() > MAX_FORMULA_BYTES {
+                return keep("formula exceeds the 4096-byte limit");
+            }
+        }
+        match FormulaParser::new(&expression).and_then(FormulaParser::parse) {
+            Ok(value) => FieldOutcome::Resolved(format_formula_value(value)),
+            Err(diagnostic) => keep(&diagnostic),
+        }
+    }
+
+    fn evaluate_mail_merge_control(
+        &mut self,
+        instruction: &FieldInstruction,
+        story: &str,
+        paragraphs: &[&CT_P],
+        paragraph_index: usize,
+    ) -> FieldOutcome {
+        match instruction.name.as_str() {
+            "MERGESEQ" if self.context.merge_sequence_number == Some(0) => {
+                return keep("MERGESEQ merge sequence number must be one-based");
+            }
+            "NEXT" | "NEXTIF" | "SKIPIF" | "MERGEREC"
+                if self.context.merge_record_number == Some(0) =>
+            {
+                return keep(&format!(
+                    "{} merge record number must be one-based",
+                    instruction.name
+                ));
+            }
+            _ => {}
+        }
+        let condition = match instruction.name.as_str() {
+            "NEXTIF" | "SKIPIF" => {
+                let values = instruction
+                    .arguments
+                    .iter()
+                    .map(|argument| {
+                        self.resolve_argument(argument, story, paragraphs, paragraph_index)
+                    })
+                    .collect::<std::result::Result<Vec<_>, _>>();
+                let values = match values {
+                    Ok(values) => values,
+                    Err(diagnostic) => return keep(&diagnostic),
+                };
+                let Some(condition) = compare_if(&values[0], &values[1], &values[2]) else {
+                    return keep(&format!(
+                        "{} operator {} is unsupported",
+                        instruction.name, values[1]
+                    ));
+                };
+                condition
+            }
+            _ => false,
+        };
+        let state =
+            self.mail_merge_stories
+                .entry(story.to_owned())
+                .or_insert(MailMergeStoryState {
+                    record_number: self.context.merge_record_number,
+                    sequence_number: self.context.merge_sequence_number,
+                });
+        match instruction.name.as_str() {
+            "NEXT" => {
+                let Some(current_record) = state.record_number else {
+                    return keep("NEXT requires an explicit merge record number");
+                };
+                let Some(record_number) = current_record.checked_add(1) else {
+                    return keep("NEXT record number overflowed");
+                };
+                state.record_number = Some(record_number);
+                FieldOutcome::MailMergeControl(MailMergeControl::NextRecord { record_number })
+            }
+            "NEXTIF" => {
+                let Some(mut record_number) = state.record_number else {
+                    return keep("NEXTIF requires an explicit merge record number");
+                };
+                if condition {
+                    let Some(next_record_number) = record_number.checked_add(1) else {
+                        return keep("NEXTIF record number overflowed");
+                    };
+                    record_number = next_record_number;
+                    state.record_number = Some(record_number);
+                }
+                FieldOutcome::MailMergeControl(MailMergeControl::NextRecordIf {
+                    condition,
+                    record_number,
+                })
+            }
+            "SKIPIF" => match state.record_number {
+                Some(record_number) => {
+                    FieldOutcome::MailMergeControl(MailMergeControl::SkipRecordIf {
+                        condition,
+                        record_number,
+                    })
+                }
+                None => keep("SKIPIF requires an explicit merge record number"),
+            },
+            "MERGEREC" => state
+                .record_number
+                .map(MailMergeControl::RecordNumber)
+                .map(FieldOutcome::MailMergeControl)
+                .unwrap_or_else(|| keep("MERGEREC requires an explicit merge record number")),
+            "MERGESEQ" => state
+                .sequence_number
+                .map(MailMergeControl::SequenceNumber)
+                .map(FieldOutcome::MailMergeControl)
+                .unwrap_or_else(|| keep("MERGESEQ requires an explicit merge sequence number")),
+            _ => unreachable!(),
+        }
+    }
+
+    fn evaluate_barcode(
+        &mut self,
+        instruction: &FieldInstruction,
+        story: &str,
+        paragraphs: &[&CT_P],
+        paragraph_index: usize,
+    ) -> FieldOutcome {
+        let Some(source) = instruction.arguments.first() else {
+            return keep(&format!("{} requires a value", instruction.name));
+        };
+        let value = match source {
+            FieldArgument::Text(source) if instruction.name == "MERGEBARCODE" => {
+                match self.context.merge_fields.get(source) {
+                    Some(value) => value.clone(),
+                    None => return keep(&format!("MERGEBARCODE input {source} was not supplied")),
+                }
+            }
+            _ => match self.resolve_argument(source, story, paragraphs, paragraph_index) {
+                Ok(value) => value,
+                Err(diagnostic) => return keep(&diagnostic),
+            },
+        };
+        let Some(kind) = instruction.arguments.get(1) else {
+            return keep(&format!("{} requires a barcode type", instruction.name));
+        };
+        let kind = match self.resolve_argument(kind, story, paragraphs, paragraph_index) {
+            Ok(value) => value,
+            Err(diagnostic) => return keep(&diagnostic),
+        };
+        let mut switches = Vec::with_capacity(instruction.switches.len());
+        for field_switch in &instruction.switches {
+            let argument = match &field_switch.argument {
+                Some(argument) => {
+                    match self.resolve_argument(argument, story, paragraphs, paragraph_index) {
+                        Ok(value) => Some(value),
+                        Err(diagnostic) => return keep(&diagnostic),
+                    }
+                }
+                None => None,
+            };
+            switches.push((field_switch.name.clone(), argument));
+        }
+        match parse_barcode(&instruction.name, &switches, value, &kind) {
+            Ok(barcode) => FieldOutcome::Barcode(barcode),
+            Err(diagnostic) => keep(&diagnostic),
+        }
+    }
+
+    fn evaluate_toc(
+        &mut self,
+        instruction: &FieldInstruction,
+        story: &str,
+        paragraphs: &[&CT_P],
+        paragraph_index: usize,
+    ) -> FieldOutcome {
+        let mut toc = TocField {
+            heading_levels: None,
+            custom_styles: Vec::new(),
+            entries: TocEntrySelection::None,
+            sequence_identifier: None,
+            bookmark: None,
+            hyperlink: false,
+            use_outline_levels: false,
+            omit_page_number_levels: None,
+            page_number_separator: None,
+            entry_page_separator: None,
+        };
+        let mut has_explicit_source = false;
+        for field_switch in &instruction.switches {
+            let argument = match &field_switch.argument {
+                Some(argument) => {
+                    match self.resolve_argument(argument, story, paragraphs, paragraph_index) {
+                        Ok(value) => Some(value),
+                        Err(diagnostic) => return keep(&diagnostic),
+                    }
+                }
+                None => None,
+            };
+            match field_switch.name.as_str() {
+                "h" if argument.is_none() => toc.hyperlink = true,
+                "u" if argument.is_none() => {
+                    toc.use_outline_levels = true;
+                    has_explicit_source = true;
+                }
+                "o" => {
+                    has_explicit_source = true;
+                    toc.heading_levels = match argument {
+                        Some(value) => match parse_level_range(&value, "TOC heading") {
+                            Ok(levels) => Some(levels),
+                            Err(diagnostic) => return keep(&diagnostic),
+                        },
+                        None => Some((1, 9)),
+                    };
+                }
+                "n" => {
+                    toc.omit_page_number_levels = match argument {
+                        Some(value) => match parse_level_range(&value, "TOC omitted page-number") {
+                            Ok(levels) => Some(levels),
+                            Err(diagnostic) => return keep(&diagnostic),
+                        },
+                        None => Some((1, 9)),
+                    };
+                }
+                "t" => {
+                    let Some(value) = argument else {
+                        return keep("field TOC switch \\t requires a text argument");
+                    };
+                    has_explicit_source = true;
+                    toc.custom_styles = match parse_custom_styles(&value) {
+                        Ok(styles) => styles,
+                        Err(diagnostic) => return keep(&diagnostic),
+                    };
+                }
+                "f" => {
+                    has_explicit_source = true;
+                    toc.entries = argument.map_or(TocEntrySelection::All, |value| {
+                        TocEntrySelection::Identifier(value)
+                    });
+                }
+                "b" | "p" | "s" | "d" => {
+                    let Some(value) = argument else {
+                        return keep(&format!(
+                            "field TOC switch \\{} requires a text argument",
+                            field_switch.name
+                        ));
+                    };
+                    match field_switch.name.as_str() {
+                        "b" => toc.bookmark = Some(value),
+                        "p" if value.chars().count() == 1 => {
+                            toc.page_number_separator = Some(value)
+                        }
+                        "p" => {
+                            return keep(
+                                "TOC page-number separator must contain exactly one character",
+                            );
+                        }
+                        "s" if !value.is_empty() => toc.sequence_identifier = Some(value),
+                        "s" => return keep("TOC sequence identifier must not be empty"),
+                        "d" => toc.entry_page_separator = Some(value),
+                        _ => unreachable!(),
+                    }
+                }
+                name if argument.is_some() => {
+                    return keep(&format!(
+                        "field TOC switch \\{name} does not take an argument"
+                    ));
+                }
+                name => return keep(&format!("field TOC uses unsupported switch \\{name}")),
+            }
+        }
+        if !has_explicit_source {
+            toc.heading_levels = Some((1, 9));
+        }
+        FieldOutcome::TableOfContents(toc)
+    }
+
+    fn evaluate_tc(
+        &mut self,
+        instruction: &FieldInstruction,
+        story: &str,
+        paragraphs: &[&CT_P],
+        paragraph_index: usize,
+    ) -> FieldOutcome {
+        let Some(entry) = instruction.arguments.first() else {
+            return keep("TC requires entry text");
+        };
+        let entry = match self.resolve_argument(entry, story, paragraphs, paragraph_index) {
+            Ok(entry) => entry,
+            Err(diagnostic) => return keep(&diagnostic),
+        };
+        if entry.is_empty() {
+            return keep("TC entry text must not be empty");
+        }
+        let mut tc = TcField {
+            entry,
+            level: 1,
+            table_identifier: None,
+            omit_page_number: false,
+        };
+        for field_switch in &instruction.switches {
+            let argument = match &field_switch.argument {
+                Some(argument) => {
+                    match self.resolve_argument(argument, story, paragraphs, paragraph_index) {
+                        Ok(value) => Some(value),
+                        Err(diagnostic) => return keep(&diagnostic),
+                    }
+                }
+                None => None,
+            };
+            match field_switch.name.as_str() {
+                "n" if argument.is_none() => tc.omit_page_number = true,
+                "f" => match argument {
+                    Some(value) if !value.is_empty() => tc.table_identifier = Some(value),
+                    Some(_) => return keep("TC table identifier must not be empty"),
+                    None => return keep("field TC switch \\f requires a text argument"),
+                },
+                "l" => {
+                    let Some(value) = argument else {
+                        return keep("field TC switch \\l requires a text argument");
+                    };
+                    tc.level = match parse_toc_level(&value, "TC") {
+                        Ok(level) => level,
+                        Err(diagnostic) => return keep(&diagnostic),
+                    };
+                }
+                name if argument.is_some() => {
+                    return keep(&format!(
+                        "field TC switch \\{name} does not take an argument"
+                    ));
+                }
+                name => return keep(&format!("field TC uses unsupported switch \\{name}")),
+            }
+        }
+        FieldOutcome::TableOfContentsEntry(tc)
     }
 }
 
@@ -2645,6 +3127,549 @@ fn keep(diagnostic: &str) -> FieldOutcome {
     }
 }
 
+const MAX_FORMULA_BYTES: usize = 4096;
+const MAX_FORMULA_TOKENS: usize = 512;
+const MAX_FORMULA_DEPTH: usize = 32;
+
+fn parse_toc_level(value: &str, field: &str) -> std::result::Result<u8, String> {
+    value
+        .trim()
+        .parse::<u8>()
+        .ok()
+        .filter(|level| (1..=9).contains(level))
+        .ok_or_else(|| format!("{field} level must be from 1 through 9"))
+}
+
+fn parse_level_range(value: &str, field: &str) -> std::result::Result<(u8, u8), String> {
+    let Some((start, end)) = value.split_once('-') else {
+        let level = parse_toc_level(value, field)?;
+        return Ok((level, level));
+    };
+    let start = parse_toc_level(start, field)?;
+    let end = parse_toc_level(end, field)?;
+    if start > end {
+        return Err(format!("{field} range starts after it ends"));
+    }
+    Ok((start, end))
+}
+
+fn parse_custom_styles(value: &str) -> std::result::Result<Vec<(String, u8)>, String> {
+    let parts = value.split(',').collect::<Vec<_>>();
+    if parts.len() % 2 != 0 || parts.is_empty() {
+        return Err("TOC custom styles require style and level pairs".to_owned());
+    }
+    let mut styles = Vec::with_capacity(parts.len() / 2);
+    for pair in parts.chunks_exact(2) {
+        let name = pair[0].trim();
+        if name.is_empty() {
+            return Err("TOC custom style name must not be empty".to_owned());
+        }
+        styles.push((name.to_owned(), parse_toc_level(pair[1], "TOC style")?));
+    }
+    Ok(styles)
+}
+
+fn parse_barcode(
+    field: &str,
+    switches: &[(String, Option<String>)],
+    value: String,
+    kind: &str,
+) -> std::result::Result<BarcodeField, String> {
+    let kind = parse_barcode_kind(kind).ok_or_else(|| {
+        format!(
+            "{field} barcode type {} is unsupported",
+            kind.to_ascii_uppercase()
+        )
+    })?;
+    if value.is_empty() || value.chars().count() > 1024 {
+        return Err(format!(
+            "{field} value must contain from 1 through 1024 characters"
+        ));
+    }
+    validate_barcode_value(field, kind, &value)?;
+    let mut barcode = BarcodeField {
+        value,
+        kind,
+        height: None,
+        scale: None,
+        error_correction: None,
+        point_of_sale_style: None,
+        case_style: None,
+        fix_check_digit: false,
+        rotation: None,
+        foreground_color: None,
+        background_color: None,
+        display_text: false,
+        add_start_stop: false,
+    };
+    for (name, argument) in switches {
+        match name.as_str() {
+            "t" if argument.is_none() => barcode.display_text = true,
+            "x" if argument.is_none() => barcode.fix_check_digit = true,
+            "d" => {
+                if argument.is_some() {
+                    return Err(format!(
+                        "field {field} switch \\d does not take an argument"
+                    ));
+                }
+                if !matches!(kind, BarcodeKind::Nw7 | BarcodeKind::Code39) {
+                    return Err(format!("{field} switch \\d requires NW7 or CODE39"));
+                }
+                barcode.add_start_stop = true;
+            }
+            "h" | "s" | "q" | "p" | "c" | "r" | "f" | "b" => {
+                let Some(value) = argument.as_deref() else {
+                    return Err(format!(
+                        "field {field} switch \\{name} requires a text argument"
+                    ));
+                };
+                match name.as_str() {
+                    "h" => barcode.height = Some(parse_unsigned_integer(value, field, "height")?),
+                    "s" => {
+                        barcode.scale = Some(
+                            u16::try_from(parse_bounded_integer(value, 10, 1000, field, "scale")?)
+                                .expect("bounded barcode scale fits u16"),
+                        )
+                    }
+                    "q" => {
+                        if kind != BarcodeKind::Qr {
+                            return Err(format!("{field} switch \\q requires QR"));
+                        }
+                        barcode.error_correction = Some(
+                            u8::try_from(parse_bounded_integer(
+                                value,
+                                0,
+                                3,
+                                field,
+                                "error correction",
+                            )?)
+                            .expect("bounded error correction fits u8"),
+                        );
+                    }
+                    "p" => {
+                        if !matches!(
+                            kind,
+                            BarcodeKind::Upca
+                                | BarcodeKind::Upce
+                                | BarcodeKind::Ean13
+                                | BarcodeKind::Ean8
+                        ) {
+                            return Err(format!(
+                                "{field} switch \\p requires UPCA, UPCE, EAN13, or EAN8"
+                            ));
+                        }
+                        barcode.point_of_sale_style =
+                            Some(parse_point_of_sale_style(value).ok_or_else(|| {
+                                format!(
+                                    "{field} point-of-sale style must be STD, SUP2, SUP5, or CASE"
+                                )
+                            })?);
+                    }
+                    "c" => {
+                        if !matches!(kind, BarcodeKind::Case | BarcodeKind::Itf14) {
+                            return Err(format!("{field} switch \\c requires ITF14"));
+                        }
+                        barcode.case_style = Some(parse_case_style(value).ok_or_else(|| {
+                            format!("{field} case style must be STD, EXT, or ADD")
+                        })?);
+                    }
+                    "r" => {
+                        let rotation = parse_bounded_integer(value, 0, 3, field, "rotation")?;
+                        barcode.rotation =
+                            Some(u8::try_from(rotation).expect("bounded barcode rotation fits u8"));
+                    }
+                    "f" => barcode.foreground_color = Some(parse_barcode_color(value, field)?),
+                    "b" => barcode.background_color = Some(parse_barcode_color(value, field)?),
+                    _ => unreachable!(),
+                }
+            }
+            name if argument.is_some() => {
+                return Err(format!(
+                    "field {field} switch \\{name} does not take an argument"
+                ));
+            }
+            _ => return Err(format!("field {field} uses unsupported switch \\{name}")),
+        }
+    }
+    Ok(barcode)
+}
+
+fn parse_barcode_kind(value: &str) -> Option<BarcodeKind> {
+    match value.to_ascii_uppercase().as_str() {
+        "UPCA" => Some(BarcodeKind::Upca),
+        "UPCE" => Some(BarcodeKind::Upce),
+        "JAN13" => Some(BarcodeKind::Jan13),
+        "JAN8" => Some(BarcodeKind::Jan8),
+        "EAN13" => Some(BarcodeKind::Ean13),
+        "EAN8" => Some(BarcodeKind::Ean8),
+        "CASE" => Some(BarcodeKind::Case),
+        "ITF14" => Some(BarcodeKind::Itf14),
+        "NW7" => Some(BarcodeKind::Nw7),
+        "CODE39" => Some(BarcodeKind::Code39),
+        "CODE128" => Some(BarcodeKind::Code128),
+        "JPPOST" => Some(BarcodeKind::JpPost),
+        "QR" => Some(BarcodeKind::Qr),
+        _ => None,
+    }
+}
+
+fn barcode_kind_name(kind: BarcodeKind) -> &'static str {
+    match kind {
+        BarcodeKind::Upca => "UPCA",
+        BarcodeKind::Upce => "UPCE",
+        BarcodeKind::Jan13 => "JAN13",
+        BarcodeKind::Jan8 => "JAN8",
+        BarcodeKind::Ean13 => "EAN13",
+        BarcodeKind::Ean8 => "EAN8",
+        BarcodeKind::Case => "CASE",
+        BarcodeKind::Itf14 => "ITF14",
+        BarcodeKind::Nw7 => "NW7",
+        BarcodeKind::Code39 => "CODE39",
+        BarcodeKind::Code128 => "CODE128",
+        BarcodeKind::JpPost => "JPPOST",
+        BarcodeKind::Qr => "QR",
+    }
+}
+
+fn parse_point_of_sale_style(value: &str) -> Option<BarcodePointOfSaleStyle> {
+    match value.to_ascii_uppercase().as_str() {
+        "STD" => Some(BarcodePointOfSaleStyle::Standard),
+        "SUP2" => Some(BarcodePointOfSaleStyle::SupplementalTwoDigit),
+        "SUP5" => Some(BarcodePointOfSaleStyle::SupplementalFiveDigit),
+        "CASE" => Some(BarcodePointOfSaleStyle::Case),
+        _ => None,
+    }
+}
+
+fn parse_case_style(value: &str) -> Option<BarcodeCaseStyle> {
+    match value.to_ascii_uppercase().as_str() {
+        "STD" => Some(BarcodeCaseStyle::Standard),
+        "EXT" => Some(BarcodeCaseStyle::Extended),
+        "ADD" => Some(BarcodeCaseStyle::Add),
+        _ => None,
+    }
+}
+
+fn parse_unsigned_integer(
+    value: &str,
+    field: &str,
+    label: &str,
+) -> std::result::Result<u32, String> {
+    value
+        .parse::<u32>()
+        .map_err(|_| format!("{field} {label} must be a nonnegative integer"))
+}
+
+fn parse_bounded_integer(
+    value: &str,
+    minimum: u32,
+    maximum: u32,
+    field: &str,
+    label: &str,
+) -> std::result::Result<u32, String> {
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|value| (minimum..=maximum).contains(value))
+        .ok_or_else(|| format!("{field} {label} must be from {minimum} through {maximum}"))
+}
+
+fn validate_barcode_value(
+    field: &str,
+    kind: BarcodeKind,
+    value: &str,
+) -> std::result::Result<(), String> {
+    let digit_range = match kind {
+        BarcodeKind::Ean8 | BarcodeKind::Jan8 => Some(7..=8),
+        BarcodeKind::Ean13 | BarcodeKind::Jan13 => Some(12..=13),
+        BarcodeKind::Upca => Some(11..=12),
+        BarcodeKind::Upce => Some(6..=8),
+        BarcodeKind::Case | BarcodeKind::Itf14 => Some(13..=14),
+        _ => None,
+    };
+    if let Some(range) = digit_range
+        && (!value.bytes().all(|byte| byte.is_ascii_digit()) || !range.contains(&value.len()))
+    {
+        return Err(format!(
+            "{field} {} value has an invalid digit count or character",
+            barcode_kind_name(kind)
+        ));
+    }
+    if kind == BarcodeKind::Code39
+        && !value.bytes().all(|byte| {
+            byte.is_ascii_uppercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b' ' | b'-' | b'.' | b'$' | b'/' | b'+' | b'%')
+        })
+    {
+        return Err(format!(
+            "{field} CODE39 value contains an unsupported character"
+        ));
+    }
+    Ok(())
+}
+
+fn parse_barcode_color(value: &str, field: &str) -> std::result::Result<u32, String> {
+    let parsed = if let Some(hexadecimal) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        u32::from_str_radix(hexadecimal, 16).ok()
+    } else {
+        value.parse::<u32>().ok()
+    };
+    parsed
+        .filter(|value| *value <= 0xFF_FFFF)
+        .ok_or_else(|| format!("{field} barcode colour must be from 0 through 0xFFFFFF"))
+}
+
+struct FormulaParser {
+    characters: Vec<char>,
+    index: usize,
+    token_count: usize,
+    depth: usize,
+}
+
+impl FormulaParser {
+    fn new(input: &str) -> std::result::Result<Self, String> {
+        if input.len() > MAX_FORMULA_BYTES {
+            return Err("formula exceeds the 4096-byte limit".to_owned());
+        }
+        if !input.is_ascii() {
+            return Err("formula contains unsupported non-ASCII syntax".to_owned());
+        }
+        Ok(Self {
+            characters: input.chars().collect(),
+            index: 0,
+            token_count: 0,
+            depth: 0,
+        })
+    }
+
+    fn parse(mut self) -> std::result::Result<f64, String> {
+        let value = self.parse_comparison()?;
+        self.skip_whitespace();
+        if self.index != self.characters.len() {
+            return Err("formula contains unsupported or trailing syntax".to_owned());
+        }
+        if !value.is_finite() {
+            return Err("formula result is outside the finite numeric range".to_owned());
+        }
+        Ok(value)
+    }
+
+    fn parse_comparison(&mut self) -> std::result::Result<f64, String> {
+        let left = self.parse_additive()?;
+        self.skip_whitespace();
+        let operator = ["<=", ">=", "<>", "=", "<", ">"]
+            .into_iter()
+            .find(|operator| self.remaining().starts_with(operator));
+        let Some(operator) = operator else {
+            return Ok(left);
+        };
+        self.index += operator.len();
+        self.count_token()?;
+        let right = self.parse_additive()?;
+        Ok(
+            if match operator {
+                "=" => left == right,
+                "<>" => left != right,
+                "<" => left < right,
+                "<=" => left <= right,
+                ">" => left > right,
+                ">=" => left >= right,
+                _ => unreachable!(),
+            } {
+                1.0
+            } else {
+                0.0
+            },
+        )
+    }
+
+    fn parse_additive(&mut self) -> std::result::Result<f64, String> {
+        let mut value = self.parse_multiplicative()?;
+        loop {
+            self.skip_whitespace();
+            let operator = self.peek();
+            if !matches!(operator, Some('+') | Some('-')) {
+                return Ok(value);
+            }
+            self.index += 1;
+            self.count_token()?;
+            let right = self.parse_multiplicative()?;
+            value = if operator == Some('+') {
+                value + right
+            } else {
+                value - right
+            };
+            self.ensure_finite(value)?;
+        }
+    }
+
+    fn parse_multiplicative(&mut self) -> std::result::Result<f64, String> {
+        let mut value = self.parse_power()?;
+        loop {
+            self.skip_whitespace();
+            let operator = self.peek();
+            if !matches!(operator, Some('*') | Some('/')) {
+                return Ok(value);
+            }
+            self.index += 1;
+            self.count_token()?;
+            let right = self.parse_power()?;
+            if operator == Some('/') && right == 0.0 {
+                return Err("formula divides by zero".to_owned());
+            }
+            value = match operator {
+                Some('*') => value * right,
+                Some('/') => value / right,
+                _ => unreachable!(),
+            };
+            self.ensure_finite(value)?;
+        }
+    }
+
+    fn parse_power(&mut self) -> std::result::Result<f64, String> {
+        let value = self.parse_unary()?;
+        self.skip_whitespace();
+        if self.peek() != Some('^') {
+            return Ok(value);
+        }
+        self.index += 1;
+        self.count_token()?;
+        let exponent = self.parse_power()?;
+        let result = value.powf(exponent);
+        self.ensure_finite(result)?;
+        Ok(result)
+    }
+
+    fn parse_unary(&mut self) -> std::result::Result<f64, String> {
+        self.skip_whitespace();
+        match self.peek() {
+            Some('+') => {
+                self.index += 1;
+                self.count_token()?;
+                self.parse_unary()
+            }
+            Some('-') => {
+                self.index += 1;
+                self.count_token()?;
+                Ok(-self.parse_unary()?)
+            }
+            _ => self.parse_percentage(),
+        }
+    }
+
+    fn parse_percentage(&mut self) -> std::result::Result<f64, String> {
+        let mut value = self.parse_primary()?;
+        loop {
+            self.skip_whitespace();
+            if self.peek() != Some('%') {
+                return Ok(value);
+            }
+            self.index += 1;
+            self.count_token()?;
+            value /= 100.0;
+            self.ensure_finite(value)?;
+        }
+    }
+
+    fn parse_primary(&mut self) -> std::result::Result<f64, String> {
+        self.skip_whitespace();
+        if self.peek() == Some('(') {
+            self.index += 1;
+            self.count_token()?;
+            self.depth += 1;
+            if self.depth > MAX_FORMULA_DEPTH {
+                return Err("formula exceeds the 32-level nesting limit".to_owned());
+            }
+            let value = self.parse_comparison()?;
+            self.skip_whitespace();
+            if self.peek() != Some(')') {
+                return Err("formula has an unclosed parenthesis".to_owned());
+            }
+            self.index += 1;
+            self.count_token()?;
+            self.depth -= 1;
+            return Ok(value);
+        }
+        let start = self.index;
+        while self
+            .peek()
+            .is_some_and(|character| character.is_ascii_digit() || matches!(character, '.' | ','))
+        {
+            self.index += 1;
+        }
+        if start == self.index {
+            return Err(
+                if self
+                    .peek()
+                    .is_some_and(|character| character.is_ascii_alphabetic())
+                {
+                    "formula functions are unsupported".to_owned()
+                } else {
+                    "formula requires a numeric operand".to_owned()
+                },
+            );
+        }
+        self.count_token()?;
+        let number = self.characters[start..self.index]
+            .iter()
+            .filter(|character| **character != ',')
+            .collect::<String>();
+        number
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| "formula contains an invalid or out-of-range number".to_owned())
+    }
+
+    fn remaining(&self) -> String {
+        self.characters[self.index..].iter().collect()
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.characters.get(self.index).copied()
+    }
+
+    fn skip_whitespace(&mut self) {
+        while self.peek().is_some_and(char::is_whitespace) {
+            self.index += 1;
+        }
+    }
+
+    fn count_token(&mut self) -> std::result::Result<(), String> {
+        self.token_count += 1;
+        if self.token_count > MAX_FORMULA_TOKENS {
+            Err("formula exceeds the 512-token limit".to_owned())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn ensure_finite(&self, value: f64) -> std::result::Result<(), String> {
+        if value.is_finite() {
+            Ok(())
+        } else {
+            Err("formula result is outside the finite numeric range".to_owned())
+        }
+    }
+}
+
+fn format_formula_value(value: f64) -> String {
+    if value == 0.0 {
+        return "0".to_owned();
+    }
+    if value.fract() == 0.0 && value >= i64::MIN as f64 && value <= i64::MAX as f64 {
+        return format!("{value:.0}");
+    }
+    format!("{value:.14e}")
+        .parse::<f64>()
+        .unwrap_or(value)
+        .to_string()
+}
+
 fn text_argument(instruction: &FieldInstruction, index: usize) -> Option<&str> {
     instruction.arguments.get(index).and_then(argument_text)
 }
@@ -2686,6 +3711,8 @@ fn unsupported_switch(instruction: &FieldInstruction) -> Option<&str> {
         "FILENAME" => &["p", "*"],
         "AUTHOR" => &["*"],
         "MERGEFIELD" => &["b", "f", "m", "v", "*", "#", "@"],
+        "=" => &["*", "#"],
+        "NEXT" | "NEXTIF" | "SKIPIF" | "MERGEREC" | "MERGESEQ" => &[],
         _ => return None,
     };
     instruction
@@ -2706,6 +3733,12 @@ fn validate_instruction_shape(instruction: &FieldInstruction) -> std::result::Re
         }
         "IF" => 5..=5,
         "INCLUDETEXT" => 1..=2,
+        "=" => 1..=usize::MAX,
+        "TOC" => 0..=0,
+        "TC" => 1..=1,
+        "DISPLAYBARCODE" | "MERGEBARCODE" => 2..=2,
+        "NEXT" | "MERGEREC" | "MERGESEQ" => 0..=0,
+        "NEXTIF" | "SKIPIF" => 3..=3,
         _ => return Ok(()),
     };
     if !argument_range.contains(&instruction.arguments.len()) {
@@ -2722,6 +3755,13 @@ fn validate_instruction_shape(instruction: &FieldInstruction) -> std::result::Re
             "field {} requires {expected} positional operands",
             instruction.name
         ));
+    }
+
+    if matches!(
+        instruction.name.as_str(),
+        "TOC" | "TC" | "DISPLAYBARCODE" | "MERGEBARCODE"
+    ) {
+        return Ok(());
     }
 
     for switch in &instruction.switches {
@@ -3415,6 +4455,628 @@ mod tests {
             .evaluate_fields(&FieldEvaluationContext::default())
             .unwrap();
         assert_eq!(results.len(), 1, "the typed field must be evaluated");
+    }
+
+    #[test]
+    fn formula_fields_use_bounded_precedence_and_stable_failures() {
+        let document = document_with_fields(&[
+            ("= 2 + 3 * 4", "precedence"),
+            ("= (2 + 3) * 4", "parentheses"),
+            ("= 2 ^ 3 ^ 2", "power"),
+            ("= 1,000 + .5", "grouping"),
+            ("= 50%", "percentage"),
+            ("= (50 + 50)%", "grouped percentage"),
+            (r#"= 7 / 2 \# "0.00""#, "picture"),
+            ("= 1 / 0", "zero"),
+            ("= SUM(1, 2)", "function"),
+            ("= (1 + 2", "malformed"),
+            ("= 1e309", "bounds"),
+        ]);
+        let results = document
+            .evaluate_fields(&FieldEvaluationContext::default())
+            .unwrap();
+        assert_eq!(
+            results
+                .iter()
+                .take(7)
+                .map(|result| result.outcome.clone())
+                .collect::<Vec<_>>(),
+            [
+                FieldOutcome::Resolved("14".to_owned()),
+                FieldOutcome::Resolved("20".to_owned()),
+                FieldOutcome::Resolved("512".to_owned()),
+                FieldOutcome::Resolved("1000.5".to_owned()),
+                FieldOutcome::Resolved("0.5".to_owned()),
+                FieldOutcome::Resolved("1".to_owned()),
+                FieldOutcome::Resolved("3.50".to_owned()),
+            ]
+        );
+        for result in &results[7..] {
+            assert!(
+                matches!(result.outcome, FieldOutcome::KeepStored { .. }),
+                "{} unexpectedly resolved as {:?}",
+                result.instruction,
+                result.outcome
+            );
+        }
+        assert_eq!(results[7].outcome, keep("formula divides by zero"));
+        assert_eq!(
+            results[8].outcome,
+            keep("formula functions are unsupported")
+        );
+        assert_eq!(
+            results[9].outcome,
+            keep("formula has an unclosed parenthesis")
+        );
+        let invalid_percentage = document_with_fields(&[("= 5 % 2", "stored")]);
+        assert_eq!(
+            invalid_percentage
+                .evaluate_fields(&FieldEvaluationContext::default())
+                .unwrap()[0]
+                .outcome,
+            keep("formula contains unsupported or trailing syntax")
+        );
+        let normalized_decimal = document_with_fields(&[("= 0.1 + 0.2", "stored")]);
+        assert_eq!(
+            normalized_decimal
+                .evaluate_fields(&FieldEvaluationContext::default())
+                .unwrap()[0]
+                .outcome,
+            FieldOutcome::Resolved("0.3".to_owned())
+        );
+        let compact = format!(
+            "= {}",
+            std::iter::repeat_n("1", 129).collect::<Vec<_>>().join("+")
+        );
+        let spaced = format!(
+            "= {}",
+            std::iter::repeat_n("1", 129)
+                .collect::<Vec<_>>()
+                .join(" + ")
+        );
+        for instruction in [compact, spaced] {
+            let equivalent = document_with_fields(&[(&instruction, "stored")]);
+            assert_eq!(
+                equivalent
+                    .evaluate_fields(&FieldEvaluationContext::default())
+                    .unwrap()[0]
+                    .outcome,
+                FieldOutcome::Resolved("129".to_owned())
+            );
+        }
+        for instruction in [
+            format!("= {}", "1".repeat(MAX_FORMULA_BYTES + 1)),
+            format!(
+                "= {}1{}",
+                "(".repeat(MAX_FORMULA_DEPTH + 1),
+                ")".repeat(MAX_FORMULA_DEPTH + 1)
+            ),
+            format!("= {}1", "1+".repeat(MAX_FORMULA_TOKENS)),
+        ] {
+            let bounded = document_with_fields(&[(&instruction, "bounded fallback")]);
+            let result = bounded
+                .evaluate_fields(&FieldEvaluationContext::default())
+                .unwrap();
+            assert!(matches!(result[0].outcome, FieldOutcome::KeepStored { .. }));
+            assert_eq!(result[0].cached_result, "bounded fallback");
+        }
+
+        let mut nested = document_with_fields(&[("= 1 + 2", "stored")]);
+        let BodyContent::Paragraph(paragraph) = &mut nested.document.body.content[0] else {
+            unreachable!()
+        };
+        let RunContent::Field(formula) = &mut paragraph.runs[0].content[0] else {
+            unreachable!()
+        };
+        formula.instruction.arguments[0] =
+            FieldArgument::Nested(Box::new(Field::new("MERGEFIELD Amount", "nested")));
+        let context = FieldEvaluationContext {
+            merge_fields: BTreeMap::from([("Amount".to_owned(), "3".to_owned())]),
+            ..Default::default()
+        };
+        let results = nested.evaluate_fields(&context).unwrap();
+        assert_eq!(results[0].outcome, FieldOutcome::Resolved("5".to_owned()));
+        assert_eq!(results[1].outcome, FieldOutcome::Resolved("3".to_owned()));
+    }
+
+    #[test]
+    fn mail_merge_control_state_is_story_and_record_scoped() {
+        let document = document_with_fields(&[
+            ("NEXT", "next"),
+            ("MERGEREC", "record"),
+            (r#"NEXTIF "A" = "B""#, "conditional next"),
+            (r#"SKIPIF "A" = "A""#, "conditional skip"),
+            ("MERGESEQ", "sequence"),
+        ]);
+        let context = FieldEvaluationContext {
+            merge_record_number: Some(4),
+            merge_sequence_number: Some(2),
+            ..Default::default()
+        };
+        let results = document.evaluate_fields(&context).unwrap();
+        assert_eq!(
+            results
+                .into_iter()
+                .map(|result| result.outcome)
+                .collect::<Vec<_>>(),
+            [
+                FieldOutcome::MailMergeControl(MailMergeControl::NextRecord { record_number: 5 }),
+                FieldOutcome::MailMergeControl(MailMergeControl::RecordNumber(5)),
+                FieldOutcome::MailMergeControl(MailMergeControl::NextRecordIf {
+                    condition: false,
+                    record_number: 5,
+                }),
+                FieldOutcome::MailMergeControl(MailMergeControl::SkipRecordIf {
+                    condition: true,
+                    record_number: 5,
+                }),
+                FieldOutcome::MailMergeControl(MailMergeControl::SequenceNumber(2)),
+            ]
+        );
+
+        let BodyContent::Paragraph(paragraph) = &document.document.body.content[0] else {
+            unreachable!()
+        };
+        let paragraphs = [paragraph];
+        let mut evaluator = Evaluator::new(&document, &context);
+        evaluator.evaluate_story("main", &paragraphs);
+        evaluator.evaluate_story("header:one", &paragraphs);
+        assert_eq!(
+            evaluator.results[0].outcome, evaluator.results[5].outcome,
+            "each story must start from the explicit record context"
+        );
+
+        let unavailable = document
+            .evaluate_fields(&FieldEvaluationContext::default())
+            .unwrap();
+        assert!(
+            unavailable
+                .iter()
+                .all(|result| matches!(result.outcome, FieldOutcome::KeepStored { .. }))
+        );
+
+        let record_only = FieldEvaluationContext {
+            merge_record_number: Some(9),
+            ..Default::default()
+        };
+        let record = document_with_fields(&[("MERGEREC", "stored")]);
+        assert_eq!(
+            record.evaluate_fields(&record_only).unwrap()[0].outcome,
+            FieldOutcome::MailMergeControl(MailMergeControl::RecordNumber(9))
+        );
+
+        for (instruction, context, diagnostic) in [
+            (
+                "MERGEREC",
+                FieldEvaluationContext {
+                    merge_record_number: Some(0),
+                    ..Default::default()
+                },
+                "MERGEREC merge record number must be one-based",
+            ),
+            (
+                "MERGESEQ",
+                FieldEvaluationContext {
+                    merge_sequence_number: Some(0),
+                    ..Default::default()
+                },
+                "MERGESEQ merge sequence number must be one-based",
+            ),
+        ] {
+            let invalid = document_with_fields(&[(instruction, "stored")]);
+            assert_eq!(
+                invalid.evaluate_fields(&context).unwrap()[0].outcome,
+                keep(diagnostic)
+            );
+        }
+    }
+
+    #[test]
+    fn toc_tc_and_barcode_fields_preserve_non_text_results() {
+        let document = document_with_fields(&[
+            (
+                r#"TOC \o "1-3" \t "Heading 1,1,Appendix,2" \f C \b Main \h \u \n "2-3" \p " " \d ":""#,
+                "stored toc",
+            ),
+            (r#"TC "Entry" \l 2 \f C \n"#, "stored tc"),
+            (
+                r#"DISPLAYBARCODE "0123456789012" EAN13 \h 100 \s 200 \f 0xFF0000 \b 0xFFFFFF \t"#,
+                "stored barcode",
+            ),
+        ]);
+        let results = document
+            .evaluate_fields(&FieldEvaluationContext::default())
+            .unwrap();
+        assert_eq!(
+            results[0].outcome,
+            FieldOutcome::TableOfContents(TocField {
+                heading_levels: Some((1, 3)),
+                custom_styles: vec![("Heading 1".to_owned(), 1), ("Appendix".to_owned(), 2)],
+                entries: TocEntrySelection::Identifier("C".to_owned()),
+                sequence_identifier: None,
+                bookmark: Some("Main".to_owned()),
+                hyperlink: true,
+                use_outline_levels: true,
+                omit_page_number_levels: Some((2, 3)),
+                page_number_separator: Some(" ".to_owned()),
+                entry_page_separator: Some(":".to_owned()),
+            })
+        );
+        assert_eq!(
+            results[1].outcome,
+            FieldOutcome::TableOfContentsEntry(TcField {
+                entry: "Entry".to_owned(),
+                level: 2,
+                table_identifier: Some("C".to_owned()),
+                omit_page_number: true,
+            })
+        );
+        assert_eq!(
+            results[2].outcome,
+            FieldOutcome::Barcode(BarcodeField {
+                value: "0123456789012".to_owned(),
+                kind: BarcodeKind::Ean13,
+                height: Some(100),
+                scale: Some(200),
+                error_correction: None,
+                point_of_sale_style: None,
+                case_style: None,
+                fix_check_digit: false,
+                rotation: None,
+                foreground_color: Some(0xFF0000),
+                background_color: Some(0xFFFFFF),
+                display_text: true,
+                add_start_stop: false,
+            })
+        );
+
+        let unsupported = document_with_fields(&[
+            (r#"TOC \o "9-1""#, "toc"),
+            (r#"TC "Entry" \l 10"#, "tc"),
+            ("DISPLAYBARCODE value UNKNOWN", "barcode"),
+            ("DISPLAYBARCODE 123 EAN13", "barcode digits"),
+        ]);
+        let outcomes = unsupported
+            .evaluate_fields(&FieldEvaluationContext::default())
+            .unwrap();
+        assert_eq!(
+            outcomes
+                .into_iter()
+                .map(|result| result.outcome)
+                .collect::<Vec<_>>(),
+            [
+                keep("TOC heading range starts after it ends"),
+                keep("TC level must be from 1 through 9"),
+                keep("DISPLAYBARCODE barcode type UNKNOWN is unsupported"),
+                keep("DISPLAYBARCODE EAN13 value has an invalid digit count or character"),
+            ]
+        );
+
+        for (instruction, heading_levels, entries, use_outline_levels) in [
+            ("TOC", Some((1, 9)), TocEntrySelection::None, false),
+            (r"TOC \o", Some((1, 9)), TocEntrySelection::None, false),
+            (r"TOC \f", None, TocEntrySelection::All, false),
+            (
+                r"TOC \f C",
+                None,
+                TocEntrySelection::Identifier("C".to_owned()),
+                false,
+            ),
+            (r"TOC \u", None, TocEntrySelection::None, true),
+        ] {
+            let toc = document_with_fields(&[(instruction, "stored toc")]);
+            assert_eq!(
+                toc.evaluate_fields(&FieldEvaluationContext::default())
+                    .unwrap()[0]
+                    .outcome,
+                FieldOutcome::TableOfContents(TocField {
+                    heading_levels,
+                    custom_styles: Vec::new(),
+                    entries,
+                    sequence_identifier: None,
+                    bookmark: None,
+                    hyperlink: false,
+                    use_outline_levels,
+                    omit_page_number_levels: None,
+                    page_number_separator: None,
+                    entry_page_separator: None,
+                })
+            );
+        }
+
+        let normalized_toc =
+            document_with_fields(&[(r#"TOC \t "Heading 1,1, Appendix,2" \p ":""#, "stored toc")]);
+        assert_eq!(
+            normalized_toc
+                .evaluate_fields(&FieldEvaluationContext::default())
+                .unwrap()[0]
+                .outcome,
+            FieldOutcome::TableOfContents(TocField {
+                heading_levels: None,
+                custom_styles: vec![("Heading 1".to_owned(), 1), ("Appendix".to_owned(), 2)],
+                entries: TocEntrySelection::None,
+                sequence_identifier: None,
+                bookmark: None,
+                hyperlink: false,
+                use_outline_levels: false,
+                omit_page_number_levels: None,
+                page_number_separator: Some(":".to_owned()),
+                entry_page_separator: None,
+            })
+        );
+        let decorated_default = document_with_fields(&[(r"TOC \h", "stored toc")]);
+        assert!(matches!(
+            decorated_default
+                .evaluate_fields(&FieldEvaluationContext::default())
+                .unwrap()[0]
+                .outcome,
+            FieldOutcome::TableOfContents(TocField {
+                heading_levels: Some((1, 9)),
+                hyperlink: true,
+                ..
+            })
+        ));
+        let invalid_toc = document_with_fields(&[(r#"TOC \p "ab""#, "stored toc")]);
+        assert_eq!(
+            invalid_toc
+                .evaluate_fields(&FieldEvaluationContext::default())
+                .unwrap()[0]
+                .outcome,
+            keep("TOC page-number separator must contain exactly one character")
+        );
+        let sequenced_toc =
+            document_with_fields(&[(r#"TOC \o "1-3" \s chapter \d ":""#, "stored toc")]);
+        assert!(matches!(
+            sequenced_toc
+                .evaluate_fields(&FieldEvaluationContext::default())
+                .unwrap()[0]
+                .outcome,
+            FieldOutcome::TableOfContents(TocField {
+                sequence_identifier: Some(ref identifier),
+                entry_page_separator: Some(ref separator),
+                ..
+            }) if identifier == "chapter" && separator == ":"
+        ));
+
+        let barcode_grammar = document_with_fields(&[
+            (r"DISPLAYBARCODE 0123456789012 EAN13 \x", "fix"),
+            (r"DISPLAYBARCODE 0123456789012 EAN13 \p STD", "pos"),
+            (r"DISPLAYBARCODE 1234567890123 ITF14 \c EXT", "case"),
+            (r"DISPLAYBARCODE value QR \q 3", "correction"),
+            (r"DISPLAYBARCODE 0123456789012 EAN13 \p OTHER", "bad pos"),
+            (r"DISPLAYBARCODE value QR \q H", "bad correction"),
+        ]);
+        let outcomes = barcode_grammar
+            .evaluate_fields(&FieldEvaluationContext::default())
+            .unwrap();
+        let FieldOutcome::Barcode(fix) = &outcomes[0].outcome else {
+            panic!("expected check-digit barcode")
+        };
+        assert!(fix.fix_check_digit);
+        let FieldOutcome::Barcode(pos) = &outcomes[1].outcome else {
+            panic!("expected point-of-sale barcode")
+        };
+        assert_eq!(
+            pos.point_of_sale_style,
+            Some(BarcodePointOfSaleStyle::Standard)
+        );
+        let FieldOutcome::Barcode(case) = &outcomes[2].outcome else {
+            panic!("expected ITF14 case barcode")
+        };
+        assert_eq!(case.case_style, Some(BarcodeCaseStyle::Extended));
+        let FieldOutcome::Barcode(correction) = &outcomes[3].outcome else {
+            panic!("expected corrected QR barcode")
+        };
+        assert_eq!(correction.error_correction, Some(3));
+        assert_eq!(
+            outcomes[4].outcome,
+            keep("DISPLAYBARCODE point-of-sale style must be STD, SUP2, SUP5, or CASE")
+        );
+        assert_eq!(
+            outcomes[5].outcome,
+            keep("DISPLAYBARCODE error correction must be from 0 through 3")
+        );
+
+        let case_alias = document_with_fields(&[
+            (r"DISPLAYBARCODE 1234567890123 CASE \c EXT", "case"),
+            (r"DISPLAYBARCODE not-digits CASE", "invalid case"),
+        ]);
+        let outcomes = case_alias
+            .evaluate_fields(&FieldEvaluationContext::default())
+            .unwrap();
+        assert!(matches!(
+            outcomes[0].outcome,
+            FieldOutcome::Barcode(BarcodeField {
+                kind: BarcodeKind::Case,
+                case_style: Some(BarcodeCaseStyle::Extended),
+                ..
+            })
+        ));
+        assert_eq!(
+            outcomes[1].outcome,
+            keep("DISPLAYBARCODE CASE value has an invalid digit count or character")
+        );
+
+        let extra_operands = document_with_fields(&[
+            (r#"TC "Entry" unexpected"#, "tc"),
+            (r"DISPLAYBARCODE value QR unexpected \t", "barcode"),
+        ]);
+        let outcomes = extra_operands
+            .evaluate_fields(&FieldEvaluationContext::default())
+            .unwrap();
+        assert_eq!(
+            outcomes[0].outcome,
+            keep("field TC requires 1 positional operands")
+        );
+        assert_eq!(
+            outcomes[1].outcome,
+            keep("field DISPLAYBARCODE requires 2 positional operands")
+        );
+
+        let escaped = document_with_fields(&[
+            (r#"TC "A\"B""#, "stored quote"),
+            (r#"TC "\Entry""#, "stored slash"),
+        ]);
+        assert_eq!(
+            escaped
+                .evaluate_fields(&FieldEvaluationContext::default())
+                .unwrap()[0]
+                .outcome,
+            FieldOutcome::TableOfContentsEntry(TcField {
+                entry: "A\"B".to_owned(),
+                level: 1,
+                table_identifier: None,
+                omit_page_number: false,
+            })
+        );
+        assert_eq!(
+            escaped
+                .evaluate_fields(&FieldEvaluationContext::default())
+                .unwrap()[1]
+                .outcome,
+            FieldOutcome::TableOfContentsEntry(TcField {
+                entry: r"\Entry".to_owned(),
+                level: 1,
+                table_identifier: None,
+                omit_page_number: false,
+            })
+        );
+
+        let long_value = "x".repeat(1025);
+        let barcode_bounds = document_with_fields(&[
+            (&format!("DISPLAYBARCODE {long_value} QR"), "value"),
+            (r"DISPLAYBARCODE value QR \h 4294967296", "height"),
+            (r"DISPLAYBARCODE value QR \s 9", "scale low"),
+            (r"DISPLAYBARCODE value QR \s 1001", "scale high"),
+            (r"DISPLAYBARCODE value QR \r 4", "rotation"),
+            (r"DISPLAYBARCODE value QR \f 0x1000000", "foreground"),
+            (r"DISPLAYBARCODE value QR \b 16777216", "background"),
+        ]);
+        let outcomes = barcode_bounds
+            .evaluate_fields(&FieldEvaluationContext::default())
+            .unwrap();
+        assert_eq!(
+            outcomes
+                .into_iter()
+                .map(|outcome| outcome.outcome)
+                .collect::<Vec<_>>(),
+            [
+                keep("DISPLAYBARCODE value must contain from 1 through 1024 characters"),
+                keep("DISPLAYBARCODE height must be a nonnegative integer"),
+                keep("DISPLAYBARCODE scale must be from 10 through 1000"),
+                keep("DISPLAYBARCODE scale must be from 10 through 1000"),
+                keep("DISPLAYBARCODE rotation must be from 0 through 3"),
+                keep("DISPLAYBARCODE barcode colour must be from 0 through 0xFFFFFF"),
+                keep("DISPLAYBARCODE barcode colour must be from 0 through 0xFFFFFF"),
+            ]
+        );
+        let maximum_value = "x".repeat(1024);
+        let boundary_instruction = format!(
+            "DISPLAYBARCODE {maximum_value} QR \\h 4294967295 \\s 10 \\r 3 \\f 0 \\b 0xFFFFFF"
+        );
+        let boundaries = document_with_fields(&[(&boundary_instruction, "stored")]);
+        assert!(matches!(
+            boundaries
+                .evaluate_fields(&FieldEvaluationContext::default())
+                .unwrap()[0]
+                .outcome,
+            FieldOutcome::Barcode(BarcodeField {
+                height: Some(u32::MAX),
+                scale: Some(10),
+                rotation: Some(3),
+                foreground_color: Some(0),
+                background_color: Some(0xFF_FFFF),
+                ..
+            })
+        ));
+
+        let mut nested = document_with_fields(&[("DISPLAYBARCODE placeholder QR", "stored")]);
+        let BodyContent::Paragraph(paragraph) = &mut nested.document.body.content[0] else {
+            unreachable!()
+        };
+        let RunContent::Field(barcode) = &mut paragraph.runs[0].content[0] else {
+            unreachable!()
+        };
+        barcode.instruction.arguments[0] =
+            FieldArgument::Nested(Box::new(Field::new("MERGEFIELD Code", "nested")));
+        let context = FieldEvaluationContext {
+            merge_fields: BTreeMap::from([("Code".to_owned(), "nested value".to_owned())]),
+            ..Default::default()
+        };
+        assert!(matches!(
+            nested.evaluate_fields(&context).unwrap()[0].outcome,
+            FieldOutcome::Barcode(BarcodeField { ref value, .. }) if value == "nested value"
+        ));
+
+        let mut nested_tc = document_with_fields(&[("TC placeholder", "stored")]);
+        let BodyContent::Paragraph(paragraph) = &mut nested_tc.document.body.content[0] else {
+            unreachable!()
+        };
+        let RunContent::Field(tc) = &mut paragraph.runs[0].content[0] else {
+            unreachable!()
+        };
+        tc.instruction.arguments[0] =
+            FieldArgument::Nested(Box::new(Field::new("MERGEFIELD Entry", "nested")));
+        let context = FieldEvaluationContext {
+            merge_fields: BTreeMap::from([("Entry".to_owned(), "Nested entry".to_owned())]),
+            ..Default::default()
+        };
+        assert!(matches!(
+            nested_tc.evaluate_fields(&context).unwrap()[0].outcome,
+            FieldOutcome::TableOfContentsEntry(TcField { ref entry, .. })
+                if entry == "Nested entry"
+        ));
+
+        let mut nested_switches = document_with_fields(&[
+            (r"TOC \b placeholder", "toc"),
+            (r#"TC "Entry" \f placeholder"#, "tc"),
+            (r"DISPLAYBARCODE value QR \s 100", "barcode"),
+        ]);
+        let BodyContent::Paragraph(paragraph) = &mut nested_switches.document.body.content[0]
+        else {
+            unreachable!()
+        };
+        for (index, instruction) in ["MERGEFIELD Scope", "MERGEFIELD Kind", "MERGEFIELD Scale"]
+            .into_iter()
+            .enumerate()
+        {
+            let RunContent::Field(field) = &mut paragraph.runs[index].content[0] else {
+                unreachable!()
+            };
+            field.instruction.switches[0].argument = Some(FieldArgument::Nested(Box::new(
+                Field::new(instruction, "nested"),
+            )));
+        }
+        let context = FieldEvaluationContext {
+            merge_fields: BTreeMap::from([
+                ("Scope".to_owned(), "Main".to_owned()),
+                ("Kind".to_owned(), "C".to_owned()),
+                ("Scale".to_owned(), "250".to_owned()),
+            ]),
+            ..Default::default()
+        };
+        let outcomes = nested_switches.evaluate_fields(&context).unwrap();
+        assert!(matches!(
+            outcomes[0].outcome,
+            FieldOutcome::TableOfContents(TocField {
+                bookmark: Some(ref bookmark),
+                ..
+            }) if bookmark == "Main"
+        ));
+        assert!(matches!(
+            outcomes[2].outcome,
+            FieldOutcome::TableOfContentsEntry(TcField {
+                table_identifier: Some(ref identifier),
+                ..
+            }) if identifier == "C"
+        ));
+        assert!(matches!(
+            outcomes[4].outcome,
+            FieldOutcome::Barcode(BarcodeField {
+                scale: Some(250),
+                ..
+            })
+        ));
     }
 
     #[test]

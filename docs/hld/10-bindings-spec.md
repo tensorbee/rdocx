@@ -484,11 +484,21 @@ explicit `FieldEvaluationContext`. `FieldDateTime` supplies deterministic civil
 time. Caller maps supply merge values and included text, including
 `source#bookmark` keys for bookmark-scoped includes. Each `FieldEvaluation`
 records a snapshot-local document-order index, original instruction, stored
-display, and a `FieldOutcome` that is resolved text, pagination deferral, or a
-stable stored-display fallback. Evaluation is additive and read-only. It never
-reads the ambient clock or filesystem and never changes field caches. Python,
-WASM, and CLI surfaces gain no evaluator methods and continue to preserve the
-same package content.
+display, and a `FieldOutcome` that is resolved text, pagination deferral, a
+structured `TocField`, `TcField`, `MailMergeControl`, or `BarcodeField`, or a
+stable stored-display fallback. The explicit context optionally supplies
+one-based merge record and output sequence numbers. Formula results remain
+text and use the existing formatting switches. Unformatted decimal formulas
+use Word-compatible stable decimal display. Structured TOC outcomes retain
+optional sequence identifiers and their page-number separators. Structured
+outcomes never materialize a generated cache. Evaluation is read-only. It
+never reads the ambient clock or filesystem and never changes field caches.
+The new public
+types are additive. The new public `FieldEvaluationContext` fields are a
+pre-1.0 source break for native callers that construct the context with a
+struct literal. The new `FieldOutcome` variants are also a pre-1.0 source break
+for exhaustive native matches. Python, WASM, and CLI surfaces gain no evaluator
+methods and continue to preserve the same package content.
 
 Native Word callers opt into cache materialization with
 `Document::update_fields`, `Document::save_with_field_updates`, or

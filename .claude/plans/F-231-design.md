@@ -1,6 +1,6 @@
 # F-231, Extended field evaluation
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S66
 **Size**: L
 **Depends on**: F-161, F-162
@@ -48,6 +48,12 @@ operands. Use bounded local parsers for formula and barcode syntax. No runtime
 oracle, filesystem access, ambient clock, or renderer dependency enters the
 evaluator.
 
+The existing shared field grammar in `crates/rdocx-oxml/src/text.rs` classifies
+which switches own operands. The evaluator consumes that typed recursive
+grammar directly. The classifier therefore recognizes the extended TOC, TC,
+and barcode switch set instead of allowing a second raw-instruction lexer in
+the facade.
+
 Add structured native outcomes for TOC or TC decisions, mail-merge controls,
 and barcode specifications. Formula fields continue to return resolved text.
 Cache materialization will replace a cache only when the result is an exact
@@ -79,6 +85,7 @@ locale in test metadata only.
 | unit | `formula_fields_use_bounded_precedence_and_stable_failures` | Formula precedence, nesting, pictures, bounds, malformed input, division by zero, and unsupported functions resolve or retain the stored display exactly. |
 | unit | `mail_merge_control_state_is_story_and_record_scoped` | Approved control instructions do not leak state between stories or records and unavailable context retains the cache. |
 | unit | `toc_tc_and_barcode_fields_preserve_non_text_results` | Supported non-text decisions use the approved outcome form while unsupported syntax keeps instruction text, cache, and a stable diagnostic. |
+| round-trip | `extended_field_switches_use_the_shared_recursive_grammar` | Extended switch values, nested operands, escaped quotes, aliased Word prefixes, schema order, and unmodelled run XML survive the shared parser and exact serialization path. |
 | regression | `extended_field_updates_preserve_instruction_and_result_scaffolding` | Simple and complex fields retain run formatting, dirty spelling policy, nested order, unmodelled XML, and surrounding package content after save and reopen. |
 
 The **test gate** is differential. Supported field results match the pinned
@@ -94,12 +101,21 @@ Word values, and unsupported instructions remain intact with diagnostics.
 
 - Public API of a published crate. Read `docs/hld/10-bindings-spec.md` and the
   `CLAUDE.md` structural rules. State the pre-1.0 additive or breaking impact,
-  run `cargo publish --dry-run -p rdocx`, and assert the generated `.crate`
-  remains below 10 MiB.
+  then apply both packaging gates. In the uncommitted worker, run the exact
+  locally patched workspace command from `/verify` step 10 with only
+  `--allow-dirty` added, and assert every generated `.crate` remains below 10
+  MiB. After the integration commit, the dependency-prefix `/verify --full`
+  runs that canonical command without `--allow-dirty` on the clean integrated
+  tree. Do not use `--no-verify` or substitute a single-crate dry run.
 - External oracle comparison. Read
   `.claude/skills/differential-testing.md`. Pin Microsoft Word 16.104 build
   16.104.25121423 and the locale in the source test metadata. Keep the oracle
   out of published crate dependencies and use only source-built fixtures.
+- Parser or serializer. Read `docs/hld/04-opc-and-packaging.md` and
+  `docs/hld/06-presentationml-model.md`. Run the focused shared-field parser
+  test and the complete `rdocx-oxml` test suite. Prove exact round-trip bytes
+  preserve the aliased Word prefix, schema child order, and unmodelled run
+  subtree.
 
 ## Hash harness
 
@@ -109,13 +125,14 @@ integration.
 
 ## Implementation checklist
 
-- [ ] Add the approved structured outcomes and supported instruction subset.
-- [ ] Add bounded syntax validation for each approved field family.
-- [ ] Evaluate supported text, control, deferred, and generated-content cases through the existing ordered evaluator.
-- [ ] Preserve instruction source, cached display, formatting, dirty policy, and unmodelled XML for every fallback.
-- [ ] Add the pinned Word differential matrix and focused bounded regressions to the existing test binaries.
-- [ ] Update the listed HLD sections and native facade contract.
-- [ ] Run focused `rdocx` checks plus every risk rider.
+- [x] Add the approved structured outcomes and supported instruction subset.
+- [x] Add bounded syntax validation for each approved field family.
+- [x] Evaluate supported text, control, deferred, and generated-content cases through the existing ordered evaluator.
+- [x] Preserve instruction source, cached display, formatting, dirty policy, and unmodelled XML for every fallback.
+- [x] Add the pinned Word differential matrix and focused bounded regressions to the existing test binaries.
+- [x] Extend the shared field switch classifier and prove its exact round-trip preservation boundary.
+- [x] Update the listed HLD sections and native facade contract.
+- [x] Run focused `rdocx` checks plus every risk rider.
 
 ## Open questions
 

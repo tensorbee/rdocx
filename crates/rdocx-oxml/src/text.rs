@@ -5011,10 +5011,15 @@ fn parse_field_instruction_parts_with_order(
 }
 
 fn switch_takes_argument(field_name: &str, switch_name: &str) -> bool {
+    let switch_name = switch_name.to_ascii_lowercase();
     matches!(
-        switch_name.to_ascii_lowercase().as_str(),
+        switch_name.as_str(),
         "*" | "#" | "@" | "r" | "s" | "d" | "b" | "f"
-    ) || field_name == "INCLUDETEXT" && switch_name.eq_ignore_ascii_case("c")
+    ) || field_name == "INCLUDETEXT" && switch_name == "c"
+        || field_name == "TOC" && matches!(switch_name.as_str(), "o" | "n" | "t" | "p")
+        || field_name == "TC" && switch_name == "l"
+        || matches!(field_name, "DISPLAYBARCODE" | "MERGEBARCODE")
+            && matches!(switch_name.as_str(), "h" | "q" | "p" | "c")
 }
 
 fn lex_field_text(input: &str) -> Vec<InstructionToken> {
@@ -5719,6 +5724,60 @@ mod tests {
                 name: "c".to_owned(),
                 argument: Some(FieldArgument::Text("MSWord8".to_owned())),
             }]
+        );
+    }
+
+    #[test]
+    fn extended_field_switches_use_the_shared_recursive_grammar() {
+        let toc = parse_field_instruction_parts(vec![
+            InstructionPart::Text("TOC \\b ".to_owned()),
+            InstructionPart::Nested(Field::new("MERGEFIELD Scope", "nested")),
+        ]);
+        assert!(toc.arguments.is_empty());
+        assert!(matches!(
+            toc.switches.as_slice(),
+            [FieldSwitch {
+                name,
+                argument: Some(FieldArgument::Nested(_)),
+            }] if name == "b"
+        ));
+
+        let tc = parse_field_instruction(r#"TC "A\"B" \l 2"#);
+        assert_eq!(tc.arguments, vec![FieldArgument::Text("A\"B".to_owned())]);
+        assert_eq!(
+            tc.switches,
+            vec![FieldSwitch {
+                name: "l".to_owned(),
+                argument: Some(FieldArgument::Text("2".to_owned())),
+            }]
+        );
+
+        let barcode = parse_field_instruction(r"DISPLAYBARCODE value QR \q 3 \p STD");
+        assert_eq!(barcode.arguments.len(), 2);
+        assert!(
+            barcode
+                .switches
+                .iter()
+                .all(|field_switch| field_switch.argument.is_some())
+        );
+
+        let source = concat!(
+            r#"<q:fldSimple xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" q:instr="TOC \p &quot;:&quot;" data-token="kept">"#,
+            r#"<q:r><q:t>cached</q:t><x:opaque xmlns:x="urn:producer"/></q:r>"#,
+            r#"</q:fldSimple>"#,
+        );
+        let paragraph = parse_paragraph(source);
+        let field = parsed_field(&paragraph, 0);
+        assert!(matches!(
+            field.instruction.switches.as_slice(),
+            [FieldSwitch {
+                name,
+                argument: Some(FieldArgument::Text(separator)),
+            }] if name == "p" && separator == ":"
+        ));
+        assert_eq!(
+            serialized_paragraph(&paragraph),
+            format!("<w:p>{source}</w:p>")
         );
     }
 

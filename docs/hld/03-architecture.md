@@ -435,15 +435,37 @@ header and footer parts, footnotes, and endnotes. Package-backed inputs come
 from unique bookmarks, styles, core and custom properties, and settings
 document variables. Date-time, filename, merge, and included-text values come
 only from an explicit caller context. Evaluation reports resolved text,
-pagination deferral, or a stable cached-display fallback without mutating the
-package. Sequence counters remain isolated by story. Raw text boxes and other
-untyped XML remain outside this evaluation boundary.
+pagination deferral, a structured TOC or TC request, a mail-merge control
+decision, a validated barcode request, or a stable cached-display fallback
+without mutating the package. Formula parsing is bounded to 4,096 bytes, 512
+tokens, and 32 parenthesis levels. It supports numeric operands, arithmetic
+precedence, comparison operators, postfix percentages, nested textual field
+operands, and the existing numeric picture formatting. Unformatted
+non-integral results round to 15 significant decimal digits before stable
+shortest-decimal display. TOC and TC requests retain the validated heading,
+style, outline, entry, bookmark, and page-number selections required by the
+native rebuild boundary. TOC page-number selection also retains an optional
+`\s` sequence identifier and the corresponding `\d` separator. A bare TOC
+selects the built-in heading styles at levels one through nine. An explicit
+`\t`, `\f`, or `\u` source does not inherit that bare-field default unless
+`\o` is also present. Custom style pairs trim list-separator whitespace, and
+the `\p` page-number separator is exactly one character. Every positional and switch
+operand uses the shared recursive field grammar, including quoted escapes and
+nested fields. Barcode requests carry validated data, symbology, dimensions,
+correction, colour, and typed symbology-specific display options without
+generating renderer content. `CASE` retains its public spelling while using
+the same payload and case-style rules as `ITF14`. Sequence counters and
+mail-merge record state remain
+isolated by story. Mail-merge record and output sequence numbers come only from
+the explicit caller context. Raw text boxes and other untyped XML remain
+outside this evaluation boundary.
 
 The facade also owns explicit field cache updates across that same typed story
 scope. It evaluates the complete field set before changing cloned document and
 package-backed parts. Resolved values replace the stored display and clear the
-field-local dirty flag. Pagination deferrals and stored-display fallbacks keep
-their cache and become dirty so Word may retry them. Only validated staged XML
+field-local dirty flag. Pagination deferrals, structured non-text outcomes,
+and stored-display fallbacks keep their cache and become dirty so Word may
+retry them. Only validated staged XML
 is committed, then both layout caches are invalidated once. Existing save and
 byte methods remain leave alone operations that preserve cache content and
 dirty spelling. Update-aware save methods opt into the same atomic operation

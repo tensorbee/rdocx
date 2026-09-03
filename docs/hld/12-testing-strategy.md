@@ -267,6 +267,23 @@ inputs, formatting pictures, and stable cached-display fallbacks. The oracle
 is test metadata only. It is not a runtime dependency and adds no binary
 fixture.
 
+The extended Word field matrix uses the same pinned Word build and environment.
+Its source-built `F-231-readable-field-matrix-v1` input covers formula, TOC,
+TC, mail-merge control, display barcode, and merge barcode outcomes in exact
+document order. Focused tests cover formula precedence, nested operands,
+postfix percentages, format pictures, resource bounds, malformed input, stable
+decimal normalization, story-isolated merge state, bare and explicitly
+selected TOC forms, normalized TOC separators, sequence-prefixed page numbers,
+and style lists, validated TC selections, recursive positional
+and switch operands, shared quoted escapes, typed barcode options, the `CASE`
+alias, and every barcode value, height, scale, rotation, and colour boundary.
+Equivalent compact and spaced formulas share the 512-token parser limit. The
+differential matrix includes supported outcomes and exact ordered fallback
+diagnostics. The cache matrix covers resolved text, every structured outcome,
+pagination deferral, unavailable explicit context, and unsupported
+instructions. Every non-text or fallback result retains the original
+instruction and stored display. Fallbacks also retain a stable diagnostic.
+
 The RTF reader differential records Microsoft Word 16.104 build
 16.104.25121423 as the oracle. Its checked input is source-encoded RTF that
 covers body order, run and paragraph formatting, tables, list overrides, PNG
