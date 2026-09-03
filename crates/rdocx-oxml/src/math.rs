@@ -2973,6 +2973,8 @@ fn math_text_has_non_text_nodes(raw: &[u8]) -> Result<bool> {
     loop {
         match reader.read_event_into(&mut buffer)? {
             Event::Start(_) if !inside => inside = true,
+            Event::Empty(_) if !inside => return Ok(false),
+            Event::Start(_) | Event::Empty(_) if inside => return Ok(true),
             Event::Comment(_) | Event::PI(_) if inside => return Ok(true),
             Event::End(_) if inside => return Ok(false),
             Event::Eof => return Ok(false),
@@ -4129,7 +4131,18 @@ mod tests {
         let nested = format!(
             r#"<m:oMath xmlns:m="{M_NS}"><m:r><m:t><x:empty xmlns:x="urn:test"/></m:t></m:r></m:oMath>"#
         );
-        assert!(CT_OMath::from_xml(nested.as_bytes()).is_err());
+        let parsed = CT_OMath::from_xml(nested.as_bytes()).unwrap();
+        assert!(parsed.expressions.is_empty());
+        assert!(parsed.has_unsupported_content());
+        let first = String::from_utf8(parsed.to_xml().unwrap()).unwrap();
+        assert_eq!(first, nested);
+        let reopened = CT_OMath::from_xml(first.as_bytes()).unwrap();
+        assert!(reopened.expressions.is_empty());
+        assert!(reopened.has_unsupported_content());
+        assert_eq!(
+            String::from_utf8(reopened.to_xml().unwrap()).unwrap(),
+            nested
+        );
         let truncated = format!(r#"<m:oMath xmlns:m="{M_NS}"><m:r><m:t>x"#);
         assert!(CT_OMath::from_xml(truncated.as_bytes()).is_err());
     }

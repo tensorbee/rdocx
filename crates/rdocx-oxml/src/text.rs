@@ -7237,4 +7237,34 @@ mod tests {
         assert!(output.find("first").unwrap() < output.find("changed").unwrap());
         assert!(!output.contains("second"));
     }
+
+    #[test]
+    fn nested_math_text_extension_remains_raw_through_paragraph_reopen() {
+        let math_namespace = crate::namespace::M_NS;
+        let relationships_namespace = crate::namespace::R_NS;
+        let compatibility_namespace = crate::namespace::MC_NS;
+        let equation = format!(
+            r#"<m:oMath xmlns:m="{math_namespace}" xmlns:r="{relationships_namespace}" xmlns:mc="{compatibility_namespace}"><m:r><m:t>x<x:nested xmlns:x="urn:test"/></m:t></m:r></m:oMath>"#
+        );
+        let source =
+            format!(r#"<w:r><w:t>before</w:t></w:r>{equation}<w:r><w:t>after</w:t></w:r>"#);
+        let paragraph = parse_paragraph(&source);
+        assert_eq!(paragraph.text(), "beforeafter");
+        assert_eq!(paragraph.equations.len(), 1);
+        assert!(paragraph.equations[0].2.has_unsupported_content());
+
+        let first = serialized_paragraph(&paragraph);
+        assert!(first.contains(&equation), "{first}");
+        let reopened = parse_paragraph(
+            first
+                .strip_prefix("<w:p>")
+                .and_then(|xml| xml.strip_suffix("</w:p>"))
+                .expect("serialized paragraph wrapper"),
+        );
+        assert_eq!(reopened.text(), "beforeafter");
+        assert_eq!(reopened.equations.len(), 1);
+        assert!(reopened.equations[0].2.has_unsupported_content());
+        let second = serialized_paragraph(&reopened);
+        assert!(second.contains(&equation), "{second}");
+    }
 }
