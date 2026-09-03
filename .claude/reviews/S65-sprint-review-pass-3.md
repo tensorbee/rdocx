@@ -32,6 +32,12 @@ This is the third bounded pass. The remaining actionable finding is blocking,
 and a fourth pass is not permitted without an explicit decision to extend the
 review bound. The dependency prefix is not ready to advance.
 
+## Review-bound extension
+
+On 2026-09-03 the user explicitly approved as many additional review passes as
+required to reach a clean verdict. Pass 4 and later remediation passes are
+therefore authorized under the same sprint state.
+
 ## Should-fix
 
 None.

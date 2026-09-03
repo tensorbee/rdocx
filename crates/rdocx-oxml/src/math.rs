@@ -3551,20 +3551,14 @@ mod tests {
         };
         assert_eq!(run.text, "changed");
         let reopened_serialized = String::from_utf8(reopened.to_xml().unwrap()).unwrap();
-        for raw in [
-            r#"<x:before keep="root"/>"#,
-            r#"<x:fraction keep="property"/>"#,
-            r#"<x:numerator keep="argument"/>"#,
-            r#"<x:after keep="root"/>"#,
-        ] {
-            assert!(reopened_serialized.contains(raw));
-        }
         assert_fragments_in_order(
             reopened_serialized.as_bytes(),
             &[
                 r#"<x:before keep="root"/>"#,
                 "<m:r>",
                 "<m:f>",
+                "<m:acc>",
+                "</m:acc>",
                 r#"<x:after keep="root"/>"#,
             ],
         );
@@ -3579,9 +3573,11 @@ mod tests {
             &[
                 "<m:fPr>",
                 r#"<x:fraction keep="property"/>"#,
+                "<m:type",
                 "</m:fPr>",
                 "<m:num>",
                 r#"<x:numerator keep="argument"/>"#,
+                "<m:r>",
                 "</m:num>",
                 "<m:den>",
             ],
