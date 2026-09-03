@@ -378,6 +378,7 @@ defended.
 | F-228 | S65 | L | 4 | 1 | 2026-09-03 | Added a typed, source-ordered OfficeMath model with document settings, native authoring, schema-order writing, and unsupported XML preservation |
 | F-229 | S65 | M | 2 | 1 | 2026-09-03 | Measured and rendered OfficeMath through shared baseline-aware layout groups with deterministic Word and Poppler oracle geometry |
 | F-230 | S65 | M | 2 | 1 | 2026-09-03 | Added bounded native MathML and LaTeX conversion with stable diagnostics and a pinned Pandoc structural differential |
+| F-231 | S66 | L | 4 | 1 | 2026-09-03 | Added bounded formula, TOC, TC, mail-control, and barcode evaluation with structured native outcomes and pinned Word parity |
 
 ## Velocity
 
