@@ -30,7 +30,7 @@ font, layout, PDF, and facade boundaries.
 |------|-------|------|--------|-------|
 | F-228 | OfficeMath model and authoring | L | done | - |
 | F-229 | OfficeMath layout and PDF rendering | M | in-progress | codex |
-| F-230 | MathML and LaTeX conversion | M | pending | - |
+| F-230 | MathML and LaTeX conversion | M | in-progress | codex |
 
 ## Sequencing note
 
