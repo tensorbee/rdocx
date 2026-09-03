@@ -375,6 +375,8 @@ defended.
 | F-X074 | S64 | S | 1 | 2 | 2026-09-03 | Published and independently verified the exact 15-package rpptx 0.9.0 family with the reviewed release body and no binding publication |
 | F-X076 | S64 | S | 1 | 1 | 2026-09-03 | Published and independently verified the exact seven-package rdocx 0.12.0 stable family with all seven reviewed contribution notifications |
 | F-228 | S65 | L | 4 | 1 | 2026-09-03 | Added a typed, source-ordered OfficeMath model with document settings, native authoring, schema-order writing, and unsupported XML preservation |
+| F-229 | S65 | M | 2 | 1 | 2026-09-03 | Measured and rendered OfficeMath through shared baseline-aware layout groups with deterministic Word and Poppler oracle geometry |
+| F-230 | S65 | M | 2 | 1 | 2026-09-03 | Added bounded native MathML and LaTeX conversion with stable diagnostics and a pinned Pandoc structural differential |
 
 ## Velocity
 
