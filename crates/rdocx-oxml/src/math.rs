@@ -100,6 +100,7 @@ impl CT_OMath {
             expression.write_xml(writer)?;
             write_raw_slot(writer, &self.preservation, index + 1)?;
         }
+        write_raw_tail(writer, &self.preservation, self.expressions.len() + 1)?;
         writer.write_event(Event::End(BytesEnd::new("m:oMath")))?;
         Ok(())
     }
@@ -209,6 +210,7 @@ impl CT_OMathPara {
             modeled += 1;
             write_raw_slot(writer, &self.preservation, modeled)?;
         }
+        write_raw_tail(writer, &self.preservation, modeled + 1)?;
         writer.write_event(Event::End(BytesEnd::new("m:oMathPara")))?;
         Ok(())
     }
@@ -463,7 +465,7 @@ impl MathArgument {
                 expression.write_xml(writer)?;
                 write_raw_slot(writer, &self.preservation, index + 1)?;
             }
-            Ok(())
+            write_raw_tail(writer, &self.preservation, self.expressions.len() + 1)
         })
     }
 }
@@ -1308,12 +1310,12 @@ impl MathMatrix {
                         cell.write_xml(writer, "e")?;
                         write_raw_slot(writer, &row.preservation, index + 1)?;
                     }
-                    Ok(())
+                    write_raw_tail(writer, &row.preservation, row.cells.len() + 1)
                 })?;
                 modeled += 1;
                 write_raw_slot(writer, &self.preservation, modeled)?;
             }
-            Ok(())
+            write_raw_tail(writer, &self.preservation, modeled + 1)
         })
     }
 }
@@ -1664,7 +1666,7 @@ impl MathDelimiter {
                 modeled += 1;
                 write_raw_slot(writer, &self.preservation, modeled)?;
             }
-            Ok(())
+            write_raw_tail(writer, &self.preservation, modeled + 1)
         })
     }
 }
@@ -3724,6 +3726,196 @@ mod tests {
                 "<m:r>",
                 "</m:num>",
                 "<m:den>",
+            ],
+        );
+    }
+
+    #[test]
+    fn shortening_repeated_math_children_emits_every_unreached_raw_slot() {
+        let root_source = format!(
+            r#"<m:oMath xmlns:m="{M_NS}" xmlns:x="urn:producer"><x:root-zero/><m:r><m:t>A</m:t></m:r><x:root-one/><m:f><m:num><x:arg-zero/><m:r><m:t>N1</m:t></m:r><x:arg-one/><m:r><m:t>N2</m:t></m:r><x:arg-two/></m:num><m:den/></m:f><x:root-two/><m:r><m:t>Z</m:t></m:r><x:root-three/></m:oMath>"#
+        );
+        let mut root = CT_OMath::from_xml(root_source.as_bytes()).unwrap();
+        root.expressions.pop();
+        let MathExpression::Fraction(fraction) = &mut root.expressions[1] else {
+            panic!("fraction")
+        };
+        fraction.numerator.expressions.pop();
+        let first = root.to_xml().unwrap();
+        assert_fragments_in_order(
+            &first,
+            &[
+                "<x:root-zero/>",
+                "<m:t>A</m:t>",
+                "<x:root-one/>",
+                "<m:f>",
+                "<x:root-two/>",
+                "<x:root-three/>",
+            ],
+        );
+        assert_fragments_in_order(
+            &first,
+            &[
+                "<m:num>",
+                "<x:arg-zero/>",
+                "<m:t>N1</m:t>",
+                "<x:arg-one/>",
+                "<x:arg-two/>",
+                "</m:num>",
+            ],
+        );
+        let reopened = CT_OMath::from_xml(&first).unwrap();
+        let second = reopened.to_xml().unwrap();
+        assert_fragments_in_order(
+            &second,
+            &[
+                "<x:root-zero/>",
+                "<m:t>A</m:t>",
+                "<x:root-one/>",
+                "<m:f>",
+                "<x:root-two/>",
+                "<x:root-three/>",
+            ],
+        );
+        assert_fragments_in_order(
+            &second,
+            &[
+                "<m:num>",
+                "<x:arg-zero/>",
+                "<m:t>N1</m:t>",
+                "<x:arg-one/>",
+                "<x:arg-two/>",
+                "</m:num>",
+            ],
+        );
+
+        let display_source = format!(
+            r#"<m:oMathPara xmlns:m="{M_NS}" xmlns:x="urn:producer"><x:display-zero/><m:oMath><m:r><m:t>A</m:t></m:r></m:oMath><x:display-one/><m:oMath><m:r><m:t>B</m:t></m:r></m:oMath><x:display-two/></m:oMathPara>"#
+        );
+        let mut display = CT_OMathPara::from_xml(display_source.as_bytes()).unwrap();
+        display.equations.pop();
+        let first = display.to_xml().unwrap();
+        assert_fragments_in_order(
+            &first,
+            &[
+                "<x:display-zero/>",
+                "<m:t>A</m:t>",
+                "<x:display-one/>",
+                "<x:display-two/>",
+            ],
+        );
+        let reopened = CT_OMathPara::from_xml(&first).unwrap();
+        assert_fragments_in_order(
+            &reopened.to_xml().unwrap(),
+            &[
+                "<x:display-zero/>",
+                "<m:t>A</m:t>",
+                "<x:display-one/>",
+                "<x:display-two/>",
+            ],
+        );
+
+        let matrix_source = format!(
+            r#"<m:oMath xmlns:m="{M_NS}" xmlns:x="urn:producer"><m:m><x:matrix-zero/><m:mr><x:cell-zero/><m:e/><x:cell-one/><m:e/><x:cell-two/></m:mr><x:matrix-one/><m:mr><m:e/></m:mr><x:matrix-two/></m:m></m:oMath>"#
+        );
+        let mut matrix_equation = CT_OMath::from_xml(matrix_source.as_bytes()).unwrap();
+        let MathExpression::Matrix(matrix) = &mut matrix_equation.expressions[0] else {
+            panic!("matrix")
+        };
+        matrix.rows.pop();
+        matrix.rows[0].cells.pop();
+        let first = matrix_equation.to_xml().unwrap();
+        assert_fragments_in_order(
+            &first,
+            &[
+                "<x:matrix-zero/>",
+                "<m:mr>",
+                "<x:matrix-one/>",
+                "<x:matrix-two/>",
+            ],
+        );
+        assert_fragments_in_order(
+            &first,
+            &["<x:cell-zero/>", "<m:e>", "<x:cell-one/>", "<x:cell-two/>"],
+        );
+        let reopened = CT_OMath::from_xml(&first).unwrap();
+        let second = reopened.to_xml().unwrap();
+        assert_fragments_in_order(
+            &second,
+            &[
+                "<x:matrix-zero/>",
+                "<m:mr>",
+                "<x:matrix-one/>",
+                "<x:matrix-two/>",
+            ],
+        );
+        assert_fragments_in_order(
+            &second,
+            &["<x:cell-zero/>", "<m:e>", "<x:cell-one/>", "<x:cell-two/>"],
+        );
+
+        let delimiter_source = format!(
+            r#"<m:oMath xmlns:m="{M_NS}" xmlns:x="urn:producer"><m:d><x:delimiter-zero/><m:e/><x:delimiter-one/><m:e/><x:delimiter-two/></m:d></m:oMath>"#
+        );
+        let mut delimiter_equation = CT_OMath::from_xml(delimiter_source.as_bytes()).unwrap();
+        let MathExpression::Delimiter(delimiter) = &mut delimiter_equation.expressions[0] else {
+            panic!("delimiter")
+        };
+        delimiter.arguments.pop();
+        let first = delimiter_equation.to_xml().unwrap();
+        assert_fragments_in_order(
+            &first,
+            &[
+                "<x:delimiter-zero/>",
+                "<m:e>",
+                "<x:delimiter-one/>",
+                "<x:delimiter-two/>",
+            ],
+        );
+        let reopened = CT_OMath::from_xml(&first).unwrap();
+        assert_fragments_in_order(
+            &reopened.to_xml().unwrap(),
+            &[
+                "<x:delimiter-zero/>",
+                "<m:e>",
+                "<x:delimiter-one/>",
+                "<x:delimiter-two/>",
+            ],
+        );
+    }
+
+    #[test]
+    fn expression_vector_edits_keep_raw_slots_at_ordinal_boundaries() {
+        let source = format!(
+            r#"<m:oMath xmlns:m="{M_NS}" xmlns:x="urn:producer"><x:slot-zero/><m:r><m:t>A</m:t></m:r><x:slot-one/><m:r><m:t>B</m:t></m:r><x:slot-two/></m:oMath>"#
+        );
+        let mut parsed = CT_OMath::from_xml(source.as_bytes()).unwrap();
+        parsed.expressions.swap(0, 1);
+        parsed
+            .expressions
+            .insert(0, MathExpression::Run(MathRun::new("C")));
+        let first = parsed.to_xml().unwrap();
+        assert_fragments_in_order(
+            &first,
+            &[
+                "<x:slot-zero/>",
+                "<m:t>C</m:t>",
+                "<x:slot-one/>",
+                "<m:t>B</m:t>",
+                "<x:slot-two/>",
+                "<m:t>A</m:t>",
+            ],
+        );
+        let reopened = CT_OMath::from_xml(&first).unwrap();
+        assert_fragments_in_order(
+            &reopened.to_xml().unwrap(),
+            &[
+                "<x:slot-zero/>",
+                "<m:t>C</m:t>",
+                "<x:slot-one/>",
+                "<m:t>B</m:t>",
+                "<x:slot-two/>",
+                "<m:t>A</m:t>",
             ],
         );
     }

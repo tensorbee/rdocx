@@ -210,7 +210,10 @@ bindings needed by retained raw content. A conflicting `m` binding, malformed
 grammar sequence, foreign same-local-name node, or legacy Equation Editor
 object remains unmodelled raw XML. Run-boundary collapse rebases both the raw
 child position and the equation projection so later mutation still replaces
-the correct source node.
+the correct source node. Repeated-child raw slots remain ordinal boundaries
+when callers insert or reorder typed values. If callers shorten a collection,
+every now-unreached higher slot is emitted at the retained owner's tail rather
+than discarded.
 
 Logical owner identity includes exact normalized raw marker multiplicity and
 the resolved namespace facts of owner-dependent element and attribute uses.
