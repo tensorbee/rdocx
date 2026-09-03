@@ -687,7 +687,9 @@ impl MathFraction {
         for child in parsed.children {
             match math_local_name(&child, &parsed.bindings)?.as_deref() {
                 Some("fPr") if modeled == 0 => {
-                    if let Some(value) = child_property_value(&child, &parsed.bindings, "type")? {
+                    if let Some(value) =
+                        child_property_value(&child, &parsed.bindings, "fPr", "type")?
+                    {
                         fraction_type = FractionType::parse(&value).unwrap_or_default();
                     }
                     preserve_modeled_child(
@@ -1147,7 +1149,7 @@ pub struct MathParagraphProperties {
 impl MathParagraphProperties {
     fn from_raw(raw: &[u8], inherited: &[(String, String)]) -> Result<Self> {
         Ok(Self {
-            justification: child_property_value(raw, inherited, "jc")?
+            justification: child_property_value(raw, inherited, "oMathParaPr", "jc")?
                 .and_then(|value| MathJustification::parse(&value)),
             preservation: preserve_unrecognized_property_children(raw, inherited, &["jc"])?,
         })
@@ -1244,12 +1246,13 @@ impl MathMatrix {
             match math_local_name(&child, &parsed.bindings)?.as_deref() {
                 Some("mPr") if modeled == 0 => {
                     properties.base_justification =
-                        child_property_value(&child, &parsed.bindings, "baseJc")?
+                        child_property_value(&child, &parsed.bindings, "mPr", "baseJc")?
                             .and_then(|value| MatrixBaseJustification::parse(&value));
-                    properties.row_spacing = child_property_value(&child, &parsed.bindings, "rSp")?
-                        .and_then(|value| value.parse().ok());
+                    properties.row_spacing =
+                        child_property_value(&child, &parsed.bindings, "mPr", "rSp")?
+                            .and_then(|value| value.parse().ok());
                     properties.column_spacing =
-                        child_property_value(&child, &parsed.bindings, "cSp")?
+                        child_property_value(&child, &parsed.bindings, "mPr", "cSp")?
                             .and_then(|value| value.parse().ok());
                     preserve_modeled_child(
                         &mut parsed.preservation,
@@ -1478,16 +1481,17 @@ impl MathNary {
         for child in parsed.children {
             match math_local_name(&child, &parsed.bindings)?.as_deref() {
                 Some("naryPr") if modeled == 0 => {
-                    value.character = child_property_value(&child, &parsed.bindings, "chr")?
-                        .unwrap_or(value.character);
+                    value.character =
+                        child_property_value(&child, &parsed.bindings, "naryPr", "chr")?
+                            .unwrap_or(value.character);
                     value.hide_subscript =
                         child_on_off_value(&child, &parsed.bindings, "subHide")?.unwrap_or(false);
                     value.hide_superscript =
                         child_on_off_value(&child, &parsed.bindings, "supHide")?.unwrap_or(false);
                     value.grow = child_on_off_value(&child, &parsed.bindings, "grow")?;
                     value.limit_location =
-                        child_property_value(&child, &parsed.bindings, "limLoc")?
-                            .and_then(|v| LimitLocation::parse(&v));
+                        child_property_value(&child, &parsed.bindings, "naryPr", "limLoc")?
+                            .and_then(|value| LimitLocation::parse(&value));
                     preserve_modeled_child(
                         &mut parsed.preservation,
                         "naryPr",
@@ -1518,9 +1522,9 @@ impl MathNary {
     }
 
     fn write_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
-        if self.character.chars().count() != 1 {
+        if self.character.chars().count() > 1 {
             return Err(OxmlError::InvalidValue(
-                "OfficeMath n-ary character must contain one Unicode scalar".to_owned(),
+                "OfficeMath n-ary character must contain at most one Unicode scalar".to_owned(),
             ));
         }
         write_container(writer, "nary", &self.preservation, |writer| {
@@ -1602,12 +1606,13 @@ impl MathDelimiter {
             match math_local_name(&child, &parsed.bindings)?.as_deref() {
                 Some("dPr") if modeled == 0 => {
                     value.begin_character =
-                        child_property_value(&child, &parsed.bindings, "begChr")?
+                        child_property_value(&child, &parsed.bindings, "dPr", "begChr")?
                             .unwrap_or(value.begin_character);
-                    value.end_character = child_property_value(&child, &parsed.bindings, "endChr")?
-                        .unwrap_or(value.end_character);
+                    value.end_character =
+                        child_property_value(&child, &parsed.bindings, "dPr", "endChr")?
+                            .unwrap_or(value.end_character);
                     value.separator_character =
-                        child_property_value(&child, &parsed.bindings, "sepChr")?
+                        child_property_value(&child, &parsed.bindings, "dPr", "sepChr")?
                             .unwrap_or(value.separator_character);
                     value.grow = child_on_off_value(&child, &parsed.bindings, "grow")?;
                     preserve_modeled_child(
@@ -1695,8 +1700,8 @@ impl MathAccent {
         for child in parsed.children {
             match math_local_name(&child, &parsed.bindings)?.as_deref() {
                 Some("accPr") if modeled == 0 => {
-                    character =
-                        child_property_value(&child, &parsed.bindings, "chr")?.unwrap_or(character);
+                    character = child_property_value(&child, &parsed.bindings, "accPr", "chr")?
+                        .unwrap_or(character);
                     preserve_modeled_child(
                         &mut parsed.preservation,
                         "accPr",
@@ -1720,9 +1725,9 @@ impl MathAccent {
     }
 
     fn write_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
-        if self.character.chars().count() != 1 {
+        if self.character.chars().count() > 1 {
             return Err(OxmlError::InvalidValue(
-                "OfficeMath accent character must contain one Unicode scalar".to_owned(),
+                "OfficeMath accent character must contain at most one Unicode scalar".to_owned(),
             ));
         }
         write_container(writer, "acc", &self.preservation, |writer| {
@@ -1794,7 +1799,8 @@ impl MathProperties {
                 continue;
             }
             property_raw_key("mathPr", Some(name), &mut last_rank, false);
-            let parsed_value = root_value(&child, &parsed.bindings)?;
+            let parsed_value = root_value(&child, &parsed.bindings)?
+                .or_else(|| property_value_default("mathPr", name).map(str::to_owned));
             let recognized = match name {
                 "mathFont" => {
                     value.math_font = parsed_value;
@@ -1950,7 +1956,8 @@ fn parse_run_properties(raw: &[u8], inherited: &[(String, String)]) -> Result<Ma
             continue;
         }
         property_raw_key("rPr", Some(name), &mut last_rank, false);
-        let parsed_value = root_value(&child, &parsed.bindings)?;
+        let parsed_value = root_value(&child, &parsed.bindings)?
+            .or_else(|| property_value_default("rPr", name).map(str::to_owned));
         let recognized = match name {
             "sty" => {
                 value.style = parsed_value.as_deref().and_then(MathStyle::parse);
@@ -2134,11 +2141,7 @@ fn property_preservation_has_unsupported_content(
     preservation_has_unsupported_content(preservation)
         || preservation.modeled_children.iter().any(|child| {
             parse_element(&child.raw, &child.bindings).map_or(true, |parsed| {
-                let modeled_attribute = if container == "rPr" && child.name == "brk" {
-                    b"alnAt".as_slice()
-                } else {
-                    b"val".as_slice()
-                };
+                let modeled_attribute = property_modeled_attribute(container, &child.name);
                 parsed.preservation.attributes.iter().any(|(name, _)| {
                     if name == "xmlns" || name.starts_with("xmlns:") {
                         return false;
@@ -2181,11 +2184,15 @@ fn math_text_has_unsupported_content(preservation: &Preservation) -> bool {
         return false;
     };
     parse_element(&source.raw, &source.bindings).map_or(true, |parsed| {
-        parsed
-            .preservation
-            .attributes
-            .iter()
-            .any(|(name, _)| name != "xmlns" && !name.starts_with("xmlns:") && name != "xml:space")
+        parsed.preservation.attributes.iter().any(|(name, value)| {
+            if name == "xmlns" || name.starts_with("xmlns:") {
+                false
+            } else if name == "xml:space" {
+                !matches!(value.as_str(), "default" | "preserve")
+            } else {
+                true
+            }
+        })
     })
 }
 
@@ -2441,6 +2448,33 @@ fn supported_properties(tag: &str) -> &'static [&'static str] {
             "naryLim",
         ],
         _ => &[],
+    }
+}
+
+fn property_value_default(container: &str, property: &str) -> Option<&'static str> {
+    match (container, property) {
+        ("rPr", "scr") => Some("roman"),
+        ("rPr", "sty") => Some("i"),
+        ("fPr", "type") => Some("bar"),
+        ("mPr", "baseJc") => Some("center"),
+        ("mPr", "rSp" | "cSp") => Some("0"),
+        ("naryPr" | "accPr", "chr") => Some(""),
+        ("naryPr", "limLoc") => Some("undOvr"),
+        ("dPr", "begChr" | "sepChr" | "endChr") => Some(""),
+        ("oMathParaPr", "jc") => Some("centerGroup"),
+        ("mathPr", "defJc") => Some("centerGroup"),
+        ("mathPr", "intLim") => Some("subSup"),
+        ("mathPr", "naryLim") => Some("undOvr"),
+        ("mathPr", "lMargin" | "rMargin" | "wrapIndent") => Some("1440"),
+        _ => None,
+    }
+}
+
+fn property_modeled_attribute(container: &str, property: &str) -> &'static [u8] {
+    if container == "rPr" && property == "brk" {
+        b"alnAt"
+    } else {
+        b"val"
     }
 }
 
@@ -2830,7 +2864,12 @@ fn property_leaf_is_valid(
     raw: &[u8],
     inherited: &[(String, String)],
 ) -> Result<bool> {
-    let value = root_value(raw, inherited)?;
+    let modeled_attribute = property_modeled_attribute(container, property);
+    if root_has_ambiguous_modeled_attribute(raw, inherited, modeled_attribute)? {
+        return Ok(false);
+    }
+    let value = root_value(raw, inherited)?
+        .or_else(|| property_value_default(container, property).map(str::to_owned));
     Ok(match (container, property) {
         ("rPr", "lit" | "nor")
         | ("sSubPr" | "sSupPr" | "sSubSupPr" | "sPrePr", "alnScr")
@@ -2972,8 +3011,15 @@ fn math_text_has_non_text_nodes(raw: &[u8]) -> Result<bool> {
     let mut buffer = Vec::new();
     loop {
         match reader.read_event_into(&mut buffer)? {
-            Event::Start(_) if !inside => inside = true,
-            Event::Empty(_) if !inside => return Ok(false),
+            Event::Start(element) if !inside => {
+                if math_text_has_invalid_space(&element)? {
+                    return Ok(true);
+                }
+                inside = true;
+            }
+            Event::Empty(element) if !inside => {
+                return math_text_has_invalid_space(&element);
+            }
             Event::Start(_) | Event::Empty(_) if inside => return Ok(true),
             Event::Comment(_) | Event::PI(_) if inside => return Ok(true),
             Event::End(_) if inside => return Ok(false),
@@ -2982,6 +3028,20 @@ fn math_text_has_non_text_nodes(raw: &[u8]) -> Result<bool> {
         }
         buffer.clear();
     }
+}
+
+fn math_text_has_invalid_space(element: &BytesStart<'_>) -> Result<bool> {
+    for attribute in element.attributes() {
+        let attribute = attribute?;
+        if attribute.key.as_ref() == b"xml:space" {
+            let value = attribute
+                .decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())?;
+            if !matches!(value.as_ref(), "default" | "preserve") {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn capture_empty(element: &BytesStart<'_>) -> Result<Vec<u8>> {
@@ -3153,6 +3213,36 @@ fn root_value(raw: &[u8], inherited: &[(String, String)]) -> Result<Option<Strin
     root_attribute(raw, inherited, b"val")
 }
 
+fn root_has_ambiguous_modeled_attribute(
+    raw: &[u8],
+    inherited: &[(String, String)],
+    expected: &[u8],
+) -> Result<bool> {
+    let parsed = parse_element(raw, inherited)?;
+    let mut modeled_count = 0;
+    for (name, _) in &parsed.preservation.attributes {
+        if name == "xmlns" || name.starts_with("xmlns:") {
+            continue;
+        }
+        let local = name
+            .as_bytes()
+            .rsplit(|byte| *byte == b':')
+            .next()
+            .unwrap_or_default();
+        if local != expected {
+            continue;
+        }
+        if expanded_attribute_name(name.as_bytes(), &parsed.bindings)
+            .is_some_and(|(namespace, local)| namespace == M_NS && local == expected)
+        {
+            modeled_count += 1;
+        } else {
+            return Ok(true);
+        }
+    }
+    Ok(modeled_count > 1)
+}
+
 fn root_attribute(
     raw: &[u8],
     inherited: &[(String, String)],
@@ -3192,12 +3282,14 @@ fn root_attribute(
 fn child_property_value(
     raw: &[u8],
     inherited: &[(String, String)],
+    container: &str,
     property: &str,
 ) -> Result<Option<String>> {
     let parsed = parse_element(raw, inherited)?;
     for child in parsed.children {
         if math_local_name(&child, &parsed.bindings)?.as_deref() == Some(property) {
-            return root_value(&child, &parsed.bindings);
+            return Ok(root_value(&child, &parsed.bindings)?
+                .or_else(|| property_value_default(container, property).map(str::to_owned)));
         }
     }
     Ok(None)
@@ -4062,6 +4154,187 @@ mod tests {
         assert!(!nary.hide_subscript);
         assert!(!nary.hide_superscript);
         assert_eq!(nary.character, "∫");
+    }
+
+    #[test]
+    fn valueless_property_leaves_use_schema_defaults_and_reopen() {
+        fn assert_expression_defaults(parsed: &CT_OMath) {
+            let MathExpression::Run(run) = &parsed.expressions[0] else {
+                panic!("run")
+            };
+            assert_eq!(run.properties.script, Some(MathScriptStyle::Roman));
+            assert_eq!(run.properties.style, Some(MathStyle::Italic));
+
+            let MathExpression::Fraction(fraction) = &parsed.expressions[1] else {
+                panic!("fraction")
+            };
+            assert_eq!(fraction.fraction_type, FractionType::Bar);
+
+            let MathExpression::Matrix(matrix) = &parsed.expressions[2] else {
+                panic!("matrix")
+            };
+            assert_eq!(
+                matrix.properties.base_justification,
+                Some(MatrixBaseJustification::Center)
+            );
+            assert_eq!(matrix.properties.row_spacing, Some(0));
+            assert_eq!(matrix.properties.column_spacing, Some(0));
+
+            let MathExpression::Nary(nary) = &parsed.expressions[3] else {
+                panic!("n-ary")
+            };
+            assert_eq!(nary.character, "");
+            assert_eq!(nary.limit_location, Some(LimitLocation::UnderOver));
+
+            let MathExpression::Delimiter(delimiter) = &parsed.expressions[4] else {
+                panic!("delimiter")
+            };
+            assert_eq!(delimiter.begin_character, "");
+            assert_eq!(delimiter.separator_character, "");
+            assert_eq!(delimiter.end_character, "");
+
+            let MathExpression::Accent(accent) = &parsed.expressions[5] else {
+                panic!("accent")
+            };
+            assert_eq!(accent.character, "");
+        }
+
+        let source = format!(
+            r#"<m:oMath xmlns:m="{M_NS}"><m:r><m:rPr><m:scr/><m:sty/></m:rPr><m:t>x</m:t></m:r><m:f><m:fPr><m:type/></m:fPr><m:num/><m:den/></m:f><m:m><m:mPr><m:baseJc/><m:rSp/><m:cSp/></m:mPr><m:mr><m:e/></m:mr></m:m><m:nary><m:naryPr><m:chr/><m:limLoc/></m:naryPr><m:e/></m:nary><m:d><m:dPr><m:begChr/><m:sepChr/><m:endChr/></m:dPr><m:e/></m:d><m:acc><m:accPr><m:chr/></m:accPr><m:e/></m:acc></m:oMath>"#
+        );
+        let parsed = CT_OMath::from_xml(source.as_bytes()).unwrap();
+        assert_eq!(parsed.expressions.len(), 6);
+        assert!(!parsed.has_unsupported_content());
+        assert_expression_defaults(&parsed);
+        let first = parsed.to_xml().unwrap();
+        let first_text = String::from_utf8(first.clone()).unwrap();
+        for expected in [
+            r#"<m:scr m:val="roman"/>"#,
+            r#"<m:sty m:val="i"/>"#,
+            r#"<m:type m:val="bar"/>"#,
+            r#"<m:baseJc m:val="center"/>"#,
+            r#"<m:rSp m:val="0"/>"#,
+            r#"<m:cSp m:val="0"/>"#,
+            r#"<m:limLoc m:val="undOvr"/>"#,
+        ] {
+            assert!(first_text.contains(expected), "{first_text}");
+        }
+        assert_eq!(first_text.matches(r#"<m:chr m:val=""/>"#).count(), 2);
+        assert!(first_text.contains(r#"<m:begChr m:val=""/>"#));
+        assert!(first_text.contains(r#"<m:sepChr m:val=""/>"#));
+        assert!(first_text.contains(r#"<m:endChr m:val=""/>"#));
+        let reopened = CT_OMath::from_xml(&first).unwrap();
+        assert_expression_defaults(&reopened);
+        assert_eq!(reopened.to_xml().unwrap(), first);
+
+        let display_source = format!(
+            r#"<m:oMathPara xmlns:m="{M_NS}"><m:oMathParaPr><m:jc/></m:oMathParaPr><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath></m:oMathPara>"#
+        );
+        let display = CT_OMathPara::from_xml(display_source.as_bytes()).unwrap();
+        assert_eq!(
+            display.properties.justification,
+            Some(MathJustification::CenterGroup)
+        );
+        assert!(!display.has_unsupported_content());
+        let first = display.to_xml().unwrap();
+        assert!(String::from_utf8_lossy(&first).contains(r#"<m:jc m:val="centerGroup"/>"#));
+        let reopened = CT_OMathPara::from_xml(&first).unwrap();
+        assert_eq!(
+            reopened.properties.justification,
+            Some(MathJustification::CenterGroup)
+        );
+        assert_eq!(reopened.to_xml().unwrap(), first);
+
+        let absent_source = format!(
+            r#"<m:oMath xmlns:m="{M_NS}"><m:r><m:t>x</m:t></m:r><m:nary><m:e/></m:nary><m:d><m:e/></m:d></m:oMath>"#
+        );
+        let absent = CT_OMath::from_xml(absent_source.as_bytes()).unwrap();
+        let MathExpression::Run(run) = &absent.expressions[0] else {
+            panic!("run")
+        };
+        assert_eq!(run.properties.script, None);
+        assert_eq!(run.properties.style, None);
+        let MathExpression::Nary(nary) = &absent.expressions[1] else {
+            panic!("n-ary")
+        };
+        assert_eq!(nary.character, "∫");
+        assert_eq!(nary.limit_location, None);
+        let MathExpression::Delimiter(delimiter) = &absent.expressions[2] else {
+            panic!("delimiter")
+        };
+        assert_eq!(delimiter.begin_character, "(");
+        assert_eq!(delimiter.separator_character, "|");
+        assert_eq!(delimiter.end_character, ")");
+    }
+
+    #[test]
+    fn valueless_global_defaults_are_typed_while_required_values_remain_raw() {
+        let source = format!(
+            r#"<m:mathPr xmlns:m="{M_NS}"><m:mathFont/><m:lMargin/><m:rMargin/><m:defJc/><m:preSp/><m:postSp/><m:interSp/><m:intraSp/><m:wrapIndent/><m:intLim/><m:naryLim/></m:mathPr>"#
+        );
+        let parsed = MathProperties::from_raw(source.as_bytes(), &[]).unwrap();
+        assert_eq!(parsed.math_font, None);
+        assert_eq!(parsed.left_margin, Some(1440));
+        assert_eq!(parsed.right_margin, Some(1440));
+        assert_eq!(parsed.justification, Some(MathJustification::CenterGroup));
+        assert_eq!(parsed.wrap_indent, Some(1440));
+        assert_eq!(
+            parsed.integral_limit_location,
+            Some(LimitLocation::SubSuperscript)
+        );
+        assert_eq!(parsed.nary_limit_location, Some(LimitLocation::UnderOver));
+        assert_eq!(parsed.pre_spacing, None);
+        assert_eq!(parsed.post_spacing, None);
+        assert_eq!(parsed.inter_spacing, None);
+        assert_eq!(parsed.intra_spacing, None);
+        assert!(parsed.has_unsupported_content());
+
+        let mut writer = Writer::new(Vec::new());
+        parsed.write_xml(&mut writer).unwrap();
+        let first = writer.into_inner();
+        let first_text = String::from_utf8(first.clone()).unwrap();
+        for raw in [
+            "<m:mathFont/>",
+            "<m:preSp/>",
+            "<m:postSp/>",
+            "<m:interSp/>",
+            "<m:intraSp/>",
+        ] {
+            assert!(first_text.contains(raw), "{first_text}");
+        }
+        let reopened = MathProperties::from_raw(&first, &[]).unwrap();
+        assert_eq!(reopened.left_margin, Some(1440));
+        assert_eq!(reopened.right_margin, Some(1440));
+        assert_eq!(reopened.wrap_indent, Some(1440));
+        assert!(reopened.has_unsupported_content());
+        let mut writer = Writer::new(Vec::new());
+        reopened.write_xml(&mut writer).unwrap();
+        assert_eq!(writer.into_inner(), first);
+    }
+
+    #[test]
+    fn invalid_math_text_space_value_keeps_the_run_opaque() {
+        let source = format!(
+            r#"<m:oMath xmlns:m="{M_NS}"><m:r><m:t xml:space="invalid">x</m:t></m:r></m:oMath>"#
+        );
+        let parsed = CT_OMath::from_xml(source.as_bytes()).unwrap();
+        assert!(parsed.expressions.is_empty());
+        assert!(parsed.has_unsupported_content());
+        let first = parsed.to_xml().unwrap();
+        assert_eq!(first, source.as_bytes());
+        let reopened = CT_OMath::from_xml(&first).unwrap();
+        assert!(reopened.expressions.is_empty());
+        assert!(reopened.has_unsupported_content());
+        assert_eq!(reopened.to_xml().unwrap(), first);
+
+        for valid in ["default", "preserve"] {
+            let source = format!(
+                r#"<m:oMath xmlns:m="{M_NS}"><m:r><m:t xml:space="{valid}">x</m:t></m:r></m:oMath>"#
+            );
+            let parsed = CT_OMath::from_xml(source.as_bytes()).unwrap();
+            assert_eq!(parsed.expressions.len(), 1);
+            assert!(!parsed.has_unsupported_content());
+        }
     }
 
     #[test]
