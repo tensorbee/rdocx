@@ -101,9 +101,13 @@ same entries, links, levels, and page numbers as the pinned Word update.
   Prove schema order, prefix-tolerant reads, fixed-prefix writes, and byte
   preservation of unmodelled subtrees in a round-trip test.
 - Public API of a published crate. Read `docs/hld/10-bindings-spec.md` and the
-  `CLAUDE.md` structural rules. State semver impact, run
-  `cargo publish --dry-run -p rdocx`, and assert the generated `.crate` remains
-  below 10 MiB.
+  `CLAUDE.md` structural rules. State the pre-1.0 additive or breaking impact,
+  then apply both packaging gates. In the uncommitted worker, run the exact
+  locally patched workspace command from `/verify` step 10 with only
+  `--allow-dirty` added, and assert every generated `.crate` remains below 10
+  MiB. After the integration commit, `/verify --full` runs that canonical
+  command without `--allow-dirty` on the clean integrated tree. Do not use
+  `--no-verify` or substitute a single-crate dry run.
 - External oracle comparison. Read
   `.claude/skills/differential-testing.md`. Pin Microsoft Word 16.104 build
   16.104.25121423 and the locale in source metadata, keep the oracle out of
