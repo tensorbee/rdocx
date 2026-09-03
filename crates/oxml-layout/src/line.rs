@@ -100,6 +100,9 @@ pub enum InlineItem {
     Group {
         width: f64,
         height: f64,
+        /// Distance from the group top to its text baseline. `None` keeps the
+        /// established top-aligned drawing behavior.
+        baseline: Option<f64>,
         group: GroupElement,
     },
     /// An informative drawing carried to a semantic output container.
@@ -191,6 +194,8 @@ pub enum LineItem {
     Group {
         width: f64,
         height: f64,
+        /// Distance from the group top to its text baseline.
+        baseline: Option<f64>,
         group: GroupElement,
     },
     /// An informative drawing carried to a semantic output container.
@@ -1238,12 +1243,30 @@ fn item_metrics(item: &InlineItem) -> (f64, f64, f64, f64, f64) {
         ),
         InlineItem::Tab => (36.0, 0.0, 0.0, 0.0, 0.0),
         InlineItem::Image { width, height, .. } => (*width, *height, 0.0, *height, 0.0),
-        InlineItem::Group { width, height, .. } => (*width, *height, 0.0, *height, 0.0),
+        InlineItem::Group {
+            width,
+            height,
+            baseline,
+            ..
+        } => {
+            let baseline = normalized_group_baseline(*height, *baseline).unwrap_or(*height);
+            (*width, baseline, *height - baseline, *height, 0.0)
+        }
         InlineItem::Figure { item, .. } => item_metrics(item),
         InlineItem::LineBreak | InlineItem::PageBreak | InlineItem::ColumnBreak => {
             (0.0, 0.0, 0.0, 0.0, 0.0)
         }
     }
+}
+
+fn normalized_group_baseline(height: f64, baseline: Option<f64>) -> Option<f64> {
+    if !height.is_finite() {
+        return None;
+    }
+    let upper = height.max(0.0);
+    baseline
+        .filter(|value| value.is_finite())
+        .map(|value| value.clamp(0.0, upper))
 }
 
 fn inline_to_line_item(
@@ -1279,10 +1302,12 @@ fn inline_to_line_item(
         InlineItem::Group {
             width,
             height,
+            baseline,
             group,
         } => LineItem::Group {
             width: *width,
             height: *height,
+            baseline: normalized_group_baseline(*height, *baseline),
             group: group.clone(),
         },
         InlineItem::Figure {
@@ -2519,6 +2544,7 @@ mod tests {
         let items = vec![InlineItem::Group {
             width: 80.0,
             height: 40.0,
+            baseline: None,
             group: group.clone(),
         }];
         let lines = break_into_lines(
@@ -2545,5 +2571,84 @@ mod tests {
         };
         assert_eq!((*width, *height), (80.0, 40.0));
         assert_eq!(actual, &group);
+    }
+
+    #[test]
+    fn baseline_aware_inline_groups_contribute_exact_ascent_and_descent() {
+        use crate::{GroupElement, Transform};
+
+        let group = GroupElement {
+            transform: Transform::IDENTITY,
+            clip: None,
+            opacity: 1.0,
+            effects: Vec::new(),
+            children: Vec::new(),
+        };
+        let lines = break_into_lines(
+            &[
+                InlineItem::Group {
+                    width: 20.0,
+                    height: 18.0,
+                    baseline: None,
+                    group: group.clone(),
+                },
+                InlineItem::Group {
+                    width: 20.0,
+                    height: 18.0,
+                    baseline: Some(11.0),
+                    group,
+                },
+            ],
+            &LineBreakParams {
+                available_width: 100.0,
+                ..Default::default()
+            },
+            &deterministic_font_manager(),
+        )
+        .expect("group line breaking");
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].ascent, 18.0);
+        assert_eq!(lines[0].descent, 7.0);
+        let LineItem::Group {
+            baseline: Some(baseline),
+            ..
+        } = &lines[0].items[1]
+        else {
+            panic!("baseline should survive line breaking");
+        };
+        assert_eq!(*baseline, 11.0);
+    }
+
+    #[test]
+    fn group_baselines_are_normalized_before_pagination() {
+        use crate::{GroupElement, Transform};
+
+        for (height, baseline, expected) in [
+            (18.0, Some(-4.0), Some(0.0)),
+            (18.0, Some(30.0), Some(18.0)),
+            (18.0, Some(f64::NAN), None),
+            (-18.0, Some(4.0), Some(0.0)),
+            (f64::NAN, Some(4.0), None),
+        ] {
+            let item = InlineItem::Group {
+                width: 20.0,
+                height,
+                baseline,
+                group: GroupElement {
+                    transform: Transform::IDENTITY,
+                    clip: None,
+                    opacity: 1.0,
+                    effects: Vec::new(),
+                    children: Vec::new(),
+                },
+            };
+            let LineItem::Group { baseline, .. } =
+                inline_to_line_item(&item, 0.0, &[], &deterministic_font_manager(), None)
+            else {
+                panic!("inline group should remain a group line item");
+            };
+            assert_eq!(baseline, expected);
+        }
     }
 }

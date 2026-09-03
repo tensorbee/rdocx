@@ -11234,3 +11234,124 @@ https://github.com/tensorbee/rdocx/issues/67#issuecomment-5522284889.
 seven-package family. Verify each downloaded registry package, owner, annotated
 tag target, release-body bytes, unpublished carrier, contribution state, and
 notification URL before completing a release story.
+
+### F-228, OfficeMath model and authoring
+
+**Sprint.** S65
+**Completed.** 2026-09-03
+**Size.** L, estimated 4 days, actual 1 day
+
+**What was built.** `rdocx-oxml` now owns one bounded, recursive Transitional
+OfficeMath model for inline and display equations, runs, fractions, scripts,
+radicals, matrices, limits, n-ary operators, delimiters, accents, and
+document-wide math properties. The native `rdocx` facade exposes equations in
+paragraph source order with borrowed inspection, indexed mutation, and bounded
+authoring.
+
+**Non-obvious choices.** Supported children are projected into typed schema
+slots while unsupported siblings, attributes, and property content retain
+their original XML. Namespace aliases resolve by expanded name, authored math
+uses the fixed `m:` prefix, unsafe prefix collisions fail closed, and legacy
+Equation Editor objects remain opaque.
+
+**Deviations from the design plan.** None.
+
+**Spec sections touched.** `docs/hld/02-scope-and-non-goals.md`,
+`docs/hld/03-architecture.md`, `docs/hld/04-opc-and-packaging.md`,
+`docs/hld/10-bindings-spec.md`, `docs/hld/12-testing-strategy.md`, and
+`docs/hld/14-development-backlog.md`.
+
+**Tests.** The round-trip gate
+`officemath_corpus_parses_mutates_saves_and_reopens_without_losing_supported_or_raw_siblings`
+covers every supported expression, raw sibling preservation, mutation, and
+reopen. Public facade tests cover inline and display authoring, ordered access,
+and mutation. Six microscope passes ended clean, and full integrated
+verification passed.
+
+**Hash harness.** Unchanged, 49 of 49.
+
+**Notes for future sessions.** Layout and conversion must consume this public
+tree directly. They must not introduce a second equation model or weaken the
+fail-closed namespace and raw-preservation behavior.
+
+### F-229, OfficeMath layout and PDF rendering
+
+**Sprint.** S65
+**Completed.** 2026-09-03
+**Size.** M, estimated 2 days, actual 1 day
+
+**What was built.** `rdocx-layout` now measures and lowers the shared typed
+OfficeMath tree into backend-neutral groups for inline and display equations.
+Fractions, scripts, radicals, matrices, limits, n-ary operators, delimiters,
+and accents participate in normal line breaking and pagination with concrete
+ascent, descent, and baseline geometry. The document facade carries optional
+document-wide math properties into layout.
+
+**Non-obvious choices.** Shared inline and line groups gained an optional
+baseline instead of a math-specific backend element. Existing drawing groups
+retain top alignment through `None`. Equation glyphs use the existing font
+manager and deterministic bundled Caladea fallback, so PDF and raster backends
+consume only `LayoutResult` and do not learn Word grammar.
+
+**Deviations from the design plan.** None.
+
+**Spec sections touched.** `docs/hld/03-architecture.md`,
+`docs/hld/08-rendering-spec.md`, `docs/hld/10-bindings-spec.md`,
+`docs/hld/12-testing-strategy.md`, and
+`docs/hld/14-development-backlog.md`.
+
+**Tests.** The golden gate
+`officemath_baselines_and_glyph_geometry_match_the_pinned_word_pdf_oracle`
+matched the source-built deterministic rendering against Microsoft Word
+16.104 and Poppler 26.01.0 within the declared 1.0 point tolerance. Focused
+layout, pagination, preservation, and mutation tests passed. Five worker
+microscope passes ended clean, and full integrated verification passed.
+
+**Hash harness.** Unchanged, 49 of 49.
+
+**Notes for future sessions.** Keep equation rendering behind shared layout
+primitives. Preserve the deterministic font boundary and require intentional,
+reviewed evidence for any Word-oracle geometry change.
+
+### F-230, MathML and LaTeX conversion
+
+**Sprint.** S65
+**Completed.** 2026-09-03
+**Size.** M, estimated 2 days, actual 1 day
+
+**What was built.** The native `rdocx` facade now imports and exports the
+supported equation subset as MathML and LaTeX through four free functions.
+Both readers normalize directly into the F-228 `MathArgument` tree, both
+writers emit canonical text, and every declared loss boundary returns an
+ordered path-aware diagnostic. Input, tree, matrix, text, recursion, event,
+token, and diagnostic work is bounded.
+
+**Non-obvious choices.** Conversion owns no second equation model. MathML uses
+expanded names through the existing XML dependency, while LaTeX uses a local
+recursive-descent parser with explicit grouping and script attachment. Pandoc
+3.10 is an exact-version structural test oracle only and is absent from the
+published runtime dependency graph. Document-wide and display properties stay
+with their owners when a bare equation argument crosses the conversion API.
+
+**Deviations from the design plan.** None. The integration reconciliation kept
+the F-229 layout contract and the F-230 conversion contract as adjacent owners
+of the same normalized tree.
+
+**Spec sections touched.** `docs/hld/02-scope-and-non-goals.md`,
+`docs/hld/03-architecture.md`, `docs/hld/04-opc-and-packaging.md`,
+`docs/hld/10-bindings-spec.md`, `docs/hld/12-testing-strategy.md`,
+`docs/hld/14-development-backlog.md`, and
+`docs/hld/15-build-and-toolchain.md`.
+
+**Tests.** The differential gate
+`mathml_and_latex_conversion_matches_pinned_pandoc_texmath_trees` matched
+source-built cases against live Pandoc 3.10 in both directions. Unit,
+round-trip, bounds, loss-diagnostic, and perturbation tests passed. Six worker
+microscope passes and the integration reconciliation pass ended clean, and
+full integrated verification passed.
+
+**Hash harness.** Unchanged, 49 of 49.
+
+**Notes for future sessions.** Compare normalized expression trees rather than
+serialized bytes when extending the conversion subset. Keep Pandoc outside the
+runtime graph and add a mutation-sensitive case for each new grammar rule.

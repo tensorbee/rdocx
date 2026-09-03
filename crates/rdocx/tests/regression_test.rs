@@ -7625,6 +7625,7 @@ fn empty_story_layout_input() -> rdocx_layout::LayoutInput {
 
     rdocx_layout::LayoutInput {
         automatic_hyphenation: false,
+        math_properties: None,
         document,
         styles: rdocx_oxml::styles::CT_Styles::new_default(),
         numbering: None,
@@ -8865,5 +8866,29 @@ fn automatic_hyphenation_authoring_round_trips_with_run_language() {
     assert_eq!(
         reopened.paragraphs()[0].run(0).unwrap().language(),
         Some("en-US")
+    );
+}
+
+#[test]
+fn legacy_equation_editor_objects_remain_unmodelled_raw_xml() {
+    let legacy =
+        r#"<w:object><v:shape id="legacy"><o:OLEObject ProgID="Equation.3"/></v:shape></w:object>"#;
+    let xml = format!(
+        r#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><w:body><w:p>{legacy}</w:p><w:sectPr/></w:body></w:document>"#
+    );
+    let mut document = document_with_content_controls(&xml);
+    let paragraph = document.paragraph(0).unwrap();
+    assert_eq!(paragraph.equations().count(), 0);
+    assert!(matches!(
+        paragraph.items().next().unwrap(),
+        rdocx::ParagraphItemRef::UnsupportedXml(raw) if raw == legacy.as_bytes()
+    ));
+    let bytes = document.to_bytes().unwrap();
+    let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+    let output = package.get_part("/word/document.xml").unwrap();
+    assert!(
+        output
+            .windows(legacy.len())
+            .any(|window| window == legacy.as_bytes())
     );
 }

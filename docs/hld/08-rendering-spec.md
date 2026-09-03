@@ -1082,8 +1082,9 @@ An informative inline image or chart uses the additive `Figure` variant in
 the same non-exhaustive inline and line enums. The variant carries alternate
 text and the logical figure id around an unchanged `Image` or `Group`, then
 pagination lowers it to `PositionedElement::MarkedContent`. Existing `Image`
-and `Group` fields and direct constructors remain unchanged. A drawing with no
-usable alternate text stays on the existing variant and becomes an artifact.
+fields and direct constructors remain unchanged. Existing drawing and chart
+group constructors use `baseline: None`. A drawing with no usable alternate
+text stays on the existing variant and becomes an artifact.
 
 An anchored chart uses `AnchoredContent::Group`. The existing anchored drawing
 path resolves its page rectangle, wrapping distances, and behind-text order,
@@ -1091,6 +1092,30 @@ then translates the local group to that rectangle. Missing, external, or
 malformed chart targets and chart-renderer errors produce a visible placeholder
 group plus a stable layout diagnostic. They do not disappear and do not move
 chart logic into a PDF or raster backend.
+
+## Word OfficeMath layout
+
+`rdocx-layout::LayoutInput` carries optional document-wide `MathProperties`
+from the relationship-resolved settings part. The paragraph projection inserts
+typed inline and display equations at their retained raw boundaries. Inline
+equations participate in ordinary line breaking. Display equations introduce
+line boundaries and apply their typed justification, margins, and spacing
+inside the available paragraph width.
+
+The private Word math module recursively measures runs, fractions, scripts,
+pre-scripts, radicals, matrices, upper and lower limits, n-ary operators,
+delimiters, and accents with the same `FontManager` used by surrounding text.
+The approved deterministic fallback is bundled Caladea. Supported constructs
+lower only to shared text, line, path, and group primitives. Visible unsupported
+content emits one stable source-path diagnostic, while the untouched typed tree
+continues to own its retained XML.
+
+`InlineItem::Group` and `LineItem::Group` carry `baseline: Option<f64>`.
+Finite values are normalized to the group height before line conversion. The
+line breaker contributes the normalized value as ascent and the remaining
+height as descent. Pagination positions that group against the resolved text
+baseline. `None` preserves the original top-aligned group position, including
+existing chart and drawing behavior.
 
 ## The renderer's input
 

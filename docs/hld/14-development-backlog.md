@@ -2082,25 +2082,43 @@ comparison, inventories embedded content, and round-trips its modern package
 variant without losing unsupported XML or executable payloads.
 
 ### F-228, OfficeMath model and authoring (L)
-Typed OfficeMath equations, runs, fractions, scripts, radicals, matrices,
-limits, n-ary operators, delimiters, accents, and equation properties with
-schema-ordered authoring.
-**Test gate**: round-trip. The equation corpus parses, mutates, saves, and
-reopens without losing supported or raw sibling content.
+`rdocx-oxml` owns one Transitional OfficeMath tree for inline and display
+equations, runs, fractions, scripts, radicals, matrices, limits, n-ary
+operators, delimiters, accents, and document-wide math defaults. The native
+`rdocx` facade exposes source-ordered borrowing, indexed mutation, bounded
+authoring, and relationship-resolved settings access. Prefix aliases are read
+by expanded name, fixed `m:` output is schema ordered, unsafe namespace
+collisions fail closed, and unsupported or legacy content remains raw.
+**Test gate**: round-trip.
+`officemath_corpus_parses_mutates_saves_and_reopens_without_losing_supported_or_raw_siblings`
+covers every supported expression plus opaque root, property, and argument
+siblings through mutation and reopen.
 
 ### F-229, OfficeMath layout and PDF rendering (M)
 Lay out supported equations through the shared font and page-frame boundary
-with baseline, stretch, delimiter, and operator sizing.
+with baseline, stretch, delimiter, and operator sizing. The Word engine lowers
+the typed tree to shared groups, text, lines, and paths, carries optional global
+math defaults through `LayoutInput`, and keeps existing top-aligned group
+behavior when no baseline is present. Deterministic rendering uses bundled
+Caladea and a source-built Word PDF oracle. Tagged-PDF math semantics remain
+outside this story.
 **Depends on**: F-228.
 **Test gate**: golden. Equation baselines and glyph geometry match the pinned
-Word PDF oracle within the declared tolerance.
+Word 16.104 PDF oracle within 1.0 point, and the complete 150 DPI page meets the
+declared luminance SSIM floor.
 
 ### F-230, MathML and LaTeX conversion (M)
-Import and export the supported OfficeMath subset through MathML and LaTeX with
-stable diagnostics for constructs that cannot round-trip.
+The native `rdocx` facade imports and exports the supported normalized
+OfficeMath subset through bounded Presentation MathML and LaTeX converters.
+Four free functions return the existing `MathArgument` tree or canonical text
+with stable ordered loss diagnostics. MathML uses expanded W3C names, accepts
+`mfenced` on input, and emits explicit fences. LaTeX uses a local bounded
+recursive-descent parser. Python, WASM, and CLI surfaces remain unchanged.
 **Depends on**: F-228.
-**Test gate**: differential. Supported source-built equations preserve their
-normalized expression tree through both conversion directions.
+**Test gate**: differential.
+`mathml_and_latex_conversion_matches_pinned_pandoc_texmath_trees` checks
+source-built equations structurally in both directions against exact Pandoc
+3.10 and records its intentional wrapper divergences.
 
 ### F-231, Extended field evaluation (L)
 Evaluate TOC, TC, formula, mail-merge control, and barcode fields while

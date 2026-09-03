@@ -11,6 +11,7 @@ use rdocx_oxml::core_properties::CoreProperties;
 use rdocx_oxml::document::CT_Document;
 use rdocx_oxml::footnotes::CT_Footnotes;
 use rdocx_oxml::header_footer::CT_HdrFtr;
+use rdocx_oxml::math::MathProperties;
 use rdocx_oxml::numbering::CT_Numbering;
 use rdocx_oxml::styles::CT_Styles;
 use rdocx_oxml::theme::Theme;
@@ -112,6 +113,8 @@ pub struct LayoutInput {
     pub document: CT_Document,
     /// Whether document settings enable automatic hyphenation.
     pub automatic_hyphenation: bool,
+    /// Document-wide OfficeMath defaults from the settings part.
+    pub math_properties: Option<MathProperties>,
     /// The tracked-revision projection to lay out.
     pub revision_view: RevisionView,
     /// Style definitions.

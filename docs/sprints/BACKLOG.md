@@ -37,9 +37,9 @@ regenerated, never hand-edited.
 | M19, Advanced spreadsheets                     | 21 | 0 | 0 | 21 |
 | M20, Fidelity at scale                         | 7  | 7 | 0 | 0  |
 | M21, Presentation depth                        | 15 | 15 | 0 | 0  |
-| M22, Word depth                                | 12 | 0 | 0 | 12 |
+| M22, Word depth                                | 12 | 3 | 0 | 9  |
 | X, Cross-cutting (opportunistic)            | 79 | 71 | 3 | 2  |
-| **Total** | **326** | **282** | **6** | **35** |
+| **Total** | **326** | **285** | **6** | **32** |
 <!-- AUTOGEN:backlog-summary END -->
 
 ## All F-IDs
@@ -431,9 +431,9 @@ regenerated, never hand-edited.
 <!-- AUTOGEN:backlog-M22 START -->
 | F-ID | Title | Sprint | Size | Status |
 |------|-------|--------|------|--------|
-| F-228 | OfficeMath model and authoring               | S65 | L | pending |
-| F-229 | OfficeMath layout and PDF rendering          | S65 | M | pending |
-| F-230 | MathML and LaTeX conversion                  | S65 | M | pending |
+| F-228 | OfficeMath model and authoring               | S65 | L | done |
+| F-229 | OfficeMath layout and PDF rendering          | S65 | M | done |
+| F-230 | MathML and LaTeX conversion                  | S65 | M | done |
 | F-231 | Extended field evaluation                    | S66 | L | pending |
 | F-232 | Dynamic table of contents rebuild            | S66 | L | pending |
 | F-233 | Advanced mail merge                          | S67 | L | pending |

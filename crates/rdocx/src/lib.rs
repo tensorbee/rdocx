@@ -29,6 +29,7 @@ mod epub;
 mod error;
 mod field;
 mod html;
+mod math;
 mod odt;
 pub mod paragraph;
 mod redaction;
@@ -52,6 +53,10 @@ pub use epub::{EpubDiagnostic, EpubWriteResult};
 pub use error::{Error, Result};
 pub use field::{FieldDateTime, FieldEvaluation, FieldEvaluationContext, FieldOutcome};
 pub use html::{HtmlDiagnostic, HtmlReadResult};
+pub use math::{
+    MathConversionDiagnostic, MathConversionResult, equation_from_latex, equation_from_mathml,
+    equation_to_latex, equation_to_mathml,
+};
 pub use odt::{OdtDiagnostic, OdtReadResult, OdtWriteResult};
 pub use oxml_chart::{ChartData, ChartKind};
 pub use oxml_core::Length;
@@ -66,6 +71,13 @@ pub use paragraph::{
     ParagraphItemRef, ParagraphRef, SectionBreak, TabAlignment, TabLeader,
 };
 pub use rdocx_layout::RevisionView;
+pub use rdocx_oxml::math::{
+    CT_OMath, CT_OMathPara, FractionType, LimitLocation, MathAccent, MathArgument, MathDelimiter,
+    MathExpression, MathFraction, MathJustification, MathLimit, MathMatrix, MathMatrixProperties,
+    MathMatrixRow, MathNary, MathParagraphProperties, MathPreSubSuperscript, MathProperties,
+    MathRadical, MathRun, MathRunProperties, MathScript, MathScriptStyle, MathStyle,
+    MathSubSuperscript, MatrixBaseJustification, OfficeMath,
+};
 pub use rdocx_oxml::settings::{
     CryptAlgorithmClass, CryptAlgorithmType, CryptProviderType, DocumentProtection, ProtectionMode,
 };

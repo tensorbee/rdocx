@@ -2585,11 +2585,18 @@ fn render_paragraph_lines(
                     elements.push(image);
                     x += width;
                 }
-                LineItem::Group { width, group, .. } => {
+                LineItem::Group {
+                    width,
+                    baseline,
+                    group,
+                    ..
+                } => {
                     let mut positioned = group.clone();
+                    let group_y =
+                        baseline.map_or(geometry.margin_top + y, |baseline| baseline_y - baseline);
                     positioned.transform = positioned.transform.then(oxml_layout::Transform {
                         e: x,
-                        f: geometry.margin_top + y,
+                        f: group_y,
                         ..oxml_layout::Transform::IDENTITY
                     });
                     let group = PositionedElement::Group(positioned);
@@ -2619,12 +2626,16 @@ fn render_paragraph_lines(
                                 media_id: *media_id,
                             }
                         }
-                        LineItem::Group { group, .. } => {
+                        LineItem::Group {
+                            baseline, group, ..
+                        } => {
                             let mut positioned = group.clone();
+                            let group_y = baseline
+                                .map_or(geometry.margin_top + y, |baseline| baseline_y - baseline);
                             positioned.transform =
                                 positioned.transform.then(oxml_layout::Transform {
                                     e: x,
-                                    f: geometry.margin_top + y,
+                                    f: group_y,
                                     ..oxml_layout::Transform::IDENTITY
                                 });
                             PositionedElement::Group(positioned)
@@ -4609,6 +4620,7 @@ mod tests {
             LineItem::Group {
                 width: 10.0,
                 height: 10.0,
+                baseline: None,
                 group: oxml_layout::GroupElement {
                     transform: oxml_layout::Transform::IDENTITY,
                     clip: None,

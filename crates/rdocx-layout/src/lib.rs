@@ -6,6 +6,7 @@ pub mod block;
 mod convert;
 pub mod engine;
 pub mod input;
+mod math;
 pub mod notes;
 pub mod paginator;
 pub mod style_resolver;

@@ -148,6 +148,18 @@ principle behind it: v1 proved the model and the renderer can live in one
 codebase, which is the thing no other library in Python or Rust has. Everything
 after v1 leans on that rather than away from it.
 
+Modern Transitional OfficeMath is part of the post-v1 Word authoring surface.
+Native Rust callers can inspect, mutate, and author inline and display
+equations through the normalized Word model. Legacy Equation Editor, OLE, and
+pre-OOXML equation payloads remain opaque under the permanent legacy-format
+boundary.
+
+Native Rust callers can also import and export the supported normalized
+equation subset as Presentation MathML or LaTeX. Lossy format and OfficeMath
+properties remain visible through ordered diagnostics. Python, WASM, CLI,
+legacy equation formats, and a second conversion model remain outside this
+surface.
+
 ### Superseded
 
 | v1 position | Superseded by | Why it changed |

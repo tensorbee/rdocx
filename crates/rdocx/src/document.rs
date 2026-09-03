@@ -19,6 +19,7 @@ use quick_xml::XmlVersion;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::{Namespace, ResolveResult};
 use quick_xml::reader::NsReader;
+use rdocx_oxml::MathProperties;
 use rdocx_oxml::content_control::{CT_Sdt, SdtContent};
 use rdocx_oxml::document::{BodyContent, CT_Columns, CT_Document, CT_SectPr};
 use rdocx_oxml::drawing::{CT_Anchor, CT_Drawing, CT_Inline};
@@ -4119,6 +4120,26 @@ impl Document {
         Ok(())
     }
 
+    /// Return document-wide OfficeMath defaults from the settings part.
+    pub fn math_properties(&self) -> Option<&MathProperties> {
+        self.settings.as_ref()?.math_properties()
+    }
+
+    /// Set document-wide OfficeMath defaults in the relationship-resolved settings part.
+    pub fn set_math_properties(&mut self, properties: MathProperties) -> Result<()> {
+        let part_name = match &self.settings_part_name {
+            Some(part_name) => part_name.clone(),
+            None => available_settings_part_name(&self.package)?,
+        };
+        self.settings
+            .get_or_insert_with(CT_Settings::new)
+            .set_math_properties(properties)?;
+        self.invalidate_layout();
+        self.settings_part_name = Some(part_name.clone());
+        self.ensure_part_relationship(&part_name, rel_types::SETTINGS, SETTINGS_CONTENT_TYPE);
+        Ok(())
+    }
+
     // ---- Metadata access ----
 
     /// Get the document title.
@@ -5755,6 +5776,11 @@ impl Document {
                 .settings
                 .as_ref()
                 .is_some_and(CT_Settings::automatic_hyphenation),
+            math_properties: self
+                .settings
+                .as_ref()
+                .and_then(CT_Settings::math_properties)
+                .cloned(),
             styles: self.styles.clone(),
             numbering: self.numbering.clone(),
             headers,
@@ -7382,6 +7408,83 @@ mod tests {
         doc.to_pdf_with_fonts(&[(family, font_data)]).unwrap();
         doc.to_pdf_with_fonts(&[(family, font_data)]).unwrap();
         assert_eq!(layout_invocations(), 4);
+    }
+
+    #[test]
+    fn officemath_document_settings_reach_pdf_and_raster_backends() {
+        fn has_direct_rule(element: &oxml_layout::PositionedElement) -> bool {
+            matches!(element, oxml_layout::PositionedElement::Line { .. })
+        }
+
+        fn fraction_group_mut(
+            elements: &mut [oxml_layout::PositionedElement],
+        ) -> Option<&mut oxml_layout::GroupElement> {
+            for element in elements {
+                match element {
+                    oxml_layout::PositionedElement::Group(group) => {
+                        if group.children.iter().any(has_direct_rule) {
+                            return Some(group);
+                        }
+                        if let Some(found) = fraction_group_mut(&mut group.children) {
+                            return Some(found);
+                        }
+                    }
+                    oxml_layout::PositionedElement::MarkedContent { children, .. } => {
+                        if let Some(found) = fraction_group_mut(children) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+
+        let word = rdocx_oxml::namespace::W_NS;
+        let math = rdocx_oxml::namespace::M_NS;
+        let document_xml = format!(
+            r#"<w:document xmlns:w="{word}" xmlns:m="{math}"><w:body><w:p><w:r><w:t>before</w:t></w:r><m:oMath><m:f><m:num><m:r><m:t>1</m:t></m:r></m:num><m:den><m:r><m:t>2</m:t></m:r></m:den></m:f></m:oMath><w:r><w:t>after</w:t></w:r></w:p><w:sectPr/></w:body></w:document>"#
+        );
+        let settings_xml = format!(
+            r#"<w:settings xmlns:w="{word}" xmlns:m="{math}"><m:mathPr><m:mathFont m:val="Caladea"/><m:jc m:val="right"/><m:preSp m:val="80"/><m:postSp m:val="120"/></m:mathPr></w:settings>"#
+        );
+        let mut document = Document::new();
+        document.document =
+            CT_Document::from_xml(document_xml.as_bytes()).expect("document parses");
+        document.settings =
+            Some(CT_Settings::from_xml(settings_xml.as_bytes()).expect("math settings parse"));
+
+        let input = document.build_layout_input();
+        assert_eq!(
+            input
+                .math_properties
+                .as_ref()
+                .and_then(|properties| properties.math_font.as_deref()),
+            Some("Caladea")
+        );
+        let pdf = document
+            .to_pdf_deterministic()
+            .expect("OfficeMath PDF render");
+        assert!(pdf.starts_with(b"%PDF-"));
+        let png = document
+            .render_page_to_png_deterministic(0, 150.0)
+            .expect("OfficeMath raster render")
+            .expect("OfficeMath page exists");
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+
+        let mut mutated = document
+            .cached_deterministic_layout()
+            .expect("deterministic OfficeMath layout")
+            .layout
+            .clone();
+        let page = Arc::make_mut(&mut mutated.pages[0]);
+        let fraction = fraction_group_mut(&mut page.elements).expect("rendered fraction group");
+        let original_y = fraction.transform.f;
+        fraction.transform.f += 1.01;
+        assert!((fraction.transform.f - original_y).abs() > 1.0);
+        let mutated_png = oxml_pdf::render_page_to_png(&mutated, 0, 150.0)
+            .expect("mutated OfficeMath page renders");
+        assert_ne!(png, mutated_png, "1.01 point page mutation must be visible");
     }
 
     #[test]

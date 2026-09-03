@@ -19,6 +19,7 @@ from unittest.mock import patch
 from scripts import fetch_docx_corpus
 from scripts import readme_doctests
 from scripts import install_pinned_libreoffice
+from scripts import install_pinned_pandoc
 from scripts import install_pinned_poppler
 from scripts import sprint_workflow as workflow
 
@@ -517,6 +518,24 @@ class SprintWorkflowTests(unittest.TestCase):
         self.assertIn("-DENABLE_UTILS=ON", installer)
         self.assertIn('expected = f"{tool} version {POPLER_VERSION}"', installer)
 
+    def assert_pinned_pandoc_installer_contract(self, installer: str) -> None:
+        for required in (
+            'PANDOC_VERSION = "3.10"',
+            'PANDOC_SHA256 = "e0f8af62d0f267d22baa5bcefe6d5dda3a097ccc60de794b759fe03159923244"',
+            "MAX_DOWNLOAD_BYTES = 40 * 1024 * 1024",
+            "MAX_ARCHIVE_MEMBERS = 256",
+            "if extracted_bytes > MAX_EXTRACTED_BYTES:",
+            "if not member_path.parts or member_path.parts[0] != ARCHIVE_ROOT:",
+            "if not member.isfile():",
+            "if not executable.is_file():",
+            'identity[0] != f"pandoc {PANDOC_VERSION}"',
+            'platform.system() != "Linux"',
+            'platform.machine() not in ("x86_64", "amd64")',
+            'os.environ.get("GITHUB_PATH")',
+            'os.environ.get("GITHUB_ENV")',
+        ):
+            self.assertIn(required, installer)
+
     def assert_pinned_libreoffice_installer_contract(self, installer: str) -> None:
         self.assertIn('LIBREOFFICE_VERSION = "26.2.5.2"', installer)
         self.assertIn(
@@ -973,6 +992,191 @@ class SprintWorkflowTests(unittest.TestCase):
         for label, mutated in mutations.items():
             with self.subTest(mutation=label), self.assertRaises(AssertionError):
                 self.assert_pinned_poppler_installer_contract(mutated)
+
+    def assert_pinned_pandoc_ci_gate(self, ci: str) -> None:
+        job = self.yaml_block(ci, "  test:")
+        install = self.yaml_step(job, "Install pinned Pandoc 3.10")
+        gate = self.yaml_step(job, "Run pinned Pandoc texmath gate")
+        workspace = self.yaml_step(job, "Run full workspace suite")
+        self.assertEqual(
+            self.operative_lines(install),
+            (
+                "- name: Install pinned Pandoc 3.10",
+                "run: python3 scripts/install_pinned_pandoc.py",
+            ),
+        )
+        self.assertEqual(
+            self.operative_lines(gate),
+            (
+                "- name: Run pinned Pandoc texmath gate",
+                "run: >-",
+                "cargo test --locked -p rdocx",
+                "math::tests::mathml_and_latex_conversion_matches_pinned_pandoc_texmath_trees",
+                "--lib -- --ignored --exact --nocapture",
+            ),
+        )
+        self.assertLess(job.index(install), job.index(gate))
+        self.assertLess(job.index(gate), job.index(workspace))
+        for step in (install, gate):
+            self.assertNotIn("continue-on-error", step)
+            self.assertNotIn("if: false", step)
+            self.assert_no_success_short_circuit(self.operative_lines(step))
+
+    def test_pinned_pandoc_installer_and_ci_gate_are_exact(self) -> None:
+        installer_path = workflow.REPO / "scripts/install_pinned_pandoc.py"
+        self.assertTrue(installer_path.is_file())
+        installer = installer_path.read_text(encoding="utf-8")
+        self.assert_pinned_pandoc_installer_contract(installer)
+
+        mutations = {
+            "missing-platform-rejection": installer.replace(
+                'if platform.system() != "Linux" or platform.machine() not in ("x86_64", "amd64"):',
+                "if False:",
+                1,
+            ),
+            "missing-archive-root-rejection": installer.replace(
+                "if not member_path.parts or member_path.parts[0] != ARCHIVE_ROOT:",
+                "if False:",
+                1,
+            ),
+            "missing-non-file-rejection": installer.replace(
+                "if not member.isfile():",
+                "if False:",
+                1,
+            ),
+            "missing-extracted-size-cap": installer.replace(
+                "if extracted_bytes > MAX_EXTRACTED_BYTES:",
+                "if False:",
+                1,
+            ),
+            "missing-expected-executable-check": installer.replace(
+                "if not executable.is_file():",
+                "if False:",
+                1,
+            ),
+            "missing-runtime-identity": installer.replace(
+                'identity[0] != f"pandoc {PANDOC_VERSION}"',
+                "False",
+                1,
+            ),
+        }
+        for label, mutated in mutations.items():
+            self.assertNotEqual(mutated, installer, label)
+            with self.subTest(mutation=label), self.assertRaises(AssertionError):
+                self.assert_pinned_pandoc_installer_contract(mutated)
+
+        ci = (workflow.REPO / ".github/workflows/ci.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assert_pinned_pandoc_ci_gate(ci)
+
+    def test_pinned_pandoc_ci_gate_rejects_disabled_or_noop_steps(self) -> None:
+        ci = (workflow.REPO / ".github/workflows/ci.yml").read_text(
+            encoding="utf-8"
+        )
+        job = self.yaml_block(ci, "  test:")
+        install = self.yaml_step(job, "Install pinned Pandoc 3.10")
+        gate = self.yaml_step(job, "Run pinned Pandoc texmath gate")
+        workspace = self.yaml_step(job, "Run full workspace suite")
+        mutations = {
+            "missing-gate": ci.replace(gate, "", 1),
+            "install-if-false": ci.replace(
+                install,
+                install.replace("        run:", "        if: false\n        run:", 1),
+                1,
+            ),
+            "install-continue-on-error": ci.replace(
+                install,
+                install.replace(
+                    "        run:",
+                    "        continue-on-error: true\n        run:",
+                    1,
+                ),
+                1,
+            ),
+            "install-noop": ci.replace(
+                install,
+                install.replace(
+                    "run: python3 scripts/install_pinned_pandoc.py",
+                    "run: python3 -c 'pass'",
+                ),
+                1,
+            ),
+            "gate-if-false": ci.replace(
+                gate,
+                gate.replace("        run:", "        if: false\n        run:", 1),
+                1,
+            ),
+            "gate-continue-on-error": ci.replace(
+                gate,
+                gate.replace(
+                    "        run:",
+                    "        continue-on-error: true\n        run:",
+                    1,
+                ),
+                1,
+            ),
+            "gate-noop": ci.replace(
+                gate,
+                gate.replace(
+                    "cargo test --locked -p rdocx",
+                    "python3 -c 'pass'",
+                ),
+                1,
+            ),
+            "gate-after-workspace": ci.replace(gate, "", 1).replace(
+                workspace,
+                workspace + gate,
+                1,
+            ),
+        }
+        for label, mutated in mutations.items():
+            self.assertNotEqual(mutated, ci, label)
+            with self.subTest(mutation=label), self.assertRaises(AssertionError):
+                self.assert_pinned_pandoc_ci_gate(mutated)
+
+    def test_pinned_pandoc_installer_enforces_archive_guards(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            with patch.object(
+                install_pinned_pandoc.urllib.request,
+                "urlopen",
+                return_value=io.BytesIO(b"not the reviewed Pandoc source"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "SHA-256"):
+                    install_pinned_pandoc.download_archive(root / "wrong.tar.gz")
+
+            archive_path = root / "unsafe.tar.gz"
+            with tarfile.open(archive_path, mode="w:gz") as archive:
+                member = tarfile.TarInfo("pandoc-3.10/../../escape")
+                member.size = 0
+                archive.addfile(member, io.BytesIO())
+            with self.assertRaisesRegex(RuntimeError, "unsafe path"):
+                install_pinned_pandoc.safe_extract(
+                    archive_path,
+                    root / "extract",
+                )
+
+            occupied = root / "occupied"
+            executable = occupied / "bin" / "pandoc"
+            executable.parent.mkdir(parents=True)
+            executable.write_text("not the reviewed executable", encoding="utf-8")
+            with (
+                patch.object(
+                    install_pinned_pandoc.platform,
+                    "system",
+                    return_value="Linux",
+                ),
+                patch.object(
+                    install_pinned_pandoc.platform,
+                    "machine",
+                    return_value="x86_64",
+                ),
+                patch.object(install_pinned_pandoc, "download_archive") as download,
+                self.assertRaisesRegex(RuntimeError, "prefix must be absent or empty"),
+            ):
+                install_pinned_pandoc.install(occupied)
+            download.assert_not_called()
 
     def test_workspace_viewer_jobs_install_pinned_libreoffice(self) -> None:
         installer_path = workflow.REPO / "scripts/install_pinned_libreoffice.py"

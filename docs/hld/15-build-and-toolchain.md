@@ -147,6 +147,14 @@ Builds otherwise stay native. There is no development container. The Linux-only
 work, manylinux wheels, `wasm32` checks and the LibreOffice render oracle, runs
 on CI runners as it always would have.
 
+Pandoc 3.10 is test infrastructure for the MathML and LaTeX conversion gate.
+The Linux x86-64 release archive is pinned to SHA-256
+`e0f8af62d0f267d22baa5bcefe6d5dda3a097ccc60de794b759fe03159923244`.
+The bounded installer rejects an unexpected platform, archive layout, member,
+size, digest, or executable identity, then exposes the verified binary only to
+CI. Pandoc and texmath are absent from every published crate and production
+dependency graph.
+
 ODP conversion adds no external production tool and reuses the workspace
 `zip`, `quick-xml`, and `oxml-media` dependencies. LibreOffice 26.2.5.2 remains
 an explicit ignored acceptance gate that runs with an isolated user profile.
@@ -574,6 +582,12 @@ unresolved-symbol link failure that is easy to misdiagnose as something else.
 same Ubuntu 24.04 job runs `python3 scripts/golden_png_harness.py --check` with
 the Poppler 26.01.0 installation already on `PATH`. The step is unconditional
 and propagates a decoded-pixel mismatch as a CI failure.
+
+**The Pandoc texmath gate in the test job.** The Ubuntu 24.04 runner installs
+the exact SHA-256-pinned Pandoc 3.10 archive, verifies the executable identity,
+and runs the ignored `rdocx` structural differential by its exact unit-test
+path before the workspace suite. The installer and gate have mutation coverage
+in the release-regression suite.
 
 **The large-document gate in the test job.** The Ubuntu 24.04 runner executes
 the exact locked `rdocx` regression binary in release mode, selects only the

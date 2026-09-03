@@ -203,6 +203,26 @@ namespace URI escaping are resolved by the XML parser. Serialization fails
 closed when owner identity or a serializer prefix binding cannot be preserved
 safely, leaving the opened package bytes authoritative.
 
+Direct paragraph `m:oMath` and `m:oMathPara` children use that same owner and
+boundary discipline. The reader accepts any prefix bound to the Transitional
+OfficeMath namespace. Canonical typed writes use `m:` and replay the inherited
+bindings needed by retained raw content. A conflicting `m` binding, malformed
+grammar sequence, foreign same-local-name node, or legacy Equation Editor
+object remains unmodelled raw XML. Run-boundary collapse rebases both the raw
+child position and the equation projection so later mutation still replaces
+the correct source node. Repeated-child raw slots remain ordinal boundaries
+when callers insert or reorder typed values. If callers shorten a collection,
+every now-unreached higher slot is emitted at the retained owner's tail rather
+than discarded.
+
+Presentation MathML conversion is a separate facade boundary rather than an
+OPC part. Its reader resolves the W3C MathML namespace by expanded name, rejects
+DTD and unresolved entity input, and applies byte, event, depth, node, text,
+matrix, and diagnostic limits. Its writer emits one default MathML namespace,
+stable attributes, ordered children, and explicit `mo` fences. `mfenced` is
+accepted only on input. Unsupported safe content is diagnosed, and descendants
+are retained only at the declared transparent `semantics` boundary.
+
 Logical owner identity includes exact normalized raw marker multiplicity and
 the resolved namespace facts of owner-dependent element and attribute uses.
 A same-URI declaration already local to a retained subtree remains independent
@@ -245,6 +265,15 @@ protection modes, unsupported algorithm enum values, and malformed numeric
 metadata remain opaque and byte-identical. A document without a settings
 relationship does not gain a settings part, relationship, or content-type
 override during an ordinary save.
+
+The settings model also projects one valid `m:mathPr` child. Typed defaults
+cover the math font, display justification, unsigned margins and spacing,
+small-fraction and display toggles, and integral and n-ary limit placement.
+Mutation replaces every existing math-properties occurrence with one
+schema-positioned subtree while preserving unrelated settings bytes. Creating
+defaults without a settings relationship allocates a collision-safe settings
+part and adds the relationship and content type through the existing package
+path.
 
 Watermark authoring follows the document-to-header graph rather than assuming
 conventional header names. The facade materializes a missing default, first, or

@@ -652,6 +652,33 @@ Repeated and concurrent focused tests preserve `Document: Send + Sync`. The
 no-default feature test, both WASM checks, committed-graph package dry-runs,
 archive-size ceiling, and reviewed 49-entry hash harness are required riders.
 
+The OfficeMath round-trip gate is
+`officemath_corpus_parses_mutates_saves_and_reopens_without_losing_supported_or_raw_siblings`.
+Its source-built corpus covers all thirteen supported expression variants and
+opaque root, property, and argument siblings through typed mutation and
+reopen. Focused grammar tests cover inline and display equations, aliases,
+fixed-prefix writes, schema child order, property defaults and domains,
+malformed sequences, XML depth, text decoding, conflicting namespace bindings,
+and legacy Equation Editor isolation. Existing integration targets cover
+paragraph item order, collapsed raw-boundary rebasing, full-corpus authoring,
+display justification, settings relationships, and mutable facade reopen. The
+published-crate riders deny rustdoc warnings, dry-run both packages, and keep
+each archive below 10 MiB. The 49-entry hash harness remains unchanged.
+
+The OfficeMath layout gate is
+`officemath_baselines_and_glyph_geometry_match_the_pinned_word_pdf_oracle`.
+Its source-only harness builds one DOCX that covers all thirteen supported
+expression families and pins Microsoft Word 16.104 build 16.104.25121423,
+Poppler 26.01.0, and 150 DPI. It requires exact Word text tokens and derives
+each expression's ink width and vertical bounds directly from the Word and
+deterministic Rust PDFs. Fixed raster windows separate only the delimiter and
+accent that Poppler coalesces into one Word token. Aggregate and
+per-expression geometry use a 1.0 point tolerance. The complete-page raster
+uses 64 by 64 pixel block luminance with a 0.99 SSIM floor. A 1.01 point
+rendered-group perturbation proves the geometry and raster path is
+mutation-sensitive. The source DOCX digest and tool identities live in the
+text manifest, while both PDF outputs remain untracked.
+
 ## The hash harness
 
 The single highest-value mechanism in the plan is
@@ -1274,6 +1301,27 @@ cover the cases that matter now.
   normalised or rejected. The code handles it, nothing tests it, and the crate
   is about to become a public shared component.
 
+**`rdocx-oxml` OfficeMath**
+- Prefix aliases and default namespaces resolve by expanded name, while
+  unqualified attributes and conflicting fixed-prefix bindings stay untyped.
+- Every supported expression and property sequence writes in schema order and
+  reparses with opaque siblings in the same logical slots.
+- Inline and display equations retain paragraph item order through mutation,
+  raw-boundary collapse, save, and reopen.
+
+**`rdocx` MathML and LaTeX conversion**
+- Source-built unit cases cover every supported Presentation MathML element,
+  LaTeX command family, normalization rule, limit, and ordered loss path.
+- Round trips compare the normalized `MathArgument` tree rather than format
+  bytes. Perturbations swap fraction operands, detach scripts, change delimiter
+  scope, reorder matrix cells, and remove a diagnostic.
+- The ignored live differential verifies exact Pandoc 3.10 identity and uses
+  its bundled texmath engine in both directions. Pandoc `display` and
+  `semantics` wrappers, its conversion of pre-scripts to an empty-base
+  post-script followed by a run, its insertion of explicit n-ary `\limits`,
+  and its removal of explicit delimiter scope are asserted as intentional
+  divergences.
+
 Agile encryption has a source-encoded Microsoft Word 16.104 oracle package so
 the regression gate does not depend on an opaque binary fixture. The gate opens
 that package only with its password, checks every supported AES data-key and
@@ -1607,7 +1655,7 @@ parallel, or failure-swallowing invocation.
 | Job | Command |
 |---|---|
 | changes | On pushes and pull requests, classify changed paths for the nine filtered jobs with `dorny/paths-filter` v4.0.3 pinned to reviewed commit `ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d` |
-| test | Install exact uv 0.10.2 and Poppler 26.01.0, fetch both pinned corpora, run the exact locked release-mode 1,000-page performance regression with one test thread, run `cargo test --workspace --all-features --exclude rdocx-py --exclude rpptx-py` with an isolated uv cache and 8 MiB Rust test-thread stack, run the exact locked deterministic animation golden, then run `python3 scripts/golden_png_harness.py --check` |
+| test | Install exact uv 0.10.2, Poppler 26.01.0, LibreOffice 26.2.5.2, and Pandoc 3.10, fetch both pinned corpora, run the pinned Pandoc texmath differential and exact locked release-mode 1,000-page performance regression with one test thread, run `cargo test --workspace --all-features --exclude rdocx-py --exclude rpptx-py` with an isolated uv cache and 8 MiB Rust test-thread stack, run the exact locked deterministic animation golden, then run `python3 scripts/golden_png_harness.py --check` |
 | no-default-features | `cargo test -p oxml-layout --no-default-features` |
 | wasm | Locked `wasm32-unknown-unknown` checks, `wasm-pack test --node`, and local bundler pack and fresh-install gates for `rdocx-wasm` and `rpptx-wasm` |
 | prose | `python3 scripts/prose_check.py` and `python3 scripts/sync_agent_skills.py --check` |
