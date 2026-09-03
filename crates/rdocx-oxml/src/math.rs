@@ -142,6 +142,12 @@ impl CT_OMathPara {
             match math_local_name(&child, &parsed.bindings)?.as_deref() {
                 Some("oMathParaPr") if modeled == 0 => {
                     properties = MathParagraphProperties::from_raw(&child, &parsed.bindings)?;
+                    preserve_modeled_child(
+                        &mut parsed.preservation,
+                        "oMathParaPr",
+                        &child,
+                        &parsed.bindings,
+                    );
                     modeled += 1;
                 }
                 Some("oMath") => {
@@ -167,7 +173,10 @@ impl CT_OMathPara {
     /// Whether this display equation retains content outside the typed subset.
     pub fn has_unsupported_content(&self) -> bool {
         preservation_has_unsupported_content(&self.preservation)
-            || property_preservation_has_unsupported_content(&self.properties.preservation)
+            || property_preservation_has_unsupported_content(
+                &self.properties.preservation,
+                "oMathParaPr",
+            )
             || self.equations.iter().any(CT_OMath::has_unsupported_content)
     }
 
@@ -183,8 +192,8 @@ impl CT_OMathPara {
         }
         let root = math_start("oMathPara", &self.preservation, declare_math);
         writer.write_event(Event::Start(root.borrow()))?;
-        let has_properties = !self.properties.is_empty();
         let had_properties = has_preserved_modeled_child(&self.preservation, "oMathParaPr");
+        let has_properties = !self.properties.is_empty() || had_properties;
         if has_properties && !had_properties {
             self.properties.write_xml(writer)?;
         }
@@ -282,7 +291,10 @@ impl MathExpression {
         match self {
             Self::Run(value) => {
                 preservation_has_unsupported_content(&value.preservation)
-                    || property_preservation_has_unsupported_content(&value.properties.preservation)
+                    || property_preservation_has_unsupported_content(
+                        &value.properties.preservation,
+                        "rPr",
+                    )
                     || math_text_has_unsupported_content(&value.preservation)
             }
             Self::Fraction(value) => {
@@ -559,6 +571,12 @@ impl MathRun {
             match math_local_name(&child, &parsed.bindings)?.as_deref() {
                 Some("rPr") if modeled == 0 => {
                     properties = parse_run_properties(&child, &parsed.bindings)?;
+                    preserve_modeled_child(
+                        &mut parsed.preservation,
+                        "rPr",
+                        &child,
+                        &parsed.bindings,
+                    );
                     modeled += 1;
                 }
                 Some("t") => {
@@ -578,8 +596,8 @@ impl MathRun {
 
     fn write_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         write_container(writer, "r", &self.preservation, |writer| {
-            let emit_properties = !self.properties.is_empty();
             let had_properties = has_preserved_modeled_child(&self.preservation, "rPr");
+            let emit_properties = !self.properties.is_empty() || had_properties;
             if emit_properties && !had_properties {
                 write_run_properties(writer, &self.properties)?;
             }
@@ -1746,7 +1764,7 @@ impl MathProperties {
 
     /// Whether the settings subtree retains content outside the typed subset.
     pub fn has_unsupported_content(&self) -> bool {
-        property_preservation_has_unsupported_content(&self.preservation)
+        property_preservation_has_unsupported_content(&self.preservation, "mathPr")
     }
 
     pub(crate) fn from_raw(raw: &[u8], inherited: &[(String, String)]) -> Result<Self> {
@@ -2107,18 +2125,25 @@ fn preservation_has_unsupported_content(preservation: &Preservation) -> bool {
         || !preservation.property_raw_children.is_empty()
 }
 
-fn property_preservation_has_unsupported_content(preservation: &Preservation) -> bool {
+fn property_preservation_has_unsupported_content(
+    preservation: &Preservation,
+    container: &str,
+) -> bool {
     preservation_has_unsupported_content(preservation)
         || preservation.modeled_children.iter().any(|child| {
             parse_element(&child.raw, &child.bindings).map_or(true, |parsed| {
+                let modeled_attribute = if container == "rPr" && child.name == "brk" {
+                    b"alnAt".as_slice()
+                } else {
+                    b"val".as_slice()
+                };
                 parsed.preservation.attributes.iter().any(|(name, _)| {
                     if name == "xmlns" || name.starts_with("xmlns:") {
                         return false;
                     }
                     expanded_attribute_name(name.as_bytes(), &parsed.bindings).is_none_or(
                         |(namespace, local)| {
-                            namespace != M_NS
-                                || (local.as_slice() != b"val" && local.as_slice() != b"alnAt")
+                            namespace != M_NS || local.as_slice() != modeled_attribute
                         },
                     )
                 }) || !parsed.children.is_empty()
@@ -2141,7 +2166,7 @@ fn property_container_has_unsupported_content(preservation: &Preservation, tag: 
         supported_properties(tag),
     )
     .map_or(true, |value| {
-        property_preservation_has_unsupported_content(&value)
+        property_preservation_has_unsupported_content(&value, tag)
     })
 }
 
@@ -2674,6 +2699,15 @@ fn valid_expression_shape(raw: &[u8], inherited: &[(String, String)]) -> Result<
             }
         }
     }
+    if root == "r" {
+        for child in &parsed.children {
+            if math_local_name(child, &parsed.bindings)?.as_deref() == Some("t")
+                && math_text_has_non_text_nodes(child)?
+            {
+                return Ok(false);
+            }
+        }
+    }
     let allowed: &[&str] = match root.as_str() {
         "r" => &["rPr", "t"],
         "f" => &["fPr", "num", "den"],
@@ -2924,6 +2958,22 @@ fn element_text(raw: &[u8]) -> Result<String> {
             Event::Eof => {
                 return Err(OxmlError::MissingElement("OfficeMath text end".to_owned()));
             }
+            _ => {}
+        }
+        buffer.clear();
+    }
+}
+
+fn math_text_has_non_text_nodes(raw: &[u8]) -> Result<bool> {
+    let mut reader = Reader::from_reader(raw);
+    let mut inside = false;
+    let mut buffer = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buffer)? {
+            Event::Start(_) if !inside => inside = true,
+            Event::Comment(_) | Event::PI(_) if inside => return Ok(true),
+            Event::End(_) if inside => return Ok(false),
+            Event::Eof => return Ok(false),
             _ => {}
         }
         buffer.clear();
@@ -3401,6 +3451,100 @@ mod tests {
         );
         let spaced_text = CT_OMath::from_xml(spaced_text.as_bytes()).unwrap();
         assert!(!spaced_text.expressions[0].has_unsupported_content());
+    }
+
+    #[test]
+    fn existing_run_and_display_properties_keep_both_parent_raw_slots() {
+        let run_source = format!(
+            r#"<m:oMath xmlns:m="{M_NS}" xmlns:x="urn:producer"><m:r><x:run-before/><m:rPr/><x:run-after-property/><m:t>x</m:t><x:run-after-text/></m:r></m:oMath>"#
+        );
+        let run = CT_OMath::from_xml(run_source.as_bytes()).unwrap();
+        let first = run.to_xml().unwrap();
+        assert_fragments_in_order(
+            &first,
+            &[
+                "<x:run-before/>",
+                "<m:rPr>",
+                "<x:run-after-property/>",
+                "<m:t>",
+                "<x:run-after-text/>",
+            ],
+        );
+        let reopened = CT_OMath::from_xml(&first).unwrap();
+        assert_fragments_in_order(
+            &reopened.to_xml().unwrap(),
+            &[
+                "<x:run-before/>",
+                "<m:rPr>",
+                "<x:run-after-property/>",
+                "<m:t>",
+                "<x:run-after-text/>",
+            ],
+        );
+
+        let display_source = format!(
+            r#"<m:oMathPara xmlns:m="{M_NS}" xmlns:x="urn:producer"><x:display-before/><m:oMathParaPr/><x:display-after-property/><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath><x:display-after-equation/></m:oMathPara>"#
+        );
+        let display = CT_OMathPara::from_xml(display_source.as_bytes()).unwrap();
+        let first = display.to_xml().unwrap();
+        assert_fragments_in_order(
+            &first,
+            &[
+                "<x:display-before/>",
+                "<m:oMathParaPr>",
+                "<x:display-after-property/>",
+                "<m:oMath>",
+                "<x:display-after-equation/>",
+            ],
+        );
+        let reopened = CT_OMathPara::from_xml(&first).unwrap();
+        assert_fragments_in_order(
+            &reopened.to_xml().unwrap(),
+            &[
+                "<x:display-before/>",
+                "<m:oMathParaPr>",
+                "<x:display-after-property/>",
+                "<m:oMath>",
+                "<x:display-after-equation/>",
+            ],
+        );
+    }
+
+    #[test]
+    fn comments_and_processing_instructions_inside_math_text_keep_the_run_opaque() {
+        let source = format!(
+            r#"<m:oMath xmlns:m="{M_NS}"><m:r><m:t>x<!--kept--></m:t></m:r><m:r><m:t>y<?kept value?></m:t></m:r></m:oMath>"#
+        );
+        let parsed = CT_OMath::from_xml(source.as_bytes()).unwrap();
+        assert!(parsed.expressions.is_empty());
+        assert!(parsed.has_unsupported_content());
+        let first = parsed.to_xml().unwrap();
+        let first = String::from_utf8(first).unwrap();
+        assert!(first.contains("<m:t>x<!--kept--></m:t>"));
+        assert!(first.contains("<m:t>y<?kept value?></m:t>"));
+        let reopened = CT_OMath::from_xml(first.as_bytes()).unwrap();
+        assert!(reopened.expressions.is_empty());
+        assert!(reopened.has_unsupported_content());
+        let second = String::from_utf8(reopened.to_xml().unwrap()).unwrap();
+        assert!(second.contains("<m:t>x<!--kept--></m:t>"));
+        assert!(second.contains("<m:t>y<?kept value?></m:t>"));
+    }
+
+    #[test]
+    fn unsupported_property_attributes_are_checked_against_their_actual_leaf() {
+        let source = format!(
+            r#"<m:oMath xmlns:m="{M_NS}"><m:f><m:fPr><m:type m:val="bar" m:alnAt="4"/></m:fPr><m:num/><m:den/></m:f><m:r><m:rPr><m:brk m:alnAt="4" m:val="1"/></m:rPr><m:t>x</m:t></m:r></m:oMath>"#
+        );
+        let parsed = CT_OMath::from_xml(source.as_bytes()).unwrap();
+        assert!(parsed.expressions[0].has_unsupported_content());
+        assert!(parsed.expressions[1].has_unsupported_content());
+
+        let supported = format!(
+            r#"<m:oMath xmlns:m="{M_NS}"><m:f><m:fPr><m:type m:val="bar"/></m:fPr><m:num/><m:den/></m:f><m:r><m:rPr><m:brk m:alnAt="4"/></m:rPr><m:t>x</m:t></m:r></m:oMath>"#
+        );
+        let supported = CT_OMath::from_xml(supported.as_bytes()).unwrap();
+        assert!(!supported.expressions[0].has_unsupported_content());
+        assert!(!supported.expressions[1].has_unsupported_content());
     }
 
     #[test]
