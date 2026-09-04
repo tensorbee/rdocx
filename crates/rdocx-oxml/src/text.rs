@@ -6,7 +6,7 @@ use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::name::{Namespace, ResolveResult};
 use quick_xml::{NsReader, Reader, Writer, XmlVersion};
 
-use crate::content_control::CT_Sdt;
+use crate::content_control::{CT_Sdt, SdtContent, SdtOwner};
 use crate::drawing::CT_Drawing;
 use crate::error::{OxmlError, Result};
 use crate::math::OfficeMath;
@@ -14,7 +14,8 @@ use crate::namespace::{R_NS, matches_local_name};
 use crate::numbering::{namespace_bindings, parse_scoped_ppr, word_prefixes_at};
 use crate::properties::{CT_PPr, CT_RPr, is_word_attribute, is_word_element};
 use crate::raw_xml::{capture_element, capture_empty_element};
-use crate::revision::CT_Revision;
+use crate::revision::{CT_Revision, RevisionKind};
+use crate::table::{CT_Row, CT_Tbl, CT_Tc, CellContent};
 
 static NEXT_FIELD_SOURCE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -372,32 +373,48 @@ pub enum CommentRangeMarker {
 }
 
 /// Read projection of a bookmark marker retained at a run boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct BookmarkMarker {
     start: bool,
     id: Option<i32>,
     name: Option<String>,
     run_index: usize,
     raw_before: usize,
+    projected_run_index: usize,
+    tracked_run_index: usize,
+    word_prefixes: Vec<String>,
+}
+
+impl PartialEq for BookmarkMarker {
+    fn eq(&self, other: &Self) -> bool {
+        self.start == other.start
+            && self.id == other.id
+            && self.name == other.name
+            && self.run_index == other.run_index
+            && self.raw_before == other.raw_before
+            && self.projected_run_index == other.projected_run_index
+            && self.tracked_run_index == other.tracked_run_index
+    }
+}
+
+impl Eq for BookmarkMarker {}
+
+impl std::fmt::Debug for BookmarkMarker {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BookmarkMarker")
+            .field("start", &self.start)
+            .field("id", &self.id)
+            .field("name", &self.name)
+            .field("run_index", &self.run_index)
+            .field("raw_before", &self.raw_before)
+            .field("projected_run_index", &self.projected_run_index)
+            .field("tracked_run_index", &self.tracked_run_index)
+            .finish()
+    }
 }
 
 impl BookmarkMarker {
-    fn new(
-        start: bool,
-        id: i32,
-        name: Option<String>,
-        run_index: usize,
-        raw_before: usize,
-    ) -> Self {
-        Self {
-            start,
-            id: Some(id),
-            name,
-            run_index,
-            raw_before,
-        }
-    }
-
     pub fn is_start(&self) -> bool {
         self.start
     }
@@ -418,6 +435,18 @@ impl BookmarkMarker {
     #[doc(hidden)]
     pub fn raw_before(&self) -> usize {
         self.raw_before
+    }
+
+    /// Accepted-view run boundary represented by this marker.
+    #[doc(hidden)]
+    pub fn projected_run_index(&self) -> usize {
+        self.projected_run_index
+    }
+
+    /// Tracked-view run boundary represented by this marker.
+    #[doc(hidden)]
+    pub fn tracked_run_index(&self) -> usize {
+        self.tracked_run_index
     }
 }
 
@@ -1097,6 +1126,16 @@ struct ParsedHyperlinkChildren {
     run_sources: Vec<Option<Vec<u8>>>,
     revisions: Vec<(usize, CT_Revision)>,
     extra_xml: Vec<(usize, usize, Vec<u8>)>,
+    bookmark_markers: Vec<BookmarkMarker>,
+    projected_run_count: usize,
+    tracked_run_count: usize,
+}
+
+#[derive(Default)]
+struct AcceptedBookmarkProjection {
+    markers: Vec<BookmarkMarker>,
+    projected_run_count: usize,
+    tracked_run_count: usize,
 }
 
 /// A hyperlink represented by a complex field sequence rather than `w:hyperlink`.
@@ -1733,6 +1772,10 @@ fn remap_complex_field_boundaries(
         }
     }
     for marker in bookmark_markers {
+        if marker.run_index > end {
+            marker.projected_run_index = marker.projected_run_index.saturating_sub(removed);
+            marker.tracked_run_index = marker.tracked_run_index.saturating_sub(removed);
+        }
         remap(&mut marker.run_index);
     }
     for (at, _, _, _) in content_controls {
@@ -1778,6 +1821,289 @@ pub struct CT_P {
     pub revisions: Vec<(usize, usize, CT_Revision)>,
     /// Typed OfficeMath projections keyed by `(run boundary, raw child slot)`.
     pub equations: Vec<(usize, usize, OfficeMath)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum AcceptedOwnerOrder {
+    BeforeRaw,
+    Raw(usize),
+    AfterRaw,
+}
+
+fn accepted_paragraph_runs(paragraph: &CT_P) -> Vec<&CT_R> {
+    let mut output = Vec::new();
+    for boundary in 0..=paragraph.runs.len() {
+        let mut owners = paragraph
+            .content_controls
+            .iter()
+            .filter(|(at, _, _, _)| *at == boundary)
+            .map(|(_, raw_before, _, control)| {
+                (
+                    AcceptedOwnerOrder::Raw(*raw_before),
+                    0u8,
+                    Some(control),
+                    None,
+                )
+            })
+            .chain(
+                paragraph
+                    .revisions
+                    .iter()
+                    .filter(|(at, _, _)| *at == boundary)
+                    .map(|(_, slot, revision)| {
+                        let order = if let Some(index) = hyperlink_revision_index(*slot) {
+                            if let Some(raw_before) = paragraph
+                                .hyperlinks
+                                .get(index)
+                                .and_then(|hyperlink| hyperlink.preserved_raw_before)
+                            {
+                                AcceptedOwnerOrder::Raw(raw_before)
+                            } else if paragraph
+                                .hyperlinks
+                                .get(index)
+                                .is_some_and(|hyperlink| boundary == hyperlink.run_end)
+                            {
+                                AcceptedOwnerOrder::BeforeRaw
+                            } else {
+                                AcceptedOwnerOrder::AfterRaw
+                            }
+                        } else {
+                            AcceptedOwnerOrder::Raw(*slot)
+                        };
+                        (order, 1u8, None, Some(revision))
+                    }),
+            )
+            .collect::<Vec<_>>();
+        owners.sort_by_key(|(order, kind, _, _)| (*order, *kind));
+        for (_, _, control, revision) in owners {
+            if let Some(control) = control {
+                append_accepted_control_runs(control, &mut output);
+            } else if let Some(revision) = revision {
+                append_accepted_revision_runs(revision, &mut output);
+            }
+        }
+        if let Some(run) = paragraph.runs.get(boundary) {
+            output.push(run);
+        }
+    }
+    output
+}
+
+fn append_accepted_control_runs<'a>(control: &'a CT_Sdt, output: &mut Vec<&'a CT_R>) {
+    for boundary in 0..=control.content.len() {
+        for (_, revision) in control.revisions().iter().filter(|(at, _)| *at == boundary) {
+            append_accepted_revision_runs(revision, output);
+        }
+        let Some(content) = control.content.get(boundary) else {
+            continue;
+        };
+        match content {
+            SdtContent::Run(run) => output.push(run),
+            SdtContent::ContentControl(control) => append_accepted_control_runs(control, output),
+            SdtContent::Paragraph(paragraph) => output.extend(accepted_paragraph_runs(paragraph)),
+            SdtContent::Table(table) => append_accepted_table_runs(table, output),
+            SdtContent::Row(row) => append_accepted_row_runs(row, output),
+            SdtContent::Cell(cell) => append_accepted_cell_runs(cell, output),
+            SdtContent::RawXml(_) => {}
+        }
+    }
+}
+
+fn append_accepted_table_runs<'a>(table: &'a CT_Tbl, output: &mut Vec<&'a CT_R>) {
+    for boundary in 0..=table.rows.len() {
+        for (_, _, control) in table
+            .content_controls
+            .iter()
+            .filter(|(at, _, _)| *at == boundary)
+        {
+            append_accepted_control_runs(control, output);
+        }
+        if let Some(row) = table.rows.get(boundary) {
+            append_accepted_row_runs(row, output);
+        }
+    }
+}
+
+fn append_accepted_row_runs<'a>(row: &'a CT_Row, output: &mut Vec<&'a CT_R>) {
+    for boundary in 0..=row.cells.len() {
+        for (_, _, control) in row
+            .content_controls
+            .iter()
+            .filter(|(at, _, _)| *at == boundary)
+        {
+            append_accepted_control_runs(control, output);
+        }
+        if let Some(cell) = row.cells.get(boundary) {
+            append_accepted_cell_runs(cell, output);
+        }
+    }
+}
+
+fn append_accepted_cell_runs<'a>(cell: &'a CT_Tc, output: &mut Vec<&'a CT_R>) {
+    for content in &cell.content {
+        match content {
+            CellContent::Paragraph(paragraph) => output.extend(accepted_paragraph_runs(paragraph)),
+            CellContent::Table(table) => append_accepted_table_runs(table, output),
+            CellContent::ContentControl(control) => append_accepted_control_runs(control, output),
+        }
+    }
+}
+
+fn tracked_paragraph_runs(paragraph: &CT_P) -> Vec<&CT_R> {
+    let mut output = Vec::new();
+    for boundary in 0..=paragraph.runs.len() {
+        let mut owners = paragraph
+            .content_controls
+            .iter()
+            .filter(|(at, _, _, _)| *at == boundary)
+            .map(|(_, raw_before, _, control)| {
+                (
+                    AcceptedOwnerOrder::Raw(*raw_before),
+                    0u8,
+                    Some(control),
+                    None,
+                )
+            })
+            .chain(
+                paragraph
+                    .revisions
+                    .iter()
+                    .filter(|(at, _, _)| *at == boundary)
+                    .map(|(_, slot, revision)| {
+                        let order = if let Some(index) = hyperlink_revision_index(*slot) {
+                            if let Some(raw_before) = paragraph
+                                .hyperlinks
+                                .get(index)
+                                .and_then(|hyperlink| hyperlink.preserved_raw_before)
+                            {
+                                AcceptedOwnerOrder::Raw(raw_before)
+                            } else if paragraph
+                                .hyperlinks
+                                .get(index)
+                                .is_some_and(|hyperlink| boundary == hyperlink.run_end)
+                            {
+                                AcceptedOwnerOrder::BeforeRaw
+                            } else {
+                                AcceptedOwnerOrder::AfterRaw
+                            }
+                        } else {
+                            AcceptedOwnerOrder::Raw(*slot)
+                        };
+                        (order, 1u8, None, Some(revision))
+                    }),
+            )
+            .collect::<Vec<_>>();
+        owners.sort_by_key(|(order, kind, _, _)| (*order, *kind));
+        for (_, _, control, revision) in owners {
+            if let Some(control) = control {
+                append_tracked_control_runs(control, &mut output);
+            } else if let Some(revision) = revision {
+                append_tracked_revision_runs(revision, &mut output);
+            }
+        }
+        if let Some(run) = paragraph.runs.get(boundary) {
+            output.push(run);
+        }
+    }
+    output
+}
+
+fn append_tracked_control_runs<'a>(control: &'a CT_Sdt, output: &mut Vec<&'a CT_R>) {
+    for boundary in 0..=control.content.len() {
+        for (_, revision) in control.revisions().iter().filter(|(at, _)| *at == boundary) {
+            append_tracked_revision_runs(revision, output);
+        }
+        let Some(content) = control.content.get(boundary) else {
+            continue;
+        };
+        match content {
+            SdtContent::Run(run) => output.push(run),
+            SdtContent::ContentControl(control) => append_tracked_control_runs(control, output),
+            SdtContent::Paragraph(paragraph) => output.extend(tracked_paragraph_runs(paragraph)),
+            SdtContent::Table(table) => append_tracked_table_runs(table, output),
+            SdtContent::Row(row) => append_tracked_row_runs(row, output),
+            SdtContent::Cell(cell) => append_tracked_cell_runs(cell, output),
+            SdtContent::RawXml(_) => {}
+        }
+    }
+}
+
+fn append_tracked_revision_runs<'a>(revision: &'a CT_Revision, output: &mut Vec<&'a CT_R>) {
+    if matches!(
+        revision.kind(),
+        RevisionKind::Insertion | RevisionKind::MoveTo
+    ) && let Some(paragraph) = revision.content_paragraph()
+    {
+        output.extend(tracked_paragraph_runs(paragraph));
+        return;
+    }
+    let crate::revision::RevisionContent::Runs(runs) = revision.content() else {
+        return;
+    };
+    for boundary in 0..=runs.len() {
+        for (_, nested) in revision
+            .nested_revisions()
+            .iter()
+            .filter(|(at, _)| *at == boundary)
+        {
+            append_tracked_revision_runs(nested, output);
+        }
+        if let Some(run) = runs.get(boundary) {
+            output.push(run);
+        }
+    }
+}
+
+fn append_tracked_table_runs<'a>(table: &'a CT_Tbl, output: &mut Vec<&'a CT_R>) {
+    for boundary in 0..=table.rows.len() {
+        for (_, _, control) in table
+            .content_controls
+            .iter()
+            .filter(|(at, _, _)| *at == boundary)
+        {
+            append_tracked_control_runs(control, output);
+        }
+        if let Some(row) = table.rows.get(boundary) {
+            append_tracked_row_runs(row, output);
+        }
+    }
+}
+
+fn append_tracked_row_runs<'a>(row: &'a CT_Row, output: &mut Vec<&'a CT_R>) {
+    for boundary in 0..=row.cells.len() {
+        for (_, _, control) in row
+            .content_controls
+            .iter()
+            .filter(|(at, _, _)| *at == boundary)
+        {
+            append_tracked_control_runs(control, output);
+        }
+        if let Some(cell) = row.cells.get(boundary) {
+            append_tracked_cell_runs(cell, output);
+        }
+    }
+}
+
+fn append_tracked_cell_runs<'a>(cell: &'a CT_Tc, output: &mut Vec<&'a CT_R>) {
+    for content in &cell.content {
+        match content {
+            CellContent::Paragraph(paragraph) => output.extend(tracked_paragraph_runs(paragraph)),
+            CellContent::Table(table) => append_tracked_table_runs(table, output),
+            CellContent::ContentControl(control) => append_tracked_control_runs(control, output),
+        }
+    }
+}
+
+fn append_accepted_revision_runs<'a>(revision: &'a CT_Revision, output: &mut Vec<&'a CT_R>) {
+    if !matches!(
+        revision.kind(),
+        RevisionKind::Insertion | RevisionKind::MoveTo
+    ) {
+        return;
+    }
+    if let Some(paragraph) = revision.content_paragraph() {
+        output.extend(accepted_paragraph_runs(paragraph));
+    }
 }
 
 #[allow(non_snake_case)]
@@ -1837,6 +2163,12 @@ impl CT_P {
         let mut runs = Vec::new();
         self.collect_runs(&mut runs);
         runs
+    }
+
+    /// Return accepted-view runs in the same order as bookmark projections.
+    #[doc(hidden)]
+    pub fn accepted_bookmark_runs(&self) -> Vec<&CT_R> {
+        accepted_paragraph_runs(self)
     }
 
     /// Add a run with the given text.
@@ -1943,7 +2275,7 @@ impl CT_P {
             }
         }
         self.runs.insert(run_index, run);
-        true
+        self.refresh_bookmark_projection()
     }
 
     /// Remove selected comment anchors and remap every collapsed run boundary.
@@ -1983,6 +2315,21 @@ impl CT_P {
         if removed.iter().all(|remove| !remove) {
             return;
         }
+        let removed_run_addresses = self
+            .runs
+            .iter()
+            .zip(&removed)
+            .filter_map(|(run, remove)| remove.then_some(std::ptr::from_ref(run)))
+            .collect::<Vec<_>>();
+        let removed_projected_indices = accepted_paragraph_runs(self)
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, run)| {
+                removed_run_addresses
+                    .contains(&std::ptr::from_ref(run))
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
 
         let old_run_count = self.runs.len();
         let boundary_map = (0..=old_run_count)
@@ -2071,6 +2418,10 @@ impl CT_P {
             marker.run_index = boundary_map[old_boundary];
             marker.raw_before =
                 raw_prefixes[old_boundary] + marker.raw_before.min(raw_counts[old_boundary]);
+            marker.projected_run_index -= removed_projected_indices
+                .iter()
+                .filter(|index| **index < marker.projected_run_index)
+                .count();
         }
         let hyperlink_revision_counts = self
             .hyperlinks
@@ -2157,6 +2508,7 @@ impl CT_P {
             .zip(removed)
             .filter_map(|(run, remove)| (!remove).then_some(run))
             .collect();
+        let _ = self.refresh_bookmark_projection();
     }
 
     /// Insert a canonical bookmark start marker at a direct-run boundary.
@@ -2175,20 +2527,12 @@ impl CT_P {
         {
             return false;
         }
-        let raw_before = self
-            .extra_xml
-            .iter()
-            .filter(|(at, _)| *at == run_index)
-            .count();
         self.extra_xml.push((run_index, raw));
-        self.bookmark_markers.push(BookmarkMarker::new(
-            true,
-            id,
-            Some(name.to_owned()),
-            run_index,
-            raw_before,
-        ));
-        true
+        let projected = self.refresh_bookmark_projection();
+        if !projected {
+            self.extra_xml.pop();
+        }
+        projected
     }
 
     /// Insert a canonical bookmark end marker at a direct-run boundary.
@@ -2206,15 +2550,51 @@ impl CT_P {
         {
             return false;
         }
-        let raw_before = self
-            .extra_xml
-            .iter()
-            .filter(|(at, _)| *at == run_index)
-            .count();
         self.extra_xml.push((run_index, raw));
-        self.bookmark_markers
-            .push(BookmarkMarker::new(false, id, None, run_index, raw_before));
-        true
+        let projected = self.refresh_bookmark_projection();
+        if !projected {
+            self.extra_xml.pop();
+        }
+        projected
+    }
+
+    fn refresh_bookmark_projection(&mut self) -> bool {
+        let mut word_prefixes = vec![
+            "w".to_owned(),
+            format!("\0r\0{R_NS}"),
+            format!("\0mc\0{}", crate::namespace::MC_NS),
+        ];
+        for prefix in self
+            .bookmark_markers
+            .iter()
+            .flat_map(|marker| marker.word_prefixes.iter())
+        {
+            if !word_prefixes.contains(prefix) {
+                word_prefixes.push(prefix.clone());
+            }
+        }
+        let mut raw = Vec::new();
+        if self.to_xml(&mut Writer::new(&mut raw)).is_err() {
+            return false;
+        }
+        let mut reader = Reader::from_reader(raw.as_slice());
+        reader.config_mut().trim_text(false);
+        let mut buffer = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buffer) {
+                Ok(Event::Start(start)) if matches_local_name(start.name().as_ref(), b"p") => {
+                    let Ok(parsed) = CT_P::from_xml_with_prefixes(&mut reader, &word_prefixes)
+                    else {
+                        return false;
+                    };
+                    self.bookmark_markers = parsed.bookmark_markers;
+                    return true;
+                }
+                Ok(Event::Eof) | Err(_) => return false,
+                Ok(_) => {}
+            }
+            buffer.clear();
+        }
     }
 
     pub fn from_xml(reader: &mut Reader<&[u8]>) -> Result<Self> {
@@ -2242,6 +2622,8 @@ impl CT_P {
         let mut extra_xml = Vec::new();
         let mut content_controls = Vec::new();
         let mut revisions = Vec::new();
+        let mut projected_run_count = 0usize;
+        let mut tracked_run_count = 0usize;
         let mut buf = Vec::new();
 
         loop {
@@ -2256,6 +2638,8 @@ impl CT_P {
                         let raw = capture_element(reader, e)?;
                         runs.push(parse_run_raw(&raw, &prefixes)?);
                         run_sources.push(Some(raw));
+                        projected_run_count += 1;
+                        tracked_run_count += 1;
                     } else if matches_local_name(name.as_ref(), b"r")
                         && !element_prefix_has_binding(name.as_ref(), &prefixes)
                     {
@@ -2263,9 +2647,11 @@ impl CT_P {
                         let raw = capture_element(reader, e)?;
                         runs.push(parse_run_raw(&raw, &prefixes)?);
                         run_sources.push(Some(raw));
+                        projected_run_count += 1;
+                        tracked_run_count += 1;
                     } else if is_word_element(name.as_ref(), b"sdt", &prefixes) {
                         let raw = capture_element(reader, e)?;
-                        if let Some(sdt) = CT_Sdt::from_raw(&raw, &prefixes) {
+                        if let Some(sdt) = CT_Sdt::from_inline_raw(&raw, &prefixes) {
                             let raw_before = raw_xml_count_at(&extra_xml, runs.len());
                             let markers_before = comment_ranges
                                 .iter()
@@ -2274,6 +2660,15 @@ impl CT_P {
                                         && marker.raw_before() == raw_before
                                 })
                                 .count();
+                            let projection = accepted_control_bookmark_projection(&sdt);
+                            append_nested_bookmark_projection(
+                                &mut bookmark_markers,
+                                &mut projected_run_count,
+                                &mut tracked_run_count,
+                                projection,
+                                runs.len(),
+                                raw_before,
+                            );
                             content_controls.push((runs.len(), raw_before, markers_before, sdt));
                         } else {
                             extra_xml.push((runs.len(), raw));
@@ -2287,6 +2682,18 @@ impl CT_P {
                         if parsed.runs.is_empty() && parsed.revisions.is_empty() {
                             extra_xml.push((run_start, raw));
                         } else {
+                            append_nested_bookmark_projection(
+                                &mut bookmark_markers,
+                                &mut projected_run_count,
+                                &mut tracked_run_count,
+                                AcceptedBookmarkProjection {
+                                    markers: parsed.bookmark_markers.clone(),
+                                    projected_run_count: parsed.projected_run_count,
+                                    tracked_run_count: parsed.tracked_run_count,
+                                },
+                                run_start,
+                                0,
+                            );
                             let hyperlink_index = hyperlinks.len();
                             let run_end = run_start + parsed.runs.len();
                             let preserved_raw_before = parsed
@@ -2322,6 +2729,8 @@ impl CT_P {
                         if let Some(field) = parse_simple_field(&raw, &prefixes)? {
                             runs.push(field_run(field, None));
                             run_sources.push(None);
+                            projected_run_count += 1;
+                            tracked_run_count += 1;
                         } else {
                             extra_xml.push((runs.len(), raw));
                         }
@@ -2350,6 +2759,9 @@ impl CT_P {
                             name: bookmark_name,
                             run_index: runs.len(),
                             raw_before: raw_xml_count_at(&extra_xml, runs.len()),
+                            projected_run_index: projected_run_count,
+                            tracked_run_index: tracked_run_count,
+                            word_prefixes: prefixes.clone(),
                         });
                         extra_xml.push((runs.len(), capture_element(reader, e)?));
                     } else if is_word_element(name.as_ref(), b"ins", &prefixes)
@@ -2360,6 +2772,15 @@ impl CT_P {
                         let raw_before = raw_xml_count_at(&extra_xml, runs.len());
                         let raw = capture_element(reader, e)?;
                         if let Some(revision) = CT_Revision::from_raw(raw.clone(), &prefixes) {
+                            let projection = accepted_revision_bookmark_projection(&revision);
+                            append_nested_bookmark_projection(
+                                &mut bookmark_markers,
+                                &mut projected_run_count,
+                                &mut tracked_run_count,
+                                projection,
+                                runs.len(),
+                                raw_before,
+                            );
                             revisions.push((runs.len(), raw_before, revision));
                         }
                         extra_xml.push((runs.len(), raw));
@@ -2395,6 +2816,9 @@ impl CT_P {
                             name: bookmark_name,
                             run_index: runs.len(),
                             raw_before: raw_xml_count_at(&extra_xml, runs.len()),
+                            projected_run_index: projected_run_count,
+                            tracked_run_index: tracked_run_count,
+                            word_prefixes: prefixes.clone(),
                         });
                         extra_xml.push((runs.len(), capture_empty_element(e)?));
                     } else if !matches_local_name(name.as_ref(), b"p") {
@@ -2406,6 +2830,15 @@ impl CT_P {
                             || is_word_element(name.as_ref(), b"moveTo", &prefixes))
                             && let Some(revision) = CT_Revision::from_raw(raw.clone(), &prefixes)
                         {
+                            let projection = accepted_revision_bookmark_projection(&revision);
+                            append_nested_bookmark_projection(
+                                &mut bookmark_markers,
+                                &mut projected_run_count,
+                                &mut tracked_run_count,
+                                projection,
+                                runs.len(),
+                                raw_before,
+                            );
                             revisions.push((runs.len(), raw_before, revision));
                         }
                         extra_xml.push((runs.len(), raw));
@@ -2638,7 +3071,7 @@ impl CT_P {
     pub(crate) fn collect_controls<'a>(&'a self, controls: &mut Vec<&'a CT_Sdt>) {
         for (_, _, _, sdt) in &self.content_controls {
             controls.push(sdt);
-            sdt.collect_controls(controls);
+            sdt.collect_controls(SdtOwner::Inline, controls);
         }
     }
 }
@@ -4204,12 +4637,265 @@ fn parse_hyperlink_children(
         }
         buffer.clear();
     }
+    let projection =
+        accepted_hyperlink_bookmark_projection(&runs, &revisions, &extra_xml, word_prefixes);
     Ok(ParsedHyperlinkChildren {
         runs,
         run_sources,
         revisions,
         extra_xml,
+        bookmark_markers: projection.markers,
+        projected_run_count: projection.projected_run_count,
+        tracked_run_count: projection.tracked_run_count,
     })
+}
+
+fn bookmark_marker_projection_from_raw(
+    raw: &[u8],
+    word_prefixes: &[String],
+    run_index: usize,
+    raw_before: usize,
+    projected_run_index: usize,
+    tracked_run_index: usize,
+) -> Option<BookmarkMarker> {
+    let mut reader = Reader::from_reader(raw);
+    reader.config_mut().trim_text(false);
+    let mut buffer = Vec::new();
+    loop {
+        let event = reader.read_event_into(&mut buffer).ok()?;
+        let element = match event {
+            Event::Start(element) | Event::Empty(element) => element,
+            Event::Text(text) if is_xml_whitespace(text.as_ref()) => {
+                buffer.clear();
+                continue;
+            }
+            Event::Eof => return None,
+            _ => return None,
+        };
+        let prefixes = word_prefixes_at(&element, word_prefixes).ok()?;
+        let start = is_word_element(element.name().as_ref(), b"bookmarkStart", &prefixes);
+        if !start && !is_word_element(element.name().as_ref(), b"bookmarkEnd", &prefixes) {
+            return None;
+        }
+        return Some(BookmarkMarker {
+            start,
+            id: optional_word_attribute(&element, b"id", &prefixes)
+                .and_then(|value| value.parse().ok()),
+            name: optional_word_attribute(&element, b"name", &prefixes),
+            run_index,
+            raw_before,
+            projected_run_index,
+            tracked_run_index,
+            word_prefixes: prefixes,
+        });
+    }
+}
+
+fn append_projection(
+    output: &mut AcceptedBookmarkProjection,
+    projection: AcceptedBookmarkProjection,
+    direct_run_offset: usize,
+    raw_before: usize,
+) {
+    let projected_offset = output.projected_run_count;
+    let tracked_offset = output.tracked_run_count;
+    output
+        .markers
+        .extend(projection.markers.into_iter().map(|mut marker| {
+            marker.run_index += direct_run_offset;
+            marker.raw_before = raw_before;
+            marker.projected_run_index += projected_offset;
+            marker.tracked_run_index += tracked_offset;
+            marker
+        }));
+    output.projected_run_count += projection.projected_run_count;
+    output.tracked_run_count += projection.tracked_run_count;
+}
+
+fn append_nested_bookmark_projection(
+    markers: &mut Vec<BookmarkMarker>,
+    projected_run_count: &mut usize,
+    tracked_run_count: &mut usize,
+    projection: AcceptedBookmarkProjection,
+    direct_run_offset: usize,
+    raw_before: usize,
+) {
+    let projected_offset = *projected_run_count;
+    let tracked_offset = *tracked_run_count;
+    markers.extend(projection.markers.into_iter().map(|mut marker| {
+        marker.run_index += direct_run_offset;
+        marker.raw_before = raw_before;
+        marker.projected_run_index += projected_offset;
+        marker.tracked_run_index += tracked_offset;
+        marker
+    }));
+    *projected_run_count += projection.projected_run_count;
+    *tracked_run_count += projection.tracked_run_count;
+}
+
+fn accepted_paragraph_bookmark_projection(paragraph: &CT_P) -> AcceptedBookmarkProjection {
+    let mut projection = AcceptedBookmarkProjection {
+        markers: paragraph.bookmark_markers.clone(),
+        projected_run_count: accepted_paragraph_runs(paragraph).len(),
+        tracked_run_count: tracked_paragraph_runs(paragraph).len(),
+    };
+    projection
+        .markers
+        .sort_by_key(BookmarkMarker::projected_run_index);
+    projection
+}
+
+fn accepted_revision_bookmark_projection(revision: &CT_Revision) -> AcceptedBookmarkProjection {
+    if matches!(
+        revision.kind(),
+        RevisionKind::Insertion | RevisionKind::MoveTo
+    ) && let Some(paragraph) = revision.content_paragraph()
+    {
+        return accepted_paragraph_bookmark_projection(paragraph);
+    }
+    let mut runs = Vec::new();
+    append_tracked_revision_runs(revision, &mut runs);
+    AcceptedBookmarkProjection {
+        markers: Vec::new(),
+        projected_run_count: 0,
+        tracked_run_count: runs.len(),
+    }
+}
+
+fn accepted_control_bookmark_projection(control: &CT_Sdt) -> AcceptedBookmarkProjection {
+    let mut output = AcceptedBookmarkProjection::default();
+    for boundary in 0..=control.content.len() {
+        for (_, revision) in control.revisions().iter().filter(|(at, _)| *at == boundary) {
+            let projection = accepted_revision_bookmark_projection(revision);
+            append_projection(&mut output, projection, 0, 0);
+        }
+        let Some(content) = control.content.get(boundary) else {
+            continue;
+        };
+        match content {
+            SdtContent::Run(_) => {
+                output.projected_run_count += 1;
+                output.tracked_run_count += 1;
+            }
+            SdtContent::RawXml(raw) => {
+                if let Some(marker) = bookmark_marker_projection_from_raw(
+                    raw,
+                    control.word_prefixes(),
+                    0,
+                    0,
+                    output.projected_run_count,
+                    output.tracked_run_count,
+                ) {
+                    output.markers.push(marker);
+                }
+            }
+            SdtContent::ContentControl(control) => {
+                let projection = accepted_control_bookmark_projection(control);
+                append_projection(&mut output, projection, 0, 0);
+            }
+            SdtContent::Paragraph(paragraph) => {
+                let projection = accepted_paragraph_bookmark_projection(paragraph);
+                append_projection(&mut output, projection, 0, 0);
+            }
+            SdtContent::Table(table) => {
+                append_control_table_bookmark_projection(&mut output, table)
+            }
+            SdtContent::Row(row) => append_control_row_bookmark_projection(&mut output, row),
+            SdtContent::Cell(cell) => append_control_cell_bookmark_projection(&mut output, cell),
+        }
+    }
+    output
+}
+
+fn append_control_table_bookmark_projection(
+    output: &mut AcceptedBookmarkProjection,
+    table: &CT_Tbl,
+) {
+    for boundary in 0..=table.rows.len() {
+        for (_, _, control) in table
+            .content_controls
+            .iter()
+            .filter(|(at, _, _)| *at == boundary)
+        {
+            let projection = accepted_control_bookmark_projection(control);
+            append_projection(output, projection, 0, 0);
+        }
+        if let Some(row) = table.rows.get(boundary) {
+            append_control_row_bookmark_projection(output, row);
+        }
+    }
+}
+
+fn append_control_row_bookmark_projection(output: &mut AcceptedBookmarkProjection, row: &CT_Row) {
+    for boundary in 0..=row.cells.len() {
+        for (_, _, control) in row
+            .content_controls
+            .iter()
+            .filter(|(at, _, _)| *at == boundary)
+        {
+            let projection = accepted_control_bookmark_projection(control);
+            append_projection(output, projection, 0, 0);
+        }
+        if let Some(cell) = row.cells.get(boundary) {
+            append_control_cell_bookmark_projection(output, cell);
+        }
+    }
+}
+
+fn append_control_cell_bookmark_projection(output: &mut AcceptedBookmarkProjection, cell: &CT_Tc) {
+    for content in &cell.content {
+        let projection = match content {
+            CellContent::Paragraph(paragraph) => accepted_paragraph_bookmark_projection(paragraph),
+            CellContent::Table(table) => {
+                append_control_table_bookmark_projection(output, table);
+                continue;
+            }
+            CellContent::ContentControl(control) => accepted_control_bookmark_projection(control),
+        };
+        append_projection(output, projection, 0, 0);
+    }
+}
+
+fn accepted_hyperlink_bookmark_projection(
+    runs: &[CT_R],
+    revisions: &[(usize, CT_Revision)],
+    extra_xml: &[(usize, usize, Vec<u8>)],
+    word_prefixes: &[String],
+) -> AcceptedBookmarkProjection {
+    let mut output = AcceptedBookmarkProjection::default();
+    for boundary in 0..=runs.len() {
+        let boundary_revisions = revisions
+            .iter()
+            .filter(|(at, _)| *at == boundary)
+            .map(|(_, revision)| revision)
+            .collect::<Vec<_>>();
+        for revision_before in 0..=boundary_revisions.len() {
+            for (_, _, raw) in extra_xml
+                .iter()
+                .filter(|(at, before, _)| *at == boundary && *before == revision_before)
+            {
+                if let Some(marker) = bookmark_marker_projection_from_raw(
+                    raw,
+                    word_prefixes,
+                    boundary,
+                    0,
+                    output.projected_run_count,
+                    output.tracked_run_count,
+                ) {
+                    output.markers.push(marker);
+                }
+            }
+            if let Some(revision) = boundary_revisions.get(revision_before) {
+                let projection = accepted_revision_bookmark_projection(revision);
+                append_projection(&mut output, projection, boundary, 0);
+            }
+        }
+        if boundary < runs.len() {
+            output.projected_run_count += 1;
+            output.tracked_run_count += 1;
+        }
+    }
+    output
 }
 
 fn parse_hyperlink_attributes(
@@ -6981,6 +7667,121 @@ mod tests {
     }
 
     #[test]
+    fn accepted_inline_owners_project_bookmarks_once_in_exact_order() {
+        let paragraph = parse_paragraph(concat!(
+            r#"<w:bookmarkStart w:id="1" w:name="direct"/>"#,
+            r#"<w:hyperlink w:anchor="target"><w:r><w:t>h</w:t></w:r><w:bookmarkStart w:id="2" w:name="hyper"/></w:hyperlink>"#,
+            r#"<w:ins w:id="3" w:author="Ada"><w:r><w:t>i</w:t></w:r><w:bookmarkStart w:id="4" w:name="revision"/></w:ins>"#,
+            r#"<w:sdt><w:sdtContent><w:r><w:t>c</w:t></w:r><w:bookmarkStart w:id="5" w:name="control"/></w:sdtContent></w:sdt>"#,
+            r#"<x:opaque xmlns:x="urn:opaque"><w:bookmarkStart w:id="6" w:name="opaque"/></x:opaque>"#,
+            r#"<w:sdtContent><w:bookmarkStart w:id="7" w:name="malformed"/></w:sdtContent>"#,
+            r#"<w:bookmarkEnd w:id="1"/>"#,
+        ));
+
+        assert_eq!(
+            paragraph
+                .bookmark_markers
+                .iter()
+                .filter_map(BookmarkMarker::name)
+                .collect::<Vec<_>>(),
+            ["direct", "hyper", "revision", "control"]
+        );
+        assert_eq!(
+            paragraph
+                .bookmark_markers
+                .iter()
+                .map(BookmarkMarker::projected_run_index)
+                .collect::<Vec<_>>(),
+            [0, 1, 2, 3, 3]
+        );
+        assert_eq!(paragraph.accepted_bookmark_runs().len(), 3);
+        let output = serialized_paragraph(&paragraph);
+        for name in [
+            "direct",
+            "hyper",
+            "revision",
+            "control",
+            "opaque",
+            "malformed",
+        ] {
+            assert_eq!(
+                output.matches(&format!(r#"w:name="{name}""#)).count(),
+                1,
+                "{output}"
+            );
+        }
+    }
+
+    #[test]
+    fn nested_control_local_word_alias_projects_bookmarks_after_reopen() {
+        let paragraph = parse_paragraph(concat!(
+            r#"<w:sdt><w:sdtContent>"#,
+            r#"<q:sdt xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><q:sdtContent>"#,
+            r#"<q:bookmarkStart q:id="8" q:name="nested"/>"#,
+            r#"<q:r><q:t>inside</q:t></q:r>"#,
+            r#"<q:bookmarkEnd q:id="8"/>"#,
+            r#"</q:sdtContent></q:sdt>"#,
+            r#"</w:sdtContent></w:sdt>"#,
+        ));
+
+        assert_eq!(
+            paragraph
+                .bookmark_markers
+                .iter()
+                .filter_map(BookmarkMarker::name)
+                .collect::<Vec<_>>(),
+            ["nested"]
+        );
+        assert_eq!(
+            paragraph
+                .bookmark_markers
+                .iter()
+                .map(BookmarkMarker::projected_run_index)
+                .collect::<Vec<_>>(),
+            [0, 1]
+        );
+        let serialized = serialized_paragraph(&paragraph);
+        assert!(
+            serialized.contains(
+                r#"xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#
+            )
+        );
+        let reopened = parse_paragraph(
+            serialized
+                .strip_prefix("<w:p>")
+                .and_then(|xml| xml.strip_suffix("</w:p>"))
+                .expect("serialized paragraph wrapper"),
+        );
+        assert_eq!(reopened.bookmark_markers.len(), 2);
+        assert_eq!(reopened.accepted_bookmark_runs()[0].text(), "inside");
+    }
+
+    #[test]
+    fn complex_field_collapse_remaps_accepted_bookmark_boundaries() {
+        let paragraph = parse_paragraph(concat!(
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+            r#"<w:r><w:instrText>AUTHOR</w:instrText></w:r>"#,
+            r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+            r#"<w:r><w:t>cached</w:t></w:r>"#,
+            r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+            r#"<w:bookmarkStart w:id="9" w:name="afterField"/>"#,
+            r#"<w:r><w:t>target</w:t></w:r>"#,
+            r#"<w:bookmarkEnd w:id="9"/>"#,
+        ));
+
+        assert_eq!(paragraph.runs.len(), 2);
+        assert_eq!(
+            paragraph
+                .bookmark_markers
+                .iter()
+                .map(BookmarkMarker::projected_run_index)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(paragraph.accepted_bookmark_runs().len(), 2);
+    }
+
+    #[test]
     fn parse_fld_simple_mixed_with_text() {
         let p = parse_paragraph(
             r#"<w:r><w:t>Page </w:t></w:r><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple><w:r><w:t> of </w:t></w:r><w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>5</w:t></w:r></w:fldSimple>"#,
@@ -7325,5 +8126,62 @@ mod tests {
         assert!(reopened.equations[0].2.has_unsupported_content());
         let second = serialized_paragraph(&reopened);
         assert!(second.contains(&equation), "{second}");
+    }
+
+    #[test]
+    fn mutation_refresh_retains_ancestor_only_bookmark_aliases() {
+        let source = format!(
+            r#"<q:p xmlns:q="{word}"><q:bookmarkStart q:id="7" q:name="target"/><q:r><q:t>target</q:t></q:r><q:bookmarkEnd q:id="7"/></q:p>"#,
+            word = crate::namespace::W_NS,
+        );
+        let mut reader = Reader::from_str(&source);
+        let mut buffer = Vec::new();
+        let start = loop {
+            match reader.read_event_into(&mut buffer).unwrap() {
+                Event::Start(start) => break start.into_owned(),
+                Event::Eof => panic!("missing paragraph"),
+                _ => buffer.clear(),
+            }
+        };
+        let prefixes = word_prefixes_at(&start, &["w".to_owned()]).unwrap();
+        let mut paragraph = CT_P::from_xml_with_prefixes(&mut reader, &prefixes).unwrap();
+
+        assert_eq!(paragraph.bookmark_markers.len(), 2);
+        assert!(paragraph.insert_unwrapped_run(1, CT_R::new("inserted")));
+        assert_eq!(paragraph.bookmark_markers.len(), 2);
+        assert_eq!(paragraph.bookmark_markers[0].projected_run_index(), 0);
+        assert_eq!(paragraph.bookmark_markers[1].projected_run_index(), 2);
+        let output = serialized_paragraph(&paragraph);
+        assert!(output.contains(r#"<q:bookmarkStart q:id="7" q:name="target"/>"#));
+        assert!(output.contains(r#"<q:bookmarkEnd q:id="7"/>"#));
+    }
+
+    #[test]
+    fn inline_control_keeps_block_children_opaque_to_typed_projections() {
+        let paragraph = parse_paragraph(concat!(
+            r#"<w:sdt><w:sdtContent>"#,
+            r#"<w:p><w:bookmarkStart w:id="1" w:name="paragraph"/><w:r><w:t>paragraph</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>"#,
+            r#"<w:tbl><w:tr><w:tc><w:p><w:r><w:t>table</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+            r#"<w:tr><w:tc><w:p><w:r><w:t>row</w:t></w:r></w:p></w:tc></w:tr>"#,
+            r#"<w:tc><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc>"#,
+            r#"<w:bookmarkStart w:id="2" w:name="inline"/><w:r><w:t>inline</w:t></w:r><w:bookmarkEnd w:id="2"/>"#,
+            r#"</w:sdtContent></w:sdt>"#,
+        ));
+
+        assert_eq!(accepted_paragraph_runs(&paragraph).len(), 1);
+        assert_eq!(tracked_paragraph_runs(&paragraph).len(), 1);
+        assert_eq!(accepted_paragraph_runs(&paragraph)[0].text(), "inline");
+        assert_eq!(
+            paragraph
+                .bookmark_markers
+                .iter()
+                .filter_map(BookmarkMarker::name)
+                .collect::<Vec<_>>(),
+            ["inline"]
+        );
+        let output = serialized_paragraph(&paragraph);
+        for retained in ["paragraph", "table", "row", "cell", "inline"] {
+            assert!(output.contains(retained), "{output}");
+        }
     }
 }

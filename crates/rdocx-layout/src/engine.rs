@@ -73,6 +73,61 @@ enum RawOrder {
     AfterRaw,
 }
 
+enum MainStoryLayoutItem<'a> {
+    Paragraph(&'a CT_P, Vec<usize>),
+    Table(&'a CT_Tbl, Vec<usize>),
+}
+
+#[derive(Clone, Copy)]
+enum BlockControlOwner {
+    Body,
+    Table,
+    Row,
+    Cell,
+}
+
+fn main_story_layout_items(document: &CT_Document) -> Vec<MainStoryLayoutItem<'_>> {
+    let mut items = Vec::new();
+    for (body_index, content) in document.body.content.iter().enumerate() {
+        let path = vec![body_index];
+        match content {
+            BodyContent::Paragraph(paragraph) => {
+                items.push(MainStoryLayoutItem::Paragraph(paragraph, path))
+            }
+            BodyContent::Table(table) => items.push(MainStoryLayoutItem::Table(table, path)),
+            BodyContent::ContentControl(control) => {
+                collect_body_control_layout_items(control, &path, &mut items)
+            }
+            BodyContent::RawXml(_) => {}
+        }
+    }
+    items
+}
+
+fn collect_body_control_layout_items<'a>(
+    control: &'a CT_Sdt,
+    path: &[usize],
+    items: &mut Vec<MainStoryLayoutItem<'a>>,
+) {
+    for (content_index, content) in control.content.iter().enumerate() {
+        let mut content_path = path.to_vec();
+        content_path.push(content_index);
+        match content {
+            SdtContent::Paragraph(paragraph) => {
+                items.push(MainStoryLayoutItem::Paragraph(paragraph, content_path))
+            }
+            SdtContent::Table(table) => items.push(MainStoryLayoutItem::Table(table, content_path)),
+            SdtContent::ContentControl(control) => {
+                collect_body_control_layout_items(control, &content_path, items)
+            }
+            SdtContent::Row(_)
+            | SdtContent::Cell(_)
+            | SdtContent::Run(_)
+            | SdtContent::RawXml(_) => {}
+        }
+    }
+}
+
 /// Immutable source identities allocated once before layout starts.
 pub(crate) struct SourceRegistry {
     nodes: Vec<WordSourcePath>,
@@ -101,7 +156,25 @@ impl SourceRegistry {
                     registry.body_ids.push(None);
                     registry.collect_table(table, &WordStory::Document, &[body_index])
                 }
-                BodyContent::ContentControl(_) | BodyContent::RawXml(_) => {
+                BodyContent::ContentControl(control) => {
+                    registry.body_ids.push(None);
+                    let mut items = Vec::new();
+                    collect_body_control_layout_items(control, &[body_index], &mut items);
+                    for item in items {
+                        match item {
+                            MainStoryLayoutItem::Paragraph(_, children) => {
+                                registry.insert(WordSourcePath {
+                                    story: WordStory::Document,
+                                    children,
+                                });
+                            }
+                            MainStoryLayoutItem::Table(table, children) => {
+                                registry.collect_table(table, &WordStory::Document, &children)
+                            }
+                        }
+                    }
+                }
+                BodyContent::RawXml(_) => {
                     registry.body_ids.push(None);
                 }
             }
@@ -163,22 +236,45 @@ impl SourceRegistry {
     }
 
     fn collect_table(&mut self, table: &CT_Tbl, story: &WordStory, prefix: &[usize]) {
-        for (row_index, row) in table.rows.iter().enumerate() {
-            for (cell_index, cell) in row.cells.iter().enumerate() {
+        for (row, row_path) in table::layout_table_rows(table, prefix) {
+            for (cell, cell_path) in table::layout_row_cells(row, &row_path) {
                 for (content_index, content) in cell.content.iter().enumerate() {
-                    let mut children = prefix.to_vec();
-                    children.extend([row_index, cell_index, content_index]);
-                    match content {
-                        CellContent::Paragraph(_) => self.insert(WordSourcePath {
-                            story: story.clone(),
-                            children,
-                        }),
-                        CellContent::Table(table) => {
-                            self.collect_table(table, story, &children);
-                        }
-                        CellContent::ContentControl(_) => {}
-                    }
+                    let mut content_path = cell_path.clone();
+                    content_path.push(content_index);
+                    self.collect_cell_content(content, story, &content_path);
                 }
+            }
+        }
+    }
+
+    fn collect_cell_content(&mut self, content: &CellContent, story: &WordStory, path: &[usize]) {
+        match content {
+            CellContent::Paragraph(_) => self.insert(WordSourcePath {
+                story: story.clone(),
+                children: path.to_vec(),
+            }),
+            CellContent::Table(table) => self.collect_table(table, story, path),
+            CellContent::ContentControl(control) => self.collect_cell_control(control, story, path),
+        }
+    }
+
+    fn collect_cell_control(&mut self, control: &CT_Sdt, story: &WordStory, path: &[usize]) {
+        for (content_index, content) in control.content.iter().enumerate() {
+            let mut content_path = path.to_vec();
+            content_path.push(content_index);
+            match content {
+                SdtContent::Paragraph(_) => self.insert(WordSourcePath {
+                    story: story.clone(),
+                    children: content_path,
+                }),
+                SdtContent::Table(table) => self.collect_table(table, story, &content_path),
+                SdtContent::ContentControl(control) => {
+                    self.collect_cell_control(control, story, &content_path)
+                }
+                SdtContent::Row(_)
+                | SdtContent::Cell(_)
+                | SdtContent::Run(_)
+                | SdtContent::RawXml(_) => {}
             }
         }
     }
@@ -220,38 +316,53 @@ impl SourceRegistry {
 fn project_paragraph_runs(para: &CT_P, view: RevisionView) -> Vec<ProjectedRun<'_>> {
     let mut projected = Vec::new();
     for boundary in 0..=para.runs.len() {
-        for (_, slot, revision) in para.revisions.iter().filter(|(at, _, _)| *at == boundary) {
-            let hyperlink_index = hyperlink_revision_index(*slot);
-            let raw_order = match hyperlink_index {
-                Some(index) => {
-                    if let Some(raw_before) = para
-                        .hyperlinks
-                        .get(index)
-                        .and_then(|hyperlink| hyperlink.preserved_raw_before)
-                    {
-                        RawOrder::Raw(raw_before)
-                    } else if para
-                        .hyperlinks
-                        .get(index)
-                        .is_some_and(|hyperlink| boundary == hyperlink.run_end)
-                    {
-                        RawOrder::BeforeRaw
-                    } else {
-                        RawOrder::AfterRaw
-                    }
+        let mut owners = para
+            .content_controls
+            .iter()
+            .filter(|(at, _, _, _)| *at == boundary)
+            .map(|(_, raw_before, _, control)| {
+                (
+                    RawOrder::Raw(*raw_before),
+                    0u8,
+                    ProjectedParagraphOwner::Control(control),
+                )
+            })
+            .chain(
+                para.revisions
+                    .iter()
+                    .filter(|(at, _, _)| *at == boundary)
+                    .map(|(_, slot, revision)| {
+                        (
+                            paragraph_revision_raw_order(para, boundary, *slot),
+                            1u8,
+                            ProjectedParagraphOwner::Revision {
+                                revision,
+                                hyperlink_index: hyperlink_revision_index(*slot),
+                            },
+                        )
+                    }),
+            )
+            .collect::<Vec<_>>();
+        owners.sort_by_key(|(raw_order, kind, _)| (*raw_order, *kind));
+        for (raw_order, _, owner) in owners {
+            match owner {
+                ProjectedParagraphOwner::Control(control) => {
+                    project_control_runs(control, view, boundary, raw_order, &mut projected)
                 }
-                None => RawOrder::Raw(*slot),
-            };
-            project_revision_runs(
-                revision,
-                view,
-                boundary,
-                raw_order,
-                hyperlink_index,
-                false,
-                false,
-                &mut projected,
-            );
+                ProjectedParagraphOwner::Revision {
+                    revision,
+                    hyperlink_index,
+                } => project_revision_runs(
+                    revision,
+                    view,
+                    boundary,
+                    raw_order,
+                    hyperlink_index,
+                    false,
+                    false,
+                    &mut projected,
+                ),
+            }
         }
         if let Some(run) = para.runs.get(boundary) {
             projected.push(ProjectedRun {
@@ -266,6 +377,166 @@ fn project_paragraph_runs(para: &CT_P, view: RevisionView) -> Vec<ProjectedRun<'
         }
     }
     projected
+}
+
+enum ProjectedParagraphOwner<'a> {
+    Control(&'a CT_Sdt),
+    Revision {
+        revision: &'a CT_Revision,
+        hyperlink_index: Option<usize>,
+    },
+}
+
+fn paragraph_revision_raw_order(para: &CT_P, boundary: usize, slot: usize) -> RawOrder {
+    let Some(index) = hyperlink_revision_index(slot) else {
+        return RawOrder::Raw(slot);
+    };
+    if let Some(raw_before) = para
+        .hyperlinks
+        .get(index)
+        .and_then(|hyperlink| hyperlink.preserved_raw_before)
+    {
+        RawOrder::Raw(raw_before)
+    } else if para
+        .hyperlinks
+        .get(index)
+        .is_some_and(|hyperlink| boundary == hyperlink.run_end)
+    {
+        RawOrder::BeforeRaw
+    } else {
+        RawOrder::AfterRaw
+    }
+}
+
+fn project_control_runs<'a>(
+    control: &'a CT_Sdt,
+    view: RevisionView,
+    boundary: usize,
+    raw_order: RawOrder,
+    projected: &mut Vec<ProjectedRun<'a>>,
+) {
+    for content_boundary in 0..=control.content.len() {
+        for (_, revision) in control
+            .revisions()
+            .iter()
+            .filter(|(at, _)| *at == content_boundary)
+        {
+            project_revision_runs(
+                revision, view, boundary, raw_order, None, false, false, projected,
+            );
+        }
+        if let Some(content) = control.content.get(content_boundary) {
+            match content {
+                SdtContent::Run(run) => projected.push(ProjectedRun {
+                    run,
+                    boundary,
+                    raw_order,
+                    ordinary_run_index: None,
+                    hyperlink_index: None,
+                    force_underline: false,
+                    force_strike: false,
+                }),
+                SdtContent::ContentControl(control) => {
+                    project_control_runs(control, view, boundary, raw_order, projected);
+                }
+                SdtContent::Paragraph(paragraph) => {
+                    project_control_paragraph_runs(paragraph, view, boundary, raw_order, projected)
+                }
+                SdtContent::Table(table) => {
+                    project_control_table_runs(table, view, boundary, raw_order, projected);
+                }
+                SdtContent::Row(row) => {
+                    project_control_row_runs(row, view, boundary, raw_order, projected);
+                }
+                SdtContent::Cell(cell) => {
+                    project_control_cell_runs(cell, view, boundary, raw_order, projected);
+                }
+                SdtContent::RawXml(_) => {}
+            }
+        }
+    }
+}
+
+fn project_control_paragraph_runs<'a>(
+    paragraph: &'a CT_P,
+    view: RevisionView,
+    boundary: usize,
+    raw_order: RawOrder,
+    projected: &mut Vec<ProjectedRun<'a>>,
+) {
+    for nested in project_paragraph_runs(paragraph, view) {
+        projected.push(ProjectedRun {
+            boundary,
+            raw_order,
+            ordinary_run_index: None,
+            hyperlink_index: None,
+            ..nested
+        });
+    }
+}
+
+fn project_control_table_runs<'a>(
+    table: &'a CT_Tbl,
+    view: RevisionView,
+    boundary: usize,
+    raw_order: RawOrder,
+    projected: &mut Vec<ProjectedRun<'a>>,
+) {
+    for row_boundary in 0..=table.rows.len() {
+        for (_, _, control) in table
+            .content_controls
+            .iter()
+            .filter(|(at, _, _)| *at == row_boundary)
+        {
+            project_control_runs(control, view, boundary, raw_order, projected);
+        }
+        if let Some(row) = table.rows.get(row_boundary) {
+            project_control_row_runs(row, view, boundary, raw_order, projected);
+        }
+    }
+}
+
+fn project_control_row_runs<'a>(
+    row: &'a CT_Row,
+    view: RevisionView,
+    boundary: usize,
+    raw_order: RawOrder,
+    projected: &mut Vec<ProjectedRun<'a>>,
+) {
+    for cell_boundary in 0..=row.cells.len() {
+        for (_, _, control) in row
+            .content_controls
+            .iter()
+            .filter(|(at, _, _)| *at == cell_boundary)
+        {
+            project_control_runs(control, view, boundary, raw_order, projected);
+        }
+        if let Some(cell) = row.cells.get(cell_boundary) {
+            project_control_cell_runs(cell, view, boundary, raw_order, projected);
+        }
+    }
+}
+
+fn project_control_cell_runs<'a>(
+    cell: &'a CT_Tc,
+    view: RevisionView,
+    boundary: usize,
+    raw_order: RawOrder,
+    projected: &mut Vec<ProjectedRun<'a>>,
+) {
+    for content in &cell.content {
+        match content {
+            CellContent::Paragraph(paragraph) => {
+                project_control_paragraph_runs(paragraph, view, boundary, raw_order, projected)
+            }
+            CellContent::Table(table) => {
+                project_control_table_runs(table, view, boundary, raw_order, projected);
+            }
+            CellContent::ContentControl(control) => {
+                project_control_runs(control, view, boundary, raw_order, projected);
+            }
+        }
+    }
 }
 
 fn project_revision_runs<'a>(
@@ -301,6 +572,24 @@ fn project_revision_runs<'a>(
                 revision.kind(),
                 RevisionKind::Deletion | RevisionKind::MoveFrom
             ));
+    if matches!(
+        revision.kind(),
+        RevisionKind::Insertion | RevisionKind::MoveTo
+    ) && let Some(paragraph) = revision.content_paragraph()
+    {
+        for nested in project_paragraph_runs(paragraph, view) {
+            projected.push(ProjectedRun {
+                boundary,
+                raw_order,
+                ordinary_run_index: None,
+                hyperlink_index,
+                force_underline: force_underline || nested.force_underline,
+                force_strike: force_strike || nested.force_strike,
+                ..nested
+            });
+        }
+        return;
+    }
     let runs = match revision.content() {
         RevisionContent::Runs(runs) => runs.as_slice(),
         RevisionContent::Marker => &[],
@@ -446,6 +735,10 @@ fn paragraph_has_visible_revision(para: &CT_P) -> bool {
             .filter_map(|run| run.properties.as_ref())
             .any(run_properties_have_revision)
         || para
+            .content_controls
+            .iter()
+            .any(|(_, _, _, control)| control_has_visible_revision(control))
+        || para
             .revisions
             .iter()
             .any(|(_, _, revision)| revision_is_visible(revision))
@@ -455,24 +748,79 @@ fn run_properties_have_revision(properties: &rdocx_oxml::properties::CT_RPr) -> 
     properties.change.is_some() || !properties.revision_markers.is_empty()
 }
 
+fn run_has_visible_content(run: &CT_R) -> bool {
+    run.content.iter().any(|content| match content {
+        RunContent::Text(text) | RunContent::DeletedText(text) => !text.text.is_empty(),
+        RunContent::CommentReference { .. } => false,
+        RunContent::Tab
+        | RunContent::Break(_)
+        | RunContent::Drawing(_)
+        | RunContent::Field(_)
+        | RunContent::FootnoteRef { .. }
+        | RunContent::EndnoteRef { .. } => true,
+    })
+}
+
+fn control_has_visible_revision(control: &CT_Sdt) -> bool {
+    control
+        .revisions()
+        .iter()
+        .any(|(_, revision)| revision_is_visible(revision))
+        || control.content.iter().any(|content| match content {
+            SdtContent::Paragraph(paragraph) => paragraph_has_visible_revision(paragraph),
+            SdtContent::ContentControl(control) => control_has_visible_revision(control),
+            SdtContent::Table(table) => {
+                table
+                    .content_controls
+                    .iter()
+                    .any(|(_, _, control)| control_has_visible_revision(control))
+                    || table.rows.iter().any(row_has_visible_control_revision)
+            }
+            SdtContent::Row(row) => row_has_visible_control_revision(row),
+            SdtContent::Cell(cell) => cell_has_visible_control_revision(cell),
+            SdtContent::Run(run) => run
+                .properties
+                .as_ref()
+                .is_some_and(run_properties_have_revision),
+            SdtContent::RawXml(_) => false,
+        })
+}
+
+fn row_has_visible_control_revision(row: &CT_Row) -> bool {
+    row.content_controls
+        .iter()
+        .any(|(_, _, control)| control_has_visible_revision(control))
+        || row.cells.iter().any(cell_has_visible_control_revision)
+}
+
+fn cell_has_visible_control_revision(cell: &CT_Tc) -> bool {
+    cell.content.iter().any(|content| match content {
+        CellContent::Paragraph(paragraph) => paragraph_has_visible_revision(paragraph),
+        CellContent::Table(table) => {
+            table
+                .content_controls
+                .iter()
+                .any(|(_, _, control)| control_has_visible_revision(control))
+                || table.rows.iter().any(row_has_visible_control_revision)
+        }
+        CellContent::ContentControl(control) => control_has_visible_revision(control),
+    })
+}
+
 fn revision_is_visible(revision: &CT_Revision) -> bool {
+    if let Some(paragraph) = revision.content_paragraph() {
+        return project_paragraph_runs(paragraph, RevisionView::Tracked)
+            .iter()
+            .any(|projected| run_has_visible_content(projected.run))
+            || paragraph_has_visible_revision(paragraph);
+    }
     match revision.content() {
         RevisionContent::Runs(runs) => {
-            runs.iter().any(|run| {
-                run.content.iter().any(|content| match content {
-                    RunContent::Text(text) | RunContent::DeletedText(text) => !text.text.is_empty(),
-                    RunContent::CommentReference { .. } => false,
-                    RunContent::Tab
-                    | RunContent::Break(_)
-                    | RunContent::Drawing(_)
-                    | RunContent::Field(_)
-                    | RunContent::FootnoteRef { .. }
-                    | RunContent::EndnoteRef { .. } => true,
-                })
-            }) || revision
-                .nested_revisions()
-                .iter()
-                .any(|(_, nested)| revision_is_visible(nested))
+            runs.iter().any(run_has_visible_content)
+                || revision
+                    .nested_revisions()
+                    .iter()
+                    .any(|(_, nested)| revision_is_visible(nested))
         }
         RevisionContent::Marker => revision
             .nested_revisions()
@@ -1272,9 +1620,9 @@ impl Engine {
         let mut current_blocks: Vec<SharedLayoutBlock> = Vec::new();
         let mut current_sect_pr: Option<CT_SectPr> = None; // Will be set from paragraph sect_pr
 
-        for (body_index, content) in input.document.body.content.iter().enumerate() {
+        for content in main_story_layout_items(&input.document) {
             match content {
-                BodyContent::Paragraph(para) => {
+                MainStoryLayoutItem::Paragraph(para, path) => {
                     // Check if this paragraph ends a section (has sect_pr)
                     let para_sect_pr = para.properties.as_ref().and_then(|p| p.sect_pr.clone());
 
@@ -1284,7 +1632,13 @@ impl Engine {
                         .unwrap_or(&final_sect_pr);
                     let geometry = sect_pr_to_geometry(sect_pr_for_layout);
 
-                    let source = sources.and_then(|sources| sources.body_id(body_index));
+                    let source = sources.and_then(|sources| {
+                        if path.len() == 1 {
+                            sources.body_id(path[0])
+                        } else {
+                            sources.id(&WordStory::Document, &path)
+                        }
+                    });
                     let mut block = self.layout_body_paragraph(
                         para,
                         geometry.content_width(),
@@ -1359,7 +1713,7 @@ impl Engine {
                         current_sect_pr = Some(sect_pr);
                     }
                 }
-                BodyContent::Table(tbl) => {
+                MainStoryLayoutItem::Table(tbl, path) => {
                     let sect_pr_for_layout = current_sect_pr.as_ref().unwrap_or(&final_sect_pr);
                     let geometry = sect_pr_to_geometry(sect_pr_for_layout);
 
@@ -1373,11 +1727,10 @@ impl Engine {
                         &mut diagnostics,
                         sources,
                         &WordStory::Document,
-                        &[body_index],
+                        &path,
                     )?;
                     current_blocks.push(table_block);
                 }
-                _ => {} // Skip RawXml elements during layout
             }
         }
 
@@ -1448,6 +1801,7 @@ impl Engine {
 
         let mut font_trace = self.font_manager.current_layout_fonts().to_vec();
         let restart_record_eligible = sections.len() == 1
+            && sections[0].blocks.len() == input.document.body.content.len()
             && input.document.background_xml.is_none()
             && !document_wraps
             && input
@@ -1709,6 +2063,31 @@ impl Engine {
                 targets
             })
             .collect::<HashMap<_, _>>();
+        let page_reference_names = page_reference_names(input);
+        let mut unresolved_targets = Vec::new();
+        for page in &pages {
+            oxml_layout::walk(&page.elements, &mut |element, _| {
+                if let PositionedElement::Text(run) = element
+                    && let Some(FieldKind::TargetPage(target)) = run.field_kind
+                    && !bookmark_pages.contains_key(&target)
+                {
+                    unresolved_targets.push(target);
+                }
+            });
+        }
+        unresolved_targets.sort_unstable();
+        unresolved_targets.dedup();
+        for target in unresolved_targets {
+            let name = page_reference_names
+                .get(target)
+                .cloned()
+                .unwrap_or_else(|| format!("#{target}"));
+            diagnostics.push(Diagnostic {
+                message: format!(
+                    "PAGEREF target {name} did not reach pagination, unresolved placeholder retained"
+                ),
+            });
+        }
         let mut bookmark_identity = bookmark_pages
             .iter()
             .map(|(&target, &page_number)| (target, page_number))
@@ -4253,10 +4632,13 @@ fn substitute_fields(
                 let value = match fk {
                     FieldKind::Page => page_number.to_string(),
                     FieldKind::NumPages => total_pages.to_string(),
-                    FieldKind::TargetPage(target) => bookmark_pages
-                        .get(&target)
-                        .map(usize::to_string)
-                        .unwrap_or_else(|| run.text.clone()),
+                    FieldKind::TargetPage(target) => {
+                        let Some(page) = bookmark_pages.get(&target) else {
+                            run.field_kind = None;
+                            continue;
+                        };
+                        page.to_string()
+                    }
                     FieldKind::Target(_) => continue,
                 };
                 if let Ok(shaped) = fm.shape_text(run.font_id, &value, run.font_size) {
@@ -4947,28 +5329,15 @@ fn layout_paragraph_with_source_and_table(
     }
 
     // Process ordinary and revision-wrapped runs in their preserved order.
-    let mut marker_boundary = None;
-    let mut marker_raw_before = None;
     let mut projection_char_offset = 0usize;
     let mut equation_cursor = 0usize;
-    for projected in project_paragraph_runs(para, input.revision_view) {
+    let projected_runs = project_paragraph_runs(para, input.revision_view);
+    let projected_run_count = projected_runs.len();
+    for (projected_index, projected) in projected_runs.into_iter().enumerate() {
         let run = projected.run;
         let projected_run_start = projection_char_offset;
         projection_char_offset += run.text().chars().count();
-        if marker_boundary != Some(projected.boundary) {
-            marker_boundary = Some(projected.boundary);
-            marker_raw_before = None;
-        }
-        push_targeted_bookmark_markers(
-            &mut inline_items,
-            para,
-            projected.boundary,
-            marker_raw_before,
-            projected.raw_order,
-            input,
-            fm,
-        )?;
-        marker_raw_before = Some(projected.raw_order);
+        push_targeted_bookmark_markers(&mut inline_items, para, projected_index, input, fm)?;
         let current_hyperlink_url = projected
             .ordinary_run_index
             .and_then(|run_index| run_hyperlink_url.get(&run_index).cloned())
@@ -5439,18 +5808,7 @@ fn layout_paragraph_with_source_and_table(
         diagnostics,
     )?;
 
-    let final_marker_lower = (marker_boundary == Some(para.runs.len()))
-        .then_some(marker_raw_before)
-        .flatten();
-    push_targeted_bookmark_markers(
-        &mut inline_items,
-        para,
-        para.runs.len(),
-        final_marker_lower,
-        RawOrder::AfterRaw,
-        input,
-        fm,
-    )?;
+    push_targeted_bookmark_markers(&mut inline_items, para, projected_run_count, input, fm)?;
 
     let attributed_empty_paragraph = inline_items.is_empty();
     if attributed_empty_paragraph {
@@ -5605,18 +5963,18 @@ fn layout_paragraph_with_source_and_table(
 fn push_targeted_bookmark_markers(
     items: &mut Vec<InlineItem>,
     paragraph: &CT_P,
-    run_index: usize,
-    after_raw: Option<RawOrder>,
-    through_raw: RawOrder,
+    projected_run_index: usize,
     input: &LayoutInput,
     fm: &mut FontManager,
 ) -> Result<()> {
     let mut font_id = None;
     for marker in paragraph.bookmark_markers.iter().filter(|marker| {
+        let marker_run_index = match input.revision_view {
+            RevisionView::Accepted => marker.projected_run_index(),
+            RevisionView::Tracked => marker.tracked_run_index(),
+        };
         marker.is_start()
-            && marker.run_index() == run_index
-            && after_raw.is_none_or(|after| RawOrder::Raw(marker.raw_before()) > after)
-            && RawOrder::Raw(marker.raw_before()) <= through_raw
+            && marker_run_index == projected_run_index
             && marker.name().is_some_and(|name| {
                 document_has_page_ref(input, name) && bookmark_text(input, name).is_some()
             })
@@ -5664,7 +6022,13 @@ fn push_bookmark_marker(items: &mut Vec<InlineItem>, target: usize, font_id: oxm
 }
 
 fn page_ref_id(input: &LayoutInput, name: &str) -> Option<usize> {
-    let mut names = Vec::<&str>::new();
+    page_reference_names(input)
+        .iter()
+        .position(|candidate| candidate == name)
+}
+
+pub(crate) fn page_reference_names(input: &LayoutInput) -> Vec<String> {
+    let mut names = Vec::<String>::new();
     visit_document_paragraphs(input, &mut |paragraph| {
         for projected in project_paragraph_runs(paragraph, input.revision_view) {
             let run = projected.run;
@@ -5678,13 +6042,13 @@ fn page_ref_id(input: &LayoutInput, name: &str) -> Option<usize> {
                 let Some(bookmark) = field_text_argument(field, 0) else {
                     continue;
                 };
-                if !names.contains(&bookmark) {
-                    names.push(bookmark);
+                if !names.iter().any(|candidate| candidate == bookmark) {
+                    names.push(bookmark.to_owned());
                 }
             }
         }
     });
-    names.iter().position(|candidate| *candidate == name)
+    names
 }
 
 fn field_text_argument(field: &Field, index: usize) -> Option<&str> {
@@ -5703,27 +6067,41 @@ fn visit_document_paragraphs<'a>(input: &'a LayoutInput, visit: &mut impl FnMut(
         match content {
             BodyContent::Paragraph(paragraph) => visit(paragraph),
             BodyContent::Table(table) => visit_table_paragraphs(table, visit),
-            BodyContent::ContentControl(control) => visit_control_paragraphs(control, visit),
+            BodyContent::ContentControl(control) => {
+                visit_control_paragraphs(control, BlockControlOwner::Body, visit)
+            }
             BodyContent::RawXml(_) => {}
         }
     }
 }
 
 fn visit_table_paragraphs<'a>(table: &'a CT_Tbl, visit: &mut impl FnMut(&'a CT_P)) {
-    for (_, _, control) in &table.content_controls {
-        visit_control_paragraphs(control, visit);
-    }
-    for row in &table.rows {
-        visit_row_paragraphs(row, visit);
+    for boundary in 0..=table.rows.len() {
+        for (_, _, control) in table
+            .content_controls
+            .iter()
+            .filter(|(position, _, _)| *position == boundary)
+        {
+            visit_control_paragraphs(control, BlockControlOwner::Table, visit);
+        }
+        if let Some(row) = table.rows.get(boundary) {
+            visit_row_paragraphs(row, visit);
+        }
     }
 }
 
 fn visit_row_paragraphs<'a>(row: &'a CT_Row, visit: &mut impl FnMut(&'a CT_P)) {
-    for (_, _, control) in &row.content_controls {
-        visit_control_paragraphs(control, visit);
-    }
-    for cell in &row.cells {
-        visit_cell_paragraphs(cell, visit);
+    for boundary in 0..=row.cells.len() {
+        for (_, _, control) in row
+            .content_controls
+            .iter()
+            .filter(|(position, _, _)| *position == boundary)
+        {
+            visit_control_paragraphs(control, BlockControlOwner::Row, visit);
+        }
+        if let Some(cell) = row.cells.get(boundary) {
+            visit_cell_paragraphs(cell, visit);
+        }
     }
 }
 
@@ -5732,46 +6110,61 @@ fn visit_cell_paragraphs<'a>(cell: &'a CT_Tc, visit: &mut impl FnMut(&'a CT_P)) 
         match content {
             CellContent::Paragraph(paragraph) => visit(paragraph),
             CellContent::Table(table) => visit_table_paragraphs(table, visit),
-            CellContent::ContentControl(control) => visit_control_paragraphs(control, visit),
+            CellContent::ContentControl(control) => {
+                visit_control_paragraphs(control, BlockControlOwner::Cell, visit)
+            }
         }
     }
 }
 
-fn visit_control_paragraphs<'a>(control: &'a CT_Sdt, visit: &mut impl FnMut(&'a CT_P)) {
+fn visit_control_paragraphs<'a>(
+    control: &'a CT_Sdt,
+    owner: BlockControlOwner,
+    visit: &mut impl FnMut(&'a CT_P),
+) {
     for content in &control.content {
-        match content {
-            SdtContent::Paragraph(paragraph) => visit(paragraph),
-            SdtContent::Table(table) => visit_table_paragraphs(table, visit),
-            SdtContent::Row(row) => visit_row_paragraphs(row, visit),
-            SdtContent::Cell(cell) => visit_cell_paragraphs(cell, visit),
-            SdtContent::ContentControl(control) => visit_control_paragraphs(control, visit),
-            SdtContent::Run(_) | SdtContent::RawXml(_) => {}
+        match (owner, content) {
+            (
+                BlockControlOwner::Body | BlockControlOwner::Cell,
+                SdtContent::Paragraph(paragraph),
+            ) => visit(paragraph),
+            (BlockControlOwner::Body | BlockControlOwner::Cell, SdtContent::Table(table)) => {
+                visit_table_paragraphs(table, visit)
+            }
+            (BlockControlOwner::Table, SdtContent::Row(row)) => visit_row_paragraphs(row, visit),
+            (BlockControlOwner::Row, SdtContent::Cell(cell)) => visit_cell_paragraphs(cell, visit),
+            (_, SdtContent::ContentControl(control)) => {
+                visit_control_paragraphs(control, owner, visit)
+            }
+            _ => {}
         }
     }
 }
 
 fn bookmark_text(input: &LayoutInput, name: &str) -> Option<String> {
-    type BodyRunPosition = (usize, usize, RawOrder);
-    type BookmarkStart<'a> = (Option<&'a str>, BodyRunPosition);
+    type OrderedBodyRunPosition = (usize, usize, usize);
+    type BookmarkStart<'a> = (Option<&'a str>, OrderedBodyRunPosition);
 
     let mut starts: HashMap<i32, Vec<BookmarkStart<'_>>> = HashMap::new();
-    let mut ends: HashMap<i32, Vec<BodyRunPosition>> = HashMap::new();
-    for (body_index, content) in input.document.body.content.iter().enumerate() {
-        let BodyContent::Paragraph(paragraph) = content else {
-            continue;
-        };
+    let mut ends: HashMap<i32, Vec<OrderedBodyRunPosition>> = HashMap::new();
+    let mut paragraphs = Vec::new();
+    let mut encounter = 0usize;
+    visit_document_paragraphs(input, &mut |paragraph| paragraphs.push(paragraph));
+    for (paragraph_index, paragraph) in paragraphs.iter().enumerate() {
+        let projected_run_count = project_paragraph_runs(paragraph, input.revision_view).len();
         for marker in &paragraph.bookmark_markers {
             let Some(id) = marker.id() else {
                 continue;
             };
-            if marker.run_index() > paragraph.runs.len() {
+            let marker_run_index = match input.revision_view {
+                RevisionView::Accepted => marker.projected_run_index(),
+                RevisionView::Tracked => marker.tracked_run_index(),
+            };
+            if marker_run_index > projected_run_count {
                 return None;
             }
-            let position = (
-                body_index,
-                marker.run_index(),
-                RawOrder::Raw(marker.raw_before()),
-            );
+            let position = (paragraph_index, marker_run_index, encounter);
+            encounter += 1;
             if marker.is_start() {
                 starts
                     .entry(id)
@@ -5793,23 +6186,24 @@ fn bookmark_text(input: &LayoutInput, name: &str) -> Option<String> {
     if candidates.len() != 1 {
         return None;
     }
-    let (start, end) = candidates[0];
-    if start > end {
+    let (ordered_start, ordered_end) = candidates[0];
+    if ordered_start > ordered_end {
         return None;
     }
+    let start = (ordered_start.0, ordered_start.1);
+    let end = (ordered_end.0, ordered_end.1);
     let mut parts = Vec::new();
-    for body_index in start.0..=end.0 {
-        let BodyContent::Paragraph(paragraph) = &input.document.body.content[body_index] else {
-            continue;
-        };
+    for (paragraph_index, paragraph) in paragraphs.iter().enumerate().take(end.0 + 1).skip(start.0)
+    {
         parts.push(
             project_paragraph_runs(paragraph, input.revision_view)
-                .iter()
-                .filter(|projected| {
-                    let position = (body_index, projected.boundary, projected.raw_order);
+                .into_iter()
+                .enumerate()
+                .filter(|(projected_index, _)| {
+                    let position = (paragraph_index, *projected_index);
                     position >= start && position < end
                 })
-                .map(|projected| projected.run.text())
+                .map(|(_, projected)| projected.run.text())
                 .collect::<String>(),
         );
     }
@@ -7267,6 +7661,73 @@ mod tests {
     }
 
     #[test]
+    fn inline_content_controls_share_the_selected_revision_projection() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p>
+            <w:sdt><w:sdtContent><w:r><w:t>control </w:t></w:r><w:ins w:id="1" w:author="Ada"><w:r><w:t>inserted </w:t></w:r></w:ins><w:del w:id="2" w:author="Ben"><w:r><w:delText>deleted </w:delText></w:r></w:del></w:sdtContent></w:sdt>
+            <w:r><w:t>tail</w:t></w:r>
+        </w:p></w:body></w:document>"#;
+        let document = rdocx_oxml::CT_Document::from_xml(xml).expect("control document parses");
+        let BodyContent::Paragraph(paragraph) = &document.body.content[0] else {
+            panic!("expected paragraph");
+        };
+
+        assert_eq!(
+            projected_paragraph_text(paragraph, RevisionView::Accepted),
+            "control inserted tail"
+        );
+        assert_eq!(
+            projected_paragraph_text(paragraph, RevisionView::Tracked),
+            "control inserted deleted tail"
+        );
+    }
+
+    #[test]
+    fn accepted_content_revisions_project_nested_content_controls() {
+        for wrapper in ["ins", "moveTo"] {
+            let xml = format!(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p>
+                <w:{wrapper} w:id="1" w:author="Ada"><w:r><w:t>inserted </w:t></w:r><w:sdt><w:sdtContent><w:r><w:t>control </w:t></w:r></w:sdtContent></w:sdt></w:{wrapper}>
+                <w:r><w:t>tail</w:t></w:r>
+            </w:p></w:body></w:document>"#
+            );
+            let document = rdocx_oxml::CT_Document::from_xml(xml.as_bytes())
+                .expect("revision document parses");
+            let BodyContent::Paragraph(paragraph) = &document.body.content[0] else {
+                panic!("expected paragraph");
+            };
+
+            assert_eq!(
+                projected_paragraph_text(paragraph, RevisionView::Accepted),
+                "inserted control tail"
+            );
+            assert_eq!(
+                projected_paragraph_text(paragraph, RevisionView::Tracked),
+                "inserted control tail"
+            );
+        }
+    }
+
+    #[test]
+    fn page_reference_names_follow_positioned_controls_and_accepted_revisions() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl>
+            <w:sdt><w:sdtContent><w:tr><w:tc><w:p><w:fldSimple w:instr="PAGEREF before"><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p></w:tc></w:tr></w:sdtContent></w:sdt>
+            <w:tr>
+              <w:sdt><w:sdtContent><w:tc><w:p><w:fldSimple w:instr="PAGEREF rowBefore"><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p></w:tc></w:sdtContent></w:sdt>
+              <w:tc><w:p><w:del w:id="1" w:author="Ada"><w:fldSimple w:instr="PAGEREF deleted"><w:r><w:delText>1</w:delText></w:r></w:fldSimple></w:del><w:fldSimple w:instr="PAGEREF row"><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p></w:tc>
+              <w:sdt><w:sdtContent><w:tc><w:p><w:fldSimple w:instr="PAGEREF rowAfter"><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p></w:tc></w:sdtContent></w:sdt>
+            </w:tr>
+            <w:sdt><w:sdtContent><w:tr><w:tc><w:p><w:fldSimple w:instr="PAGEREF after"><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p></w:tc></w:tr></w:sdtContent></w:sdt>
+        </w:tbl></w:body></w:document>"#;
+        let mut input = make_input_with_text("");
+        input.document = rdocx_oxml::CT_Document::from_xml(xml).expect("field document parses");
+
+        assert_eq!(
+            page_reference_names(&input),
+            ["before", "rowBefore", "row", "rowAfter", "after"]
+        );
+    }
+
+    #[test]
     fn nested_only_revision_wrappers_project_their_visible_runs() {
         let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p>
             <w:ins w:id="1" w:author="Ada"><w:moveTo w:id="2" w:author="Ben"><w:r><w:t>nested</w:t></w:r></w:moveTo></w:ins>
@@ -7279,6 +7740,26 @@ mod tests {
             assert_eq!(projected_paragraph_text(paragraph, view), "nested");
         }
         assert!(paragraph_has_visible_revision(paragraph));
+    }
+
+    #[test]
+    fn inline_control_block_children_stay_opaque_to_layout_views() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p>
+          <w:sdt><w:sdtContent>
+            <w:p><w:ins w:id="1" w:author="Ada"><w:r><w:t>opaque block</w:t></w:r></w:ins></w:p>
+            <w:tbl><w:tr><w:tc><w:p><w:r><w:t>opaque table</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+            <w:r><w:t>visible inline</w:t></w:r>
+          </w:sdtContent></w:sdt>
+        </w:p></w:body></w:document>"#;
+        let document = rdocx_oxml::CT_Document::from_xml(xml).expect("document parses");
+        let BodyContent::Paragraph(paragraph) = &document.body.content[0] else {
+            panic!("expected paragraph");
+        };
+
+        for view in [RevisionView::Accepted, RevisionView::Tracked] {
+            assert_eq!(projected_paragraph_text(paragraph, view), "visible inline");
+        }
+        assert!(!paragraph_has_visible_revision(paragraph));
     }
 
     #[test]
@@ -7339,6 +7820,144 @@ mod tests {
         assert_eq!(bookmark_text(&input, "target").as_deref(), Some("new"));
         input.revision_view = RevisionView::Tracked;
         assert_eq!(bookmark_text(&input, "target").as_deref(), Some("newold"));
+    }
+
+    #[test]
+    fn equal_boundary_marker_order_qualifies_layout_bookmark_targets() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+        <w:p><w:fldSimple w:instr=" PAGEREF bad "><w:r><w:t>1</w:t></w:r></w:fldSimple><w:fldSimple w:instr=" PAGEREF empty "><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:bookmarkEnd w:id="7"/><w:bookmarkStart w:id="7" w:name="bad"/><w:bookmarkStart w:id="8" w:name="empty"/><w:bookmarkEnd w:id="8"/><w:r><w:t>after</w:t></w:r></w:p>
+        </w:body></w:document>"#;
+        let document = rdocx_oxml::CT_Document::from_xml(xml).expect("document parses");
+        let mut input = make_input_with_text("");
+        input.document = document;
+
+        assert_eq!(bookmark_text(&input, "bad"), None);
+        assert_eq!(bookmark_text(&input, "empty").as_deref(), Some(""));
+        let BodyContent::Paragraph(paragraph) = &input.document.body.content[1] else {
+            panic!("expected target paragraph");
+        };
+        let media = MediaRegistry::new(&input.images);
+        let mut fonts = FontManager::new_deterministic().expect("bundled fonts load");
+        let mut numbering = NumberingState::new();
+        let mut diagnostics = Vec::new();
+        let block = layout_paragraph(
+            paragraph,
+            468.0,
+            &input.styles,
+            &input,
+            &media,
+            &mut fonts,
+            &mut numbering,
+            &mut diagnostics,
+        )
+        .expect("paragraph lays out");
+        let targets = block
+            .reflow
+            .expect("reflow items retained")
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                InlineItem::Text(text) => match text.field_kind {
+                    Some(FieldKind::Target(target)) => Some(target),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(targets, [1]);
+    }
+
+    #[test]
+    fn unresolved_pageref_target_is_diagnosed_and_not_exposed_as_resolved() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+        <w:p><w:fldSimple w:instr=" PAGEREF hidden "><w:r><w:t>stored page</w:t></w:r></w:fldSimple></w:p>
+        <w:tbl><w:tblGrid><w:gridCol w:w="8000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:vMerge w:val="continue"/></w:tcPr><w:p><w:bookmarkStart w:id="7" w:name="hidden"/><w:r><w:t>unlaid target</w:t></w:r><w:bookmarkEnd w:id="7"/></w:p></w:tc></w:tr></w:tbl>
+        </w:body></w:document>"#;
+        let document = rdocx_oxml::CT_Document::from_xml(xml).expect("document parses");
+        let mut input = make_input_with_text("");
+        input.document = document;
+
+        assert_eq!(
+            bookmark_text(&input, "hidden").as_deref(),
+            Some("unlaid target")
+        );
+        let output = Engine::new_deterministic()
+            .expect("bundled fonts load")
+            .layout(&input)
+            .expect("document lays out");
+        assert!(output.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message
+                == "PAGEREF target hidden did not reach pagination, unresolved placeholder retained"
+        }));
+        for page in &output.pages {
+            oxml_layout::walk(&page.elements, &mut |element, _| {
+                assert!(
+                    !matches!(
+                        element,
+                        PositionedElement::Text(run)
+                            if matches!(run.field_kind, Some(FieldKind::TargetPage(_)))
+                    ),
+                    "an unresolved TargetPage must not be exposed as resolved"
+                );
+            });
+        }
+    }
+
+    #[test]
+    fn tracked_bookmark_text_keeps_nested_control_and_revision_boundaries() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+        <w:p><w:sdt><w:sdtContent>
+          <w:del w:id="1" w:author="Ada"><w:r><w:delText>old</w:delText></w:r></w:del>
+          <w:bookmarkStart w:id="7" w:name="controlTarget"/><w:r><w:t>control inside</w:t></w:r><w:bookmarkEnd w:id="7"/><w:r><w:t>control after</w:t></w:r>
+        </w:sdtContent></w:sdt></w:p>
+        <w:p><w:ins w:id="2" w:author="Ben"><w:r><w:t>revision before</w:t></w:r><w:bookmarkStart w:id="8" w:name="revisionTarget"/><w:r><w:t>revision inside</w:t></w:r><w:bookmarkEnd w:id="8"/></w:ins></w:p>
+        </w:body></w:document>"#;
+        let document = rdocx_oxml::CT_Document::from_xml(xml).expect("document parses");
+        let mut input = make_input_with_text("");
+        input.document = document;
+
+        assert_eq!(
+            bookmark_text(&input, "controlTarget").as_deref(),
+            Some("control inside")
+        );
+        assert_eq!(
+            bookmark_text(&input, "revisionTarget").as_deref(),
+            Some("revision inside")
+        );
+        input.revision_view = RevisionView::Tracked;
+        assert_eq!(
+            bookmark_text(&input, "controlTarget").as_deref(),
+            Some("control inside")
+        );
+        assert_eq!(
+            bookmark_text(&input, "revisionTarget").as_deref(),
+            Some("revision inside")
+        );
+    }
+
+    #[test]
+    fn collapsed_complex_field_keeps_ref_and_pageref_target_boundaries() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+        <w:p><w:fldSimple w:instr="REF afterField"><w:r><w:t>stale ref</w:t></w:r></w:fldSimple><w:fldSimple w:instr="PAGEREF afterField"><w:r><w:t>stale page</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>AUTHOR</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>cached author</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:bookmarkStart w:id="9" w:name="afterField"/><w:r><w:t>target text</w:t></w:r><w:bookmarkEnd w:id="9"/></w:p>
+        </w:body></w:document>"#;
+        let document = rdocx_oxml::CT_Document::from_xml(xml).expect("document parses");
+        let mut input = make_input_with_text("");
+        input.document = document;
+
+        assert_eq!(
+            bookmark_text(&input, "afterField").as_deref(),
+            Some("target text")
+        );
+        let output = Engine::new_deterministic()
+            .expect("bundled fonts load")
+            .layout(&input)
+            .expect("REF and PAGEREF target layout");
+        assert!(output.diagnostics.iter().all(|diagnostic| {
+            !diagnostic.message.contains("afterField")
+                && !diagnostic.message.contains("stored display retained")
+        }));
     }
 
     #[test]
@@ -7653,6 +8272,84 @@ mod tests {
                             || start.x > geometry.page_width - geometry.margin_right))
             })
             .count()
+    }
+
+    #[test]
+    fn tracked_nested_control_revisions_draw_change_bars_in_both_orders() {
+        let cases = [
+            (
+                "controlled insertion",
+                r#"<w:sdt><w:sdtContent><w:ins w:id="1" w:author="Ada"><w:r><w:t>controlled insertion</w:t></w:r></w:ins></w:sdtContent></w:sdt>"#,
+            ),
+            (
+                "inserted control",
+                r#"<w:ins w:id="2" w:author="Ben"><w:sdt><w:sdtContent><w:r><w:t>inserted control</w:t></w:r></w:sdtContent></w:sdt></w:ins>"#,
+            ),
+        ];
+        for (expected, content) in cases {
+            let xml = format!(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p>{content}</w:p></w:body></w:document>"#
+            );
+            let document = rdocx_oxml::CT_Document::from_xml(xml.as_bytes())
+                .expect("nested revision document parses");
+            let BodyContent::Paragraph(paragraph) = &document.body.content[0] else {
+                panic!("expected paragraph");
+            };
+            assert_eq!(
+                projected_paragraph_text(paragraph, RevisionView::Tracked),
+                expected
+            );
+
+            let mut input = make_input_with_text("");
+            input.document = document;
+            input.revision_view = RevisionView::Tracked;
+            let output = Engine::new_deterministic()
+                .expect("bundled fonts load")
+                .layout(&input)
+                .expect("nested revision lays out");
+            let rendered_text = compatibility_page_elements(&output.pages[0])
+                .into_iter()
+                .filter_map(|element| match element {
+                    PositionedElement::Text(run) => Some(run.text.as_str()),
+                    PositionedElement::MultilingualText(run) => Some(run.logical_text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>();
+            assert_eq!(rendered_text, expected);
+            assert_eq!(page_change_bar_count(&output.pages[0]), 1);
+        }
+    }
+
+    #[test]
+    fn tracked_control_run_property_revision_draws_a_change_bar() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:sdt><w:sdtContent><w:r><w:rPr><w:rPrChange w:id="3" w:author="Ada"><w:rPr><w:b/></w:rPr></w:rPrChange></w:rPr><w:t>controlled property</w:t></w:r></w:sdtContent></w:sdt></w:p></w:body></w:document>"#;
+        let document = rdocx_oxml::CT_Document::from_xml(xml)
+            .expect("controlled property revision document parses");
+        let BodyContent::Paragraph(paragraph) = &document.body.content[0] else {
+            panic!("expected paragraph");
+        };
+        assert_eq!(
+            projected_paragraph_text(paragraph, RevisionView::Tracked),
+            "controlled property"
+        );
+
+        let mut input = make_input_with_text("");
+        input.document = document;
+        input.revision_view = RevisionView::Tracked;
+        let output = Engine::new_deterministic()
+            .expect("bundled fonts load")
+            .layout(&input)
+            .expect("controlled property revision lays out");
+        let rendered_text = compatibility_page_elements(&output.pages[0])
+            .into_iter()
+            .filter_map(|element| match element {
+                PositionedElement::Text(run) => Some(run.text.as_str()),
+                PositionedElement::MultilingualText(run) => Some(run.logical_text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(rendered_text, "controlled property");
+        assert_eq!(page_change_bar_count(&output.pages[0]), 1);
     }
 
     #[test]

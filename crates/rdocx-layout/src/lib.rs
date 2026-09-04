@@ -41,6 +41,7 @@ pub struct WordLayoutResult {
     pub layout: LayoutResult,
     pub revision_view: RevisionView,
     source_nodes: Vec<WordSourcePath>,
+    page_reference_names: Vec<String>,
 }
 
 impl WordLayoutResult {
@@ -52,6 +53,12 @@ impl WordLayoutResult {
     /// Discard the Word source map and return the backend-neutral layout.
     pub fn into_layout_result(self) -> LayoutResult {
         self.layout
+    }
+
+    /// Resolve the bookmark name assigned to a result-local page target.
+    #[doc(hidden)]
+    pub fn page_reference_name(&self, target: usize) -> Option<&str> {
+        self.page_reference_names.get(target).map(String::as_str)
     }
 }
 
@@ -67,6 +74,7 @@ pub fn layout_document_with_provenance(input: &LayoutInput) -> Result<WordLayout
         layout,
         revision_view: input.revision_view,
         source_nodes,
+        page_reference_names: engine::page_reference_names(input),
     })
 }
 
@@ -84,6 +92,7 @@ pub fn layout_document_with_reusable_engine(
         layout,
         revision_view: input.revision_view,
         source_nodes,
+        page_reference_names: engine::page_reference_names(input),
     })
 }
 
@@ -98,6 +107,7 @@ pub fn layout_document_with_caller_fonts_and_provenance(
         layout,
         revision_view: input.revision_view,
         source_nodes,
+        page_reference_names: engine::page_reference_names(input),
     })
 }
 
@@ -116,5 +126,6 @@ pub fn layout_document_deterministic_with_provenance(
         layout,
         revision_view: input.revision_view,
         source_nodes,
+        page_reference_names: engine::page_reference_names(input),
     })
 }

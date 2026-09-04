@@ -408,9 +408,16 @@ with unmodelled attributes and root children retained at their original
 boundaries. The `rdocx` facade owns the relationship-resolved pair of comment
 parts and coordinates them with the anchors in the main document.
 
-The Word text model also projects bookmark starts and ends at direct-run
-boundaries while retaining every marker as ordered raw XML. Simple and complex
-fields share one recursive `Field` grammar with a normalized name, text or
+The Word text model projects bookmark starts and ends at accepted-view and
+tracked-view run boundaries while retaining every marker as ordered raw XML.
+The projection combines direct paragraph markers with markers owned by typed
+hyperlinks, accepted insertion and move-destination revisions, and inline
+content controls in exact document order. Each nested content control retains
+its own namespace scope for this projection. Opaque wrappers remain excluded,
+and direct markers are not duplicated. Complex-field collapse remaps both run
+views. Direct-run and marker mutation rebuild the same read projection in
+memory. Simple and complex fields share one recursive
+`Field` grammar with a normalized name, text or
 nested arguments, switches, cached result, and optional dirty state. Its private
 source records the original field form, run partition, and producer XML.
 Complex fields expose ordered cached-display segments with each segment's
@@ -424,7 +431,8 @@ in-scope WordprocessingML namespace bindings. Malformed sequences remain opaque
 raw XML, while unsupported valid fields retain their cached display. Dirty
 complex hyperlinks are not reported as `Document::links()` until the update
 policy defines how to handle them. The `rdocx` facade correlates bookmark ids
-and owns mutation across top-level body paragraphs.
+and owns mutation across typed body paragraphs, including supported table and
+content-control traversal.
 `rdocx-layout` resolves bookmark text and maps page targets, while the shared
 `oxml-layout` boundary exposes only format-neutral `Target` and `TargetPage`
 field kinds.
@@ -470,6 +478,102 @@ is committed, then both layout caches are invalidated once. Existing save and
 byte methods remain leave alone operations that preserve cache content and
 dirty spelling. Update-aware save methods opt into the same atomic operation
 before writing. The settings-level `w:updateFields` value remains untouched.
+
+The native facade also rebuilds supported existing main-story table of
+contents fields. It reparses each owned instruction through the same recursive
+field grammar, discovers selected headings, custom paragraph styles, direct
+outline levels, and TC entries in document order, and excludes the old owned
+result range from source discovery. A complete-paragraph source reuses one
+valid whole-paragraph bookmark when available. If multiple valid ranges cover
+the whole paragraph, the earliest start in document marker order wins. A
+source restricted to the surviving fragment of a TOC begin or end paragraph
+never reuses a whole-paragraph range. Otherwise the staged candidate allocates
+a unique hidden bookmark id and `_Toc` name. Level-specific
+TOC paragraphs contain the selected title, optional internal hyperlink,
+configured separator, and a PAGEREF field unless that level omits page
+numbers. Sequence-selected entries prefix the final page value with the
+nearest preceding matching SEQ value and the configured separator. TOC and
+SEQ identifiers share the evaluator's ASCII case-insensitive namespace.
+Source field discovery and heading title extraction use the accepted revision
+projection. Direct and content-control runs retain their stored order,
+insertion and move-to runs are included at their typed boundaries, and deleted
+or moved-from runs are excluded. Direct outline values use checked one-based
+conversion, so values outside the supported TOC level domain are ignored.
+When a content control and accepted revision share a direct-run boundary, their
+raw sidecar positions retain exact serialized order. Simple TOC fields inside
+accepted insertions and move-to revisions stay unchanged and contribute one
+diagnostic each.
+
+Rebuild changes no instruction or source paragraph content. Byte-position XML
+edits insert only newly owned bookmark markers and replace only the span after
+the TOC separator run through the run containing its matching end marker.
+Ownership scanning requires expanded-name Word ancestors, a recognized typed
+paragraph path, and field markers as direct children of typed Word runs.
+Word-shaped field content retained below an opaque descendant is ignored.
+Same-namespace inline wrappers qualify only when their parent-child grammar
+and required metadata match a typed owner path. Block-level document, body,
+table, row, cell, and content-control ownership follows the same parent-child
+grammar as the typed parser. A body or cell content control types only
+paragraphs and tables, a table control types only rows, and a row control types
+only cells. The byte-position rebuild scanner retains that placement on each
+content-control owner, so an invalid child cannot enter its paragraph index or
+shift a later bookmark insertion. Before entering a content container, the
+scanner also requires the complete control shell to parse successfully in that
+same placement with its inherited namespace bindings. A rejected control and
+all of its fields and markers remain opaque. The public standalone
+content-control parser
+keeps its context-free union of paragraph, table, row, cell, and run children.
+Parent document, table, row, cell, and paragraph parsers use placement-specific
+internal entry points.
+Other Word children remain preserved raw XML and contribute no
+headings, fields, bookmarks, or other typed sources. A content control owned by
+a paragraph types only inline children. Paragraph, table, row, and cell
+children below that control remain opaque and contribute no runs, markers, or
+TOC sources. Accepted
+revision ownership stops at the parser's
+32-wrapper nesting ceiling. Wrapped instructions are validated with a balanced
+synthetic end marker inside their complete owner chain, and result replacement
+restores the matching wrapper closures. At the matching end paragraph,
+replacement retains only the exact paragraph opening, paragraph properties,
+and accepted wrapper prefix needed to contain the end-marker run. Direct
+self-closing paragraph properties retain their exact prefix spelling and
+attributes. A content-control prefix retains its properties, end properties,
+identity, binding, type, and raw property slots through its content opening.
+Cached result runs before that marker are removed. Whole-paragraph bookmarks
+and every other valid bookmark range with exactly one marker inside a replaced
+result are narrowed to the surviving source fragment, including partial
+same-paragraph and cross-paragraph ranges and entries that need no generated
+target. The exact end-marker run boundary stays separate from wrapper-prefix
+reconstruction. Deterministic pagination uses the staged direct marker, then
+the final XML moves each generated or repaired start immediately after the end
+run inside its accepted hyperlink, revision, or content-control owner. The
+bookmark therefore covers surviving post-end text without changing the
+wrapper structure or its metadata. Save and reopen reconstruct the same
+accepted-view marker and run boundaries used by the public bookmark facade,
+PAGEREF layout targets, and later TOC ownership scans, so the rebuilt document
+can be rebuilt again.
+Whole-paragraph bookmark reuse
+compares marker bounds with every ordered direct paragraph child, including
+content controls and revision wrappers, rather than only direct-run indexes.
+Bookmark range validation also compares each marker's raw position at a shared
+run boundary, so an end before its start is rejected.
+Nested TOC ownership is rejected before any edit is applied. Page placeholders
+are chosen outside the complete source and generated byte sets, then
+substituted only at their unique owned result offsets. Bookmark ids and names
+are allocated lazily, including the final representable id when it is the next
+free value.
+Unsupported valid TOCs stay unchanged and increment the report diagnostic
+count. Malformed ownership, ambiguous bookmarks, missing selected bookmarks,
+layout failure, or serialization failure rejects the whole staged operation.
+The candidate is reopened before deterministic bundled-font pagination and
+again after final displayed page substitution. The live document receives the
+validated package once and both completed layout caches are invalidated once.
+Main-story pagination visits paragraphs and tables inside valid body, table,
+row, and cell content controls in the same order used by TOC source and
+bookmark discovery. A generated PAGEREF target that does not reach pagination
+is diagnosed and is not exposed as a resolved target-page value. Missing or
+invalid target-page output rejects the staged rebuild before the live package
+changes.
 
 The `rdocx` facade also owns flat native mail merge over
 `BTreeMap<String, String>` records. Separate mode stages, serializes, and
@@ -884,13 +988,20 @@ Replies follow paragraph-id parent linkage, resolution applies to the thread
 root, and removal deletes the selected comment plus descendant replies without
 deleting unrelated runs or producer XML.
 
-Word bookmark mutation reuses the same top-level `RunPosition` and half-open
-`RunRange` boundary. `Document::bookmarks` returns immutable correlated
-summaries in document order and reports malformed, unmatched, reversed, or
-duplicate markers without hiding their preserved XML. `Document::add_bookmark`
-validates both endpoints and the Word name, rejects producer-reserved and
-duplicate names, allocates the first free nonnegative id, stages both marker
-insertions, commits once, and invalidates layout once.
+Word bookmark mutation input reuses the same top-level `RunPosition` and
+half-open `RunRange` boundary as comments. `Document::bookmarks` returns
+immutable correlated summaries in typed main-story paragraph order through
+tables and block content controls. A reported body index is that recursive
+paragraph ordinal, and its run index is the accepted-view boundary used to
+extract bookmark text. Marker encounter order resolves direction when start
+and end share one accepted boundary, so end before start remains reversed and
+start before end is a valid empty range. Isolated projection refresh after a
+run, comment, or bookmark edit carries the original Word namespace aliases.
+The facade reports malformed, unmatched, reversed, or duplicate markers
+without hiding their preserved XML. `Document::add_bookmark`
+validates both mutation endpoints and the Word name, rejects producer-reserved
+and duplicate names, allocates the first free nonnegative id, stages both
+marker insertions, commits once, and invalidates layout once.
 
 The `rpptx` facade provides the same total lookup boundary for slides, nested
 shape trees, placeholders, text frames, paragraphs, regular runs, tables and

@@ -54,7 +54,7 @@ pub use error::{Error, Result};
 pub use field::{
     BarcodeCaseStyle, BarcodeField, BarcodeKind, BarcodePointOfSaleStyle, FieldDateTime,
     FieldEvaluation, FieldEvaluationContext, FieldOutcome, MailMergeControl, TcField,
-    TocEntrySelection, TocField,
+    TocEntrySelection, TocField, TocRebuildReport,
 };
 pub use html::{HtmlDiagnostic, HtmlReadResult};
 pub use math::{

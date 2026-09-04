@@ -869,12 +869,18 @@ font selection, or rendered bytes.
 `LayoutInput::revision_view` selects the accepted or tracked projection before
 Word text shaping. One ordered projection combines ordinary runs and typed
 revision wrappers at their preserved boundaries, including nested wrappers and
-revisions inside hyperlinks. The same projection applies to body, table,
-header, footer, footnote, and endnote paragraphs. Accepted layout includes
-insertions and move destinations and omits deletions and move sources. Tracked
-layout includes both sides. It forces single underline on insertion and move
-destination text and single strike on deletion and move source text while
-retaining the remaining resolved formatting.
+revisions inside hyperlinks. Inline content controls join that projection at
+their raw paragraph position, including revisions directly inside the control
+content. A content control nested in an insertion or move destination is read
+from the revision's typed paragraph projection and retains the same order.
+Block-shaped paragraph, table, row, and cell children below an inline content
+control remain raw and do not enter accepted or tracked layout. The
+same projection applies to body, table, header, footer, footnote, and endnote
+paragraphs. Accepted layout includes insertions and move
+destinations and omits deletions and move sources. Tracked layout includes both
+sides. It forces single underline on insertion and move destination text and
+single strike on deletion and move source text while retaining the remaining
+resolved formatting.
 
 Provenance ranges are local to this selected projection. The field model's
 `Field::projected_text` decision is the single owner of whether a field cache
@@ -883,11 +889,14 @@ text from producing a plausible but false range. Field display glyphs remain
 unattributed even when a parsed complex cache contributes to later offsets.
 
 A tracked paragraph with visible revised content or a property-only revision
-carries a changed marker into pagination. Every page fragment of that paragraph
-draws one solid line outside the text margin, on the right for odd pages and on
-the left for even pages. The marker does not affect text placement. Existing
-render methods select accepted layout and retain the normal and deterministic
-caches. Option-taking tracked renders are uncached.
+carries a changed marker into pagination. Visible-revision detection follows
+the same typed paragraph projection through revisions inside controls and
+controls inside accepted revisions. Modeled property revisions on a direct run
+inside control content also mark the owning paragraph. Every page fragment of
+that paragraph draws one solid line outside the text margin, on the right for
+odd pages and on the left for even pages. The marker does not affect text
+placement. Existing render methods select accepted layout and retain the normal
+and deterministic caches. Option-taking tracked renders are uncached.
 
 ### Word watermarks
 
@@ -1045,28 +1054,61 @@ system codec.
 
 ## Word bookmark field pagination
 
-Word `REF` fields resolve the text of one uniquely correlated top-level
-bookmark before shaping. A missing or ambiguous target keeps the stored field
-display and emits a stable diagnostic. `PAGEREF` follows the same validation,
-then shapes the fixed page placeholder and carries a format-neutral target id
-through line breaking.
+Word `REF` fields resolve the text of one uniquely correlated typed main-story
+bookmark before shaping. Paragraph correlation follows document order through
+body paragraphs, laid-out tables, and modeled content controls. A missing or
+ambiguous target keeps the stored field display and emits a stable diagnostic.
+`PAGEREF` follows the same validation, then shapes the fixed page placeholder
+and carries a format-neutral target id through line breaking. Direct and
+accepted wrapper-local bookmark markers use the same projected run boundaries
+as accepted hyperlink, revision, and inline-control text. Opaque wrapper
+markers do not enter the target model. Tracked layout uses the corresponding
+tracked boundary, including deleted and moved-from runs before an accepted
+marker. Complex-field collapse and in-memory direct-run mutation preserve both
+coordinates. When two markers share one projected boundary, encounter order
+qualifies their direction before layout creates a bookmark target.
 
 Only bookmarks named by a valid `PAGEREF` add a zero-width target marker to
 page output. After the document paginates once, the existing field substitution
 pass records the page containing each target, reshapes PAGE, NUMPAGES, and
 target-page values, and removes the target markers. It does not run pagination
-again. A field inside a laid-out table paragraph follows the same target
-discovery and substitution path. Normal and deterministic layouts use this
-identical algorithm, with the deterministic entry point restricted to bundled
-and document-supplied fonts.
+again. Main-story layout visits valid block content controls at body, table,
+row, and cell level in the same paragraph order used by bookmark and TOC
+discovery. Body and cell controls admit paragraphs and tables, table controls
+admit rows, and row controls admit cells. Other Word child shapes stay opaque
+to parsing, bookmark and TOC discovery, and layout. A field inside any of those
+laid-out paragraphs follows the same target discovery and substitution path.
+If a valid PAGEREF target does not
+reach pagination, layout emits a stable diagnostic and removes its
+`TargetPage` classification so the fixed placeholder cannot be consumed as a
+resolved value. Normal and deterministic layouts use this identical algorithm,
+with the deterministic entry point restricted to bundled and
+document-supplied fonts.
 
 The native facade exposes a separate read-only field evaluator for automation
 callers. `PAGE` and `NUMPAGES` always report pagination deferral. A valid
 `PAGEREF` also reports deferral, while a missing or ambiguous target keeps its
 stored display with a stable diagnostic. The evaluator does not replace the
 single post-pagination substitution pass and does not trigger layout. `REF`
-resolves the same unique top-level bookmark text used by layout, so pure
+resolves the same unique typed bookmark text used by layout, so pure
 evaluation and rendering share the same target-validity boundary.
+
+Table-of-contents rebuild creates its provisional PAGEREF fields before
+calling the deterministic bundled-font layout. The existing post-pagination
+pass remains the only page-target authority. Rebuild reads those displayed
+target values, materializes them into the owned TOC cache, reopens the final
+package, and discards the completed provisional layout. It does not estimate
+page numbers or run a second pagination algorithm. It accepts only stable
+decimal values within the produced page range and rejects a missing,
+inconsistent, or invalid target atomically. The Word layout result owns
+the result-local target-to-bookmark mapping. Facade substitution therefore
+uses the same accepted-revision projection and positioned table, row, cell,
+and content-control order as bookmark markers and PAGEREF layout. A revision
+inside a hyperlink uses the hyperlink owner's raw paragraph position for this
+ordering, including a hyperlink whose only modeled content is revised. Heading
+sources on a TOC boundary paragraph concatenate only accepted runs outside the
+owned old-result range, so the displayed title and generated bookmark cover
+the same post-end content.
 
 ## Word chart pagination
 

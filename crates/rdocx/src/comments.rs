@@ -58,6 +58,7 @@ impl BookmarkRef {
         self.name.as_deref()
     }
 
+    /// Return the accepted-view half-open range reported by `Document::bookmarks`.
     pub fn range(&self) -> Option<RunRange> {
         self.range
     }
@@ -115,7 +116,10 @@ impl CommentRef<'_> {
 }
 
 impl Document {
-    /// Return bookmarks and malformed marker reports in document order.
+    /// Return bookmarks and malformed marker reports in main-story paragraph order.
+    ///
+    /// Reported body indexes count typed paragraphs recursively through tables and
+    /// block content controls. Reported run indexes use accepted-view run boundaries.
     pub fn bookmarks(&self) -> Vec<BookmarkRef> {
         #[derive(Clone)]
         struct Marker {
@@ -126,15 +130,14 @@ impl Document {
         }
 
         let mut markers = Vec::new();
-        for (body_index, content) in self.document.body.content.iter().enumerate() {
-            let BodyContent::Paragraph(paragraph) = content else {
-                continue;
-            };
+        let mut paragraphs = Vec::new();
+        collect_main_story_paragraphs(&self.document.body.content, &mut paragraphs);
+        for (body_index, paragraph) in paragraphs.into_iter().enumerate() {
             for marker in &paragraph.bookmark_markers {
                 markers.push(Marker {
                     position: RunPosition {
                         body_index,
-                        run_index: marker.run_index(),
+                        run_index: marker.projected_run_index(),
                     },
                     start: marker.is_start(),
                     id: marker.id(),
@@ -193,7 +196,9 @@ impl Document {
                     start: markers[starts[0]].position,
                     end: markers[ends[0]].position,
                 };
-                if candidate.start > candidate.end {
+                if candidate.start > candidate.end
+                    || (candidate.start == candidate.end && starts[0] > ends[0])
+                {
                     (
                         None,
                         Some(format!("bookmark id {id} ends before it starts")),
@@ -203,7 +208,15 @@ impl Document {
                 }
             };
             let text = range
-                .map(|range| bookmark_range_text(&self.document.body.content, range))
+                .map(|_| {
+                    bookmark_range_text(
+                        &self.document.body.content,
+                        markers[starts[0]].position.body_index,
+                        markers[starts[0]].position.run_index,
+                        markers[ends[0]].position.body_index,
+                        markers[ends[0]].position.run_index,
+                    )
+                })
                 .unwrap_or_default();
             results.push((
                 first,
@@ -258,16 +271,11 @@ impl Document {
         {
             return Err(Error::Other(format!("bookmark name {name} already exists")));
         }
-        let occupied = self
-            .document
-            .body
-            .content
-            .iter()
-            .filter_map(|content| match content {
-                BodyContent::Paragraph(paragraph) => Some(&paragraph.bookmark_markers),
-                _ => None,
-            })
-            .flatten()
+        let mut paragraphs = Vec::new();
+        collect_main_story_paragraphs(&self.document.body.content, &mut paragraphs);
+        let occupied = paragraphs
+            .into_iter()
+            .flat_map(|paragraph| &paragraph.bookmark_markers)
             .filter_map(|marker| marker.id())
             .filter(|id| *id >= 0)
             .collect::<HashSet<_>>();
@@ -750,30 +758,51 @@ fn validate_bookmark_range(content: &[BodyContent], range: RunRange) -> Result<(
     Ok(())
 }
 
-fn bookmark_range_text(content: &[BodyContent], range: RunRange) -> String {
-    let mut paragraphs = Vec::new();
-    for body_index in range.start.body_index..=range.end.body_index {
-        let Some(paragraph) = body_paragraph(content, body_index) else {
+fn bookmark_range_text(
+    content: &[BodyContent],
+    start_body_index: usize,
+    start_run_index: usize,
+    end_body_index: usize,
+    end_run_index: usize,
+) -> String {
+    let mut paragraphs = Vec::<String>::new();
+    for body_index in start_body_index..=end_body_index {
+        let Some(paragraph) = story_paragraph(content, body_index) else {
             continue;
         };
-        let start = if body_index == range.start.body_index {
-            range.start.run_index
+        let runs = paragraph.accepted_bookmark_runs();
+        let start = if body_index == start_body_index {
+            start_run_index
         } else {
             0
         };
-        let end = if body_index == range.end.body_index {
-            range.end.run_index
+        let end = if body_index == end_body_index {
+            end_run_index
         } else {
-            paragraph.runs.len()
+            runs.len()
         };
-        paragraphs.push(
-            paragraph.runs[start..end]
-                .iter()
-                .map(CT_R::text)
-                .collect::<String>(),
-        );
+        let start = start.min(runs.len());
+        let end = end.min(runs.len());
+        paragraphs.push(runs[start..end].iter().map(|run| run.text()).collect());
     }
     paragraphs.join("\n")
+}
+
+fn story_paragraph(content: &[BodyContent], index: usize) -> Option<&CT_P> {
+    let mut remaining = index;
+    for item in content {
+        if let Some(paragraph) = paragraph_in_body_content(item, &mut remaining) {
+            return Some(paragraph);
+        }
+    }
+    None
+}
+
+fn body_paragraph_mut(content: &mut [BodyContent], index: usize) -> Option<&mut CT_P> {
+    match content.get_mut(index)? {
+        BodyContent::Paragraph(paragraph) => Some(paragraph),
+        BodyContent::Table(_) | BodyContent::ContentControl(_) | BodyContent::RawXml(_) => None,
+    }
 }
 
 fn body_paragraph(content: &[BodyContent], index: usize) -> Option<&CT_P> {
@@ -783,10 +812,203 @@ fn body_paragraph(content: &[BodyContent], index: usize) -> Option<&CT_P> {
     }
 }
 
-fn body_paragraph_mut(content: &mut [BodyContent], index: usize) -> Option<&mut CT_P> {
-    match content.get_mut(index)? {
-        BodyContent::Paragraph(paragraph) => Some(paragraph),
-        BodyContent::Table(_) | BodyContent::ContentControl(_) | BodyContent::RawXml(_) => None,
+fn collect_main_story_paragraphs<'a>(content: &'a [BodyContent], output: &mut Vec<&'a CT_P>) {
+    for item in content {
+        match item {
+            BodyContent::Paragraph(paragraph) => output.push(paragraph),
+            BodyContent::Table(table) => collect_table_paragraphs(table, output),
+            BodyContent::ContentControl(control) => {
+                collect_control_paragraphs(control, BlockControlOwner::Body, output)
+            }
+            BodyContent::RawXml(_) => {}
+        }
+    }
+}
+
+fn collect_table_paragraphs<'a>(table: &'a CT_Tbl, output: &mut Vec<&'a CT_P>) {
+    for boundary in 0..=table.rows.len() {
+        for (_, _, control) in table
+            .content_controls
+            .iter()
+            .filter(|(at, _, _)| *at == boundary)
+        {
+            collect_control_paragraphs(control, BlockControlOwner::Table, output);
+        }
+        if let Some(row) = table.rows.get(boundary) {
+            collect_row_paragraphs(row, output);
+        }
+    }
+}
+
+fn collect_row_paragraphs<'a>(row: &'a CT_Row, output: &mut Vec<&'a CT_P>) {
+    for boundary in 0..=row.cells.len() {
+        for (_, _, control) in row
+            .content_controls
+            .iter()
+            .filter(|(at, _, _)| *at == boundary)
+        {
+            collect_control_paragraphs(control, BlockControlOwner::Row, output);
+        }
+        if let Some(cell) = row.cells.get(boundary) {
+            collect_cell_paragraphs(cell, output);
+        }
+    }
+}
+
+fn collect_cell_paragraphs<'a>(cell: &'a CT_Tc, output: &mut Vec<&'a CT_P>) {
+    for item in &cell.content {
+        match item {
+            CellContent::Paragraph(paragraph) => output.push(paragraph),
+            CellContent::Table(table) => collect_table_paragraphs(table, output),
+            CellContent::ContentControl(control) => {
+                collect_control_paragraphs(control, BlockControlOwner::Cell, output)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum BlockControlOwner {
+    Body,
+    Table,
+    Row,
+    Cell,
+}
+
+fn collect_control_paragraphs<'a>(
+    control: &'a CT_Sdt,
+    owner: BlockControlOwner,
+    output: &mut Vec<&'a CT_P>,
+) {
+    for item in &control.content {
+        match (owner, item) {
+            (
+                BlockControlOwner::Body | BlockControlOwner::Cell,
+                SdtContent::Paragraph(paragraph),
+            ) => output.push(paragraph),
+            (BlockControlOwner::Body | BlockControlOwner::Cell, SdtContent::Table(table)) => {
+                collect_table_paragraphs(table, output)
+            }
+            (BlockControlOwner::Table, SdtContent::Row(row)) => collect_row_paragraphs(row, output),
+            (BlockControlOwner::Row, SdtContent::Cell(cell)) => {
+                collect_cell_paragraphs(cell, output)
+            }
+            (_, SdtContent::ContentControl(control)) => {
+                collect_control_paragraphs(control, owner, output)
+            }
+            _ => {}
+        }
+    }
+}
+
+fn paragraph_in_body_content<'a>(
+    content: &'a BodyContent,
+    remaining: &mut usize,
+) -> Option<&'a CT_P> {
+    match content {
+        BodyContent::Paragraph(paragraph) => take_paragraph(paragraph, remaining),
+        BodyContent::Table(table) => paragraph_in_table(table, remaining),
+        BodyContent::ContentControl(control) => {
+            paragraph_in_control(control, BlockControlOwner::Body, remaining)
+        }
+        BodyContent::RawXml(_) => None,
+    }
+}
+
+fn paragraph_in_table<'a>(table: &'a CT_Tbl, remaining: &mut usize) -> Option<&'a CT_P> {
+    for boundary in 0..=table.rows.len() {
+        for (_, _, control) in table
+            .content_controls
+            .iter()
+            .filter(|(at, _, _)| *at == boundary)
+        {
+            if let Some(paragraph) =
+                paragraph_in_control(control, BlockControlOwner::Table, remaining)
+            {
+                return Some(paragraph);
+            }
+        }
+        if let Some(row) = table.rows.get(boundary)
+            && let Some(paragraph) = paragraph_in_row(row, remaining)
+        {
+            return Some(paragraph);
+        }
+    }
+    None
+}
+
+fn paragraph_in_row<'a>(row: &'a CT_Row, remaining: &mut usize) -> Option<&'a CT_P> {
+    for boundary in 0..=row.cells.len() {
+        for (_, _, control) in row
+            .content_controls
+            .iter()
+            .filter(|(at, _, _)| *at == boundary)
+        {
+            if let Some(paragraph) =
+                paragraph_in_control(control, BlockControlOwner::Row, remaining)
+            {
+                return Some(paragraph);
+            }
+        }
+        if let Some(cell) = row.cells.get(boundary)
+            && let Some(paragraph) = paragraph_in_cell(cell, remaining)
+        {
+            return Some(paragraph);
+        }
+    }
+    None
+}
+
+fn paragraph_in_cell<'a>(cell: &'a CT_Tc, remaining: &mut usize) -> Option<&'a CT_P> {
+    for content in &cell.content {
+        let paragraph = match content {
+            CellContent::Paragraph(paragraph) => take_paragraph(paragraph, remaining),
+            CellContent::Table(table) => paragraph_in_table(table, remaining),
+            CellContent::ContentControl(control) => {
+                paragraph_in_control(control, BlockControlOwner::Cell, remaining)
+            }
+        };
+        if paragraph.is_some() {
+            return paragraph;
+        }
+    }
+    None
+}
+
+fn paragraph_in_control<'a>(
+    control: &'a CT_Sdt,
+    owner: BlockControlOwner,
+    remaining: &mut usize,
+) -> Option<&'a CT_P> {
+    for content in &control.content {
+        let paragraph = match (owner, content) {
+            (
+                BlockControlOwner::Body | BlockControlOwner::Cell,
+                SdtContent::Paragraph(paragraph),
+            ) => take_paragraph(paragraph, remaining),
+            (BlockControlOwner::Body | BlockControlOwner::Cell, SdtContent::Table(table)) => {
+                paragraph_in_table(table, remaining)
+            }
+            (BlockControlOwner::Table, SdtContent::Row(row)) => paragraph_in_row(row, remaining),
+            (BlockControlOwner::Row, SdtContent::Cell(cell)) => paragraph_in_cell(cell, remaining),
+            (_, SdtContent::ContentControl(control)) => {
+                paragraph_in_control(control, owner, remaining)
+            }
+            _ => None,
+        };
+        if paragraph.is_some() {
+            return paragraph;
+        }
+    }
+    None
+}
+
+fn take_paragraph<'a>(paragraph: &'a CT_P, remaining: &mut usize) -> Option<&'a CT_P> {
+    if *remaining == 0 {
+        Some(paragraph)
+    } else {
+        *remaining -= 1;
+        None
     }
 }
 

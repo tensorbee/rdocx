@@ -730,3 +730,43 @@ patches only the field-source spans in the relationship-resolved part, so
 unmodelled siblings remain byte-preserved. Any rejected record, XML parse, or
 identity-allocation failure leaves the source and all prospective outputs
 uncommitted.
+
+Dynamic table-of-contents rebuild uses the same staged package rule. It scans
+the relationship-resolved main document by expanded WordprocessingML names,
+correlates the existing complex TOC begin, separator, and end markers, and
+records exact byte offsets for the owned cached-result range. Bookmark markers
+are inserted at schema-valid unowned boundaries by byte-position edits. Source
+selection retains paragraph, run, and raw-child positions for bookmark scope.
+Old-result exclusion adds a total nested-run order within each accepted
+revision or content-control owner, so fields on opposite sides of a marker in
+one wrapper remain distinguishable. The outer coordinate is the typed
+paragraph owner's actual run boundary and raw-child slot, including terminal
+hyperlink revisions and owners after preserved raw children. Hyperlink child
+shapes retained as raw XML do not advance that run boundary. Sources before
+the begin marker or after the end marker in a boundary paragraph remain
+eligible. Retained comments and processing instructions consume raw-child
+slots exactly as they do in the typed paragraph parser. A direct simple field
+advances a modeled run boundary only when its parsed instruction is nonempty.
+Hyperlink revisions and direct runs sharing one outer coordinate receive
+distinct nested ordinals.
+Generated entry paragraphs replace only the recorded range. The instruction
+runs, matching field markers, neighbouring raw XML, relationships, and every
+other package part remain outside the edit set. The provisional package and
+the final page-substituted package both parse and reopen before one atomic
+commit. Placeholder substitution requires one match in its recorded result
+span and cannot search or replace elsewhere in the part. Overlapping TOC field
+ranges fail before edits are built. Unsupported valid TOCs remain byte-identical with a reported
+diagnostic. Malformed ownership, ambiguous bookmark identity, or any package,
+layout, or reopen failure leaves the original package untouched.
+Malformed or unprojected Word wrapper chains remain outside the ownership
+scan even when their element names use the WordprocessingML namespace.
+Each modeled content control owns only its first `w:sdtContent` child. A later
+same-namespace content container remains opaque. The scan applies typed block
+grammar and the 32-level revision nesting bound, counting property-change
+revision elements as well as content revisions.
+When a supported instruction is wrapped by inline ownership elements, staged
+parsing and replacement close that exact balanced owner chain before emitting
+the following paragraph content. Isolated instruction-run projection injects
+the inherited namespace bindings required by every copied qualified name. It
+locates the start-tag boundary with the XML parser and does not repeat a
+declaration already local to the run.

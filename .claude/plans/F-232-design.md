@@ -1,6 +1,6 @@
 # F-232, Dynamic table of contents rebuild
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S66
 **Size**: L
 **Depends on**: F-154, F-231
@@ -120,15 +120,15 @@ sample is added or changed. Any delta is unexplained and blocks integration.
 
 ## Implementation checklist
 
-- [ ] Add deterministic `Document::rebuild_toc()` and its approved report surface.
-- [ ] Discover and validate existing TOC ownership plus approved instruction switches.
-- [ ] Discover headings, custom styles, direct outline levels, and TC entries in document order.
-- [ ] Reuse or allocate collision-free bookmarks and build styled linked entry content.
-- [ ] Replace only the TOC-owned cached result range and preserve unrelated formatting and raw XML.
-- [ ] Paginate the staged candidate and substitute final displayed page numbers.
-- [ ] Serialize, reopen, commit atomically, and invalidate both layout caches once.
-- [ ] Add pinned Word differential, deterministic layout, preservation, and failure regressions to existing test binaries.
-- [ ] Update exactly the listed HLD files and run the full risk-rider union.
+- [x] Add deterministic `Document::rebuild_toc()` and its approved report surface.
+- [x] Discover and validate existing TOC ownership plus approved instruction switches.
+- [x] Discover headings, custom styles, direct outline levels, and TC entries in document order.
+- [x] Reuse or allocate collision-free bookmarks and build styled linked entry content.
+- [x] Replace only the TOC-owned cached result range and preserve unrelated formatting and raw XML.
+- [x] Paginate the staged candidate and substitute final displayed page numbers.
+- [x] Serialize, reopen, commit atomically, and invalidate both layout caches once.
+- [x] Add pinned Word differential, deterministic layout, preservation, and failure regressions to existing test binaries.
+- [x] Update exactly the listed HLD files and run the full risk-rider union.
 
 ## Open questions
 

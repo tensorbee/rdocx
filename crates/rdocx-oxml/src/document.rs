@@ -3,7 +3,7 @@
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, Event};
 use quick_xml::{Reader, Writer, XmlVersion};
 
-use crate::content_control::CT_Sdt;
+use crate::content_control::{CT_Sdt, SdtOwner};
 use crate::error::Result;
 use crate::header_footer::{HdrFtrRef, HdrFtrType};
 use crate::namespace::{W_NS, matches_local_name};
@@ -585,7 +585,9 @@ impl CT_Body {
         for content in &self.content {
             match content {
                 BodyContent::Paragraph(paragraph) => paragraphs.push(paragraph),
-                BodyContent::ContentControl(sdt) => sdt.collect_paragraphs(&mut paragraphs),
+                BodyContent::ContentControl(sdt) => {
+                    sdt.collect_paragraphs(SdtOwner::Body, &mut paragraphs)
+                }
                 BodyContent::Table(_) | BodyContent::RawXml(_) => {}
             }
         }
@@ -606,7 +608,7 @@ impl CT_Body {
         for content in &self.content {
             match content {
                 BodyContent::Table(table) => tables.push(table),
-                BodyContent::ContentControl(sdt) => sdt.collect_tables(&mut tables),
+                BodyContent::ContentControl(sdt) => sdt.collect_tables(SdtOwner::Body, &mut tables),
                 BodyContent::Paragraph(_) | BodyContent::RawXml(_) => {}
             }
         }
@@ -656,7 +658,7 @@ impl CT_Body {
             BodyContent::Paragraph(p) => p.text().contains(text),
             BodyContent::ContentControl(sdt) => {
                 let mut paragraphs = Vec::new();
-                sdt.collect_paragraphs(&mut paragraphs);
+                sdt.collect_paragraphs(SdtOwner::Body, &mut paragraphs);
                 paragraphs
                     .iter()
                     .any(|paragraph| paragraph.text().contains(text))
@@ -674,7 +676,7 @@ impl CT_Body {
                 BodyContent::Table(table) => table.collect_controls(&mut controls),
                 BodyContent::ContentControl(sdt) => {
                     controls.push(sdt);
-                    sdt.collect_controls(&mut controls);
+                    sdt.collect_controls(SdtOwner::Body, &mut controls);
                 }
                 BodyContent::RawXml(_) => {}
             }
@@ -738,7 +740,7 @@ impl CT_Body {
                             &capture_element(reader, e)?,
                             owner_bindings,
                         )?;
-                        if let Some(sdt) = CT_Sdt::from_raw(&raw, &prefixes) {
+                        if let Some(sdt) = CT_Sdt::from_body_raw(&raw, &prefixes) {
                             content.push(BodyContent::ContentControl(sdt));
                         } else {
                             content.push(BodyContent::RawXml(raw));

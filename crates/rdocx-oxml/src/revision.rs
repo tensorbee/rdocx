@@ -112,14 +112,15 @@ impl CT_Revision {
             buffer.clear();
         };
         let (kind, id, author, timestamp) = kind;
-        let (content, content_paragraph, nested_revisions) = if kind == RevisionKind::Insertion {
-            let (content, nested_revisions) = parse_content(&mut reader, kind, &prefixes)?;
-            let paragraph = parse_insertion_content(&raw_xml, &prefixes)?;
-            (content, Some(Box::new(paragraph)), nested_revisions)
-        } else {
-            let (content, nested_revisions) = parse_content(&mut reader, kind, &prefixes)?;
-            (content, None, nested_revisions)
-        };
+        let (content, content_paragraph, nested_revisions) =
+            if matches!(kind, RevisionKind::Insertion | RevisionKind::MoveTo) {
+                let (content, nested_revisions) = parse_content(&mut reader, kind, &prefixes)?;
+                let paragraph = parse_accepted_revision_content(&raw_xml, &prefixes)?;
+                (content, Some(Box::new(paragraph)), nested_revisions)
+            } else {
+                let (content, nested_revisions) = parse_content(&mut reader, kind, &prefixes)?;
+                (content, None, nested_revisions)
+            };
         Ok(Self {
             kind,
             id,
@@ -462,7 +463,10 @@ fn collect_revision<'a>(revision: &'a CT_Revision, revisions: &mut Vec<&'a CT_Re
     }
 }
 
-fn parse_insertion_content(raw_xml: &[u8], word_prefixes: &[String]) -> crate::Result<CT_P> {
+fn parse_accepted_revision_content(
+    raw_xml: &[u8],
+    word_prefixes: &[String],
+) -> crate::Result<CT_P> {
     let mut reader = Reader::from_reader(raw_xml);
     reader.config_mut().trim_text(false);
     let mut buffer = Vec::new();
@@ -865,6 +869,29 @@ mod tests {
         assert_eq!(paragraph.text(), "beforelinked");
         assert_eq!(paragraph.hyperlinks.len(), 1);
         assert_eq!(paragraph.hyperlinks[0].rel_id.as_deref(), Some("rId9"));
+    }
+
+    #[test]
+    fn accepted_content_revisions_retain_inline_content_controls() {
+        for kind in ["ins", "moveTo"] {
+            let raw = format!(
+                r#"<w:{kind} xmlns:w="{W_NS}" w:id="7" w:author="Ada"><w:r><w:t>before</w:t></w:r><w:sdt><w:sdtContent><w:r><w:t>control</w:t></w:r></w:sdtContent></w:sdt></w:{kind}>"#
+            )
+            .into_bytes();
+            let revision = CT_Revision::from_raw(raw, &["w".to_owned()]).expect("revision parses");
+            let paragraph = revision
+                .content_paragraph()
+                .expect("accepted revision exposes paragraph content");
+
+            assert_eq!(paragraph.text(), "beforecontrol");
+            assert_eq!(paragraph.content_controls.len(), 1);
+            let crate::content_control::SdtContent::Run(run) =
+                &paragraph.content_controls[0].3.content[0]
+            else {
+                panic!("expected controlled run");
+            };
+            assert_eq!(run.text(), "control");
+        }
     }
 
     #[test]

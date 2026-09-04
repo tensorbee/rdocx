@@ -227,6 +227,13 @@ mutation for a larger value. `Document::set_list_level` can redefine an
 existing level without rebuilding the document. A rejected redefinition is
 side-effect free.
 
+`Document::rebuild_toc()` is an additive pre-1.0 native Rust operation. It
+updates only supported existing main-story TOC fields with deterministic
+bundled-font page targets and returns `TocRebuildReport` with entry, newly
+allocated bookmark, and retained-field diagnostic counts. A document without
+a TOC is unchanged and returns zero counts. Python, WASM, and CLI surfaces do
+not gain this operation or a parallel report type.
+
 The native facade re-exports the concrete OfficeMath tree from `rdocx-oxml`.
 `Paragraph::equations`, `Paragraph::equation`, and their read-only equivalents
 borrow inline and display equations in source order. Mutable paragraphs add
