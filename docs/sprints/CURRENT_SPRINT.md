@@ -30,7 +30,7 @@ access only inside modern OOXML packages.
 | F-ID | Title | Size | Status | Owner |
 |------|-------|------|--------|-------|
 | F-236 | Embedded object and macro inventory | L | in-progress | codex |
-| F-237 | Forms, glossary, and building blocks | L | pending | - |
+| F-237 | Forms, glossary, and building blocks | L | in-progress | codex |
 
 ## Sequencing note
 
