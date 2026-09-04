@@ -1,63 +1,59 @@
-# Current Sprint, S65
+# Current Sprint, S66
 
 **Milestone**: M22 Word depth.
 
-**Goal**: author, convert, lay out, and render modern Word equations. The typed
-OfficeMath model preserves unsupported siblings and remains independent of
-legacy Equation Editor objects, while supported expressions share the existing
-font, layout, PDF, and facade boundaries.
+**Goal**: update the field-driven structures that real reports depend on.
+Extended evaluation must preserve unavailable instructions and intentional
+cached results, while TOC rebuild uses headings, styles, entries, bookmarks,
+and final page numbers without replacing unrelated field formatting.
 
 ## Spec references
 
-- `docs/hld/02-scope-and-non-goals.md`, for the modern OOXML boundary and the
-  permanent exclusion of legacy document-format compatibility.
-- `docs/hld/03-architecture.md`, for WordprocessingML grammar ownership, the
-  single document facade, dependency direction, and shared layout projection.
+- `docs/hld/03-architecture.md`, for recursive field grammar, pure facade
+  evaluation, story traversal, bookmark ownership, cache updates, and the
+  separation between Word field semantics and format-neutral page targets.
 - `docs/hld/04-opc-and-packaging.md`, for namespace-aware parsing,
-  schema-ordered serialization, and verbatim preservation of unmodelled XML.
-- `docs/hld/08-rendering-spec.md`, for the shared font, page-frame, PDF, and
-  raster boundaries used to measure equation baselines and glyph geometry.
-- `docs/hld/10-bindings-spec.md`, for additive native Word facade rules and the
-  requirement that Python, WASM, and CLI exposure remain explicit.
-- `docs/hld/12-testing-strategy.md`, for round-trip, golden, differential,
-  deterministic-font, and pinned external-oracle evidence.
-- `docs/hld/14-development-backlog.md`, for the F-228 through F-230 contracts,
-  dependency order, acceptance gates, and the M22 completion boundary.
+  schema-ordered mutation, fail-closed owner identity, and verbatim retention
+  of unmodelled field and paragraph XML.
+- `docs/hld/08-rendering-spec.md`, for displayed page numbers, bookmark target
+  resolution, field substitution after pagination, and exact invalidation of
+  cached field-bearing pages.
+- `docs/hld/10-bindings-spec.md`, for the additive native Word facade boundary
+  and explicit decisions about Python, WASM, and CLI exposure.
+- `docs/hld/12-testing-strategy.md`, for the pinned Word 16.104 field matrix,
+  source-built fixtures, deterministic pagination evidence, and external
+  differential rules.
+- `docs/hld/14-development-backlog.md`, for the F-231 and F-232 contracts,
+  their dependency chain, acceptance gates, and the M22 completion boundary.
 
 ## The wave
 
 | F-ID | Title | Size | Status | Owner |
 |------|-------|------|--------|-------|
-| F-228 | OfficeMath model and authoring | L | done | - |
-| F-229 | OfficeMath layout and PDF rendering | M | done | - |
-| F-230 | MathML and LaTeX conversion | M | done | - |
+| F-231 | Extended field evaluation | L | done | - |
+| F-232 | Dynamic table of contents rebuild | L | done | - |
 
 ## Sequencing note
 
 Rows are listed in dependency order, not F-ID order.
 
-F-228 establishes the typed, schema-ordered OfficeMath model and must complete
-before either consumer begins. F-229 and F-230 both depend only on F-228, so
-layout and rendering can proceed independently from conversion once that model
-is reviewed and integrated. Their combined sprint review proves that authoring,
-conversion, layout, and rendering use one normalized equation structure without
-weakening unsupported-sibling preservation.
+F-231 must complete first because F-232 depends on its TOC and TC field
+semantics as well as the existing bookmark, update-policy, and pagination
+foundations. The reviewed F-231 result then becomes the single evaluation
+boundary used by TOC discovery, entry construction, and final page-number
+substitution in F-232.
 
 ## Definition of done for this sprint
 
-- The source-built equation corpus parses, mutates, saves, and reopens typed
-  runs, fractions, scripts, radicals, matrices, limits, n-ary operators,
-  delimiters, accents, and equation properties in schema order.
-- Supported OfficeMath content remains editable while unsupported sibling XML
-  is preserved verbatim, and legacy Equation Editor objects remain outside the
-  typed model.
-- Supported equations use the shared deterministic font and page-frame path for
-  baseline, stretch, delimiter, and operator sizing.
-- Equation baselines and glyph geometry match the pinned Word PDF oracle within
-  an explicit calibrated tolerance and a mutation-sensitive golden gate.
-- Supported source-built expressions preserve their normalized expression tree
-  through both MathML and LaTeX import and export.
-- Conversion loss is reported through stable diagnostics rather than silently
-  substituting unsupported constructs.
+- TOC, TC, formula, mail-merge control, and barcode fields evaluate to the
+  pinned Word results across supported story locations and formatting forms.
+- Unavailable or unsupported instructions retain their original instruction
+  text and cached display, with stable diagnostics instead of guessed values.
+- An existing TOC rebuilds from headings, custom styles, outline levels, TC
+  entries, bookmarks, and final displayed page numbers.
+- Heading, style, and TC mutations produce the same entries, links, levels,
+  and page numbers as the pinned Word update.
+- TOC rebuild preserves unrelated field formatting, surrounding unmodelled
+  XML, and package content through save and reopen.
 - Full verification passes with every deterministic hash explained, every
   package archive below 10 MiB, and the bounded sprint review clean.

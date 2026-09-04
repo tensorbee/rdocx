@@ -51,7 +51,11 @@ pub use document::{
 };
 pub use epub::{EpubDiagnostic, EpubWriteResult};
 pub use error::{Error, Result};
-pub use field::{FieldDateTime, FieldEvaluation, FieldEvaluationContext, FieldOutcome};
+pub use field::{
+    BarcodeCaseStyle, BarcodeField, BarcodeKind, BarcodePointOfSaleStyle, FieldDateTime,
+    FieldEvaluation, FieldEvaluationContext, FieldOutcome, MailMergeControl, TcField,
+    TocEntrySelection, TocField, TocRebuildReport,
+};
 pub use html::{HtmlDiagnostic, HtmlReadResult};
 pub use math::{
     MathConversionDiagnostic, MathConversionResult, equation_from_latex, equation_from_mathml,

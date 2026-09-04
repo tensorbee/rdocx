@@ -309,6 +309,48 @@ pub enum SdtContent {
     RawXml(Vec<u8>),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SdtOwner {
+    Standalone,
+    Body,
+    Table,
+    Row,
+    Cell,
+    Inline,
+}
+
+impl SdtOwner {
+    fn owns(self, local: &[u8]) -> bool {
+        match self {
+            Self::Standalone => matches!(local, b"p" | b"tbl" | b"tr" | b"tc" | b"r"),
+            Self::Body | Self::Cell => matches!(local, b"p" | b"tbl"),
+            Self::Table => local == b"tr",
+            Self::Row => local == b"tc",
+            Self::Inline => local == b"r",
+        }
+    }
+
+    fn owns_content(self, content: &SdtContent) -> bool {
+        matches!(content, SdtContent::ContentControl(_))
+            || matches!(
+                (self, content),
+                (
+                    Self::Standalone,
+                    SdtContent::Paragraph(_)
+                        | SdtContent::Table(_)
+                        | SdtContent::Row(_)
+                        | SdtContent::Cell(_)
+                        | SdtContent::Run(_)
+                ) | (
+                    Self::Body | Self::Cell,
+                    SdtContent::Paragraph(_) | SdtContent::Table(_)
+                ) | (Self::Table, SdtContent::Row(_))
+                    | (Self::Row, SdtContent::Cell(_))
+                    | (Self::Inline, SdtContent::Run(_))
+            )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum RootSlot {
     Properties,
@@ -325,22 +367,54 @@ pub struct CT_Sdt {
     extra_attributes: Vec<(String, String)>,
     content_attributes: Vec<(String, String)>,
     slots: Vec<RootSlot>,
+    word_prefixes: Vec<String>,
 }
 
 impl CT_Sdt {
-    /// Parse a content control at the reader's current `w:sdt` start.
-    pub fn from_xml(reader: &mut Reader<&[u8]>, start: &BytesStart<'_>) -> Result<Self> {
-        Self::from_xml_with_prefixes(reader, start, &["w".to_owned()])
+    /// Return revision wrappers at their direct content boundaries.
+    #[doc(hidden)]
+    pub fn revisions(&self) -> &[(usize, CT_Revision)] {
+        &self.revisions
     }
 
-    pub(crate) fn from_raw(raw: &[u8], inherited: &[String]) -> Option<Self> {
+    pub(crate) fn word_prefixes(&self) -> &[String] {
+        &self.word_prefixes
+    }
+
+    /// Parse a content control at the reader's current `w:sdt` start.
+    pub fn from_xml(reader: &mut Reader<&[u8]>, start: &BytesStart<'_>) -> Result<Self> {
+        Self::from_xml_with_prefixes(reader, start, &["w".to_owned()], SdtOwner::Standalone)
+    }
+
+    pub(crate) fn from_body_raw(raw: &[u8], inherited: &[String]) -> Option<Self> {
+        Self::from_raw_with_context(raw, inherited, SdtOwner::Body)
+    }
+
+    pub(crate) fn from_table_raw(raw: &[u8], inherited: &[String]) -> Option<Self> {
+        Self::from_raw_with_context(raw, inherited, SdtOwner::Table)
+    }
+
+    pub(crate) fn from_row_raw(raw: &[u8], inherited: &[String]) -> Option<Self> {
+        Self::from_raw_with_context(raw, inherited, SdtOwner::Row)
+    }
+
+    pub(crate) fn from_cell_raw(raw: &[u8], inherited: &[String]) -> Option<Self> {
+        Self::from_raw_with_context(raw, inherited, SdtOwner::Cell)
+    }
+
+    pub(crate) fn from_inline_raw(raw: &[u8], inherited: &[String]) -> Option<Self> {
+        Self::from_raw_with_context(raw, inherited, SdtOwner::Inline)
+    }
+
+    fn from_raw_with_context(raw: &[u8], inherited: &[String], owner: SdtOwner) -> Option<Self> {
         let mut reader = Reader::from_reader(raw);
         reader.config_mut().trim_text(false);
         let mut buffer = Vec::new();
         loop {
             match reader.read_event_into(&mut buffer) {
                 Ok(Event::Start(start)) if matches_local_name(start.name().as_ref(), b"sdt") => {
-                    return Self::from_xml_with_prefixes(&mut reader, &start, inherited).ok();
+                    return Self::from_xml_with_prefixes(&mut reader, &start, inherited, owner)
+                        .ok();
                 }
                 Ok(Event::Eof) | Err(_) => return None,
                 Ok(_) => {}
@@ -353,6 +427,7 @@ impl CT_Sdt {
         reader: &mut Reader<&[u8]>,
         start: &BytesStart<'_>,
         inherited: &[String],
+        owner: SdtOwner,
     ) -> Result<Self> {
         let prefixes = word_prefixes_at(start, inherited)?;
         let mut sdt = Self {
@@ -362,6 +437,7 @@ impl CT_Sdt {
             extra_attributes: capture_attributes(start, &prefixes, &[])?,
             content_attributes: Vec::new(),
             slots: Vec::new(),
+            word_prefixes: prefixes.clone(),
         };
         let mut buffer = Vec::new();
         loop {
@@ -384,7 +460,8 @@ impl CT_Sdt {
                             .any(|slot| matches!(slot, RootSlot::Content))
                     {
                         sdt.content_attributes = capture_attributes(&child, &child_prefixes, &[])?;
-                        sdt.content = parse_content(reader, &child_prefixes, &mut sdt.revisions)?;
+                        sdt.content =
+                            parse_content(reader, &child_prefixes, &mut sdt.revisions, owner)?;
                         sdt.slots.push(RootSlot::Content);
                     } else {
                         sdt.slots
@@ -478,8 +555,12 @@ impl CT_Sdt {
         Ok(())
     }
 
-    pub(crate) fn collect_controls<'a>(&'a self, controls: &mut Vec<&'a CT_Sdt>) {
-        for child in &self.content {
+    pub(crate) fn collect_controls<'a>(&'a self, owner: SdtOwner, controls: &mut Vec<&'a CT_Sdt>) {
+        for child in self
+            .content
+            .iter()
+            .filter(|child| owner.owns_content(child))
+        {
             match child {
                 SdtContent::Paragraph(paragraph) => paragraph.collect_controls(controls),
                 SdtContent::Table(table) => table.collect_controls(controls),
@@ -488,60 +569,84 @@ impl CT_Sdt {
                 SdtContent::Run(_) | SdtContent::RawXml(_) => {}
                 SdtContent::ContentControl(sdt) => {
                     controls.push(sdt);
-                    sdt.collect_controls(controls);
+                    sdt.collect_controls(owner, controls);
                 }
             }
         }
     }
 
-    pub(crate) fn collect_paragraphs<'a>(&'a self, paragraphs: &mut Vec<&'a CT_P>) {
-        for child in &self.content {
+    pub(crate) fn collect_paragraphs<'a>(
+        &'a self,
+        owner: SdtOwner,
+        paragraphs: &mut Vec<&'a CT_P>,
+    ) {
+        for child in self
+            .content
+            .iter()
+            .filter(|child| owner.owns_content(child))
+        {
             match child {
                 SdtContent::Paragraph(paragraph) => paragraphs.push(paragraph),
                 SdtContent::Table(table) => table.collect_paragraphs(paragraphs),
                 SdtContent::Row(row) => row.collect_paragraphs(paragraphs),
                 SdtContent::Cell(cell) => cell.collect_paragraphs(paragraphs),
-                SdtContent::ContentControl(sdt) => sdt.collect_paragraphs(paragraphs),
+                SdtContent::ContentControl(sdt) => sdt.collect_paragraphs(owner, paragraphs),
                 _ => {}
             }
         }
     }
 
-    pub(crate) fn collect_tables<'a>(&'a self, tables: &mut Vec<&'a CT_Tbl>) {
-        for child in &self.content {
+    pub(crate) fn collect_tables<'a>(&'a self, owner: SdtOwner, tables: &mut Vec<&'a CT_Tbl>) {
+        for child in self
+            .content
+            .iter()
+            .filter(|child| owner.owns_content(child))
+        {
             match child {
                 SdtContent::Table(table) => tables.push(table),
                 SdtContent::Cell(cell) => cell.collect_tables(tables),
-                SdtContent::ContentControl(sdt) => sdt.collect_tables(tables),
+                SdtContent::ContentControl(sdt) => sdt.collect_tables(owner, tables),
                 _ => {}
             }
         }
     }
 
-    pub(crate) fn collect_rows<'a>(&'a self, rows: &mut Vec<&'a CT_Row>) {
-        for child in &self.content {
+    pub(crate) fn collect_rows<'a>(&'a self, owner: SdtOwner, rows: &mut Vec<&'a CT_Row>) {
+        for child in self
+            .content
+            .iter()
+            .filter(|child| owner.owns_content(child))
+        {
             match child {
                 SdtContent::Row(row) => rows.push(row),
                 SdtContent::Table(table) => table.collect_rows(rows),
-                SdtContent::ContentControl(sdt) => sdt.collect_rows(rows),
+                SdtContent::ContentControl(sdt) => sdt.collect_rows(owner, rows),
                 _ => {}
             }
         }
     }
 
-    pub(crate) fn collect_cells<'a>(&'a self, cells: &mut Vec<&'a CT_Tc>) {
-        for child in &self.content {
+    pub(crate) fn collect_cells<'a>(&'a self, owner: SdtOwner, cells: &mut Vec<&'a CT_Tc>) {
+        for child in self
+            .content
+            .iter()
+            .filter(|child| owner.owns_content(child))
+        {
             match child {
                 SdtContent::Cell(cell) => cells.push(cell),
                 SdtContent::Row(row) => row.collect_cells(cells),
-                SdtContent::ContentControl(sdt) => sdt.collect_cells(cells),
+                SdtContent::ContentControl(sdt) => sdt.collect_cells(owner, cells),
                 _ => {}
             }
         }
     }
 
     pub(crate) fn collect_runs<'a>(&'a self, runs: &mut Vec<&'a CT_R>) {
-        for child in &self.content {
+        for child in self
+            .content
+            .iter()
+            .filter(|child| SdtOwner::Inline.owns_content(child))
+        {
             match child {
                 SdtContent::Run(run) => runs.push(run),
                 SdtContent::Paragraph(paragraph) => paragraph.collect_runs(runs),
@@ -556,6 +661,7 @@ fn parse_content(
     reader: &mut Reader<&[u8]>,
     inherited: &[String],
     revisions: &mut Vec<(usize, CT_Revision)>,
+    owner: SdtOwner,
 ) -> Result<Vec<SdtContent>> {
     let mut content = Vec::new();
     let mut buffer = Vec::new();
@@ -563,7 +669,18 @@ fn parse_content(
         match reader.read_event_into(&mut buffer) {
             Ok(Event::Start(child)) => {
                 let prefixes = word_prefixes_at(&child, inherited)?;
-                if is_word_element(child.name().as_ref(), b"p", &prefixes) {
+                let owned_word_child = [
+                    b"p".as_slice(),
+                    b"tbl".as_slice(),
+                    b"tr".as_slice(),
+                    b"tc".as_slice(),
+                    b"r".as_slice(),
+                ]
+                .into_iter()
+                .find(|local| is_word_element(child.name().as_ref(), local, &prefixes));
+                if owned_word_child.is_some_and(|local| !owner.owns(local)) {
+                    content.push(SdtContent::RawXml(capture_element(reader, &child)?));
+                } else if is_word_element(child.name().as_ref(), b"p", &prefixes) {
                     content.push(SdtContent::Paragraph(CT_P::from_xml_with_prefixes(
                         reader, &prefixes,
                     )?));
@@ -600,7 +717,8 @@ fn parse_content(
                     )?));
                 } else if is_word_element(child.name().as_ref(), b"sdt", &prefixes) {
                     let raw = capture_element(reader, &child)?;
-                    if let Some(sdt) = CT_Sdt::from_raw(&raw, &prefixes) {
+                    let parsed = CT_Sdt::from_raw_with_context(&raw, &prefixes, owner);
+                    if let Some(sdt) = parsed {
                         content.push(SdtContent::ContentControl(sdt));
                     } else {
                         content.push(SdtContent::RawXml(raw));
@@ -615,7 +733,18 @@ fn parse_content(
             }
             Ok(Event::Empty(child)) => {
                 let prefixes = word_prefixes_at(&child, inherited)?;
-                if is_word_element(child.name().as_ref(), b"p", &prefixes) {
+                let owned_word_child = [
+                    b"p".as_slice(),
+                    b"tbl".as_slice(),
+                    b"tr".as_slice(),
+                    b"tc".as_slice(),
+                    b"r".as_slice(),
+                ]
+                .into_iter()
+                .find(|local| is_word_element(child.name().as_ref(), local, &prefixes));
+                if owned_word_child.is_some_and(|local| !owner.owns(local)) {
+                    content.push(SdtContent::RawXml(capture_empty_element(&child)?));
+                } else if is_word_element(child.name().as_ref(), b"p", &prefixes) {
                     content.push(SdtContent::Paragraph(CT_P::new()));
                 } else if is_word_element(child.name().as_ref(), b"tbl", &prefixes) {
                     content.push(SdtContent::Table(CT_Tbl::new()));
@@ -825,6 +954,23 @@ mod tests {
         CT_Tbl::from_xml(&mut reader).expect("table parses")
     }
 
+    fn parse_standalone_control(xml: &str) -> CT_Sdt {
+        let mut reader = Reader::from_str(xml);
+        reader.config_mut().trim_text(false);
+        let mut buffer = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buffer) {
+                Ok(Event::Start(start)) if start.local_name().as_ref() == b"sdt" => {
+                    return CT_Sdt::from_xml(&mut reader, &start).expect("control parses");
+                }
+                Ok(Event::Eof) => panic!("control start is missing"),
+                Ok(_) => {}
+                Err(error) => panic!("control XML is valid: {error}"),
+            }
+            buffer.clear();
+        }
+    }
+
     #[test]
     fn sdt_properties_report_tag_alias_id_type_and_binding() {
         let document = parse_document(
@@ -944,6 +1090,112 @@ mod tests {
     }
 
     #[test]
+    fn block_control_parser_types_only_children_owned_at_its_placement() {
+        let body = CT_Sdt::from_body_raw(
+            br#"<w:sdt><w:sdtContent><w:p/><w:tbl/><w:tr data-case="body-row"/><w:tc data-case="body-cell"/></w:sdtContent></w:sdt>"#,
+            &["w".to_owned()],
+        )
+        .expect("body control parses");
+        assert!(matches!(body.content[0], SdtContent::Paragraph(_)));
+        assert!(matches!(body.content[1], SdtContent::Table(_)));
+        assert_eq!(
+            body.content[2],
+            SdtContent::RawXml(br#"<w:tr data-case="body-row"/>"#.to_vec())
+        );
+        assert_eq!(
+            body.content[3],
+            SdtContent::RawXml(br#"<w:tc data-case="body-cell"/>"#.to_vec())
+        );
+
+        let table = CT_Sdt::from_table_raw(
+            br#"<w:sdt><w:sdtContent><w:tr/><w:p data-case="table-paragraph"/><w:tbl data-case="table-table"/><w:tc data-case="table-cell"/></w:sdtContent></w:sdt>"#,
+            &["w".to_owned()],
+        )
+        .expect("table control parses");
+        assert!(matches!(table.content[0], SdtContent::Row(_)));
+        assert_eq!(
+            table.content[1],
+            SdtContent::RawXml(br#"<w:p data-case="table-paragraph"/>"#.to_vec())
+        );
+        assert_eq!(
+            table.content[2],
+            SdtContent::RawXml(br#"<w:tbl data-case="table-table"/>"#.to_vec())
+        );
+        assert_eq!(
+            table.content[3],
+            SdtContent::RawXml(br#"<w:tc data-case="table-cell"/>"#.to_vec())
+        );
+
+        let row = CT_Sdt::from_row_raw(
+            br#"<w:sdt><w:sdtContent><w:tc/><w:p data-case="row-paragraph"/><w:tbl data-case="row-table"/><w:tr data-case="row-row"/></w:sdtContent></w:sdt>"#,
+            &["w".to_owned()],
+        )
+        .expect("row control parses");
+        assert!(matches!(row.content[0], SdtContent::Cell(_)));
+        assert_eq!(
+            row.content[1],
+            SdtContent::RawXml(br#"<w:p data-case="row-paragraph"/>"#.to_vec())
+        );
+        assert_eq!(
+            row.content[2],
+            SdtContent::RawXml(br#"<w:tbl data-case="row-table"/>"#.to_vec())
+        );
+        assert_eq!(
+            row.content[3],
+            SdtContent::RawXml(br#"<w:tr data-case="row-row"/>"#.to_vec())
+        );
+
+        let cell = CT_Sdt::from_cell_raw(
+            br#"<w:sdt><w:sdtContent><w:p/><w:tbl/><w:tr data-case="cell-row"/><w:tc data-case="cell-cell"/></w:sdtContent></w:sdt>"#,
+            &["w".to_owned()],
+        )
+        .expect("cell control parses");
+        assert!(matches!(cell.content[0], SdtContent::Paragraph(_)));
+        assert!(matches!(cell.content[1], SdtContent::Table(_)));
+        assert_eq!(
+            cell.content[2],
+            SdtContent::RawXml(br#"<w:tr data-case="cell-row"/>"#.to_vec())
+        );
+        assert_eq!(
+            cell.content[3],
+            SdtContent::RawXml(br#"<w:tc data-case="cell-cell"/>"#.to_vec())
+        );
+    }
+
+    #[test]
+    fn public_standalone_control_parser_keeps_the_union_child_contract() {
+        let cases = [
+            ("paragraph", "<w:p><w:r><w:t>paragraph</w:t></w:r></w:p>"),
+            ("table", "<w:tbl><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>"),
+            ("row", "<w:tr><w:tc><w:p/></w:tc></w:tr>"),
+            ("cell", "<w:tc><w:p/></w:tc>"),
+            ("run", "<w:r><w:t>run</w:t></w:r>"),
+        ];
+        for (label, child) in cases {
+            let xml =
+                format!(r#"<w:sdt xmlns:w="{W_NS}"><w:sdtContent>{child}</w:sdtContent></w:sdt>"#);
+            let control = parse_standalone_control(&xml);
+            let modeled = matches!(
+                (label, &control.content[0]),
+                ("paragraph", SdtContent::Paragraph(_))
+                    | ("table", SdtContent::Table(_))
+                    | ("row", SdtContent::Row(_))
+                    | ("cell", SdtContent::Cell(_))
+                    | ("run", SdtContent::Run(_))
+            );
+            assert!(modeled, "standalone {label} child remains modeled");
+
+            let mut writer = Writer::new(Vec::new());
+            control.to_xml(&mut writer).expect("control serializes");
+            assert_eq!(
+                String::from_utf8(writer.into_inner()).expect("UTF-8"),
+                xml,
+                "standalone {label} control round-trips exactly"
+            );
+        }
+    }
+
+    #[test]
     fn table_traversal_sees_rows_cells_and_paragraphs_inside_controls_once() {
         let table = parse_table(
             r#"<w:sdt><w:sdtContent><w:tr><w:sdt><w:sdtContent><w:tc><w:sdt><w:sdtContent><w:p><w:sdt><w:sdtContent><w:r><w:t>once</w:t></w:r></w:sdtContent></w:sdt></w:p></w:sdtContent></w:sdt></w:tc></w:sdtContent></w:sdt></w:tr></w:sdtContent></w:sdt>"#,
@@ -961,15 +1213,10 @@ mod tests {
 
     #[test]
     fn content_control_cell_preserves_child_binding_declared_on_cell() {
-        let document = parse_document(
-            r#"<w:sdt><w:sdtContent><w:tc xmlns:ext="urn:producer"><w:tcPr><ext:property ext:value="kept"/></w:tcPr><w:p/></w:tc></w:sdtContent></w:sdt>"#,
+        let table = parse_table(
+            r#"<w:tr><w:sdt><w:sdtContent><w:tc xmlns:ext="urn:producer"><w:tcPr><ext:property ext:value="kept"/></w:tcPr><w:p/></w:tc></w:sdtContent></w:sdt></w:tr>"#,
         );
-        let BodyContent::ContentControl(control) = &document.body.content[0] else {
-            panic!("content control parses");
-        };
-        let SdtContent::Cell(cell) = &control.content[0] else {
-            panic!("content-control cell parses");
-        };
+        let cell = table.rows()[0].cells()[0];
         let properties = cell.properties.as_ref().expect("cell properties parse");
         assert_eq!(
             properties.extra_xml,
@@ -979,7 +1226,9 @@ mod tests {
             )]
         );
 
-        let saved = String::from_utf8(document.to_xml().expect("serializes")).expect("UTF-8");
+        let mut writer = Writer::new(Vec::new());
+        table.to_xml(&mut writer).expect("serializes");
+        let saved = String::from_utf8(writer.into_inner()).expect("UTF-8");
         assert!(
             saved.contains(r#"<ext:property ext:value="kept" xmlns:ext="urn:producer"/>"#),
             "content-control cell child keeps its cell-local namespace binding: {saved}"

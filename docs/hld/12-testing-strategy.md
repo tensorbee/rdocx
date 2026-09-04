@@ -267,6 +267,120 @@ inputs, formatting pictures, and stable cached-display fallbacks. The oracle
 is test metadata only. It is not a runtime dependency and adds no binary
 fixture.
 
+The extended Word field matrix uses the same pinned Word build and environment.
+Its source-built `F-231-readable-field-matrix-v1` input covers formula, TOC,
+TC, mail-merge control, display barcode, and merge barcode outcomes in exact
+document order. Focused tests cover formula precedence, nested operands,
+postfix percentages, format pictures, resource bounds, malformed input, stable
+decimal normalization, story-isolated merge state, bare and explicitly
+selected TOC forms, normalized TOC separators, sequence-prefixed page numbers,
+and style lists, validated TC selections, recursive positional
+and switch operands, shared quoted escapes, typed barcode options, the `CASE`
+alias, and every barcode value, height, scale, rotation, and colour boundary.
+Equivalent compact and spaced formulas share the 512-token parser limit. The
+differential matrix includes supported outcomes and exact ordered fallback
+diagnostics. The cache matrix covers resolved text, every structured outcome,
+pagination deferral, unavailable explicit context, and unsupported
+instructions. Every non-text or fallback result retains the original
+instruction and stored display. Fallbacks also retain a stable diagnostic.
+
+The dynamic TOC differential uses the same pinned Word build and locale. Its
+source-built `F-232-dynamic-toc-rebuild-v1` input combines built-in heading,
+custom-style, direct-outline, and selected TC sources. It compares exact entry
+order, levels, internal links, and displayed page values. Focused regressions
+cover final deterministic page targets for table sources, collision-free
+bookmark reuse and allocation, sequence and separator behavior, multiple TOCs,
+unsupported valid instructions, malformed ownership, duplicate bookmarks,
+foreign ancestor and indirect-marker rejection, nested TOC ranges, lazy
+maximum-id allocation, collision-safe owned placeholder substitution, and the
+no-TOC no-op. Opaque-wrapper cases cover both complex and simple Word-shaped
+fields. Nested full-paragraph bookmarks prove repeatable first-marker reuse,
+mixed-case TOC and SEQ identifiers prove shared normalization, and one rebuild
+binds two exact entry targets to distinct final pages. Same-namespace malformed
+control and revision wrappers remain opaque. Accepted insertion coverage binds
+inserted SEQ and TC fields plus inserted-only and mixed heading text to exact
+entries. The maximum parsed outline value stays inside checked conversion, and
+a control before a partial bookmark prevents whole-paragraph reuse. The
+preservation case keeps alternate-prefix field scaffolding and neighbouring raw
+XML while proving an untouched custom part is byte-identical after save and
+reopen. Failure cases compare the live document before and after the rejected
+rebuild.
+Block-owner coverage keeps a direct body `sdtContent` opaque. It also places
+invalid control paragraphs before a valid TOC to prove the byte scanner and
+typed projection retain identical paragraph coordinates, and keeps invalidly
+owned complex and simple TOCs opaque without diagnostics or mutation. Public
+parser coverage round-trips standalone controls with each paragraph, table,
+row, cell, and run child from the context-free union. Malformed shell coverage
+uses an invalid modeled control id and a missing required property value at
+block and inline placements. Nested complex and simple fields plus bookmarks
+remain byte-identical and cannot shift a later valid rebuild. Revision coverage
+rejects field ownership below the 32-wrapper parser ceiling and counts simple
+TOCs inside accepted insertions and move-to revisions. Wrapped instruction
+cases cover insertion, hyperlink, and content-control owners. Same-boundary
+SEQ and TC cases exercise both control and accepted-revision orders. A bookmark
+whose end precedes its start at one run boundary proves raw-position range
+validation and atomic rejection. Content-control ownership tests keep a second
+`sdtContent` child opaque and project accepted revisions inside the first
+content child. Revision-depth coverage includes a property-change wrapper at
+the overflow boundary. Alias-prefixed wrapped instruction runs retain the
+namespace binding inherited from their wrapper. A revision-only hyperlink
+before a positioned control proves raw-owner ordering. Inline-control text and
+accepted revisions participate in layout, with exact later-page TOC targets
+that move when that projection is omitted. Namespace injection covers a quoted
+greater-than sign and a declaration repeated locally on the run. A terminal
+hyperlink revision precedes a following same-boundary control. Same-paragraph
+bookmark scope retains only the field between its exact markers. Old-result
+exclusion keeps sources before the begin marker and after the end marker while
+rejecting sources on both boundary interiors. Accepted insertion and move-to
+coverage composes each revision with a nested content control, and the layout
+case makes that composition move a later exact page target. Boundary tests put
+selected SEQ and TC fields, the separator, and the end marker inside accepted
+revision and content-control owners. They require the total nested position to
+retain sources before the result while excluding sources inside it. Tracked
+layout tests compose revision and inline control wrappers in both orders and
+require exact visible text plus one paragraph change bar. Outer-coordinate
+cases place revision and control owners after preserved raw paragraph children
+and put a TOC in a terminal hyperlink revision. A hyperlink-retained simple
+field before the TOC proves raw child shapes do not advance typed run
+boundaries. The tracked control case requires a direct run-property revision
+to render exact text and one paragraph change bar. Comment and processing
+instruction prefixes exercise retained raw-slot accounting. Missing and empty
+simple-field instructions prove raw fields do not advance modeled boundaries.
+A selected TC inside a hyperlink revision immediately before the direct end
+run remains owned. A styled end-boundary paragraph proves stale cached text is
+removed from saved and reopened XML while its structural prefix remains valid,
+and excluded from both the generated heading title and its bookmark target.
+Begin and end boundary headings with pre-existing whole-paragraph bookmarks
+prove generated hyperlinks and optional PAGEREF fields instead target exact
+surviving-fragment bookmarks with no dangling generated reference. The same
+cases prove every original crossing bookmark is repaired around that fragment
+for hyperlink plus PAGEREF, hyperlink-only, and target-free entries. Partial
+same-paragraph and cross-paragraph ranges exercise the same repair rule when
+exactly one marker is consumed. End markers wrapped by a hyperlink, accepted
+insertion, or inline content control keep heading text after the field inside
+the same wrapper. Each wrapper case asserts the exact generated entry,
+hyperlink and PAGEREF target, bookmark text range, and structurally valid XML.
+After save and reopen, each generated wrapper-local target remains a matched
+public bookmark, resolves through deterministic PAGEREF layout, and permits a
+second rebuild. Repaired original wrapper-local markers exercise the same
+reopen and repeat-rebuild contract under hyperlink plus PAGEREF, hyperlink-only,
+and target-free entry policies. Parser coverage proves accepted owner order,
+single projection of direct markers, and exclusion of foreign and malformed
+same-namespace wrappers.
+Adjacent bookmark-coordinate coverage asserts accepted public range direction
+and text for revision-local and control-local markers. Tracked layout keeps
+nested marker positions around deleted and accepted text, while TOC bookmark
+scope selects only the nested TC, SEQ, and heading sources inside its accepted
+half-open boundaries. A nested control with a local alternate Word prefix
+retains its markers after reopen. Complex-field collapse, comment reference
+insertion, and new bookmark mutation retain live REF and PAGEREF targets before
+reopen. Generated targets in table and block-control paragraphs appear through
+the public bookmark facade with the same recursive paragraph order used by TOC
+discovery and layout.
+An alias-prefixed self-closing paragraph-property element retains exact producer
+attributes. An end-marker content control retains modeled identity, binding,
+type, end properties, and ordered raw property slots after save and reopen.
+
 The RTF reader differential records Microsoft Word 16.104 build
 16.104.25121423 as the oracle. Its checked input is source-encoded RTF that
 covers body order, run and paragraph formatting, tables, list overrides, PNG

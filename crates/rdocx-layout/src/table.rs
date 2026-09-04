@@ -1,7 +1,8 @@
 //! Table layout: column widths, cell content, merge handling.
 
+use rdocx_oxml::content_control::{CT_Sdt, SdtContent};
 use rdocx_oxml::styles::CT_Styles;
-use rdocx_oxml::table::{CT_Tbl, CT_TblBorders, CT_TblGrid, ST_VerticalJc, VMerge};
+use rdocx_oxml::table::{CT_Row, CT_Tbl, CT_TblBorders, CT_TblGrid, CT_Tc, ST_VerticalJc, VMerge};
 
 use crate::WordStory;
 use crate::block::{
@@ -12,6 +13,94 @@ use crate::engine::SourceRegistry;
 use crate::input::{LayoutInput, MediaRegistry};
 use crate::style_resolver::NumberingState;
 use oxml_layout::{Color, Diagnostic, FontManager, Result, StructureId};
+
+const CONTROL_PATH_COMPONENT: usize = usize::MAX;
+
+pub(crate) fn layout_table_rows<'a>(
+    table: &'a CT_Tbl,
+    path: &[usize],
+) -> Vec<(&'a CT_Row, Vec<usize>)> {
+    let mut rows = Vec::new();
+    for boundary in 0..=table.rows.len() {
+        for (control_index, (_, _, control)) in table
+            .content_controls
+            .iter()
+            .enumerate()
+            .filter(|(_, (position, _, _))| *position == boundary)
+        {
+            let mut control_path = path.to_vec();
+            control_path.extend([CONTROL_PATH_COMPONENT, boundary, control_index]);
+            collect_control_rows(control, &control_path, &mut rows);
+        }
+        if let Some(row) = table.rows.get(boundary) {
+            let mut row_path = path.to_vec();
+            row_path.push(boundary);
+            rows.push((row, row_path));
+        }
+    }
+    rows
+}
+
+fn collect_control_rows<'a>(
+    control: &'a CT_Sdt,
+    path: &[usize],
+    rows: &mut Vec<(&'a CT_Row, Vec<usize>)>,
+) {
+    for (content_index, content) in control.content.iter().enumerate() {
+        let mut content_path = path.to_vec();
+        content_path.push(content_index);
+        match content {
+            SdtContent::Row(row) => rows.push((row, content_path)),
+            SdtContent::ContentControl(control) => {
+                collect_control_rows(control, &content_path, rows)
+            }
+            _ => {}
+        }
+    }
+}
+
+pub(crate) fn layout_row_cells<'a>(
+    row: &'a CT_Row,
+    path: &[usize],
+) -> Vec<(&'a CT_Tc, Vec<usize>)> {
+    let mut cells = Vec::new();
+    for boundary in 0..=row.cells.len() {
+        for (control_index, (_, _, control)) in row
+            .content_controls
+            .iter()
+            .enumerate()
+            .filter(|(_, (position, _, _))| *position == boundary)
+        {
+            let mut control_path = path.to_vec();
+            control_path.extend([CONTROL_PATH_COMPONENT, boundary, control_index]);
+            collect_control_cells(control, &control_path, &mut cells);
+        }
+        if let Some(cell) = row.cells.get(boundary) {
+            let mut cell_path = path.to_vec();
+            cell_path.push(boundary);
+            cells.push((cell, cell_path));
+        }
+    }
+    cells
+}
+
+fn collect_control_cells<'a>(
+    control: &'a CT_Sdt,
+    path: &[usize],
+    cells: &mut Vec<(&'a CT_Tc, Vec<usize>)>,
+) {
+    for (content_index, content) in control.content.iter().enumerate() {
+        let mut content_path = path.to_vec();
+        content_path.push(content_index);
+        match content {
+            SdtContent::Cell(cell) => cells.push((cell, content_path)),
+            SdtContent::ContentControl(control) => {
+                collect_control_cells(control, &content_path, cells)
+            }
+            _ => {}
+        }
+    }
+}
 
 /// A laid-out table.
 #[derive(Debug, Clone)]
@@ -189,8 +278,9 @@ fn layout_table_inner(
     story: &WordStory,
     path: &[usize],
 ) -> Result<(TableBlock, TableSemantics)> {
+    let source_rows = layout_table_rows(tbl, path);
     // 1. Compute column widths
-    let col_widths = compute_column_widths(tbl.grid.as_ref(), available_width, tbl);
+    let col_widths = compute_column_widths(tbl.grid.as_ref(), available_width, tbl, path);
     let table_width: f64 = col_widths.iter().sum();
 
     // Table indent
@@ -246,13 +336,13 @@ fn layout_table_inner(
         .map(|t| t.to_pt())
         .unwrap_or(0.0);
 
-    let num_rows = tbl.rows.len();
+    let num_rows = source_rows.len();
     let mut header_row_indices = Vec::new();
     let mut rows = Vec::new();
     let mut row_semantics = Vec::new();
     let mut exact_rows = Vec::new();
 
-    for (row_idx, row) in tbl.rows.iter().enumerate() {
+    for (row_idx, (row, row_path)) in source_rows.iter().enumerate() {
         let is_header = row
             .properties
             .as_ref()
@@ -266,7 +356,8 @@ fn layout_table_inner(
         let mut cell_semantics = Vec::new();
         let mut col_index = 0usize;
 
-        for (cell_index, cell) in row.cells.iter().enumerate() {
+        let source_cells = layout_row_cells(row, row_path);
+        for (cell, cell_path) in &source_cells {
             let grid_span = cell
                 .properties
                 .as_ref()
@@ -333,9 +424,7 @@ fn layout_table_inner(
                     diagnostics,
                     sources,
                     story,
-                    path,
-                    row_idx,
-                    cell_index,
+                    cell_path,
                     style_cell.paragraph_properties.as_ref(),
                 )?
             };
@@ -503,7 +592,8 @@ fn layout_table_inner(
 fn compute_column_widths(
     grid: Option<&CT_TblGrid>,
     available_width: f64,
-    tbl: &CT_Tbl,
+    table: &CT_Tbl,
+    path: &[usize],
 ) -> Vec<f64> {
     match grid {
         Some(g) if !g.columns.is_empty() => {
@@ -523,14 +613,16 @@ fn compute_column_widths(
         }
         _ => {
             // No grid defined — infer column count from the first row
-            let num_cols = tbl
-                .rows
+            let num_cols = layout_table_rows(table, path)
                 .first()
-                .map(|r| {
-                    r.cells
+                .map(|(row, path)| {
+                    layout_row_cells(row, path)
                         .iter()
-                        .map(|c| {
-                            c.properties.as_ref().and_then(|p| p.grid_span).unwrap_or(1) as usize
+                        .map(|(cell, _)| {
+                            cell.properties
+                                .as_ref()
+                                .and_then(|p| p.grid_span)
+                                .unwrap_or(1) as usize
                         })
                         .sum::<usize>()
                 })
@@ -555,9 +647,7 @@ fn layout_cell_content(
     diagnostics: &mut Vec<Diagnostic>,
     sources: Option<&SourceRegistry>,
     story: &WordStory,
-    table_path: &[usize],
-    row_index: usize,
-    cell_index: usize,
+    cell_path: &[usize],
     table_style_ppr: Option<&rdocx_oxml::properties::CT_PPr>,
 ) -> Result<(Vec<CellBlock>, Vec<CellBlockSemantics>)> {
     use crate::engine;
@@ -566,8 +656,8 @@ fn layout_cell_content(
     let mut blocks = Vec::new();
     let mut semantics = Vec::new();
     for (content_index, item) in content.iter().enumerate() {
-        let mut source_path = table_path.to_vec();
-        source_path.extend([row_index, cell_index, content_index]);
+        let mut source_path = cell_path.to_vec();
+        source_path.push(content_index);
         match item {
             CellContent::Paragraph(para) => {
                 let source = sources.and_then(|sources| sources.id(story, &source_path));
@@ -608,10 +698,111 @@ fn layout_cell_content(
                 blocks.push(CellBlock::Table(nested));
                 semantics.push(CellBlockSemantics::Table(nested_semantics));
             }
-            CellContent::ContentControl(_) => {}
+            CellContent::ContentControl(control) => layout_control_cell_content(
+                control,
+                available_width,
+                styles,
+                input,
+                media,
+                fm,
+                num_state,
+                diagnostics,
+                sources,
+                story,
+                &source_path,
+                table_style_ppr,
+                &mut blocks,
+                &mut semantics,
+            )?,
         }
     }
     Ok((blocks, semantics))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_control_cell_content(
+    control: &CT_Sdt,
+    available_width: f64,
+    styles: &CT_Styles,
+    input: &LayoutInput,
+    media: &MediaRegistry,
+    fm: &mut FontManager,
+    num_state: &mut NumberingState,
+    diagnostics: &mut Vec<Diagnostic>,
+    sources: Option<&SourceRegistry>,
+    story: &WordStory,
+    path: &[usize],
+    table_style_ppr: Option<&rdocx_oxml::properties::CT_PPr>,
+    blocks: &mut Vec<CellBlock>,
+    semantics: &mut Vec<CellBlockSemantics>,
+) -> Result<()> {
+    use crate::engine;
+
+    for (content_index, content) in control.content.iter().enumerate() {
+        let mut source_path = path.to_vec();
+        source_path.push(content_index);
+        match content {
+            SdtContent::Paragraph(paragraph) => {
+                let source = sources.and_then(|sources| sources.id(story, &source_path));
+                let (block, reflow_direction) = engine::layout_paragraph_with_source_in_table(
+                    paragraph,
+                    available_width,
+                    styles,
+                    input,
+                    media,
+                    fm,
+                    num_state,
+                    diagnostics,
+                    source,
+                    table_style_ppr,
+                )?;
+                blocks.push(CellBlock::Paragraph(block));
+                semantics.push(CellBlockSemantics::Paragraph(ParagraphSemantics {
+                    source_node: source,
+                    structure_id: None,
+                    reflow_direction,
+                }));
+            }
+            SdtContent::Table(table) => {
+                let (nested, nested_semantics) = layout_table_inner(
+                    table,
+                    available_width,
+                    styles,
+                    input,
+                    media,
+                    fm,
+                    num_state,
+                    diagnostics,
+                    sources,
+                    story,
+                    &source_path,
+                )?;
+                blocks.push(CellBlock::Table(nested));
+                semantics.push(CellBlockSemantics::Table(nested_semantics));
+            }
+            SdtContent::ContentControl(control) => layout_control_cell_content(
+                control,
+                available_width,
+                styles,
+                input,
+                media,
+                fm,
+                num_state,
+                diagnostics,
+                sources,
+                story,
+                &source_path,
+                table_style_ppr,
+                blocks,
+                semantics,
+            )?,
+            SdtContent::Row(_)
+            | SdtContent::Cell(_)
+            | SdtContent::Run(_)
+            | SdtContent::RawXml(_) => {}
+        }
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -911,7 +1102,7 @@ mod tests {
 
         // 288pt total in a 468pt text column: the author asked for a narrow
         // table, so it must not be stretched to the margins.
-        let widths = compute_column_widths(Some(&grid), 468.0, &tbl);
+        let widths = compute_column_widths(Some(&grid), 468.0, &tbl, &[]);
 
         assert_eq!(widths.len(), 2);
         let total: f64 = widths.iter().sum();
@@ -934,7 +1125,7 @@ mod tests {
         };
 
         assert_eq!(
-            compute_column_widths(Some(&grid), 468.0, &table),
+            compute_column_widths(Some(&grid), 468.0, &table, &[]),
             vec![72.0, 144.0]
         );
     }
@@ -951,7 +1142,7 @@ mod tests {
         };
 
         // 720pt total will not fit a 468pt column, so scale it down.
-        let widths = compute_column_widths(Some(&grid), 468.0, &tbl);
+        let widths = compute_column_widths(Some(&grid), 468.0, &tbl, &[]);
 
         let total: f64 = widths.iter().sum();
         assert!((total - 468.0).abs() < 1.0, "got {total}");
@@ -962,7 +1153,7 @@ mod tests {
     #[test]
     fn column_widths_no_grid() {
         let tbl = CT_Tbl::new();
-        let widths = compute_column_widths(None, 468.0, &tbl);
+        let widths = compute_column_widths(None, 468.0, &tbl, &[]);
         assert_eq!(widths.len(), 1);
         assert!((widths[0] - 468.0).abs() < 0.01);
     }
@@ -978,7 +1169,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        let widths = compute_column_widths(Some(&grid), 468.0, &tbl);
+        let widths = compute_column_widths(Some(&grid), 468.0, &tbl, &[]);
         assert_eq!(widths.len(), 3);
         for w in &widths {
             assert!((w - 156.0).abs() < 0.01);
@@ -994,7 +1185,7 @@ mod tests {
         row.cells.push(CT_Tc::new());
         row.cells.push(CT_Tc::new());
         tbl.rows.push(row);
-        let widths = compute_column_widths(None, 300.0, &tbl);
+        let widths = compute_column_widths(None, 300.0, &tbl, &[]);
         assert_eq!(widths.len(), 3);
         for w in &widths {
             assert!((w - 100.0).abs() < 0.01);

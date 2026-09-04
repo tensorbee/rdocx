@@ -10,13 +10,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use rdocx::{
-    BodyContentRef, BodyItemRef, BreakKind, CellItemRef, CellRef, ChartData, ChartKind, Document,
-    FieldDateTime, FieldEvaluationContext, FieldOutcome, HyperlinkItemRef, HyperlinkRef, Length,
-    ParagraphItemRef, ParagraphRef, RasterFormat, RasterOptions, RasterOutput, RenderOptions,
-    RevisionView, RunItemRef, RunPosition, RunRange, RunRef, TableRef, UnsupportedXmlRef,
+    BarcodeField, BarcodeKind, BodyContentRef, BodyItemRef, BreakKind, CellItemRef, CellRef,
+    ChartData, ChartKind, Document, FieldDateTime, FieldEvaluationContext, FieldOutcome,
+    HyperlinkItemRef, HyperlinkRef, Length, MailMergeControl, ParagraphItemRef, ParagraphRef,
+    RasterFormat, RasterOptions, RasterOutput, RenderOptions, RevisionView, RunItemRef,
+    RunPosition, RunRange, RunRef, TableRef, TcField, TocEntrySelection, TocField,
+    TocRebuildReport, UnsupportedXmlRef,
 };
 use rdocx_oxml::CT_Document;
 use rdocx_oxml::document::{BodyContent, CT_Body};
+use rdocx_oxml::namespace::W_NS;
 use rdocx_oxml::text::CT_R;
 
 struct MeasuredAllocator;
@@ -924,6 +927,8 @@ const WORD_DENSE_FORM_ORACLE: &str = "Microsoft Word 16.104 build 16.104.2512142
 const WORD_FIELD_ORACLE_ENVIRONMENT: &str =
     "locale=en-US; calendar=Gregorian; decimal=.; grouping=,; timezone=UTC";
 const WORD_FIELD_ORACLE_INPUT: &str = "F-161-readable-field-matrix-v1";
+const EXTENDED_WORD_FIELD_ORACLE_INPUT: &str = "F-231-readable-field-matrix-v1";
+const DYNAMIC_TOC_WORD_ORACLE_INPUT: &str = "F-232-dynamic-toc-rebuild-v1";
 
 fn document_with_field_parts(
     document_xml: &str,
@@ -961,6 +966,54 @@ fn document_with_field_parts(
     let mut output = std::io::Cursor::new(Vec::new());
     package.write_to(&mut output).unwrap();
     Document::from_bytes(output.get_ref()).unwrap()
+}
+
+fn toc_entry_signatures(xml: &str) -> Vec<(String, String, Option<String>, Option<String>)> {
+    let document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+    document
+        .body
+        .content
+        .iter()
+        .filter_map(|content| {
+            let BodyContent::Paragraph(paragraph) = content else {
+                return None;
+            };
+            let style = paragraph
+                .properties
+                .as_ref()
+                .and_then(|properties| properties.style_id.as_deref())?;
+            style.starts_with("TOC").then(|| {
+                let mut display = paragraph.text();
+                let mut page_target = None;
+                for run in paragraph.runs() {
+                    for content in &run.content {
+                        if let rdocx_oxml::text::RunContent::Field(field) = content
+                            && field.instruction.name == "PAGEREF"
+                        {
+                            display.push_str(&field.cached_result);
+                            page_target =
+                                field.instruction.arguments.first().and_then(|argument| {
+                                    let rdocx_oxml::text::FieldArgument::Text(value) = argument
+                                    else {
+                                        return None;
+                                    };
+                                    Some(value.clone())
+                                });
+                        }
+                    }
+                }
+                (
+                    display,
+                    style.to_owned(),
+                    paragraph
+                        .hyperlinks
+                        .first()
+                        .and_then(|hyperlink| hyperlink.anchor.clone()),
+                    page_target,
+                )
+            })
+        })
+        .collect()
 }
 
 #[test]
@@ -1010,6 +1063,8 @@ fn every_supported_field_matches_the_pinned_word_result() {
         file_path: Some("/templates/report.docx".to_owned()),
         merge_fields: BTreeMap::from([("Name".to_owned(), "Grace".to_owned())]),
         included_text: BTreeMap::from([("chapter.docx".to_owned(), "Included chapter".to_owned())]),
+        merge_record_number: None,
+        merge_sequence_number: None,
     };
     let actual = document
         .evaluate_fields(&context)
@@ -1035,6 +1090,2301 @@ fn every_supported_field_matches_the_pinned_word_result() {
         FieldOutcome::DeferredPagination,
     ];
     assert_eq!(actual, expected, "{WORD_FIELD_ORACLE_INPUT}");
+}
+
+#[test]
+fn extended_field_families_match_the_pinned_word_result() {
+    assert_eq!(
+        WORD_FIELD_ORACLE,
+        "Microsoft Word 16.104 build 16.104.25121423"
+    );
+    assert_eq!(
+        WORD_FIELD_ORACLE_ENVIRONMENT,
+        "locale=en-US; calendar=Gregorian; decimal=.; grouping=,; timezone=UTC"
+    );
+    assert_eq!(
+        EXTENDED_WORD_FIELD_ORACLE_INPUT,
+        "F-231-readable-field-matrix-v1"
+    );
+
+    let body = r#"
+        <w:p><w:fldSimple w:instr="= 50% + 0.5"><w:r><w:t>stored formula</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="TOC \o &quot;1-3&quot; \h"><w:r><w:t>stored toc</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="TC &quot;Alpha&quot; \l 2"><w:r><w:t>stored tc</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="NEXT"><w:r><w:t>stored next</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="NEXTIF &quot;A&quot; = &quot;A&quot;"><w:r><w:t>stored nextif</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="SKIPIF &quot;A&quot; = &quot;A&quot;"><w:r><w:t>stored skipif</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="MERGEREC"><w:r><w:t>stored record</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="MERGESEQ"><w:r><w:t>stored sequence</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="DISPLAYBARCODE 0123456789012 EAN13 \x \p STD"><w:r><w:t>stored display barcode</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="MERGEBARCODE Code QR \q 3"><w:r><w:t>stored merge barcode</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="= 0.1 + 0.2"><w:r><w:t>stored decimal formula</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="TOC \o &quot;1-3&quot; \s chapter \d &quot;:&quot;"><w:r><w:t>stored sequenced toc</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="TOC \p &quot;ab&quot;"><w:r><w:t>stored invalid toc</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="TC &quot;Entry&quot; unexpected"><w:r><w:t>stored invalid tc</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="DISPLAYBARCODE value QR \s 9"><w:r><w:t>stored invalid barcode</w:t></w:r></w:fldSimple></w:p>
+    "#;
+    let document = document_with_field_parts(&wrap_word_body(body), None, None);
+    let context = FieldEvaluationContext {
+        merge_fields: BTreeMap::from([("Code".to_owned(), "https://example.test/42".to_owned())]),
+        merge_record_number: Some(10),
+        merge_sequence_number: Some(7),
+        ..Default::default()
+    };
+    assert_eq!(
+        document.evaluate_fields(&context).unwrap()[0].outcome,
+        FieldOutcome::Resolved("1".to_owned()),
+    );
+
+    let actual = document
+        .evaluate_fields(&context)
+        .unwrap()
+        .into_iter()
+        .map(|evaluation| evaluation.outcome)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual,
+        [
+            FieldOutcome::Resolved("1".to_owned()),
+            FieldOutcome::TableOfContents(TocField {
+                heading_levels: Some((1, 3)),
+                custom_styles: Vec::new(),
+                entries: TocEntrySelection::None,
+                sequence_identifier: None,
+                bookmark: None,
+                hyperlink: true,
+                use_outline_levels: false,
+                omit_page_number_levels: None,
+                page_number_separator: None,
+                entry_page_separator: None,
+            }),
+            FieldOutcome::TableOfContentsEntry(TcField {
+                entry: "Alpha".to_owned(),
+                level: 2,
+                table_identifier: None,
+                omit_page_number: false,
+            }),
+            FieldOutcome::MailMergeControl(MailMergeControl::NextRecord { record_number: 11 }),
+            FieldOutcome::MailMergeControl(MailMergeControl::NextRecordIf {
+                condition: true,
+                record_number: 12,
+            }),
+            FieldOutcome::MailMergeControl(MailMergeControl::SkipRecordIf {
+                condition: true,
+                record_number: 12,
+            }),
+            FieldOutcome::MailMergeControl(MailMergeControl::RecordNumber(12)),
+            FieldOutcome::MailMergeControl(MailMergeControl::SequenceNumber(7)),
+            FieldOutcome::Barcode(BarcodeField {
+                value: "0123456789012".to_owned(),
+                kind: BarcodeKind::Ean13,
+                height: None,
+                scale: None,
+                error_correction: None,
+                point_of_sale_style: Some(rdocx::BarcodePointOfSaleStyle::Standard),
+                case_style: None,
+                fix_check_digit: true,
+                rotation: None,
+                foreground_color: None,
+                background_color: None,
+                display_text: false,
+                add_start_stop: false,
+            }),
+            FieldOutcome::Barcode(BarcodeField {
+                value: "https://example.test/42".to_owned(),
+                kind: BarcodeKind::Qr,
+                height: None,
+                scale: None,
+                error_correction: Some(3),
+                point_of_sale_style: None,
+                case_style: None,
+                fix_check_digit: false,
+                rotation: None,
+                foreground_color: None,
+                background_color: None,
+                display_text: false,
+                add_start_stop: false,
+            }),
+            FieldOutcome::Resolved("0.3".to_owned()),
+            FieldOutcome::TableOfContents(TocField {
+                heading_levels: Some((1, 3)),
+                custom_styles: Vec::new(),
+                entries: TocEntrySelection::None,
+                sequence_identifier: Some("chapter".to_owned()),
+                bookmark: None,
+                hyperlink: false,
+                use_outline_levels: false,
+                omit_page_number_levels: None,
+                page_number_separator: None,
+                entry_page_separator: Some(":".to_owned()),
+            }),
+            FieldOutcome::KeepStored {
+                diagnostic: "TOC page-number separator must contain exactly one character, stored display retained".to_owned(),
+            },
+            FieldOutcome::KeepStored {
+                diagnostic: "field TC requires 1 positional operands, stored display retained".to_owned(),
+            },
+            FieldOutcome::KeepStored {
+                diagnostic: "DISPLAYBARCODE scale must be from 10 through 1000, stored display retained".to_owned(),
+            },
+        ],
+        "{EXTENDED_WORD_FIELD_ORACLE_INPUT}"
+    );
+}
+
+#[test]
+fn extended_field_updates_preserve_instruction_and_result_scaffolding() {
+    let body = concat!(
+        r#"<w:p xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><q:fldSimple q:instr="DISPLAYBARCODE 0123456789012 EAN13" q:dirty="0" data-token="kept"><q:r><q:rPr><q:b/></q:rPr><q:t>stored barcode</q:t><q:inside/></q:r></q:fldSimple></w:p>"#,
+        r#"<w:p>"#,
+        r#"<w:r><w:rPr><w:i/></w:rPr><w:fldChar w:fldCharType="begin" w:dirty="1"/></w:r>"#,
+        r#"<w:r><w:instrText xml:space="preserve">= </w:instrText></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+        r#"<w:r><w:instrText>MERGEFIELD Amount</w:instrText></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="separate"/><w:t>stored amount</w:t></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+        r#"<w:r><w:instrText xml:space="preserve"> + 2</w:instrText></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+        r#"<w:r><w:rPr><w:u w:val="single"/></w:rPr><w:t>stored formula</w:t></w:r>"#,
+        r#"<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#,
+        r#"<w:p><w:fldSimple w:instr="TOC" w:dirty="0"><w:r><w:t>stored toc</w:t></w:r></w:fldSimple></w:p>"#,
+        r#"<w:p><w:fldSimple w:instr="TC &quot;Entry&quot; \l 2" w:dirty="0"><w:r><w:t>stored tc</w:t></w:r></w:fldSimple></w:p>"#,
+        r#"<w:p><w:fldSimple w:instr="NEXT" w:dirty="0"><w:r><w:t>stored next</w:t></w:r></w:fldSimple></w:p>"#,
+        r#"<w:p><w:fldSimple w:instr="PAGE" w:dirty="0"><w:r><w:t>stored page</w:t></w:r></w:fldSimple></w:p>"#,
+        r#"<w:p><w:fldSimple w:instr="DATE" w:dirty="0"><w:r><w:t>stored date</w:t></w:r></w:fldSimple></w:p>"#,
+        r#"<w:p><w:fldSimple w:instr="UNKNOWN" w:dirty="0"><w:r><w:t>stored unknown</w:t></w:r></w:fldSimple></w:p>"#,
+    );
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+    let context = FieldEvaluationContext {
+        merge_fields: BTreeMap::from([("Amount".to_owned(), "3".to_owned())]),
+        merge_record_number: Some(4),
+        merge_sequence_number: Some(2),
+        ..Default::default()
+    };
+    assert_eq!(document.update_fields(&context).unwrap(), 9);
+    let saved = document.to_bytes().unwrap();
+    let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(&saved)).unwrap();
+    let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+    assert!(xml.contains("DISPLAYBARCODE 0123456789012 EAN13"), "{xml}");
+    assert!(xml.contains("stored barcode"), "{xml}");
+    assert!(xml.contains("data-token=\"kept\""), "{xml}");
+    assert!(xml.contains("<q:b/>"), "{xml}");
+    assert!(xml.contains("<q:inside/>"), "{xml}");
+    assert!(xml.contains("w:dirty=\"1\""), "{xml}");
+    assert_eq!(xml.matches("w:dirty=\"1\"").count(), 7, "{xml}");
+    for (instruction, cache) in [
+        ("TOC", "stored toc"),
+        ("TC &quot;Entry&quot; \\l 2", "stored tc"),
+        ("NEXT", "stored next"),
+        ("PAGE", "stored page"),
+        ("DATE", "stored date"),
+        ("UNKNOWN", "stored unknown"),
+    ] {
+        assert!(xml.contains(instruction), "missing {instruction}: {xml}");
+        assert!(xml.contains(cache), "missing {cache}: {xml}");
+    }
+    for preserved in ["MERGEFIELD Amount", "<w:i/>", "<w:u w:val=\"single\"/>"] {
+        assert!(xml.contains(preserved), "missing {preserved}: {xml}");
+    }
+
+    let reopened = Document::from_bytes(&saved).unwrap();
+    let evaluations = reopened.evaluate_fields(&context).unwrap();
+    assert_eq!(evaluations[1].cached_result, "5");
+    assert_eq!(evaluations[2].cached_result, "3");
+    assert_eq!(
+        evaluations[1].outcome,
+        FieldOutcome::Resolved("5".to_owned())
+    );
+    assert!(matches!(evaluations[0].outcome, FieldOutcome::Barcode(_)));
+    assert!(matches!(
+        evaluations[3].outcome,
+        FieldOutcome::TableOfContents(_)
+    ));
+    assert!(matches!(
+        evaluations[4].outcome,
+        FieldOutcome::TableOfContentsEntry(_)
+    ));
+    assert_eq!(
+        evaluations[5].outcome,
+        FieldOutcome::MailMergeControl(MailMergeControl::NextRecord { record_number: 5 })
+    );
+    assert_eq!(evaluations[6].outcome, FieldOutcome::DeferredPagination);
+    assert_eq!(
+        evaluations[7].outcome,
+        FieldOutcome::KeepStored {
+            diagnostic: "DATE requires an explicit date and time, stored display retained"
+                .to_owned()
+        }
+    );
+    assert_eq!(
+        evaluations[8].outcome,
+        FieldOutcome::KeepStored {
+            diagnostic: "field UNKNOWN is unsupported, stored display retained".to_owned()
+        }
+    );
+}
+
+#[test]
+fn dynamic_toc_rebuild_matches_the_pinned_word_update() {
+    assert_eq!(
+        WORD_FIELD_ORACLE,
+        "Microsoft Word 16.104 build 16.104.25121423"
+    );
+    assert_eq!(
+        WORD_FIELD_ORACLE_ENVIRONMENT,
+        "locale=en-US; calendar=Gregorian; decimal=.; grouping=,; timezone=UTC"
+    );
+    assert_eq!(
+        DYNAMIC_TOC_WORD_ORACLE_INPUT,
+        "F-232-dynamic-toc-rebuild-v1"
+    );
+
+    let body = r#"
+        <w:p data-owner="keep"><w:r data-begin="keep"><w:fldChar w:fldCharType="begin"/></w:r><w:r data-code="keep"><w:instrText xml:space="preserve"> TOC \o "1-2" \t "Appendix,2" \u \f C \h </w:instrText></w:r><w:r data-separate="keep"><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="TOC1"/></w:pPr><w:r><w:t>stale entry</w:t></w:r></w:p>
+        <w:p data-end="keep"><w:r data-end-run="keep"><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Overview</w:t></w:r></w:p>
+        <w:tbl><w:tr><w:tc><w:p><w:pPr><w:pStyle w:val="Appendix"/></w:pPr><w:r><w:t>Appendix A</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+        <w:p><w:pPr><w:outlineLvl w:val="1"/></w:pPr><w:r><w:t>Outline item</w:t></w:r></w:p>
+        <w:p><w:fldSimple w:instr="TC &quot;Manual entry&quot; \f C \l 2"><w:r><w:t>hidden marker</w:t></w:r></w:fldSimple></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    let report: TocRebuildReport = document.rebuild_toc().unwrap();
+    assert_eq!(
+        report,
+        TocRebuildReport {
+            entry_count: 4,
+            bookmark_count: 4,
+            diagnostic_count: 0,
+        }
+    );
+
+    let xml = document_xml(&mut document);
+    assert!(!xml.contains("stale entry"), "{xml}");
+    assert_eq!(
+        toc_entry_signatures(&xml),
+        [
+            (
+                "Overview\t1".to_owned(),
+                "TOC1".to_owned(),
+                Some("_Toc1".to_owned()),
+                Some("_Toc1".to_owned())
+            ),
+            (
+                "Appendix A\t1".to_owned(),
+                "TOC2".to_owned(),
+                Some("_Toc2".to_owned()),
+                Some("_Toc2".to_owned())
+            ),
+            (
+                "Outline item\t1".to_owned(),
+                "TOC2".to_owned(),
+                Some("_Toc3".to_owned()),
+                Some("_Toc3".to_owned())
+            ),
+            (
+                "Manual entry\t1".to_owned(),
+                "TOC2".to_owned(),
+                Some("_Toc4".to_owned()),
+                Some("_Toc4".to_owned())
+            ),
+        ]
+    );
+    assert_eq!(xml.matches("<w:pStyle w:val=\"TOC1\"").count(), 1, "{xml}");
+    assert_eq!(xml.matches("<w:pStyle w:val=\"TOC2\"").count(), 3, "{xml}");
+    assert_eq!(xml.matches("w:bookmarkStart").count(), 4, "{xml}");
+    assert_eq!(xml.matches("w:hyperlink").count(), 8, "{xml}");
+    assert_eq!(xml.matches("PAGEREF _Toc").count(), 4, "{xml}");
+    assert!(xml.contains("TOC \\o \"1-2\""), "{xml}");
+    assert!(xml.contains("w:fldCharType=\"end\""), "{xml}");
+    let toc_style = xml.find("<w:pStyle w:val=\"TOC1\"").unwrap();
+    let toc_tabs = xml[toc_style..].find("<w:tabs>").unwrap() + toc_style;
+    let toc_link = xml[toc_tabs..].find("<w:hyperlink").unwrap() + toc_tabs;
+    assert!(toc_style < toc_tabs && toc_tabs < toc_link, "{xml}");
+    assert!(
+        xml.contains("<w:fldChar w:fldCharType=\"begin\"/>"),
+        "{xml}"
+    );
+
+    let body = r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o "1-1" \s chapter \d ":" \h</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old first</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \t "Appendix,2" \p </w:instrText></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>DOCVARIABLE TocSeparator</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>|</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old second</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:fldSimple w:instr="SEQ Chapter"><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:bookmarkStart w:id="10" w:name="existingTarget"/><w:r><w:t>Chapter title</w:t></w:r><w:bookmarkEnd w:id="10"/></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Appendix"/></w:pPr><w:r><w:t>Appendix B</w:t></w:r></w:p>
+    "#;
+    let settings = r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docVars><w:docVar w:name="TocSeparator" w:val="|"/></w:docVars></w:settings>"#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), Some(settings), None);
+    assert_eq!(
+        document.rebuild_toc().unwrap(),
+        TocRebuildReport {
+            entry_count: 2,
+            bookmark_count: 1,
+            diagnostic_count: 0,
+        }
+    );
+    let xml = document_xml(&mut document);
+    assert!(!xml.contains("old first"), "{xml}");
+    assert!(!xml.contains("old second"), "{xml}");
+    assert!(xml.contains("w:anchor=\"existingTarget\""), "{xml}");
+    assert_eq!(xml.matches("w:name=\"existingTarget\"").count(), 1, "{xml}");
+    assert_eq!(xml.matches("w:bookmarkStart").count(), 2, "{xml}");
+    assert!(xml.contains("<w:t>:</w:t>"), "{xml}");
+    assert!(xml.contains("<w:t xml:space=\"preserve\">|</w:t>"), "{xml}");
+    assert_eq!(
+        toc_entry_signatures(&xml),
+        [
+            (
+                "Chapter title\t1:1".to_owned(),
+                "TOC1".to_owned(),
+                Some("existingTarget".to_owned()),
+                Some("existingTarget".to_owned())
+            ),
+            (
+                "Appendix B|1".to_owned(),
+                "TOC2".to_owned(),
+                None,
+                Some("_Toc1".to_owned())
+            ),
+        ]
+    );
+}
+
+#[test]
+fn toc_rebuild_uses_final_deterministic_page_targets() {
+    let body = r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> TOC \o "1-1" \h </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old page</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>First page heading</w:t></w:r></w:p>
+        <w:p><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>Page boundary</w:t></w:r></w:p>
+        <w:tbl><w:tr><w:tc><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Second page heading</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 2);
+    let xml = document_xml(&mut document);
+    assert_eq!(
+        toc_entry_signatures(&xml),
+        [
+            (
+                "First page heading\t1".to_owned(),
+                "TOC1".to_owned(),
+                Some("_Toc1".to_owned()),
+                Some("_Toc1".to_owned())
+            ),
+            (
+                "Second page heading\t2".to_owned(),
+                "TOC1".to_owned(),
+                Some("_Toc2".to_owned()),
+                Some("_Toc2".to_owned())
+            ),
+        ]
+    );
+
+    let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+    let layout = reopened.layout_deterministic().unwrap();
+    assert!(layout.layout.pages.len() >= 2);
+}
+
+#[test]
+fn toc_rebuild_preserves_unowned_field_and_package_xml() {
+    let body = r#"
+        <w:p><w:r><q:fldChar xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" q:fldCharType="begin"/></w:r><w:r><q:instrText xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xml:space="preserve"> TOC \o "1-1" </q:instrText></w:r><w:r><q:fldChar xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" q:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>stale cache</w:t></w:r></w:p>
+        <w:p><w:r><q:fldChar xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" q:fldCharType="end"/></w:r></w:p>
+        <w:p data-source="keep"><w:pPr><w:pStyle w:val="Heading1"/><producer:opaque xmlns:producer="urn:producer" producer:value="keep"/></w:pPr><w:r><w:t>Owned heading</w:t></w:r></w:p>
+        <w:p><w:fldSimple w:instr="IF 1 = 1 &quot;yes&quot; &quot;no&quot;" producer:token="keep" xmlns:producer="urn:producer"><w:r><w:t>unowned cache</w:t></w:r></w:fldSimple></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+    let before = document.to_bytes().unwrap();
+    let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(before)).unwrap();
+    package.set_part("/custom/unrelated.bin", b"producer bytes".to_vec());
+    let mut output = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut output).unwrap();
+    let mut document = Document::from_bytes(output.get_ref()).unwrap();
+
+    document.rebuild_toc().unwrap();
+    let saved = document.to_bytes().unwrap();
+    let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(saved)).unwrap();
+    assert_eq!(
+        package.get_part("/custom/unrelated.bin").unwrap(),
+        b"producer bytes"
+    );
+    let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+    for preserved in [
+        "<q:fldChar xmlns:q=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" q:fldCharType=\"begin\"/>",
+        "<q:instrText xmlns:q=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xml:space=\"preserve\">",
+        "TOC \\o \"1-1\"",
+        "producer:opaque",
+        "producer:value=\"keep\"",
+        "producer:token=\"keep\"",
+        "unowned cache",
+    ] {
+        assert!(xml.contains(preserved), "missing {preserved}: {xml}");
+    }
+}
+
+#[test]
+fn toc_rebuild_rejects_ambiguous_or_malformed_sources_atomically() {
+    for body in [
+        r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o "1-1"</w:instrText></w:r></w:p><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Heading</w:t></w:r></w:p>"#,
+        r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o "1-1"</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p><w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p><w:p><w:bookmarkStart w:id="7" w:name="duplicate"/><w:bookmarkStart w:id="8" w:name="duplicate"/><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Heading</w:t></w:r><w:bookmarkEnd w:id="8"/><w:bookmarkEnd w:id="7"/></w:p>"#,
+    ] {
+        let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+        let before = document_xml(&mut document);
+        let error = document.rebuild_toc().unwrap_err();
+        assert!(
+            error.to_string().contains("table of contents"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(document_xml(&mut document), before);
+    }
+
+    let unsupported = r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \z</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>stored unsupported cache</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(unsupported), None, None);
+    let before = document_xml(&mut document);
+    assert_eq!(
+        document.rebuild_toc().unwrap(),
+        TocRebuildReport {
+            entry_count: 0,
+            bookmark_count: 0,
+            diagnostic_count: 1,
+        }
+    );
+    assert_eq!(document_xml(&mut document), before);
+
+    let simple = r#"<w:p><w:fldSimple w:instr="TOC"><w:r><w:t>stored simple cache</w:t></w:r></w:fldSimple></w:p>"#;
+    let mut document = document_with_field_parts(&wrap_word_body(simple), None, None);
+    let before = document_xml(&mut document);
+    assert_eq!(document.rebuild_toc().unwrap().diagnostic_count, 1);
+    assert_eq!(document_xml(&mut document), before);
+
+    let mut no_toc = Document::new();
+    no_toc.add_paragraph("Heading").style("Heading1");
+    assert_eq!(no_toc.rebuild_toc().unwrap(), TocRebuildReport::default());
+}
+
+#[test]
+fn toc_rebuild_confines_collision_safe_page_substitution_to_owned_results() {
+    let token = "__RDOCX_TOC_PAGE_0_0__";
+    let body = format!(
+        r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o "1-1"</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>{token}</w:t></w:r></w:p>
+        <w:p><w:r><producer:opaque xmlns:producer="urn:producer" producer:value="{token}"/></w:r></w:p>
+    "#
+    );
+    let mut document = document_with_field_parts(&wrap_word_body(&body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 1);
+    let xml = document_xml(&mut document);
+    assert_eq!(xml.matches(token).count(), 3, "{xml}");
+    assert!(
+        xml.contains(&format!("producer:value=\"{token}\"")),
+        "{xml}"
+    );
+}
+
+#[test]
+fn toc_rebuild_ignores_foreign_ancestors_and_indirect_field_markers() {
+    for body in [
+        r#"<x:tbl xmlns:x="urn:producer"><x:tr><x:tc><w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p><w:p><w:r><w:t>foreign cache</w:t></w:r></w:p><w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p></x:tc></x:tr></x:tbl>"#,
+        r#"<x:wrapper xmlns:x="urn:producer"><w:body><w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p><w:p><w:r><w:t>nested body cache</w:t></w:r></w:p><w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></x:wrapper>"#,
+        r#"<w:p><w:r><x:wrapper xmlns:x="urn:producer"><w:fldChar w:fldCharType="begin"/></x:wrapper></w:r><w:r><w:instrText>TOC</w:instrText></w:r><w:r><x:wrapper xmlns:x="urn:producer"><w:fldChar w:fldCharType="separate"/></x:wrapper></w:r></w:p><w:p><w:r><w:t>opaque cache</w:t></w:r></w:p><w:p><w:r><x:wrapper xmlns:x="urn:producer"><w:fldChar w:fldCharType="end"/></x:wrapper></w:r></w:p>"#,
+        r#"<w:p><x:wrapper xmlns:x="urn:producer"><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></x:wrapper></w:p><w:p><w:r><w:t>opaque wrapped cache</w:t></w:r></w:p><w:p><x:wrapper xmlns:x="urn:producer"><w:r><w:fldChar w:fldCharType="end"/></w:r></x:wrapper></w:p>"#,
+        r#"<w:p><x:wrapper xmlns:x="urn:producer"><w:fldSimple w:instr="TOC"><w:r><w:t>opaque simple cache</w:t></w:r></w:fldSimple></x:wrapper></w:p>"#,
+        r#"<w:p><w:sdtContent><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:sdtContent></w:p><w:p><w:r><w:t>opaque malformed control cache</w:t></w:r></w:p><w:p><w:sdtContent><w:r><w:fldChar w:fldCharType="end"/></w:r></w:sdtContent></w:p>"#,
+        r#"<w:p><w:ins><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:ins></w:p><w:p><w:r><w:t>opaque malformed revision cache</w:t></w:r></w:p><w:p><w:ins><w:r><w:fldChar w:fldCharType="end"/></w:r></w:ins></w:p>"#,
+    ] {
+        let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+        let before = document_xml(&mut document);
+        assert_eq!(document.rebuild_toc().unwrap(), TocRebuildReport::default());
+        assert_eq!(document_xml(&mut document), before);
+    }
+}
+
+#[test]
+fn toc_rebuild_rejects_nested_toc_ownership_before_any_edit() {
+    let body = r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o "1-1"</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o "1-1"</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>inner cache</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Heading</w:t></w:r></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+    let before = document_xml(&mut document);
+
+    let error = document.rebuild_toc().unwrap_err();
+    assert!(
+        error.to_string().contains("nested table of contents"),
+        "{error}"
+    );
+    assert_eq!(document_xml(&mut document), before);
+}
+
+#[test]
+fn toc_bookmark_allocation_uses_the_final_id_lazily() {
+    let toc = r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o "1-1"</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p><w:p><w:r><w:t>old</w:t></w:r></w:p><w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#;
+    let reused = format!(
+        r#"{toc}<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:bookmarkStart w:id="{}" w:name="existing"/><w:r><w:t>Heading</w:t></w:r><w:bookmarkEnd w:id="{}"/></w:p>"#,
+        i32::MAX,
+        i32::MAX
+    );
+    let mut document = document_with_field_parts(&wrap_word_body(&reused), None, None);
+    assert_eq!(document.rebuild_toc().unwrap().bookmark_count, 0);
+    assert!(document_xml(&mut document).contains("PAGEREF existing"));
+
+    let allocated = format!(
+        r#"{toc}<w:p><w:bookmarkStart w:id="{}" w:name="prior"/><w:r><w:t>Prior</w:t></w:r><w:bookmarkEnd w:id="{}"/></w:p><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Heading</w:t></w:r></w:p>"#,
+        i32::MAX - 1,
+        i32::MAX - 1
+    );
+    let mut document = document_with_field_parts(&wrap_word_body(&allocated), None, None);
+    assert_eq!(document.rebuild_toc().unwrap().bookmark_count, 1);
+    assert!(
+        document_xml(&mut document).contains(&format!("w:id=\"{}\" w:name=\"_Toc1\"", i32::MAX))
+    );
+}
+
+#[test]
+fn toc_rebuild_reuses_the_first_whole_paragraph_bookmark_repeatably() {
+    let body = r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o "1-1" \h</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:bookmarkStart w:id="11" w:name="outer"/><w:bookmarkStart w:id="12" w:name="inner"/><w:r><w:t>Heading</w:t></w:r><w:bookmarkEnd w:id="12"/><w:bookmarkEnd w:id="11"/></w:p>
+    "#;
+
+    for _ in 0..32 {
+        let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+        assert_eq!(document.rebuild_toc().unwrap().bookmark_count, 0);
+        assert_eq!(
+            toc_entry_signatures(&document_xml(&mut document)),
+            [(
+                "Heading\t1".to_owned(),
+                "TOC1".to_owned(),
+                Some("outer".to_owned()),
+                Some("outer".to_owned())
+            )]
+        );
+    }
+}
+
+#[test]
+fn toc_rebuild_handles_the_largest_outline_level_without_panicking() {
+    let body = r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \u</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:pPr><w:outlineLvl w:val="4294967295"/></w:pPr><w:r><w:t>Out of range</w:t></w:r></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| document.rebuild_toc()));
+    let report = result
+        .expect("outline conversion stays inside the Result boundary")
+        .unwrap();
+    assert_eq!(report.entry_count, 0);
+    assert!(!document_xml(&mut document).contains("old"));
+}
+
+#[test]
+fn toc_rebuild_discovers_the_accepted_revision_projection() {
+    let body = r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o "1-1" \f C \s chapter \d ":" \h</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:ins w:id="20" w:author="Ada"><w:fldSimple w:instr="SEQ Chapter"><w:r><w:t>1</w:t></w:r></w:fldSimple></w:ins></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:ins w:id="21" w:author="Ada"><w:r><w:t>Inserted heading</w:t></w:r></w:ins></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Direct </w:t></w:r><w:ins w:id="22" w:author="Ada"><w:r><w:t>and inserted</w:t></w:r></w:ins><w:r><w:t> tail</w:t></w:r></w:p>
+        <w:p><w:ins w:id="23" w:author="Ada"><w:fldSimple w:instr="TC &quot;Inserted TC&quot; \f C \l 1"><w:r><w:t>hidden</w:t></w:r></w:fldSimple><w:r><w:t>anchor</w:t></w:r></w:ins></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 3);
+    assert_eq!(
+        toc_entry_signatures(&document_xml(&mut document)),
+        [
+            (
+                "Inserted heading\t1:1".to_owned(),
+                "TOC1".to_owned(),
+                Some("_Toc1".to_owned()),
+                Some("_Toc1".to_owned())
+            ),
+            (
+                "Direct and inserted tail\t1:1".to_owned(),
+                "TOC1".to_owned(),
+                Some("_Toc2".to_owned()),
+                Some("_Toc2".to_owned())
+            ),
+            (
+                "Inserted TC\t1:1".to_owned(),
+                "TOC1".to_owned(),
+                Some("_Toc3".to_owned()),
+                Some("_Toc3".to_owned())
+            ),
+        ]
+    );
+}
+
+#[test]
+fn toc_rebuild_does_not_reuse_a_bookmark_after_an_inline_control_prefix() {
+    let body = r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o "1-1" \h</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:sdt><w:sdtPr/><w:sdtContent><w:r><w:t>Prefix </w:t></w:r></w:sdtContent></w:sdt><w:bookmarkStart w:id="11" w:name="partial"/><w:r><w:t>Heading</w:t></w:r><w:bookmarkEnd w:id="11"/></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().bookmark_count, 1);
+    assert_eq!(
+        toc_entry_signatures(&document_xml(&mut document)),
+        [(
+            "Prefix Heading\t1".to_owned(),
+            "TOC1".to_owned(),
+            Some("_Toc1".to_owned()),
+            Some("_Toc1".to_owned())
+        )]
+    );
+}
+
+#[test]
+fn toc_rebuild_ignores_paragraphs_below_an_untyped_block_chain() {
+    let body = r#"
+        <w:sdtContent>
+          <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o "1-1"</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+          <w:p><w:r><w:t>opaque cache</w:t></w:r></w:p>
+          <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        </w:sdtContent>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Visible heading</w:t></w:r></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+    let before = document_xml(&mut document);
+
+    assert_eq!(document.rebuild_toc().unwrap(), TocRebuildReport::default());
+    assert_eq!(document_xml(&mut document), before);
+}
+
+#[test]
+fn toc_rebuild_ignores_revision_content_beyond_the_typed_depth_limit() {
+    let wrappers = (1..=33)
+        .map(|id| format!(r#"<w:ins w:id="{id}" w:author="Ada">"#))
+        .collect::<String>();
+    let body = format!(
+        r#"
+        <w:p>{wrappers}<w:r><w:fldChar w:fldCharType="begin"/></w:r>{}</w:ins><w:r><w:instrText>TOC \o "1-1"</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>opaque cache</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Visible heading</w:t></w:r></w:p>
+        "#,
+        "</w:ins>".repeat(32)
+    );
+    let mut document = document_with_field_parts(&wrap_word_body(&body), None, None);
+    let before = document_xml(&mut document);
+
+    assert_eq!(document.rebuild_toc().unwrap(), TocRebuildReport::default());
+    assert_eq!(document_xml(&mut document), before);
+}
+
+#[test]
+fn toc_rebuild_balances_each_supported_inline_owner_around_the_instruction() {
+    for (open, close) in [
+        (r#"<w:ins w:id="31" w:author="Ada">"#, "</w:ins>"),
+        (r#"<w:hyperlink w:anchor="existing">"#, "</w:hyperlink>"),
+        ("<w:sdt><w:sdtPr/><w:sdtContent>", "</w:sdtContent></w:sdt>"),
+    ] {
+        let body = format!(
+            r#"
+            <w:p>{open}<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o "1-1" \h</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>{close}</w:p>
+            <w:p><w:r><w:t>old</w:t></w:r></w:p>
+            <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Heading</w:t></w:r></w:p>
+            "#
+        );
+        let mut document = document_with_field_parts(&wrap_word_body(&body), None, None);
+
+        assert_eq!(document.rebuild_toc().unwrap().entry_count, 1, "{open}");
+        assert_eq!(
+            toc_entry_signatures(&document_xml(&mut document)),
+            [(
+                "Heading\t1".to_owned(),
+                "TOC1".to_owned(),
+                Some("_Toc1".to_owned()),
+                Some("_Toc1".to_owned())
+            )],
+            "{open}",
+        );
+    }
+}
+
+#[test]
+fn toc_rebuild_keeps_control_and_revision_fields_in_serialized_order() {
+    let sequence = r#"<w:ins w:id="41" w:author="Ada"><w:fldSimple w:instr="SEQ Chapter"><w:r><w:t>1</w:t></w:r></w:fldSimple></w:ins>"#;
+    let entry = r#"<w:sdt><w:sdtContent><w:ins w:id="42" w:author="Ada"><w:fldSimple w:instr="TC &quot;Control entry&quot; \f C \l 1"><w:r><w:t>hidden</w:t></w:r></w:fldSimple></w:ins></w:sdtContent></w:sdt>"#;
+    for (source, expected) in [
+        (
+            format!("{sequence}{entry}"),
+            "Control entry\t1:1".to_owned(),
+        ),
+        (format!("{entry}{sequence}"), "Control entry\t1".to_owned()),
+    ] {
+        let body = format!(
+            r#"
+            <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \f C \s chapter \d ":"</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+            <w:p><w:r><w:t>old</w:t></w:r></w:p>
+            <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+            <w:p>{source}</w:p>
+            "#
+        );
+        let mut document = document_with_field_parts(&wrap_word_body(&body), None, None);
+
+        assert_eq!(document.rebuild_toc().unwrap().entry_count, 1);
+        assert_eq!(
+            toc_entry_signatures(&document_xml(&mut document))[0].0,
+            expected,
+        );
+    }
+}
+
+#[test]
+fn toc_rebuild_rejects_a_bookmark_reversed_at_one_run_boundary() {
+    let body = r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \b Scope \o "1-1"</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:bookmarkEnd w:id="7"/><w:sdt><w:sdtContent><w:r><w:t>Prefix </w:t></w:r></w:sdtContent></w:sdt><w:bookmarkStart w:id="7" w:name="Scope"/><w:r><w:t>Heading</w:t></w:r></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+    let before = document_xml(&mut document);
+
+    let error = document.rebuild_toc().unwrap_err();
+    assert!(error.to_string().contains("reversed bookmark"), "{error}");
+    assert_eq!(document_xml(&mut document), before);
+}
+
+#[test]
+fn toc_rebuild_diagnoses_simple_tocs_in_accepted_revisions() {
+    for wrapper in ["ins", "moveTo"] {
+        let body = format!(
+            r#"<w:p><w:{wrapper} w:id="51" w:author="Ada"><w:fldSimple w:instr="TOC"><w:r><w:t>stored cache</w:t></w:r></w:fldSimple></w:{wrapper}></w:p>"#
+        );
+        let mut document = document_with_field_parts(&wrap_word_body(&body), None, None);
+        let before = document_xml(&mut document);
+
+        assert_eq!(
+            document.rebuild_toc().unwrap(),
+            TocRebuildReport {
+                entry_count: 0,
+                bookmark_count: 0,
+                diagnostic_count: 1,
+            },
+            "{wrapper}",
+        );
+        assert_eq!(document_xml(&mut document), before);
+    }
+}
+
+#[test]
+fn toc_rebuild_ignores_a_second_content_container_in_one_control() {
+    let body = r#"
+        <w:sdt><w:sdtContent><w:p><w:r><w:t>typed content</w:t></w:r></w:p></w:sdtContent>
+          <w:sdtContent>
+            <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o "1-1"</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+            <w:p><w:r><w:t>opaque cache</w:t></w:r></w:p>
+            <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+          </w:sdtContent>
+        </w:sdt>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Visible heading</w:t></w:r></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+    let before = document_xml(&mut document);
+
+    assert_eq!(document.rebuild_toc().unwrap(), TocRebuildReport::default());
+    assert_eq!(document_xml(&mut document), before);
+}
+
+#[test]
+fn toc_rebuild_counts_property_revisions_toward_the_depth_limit() {
+    let wrappers = (1..=32)
+        .map(|id| format!(r#"<w:ins w:id="{id}" w:author="Ada">"#))
+        .collect::<String>();
+    let body = format!(
+        r#"
+        <w:p>{wrappers}<w:r><w:rPr><w:rPrChange w:id="40" w:author="Ada"><w:rPr/></w:rPrChange></w:rPr><w:fldChar w:fldCharType="begin"/></w:r>{}<w:r><w:instrText>TOC \o "1-1"</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>opaque cache</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Visible heading</w:t></w:r></w:p>
+        "#,
+        "</w:ins>".repeat(32)
+    );
+    let mut document = document_with_field_parts(&wrap_word_body(&body), None, None);
+    let before = document_xml(&mut document);
+
+    assert_eq!(document.rebuild_toc().unwrap(), TocRebuildReport::default());
+    assert_eq!(document_xml(&mut document), before);
+}
+
+#[test]
+fn toc_rebuild_carries_inherited_aliases_into_wrapped_instruction_projection() {
+    let body = r#"
+        <w:p><q:ins xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" q:id="61" q:author="Ada"><q:r><q:fldChar q:fldCharType="begin"/></q:r><q:r><q:instrText>TOC \o "1-1" \h</q:instrText></q:r><q:r><q:fldChar q:fldCharType="separate"/></q:r></q:ins></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Heading</w:t></w:r></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 1);
+    let xml = document_xml(&mut document);
+    assert!(xml.contains(
+        r#"<q:ins xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main""#
+    ));
+    assert_eq!(toc_entry_signatures(&xml)[0].0, "Heading\t1");
+}
+
+#[test]
+fn toc_rebuild_projects_accepted_revisions_inside_content_controls() {
+    let body = r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o "1-1" \f C \s chapter \d ":"</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:sdt><w:sdtContent><w:ins w:id="71" w:author="Ada"><w:fldSimple w:instr="SEQ Chapter"><w:r><w:t>1</w:t></w:r></w:fldSimple></w:ins></w:sdtContent></w:sdt></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:sdt><w:sdtContent><w:ins w:id="72" w:author="Ada"><w:r><w:t>Controlled heading</w:t></w:r></w:ins></w:sdtContent></w:sdt></w:p>
+        <w:p><w:sdt><w:sdtContent><w:ins w:id="73" w:author="Ada"><w:fldSimple w:instr="TC &quot;Controlled TC&quot; \f C \l 1"><w:r><w:t>hidden</w:t></w:r></w:fldSimple></w:ins></w:sdtContent></w:sdt></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 2);
+    assert_eq!(
+        toc_entry_signatures(&document_xml(&mut document))
+            .into_iter()
+            .map(|entry| entry.0)
+            .collect::<Vec<_>>(),
+        ["Controlled heading\t1:1", "Controlled TC\t1:1"]
+    );
+
+    for wrapper in ["ins", "moveTo"] {
+        let body = format!(
+            r#"<w:p><w:sdt><w:sdtContent><w:{wrapper} w:id="74" w:author="Ada"><w:fldSimple w:instr="TOC"><w:r><w:t>stored</w:t></w:r></w:fldSimple></w:{wrapper}></w:sdtContent></w:sdt></w:p>"#
+        );
+        let mut document = document_with_field_parts(&wrap_word_body(&body), None, None);
+        assert_eq!(document.rebuild_toc().unwrap().diagnostic_count, 1);
+    }
+}
+
+#[test]
+fn toc_rebuild_orders_revision_only_hyperlinks_by_their_owner_position() {
+    let sequence = r#"<w:hyperlink w:anchor="sequence"><w:ins w:id="81" w:author="Ada"><w:fldSimple w:instr="SEQ Chapter"><w:r><w:t>1</w:t></w:r></w:fldSimple></w:ins></w:hyperlink>"#;
+    let entry = r#"<w:sdt><w:sdtContent><w:ins w:id="82" w:author="Ada"><w:fldSimple w:instr="TC &quot;Hyperlink order&quot; \f C \l 1"><w:r><w:t>hidden</w:t></w:r></w:fldSimple></w:ins></w:sdtContent></w:sdt>"#;
+    let body = format!(
+        r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \f C \s chapter \d ":"</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p>{sequence}{entry}</w:p>
+        "#
+    );
+    let mut document = document_with_field_parts(&wrap_word_body(&body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 1);
+    assert_eq!(
+        toc_entry_signatures(&document_xml(&mut document))[0].0,
+        "Hyperlink order\t1:1"
+    );
+}
+
+#[test]
+fn toc_rebuild_layouts_inline_control_text_before_resolving_later_pages() {
+    let long_title = "wrapped ".repeat(900);
+    let body = format!(
+        r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o "1-1"</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:sdt><w:sdtContent><w:r><w:t>{long_title}</w:t></w:r></w:sdtContent></w:sdt></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Later heading</w:t></w:r></w:p>
+        "#
+    );
+    let mut document = document_with_field_parts(&wrap_word_body(&body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 2);
+    let entries = toc_entry_signatures(&document_xml(&mut document));
+    assert_eq!(entries[0].0, format!("{long_title}\t3"));
+    assert_eq!(entries[1].0, "Later heading\t6");
+}
+
+#[test]
+fn toc_rebuild_injects_namespaces_after_the_real_start_tag_close() {
+    let body = format!(
+        r#"
+        <w:p xmlns:producer="urn:producer"><q:ins xmlns:q="{W_NS}" q:id="91" q:author="Ada">
+          <q:r xmlns:q="{W_NS}" producer:value=">"><q:fldChar q:fldCharType="begin"/></q:r>
+          <q:r xmlns:q="{W_NS}" producer:value=">"><q:instrText>TOC \o "1-1"</q:instrText></q:r>
+          <q:r xmlns:q="{W_NS}" producer:value=">"><q:fldChar q:fldCharType="separate"/></q:r>
+        </q:ins></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Alias heading</w:t></w:r></w:p>
+        "#
+    );
+    let mut document = document_with_field_parts(&wrap_word_body(&body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 1);
+    assert_eq!(
+        toc_entry_signatures(&document_xml(&mut document))[0].0,
+        "Alias heading\t1"
+    );
+}
+
+#[test]
+fn toc_rebuild_orders_terminal_hyperlink_revisions_before_following_controls() {
+    let sequence = r#"<w:hyperlink w:anchor="sequence"><w:r><w:t>lead</w:t></w:r><w:ins w:id="92" w:author="Ada"><w:fldSimple w:instr="SEQ Chapter"><w:r><w:t>1</w:t></w:r></w:fldSimple></w:ins></w:hyperlink>"#;
+    let entry = r#"<w:sdt><w:sdtContent><w:ins w:id="93" w:author="Ada"><w:fldSimple w:instr="TC &quot;Terminal order&quot; \f C \l 1"><w:r><w:t>hidden</w:t></w:r></w:fldSimple></w:ins></w:sdtContent></w:sdt>"#;
+    let body = format!(
+        r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \f C \s chapter \d ":"</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p>{sequence}{entry}</w:p>
+        "#
+    );
+    let mut document = document_with_field_parts(&wrap_word_body(&body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 1);
+    assert_eq!(
+        toc_entry_signatures(&document_xml(&mut document))[0].0,
+        "Terminal order\t1:1"
+    );
+}
+
+#[test]
+fn toc_rebuild_filters_same_paragraph_sources_by_exact_bookmark_position() {
+    let body = r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \f C \b Scope</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p>
+          <w:fldSimple w:instr="TC &quot;Before&quot; \f C \l 1"><w:r><w:t>hidden</w:t></w:r></w:fldSimple>
+          <w:bookmarkStart w:id="93" w:name="Scope"/>
+          <w:fldSimple w:instr="TC &quot;Inside&quot; \f C \l 1"><w:r><w:t>hidden</w:t></w:r></w:fldSimple>
+          <w:bookmarkEnd w:id="93"/>
+          <w:fldSimple w:instr="TC &quot;After&quot; \f C \l 1"><w:r><w:t>hidden</w:t></w:r></w:fldSimple>
+        </w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 1);
+    let entries = toc_entry_signatures(&document_xml(&mut document));
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0, "Inside\t1");
+}
+
+#[test]
+fn toc_rebuild_excludes_only_sources_inside_the_owned_result_positions() {
+    let body = r#"
+        <w:p>
+          <w:fldSimple w:instr="SEQ Chapter"><w:r><w:t>1</w:t></w:r></w:fldSimple>
+          <w:fldSimple w:instr="TC &quot;Before&quot; \f C \l 1"><w:r><w:t>hidden</w:t></w:r></w:fldSimple>
+          <w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \f C \s Chapter \d ":"</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>
+          <w:fldSimple w:instr="TC &quot;Owned start&quot; \f C \l 1"><w:r><w:t>hidden</w:t></w:r></w:fldSimple>
+        </w:p>
+        <w:p><w:fldSimple w:instr="TC &quot;Owned middle&quot; \f C \l 1"><w:r><w:t>hidden</w:t></w:r></w:fldSimple></w:p>
+        <w:p>
+          <w:fldSimple w:instr="TC &quot;Owned end&quot; \f C \l 1"><w:r><w:t>hidden</w:t></w:r></w:fldSimple>
+          <w:r><w:fldChar w:fldCharType="end"/></w:r>
+          <w:fldSimple w:instr="TC &quot;After&quot; \f C \l 1"><w:r><w:t>hidden</w:t></w:r></w:fldSimple>
+        </w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 2);
+    let entries = toc_entry_signatures(&document_xml(&mut document));
+    assert_eq!(entries[0].0, "Before\t1:1");
+    assert_eq!(entries[1].0, "After\t1:1");
+}
+
+#[test]
+fn toc_rebuild_keeps_exact_positions_inside_one_accepted_insertion() {
+    let body = r#"
+        <w:p><w:ins w:id="96" w:author="Ada">
+          <w:fldSimple w:instr="SEQ Chapter"><w:r><w:t>1</w:t></w:r></w:fldSimple>
+          <w:fldSimple w:instr="TC &quot;Before&quot; \f C \l 1 \n"><w:r><w:t>hidden</w:t></w:r></w:fldSimple>
+          <w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \f C \s Chapter \d ":"</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>
+        </w:ins></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:ins w:id="98" w:author="Ada">
+          <w:fldSimple w:instr="TC &quot;Owned&quot; \f C \l 1 \n"><w:r><w:t>hidden</w:t></w:r></w:fldSimple>
+          <w:r><w:fldChar w:fldCharType="end"/></w:r>
+          <w:fldSimple w:instr="TC &quot;After&quot; \f C \l 1 \n"><w:r><w:t>hidden</w:t></w:r></w:fldSimple>
+        </w:ins></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 2);
+    let entries = toc_entry_signatures(&document_xml(&mut document));
+    assert_eq!(entries[0].0, "Before");
+    assert_eq!(entries[1].0, "After");
+}
+
+#[test]
+fn toc_rebuild_keeps_exact_positions_inside_one_inline_control() {
+    let body = r#"
+        <w:p><w:sdt><w:sdtContent><w:ins w:id="97" w:author="Ada">
+          <w:fldSimple w:instr="SEQ Chapter"><w:r><w:t>1</w:t></w:r></w:fldSimple>
+          <w:fldSimple w:instr="TC &quot;Before control&quot; \f C \l 1 \n"><w:r><w:t>hidden</w:t></w:r></w:fldSimple>
+          <w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \f C \s Chapter \d ":"</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>
+        </w:ins></w:sdtContent></w:sdt></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:sdt><w:sdtContent><w:ins w:id="99" w:author="Ada">
+          <w:fldSimple w:instr="TC &quot;Owned control&quot; \f C \l 1 \n"><w:r><w:t>hidden</w:t></w:r></w:fldSimple>
+          <w:r><w:fldChar w:fldCharType="end"/></w:r>
+          <w:fldSimple w:instr="TC &quot;After control&quot; \f C \l 1 \n"><w:r><w:t>hidden</w:t></w:r></w:fldSimple>
+        </w:ins></w:sdtContent></w:sdt></w:p>
+        <w:p><w:fldSimple w:instr="TC &quot;Control page&quot; \f C \l 1"><w:r><w:t>hidden</w:t></w:r></w:fldSimple></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 3);
+    let entries = toc_entry_signatures(&document_xml(&mut document));
+    assert_eq!(entries[0].0, "Before control");
+    assert_eq!(entries[1].0, "After control");
+    assert_eq!(entries[2].0, "Control page\t1:1");
+}
+
+#[test]
+fn toc_rebuild_uses_real_owner_slots_after_raw_paragraph_children() {
+    let inner = r#"
+        <w:fldSimple w:instr="TC &quot;Before owner&quot; \f C \l 1 \n"><w:r><w:t>hidden</w:t></w:r></w:fldSimple>
+        <w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \f C</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>
+    "#;
+    let owners = [
+        format!(r#"<w:ins w:id="101" w:author="Ada">{inner}</w:ins>"#),
+        format!(
+            r#"<w:sdt><w:sdtContent><w:ins w:id="102" w:author="Ada">{inner}</w:ins></w:sdtContent></w:sdt>"#
+        ),
+    ];
+    for owner in owners {
+        let body = format!(
+            r#"
+            <w:p><producer:raw xmlns:producer="urn:producer"/>{owner}</w:p>
+            <w:p><w:r><w:t>old</w:t></w:r></w:p>
+            <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+            "#
+        );
+        let mut document = document_with_field_parts(&wrap_word_body(&body), None, None);
+
+        assert_eq!(document.rebuild_toc().unwrap().entry_count, 1);
+        assert_eq!(
+            toc_entry_signatures(&document_xml(&mut document))[0].0,
+            "Before owner"
+        );
+    }
+}
+
+#[test]
+fn toc_rebuild_counts_comments_and_processing_instructions_in_owner_slots() {
+    for raw in ["<!--producer comment-->", "<?producer keep?>"] {
+        let body = format!(
+            r#"
+            <w:p>{raw}<w:ins w:id="105" w:author="Ada">
+              <w:fldSimple w:instr="TC &quot;Before retained raw&quot; \f C \l 1 \n"><w:r><w:t>hidden</w:t></w:r></w:fldSimple>
+              <w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \f C</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>
+            </w:ins></w:p>
+            <w:p><w:r><w:t>old</w:t></w:r></w:p>
+            <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+            "#
+        );
+        let mut document = document_with_field_parts(&wrap_word_body(&body), None, None);
+
+        assert_eq!(document.rebuild_toc().unwrap().entry_count, 1);
+        assert_eq!(
+            toc_entry_signatures(&document_xml(&mut document))[0].0,
+            "Before retained raw"
+        );
+    }
+}
+
+#[test]
+fn toc_rebuild_excludes_post_separator_source_in_terminal_hyperlink_revision() {
+    let body = r#"
+        <w:p><w:hyperlink w:anchor="terminal"><w:r><w:t>lead</w:t></w:r><w:ins w:id="103" w:author="Ada">
+          <w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \f C</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>
+          <w:fldSimple w:instr="TC &quot;Owned terminal&quot; \f C \l 1 \n"><w:r><w:t>hidden</w:t></w:r></w:fldSimple>
+        </w:ins></w:hyperlink></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r><w:fldSimple w:instr="TC &quot;After terminal&quot; \f C \l 1 \n"><w:r><w:t>hidden</w:t></w:r></w:fldSimple></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 1);
+    assert_eq!(
+        toc_entry_signatures(&document_xml(&mut document))[0].0,
+        "After terminal"
+    );
+}
+
+#[test]
+fn toc_rebuild_does_not_count_raw_hyperlink_simple_fields_as_runs() {
+    let body = r#"
+        <w:p><w:hyperlink w:anchor="raw-field">
+          <w:fldSimple w:instr="TC &quot;Opaque hyperlink field&quot; \f C \l 1"><w:r><w:t>hidden</w:t></w:r></w:fldSimple>
+          <w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \f C</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>
+          <w:ins w:id="104" w:author="Ada"><w:fldSimple w:instr="TC &quot;Owned after raw&quot; \f C \l 1 \n"><w:r><w:t>hidden</w:t></w:r></w:fldSimple></w:ins>
+        </w:hyperlink></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r><w:fldSimple w:instr="TC &quot;After raw&quot; \f C \l 1 \n"><w:r><w:t>hidden</w:t></w:r></w:fldSimple></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 1);
+    assert_eq!(
+        toc_entry_signatures(&document_xml(&mut document))[0].0,
+        "After raw"
+    );
+}
+
+#[test]
+fn toc_rebuild_does_not_count_malformed_direct_simple_fields_as_runs() {
+    for malformed in [
+        r#"<w:fldSimple><w:r><w:t>missing</w:t></w:r></w:fldSimple>"#,
+        r#"<w:fldSimple w:instr="   "><w:r><w:t>empty</w:t></w:r></w:fldSimple>"#,
+    ] {
+        let body = format!(
+            r#"
+            <w:p>{malformed}
+              <w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \f C</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>
+              <w:fldSimple w:instr="TC &quot;Owned malformed&quot; \f C \l 1 \n"><w:r><w:t>hidden</w:t></w:r></w:fldSimple>
+            </w:p>
+            <w:p><w:r><w:t>old</w:t></w:r></w:p>
+            <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r><w:fldSimple w:instr="TC &quot;After malformed&quot; \f C \l 1 \n"><w:r><w:t>hidden</w:t></w:r></w:fldSimple></w:p>
+            "#
+        );
+        let mut document = document_with_field_parts(&wrap_word_body(&body), None, None);
+
+        assert_eq!(document.rebuild_toc().unwrap().entry_count, 1);
+        assert_eq!(
+            toc_entry_signatures(&document_xml(&mut document))[0].0,
+            "After malformed"
+        );
+    }
+}
+
+#[test]
+fn toc_rebuild_excludes_revision_source_before_a_direct_hyperlink_end_run() {
+    let body = r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \f C</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:hyperlink w:anchor="end"><w:ins w:id="106" w:author="Ada"><w:fldSimple w:instr="TC &quot;Owned hyperlink end&quot; \f C \l 1 \n"><w:r><w:t>hidden</w:t></w:r></w:fldSimple></w:ins><w:r><w:fldChar w:fldCharType="end"/></w:r></w:hyperlink><w:fldSimple w:instr="TC &quot;After hyperlink end&quot; \f C \l 1 \n"><w:r><w:t>hidden</w:t></w:r></w:fldSimple></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 1);
+    assert_eq!(
+        toc_entry_signatures(&document_xml(&mut document))[0].0,
+        "After hyperlink end"
+    );
+}
+
+#[test]
+fn toc_rebuild_heading_title_excludes_old_result_on_the_end_boundary() {
+    let body = r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o &quot;1-1&quot; \h</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old middle</w:t></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>old boundary</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t>Real heading</w:t></w:r></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 1);
+    let xml = document_xml(&mut document);
+    let entries = toc_entry_signatures(&xml);
+    assert_eq!(entries[0].0, "Real heading\t1");
+    assert_eq!(entries[0].2.as_deref(), Some("_Toc1"));
+    assert!(!xml.contains("old middle"), "{xml}");
+    assert!(!xml.contains("old boundary"), "{xml}");
+    CT_Document::from_xml(xml.as_bytes()).expect("replacement XML remains structurally valid");
+    let heading_style = xml.find(r#"w:val="Heading1""#).unwrap();
+    let end_marker = xml[heading_style..]
+        .find(r#"w:fldCharType="end""#)
+        .map(|offset| heading_style + offset)
+        .unwrap();
+    let target_start = xml[end_marker..]
+        .find(r#"w:name="_Toc1""#)
+        .map(|offset| end_marker + offset)
+        .unwrap();
+    let heading_text = xml[target_start..]
+        .find("Real heading")
+        .map(|offset| target_start + offset)
+        .unwrap();
+    assert!(
+        heading_style < end_marker && end_marker < target_start && target_start < heading_text,
+        "{xml}"
+    );
+    let target = document
+        .bookmarks()
+        .into_iter()
+        .find(|bookmark| bookmark.name() == Some("_Toc1"))
+        .expect("generated TOC target exists");
+    assert_eq!(target.text(), "Real heading");
+
+    let bytes = document.to_bytes().unwrap();
+    let mut reopened = Document::from_bytes(&bytes).unwrap();
+    let reopened_xml = document_xml(&mut reopened);
+    assert!(!reopened_xml.contains("old middle"), "{reopened_xml}");
+    assert!(!reopened_xml.contains("old boundary"), "{reopened_xml}");
+    let target = reopened
+        .bookmarks()
+        .into_iter()
+        .find(|bookmark| bookmark.name() == Some("_Toc1"))
+        .expect("generated TOC target survives reopening");
+    assert_eq!(target.text(), "Real heading");
+}
+
+#[test]
+fn toc_rebuild_preserves_an_empty_aliased_end_paragraph_property_element() {
+    let exact_properties = r#"<q:pPr xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:producer="urn:producer" producer:keep="exact"/>"#;
+    let body = format!(
+        r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o &quot;1-1&quot;</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old cache</w:t></w:r></w:p>
+        <w:p>{exact_properties}<w:r><w:t>old boundary</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Heading</w:t></w:r></w:p>
+        "#
+    );
+    let mut document = document_with_field_parts(&wrap_word_body(&body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 1);
+    let bytes = document.to_bytes().unwrap();
+    let mut reopened = Document::from_bytes(&bytes).unwrap();
+    let xml = document_xml(&mut reopened);
+    assert!(xml.contains(exact_properties), "{xml}");
+    assert!(!xml.contains("old cache"), "{xml}");
+    assert!(!xml.contains("old boundary"), "{xml}");
+}
+
+#[test]
+fn toc_rebuild_preserves_the_complete_end_marker_control_prefix() {
+    let body = r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o &quot;1-1&quot;</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old cache</w:t></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>old boundary</w:t></w:r><w:sdt producer:root="keep"><w:sdtPr producer:properties="keep"><w:alias w:val="End control"/><producer:before producer:value="one"/><w:tag w:val="end-tag"/><w:id w:val="77"/><w:dataBinding w:storeItemID="{AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}" w:xpath="/root/value" w:prefixMappings="xmlns:n='urn:value'" producer:binding="keep"/><w:text/><producer:after producer:value="two"/></w:sdtPr><w:sdtEndPr><w:rPr><w:b/></w:rPr></w:sdtEndPr><w:sdtContent producer:content="keep"><w:r><w:fldChar w:fldCharType="end"/></w:r></w:sdtContent></w:sdt><w:r><w:t>Real heading</w:t></w:r></w:p>
+    "#;
+    let xml = wrap_word_body(body).replacen(
+        "<w:document ",
+        r#"<w:document xmlns:producer="urn:producer" "#,
+        1,
+    );
+    let mut document = document_with_field_parts(&xml, None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 1);
+    let bytes = document.to_bytes().unwrap();
+    let mut reopened = Document::from_bytes(&bytes).unwrap();
+    let xml = document_xml(&mut reopened);
+    for preserved in [
+        r#"producer:root="keep""#,
+        r#"producer:properties="keep""#,
+        r#"w:alias w:val="End control""#,
+        r#"producer:before producer:value="one""#,
+        r#"w:tag w:val="end-tag""#,
+        r#"w:id w:val="77""#,
+        r#"w:storeItemID="{AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}""#,
+        r#"w:xpath="/root/value""#,
+        r#"producer:binding="keep""#,
+        "<w:text/>",
+        r#"producer:after producer:value="two""#,
+        "<w:sdtEndPr><w:rPr><w:b/></w:rPr></w:sdtEndPr>",
+        r#"producer:content="keep""#,
+    ] {
+        assert!(xml.contains(preserved), "missing {preserved}: {xml}");
+    }
+    let properties = xml.find("<w:sdtPr").unwrap();
+    let content = xml.find("<w:sdtContent").unwrap();
+    let end_marker = xml.find(r#"w:fldCharType="end""#).unwrap();
+    assert!(properties < content && content < end_marker, "{xml}");
+    assert!(!xml.contains("old cache"), "{xml}");
+    assert!(!xml.contains("old boundary"), "{xml}");
+}
+
+#[test]
+fn toc_rebuild_targets_post_end_text_inside_each_accepted_wrapper() {
+    for (label, wrapped_end) in [
+        (
+            "hyperlink",
+            r#"<w:hyperlink w:anchor="source"><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t>Inside hyperlink</w:t></w:r></w:hyperlink>"#,
+        ),
+        (
+            "revision",
+            r#"<w:ins w:id="81" w:author="Ada"><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t>Inside revision</w:t></w:r></w:ins>"#,
+        ),
+        (
+            "control",
+            r#"<w:sdt><w:sdtPr><w:tag w:val="source"/></w:sdtPr><w:sdtContent><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t>Inside control</w:t></w:r></w:sdtContent></w:sdt>"#,
+        ),
+    ] {
+        let expected = format!("Inside {label}");
+        let body = format!(
+            r#"
+            <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o &quot;1-1&quot; \h</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+            <w:p><w:r><w:t>old cache</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>old boundary</w:t></w:r>{wrapped_end}</w:p>
+            "#
+        );
+        let mut document = document_with_field_parts(&wrap_word_body(&body), None, None);
+
+        assert_eq!(document.rebuild_toc().unwrap().entry_count, 1, "{label}");
+        let xml = document_xml(&mut document);
+        assert_eq!(
+            toc_entry_signatures(&xml),
+            [(
+                format!("{expected}\t1"),
+                "TOC1".to_owned(),
+                Some("_Toc1".to_owned()),
+                Some("_Toc1".to_owned())
+            )],
+            "{label}"
+        );
+        CT_Document::from_xml(xml.as_bytes()).expect("rebuilt wrapper remains structurally valid");
+        let end_marker = xml.find(r#"w:fldCharType="end""#).unwrap();
+        let target_start = xml.find(r#"w:name="_Toc1""#).unwrap();
+        let heading_text = xml[target_start..]
+            .find(&expected)
+            .map(|offset| target_start + offset)
+            .unwrap();
+        assert!(
+            end_marker < target_start && target_start < heading_text,
+            "{label}: {xml}"
+        );
+        let target_end = xml[target_start..]
+            .find("<w:bookmarkEnd")
+            .map(|offset| target_start + offset)
+            .unwrap();
+        let target_xml = &xml[target_start..target_end];
+        assert!(
+            target_xml.contains(&format!("<w:t>{expected}</w:t>")),
+            "{label}: {target_xml}"
+        );
+        assert_eq!(
+            target_xml.matches("<w:t").count(),
+            1,
+            "{label}: {target_xml}"
+        );
+        assert!(
+            !target_xml.contains("old boundary"),
+            "{label}: {target_xml}"
+        );
+
+        let bytes = document.to_bytes().unwrap();
+        let mut reopened = Document::from_bytes(&bytes).unwrap();
+        let target = reopened
+            .bookmarks()
+            .into_iter()
+            .find(|bookmark| bookmark.name() == Some("_Toc1"))
+            .expect("wrapper-local generated target remains matched after reopen");
+        assert_eq!(target.text(), expected, "{label}");
+        let layout = reopened.layout_deterministic().unwrap();
+        let mut target_pages = 0usize;
+        for page in &layout.layout.pages {
+            oxml_layout::walk(&page.elements, &mut |element, _| {
+                if matches!(
+                    element,
+                    oxml_layout::PositionedElement::Text(run)
+                        if matches!(run.field_kind, Some(oxml_layout::FieldKind::TargetPage(_)))
+                ) {
+                    target_pages += 1;
+                }
+            });
+        }
+        assert_eq!(target_pages, 1, "{label}");
+        assert_eq!(reopened.rebuild_toc().unwrap().entry_count, 1, "{label}");
+    }
+}
+
+#[test]
+fn toc_rebuild_repairs_wrapper_local_bookmarks_for_every_target_policy() {
+    for (label, switches, expected_target, expected_page) in [
+        ("link-page", r#"\h"#, Some("_Toc1"), Some("_Toc1")),
+        ("link-only", r#"\h \n &quot;1-1&quot;"#, Some("_Toc1"), None),
+        ("target-free", r#"\n &quot;1-1&quot;"#, None, None),
+    ] {
+        let body = format!(
+            r#"
+            <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o &quot;1-1&quot; {switches}</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+            <w:p><w:bookmarkStart w:id="91" w:name="originalTarget"/><w:r><w:t>old cache</w:t></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:ins w:id="92" w:author="Ada"><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t>Repaired heading</w:t></w:r><w:bookmarkEnd w:id="91"/></w:ins></w:p>
+            <w:p><w:hyperlink w:anchor="originalTarget"><w:r><w:t>existing reference</w:t></w:r></w:hyperlink></w:p>
+            "#
+        );
+        let mut document = document_with_field_parts(&wrap_word_body(&body), None, None);
+
+        let report = document.rebuild_toc().unwrap();
+        assert_eq!(report.entry_count, 1, "{label}");
+        let bytes = document.to_bytes().unwrap();
+        let mut reopened = Document::from_bytes(&bytes).unwrap();
+        let xml = document_xml(&mut reopened);
+        assert_eq!(
+            toc_entry_signatures(&xml),
+            [(
+                if expected_page.is_some() {
+                    "Repaired heading\t1".to_owned()
+                } else {
+                    "Repaired heading".to_owned()
+                },
+                "TOC1".to_owned(),
+                expected_target.map(str::to_owned),
+                expected_page.map(str::to_owned),
+            )],
+            "{label}"
+        );
+        let original = reopened
+            .bookmarks()
+            .into_iter()
+            .find(|bookmark| bookmark.name() == Some("originalTarget"))
+            .expect("wrapper-local repaired target remains matched after reopen");
+        assert_eq!(original.text(), "Repaired heading", "{label}");
+        assert!(xml.contains(r#"w:anchor="originalTarget""#), "{label}");
+        if expected_page.is_some() {
+            reopened.layout_deterministic().unwrap();
+        }
+        assert_eq!(reopened.rebuild_toc().unwrap().entry_count, 1, "{label}");
+    }
+}
+
+#[test]
+fn wrapper_local_bookmark_ranges_use_the_same_accepted_boundaries_as_text() {
+    let body = r#"
+        <w:p><w:ins w:id="1" w:author="Ada"><w:r><w:t>revision before</w:t></w:r><w:bookmarkStart w:id="11" w:name="revisionRange"/><w:r><w:t>revision inside</w:t></w:r></w:ins><w:bookmarkEnd w:id="11"/><w:r><w:t>revision after</w:t></w:r></w:p>
+        <w:p><w:sdt><w:sdtContent><w:bookmarkStart w:id="12" w:name="controlRange"/><w:r><w:t>control inside</w:t></w:r><w:bookmarkEnd w:id="12"/><w:r><w:t>control after</w:t></w:r></w:sdtContent></w:sdt></w:p>
+        <w:p><w:sdt><w:sdtContent><w:bookmarkEnd w:id="13"/><w:r><w:t>reversed</w:t></w:r><w:bookmarkStart w:id="13" w:name="reversedRange"/></w:sdtContent></w:sdt></w:p>
+        <w:p><w:bookmarkEnd w:id="14"/><w:bookmarkStart w:id="14" w:name="sameBoundaryReversed"/><w:bookmarkStart w:id="15" w:name="sameBoundaryEmpty"/><w:bookmarkEnd w:id="15"/><w:r><w:t>after empty ranges</w:t></w:r></w:p>
+    "#;
+    let document = document_with_field_parts(&wrap_word_body(body), None, None);
+    let bookmarks = document.bookmarks();
+    let revision = bookmarks
+        .iter()
+        .find(|bookmark| bookmark.name() == Some("revisionRange"))
+        .expect("revision bookmark");
+    assert_eq!(revision.text(), "revision inside");
+    assert_eq!(
+        revision.range(),
+        Some(RunRange {
+            start: RunPosition {
+                body_index: 0,
+                run_index: 1,
+            },
+            end: RunPosition {
+                body_index: 0,
+                run_index: 2,
+            },
+        })
+    );
+    let control = bookmarks
+        .iter()
+        .find(|bookmark| bookmark.name() == Some("controlRange"))
+        .expect("control bookmark");
+    assert_eq!(control.text(), "control inside");
+    assert_eq!(
+        control.range(),
+        Some(RunRange {
+            start: RunPosition {
+                body_index: 1,
+                run_index: 0,
+            },
+            end: RunPosition {
+                body_index: 1,
+                run_index: 1,
+            },
+        })
+    );
+    let reversed = bookmarks
+        .iter()
+        .find(|bookmark| bookmark.name() == Some("reversedRange"))
+        .expect("reversed bookmark report");
+    assert!(reversed.range().is_none());
+    assert_eq!(
+        reversed.issue(),
+        Some("bookmark id 13 ends before it starts")
+    );
+    let same_boundary_reversed = bookmarks
+        .iter()
+        .find(|bookmark| bookmark.name() == Some("sameBoundaryReversed"))
+        .expect("same-boundary reversed bookmark report");
+    assert!(same_boundary_reversed.range().is_none());
+    assert_eq!(
+        same_boundary_reversed.issue(),
+        Some("bookmark id 14 ends before it starts")
+    );
+    let same_boundary_empty = bookmarks
+        .iter()
+        .find(|bookmark| bookmark.name() == Some("sameBoundaryEmpty"))
+        .expect("same-boundary empty bookmark");
+    assert_eq!(same_boundary_empty.text(), "");
+    assert_eq!(
+        same_boundary_empty.range(),
+        Some(RunRange {
+            start: RunPosition {
+                body_index: 3,
+                run_index: 0,
+            },
+            end: RunPosition {
+                body_index: 3,
+                run_index: 0,
+            },
+        })
+    );
+}
+
+#[test]
+fn ancestor_only_bookmark_alias_survives_live_comment_and_bookmark_mutations() {
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="{word}" xmlns:q="{word}"><w:body>
+        <w:p><w:fldSimple w:instr=" REF aliasTarget "><w:r><w:t>stale ref</w:t></w:r></w:fldSimple><w:r><w:t>/</w:t></w:r><w:fldSimple w:instr=" PAGEREF aliasTarget "><w:r><w:t>stale page</w:t></w:r></w:fldSimple></w:p>
+        <w:p><q:bookmarkStart q:id="41" q:name="aliasTarget"/><w:r><w:t>live target</w:t></w:r><q:bookmarkEnd q:id="41"/></w:p>
+        </w:body></w:document>"#,
+        word = rdocx_oxml::namespace::W_NS,
+    );
+    let mut document = document_with_field_parts(&xml, None, None);
+    let target_range = RunRange {
+        start: RunPosition {
+            body_index: 1,
+            run_index: 0,
+        },
+        end: RunPosition {
+            body_index: 1,
+            run_index: 1,
+        },
+    };
+
+    document
+        .add_comment(target_range, "Ada", Some("A"), "review")
+        .unwrap();
+    document.add_bookmark("secondTarget", target_range).unwrap();
+    let bookmarks = document.bookmarks();
+    for name in ["aliasTarget", "secondTarget"] {
+        let bookmark = bookmarks
+            .iter()
+            .find(|bookmark| bookmark.name() == Some(name))
+            .unwrap_or_else(|| panic!("missing live {name}"));
+        assert_eq!(bookmark.text(), "live target", "{name}");
+        assert!(bookmark.issue().is_none(), "{name}: {:?}", bookmark.issue());
+    }
+
+    let layout = document.layout_deterministic().unwrap();
+    let mut page_targets = 0usize;
+    let mut text = String::new();
+    for page in &layout.layout.pages {
+        oxml_layout::walk(&page.elements, &mut |element, _| {
+            if let oxml_layout::PositionedElement::Text(run) = element {
+                text.push_str(&run.text);
+                if matches!(run.field_kind, Some(oxml_layout::FieldKind::TargetPage(_))) {
+                    page_targets += 1;
+                }
+            }
+        });
+    }
+    assert!(text.contains("live target"), "{text}");
+    assert!(!text.contains("stale ref"), "{text}");
+    assert!(!text.contains("stale page"), "{text}");
+    assert_eq!(page_targets, 1);
+}
+
+#[test]
+fn toc_sources_ignore_block_children_of_an_inline_content_control() {
+    let body = r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \f C \s Chapter \d ":"</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:sdt><w:sdtContent>
+          <w:p><w:fldSimple w:instr="SEQ Chapter"><w:r><w:t>7</w:t></w:r></w:fldSimple><w:fldSimple w:instr="TC &quot;Opaque block&quot; \f C \l 1"><w:r><w:t>hidden</w:t></w:r></w:fldSimple></w:p>
+          <w:ins w:id="71" w:author="Ada"><w:fldSimple w:instr="TC &quot;Visible inline&quot; \f C \l 1"><w:r><w:t>hidden</w:t></w:r></w:fldSimple></w:ins>
+        </w:sdtContent></w:sdt></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 1);
+    assert_eq!(
+        toc_entry_signatures(&document_xml(&mut document))[0].0,
+        "Visible inline\t1"
+    );
+}
+
+#[test]
+fn toc_heading_title_ignores_block_children_of_an_inline_content_control() {
+    let body = r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o &quot;1-1&quot; \n</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:sdt><w:sdtContent><w:p><w:r><w:t>Opaque block</w:t></w:r></w:p><w:r><w:t>Visible heading</w:t></w:r></w:sdtContent></w:sdt></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 1);
+    assert_eq!(
+        toc_entry_signatures(&document_xml(&mut document))[0].0,
+        "Visible heading"
+    );
+}
+
+#[test]
+fn toc_bookmark_scope_uses_nested_accepted_run_boundaries() {
+    let body = r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \f C \b Scope \s Chapter \d ":"</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:ins w:id="21" w:author="Ada">
+          <w:fldSimple w:instr="SEQ Chapter"><w:r><w:t>7</w:t></w:r></w:fldSimple>
+          <w:fldSimple w:instr="TC &quot;Before&quot; \f C \l 1"><w:r><w:t>hidden</w:t></w:r></w:fldSimple>
+          <w:bookmarkStart w:id="22" w:name="Scope"/>
+          <w:fldSimple w:instr="SEQ Chapter"><w:r><w:t>8</w:t></w:r></w:fldSimple>
+          <w:fldSimple w:instr="TC &quot;Inside&quot; \f C \l 1"><w:r><w:t>hidden</w:t></w:r></w:fldSimple>
+          <w:bookmarkEnd w:id="22"/>
+          <w:fldSimple w:instr="TC &quot;After&quot; \f C \l 1"><w:r><w:t>hidden</w:t></w:r></w:fldSimple>
+        </w:ins></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 1);
+    let entries = toc_entry_signatures(&document_xml(&mut document));
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0, "Inside\t2:1");
+}
+
+#[test]
+fn toc_bookmark_scope_excludes_a_heading_before_a_nested_start_boundary() {
+    let body = r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o &quot;1-1&quot; \b HeadingScope</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:sdt><w:sdtContent><w:r><w:t>Excluded heading</w:t></w:r><w:bookmarkStart w:id="31" w:name="HeadingScope"/></w:sdtContent></w:sdt></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:sdt><w:sdtContent><w:r><w:t>Included heading</w:t></w:r><w:bookmarkEnd w:id="31"/></w:sdtContent></w:sdt></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 1);
+    let entries = toc_entry_signatures(&document_xml(&mut document));
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].0, "Included heading\t1");
+}
+
+#[test]
+fn toc_block_control_targets_at_every_main_story_level_resolve_exact_pages() {
+    let body = r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o &quot;1-1&quot; \h</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:pPr><w:pageBreakBefore/></w:pPr></w:p>
+        <w:sdt><w:sdtContent><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Body control</w:t></w:r></w:p></w:sdtContent></w:sdt>
+        <w:p><w:pPr><w:pageBreakBefore/></w:pPr></w:p>
+        <w:tbl><w:tblGrid><w:gridCol w:w="8000"/></w:tblGrid><w:sdt><w:sdtContent><w:tr><w:tc><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Table control</w:t></w:r></w:p></w:tc></w:tr></w:sdtContent></w:sdt></w:tbl>
+        <w:p><w:pPr><w:pageBreakBefore/></w:pPr></w:p>
+        <w:tbl><w:tblGrid><w:gridCol w:w="8000"/></w:tblGrid><w:tr><w:sdt><w:sdtContent><w:tc><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Row control</w:t></w:r></w:p></w:tc></w:sdtContent></w:sdt></w:tr></w:tbl>
+        <w:p><w:pPr><w:pageBreakBefore/></w:pPr></w:p>
+        <w:tbl><w:tblGrid><w:gridCol w:w="8000"/></w:tblGrid><w:tr><w:tc><w:sdt><w:sdtContent><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Cell control</w:t></w:r></w:p></w:sdtContent></w:sdt></w:tc></w:tr></w:tbl>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 4);
+    assert_eq!(
+        toc_entry_signatures(&document_xml(&mut document)),
+        [
+            (
+                "Body control\t2".to_owned(),
+                "TOC1".to_owned(),
+                Some("_Toc1".to_owned()),
+                Some("_Toc1".to_owned()),
+            ),
+            (
+                "Table control\t3".to_owned(),
+                "TOC1".to_owned(),
+                Some("_Toc2".to_owned()),
+                Some("_Toc2".to_owned()),
+            ),
+            (
+                "Row control\t4".to_owned(),
+                "TOC1".to_owned(),
+                Some("_Toc3".to_owned()),
+                Some("_Toc3".to_owned()),
+            ),
+            (
+                "Cell control\t5".to_owned(),
+                "TOC1".to_owned(),
+                Some("_Toc4".to_owned()),
+                Some("_Toc4".to_owned()),
+            ),
+        ]
+    );
+    let targets = document
+        .bookmarks()
+        .into_iter()
+        .filter(|bookmark| bookmark.name().is_some_and(|name| name.starts_with("_Toc")))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        targets
+            .iter()
+            .map(|bookmark| (bookmark.name().unwrap(), bookmark.text()))
+            .collect::<Vec<_>>(),
+        [
+            ("_Toc1", "Body control"),
+            ("_Toc2", "Table control"),
+            ("_Toc3", "Row control"),
+            ("_Toc4", "Cell control"),
+        ]
+    );
+    let layout = document.layout_deterministic().unwrap();
+    let mut resolved = Vec::new();
+    for page in &layout.layout.pages {
+        oxml_layout::walk(&page.elements, &mut |element, _| {
+            if let oxml_layout::PositionedElement::Text(run) = element
+                && let Some(oxml_layout::FieldKind::TargetPage(target)) = run.field_kind
+            {
+                resolved.push((
+                    layout.page_reference_name(target).unwrap().to_owned(),
+                    run.text.clone(),
+                ));
+            }
+        });
+    }
+    assert_eq!(
+        resolved,
+        [
+            ("_Toc1".to_owned(), "2".to_owned()),
+            ("_Toc2".to_owned(), "3".to_owned()),
+            ("_Toc3".to_owned(), "4".to_owned()),
+            ("_Toc4".to_owned(), "5".to_owned()),
+        ]
+    );
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 4);
+}
+
+#[test]
+fn toc_rebuild_rejects_an_unresolved_page_target_atomically() {
+    let body = r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o &quot;1-1&quot; \h</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:tbl><w:tblGrid><w:gridCol w:w="8000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:vMerge w:val="continue"/></w:tcPr><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Unlaid continuation</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+    let before = document.to_bytes().unwrap();
+
+    let error = document.rebuild_toc().unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "table of contents page target _Toc1 was not resolved"
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+}
+
+fn invalid_block_control_source(label: &str, id: i32) -> String {
+    format!(
+        r#"<w:p data-case="{label}"><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:bookmarkStart w:id="{id}" w:name="invalid_{label}"/><w:fldSimple w:instr=" SEQ Chapter "><w:r><w:t>1</w:t></w:r></w:fldSimple><w:fldSimple w:instr=" TC &quot;TC {label}&quot; \f C \l 1 "/><w:r><w:t>Heading {label}</w:t></w:r><w:bookmarkEnd w:id="{id}"/></w:p>"#
+    )
+}
+
+fn invalid_block_control_owner_matrix() -> String {
+    let body_row = invalid_block_control_source("body_row", 201);
+    let body_cell = invalid_block_control_source("body_cell", 202);
+    let table_paragraph = invalid_block_control_source("table_paragraph", 203);
+    let table_table = invalid_block_control_source("table_table", 204);
+    let table_cell = invalid_block_control_source("table_cell", 205);
+    let row_paragraph = invalid_block_control_source("row_paragraph", 206);
+    let row_table = invalid_block_control_source("row_table", 207);
+    let row_row = invalid_block_control_source("row_row", 208);
+    let cell_row = invalid_block_control_source("cell_row", 209);
+    let cell_cell = invalid_block_control_source("cell_cell", 210);
+    format!(
+        r#"
+        <w:sdt><w:sdtContent><w:tr><w:tc>{body_row}</w:tc></w:tr><w:tc>{body_cell}</w:tc><w:p/></w:sdtContent></w:sdt>
+        <w:tbl><w:tblGrid><w:gridCol w:w="8000"/></w:tblGrid><w:sdt><w:sdtContent>{table_paragraph}<w:tbl><w:tr><w:tc>{table_table}</w:tc></w:tr></w:tbl><w:tc>{table_cell}</w:tc></w:sdtContent></w:sdt><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>
+        <w:tbl><w:tblGrid><w:gridCol w:w="8000"/></w:tblGrid><w:tr><w:sdt><w:sdtContent>{row_paragraph}<w:tbl><w:tr><w:tc>{row_table}</w:tc></w:tr></w:tbl><w:tr><w:tc>{row_row}</w:tc></w:tr></w:sdtContent></w:sdt><w:tc><w:p/></w:tc></w:tr></w:tbl>
+        <w:tbl><w:tblGrid><w:gridCol w:w="8000"/></w:tblGrid><w:tr><w:tc><w:sdt><w:sdtContent><w:tr><w:tc>{cell_row}</w:tc></w:tr><w:tc>{cell_cell}</w:tc><w:p/></w:sdtContent></w:sdt></w:tc></w:tr></w:tbl>
+        "#
+    )
+}
+
+fn assert_invalid_block_control_sources_are_opaque(document: &mut Document) {
+    let xml = document_xml(document);
+    for label in [
+        "body_row",
+        "body_cell",
+        "table_paragraph",
+        "table_table",
+        "table_cell",
+        "row_paragraph",
+        "row_table",
+        "row_row",
+        "cell_row",
+        "cell_cell",
+    ] {
+        assert!(
+            xml.contains(&format!(r#"<w:p data-case="{label}">"#)),
+            "invalid source {label} was not preserved exactly: {xml}"
+        );
+        assert!(
+            document
+                .bookmarks()
+                .iter()
+                .all(|bookmark| bookmark.name() != Some(&format!("invalid_{label}"))),
+            "invalid source {label} exposed a public bookmark"
+        );
+    }
+}
+
+#[test]
+fn toc_rebuild_ignores_every_block_control_owner_mismatch_without_page_fields() {
+    let body = format!(
+        r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o &quot;1-1&quot; \f C \n &quot;1-1&quot;</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        {}
+        "#,
+        invalid_block_control_owner_matrix()
+    );
+    let mut document = document_with_field_parts(&wrap_word_body(&body), None, None);
+
+    assert_eq!(
+        document
+            .evaluate_fields(&FieldEvaluationContext::default())
+            .unwrap()
+            .len(),
+        0,
+        "invalid SEQ and TC fields must remain opaque"
+    );
+    let report = document
+        .rebuild_toc()
+        .expect("invalid children stay opaque");
+    assert_eq!(report.entry_count, 0);
+    assert!(toc_entry_signatures(&document_xml(&mut document)).is_empty());
+    assert_invalid_block_control_sources_are_opaque(&mut document);
+}
+
+#[test]
+fn toc_rebuild_does_not_treat_owner_mismatches_as_unresolved_pageref_sources() {
+    let body = format!(
+        r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o &quot;1-1&quot; \f C \s Chapter</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        {}
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Valid heading</w:t></w:r></w:p>
+        "#,
+        invalid_block_control_owner_matrix()
+    );
+    let mut document = document_with_field_parts(&wrap_word_body(&body), None, None);
+
+    assert_eq!(
+        document
+            .evaluate_fields(&FieldEvaluationContext::default())
+            .unwrap()
+            .len(),
+        0,
+        "invalid SEQ and TC fields must remain opaque"
+    );
+    let report = document
+        .rebuild_toc()
+        .expect("invalid children are not unresolved valid sources");
+    assert_eq!(report.entry_count, 1);
+    assert_eq!(
+        toc_entry_signatures(&document_xml(&mut document)),
+        [(
+            "Valid heading\t1".to_owned(),
+            "TOC1".to_owned(),
+            None,
+            Some("_Toc1".to_owned()),
+        )]
+    );
+    assert_invalid_block_control_sources_are_opaque(&mut document);
+}
+
+#[test]
+fn invalid_block_control_paragraphs_before_toc_do_not_shift_raw_coordinates() {
+    let body = format!(
+        r#"
+        {}
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o &quot;1-1&quot; \h \n &quot;1-1&quot;</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p data-case="valid-target"><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Valid target</w:t></w:r></w:p>
+        "#,
+        invalid_block_control_owner_matrix()
+    );
+    let mut document = document_with_field_parts(&wrap_word_body(&body), None, None);
+
+    let report = document
+        .rebuild_toc()
+        .expect("raw and typed coordinates agree");
+    assert_eq!(report.entry_count, 1);
+    assert_eq!(report.bookmark_count, 1);
+    let xml = document_xml(&mut document);
+    assert_eq!(
+        toc_entry_signatures(&xml),
+        [(
+            "Valid target".to_owned(),
+            "TOC1".to_owned(),
+            Some("_Toc1".to_owned()),
+            None,
+        )]
+    );
+    let target = document
+        .bookmarks()
+        .into_iter()
+        .find(|bookmark| bookmark.name() == Some("_Toc1"))
+        .expect("generated target is public");
+    assert_eq!(target.text(), "Valid target");
+    let valid_text = xml.rfind(">Valid target<").unwrap();
+    let valid_start = xml[..valid_text].rfind("<w:p").unwrap();
+    let valid_end = valid_start + xml[valid_start..].find("</w:p>").unwrap();
+    let marker = xml.find(r#"w:name="_Toc1""#).unwrap();
+    assert!((valid_start..valid_end).contains(&marker), "{xml}");
+    assert_invalid_block_control_sources_are_opaque(&mut document);
+}
+
+#[test]
+fn invalidly_owned_complex_and_simple_tocs_remain_opaque() {
+    let body = r#"
+        <w:tbl><w:tblGrid/><w:sdt><w:sdtContent>
+          <w:p data-case="invalid-complex"><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o &quot;1-1&quot;</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>opaque cache</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+          <w:p data-case="invalid-simple"><w:fldSimple w:instr="TOC \o &quot;1-1&quot;"><w:r><w:t>opaque simple</w:t></w:r></w:fldSimple></w:p>
+        </w:sdtContent></w:sdt><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+    let before = document_xml(&mut document);
+
+    assert_eq!(document.rebuild_toc().unwrap(), TocRebuildReport::default());
+    assert_eq!(document_xml(&mut document), before);
+}
+
+#[test]
+fn malformed_block_control_shell_keeps_complex_and_simple_tocs_opaque() {
+    let body = r#"
+        <w:sdt data-case="malformed-block"><w:sdtPr><w:id w:val="not-an-integer"/></w:sdtPr><w:sdtContent>
+          <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o &quot;1-1&quot;</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+          <w:p><w:r><w:t>opaque cache</w:t></w:r></w:p>
+          <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r><w:fldSimple w:instr="TOC \o &quot;1-1&quot;"><w:r><w:t>opaque simple</w:t></w:r></w:fldSimple></w:p>
+        </w:sdtContent></w:sdt>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+    let before = document_xml(&mut document);
+
+    assert_eq!(document.rebuild_toc().unwrap(), TocRebuildReport::default());
+    assert_eq!(document_xml(&mut document), before);
+}
+
+#[test]
+fn malformed_inline_control_shell_keeps_complex_and_simple_tocs_opaque() {
+    let body = r#"
+        <w:p><w:sdt data-case="malformed-inline"><w:sdtPr><w:tag/></w:sdtPr><w:sdtContent>
+          <w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o &quot;1-1&quot;</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:fldSimple w:instr="TOC \o &quot;1-1&quot;"><w:r><w:t>opaque simple</w:t></w:r></w:fldSimple><w:r><w:fldChar w:fldCharType="end"/></w:r>
+        </w:sdtContent></w:sdt></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+    let before = document_xml(&mut document);
+
+    assert_eq!(document.rebuild_toc().unwrap(), TocRebuildReport::default());
+    assert_eq!(document_xml(&mut document), before);
+}
+
+#[test]
+fn malformed_control_fields_and_bookmarks_do_not_shift_later_toc_coordinates() {
+    let body = r#"
+        <w:sdt data-case="malformed-block-prefix"><w:sdtPr><w:id w:val="invalid"/></w:sdtPr><w:sdtContent>
+          <w:p><w:bookmarkStart w:id="700" w:name="opaqueBlock"/><w:fldSimple w:instr="TOC \o &quot;1-1&quot;"><w:r><w:t>opaque TOC</w:t></w:r></w:fldSimple><w:fldSimple w:instr="SEQ Chapter"><w:r><w:t>99</w:t></w:r></w:fldSimple><w:r><w:t>opaque block</w:t></w:r><w:bookmarkEnd w:id="700"/></w:p>
+        </w:sdtContent></w:sdt>
+        <w:p><w:sdt data-case="malformed-inline-prefix"><w:sdtPr><w:tag/></w:sdtPr><w:sdtContent><w:bookmarkStart w:id="701" w:name="opaqueInline"/><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>SEQ Chapter</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>99</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:bookmarkEnd w:id="701"/></w:sdtContent></w:sdt></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o &quot;1-1&quot; \h \n &quot;1-1&quot;</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Valid target</w:t></w:r></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    assert!(document.bookmarks().is_empty());
+    assert!(
+        document
+            .evaluate_fields(&FieldEvaluationContext::default())
+            .unwrap()
+            .is_empty()
+    );
+    let report = document
+        .rebuild_toc()
+        .expect("opaque prefixes do not shift coordinates");
+    assert_eq!(report.entry_count, 1);
+    assert_eq!(report.bookmark_count, 1);
+    assert_eq!(report.diagnostic_count, 0);
+    let target = document
+        .bookmarks()
+        .into_iter()
+        .find(|bookmark| bookmark.name() == Some("_Toc1"))
+        .expect("generated target is public");
+    assert_eq!(target.id(), Some(1));
+    assert_eq!(target.text(), "Valid target");
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 1);
+}
+
+#[test]
+fn toc_rebuild_does_not_reuse_a_whole_bookmark_for_the_begin_boundary_fragment() {
+    let body = r#"
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:bookmarkStart w:id="41" w:name="wholeBegin"/><w:bookmarkStart w:id="42" w:name="wholeBeginInner"/><w:r><w:t>Begin fragment</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o &quot;1-1&quot; \h</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:bookmarkEnd w:id="42"/><w:bookmarkEnd w:id="41"/></w:p>
+        <w:p><w:r><w:t>old cache</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    let report = document.rebuild_toc().unwrap();
+    assert_eq!(report.entry_count, 1);
+    assert_eq!(report.bookmark_count, 1);
+    let xml = document_xml(&mut document);
+    assert_eq!(
+        toc_entry_signatures(&xml),
+        [(
+            "Begin fragment\t1".to_owned(),
+            "TOC1".to_owned(),
+            Some("_Toc1".to_owned()),
+            Some("_Toc1".to_owned())
+        )]
+    );
+    assert!(xml.contains(r#"w:id="43" w:name="_Toc1""#), "{xml}");
+    let target = document
+        .bookmarks()
+        .into_iter()
+        .find(|bookmark| bookmark.name() == Some("_Toc1"))
+        .expect("generated hyperlink and page field have a surviving target");
+    assert_eq!(target.text(), "Begin fragment");
+    let original = document
+        .bookmarks()
+        .into_iter()
+        .find(|bookmark| bookmark.name() == Some("wholeBegin"))
+        .expect("the original whole-paragraph bookmark remains matched");
+    assert_eq!(original.text(), "Begin fragment");
+    let inner = document
+        .bookmarks()
+        .into_iter()
+        .find(|bookmark| bookmark.name() == Some("wholeBeginInner"))
+        .expect("every nested whole-paragraph bookmark remains matched");
+    assert_eq!(inner.text(), "Begin fragment");
+}
+
+#[test]
+fn toc_rebuild_repairs_a_partial_begin_bookmark_with_link_and_page_targets() {
+    let body = r#"
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Outside </w:t></w:r><w:bookmarkStart w:id="71" w:name="partialBegin"/><w:r><w:t>selected</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o &quot;1-1&quot; \h</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:bookmarkEnd w:id="71"/></w:p>
+        <w:p><w:r><w:t>old cache</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:hyperlink w:anchor="partialBegin"><w:r><w:t>existing reference</w:t></w:r></w:hyperlink></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 1);
+    let xml = document_xml(&mut document);
+    assert_eq!(
+        toc_entry_signatures(&xml)[0],
+        (
+            "Outside selected\t1".to_owned(),
+            "TOC1".to_owned(),
+            Some("_Toc1".to_owned()),
+            Some("_Toc1".to_owned())
+        )
+    );
+    assert!(xml.contains(r#"w:anchor="partialBegin""#), "{xml}");
+    let original = document
+        .bookmarks()
+        .into_iter()
+        .find(|bookmark| bookmark.name() == Some("partialBegin"))
+        .expect("partial begin bookmark remains matched");
+    assert_eq!(original.text(), "selected");
+}
+
+#[test]
+fn toc_rebuild_repairs_a_cross_paragraph_bookmark_with_a_hyperlink_only_entry() {
+    let body = r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o &quot;1-1&quot; \h \n &quot;1-1&quot;</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:bookmarkStart w:id="72" w:name="crossEnd"/><w:r><w:t>old cache</w:t></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t>End selected</w:t></w:r><w:bookmarkEnd w:id="72"/></w:p>
+        <w:p><w:hyperlink w:anchor="crossEnd"><w:r><w:t>existing reference</w:t></w:r></w:hyperlink></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 1);
+    let xml = document_xml(&mut document);
+    assert_eq!(
+        toc_entry_signatures(&xml)[0],
+        (
+            "End selected".to_owned(),
+            "TOC1".to_owned(),
+            Some("_Toc1".to_owned()),
+            None
+        )
+    );
+    assert!(xml.contains(r#"w:anchor="crossEnd""#), "{xml}");
+    let original = document
+        .bookmarks()
+        .into_iter()
+        .find(|bookmark| bookmark.name() == Some("crossEnd"))
+        .expect("cross-paragraph bookmark remains matched");
+    assert_eq!(original.text(), "End selected");
+}
+
+#[test]
+fn toc_rebuild_repairs_a_partial_end_bookmark_without_a_generated_target() {
+    let body = r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o &quot;1-1&quot; \n &quot;1-1&quot;</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old cache</w:t></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>outside old</w:t></w:r><w:bookmarkStart w:id="73" w:name="partialEnd"/><w:r><w:t>inside old</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t>End selected</w:t></w:r><w:bookmarkEnd w:id="73"/></w:p>
+        <w:p><w:hyperlink w:anchor="partialEnd"><w:r><w:t>existing reference</w:t></w:r></w:hyperlink></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    let report = document.rebuild_toc().unwrap();
+    assert_eq!(report.entry_count, 1);
+    assert_eq!(report.bookmark_count, 0);
+    let xml = document_xml(&mut document);
+    assert_eq!(
+        toc_entry_signatures(&xml)[0],
+        ("End selected".to_owned(), "TOC1".to_owned(), None, None)
+    );
+    assert!(xml.contains(r#"w:anchor="partialEnd""#), "{xml}");
+    let original = document
+        .bookmarks()
+        .into_iter()
+        .find(|bookmark| bookmark.name() == Some("partialEnd"))
+        .expect("partial end bookmark remains matched");
+    assert_eq!(original.text(), "End selected");
+}
+
+#[test]
+fn toc_rebuild_does_not_reuse_a_whole_bookmark_for_the_end_boundary_fragment() {
+    let body = r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o &quot;1-1&quot; \h \n &quot;1-1&quot;</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old cache</w:t></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:bookmarkStart w:id="51" w:name="wholeEnd"/><w:r><w:t>old boundary</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t>End fragment</w:t></w:r><w:bookmarkEnd w:id="51"/></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    let report = document.rebuild_toc().unwrap();
+    assert_eq!(report.entry_count, 1);
+    assert_eq!(report.bookmark_count, 1);
+    let xml = document_xml(&mut document);
+    assert_eq!(
+        toc_entry_signatures(&xml),
+        [(
+            "End fragment".to_owned(),
+            "TOC1".to_owned(),
+            Some("_Toc1".to_owned()),
+            None
+        )]
+    );
+    assert!(xml.contains(r#"w:id="52" w:name="_Toc1""#), "{xml}");
+    let target = document
+        .bookmarks()
+        .into_iter()
+        .find(|bookmark| bookmark.name() == Some("_Toc1"))
+        .expect("generated hyperlink has a surviving target");
+    assert_eq!(target.text(), "End fragment");
+    let original = document
+        .bookmarks()
+        .into_iter()
+        .find(|bookmark| bookmark.name() == Some("wholeEnd"))
+        .expect("the original whole-paragraph bookmark remains matched");
+    assert_eq!(original.text(), "End fragment");
+}
+
+#[test]
+fn toc_rebuild_repairs_boundary_bookmarks_when_links_and_page_fields_are_disabled() {
+    let body = r#"
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:bookmarkStart w:id="61" w:name="wholeBegin"/><w:r><w:t>Begin fragment</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o &quot;1-1&quot; \n &quot;1-1&quot;</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:bookmarkEnd w:id="61"/></w:p>
+        <w:p><w:r><w:t>old cache</w:t></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:bookmarkStart w:id="62" w:name="wholeEnd"/><w:r><w:t>old boundary</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t>End fragment</w:t></w:r><w:bookmarkEnd w:id="62"/></w:p>
+        <w:p><w:hyperlink w:anchor="wholeBegin"><w:r><w:t>existing link</w:t></w:r></w:hyperlink><w:fldSimple w:instr="PAGEREF wholeEnd"><w:r><w:t>stored page</w:t></w:r></w:fldSimple></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    let report = document.rebuild_toc().unwrap();
+    assert_eq!(report.entry_count, 2);
+    assert_eq!(report.bookmark_count, 0);
+    let xml = document_xml(&mut document);
+    assert_eq!(
+        toc_entry_signatures(&xml),
+        [
+            ("Begin fragment".to_owned(), "TOC1".to_owned(), None, None),
+            ("End fragment".to_owned(), "TOC1".to_owned(), None, None)
+        ]
+    );
+    assert!(xml.contains(r#"w:anchor="wholeBegin""#), "{xml}");
+    assert!(xml.contains("PAGEREF wholeEnd"), "{xml}");
+    let bookmarks = document.bookmarks();
+    assert_eq!(
+        bookmarks
+            .iter()
+            .find(|bookmark| bookmark.name() == Some("wholeBegin"))
+            .expect("begin bookmark remains matched")
+            .text(),
+        "Begin fragment"
+    );
+    assert_eq!(
+        bookmarks
+            .iter()
+            .find(|bookmark| bookmark.name() == Some("wholeEnd"))
+            .expect("end bookmark remains matched")
+            .text(),
+        "End fragment"
+    );
+}
+
+#[test]
+fn toc_rebuild_accepts_a_content_control_nested_inside_an_accepted_revision() {
+    for wrapper in ["ins", "moveTo"] {
+        let body = format!(
+            r#"
+            <w:p><w:{wrapper} w:id="94" w:author="Ada"><w:sdt><w:sdtContent>
+              <w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o "1-1"</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r>
+            </w:sdtContent></w:sdt></w:{wrapper}></w:p>
+            <w:p><w:r><w:t>old</w:t></w:r></w:p>
+            <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+            <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Nested owner</w:t></w:r></w:p>
+            "#
+        );
+        let mut document = document_with_field_parts(&wrap_word_body(&body), None, None);
+
+        assert_eq!(document.rebuild_toc().unwrap().entry_count, 1);
+        assert_eq!(
+            toc_entry_signatures(&document_xml(&mut document))[0].0,
+            "Nested owner\t1"
+        );
+    }
+}
+
+#[test]
+fn toc_rebuild_layouts_controls_nested_inside_insertions() {
+    let long_title = "nested ".repeat(900);
+    let body = format!(
+        r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o "1-1"</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:ins w:id="95" w:author="Ada"><w:sdt><w:sdtContent><w:r><w:t>{long_title}</w:t></w:r></w:sdtContent></w:sdt></w:ins></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Later nested heading</w:t></w:r></w:p>
+        "#
+    );
+    let mut document = document_with_field_parts(&wrap_word_body(&body), None, None);
+
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 2);
+    let entries = toc_entry_signatures(&document_xml(&mut document));
+    assert_eq!(entries[0].0, format!("{long_title}\t3"));
+    assert_eq!(entries[1].0, "Later nested heading\t5");
 }
 
 #[test]
@@ -1961,6 +4311,8 @@ fn date_time_filename_mergefield_and_includetext_use_only_explicit_context() {
                 "Chapter summary".to_owned(),
             ),
         ]),
+        merge_record_number: None,
+        merge_sequence_number: None,
     };
     assert_eq!(
         document
@@ -5062,7 +7414,8 @@ fn comment_mutations_keep_bookmarks_and_run_controls_at_their_boundaries() {
         r#"<w:p><w:bookmarkStart w:id="4" w:name="destination"/><w:r><w:t>left</w:t></w:r><w:sdt><w:sdtPr><w:tag w:val="run-control"/></w:sdtPr><w:sdtContent><w:r><w:t>wrapped</w:t></w:r></w:sdtContent></w:sdt><w:r><w:t>right</w:t></w:r><w:bookmarkEnd w:id="4"/></w:p>"#,
     );
     let mut document = document_with_content_controls(&xml);
-    assert_eq!(document.bookmarks()[0].range().unwrap().end.run_index, 2);
+    assert_eq!(document.bookmarks()[0].range().unwrap().end.run_index, 3);
+    assert_eq!(document.bookmarks()[0].text(), "leftwrappedright");
 
     let comment_id = document
         .add_comment(
@@ -5081,7 +7434,8 @@ fn comment_mutations_keep_bookmarks_and_run_controls_at_their_boundaries() {
             "Review",
         )
         .unwrap();
-    assert_eq!(document.bookmarks()[0].range().unwrap().end.run_index, 3);
+    assert_eq!(document.bookmarks()[0].range().unwrap().end.run_index, 4);
+    assert_eq!(document.bookmarks()[0].text(), "leftwrappedright");
     assert_eq!(document.content_controls()[0].text(), "wrapped");
 
     let bytes = document.to_bytes().unwrap();
@@ -5102,7 +7456,8 @@ fn comment_mutations_keep_bookmarks_and_run_controls_at_their_boundaries() {
     )
     .unwrap();
     assert!(reopened.remove_comment(comment_id).unwrap());
-    assert_eq!(reopened.bookmarks()[0].range().unwrap().end.run_index, 2);
+    assert_eq!(reopened.bookmarks()[0].range().unwrap().end.run_index, 3);
+    assert_eq!(reopened.bookmarks()[0].text(), "leftwrappedright");
     assert_eq!(reopened.content_controls()[0].text(), "wrapped");
     let saved = reopened.to_bytes().unwrap();
     let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(saved)).unwrap();
@@ -5115,6 +7470,46 @@ fn comment_mutations_keep_bookmarks_and_run_controls_at_their_boundaries() {
     let right = document_xml.find("<w:t>right</w:t>").unwrap();
     let bookmark_end = document_xml.find("<w:bookmarkEnd").unwrap();
     assert!(left < control && control < right && right < bookmark_end);
+}
+
+#[test]
+fn new_bookmark_after_an_accepted_control_has_live_accepted_coordinates() {
+    let body = r#"
+        <w:p><w:fldSimple w:instr="REF destination"><w:r><w:t>stale</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:sdt><w:sdtContent><w:r><w:t>wrapped prefix</w:t></w:r></w:sdtContent></w:sdt><w:r><w:t>direct target</w:t></w:r></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    document
+        .add_bookmark(
+            "destination",
+            RunRange {
+                start: RunPosition {
+                    body_index: 1,
+                    run_index: 0,
+                },
+                end: RunPosition {
+                    body_index: 1,
+                    run_index: 1,
+                },
+            },
+        )
+        .unwrap();
+    let bookmark = &document.bookmarks()[0];
+    assert_eq!(bookmark.text(), "direct target");
+    assert_eq!(bookmark.range().unwrap().start.run_index, 1);
+    assert_eq!(bookmark.range().unwrap().end.run_index, 2);
+
+    let page = document.layout_page(0).unwrap().unwrap();
+    let text = compatibility_page_elements(&page.elements)
+        .into_iter()
+        .filter_map(|element| match element {
+            oxml_layout::PositionedElement::Text(run) => Some(run.text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    assert!(text.contains("direct target"), "{text}");
+    assert!(!text.contains("stale"), "{text}");
 }
 
 #[test]

@@ -11355,3 +11355,86 @@ full integrated verification passed.
 **Notes for future sessions.** Compare normalized expression trees rather than
 serialized bytes when extending the conversion subset. Keep Pandoc outside the
 runtime graph and add a mutation-sensitive case for each new grammar rule.
+
+### F-231, Extended field evaluation
+
+**Sprint.** S66
+**Completed.** 2026-09-03
+**Size.** L, estimated 4 days, actual 1 day
+
+**What was built.** The native Word field evaluator now handles bounded
+formula expressions, TOC and TC entry decisions, mail-merge control fields,
+record counters, and DISPLAYBARCODE and MERGEBARCODE specifications. Public
+structured outcomes distinguish generated content and control decisions from
+resolved text, while unsupported or unavailable cases preserve the original
+instruction and cached display with stable diagnostics.
+
+**Non-obvious choices.** Extended instructions consume the existing typed,
+recursive field grammar, including nested operands and escaped tokens, instead
+of introducing another raw lexer. Only exact supported text results replace a
+cache. Control, generated-content, deferred, unavailable-context, and
+unsupported outcomes retain their cache and use the existing field-local dirty
+policy.
+
+**Deviations from the design plan.** None. Review refined the approved plan's
+TOC switch ownership, formula normalization, parser boundary, and packaging
+evidence before completion.
+
+**Spec sections touched.** `docs/hld/03-architecture.md`,
+`docs/hld/10-bindings-spec.md`, and `docs/hld/12-testing-strategy.md`.
+
+**Tests.** The differential gate
+`extended_field_families_match_the_pinned_word_result` matches source-built
+cases against Microsoft Word 16.104. Focused unit and regression tests cover
+bounded formula precedence and normalization, story-local mail state, TOC and
+TC selection, typed barcode limits, cache fallback policy, nested operands,
+and exact field scaffolding preservation. Five microscope passes ended clean,
+and the integrated full-workspace verification passed.
+
+**Hash harness.** Unchanged, 49 of 49.
+
+**Notes for future sessions.** Keep generated-content and mail-control outcomes
+structured until their owning workflow consumes them. Extend switch ownership
+in the shared field grammar and add a mutation-sensitive Word differential case
+for every new field rule.
+
+### F-232, Dynamic table of contents rebuild
+
+**Sprint.** S66
+**Completed.** 2026-09-04
+**Size.** L, estimated 4 days, actual 1 day
+
+**What was built.** The native `Document::rebuild_toc()` operation now rebuilds
+existing complex TOCs from headings, custom styles, outline levels, and TC
+fields. It allocates or reuses bookmarks, writes linked entries and PAGEREF
+fields, resolves final deterministic page numbers, and commits the staged
+package atomically with a structured report.
+
+**Non-obvious choices.** TOC source discovery, public bookmark correlation, and
+layout share owner-aware main-story traversal and explicit accepted and tracked
+coordinates. Byte-level replacement validates the same typed ownership grammar
+before editing, preserves unsupported XML verbatim, and rejects unresolved page
+targets instead of committing cached placeholders.
+
+**Deviations from the design plan.** None. Review expanded the approved parser,
+serializer, layout, and preservation riders into exact owner, namespace,
+bookmark-boundary, mutation, and atomicity coverage.
+
+**Spec sections touched.** `docs/hld/03-architecture.md`,
+`docs/hld/04-opc-and-packaging.md`, `docs/hld/08-rendering-spec.md`,
+`docs/hld/10-bindings-spec.md`, and `docs/hld/12-testing-strategy.md`.
+
+**Tests.** The differential gate
+`dynamic_toc_rebuild_matches_the_pinned_word_update` matches source-built cases
+against Microsoft Word 16.104. Focused regression coverage proves exact entry,
+link, level, bookmark, and final-page output across paragraphs, tables, content
+controls, revisions, nested fields, malformed owners, mutations, repeated
+rebuilds, and atomic failure. Twenty microscope passes ended clean, and the
+integrated full-workspace verification passed.
+
+**Hash harness.** Unchanged, 49 of 49.
+
+**Notes for future sessions.** Keep raw and typed ownership decisions aligned
+when extending TOC sources. Any new wrapper or story location needs one shared
+coordinate contract across parsing, bookmark facade access, layout, save and
+reopen, and in-memory mutation before reopen.

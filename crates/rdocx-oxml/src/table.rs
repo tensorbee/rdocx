@@ -4,7 +4,7 @@ use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::{Reader, Writer};
 
 use crate::borders::CT_BorderEdge;
-use crate::content_control::CT_Sdt;
+use crate::content_control::{CT_Sdt, SdtOwner};
 use crate::error::{OxmlError, Result};
 use crate::namespace::matches_local_name;
 use crate::numbering::{
@@ -1674,7 +1674,7 @@ impl CT_Tc {
                             &capture_element(reader, e)?,
                             owner_bindings,
                         )?;
-                        if let Some(sdt) = CT_Sdt::from_raw(&raw, &prefixes) {
+                        if let Some(sdt) = CT_Sdt::from_cell_raw(&raw, &prefixes) {
                             content.push(CellContent::ContentControl(sdt));
                         } else {
                             extra_xml.push((content.len(), raw));
@@ -1751,7 +1751,7 @@ impl CT_Tc {
                 CellContent::Table(table) => table.collect_controls(controls),
                 CellContent::ContentControl(sdt) => {
                     controls.push(sdt);
-                    sdt.collect_controls(controls);
+                    sdt.collect_controls(SdtOwner::Cell, controls);
                 }
             }
         }
@@ -1761,7 +1761,9 @@ impl CT_Tc {
         for content in &self.content {
             match content {
                 CellContent::Paragraph(paragraph) => paragraphs.push(paragraph),
-                CellContent::ContentControl(sdt) => sdt.collect_paragraphs(paragraphs),
+                CellContent::ContentControl(sdt) => {
+                    sdt.collect_paragraphs(SdtOwner::Cell, paragraphs)
+                }
                 CellContent::Table(_) => {}
             }
         }
@@ -1771,7 +1773,7 @@ impl CT_Tc {
         for content in &self.content {
             match content {
                 CellContent::Table(table) => tables.push(table),
-                CellContent::ContentControl(sdt) => sdt.collect_tables(tables),
+                CellContent::ContentControl(sdt) => sdt.collect_tables(SdtOwner::Cell, tables),
                 CellContent::Paragraph(_) => {}
             }
         }
@@ -1866,7 +1868,7 @@ impl CT_Row {
                             &capture_element(reader, e)?,
                             owner_bindings,
                         )?;
-                        if let Some(sdt) = CT_Sdt::from_raw(&raw, &prefixes) {
+                        if let Some(sdt) = CT_Sdt::from_row_raw(&raw, &prefixes) {
                             let raw_before = extra_xml
                                 .iter()
                                 .filter(|(at, _)| *at == cells.len())
@@ -1966,7 +1968,7 @@ impl CT_Row {
                 .iter()
                 .filter(|(at, _, _)| *at == index)
             {
-                sdt.collect_cells(cells);
+                sdt.collect_cells(SdtOwner::Row, cells);
             }
             if let Some(cell) = self.cells.get(index) {
                 cells.push(cell);
@@ -1982,7 +1984,7 @@ impl CT_Row {
                 .filter(|(at, _, _)| *at == index)
             {
                 controls.push(sdt);
-                sdt.collect_controls(controls);
+                sdt.collect_controls(SdtOwner::Row, controls);
             }
             if let Some(cell) = self.cells.get(index) {
                 cell.collect_controls(controls);
@@ -1997,7 +1999,7 @@ impl CT_Row {
                 .iter()
                 .filter(|(at, _, _)| *at == index)
             {
-                sdt.collect_paragraphs(paragraphs);
+                sdt.collect_paragraphs(SdtOwner::Row, paragraphs);
             }
             if let Some(cell) = self.cells.get(index) {
                 cell.collect_paragraphs(paragraphs);
@@ -2092,7 +2094,7 @@ impl CT_Tbl {
                             &capture_element(reader, e)?,
                             owner_bindings,
                         )?;
-                        if let Some(sdt) = CT_Sdt::from_raw(&raw, &prefixes) {
+                        if let Some(sdt) = CT_Sdt::from_table_raw(&raw, &prefixes) {
                             let raw_before =
                                 extra_xml.iter().filter(|(at, _)| *at == rows.len()).count();
                             content_controls.push((rows.len(), raw_before, sdt));
@@ -2207,7 +2209,7 @@ impl CT_Tbl {
                 .iter()
                 .filter(|(at, _, _)| *at == index)
             {
-                sdt.collect_rows(rows);
+                sdt.collect_rows(SdtOwner::Table, rows);
             }
             if let Some(row) = self.rows.get(index) {
                 rows.push(row);
@@ -2223,7 +2225,7 @@ impl CT_Tbl {
                 .filter(|(at, _, _)| *at == index)
             {
                 controls.push(sdt);
-                sdt.collect_controls(controls);
+                sdt.collect_controls(SdtOwner::Table, controls);
             }
             if let Some(row) = self.rows.get(index) {
                 row.collect_controls(controls);
@@ -2238,7 +2240,7 @@ impl CT_Tbl {
                 .iter()
                 .filter(|(at, _, _)| *at == index)
             {
-                sdt.collect_paragraphs(paragraphs);
+                sdt.collect_paragraphs(SdtOwner::Table, paragraphs);
             }
             if let Some(row) = self.rows.get(index) {
                 row.collect_paragraphs(paragraphs);
