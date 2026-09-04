@@ -1,6 +1,6 @@
 # F-234, Full-story document comparison
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S67
 **Size**: L
 **Depends on**: F-167
@@ -138,18 +138,18 @@ delta is unexplained and blocks integration.
 
 ## Implementation checklist
 
-- [ ] Approve the exact full-story, move, and formatting boundary.
-- [ ] Build one relationship-resolved story index in `comparison.rs`.
-- [ ] Seed one global revision allocator from every source part.
-- [ ] Compare related stories, fields, and nested text boxes through the
+- [x] Approve the exact full-story, move, and formatting boundary.
+- [x] Build one relationship-resolved story index in `comparison.rs`.
+- [x] Seed one global revision allocator from every source part.
+- [x] Compare related stories, fields, and nested text boxes through the
   existing hierarchical owner logic.
-- [ ] Emit stable same-story moves and supported property revisions.
-- [ ] Patch only owned spans and reopen the complete staged package.
-- [ ] Extend revision resolution across the same stories.
-- [ ] Prove accepted and rejected package-wide postconditions and provenance.
-- [ ] Add the source-built pinned Word differential and focused regressions.
-- [ ] Run focused checks, every risk rider, and the unchanged hash harness.
-- [ ] Update exactly the four listed HLD files.
+- [x] Emit stable same-story moves and supported property revisions.
+- [x] Patch only owned spans and reopen the complete staged package.
+- [x] Extend revision resolution across the same stories.
+- [x] Prove accepted and rejected package-wide postconditions and provenance.
+- [x] Add the source-built pinned Word differential and focused regressions.
+- [x] Run focused checks, every risk rider, and the unchanged hash harness.
+- [x] Update exactly the four listed HLD files.
 
 ## Open questions
 

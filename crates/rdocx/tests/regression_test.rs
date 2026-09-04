@@ -925,6 +925,8 @@ const CUSTOM_XML_PROPS_REL_TYPE: &str =
 const WORD_REVISION_ORACLE: &str = "Microsoft Word 16.104 build 16.104.25121423";
 const WORD_FIELD_ORACLE: &str = "Microsoft Word 16.104 build 16.104.25121423";
 const WORD_DENSE_FORM_ORACLE: &str = "Microsoft Word 16.104 build 16.104.25121423";
+const WORD_COMPARISON_ORACLE: &str = "Microsoft Word 16.104 build 16.104.25121423";
+const WORD_COMPARISON_ENVIRONMENT: &str = "locale=en-US; normalization=revision-records-v1";
 const WORD_FIELD_ORACLE_ENVIRONMENT: &str =
     "locale=en-US; calendar=Gregorian; decimal=.; grouping=,; timezone=UTC";
 const WORD_FIELD_ORACLE_INPUT: &str = "F-161-readable-field-matrix-v1";
@@ -9074,27 +9076,39 @@ fn rejecting_a_comparison_reproduces_the_original_body_exactly() {
 }
 
 #[test]
-fn formatting_only_changes_report_diagnostics_without_revisions() {
+fn modeled_formatting_changes_are_tracked_without_diagnostics() {
     let original_xml =
         wrap_word_body(r#"<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>same</w:t></w:r></w:p>"#);
     let edited_xml =
         wrap_word_body(r#"<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>same</w:t></w:r></w:p>"#);
+    let original = document_with_content_controls(&original_xml);
     let edited = document_with_content_controls(&edited_xml);
     let mut compared = document_with_content_controls(&original_xml);
-    let before = body_from_document(&mut compared);
     let diagnostics = compared
         .compare(&edited, "Ada", "2026-08-21T09:30:00Z")
         .unwrap();
 
-    assert_eq!(
-        diagnostics,
-        vec![rdocx::ComparisonDiagnostic {
-            location: "body/paragraph[0]/run[0]".to_owned(),
-            message: "formatting differs and the original formatting was retained".to_owned(),
-        }]
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert!(!compared.revisions().is_empty());
+    let tracked_bytes = compared.to_bytes().unwrap();
+    assert!(document_xml(&mut compared).contains("<w:rPrChange"));
+
+    let mut accepted = Document::from_bytes(&tracked_bytes).unwrap();
+    accepted.accept_all().unwrap();
+    assert!(
+        accepted
+            .compare(&edited, "postcondition", "2026-08-21T09:31:00Z")
+            .unwrap()
+            .is_empty()
     );
-    assert!(compared.revisions().is_empty());
-    assert_eq!(body_from_document(&mut compared), before);
+    let mut rejected = Document::from_bytes(&tracked_bytes).unwrap();
+    rejected.reject_all().unwrap();
+    assert!(
+        rejected
+            .compare(&original, "postcondition", "2026-08-21T09:31:00Z")
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -9345,13 +9359,111 @@ fn comparison_reports_formatting_inside_matched_table_rows() {
             .iter()
             .map(|diagnostic| diagnostic.location.as_str())
             .collect::<Vec<_>>(),
-        vec![
-            "body/table[0]/row[0]/cell[0]",
-            "body/table[0]/row[0]/cell[0]/content[0]",
-            "body/table[0]/row[0]/cell[0]/content[0]/run[0]",
-        ]
+        vec!["body/table[0]/row[0]/cell[0]"]
     );
-    assert!(compared.revisions().is_empty());
+    assert!(!compared.revisions().is_empty());
+    let tracked_bytes = compared.to_bytes().unwrap();
+    let tracked = document_xml(&mut compared);
+    assert!(tracked.contains("<w:pPrChange"), "{tracked}");
+    assert!(tracked.contains("<w:rPrChange"), "{tracked}");
+
+    let mut accepted = Document::from_bytes(&tracked_bytes).unwrap();
+    accepted.accept_all().unwrap();
+    let accepted = document_xml(&mut accepted);
+    assert!(accepted.contains(r#"<w:jc w:val="right"/>"#), "{accepted}");
+    assert!(accepted.contains("<w:i/>"), "{accepted}");
+    assert!(accepted.contains(r#"w:fill="FF0000""#), "{accepted}");
+
+    let mut rejected = Document::from_bytes(&tracked_bytes).unwrap();
+    rejected.reject_all().unwrap();
+    let rejected = document_xml(&mut rejected);
+    assert!(rejected.contains(r#"<w:jc w:val="left"/>"#), "{rejected}");
+    assert!(rejected.contains("<w:b/>"), "{rejected}");
+    assert!(rejected.contains(r#"w:fill="FF0000""#), "{rejected}");
+}
+
+#[test]
+fn a_new_paragraph_property_owner_does_not_adopt_edited_unmodelled_xml() {
+    let edited_raw = r#"<x:edited xmlns:x="urn:f234-paragraph-property" x:value="discard"/>"#;
+    let original_xml = wrap_word_body(r#"<w:p><w:r><w:t>same</w:t></w:r></w:p>"#);
+    let edited_xml = wrap_word_body(&format!(
+        r#"<w:p><w:pPr><w:jc w:val="center"/>{edited_raw}</w:pPr><w:r><w:t>same</w:t></w:r></w:p>"#,
+    ));
+    let edited = document_with_content_controls(&edited_xml);
+    let mut compared = document_with_content_controls(&original_xml);
+
+    assert_eq!(
+        compared
+            .compare(&edited, "Ada", "2026-08-21T09:30:00Z")
+            .unwrap(),
+        vec![rdocx::ComparisonDiagnostic {
+            location: "body/paragraph[0]".to_owned(),
+            message: "formatting differs and the original formatting was retained".to_owned(),
+        }]
+    );
+    let tracked_bytes = compared.to_bytes().unwrap();
+    let tracked = document_xml(&mut compared);
+    assert!(tracked.contains("<w:pPrChange"), "{tracked}");
+    assert!(tracked.contains(r#"<w:jc w:val="center"/>"#), "{tracked}");
+    assert!(!tracked.contains(edited_raw), "{tracked}");
+
+    let mut accepted = Document::from_bytes(&tracked_bytes).unwrap();
+    accepted.accept_all().unwrap();
+    let accepted = document_xml(&mut accepted);
+    assert!(accepted.contains(r#"<w:jc w:val="center"/>"#), "{accepted}");
+    assert!(!accepted.contains(edited_raw), "{accepted}");
+
+    let mut rejected = Document::from_bytes(&tracked_bytes).unwrap();
+    rejected.reject_all().unwrap();
+    let rejected = document_xml(&mut rejected);
+    assert!(!rejected.contains("<w:pPr"), "{rejected}");
+    assert!(!rejected.contains(edited_raw), "{rejected}");
+}
+
+#[test]
+fn a_new_table_property_owner_does_not_adopt_edited_unmodelled_xml() {
+    let edited_raw = r#"<x:edited xmlns:x="urn:f234-table-property" x:value="discard"/>"#;
+    let original_xml = wrap_word_body(
+        r#"<w:tbl><w:tblGrid/><w:tr><w:tc><w:p><w:r><w:t>same</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+    );
+    let edited_xml = wrap_word_body(&format!(
+        r#"<w:tbl><w:tblPr><w:tblW w:w="200" w:type="dxa"/>{edited_raw}</w:tblPr><w:tblGrid/><w:tr><w:tc><w:p><w:r><w:t>same</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+    ));
+    let edited = document_with_content_controls(&edited_xml);
+    let mut compared = document_with_content_controls(&original_xml);
+
+    assert_eq!(
+        compared
+            .compare(&edited, "Ada", "2026-08-21T09:30:00Z")
+            .unwrap(),
+        vec![rdocx::ComparisonDiagnostic {
+            location: "body/table[0]".to_owned(),
+            message: "formatting differs and the original formatting was retained".to_owned(),
+        }]
+    );
+    let tracked_bytes = compared.to_bytes().unwrap();
+    let tracked = document_xml(&mut compared);
+    assert!(tracked.contains("<w:tblPrChange"), "{tracked}");
+    assert!(
+        tracked.contains(r#"<w:tblW w:w="200" w:type="dxa"/>"#),
+        "{tracked}"
+    );
+    assert!(!tracked.contains(edited_raw), "{tracked}");
+
+    let mut accepted = Document::from_bytes(&tracked_bytes).unwrap();
+    accepted.accept_all().unwrap();
+    let accepted = document_xml(&mut accepted);
+    assert!(
+        accepted.contains(r#"<w:tblW w:w="200" w:type="dxa"/>"#),
+        "{accepted}"
+    );
+    assert!(!accepted.contains(edited_raw), "{accepted}");
+
+    let mut rejected = Document::from_bytes(&tracked_bytes).unwrap();
+    rejected.reject_all().unwrap();
+    let rejected = document_xml(&mut rejected);
+    assert!(!rejected.contains("<w:tblPr"), "{rejected}");
+    assert!(!rejected.contains(edited_raw), "{rejected}");
 }
 
 #[test]
@@ -9874,6 +9986,1320 @@ fn control_block_replacement_keeps_whitespace_before_the_replacement() {
             .unwrap()
             .is_empty()
     );
+}
+
+fn document_with_comparison_header(inner: &str) -> Document {
+    let mut seed = Document::new();
+    let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(
+        seed.to_bytes().expect("serialize comparison seed"),
+    ))
+    .expect("open comparison seed package");
+    package.set_part(
+        "/word/header1.xml",
+        format!(
+            r#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:x="urn:comparison-producer">{inner}</w:hdr>"#,
+        )
+        .into_bytes(),
+    );
+    package.content_types.add_override(
+        "/word/header1.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+    );
+    let header_id = package
+        .get_or_create_part_rels("/word/document.xml")
+        .add(oxml_opc::relationship::rel_types::HEADER, "header1.xml");
+    package.set_part(
+        "/word/document.xml",
+        format!(
+            r#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>same body</w:t></w:r></w:p><w:sectPr><w:headerReference w:type="default" r:id="{header_id}"/></w:sectPr></w:body></w:document>"#,
+        )
+        .into_bytes(),
+    );
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package
+        .write_to(&mut bytes)
+        .expect("serialize comparison fixture");
+    Document::from_bytes(bytes.get_ref()).expect("open comparison fixture")
+}
+
+fn document_with_comparison_stories(value: &str) -> Document {
+    document_with_comparison_story_values(value, value)
+}
+
+fn document_with_comparison_story_values(value: &str, comment_value: &str) -> Document {
+    let mut seed = Document::new();
+    let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(
+        seed.to_bytes().expect("serialize full-story seed"),
+    ))
+    .expect("open full-story seed package");
+    let relationships = package.get_or_create_part_rels("/word/document.xml");
+    let header_id = relationships.add(oxml_opc::relationship::rel_types::HEADER, "header1.xml");
+    let footer_id = relationships.add(oxml_opc::relationship::rel_types::FOOTER, "footer1.xml");
+    relationships.add(oxml_opc::relationship::rel_types::COMMENTS, "comments.xml");
+    relationships.add(
+        oxml_opc::relationship::rel_types::FOOTNOTES,
+        "footnotes.xml",
+    );
+    relationships.add(oxml_opc::relationship::rel_types::ENDNOTES, "endnotes.xml");
+    let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    package.set_part(
+        "/word/header1.xml",
+        format!(
+            r#"<w:hdr xmlns:w="{word}"><w:p><w:r><w:t>{value} header</w:t></w:r></w:p></w:hdr>"#
+        )
+        .into_bytes(),
+    );
+    package.set_part(
+        "/word/footer1.xml",
+        format!(
+            r#"<w:ftr xmlns:w="{word}"><w:p><w:r><w:t>{value} footer</w:t></w:r></w:p></w:ftr>"#
+        )
+        .into_bytes(),
+    );
+    package.set_part(
+        "/word/comments.xml",
+        format!(r#"<w:comments xmlns:w="{word}"><w:comment w:id="0" w:author="Ada" w:initials="AL" w:date="2026-09-04T09:00:00Z"><w:p><w:r><w:t>{comment_value} comment</w:t></w:r></w:p></w:comment></w:comments>"#).into_bytes(),
+    );
+    package.set_part(
+        "/word/footnotes.xml",
+        format!(r#"<w:footnotes xmlns:w="{word}"><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote><w:footnote w:id="1"><w:p><w:r><w:footnoteRef/><w:t xml:space="preserve"> {value} footnote</w:t></w:r></w:p></w:footnote></w:footnotes>"#).into_bytes(),
+    );
+    package.set_part(
+        "/word/endnotes.xml",
+        format!(r#"<w:endnotes xmlns:w="{word}"><w:endnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:endnote><w:endnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:endnote><w:endnote w:id="1"><w:p><w:r><w:endnoteRef/><w:t xml:space="preserve"> {value} endnote</w:t></w:r></w:p></w:endnote></w:endnotes>"#).into_bytes(),
+    );
+    for (part, content_type) in [
+        (
+            "/word/header1.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        ),
+        (
+            "/word/footer1.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml",
+        ),
+        (
+            "/word/comments.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml",
+        ),
+        (
+            "/word/footnotes.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml",
+        ),
+        (
+            "/word/endnotes.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml",
+        ),
+    ] {
+        package.content_types.add_override(part, content_type);
+    }
+    package.set_part(
+        "/word/document.xml",
+        format!(r#"<?xml version="1.0"?><w:document xmlns:w="{word}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:commentRangeStart w:id="0"/><w:r><w:t>{value} body</w:t></w:r><w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r></w:p><w:p><w:r><w:footnoteReference w:id="1"/></w:r><w:r><w:endnoteReference w:id="1"/></w:r></w:p><w:sectPr><w:headerReference w:type="default" r:id="{header_id}"/><w:footerReference w:type="default" r:id="{footer_id}"/></w:sectPr></w:body></w:document>"#).into_bytes(),
+    );
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package
+        .write_to(&mut bytes)
+        .expect("write full-story package");
+    Document::from_bytes(bytes.get_ref()).expect("open full-story package")
+}
+
+fn comparison_part_xml(document: &mut Document, part_name: &str) -> String {
+    let bytes = document.to_bytes().expect("serialize comparison document");
+    let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes))
+        .expect("open comparison package");
+    String::from_utf8(
+        package
+            .get_part(part_name)
+            .expect("comparison part exists")
+            .to_vec(),
+    )
+    .expect("comparison part is UTF-8")
+}
+
+fn comparison_story_with_run_properties(
+    mut document: Document,
+    part_name: &str,
+    run_start: &str,
+    properties: &str,
+) -> Document {
+    let bytes = document.to_bytes().expect("serialize comparison story");
+    let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes))
+        .expect("open comparison story package");
+    let source = String::from_utf8(
+        package
+            .get_part(part_name)
+            .expect("comparison story exists")
+            .to_vec(),
+    )
+    .expect("comparison story is UTF-8");
+    let replacement = run_start.replacen("<w:r>", &format!("<w:r><w:rPr>{properties}</w:rPr>"), 1);
+    let rewritten = source.replacen(run_start, &replacement, 1);
+    assert_ne!(rewritten, source, "missing run source in {part_name}");
+    package.set_part(part_name, rewritten.into_bytes());
+    let mut output = std::io::Cursor::new(Vec::new());
+    package
+        .write_to(&mut output)
+        .expect("serialize rewritten comparison story");
+    Document::from_bytes(output.get_ref()).expect("open rewritten comparison story")
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ComparisonOracleRecord {
+    kind: &'static str,
+    order: usize,
+    story: &'static str,
+    pair: Option<&'static str>,
+    field_owner: Option<&'static str>,
+    formatting: Option<&'static str>,
+}
+
+fn pinned_word_comparison_records() -> Vec<ComparisonOracleRecord> {
+    let mut records = Vec::new();
+    let mut push = |kind, story, pair, field_owner, formatting| {
+        records.push(ComparisonOracleRecord {
+            kind,
+            order: records.len(),
+            story,
+            pair,
+            field_owner,
+            formatting,
+        });
+    };
+    for story in [
+        "body",
+        "header",
+        "footer",
+        "comments",
+        "footnote",
+        "endnote",
+        "header/textbox[0]",
+    ] {
+        push("del", story, None, None, None);
+        push("ins", story, None, None, None);
+    }
+    push("moveFrom", "header", Some("move-0"), None, None);
+    push("moveTo", "header", Some("move-0"), None, None);
+    push("del", "header", None, Some("field-result"), None);
+    push("ins", "header", None, Some("field-result"), None);
+    push("del", "header", None, Some("field"), None);
+    push("ins", "header", None, Some("field"), None);
+    for formatting in ["pPrChange", "rPrChange", "tblPrChange", "sectPrChange"] {
+        push(formatting, "header", None, None, Some(formatting));
+    }
+    records.last_mut().expect("section record").story = "body";
+    records
+}
+
+fn push_oracle_replacement(
+    records: &mut Vec<ComparisonOracleRecord>,
+    story: &'static str,
+    xml: &str,
+    field_owner: Option<&'static str>,
+) {
+    assert!(xml.contains("<w:del"), "missing deletion in {story}: {xml}");
+    assert!(
+        xml.contains("<w:ins"),
+        "missing insertion in {story}: {xml}"
+    );
+    for kind in ["del", "ins"] {
+        records.push(ComparisonOracleRecord {
+            kind,
+            order: records.len(),
+            story,
+            pair: None,
+            field_owner,
+            formatting: None,
+        });
+    }
+}
+
+fn push_oracle_move(records: &mut Vec<ComparisonOracleRecord>, xml: &str) {
+    assert!(xml.contains("<w:moveFrom"), "missing move source: {xml}");
+    assert!(xml.contains("<w:moveTo"), "missing move target: {xml}");
+    for kind in ["moveFrom", "moveTo"] {
+        records.push(ComparisonOracleRecord {
+            kind,
+            order: records.len(),
+            story: "header",
+            pair: Some("move-0"),
+            field_owner: None,
+            formatting: None,
+        });
+    }
+}
+
+fn push_oracle_formatting(
+    records: &mut Vec<ComparisonOracleRecord>,
+    story: &'static str,
+    kind: &'static str,
+    xml: &str,
+) {
+    assert!(xml.contains(&format!("<w:{kind}")), "missing {kind}: {xml}");
+    records.push(ComparisonOracleRecord {
+        kind,
+        order: records.len(),
+        story,
+        pair: None,
+        field_owner: None,
+        formatting: Some(kind),
+    });
+}
+
+fn normalized_rdocx_comparison_records() -> Vec<ComparisonOracleRecord> {
+    let mut records = Vec::new();
+    let mut stories = document_with_comparison_stories("original");
+    let edited_stories = document_with_comparison_stories("edited");
+    stories
+        .compare(&edited_stories, "Word", "2026-09-04T09:00:00Z")
+        .expect("compare story oracle inputs");
+    for (part, story) in [
+        ("/word/document.xml", "body"),
+        ("/word/header1.xml", "header"),
+        ("/word/footer1.xml", "footer"),
+        ("/word/comments.xml", "comments"),
+        ("/word/footnotes.xml", "footnote"),
+        ("/word/endnotes.xml", "endnote"),
+    ] {
+        push_oracle_replacement(
+            &mut records,
+            story,
+            &comparison_part_xml(&mut stories, part),
+            None,
+        );
+    }
+
+    let text_box = |value: &str| {
+        format!(
+            r#"<w:p><w:r><w:pict><v:shape id="f234-box" style="width:100pt;height:50pt"><v:textbox><w:txbxContent><w:p><w:r><w:t>{value} box</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>"#,
+        )
+    };
+    let mut text_box_original = document_with_comparison_header(&text_box("old"));
+    let text_box_edited = document_with_comparison_header(&text_box("new"));
+    text_box_original
+        .compare(&text_box_edited, "Word", "2026-09-04T09:00:00Z")
+        .expect("compare text-box oracle inputs");
+    push_oracle_replacement(
+        &mut records,
+        "header/textbox[0]",
+        &comparison_part_xml(&mut text_box_original, "/word/header1.xml"),
+        None,
+    );
+
+    let mut move_original = document_with_comparison_header(
+        r#"<w:p><w:r><w:t>first</w:t></w:r></w:p><w:p><w:r><w:t>second</w:t></w:r></w:p>"#,
+    );
+    let move_edited = document_with_comparison_header(
+        r#"<w:p><w:r><w:t>second</w:t></w:r></w:p><w:p><w:r><w:t>first</w:t></w:r></w:p>"#,
+    );
+    move_original
+        .compare(&move_edited, "Word", "2026-09-04T09:00:00Z")
+        .expect("compare move oracle inputs");
+    push_oracle_move(
+        &mut records,
+        &comparison_part_xml(&mut move_original, "/word/header1.xml"),
+    );
+
+    let mut field_original = document_with_comparison_header(
+        r#"<w:p><w:fldSimple w:instr="MERGEFIELD Name"><w:r><w:t>old cache</w:t></w:r></w:fldSimple></w:p><w:p><w:fldSimple w:instr="MERGEFIELD Name"><w:r><w:t>same cache</w:t></w:r></w:fldSimple></w:p>"#,
+    );
+    let field_edited = document_with_comparison_header(
+        r#"<w:p><w:fldSimple w:instr="MERGEFIELD Name"><w:r><w:t>new cache</w:t></w:r></w:fldSimple></w:p><w:p><w:fldSimple w:instr="MERGEFIELD Other"><w:r><w:t>same cache</w:t></w:r></w:fldSimple></w:p>"#,
+    );
+    field_original
+        .compare(&field_edited, "Word", "2026-09-04T09:00:00Z")
+        .expect("compare field oracle inputs");
+    let field_xml = comparison_part_xml(&mut field_original, "/word/header1.xml");
+    let first_field_end = field_xml.find("</w:fldSimple>").expect("first field end");
+    push_oracle_replacement(
+        &mut records,
+        "header",
+        &field_xml[..first_field_end],
+        Some("field-result"),
+    );
+    push_oracle_replacement(
+        &mut records,
+        "header",
+        &field_xml[first_field_end..],
+        Some("field"),
+    );
+
+    let property_pairs = [
+        (
+            r#"<w:p><w:pPr><w:keepNext/></w:pPr><w:r><w:t>same</w:t></w:r></w:p>"#,
+            r#"<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>same</w:t></w:r></w:p>"#,
+            "pPrChange",
+        ),
+        (
+            r#"<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>same</w:t></w:r></w:p>"#,
+            r#"<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>same</w:t></w:r></w:p>"#,
+            "rPrChange",
+        ),
+        (
+            r#"<w:tbl><w:tblPr><w:tblW w:w="100" w:type="dxa"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:p><w:r><w:t>same</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+            r#"<w:tbl><w:tblPr><w:tblW w:w="200" w:type="dxa"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:p><w:r><w:t>same</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+            "tblPrChange",
+        ),
+    ];
+    for (original, edited, kind) in property_pairs {
+        let mut original = document_with_comparison_header(original);
+        let edited = document_with_comparison_header(edited);
+        original
+            .compare(&edited, "Word", "2026-09-04T09:00:00Z")
+            .expect("compare property oracle inputs");
+        push_oracle_formatting(
+            &mut records,
+            "header",
+            kind,
+            &comparison_part_xml(&mut original, "/word/header1.xml"),
+        );
+    }
+    let mut section_original = document_with_content_controls(&wrap_word_body(
+        r#"<w:p><w:r><w:t>same</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="1000" w:h="2000"/></w:sectPr>"#,
+    ));
+    let section_edited = document_with_content_controls(&wrap_word_body(
+        r#"<w:p><w:r><w:t>same</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="1100" w:h="2000"/></w:sectPr>"#,
+    ));
+    section_original
+        .compare(&section_edited, "Word", "2026-09-04T09:00:00Z")
+        .expect("compare section oracle inputs");
+    push_oracle_formatting(
+        &mut records,
+        "body",
+        "sectPrChange",
+        &document_xml(&mut section_original),
+    );
+    records
+}
+
+fn capture_word_comparison_case(
+    directory: &std::path::Path,
+    name: &str,
+    mut original: Document,
+    mut edited: Document,
+) -> oxml_opc::OpcPackage {
+    use std::process::Command;
+
+    let original_path = directory.join(format!("{name}-original.docx"));
+    let edited_path = directory.join(format!("{name}-edited.docx"));
+    let compared_path = directory.join(format!("{name}-word-compared.docx"));
+    std::fs::write(
+        &original_path,
+        original.to_bytes().expect("serialize Word original"),
+    )
+    .expect("write Word original");
+    std::fs::write(
+        &edited_path,
+        edited.to_bytes().expect("serialize Word edited"),
+    )
+    .expect("write Word edited");
+    let script = format!(
+        r#"with timeout of 60 seconds
+tell application "Microsoft Word"
+set revised_path to (POSIX file "{}") as text
+set output_path to (POSIX file "{}") as text
+set original_document to open file name "{}" read only false add to recent files false
+compare original_document path revised_path author name "Word" target compare target new detect format changes true ignore all comparison warnings true add to recent files false
+set compared_document to active document
+save as compared_document file name output_path file format format document default add to recent files false
+end tell
+end timeout"#,
+        edited_path.display(),
+        compared_path.display(),
+        original_path.display(),
+    );
+    let output = Command::new("osascript")
+        .args(["-e", &script])
+        .output()
+        .expect("run Word comparison automation");
+    assert!(
+        output.status.success(),
+        "Word comparison {name} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cleanup_script = format!(
+        r#"tell application "Microsoft Word"
+set directory_path to (POSIX file "{}/") as text
+repeat 2 times
+set gate_document to active document
+set opened_path to full name of gate_document as text
+if opened_path starts with directory_path then
+close gate_document saving no
+else
+error "unsafe non-F-234 Word document: " & opened_path
+end if
+end repeat
+end tell"#,
+        directory.display(),
+    );
+    let cleanup = Command::new("osascript")
+        .args(["-e", &cleanup_script])
+        .output()
+        .expect("clean up Word comparison documents");
+    assert!(
+        cleanup.status.success(),
+        "Word comparison {name} cleanup failed: {}",
+        String::from_utf8_lossy(&cleanup.stderr)
+    );
+    println!("F-234 Word oracle {name}: {}", compared_path.display());
+    oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(
+        std::fs::read(&compared_path).expect("read Word comparison"),
+    ))
+    .expect("open Word comparison package")
+}
+
+fn word_part_xml(package: &oxml_opc::OpcPackage, part: &str) -> String {
+    String::from_utf8(package.get_part(part).expect("Word part exists").to_vec())
+        .expect("Word part is UTF-8")
+}
+
+#[test]
+#[ignore = "requires installed Microsoft Word 16.104 GUI automation"]
+fn capture_full_story_comparison_word_records() {
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let version = Command::new("/usr/libexec/PlistBuddy")
+        .args([
+            "-c",
+            "Print:CFBundleShortVersionString",
+            "/Applications/Microsoft Word.app/Contents/Info.plist",
+        ])
+        .output()
+        .expect("read Word version");
+    let build = Command::new("/usr/libexec/PlistBuddy")
+        .args([
+            "-c",
+            "Print:CFBundleVersion",
+            "/Applications/Microsoft Word.app/Contents/Info.plist",
+        ])
+        .output()
+        .expect("read Word build");
+    assert_eq!(String::from_utf8_lossy(&version.stdout).trim(), "16.104");
+    assert_eq!(
+        String::from_utf8_lossy(&build.stdout).trim(),
+        "16.104.25121423"
+    );
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let capture_name = format!("{}-{nonce}", std::process::id());
+    let directory = std::path::Path::new(
+        "/Users/atulsharma/Library/Containers/com.microsoft.Word/Data/Documents/rdocx-f234-word-oracle",
+    )
+    .join(&capture_name);
+    std::fs::create_dir_all(&directory).expect("create Word oracle directory");
+    let mut records = Vec::new();
+
+    let story_package = capture_word_comparison_case(
+        &directory,
+        "stories",
+        document_with_comparison_story_values("original", "same"),
+        document_with_comparison_story_values("edited", "same"),
+    );
+    for (part, story) in [
+        ("/word/document.xml", "body"),
+        ("/word/header1.xml", "header"),
+        ("/word/footer1.xml", "footer"),
+        ("/word/footnotes.xml", "footnote"),
+        ("/word/endnotes.xml", "endnote"),
+    ] {
+        push_oracle_replacement(
+            &mut records,
+            story,
+            &word_part_xml(&story_package, part),
+            None,
+        );
+    }
+    records.insert(
+        6,
+        ComparisonOracleRecord {
+            kind: "del",
+            order: 6,
+            story: "comments",
+            pair: None,
+            field_owner: None,
+            formatting: None,
+        },
+    );
+    records.insert(
+        7,
+        ComparisonOracleRecord {
+            kind: "ins",
+            order: 7,
+            story: "comments",
+            pair: None,
+            field_owner: None,
+            formatting: None,
+        },
+    );
+    for (index, record) in records.iter_mut().enumerate() {
+        record.order = index;
+    }
+    let comment_package = capture_word_comparison_case(
+        &directory,
+        "comments",
+        document_with_comparison_story_values("same", "original"),
+        document_with_comparison_story_values("same", "edited"),
+    );
+    let comments = word_part_xml(&comment_package, "/word/comments.xml");
+    assert!(comments.contains("original comment"), "{comments}");
+    assert!(comments.contains("edited comment"), "{comments}");
+
+    let text_box = |value: &str| {
+        format!(
+            r#"<w:p><w:r><w:pict><v:shape id="f234-box" style="width:100pt;height:50pt"><v:textbox><w:txbxContent><w:p><w:r><w:t>{value} box</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>"#,
+        )
+    };
+    let text_box_package = capture_word_comparison_case(
+        &directory,
+        "textbox",
+        document_with_comparison_header(&text_box("old")),
+        document_with_comparison_header(&text_box("new")),
+    );
+    push_oracle_replacement(
+        &mut records,
+        "header/textbox[0]",
+        &word_part_xml(&text_box_package, "/word/header1.xml"),
+        None,
+    );
+
+    let move_package = capture_word_comparison_case(
+        &directory,
+        "move",
+        document_with_comparison_header(
+            r#"<w:p><w:r><w:t>first</w:t></w:r></w:p><w:p><w:r><w:t>second</w:t></w:r></w:p>"#,
+        ),
+        document_with_comparison_header(
+            r#"<w:p><w:r><w:t>second</w:t></w:r></w:p><w:p><w:r><w:t>first</w:t></w:r></w:p>"#,
+        ),
+    );
+    let move_xml = word_part_xml(&move_package, "/word/header1.xml");
+    let move_name = move_xml
+        .split("<w:moveFromRangeStart")
+        .nth(1)
+        .and_then(|xml| xml.split("w:name=\"").nth(1))
+        .and_then(|xml| xml.split('"').next())
+        .expect("Word move range name");
+    assert!(
+        move_xml
+            .split("<w:moveToRangeStart")
+            .nth(1)
+            .is_some_and(|xml| xml.contains(&format!("w:name=\"{move_name}\""))),
+        "{move_xml}"
+    );
+    push_oracle_move(&mut records, &move_xml);
+
+    let fields_package = capture_word_comparison_case(
+        &directory,
+        "fields",
+        document_with_comparison_header(
+            r#"<w:p><w:fldSimple w:instr="MERGEFIELD Name"><w:r><w:t>old cache</w:t></w:r></w:fldSimple></w:p><w:p><w:fldSimple w:instr="MERGEFIELD Name"><w:r><w:t>same cache</w:t></w:r></w:fldSimple></w:p>"#,
+        ),
+        document_with_comparison_header(
+            r#"<w:p><w:fldSimple w:instr="MERGEFIELD Name"><w:r><w:t>new cache</w:t></w:r></w:fldSimple></w:p><w:p><w:fldSimple w:instr="MERGEFIELD Other"><w:r><w:t>same cache</w:t></w:r></w:fldSimple></w:p>"#,
+        ),
+    );
+    let fields = word_part_xml(&fields_package, "/word/header1.xml");
+    assert!(fields.contains("MERGEFIELD Other"), "{fields}");
+    assert!(fields.contains("MERGEFIELD Name"), "{fields}");
+    push_oracle_replacement(&mut records, "header", &fields, Some("field-result"));
+    push_oracle_replacement(&mut records, "header", &fields, Some("field"));
+
+    let properties_package = capture_word_comparison_case(
+        &directory,
+        "properties",
+        document_with_comparison_header(
+            r#"<w:p><w:pPr><w:keepNext/></w:pPr><w:r><w:t>paragraph</w:t></w:r></w:p><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>run</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblW w:w="100" w:type="dxa"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:p><w:r><w:t>table</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+        ),
+        document_with_comparison_header(
+            r#"<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>paragraph</w:t></w:r></w:p><w:p><w:r><w:rPr><w:i/></w:rPr><w:t>run</w:t></w:r></w:p><w:tbl><w:tblPr><w:tblW w:w="200" w:type="dxa"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:p><w:r><w:t>table</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+        ),
+    );
+    let properties = word_part_xml(&properties_package, "/word/header1.xml");
+    for kind in ["pPrChange", "rPrChange", "tblPrChange"] {
+        push_oracle_formatting(&mut records, "header", kind, &properties);
+    }
+    let section_package = capture_word_comparison_case(
+        &directory,
+        "section",
+        document_with_content_controls(&wrap_word_body(
+            r#"<w:p><w:r><w:t>same</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="1000" w:h="2000"/></w:sectPr>"#,
+        )),
+        document_with_content_controls(&wrap_word_body(
+            r#"<w:p><w:r><w:t>same</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="1100" w:h="2000"/></w:sectPr>"#,
+        )),
+    );
+    push_oracle_formatting(
+        &mut records,
+        "body",
+        "sectPrChange",
+        &word_part_xml(&section_package, "/word/document.xml"),
+    );
+    assert_eq!(records, pinned_word_comparison_records());
+    let inspection_directory =
+        std::path::Path::new("/Users/atulsharma/Downloads/rdocx-f234-word-oracle")
+            .join(capture_name);
+    std::fs::create_dir_all(&inspection_directory)
+        .expect("create Word oracle inspection directory");
+    for entry in std::fs::read_dir(&directory).expect("read Word oracle capture directory") {
+        let entry = entry.expect("read Word oracle capture entry");
+        if entry
+            .file_type()
+            .expect("read capture entry type")
+            .is_file()
+        {
+            std::fs::copy(entry.path(), inspection_directory.join(entry.file_name()))
+                .expect("copy Word oracle evidence for inspection");
+        }
+    }
+    println!(
+        "F-234 preserved Word oracle evidence: {}",
+        inspection_directory.display()
+    );
+}
+
+#[test]
+fn full_story_comparison_matches_pinned_word_records() {
+    assert_eq!(
+        WORD_COMPARISON_ORACLE,
+        "Microsoft Word 16.104 build 16.104.25121423"
+    );
+    assert_eq!(
+        WORD_COMPARISON_ENVIRONMENT,
+        "locale=en-US; normalization=revision-records-v1"
+    );
+    assert_eq!(
+        normalized_rdocx_comparison_records(),
+        pinned_word_comparison_records(),
+        "{WORD_COMPARISON_ORACLE}"
+    );
+    let original_run = r#"<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>old header</w:t></w:r></w:p>"#;
+    let edited_run = r#"<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>new header</w:t></w:r></w:p>"#;
+    let mut original = document_with_comparison_header(original_run);
+    let edited = document_with_comparison_header(edited_run);
+
+    original
+        .compare(&edited, "Word", "2026-09-04T09:00:00Z")
+        .expect("full-story comparison");
+    let tracked = comparison_part_xml(&mut original, "/word/header1.xml");
+    assert!(tracked.contains("<w:del"), "{tracked}");
+    assert!(tracked.contains("<w:ins"), "{tracked}");
+
+    for (original_owner, edited_owner, revision_kind) in [
+        (
+            r#"<w:p><w:pPr><w:keepNext/></w:pPr><w:r><w:t>same</w:t></w:r></w:p>"#,
+            r#"<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>same</w:t></w:r></w:p>"#,
+            "pPrChange",
+        ),
+        (
+            r#"<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>same</w:t></w:r></w:p>"#,
+            r#"<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>same</w:t></w:r></w:p>"#,
+            "rPrChange",
+        ),
+        (
+            r#"<w:tbl><w:tblPr><w:tblW w:w="100" w:type="dxa"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:p><w:r><w:t>same</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+            r#"<w:tbl><w:tblPr><w:tblW w:w="200" w:type="dxa"/></w:tblPr><w:tblGrid/><w:tr><w:tc><w:p><w:r><w:t>same</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+            "tblPrChange",
+        ),
+    ] {
+        let mut original = document_with_comparison_header(original_owner);
+        let edited = document_with_comparison_header(edited_owner);
+        original
+            .compare(&edited, "Word", "2026-09-04T09:00:00Z")
+            .expect("modeled property comparison");
+        let xml = comparison_part_xml(&mut original, "/word/header1.xml");
+        assert!(xml.contains(&format!("<w:{revision_kind}")), "{xml}");
+        let bytes = original.to_bytes().expect("serialize property comparison");
+        let mut accepted = Document::from_bytes(&bytes).expect("open accepted property copy");
+        accepted.accept_all().expect("accept property change");
+        assert!(
+            accepted
+                .compare(&edited, "postcondition", "2026-09-04T09:01:00Z")
+                .expect("accepted property postcondition")
+                .is_empty()
+        );
+    }
+
+    let mut original = document_with_comparison_header(
+        r#"<w:p><w:fldSimple w:instr="DATE"><w:r><w:t>old cache</w:t></w:r></w:fldSimple></w:p>"#,
+    );
+    let edited = document_with_comparison_header(
+        r#"<w:p><w:fldSimple w:instr="DATE"><w:r><w:t>new cache</w:t></w:r></w:fldSimple></w:p>"#,
+    );
+    original
+        .compare(&edited, "Word", "2026-09-04T09:00:00Z")
+        .expect("field result comparison");
+    let field = comparison_part_xml(&mut original, "/word/header1.xml");
+    let field_start = field.find("<w:fldSimple").expect("field owner");
+    let field_end = field.find("</w:fldSimple>").expect("field owner end");
+    assert!(field[field_start..field_end].contains("<w:del"), "{field}");
+    assert!(field[field_start..field_end].contains("<w:ins"), "{field}");
+
+    let mut original = document_with_comparison_header(
+        r#"<w:p><w:fldSimple w:instr="DATE"><w:r><w:t>cache</w:t></w:r></w:fldSimple></w:p>"#,
+    );
+    let edited = document_with_comparison_header(
+        r#"<w:p><w:fldSimple w:instr="TIME"><w:r><w:t>cache</w:t></w:r></w:fldSimple></w:p>"#,
+    );
+    original
+        .compare(&edited, "Word", "2026-09-04T09:00:00Z")
+        .expect("field instruction comparison");
+    let instruction = comparison_part_xml(&mut original, "/word/header1.xml");
+    assert_eq!(
+        instruction.matches("<w:fldSimple").count(),
+        2,
+        "{instruction}"
+    );
+    let bytes = original
+        .to_bytes()
+        .expect("serialize instruction comparison");
+    let mut accepted = Document::from_bytes(&bytes).expect("open accepted instruction copy");
+    accepted.accept_all().expect("accept instruction change");
+    assert!(comparison_part_xml(&mut accepted, "/word/header1.xml").contains("TIME"));
+    let mut rejected = Document::from_bytes(&bytes).expect("open rejected instruction copy");
+    rejected.reject_all().expect("reject instruction change");
+    assert!(comparison_part_xml(&mut rejected, "/word/header1.xml").contains("DATE"));
+
+    let original_main = wrap_word_body(
+        r#"<w:p><w:r><w:t>same</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="1000" w:h="2000"/></w:sectPr>"#,
+    );
+    let edited_main = wrap_word_body(
+        r#"<w:p><w:r><w:t>same</w:t></w:r></w:p><w:sectPr><w:pgSz w:w="1100" w:h="2000"/></w:sectPr>"#,
+    );
+    let mut original = document_with_content_controls(&original_main);
+    let edited = document_with_content_controls(&edited_main);
+    original
+        .compare(&edited, "Word", "2026-09-04T09:00:00Z")
+        .expect("section property comparison");
+    assert!(document_xml(&mut original).contains("<w:sectPrChange"));
+
+    let text_box = |value: &str| {
+        format!(
+            r#"<w:p><w:r><w:drawing><wps:wsp><wps:txbx><w:txbxContent><w:p><w:r><w:t>{value} box</w:t></w:r></w:p></w:txbxContent></wps:txbx></wps:wsp></w:drawing></w:r></w:p>"#,
+        )
+    };
+    let mut original = document_with_comparison_header(&text_box("old"));
+    let edited = document_with_comparison_header(&text_box("new"));
+    original
+        .compare(&edited, "Word", "2026-09-04T09:00:00Z")
+        .expect("nested text-box comparison");
+    let tracked_box = comparison_part_xml(&mut original, "/word/header1.xml");
+    assert!(tracked_box.contains("txbxContent"), "{tracked_box}");
+    assert!(tracked_box.contains("<w:del"), "{tracked_box}");
+    assert!(tracked_box.contains("<w:ins"), "{tracked_box}");
+
+    let mut original = document_with_comparison_header(&format!(
+        r#"<w:p><w:r><w:t>old host</w:t></w:r></w:p>{}"#,
+        text_box("old")
+    ));
+    let edited = document_with_comparison_header(&format!(
+        r#"<w:p><w:r><w:t>new host</w:t></w:r></w:p>{}"#,
+        text_box("new")
+    ));
+    original
+        .compare(&edited, "Word", "2026-09-04T09:00:00Z")
+        .expect("simultaneous host and text-box comparison");
+    let tracked_box = comparison_part_xml(&mut original, "/word/header1.xml");
+    assert!(tracked_box.contains("old host"), "{tracked_box}");
+    assert!(tracked_box.contains("new host"), "{tracked_box}");
+    assert!(tracked_box.contains("old box"), "{tracked_box}");
+    assert!(tracked_box.contains("new box"), "{tracked_box}");
+    let mut accepted = Document::from_bytes(&original.to_bytes().unwrap()).unwrap();
+    accepted.accept_all().unwrap();
+    assert!(
+        accepted
+            .compare(&edited, "postcondition", "2026-09-04T09:01:00Z")
+            .unwrap()
+            .is_empty()
+    );
+
+    let aliased_box = |value: &str| {
+        text_box(value)
+            .replace(
+                "<w:txbxContent>",
+                r#"<q:txbxContent xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#,
+            )
+            .replace("</w:txbxContent>", "</q:txbxContent>")
+    };
+    let mut aliased = document_with_comparison_header(&aliased_box("old"));
+    let aliased_edited = document_with_comparison_header(&aliased_box("new"));
+    aliased
+        .compare(&aliased_edited, "Word", "2026-09-04T09:00:00Z")
+        .expect("locally aliased nested text box");
+    let aliased_xml = comparison_part_xml(&mut aliased, "/word/header1.xml");
+    assert!(aliased_xml.contains("<q:txbxContent"), "{aliased_xml}");
+    assert!(aliased_xml.contains("old box"), "{aliased_xml}");
+    assert!(aliased_xml.contains("new box"), "{aliased_xml}");
+}
+
+#[test]
+fn run_property_changes_preserve_original_unmodelled_children_and_report_the_difference() {
+    let original_raw =
+        r#"<x:original xmlns:x="urn:f234-run-property" x:value="keep"><x:nested/></x:original>"#;
+    let edited_raw = r#"<x:edited xmlns:x="urn:f234-run-property" x:value="discard"/>"#;
+    let mut original = document_with_comparison_header(&format!(
+        r#"<w:p><w:r><w:rPr><w:b/>{original_raw}</w:rPr><w:t>same</w:t></w:r></w:p>"#,
+    ));
+    let edited = document_with_comparison_header(&format!(
+        r#"<w:p><w:r><w:rPr><w:i/>{edited_raw}</w:rPr><w:t>same</w:t></w:r></w:p>"#,
+    ));
+
+    let diagnostics = original
+        .compare(&edited, "Word", "2026-09-04T09:00:00Z")
+        .expect("compare modeled and unmodelled run properties");
+    assert_eq!(
+        diagnostics,
+        vec![rdocx::ComparisonDiagnostic {
+            location: "header:/word/header1.xml/paragraph[0]/run[0]".to_owned(),
+            message: "formatting differs and the original formatting was retained".to_owned(),
+        }]
+    );
+
+    let tracked_bytes = original.to_bytes().expect("serialize tracked comparison");
+    let tracked = comparison_part_xml(&mut original, "/word/header1.xml");
+    assert!(tracked.contains("<w:i/>"), "{tracked}");
+    assert!(tracked.contains("<w:rPrChange"), "{tracked}");
+    assert_eq!(tracked.matches(original_raw).count(), 1, "{tracked}");
+    assert!(!tracked.contains(edited_raw), "{tracked}");
+
+    let mut accepted = Document::from_bytes(&tracked_bytes).expect("open accepted copy");
+    accepted.accept_all().expect("accept run property change");
+    let accepted = comparison_part_xml(&mut accepted, "/word/header1.xml");
+    assert!(accepted.contains("<w:i/>"), "{accepted}");
+    assert!(!accepted.contains("<w:b/>"), "{accepted}");
+    assert_eq!(accepted.matches(original_raw).count(), 1, "{accepted}");
+    assert!(!accepted.contains(edited_raw), "{accepted}");
+
+    let mut rejected = Document::from_bytes(&tracked_bytes).expect("open rejected copy");
+    rejected.reject_all().expect("reject run property change");
+    let rejected = comparison_part_xml(&mut rejected, "/word/header1.xml");
+    assert!(rejected.contains("<w:b/>"), "{rejected}");
+    assert!(!rejected.contains("<w:i/>"), "{rejected}");
+    assert_eq!(rejected.matches(original_raw).count(), 1, "{rejected}");
+    assert!(!rejected.contains(edited_raw), "{rejected}");
+}
+
+#[test]
+fn related_story_formatting_diagnostics_retain_deterministic_story_locations() {
+    let original_properties = r#"<w:b/><x:original xmlns:x="urn:f234-diagnostic" x:value="keep"/>"#;
+    let edited_properties = r#"<w:b/><x:edited xmlns:x="urn:f234-diagnostic" x:value="discard"/>"#;
+    for (part_name, run_start, expected_location) in [
+        (
+            "/word/header1.xml",
+            "<w:r><w:t>same header",
+            "header:/word/header1.xml/paragraph[0]/run[0]",
+        ),
+        (
+            "/word/footer1.xml",
+            "<w:r><w:t>same footer",
+            "footer:/word/footer1.xml/paragraph[0]/run[0]",
+        ),
+        (
+            "/word/comments.xml",
+            "<w:r><w:t>same comment",
+            "comments:/word/comments.xml/comment[0]/paragraph[0]/run[0]",
+        ),
+        (
+            "/word/footnotes.xml",
+            "<w:r><w:footnoteRef/>",
+            "footnotes:/word/footnotes.xml/footnote[2]/paragraph[0]/run[0]",
+        ),
+        (
+            "/word/endnotes.xml",
+            "<w:r><w:endnoteRef/>",
+            "endnotes:/word/endnotes.xml/endnote[2]/paragraph[0]/run[0]",
+        ),
+    ] {
+        let mut original = comparison_story_with_run_properties(
+            document_with_comparison_stories("same"),
+            part_name,
+            run_start,
+            original_properties,
+        );
+        let edited = comparison_story_with_run_properties(
+            document_with_comparison_stories("same"),
+            part_name,
+            run_start,
+            edited_properties,
+        );
+
+        assert_eq!(
+            original
+                .compare(&edited, "Word", "2026-09-04T09:00:00Z")
+                .expect("compare related-story formatting"),
+            vec![rdocx::ComparisonDiagnostic {
+                location: expected_location.to_owned(),
+                message: "formatting differs and the original formatting was retained".to_owned(),
+            }],
+            "{part_name}"
+        );
+    }
+}
+
+#[test]
+fn nested_text_box_formatting_diagnostic_retains_its_host_story_location() {
+    let text_box = |raw_property: &str| {
+        format!(
+            r#"<w:p><w:r><w:drawing><wps:wsp><wps:txbx><w:txbxContent><w:p><w:r><w:rPr><w:b/>{raw_property}</w:rPr><w:t>same box</w:t></w:r></w:p></w:txbxContent></wps:txbx></wps:wsp></w:drawing></w:r></w:p>"#,
+        )
+    };
+    let mut original = document_with_comparison_header(&text_box(
+        r#"<x:original x:value="keep"><x:nested/></x:original>"#,
+    ));
+    let edited = document_with_comparison_header(&text_box(r#"<x:edited x:value="discard"/>"#));
+
+    assert_eq!(
+        original
+            .compare(&edited, "Word", "2026-09-04T09:00:00Z")
+            .expect("compare nested text-box formatting"),
+        vec![rdocx::ComparisonDiagnostic {
+            location: "header:/word/header1.xml/text-box[0:0]/paragraph[0]/run[0]".to_owned(),
+            message: "formatting differs and the original formatting was retained".to_owned(),
+        }]
+    );
+}
+
+#[test]
+fn full_story_comparison_differential_rejects_kind_order_and_story_perturbations() {
+    let actual = normalized_rdocx_comparison_records();
+    let expected = pinned_word_comparison_records();
+    assert_eq!(actual, expected, "{WORD_COMPARISON_ORACLE}");
+    for (label, index, replacement) in [
+        (
+            "kind",
+            14usize,
+            ComparisonOracleRecord {
+                kind: "del",
+                ..expected[14].clone()
+            },
+        ),
+        (
+            "order",
+            14,
+            ComparisonOracleRecord {
+                order: 15,
+                ..expected[14].clone()
+            },
+        ),
+        (
+            "story",
+            14,
+            ComparisonOracleRecord {
+                story: "footer",
+                ..expected[14].clone()
+            },
+        ),
+        (
+            "move-pair",
+            15,
+            ComparisonOracleRecord {
+                pair: Some("wrong-pair"),
+                ..expected[15].clone()
+            },
+        ),
+        (
+            "field-owner",
+            16,
+            ComparisonOracleRecord {
+                field_owner: None,
+                ..expected[16].clone()
+            },
+        ),
+        (
+            "formatting",
+            20,
+            ComparisonOracleRecord {
+                formatting: Some("rPrChange"),
+                ..expected[20].clone()
+            },
+        ),
+    ] {
+        let mut mutated = expected.clone();
+        mutated[index] = replacement;
+        assert_ne!(
+            mutated, expected,
+            "{label} mutation must fail the predicate"
+        );
+    }
+}
+
+#[test]
+fn accepting_and_rejecting_full_story_comparison_reproduces_each_supported_story() {
+    let mut tracked = document_with_comparison_stories("original");
+    let edited = document_with_comparison_stories("edited");
+    tracked
+        .compare(&edited, "Word", "2026-09-04T09:00:00Z")
+        .expect("full-story comparison");
+
+    let tracked_bytes = tracked.to_bytes().expect("serialize tracked document");
+    let mut accepted = Document::from_bytes(&tracked_bytes).expect("open accepted copy");
+    accepted.accept_all().expect("accept comparison");
+    for part in [
+        "/word/document.xml",
+        "/word/header1.xml",
+        "/word/footer1.xml",
+        "/word/comments.xml",
+        "/word/footnotes.xml",
+        "/word/endnotes.xml",
+    ] {
+        assert!(
+            comparison_part_xml(&mut accepted, part).contains("edited"),
+            "{part}"
+        );
+    }
+    let mut rejected = Document::from_bytes(&tracked_bytes).expect("open rejected copy");
+    rejected.reject_all().expect("reject comparison");
+    for part in [
+        "/word/document.xml",
+        "/word/header1.xml",
+        "/word/footer1.xml",
+        "/word/comments.xml",
+        "/word/footnotes.xml",
+        "/word/endnotes.xml",
+    ] {
+        assert!(
+            comparison_part_xml(&mut rejected, part).contains("original"),
+            "{part}"
+        );
+    }
+}
+
+#[test]
+fn scoped_revision_resolution_visits_every_compared_story_once() {
+    let mut document = document_with_comparison_header(
+        r#"<w:p><w:ins w:id="71" w:author="Word"><w:r><w:t>selected header</w:t></w:r></w:ins><w:ins w:id="72" w:author="Other"><w:r><w:t>retained header</w:t></w:r></w:ins></w:p>"#,
+    );
+
+    assert_eq!(
+        document
+            .accept_revision_id(71)
+            .expect("accept header revision"),
+        1
+    );
+    let resolved = comparison_part_xml(&mut document, "/word/header1.xml");
+    assert!(!resolved.contains(r#"w:id="71""#), "{resolved}");
+    assert!(resolved.contains(r#"w:id="72""#), "{resolved}");
+}
+
+#[test]
+fn comparison_preserves_word_source_paths_in_every_revision_view() {
+    let mut original =
+        document_with_comparison_header(r#"<w:p><w:r><w:t>source original</w:t></w:r></w:p>"#);
+    let edited =
+        document_with_comparison_header(r#"<w:p><w:r><w:t>source edited</w:t></w:r></w:p>"#);
+    original
+        .compare(&edited, "Word", "2026-09-04T09:00:00Z")
+        .expect("full-story comparison");
+
+    let tracked_bytes = original
+        .to_bytes()
+        .expect("serialize tracked source fixture");
+    let tracked = Document::from_bytes(&tracked_bytes).expect("open tracked source view");
+    let mut accepted = Document::from_bytes(&tracked_bytes).expect("open accepted source view");
+    accepted.accept_all().expect("accept source view");
+    let mut rejected = Document::from_bytes(&tracked_bytes).expect("open rejected source view");
+    rejected.reject_all().expect("reject source view");
+    for (view, document) in [
+        (rdocx_layout::RevisionView::Tracked, tracked),
+        (rdocx_layout::RevisionView::Accepted, accepted),
+        (rdocx_layout::RevisionView::Accepted, rejected),
+    ] {
+        let result = document
+            .layout_with_options(RenderOptions {
+                revision_view: view,
+            })
+            .expect("layout revision source view");
+        let mut header_sources = 0usize;
+        let mut actual_paths = Vec::new();
+        for page in &result.layout.pages {
+            for element in compatibility_page_elements(&page.elements) {
+                let oxml_layout::PositionedElement::Text(run) = element else {
+                    continue;
+                };
+                let Some(source) = run.source else {
+                    continue;
+                };
+                assert_eq!(
+                    source.char_end - source.char_start,
+                    run.text.chars().count() as u32,
+                    "scalar source range for {view:?} and {:?}",
+                    run.text
+                );
+                if matches!(
+                    result.source_node(source.node),
+                    Some(rdocx_layout::WordSourcePath {
+                        story: rdocx_layout::WordStory::Header { relationship_id },
+                        children,
+                    }) if relationship_id == "rId1" && children == &[0]
+                ) {
+                    header_sources += 1;
+                }
+                actual_paths.push((run.text.clone(), result.source_node(source.node).cloned()));
+            }
+        }
+        assert!(
+            header_sources > 0,
+            "missing exact header source path in {view:?}: {actual_paths:?}"
+        );
+    }
+}
+
+#[test]
+fn comparison_preserves_unmodelled_story_xml_and_relationships_byte_for_byte() {
+    let leading = "\n  <!--leading exact-->\n<?producer leading?>\t";
+    let raw = r#"<x:owner xmlns:q="urn:f234-local-binding" x:value="keep"><q:nested/><?producer inside?></x:owner>"#;
+    let before_paragraph = "\r\n <!--before paragraph--><?producer paragraph?> \n";
+    let before_table = "\n\t<!--before table--> <?producer table?>\r\n";
+    let before_text_box = "\r\n<?producer text-box?><!--before text box-->  ";
+    let trailing = "\n <?producer trailing?><!--trailing exact-->\t\n";
+    let text_box = |value: &str| {
+        format!(
+            r#"<w:p><w:r><w:drawing><wps:wsp><wps:txbx><w:txbxContent><w:p><w:r><w:t>{value} box</w:t></w:r></w:p></w:txbxContent></wps:txbx></wps:wsp></w:drawing></w:r></w:p>"#,
+        )
+    };
+    let story = |value: &str| {
+        format!(
+            r#"{leading}{raw}{before_paragraph}<w:p><w:r><w:t>{value} paragraph</w:t></w:r></w:p>{before_table}<w:tbl><w:tblPr/><w:tblGrid/><w:tr><w:tc><w:p><w:r><w:t>{value} table</w:t></w:r></w:p></w:tc></w:tr></w:tbl>{before_text_box}{}{trailing}"#,
+            text_box(value)
+        )
+    };
+    let mut original = document_with_comparison_header(&story("original"));
+    let edited = document_with_comparison_header(&story("edited"));
+
+    original
+        .compare(&edited, "Word", "2026-09-04T09:00:00Z")
+        .expect("full-story comparison");
+    let tracked_bytes = original.to_bytes().expect("save tracked comparison");
+    let header_xml = |bytes: &[u8]| {
+        let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes))
+            .expect("open comparison view");
+        String::from_utf8(
+            package
+                .get_part("/word/header1.xml")
+                .expect("header story exists")
+                .to_vec(),
+        )
+        .expect("header story is UTF-8")
+    };
+    let unowned = [
+        leading,
+        raw,
+        before_paragraph,
+        before_table,
+        before_text_box,
+        trailing,
+    ];
+    let assert_unowned = |view: &str, xml: &str| {
+        let mut previous = 0usize;
+        for segment in unowned {
+            let matches = xml.match_indices(segment).collect::<Vec<_>>();
+            assert_eq!(matches.len(), 1, "{view} changed {segment:?}: {xml}");
+            let at = matches[0].0;
+            assert!(at >= previous, "{view} reordered {segment:?}: {xml}");
+            assert_eq!(
+                &xml.as_bytes()[at..at + segment.len()],
+                segment.as_bytes(),
+                "{view} changed bytes in {segment:?}"
+            );
+            previous = at + segment.len();
+        }
+    };
+
+    let tracked = header_xml(&tracked_bytes);
+    assert_unowned("tracked save", &tracked);
+    assert!(tracked.contains("<w:ins"), "{tracked}");
+    assert!(tracked.contains("original paragraph"), "{tracked}");
+    assert!(tracked.contains("edited paragraph"), "{tracked}");
+    assert!(tracked.contains("original table"), "{tracked}");
+    assert!(tracked.contains("edited table"), "{tracked}");
+    assert!(tracked.contains("original box"), "{tracked}");
+    assert!(tracked.contains("edited box"), "{tracked}");
+
+    let mut tracked_reopened =
+        Document::from_bytes(&tracked_bytes).expect("reopen tracked comparison");
+    let tracked_reopened = tracked_reopened
+        .to_bytes()
+        .expect("save reopened tracked view");
+    assert_unowned("tracked reopen", &header_xml(&tracked_reopened));
+
+    let mut accepted = Document::from_bytes(&tracked_bytes).expect("open accepted view");
+    accepted.accept_all().expect("accept comparison");
+    let accepted_bytes = accepted.to_bytes().expect("save accepted view");
+    let accepted_xml = header_xml(&accepted_bytes);
+    assert_unowned("accepted save", &accepted_xml);
+    assert!(accepted_xml.contains("edited paragraph"), "{accepted_xml}");
+    assert!(accepted_xml.contains("edited table"), "{accepted_xml}");
+    assert!(accepted_xml.contains("edited box"), "{accepted_xml}");
+    assert!(
+        !accepted_xml.contains("original paragraph"),
+        "{accepted_xml}"
+    );
+    let mut accepted_reopened =
+        Document::from_bytes(&accepted_bytes).expect("reopen accepted view");
+    let accepted_reopened = accepted_reopened
+        .to_bytes()
+        .expect("save reopened accepted view");
+    assert_unowned("accepted reopen", &header_xml(&accepted_reopened));
+
+    let mut rejected = Document::from_bytes(&tracked_bytes).expect("open rejected view");
+    rejected.reject_all().expect("reject comparison");
+    let rejected_bytes = rejected.to_bytes().expect("save rejected view");
+    let rejected_xml = header_xml(&rejected_bytes);
+    assert_unowned("rejected save", &rejected_xml);
+    assert!(
+        rejected_xml.contains("original paragraph"),
+        "{rejected_xml}"
+    );
+    assert!(rejected_xml.contains("original table"), "{rejected_xml}");
+    assert!(rejected_xml.contains("original box"), "{rejected_xml}");
+    assert!(!rejected_xml.contains("edited paragraph"), "{rejected_xml}");
+    let mut rejected_reopened =
+        Document::from_bytes(&rejected_bytes).expect("reopen rejected view");
+    let rejected_reopened = rejected_reopened
+        .to_bytes()
+        .expect("save reopened rejected view");
+    assert_unowned("rejected reopen", &header_xml(&rejected_reopened));
+}
+
+#[test]
+fn a_failed_full_story_comparison_leaves_package_typed_state_and_caches_unchanged() {
+    let mut original =
+        document_with_comparison_header(r#"<w:p><w:r><w:t>same header</w:t></w:r></w:p>"#);
+    let edited = document_with_comparison_header(
+        r#"<w:tbl><w:tblPr/><w:tblGrid/><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>"#,
+    );
+    let before = original.to_bytes().expect("serialize original");
+
+    assert!(
+        original
+            .compare(&edited, "Word", "2026-09-04T09:00:00Z")
+            .is_err()
+    );
+    assert_eq!(
+        original.to_bytes().expect("serialize after failure"),
+        before
+    );
+}
+
+#[test]
+fn repeated_story_content_and_moves_use_deterministic_matches_and_ids() {
+    let first = r#"<w:p><w:r><w:t>repeat</w:t></w:r></w:p><w:p><w:r><w:t>anchor</w:t></w:r></w:p><w:p><w:r><w:t>repeat</w:t></w:r></w:p>"#;
+    let second = r#"<w:p><w:r><w:t>repeat</w:t></w:r></w:p><w:p><w:r><w:t>repeat</w:t></w:r></w:p><w:p><w:r><w:t>anchor</w:t></w:r></w:p>"#;
+    let edited = document_with_comparison_header(second);
+    let mut left = document_with_comparison_header(first);
+    let mut right = document_with_comparison_header(first);
+
+    left.compare(&edited, "Word", "2026-09-04T09:00:00Z")
+        .expect("first comparison");
+    right
+        .compare(&edited, "Word", "2026-09-04T09:00:00Z")
+        .expect("second comparison");
+    let left_xml = comparison_part_xml(&mut left, "/word/header1.xml");
+    let right_xml = comparison_part_xml(&mut right, "/word/header1.xml");
+    assert_eq!(left_xml, right_xml);
+    assert!(left_xml.contains("<w:moveFrom"), "{left_xml}");
 }
 
 #[test]

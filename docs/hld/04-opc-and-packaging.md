@@ -657,21 +657,25 @@ matching overrides and namespace declarations. A failed validation or
 allocation leaves anchors, typed parts, relationships, and overrides unchanged.
 
 Tracked-revision resolution is also staged above the package boundary. The
-facade serializes a candidate main-document tree, resolves selected revision
-placements, and reparses the complete candidate before replacing live typed
-state. Namespace declarations carried only by a removed revision or property
-owner are promoted to retained raw descendants. Any selector, revision-shape,
-namespace, parse, or serialization failure leaves the package part bytes and
-live document unchanged. The ordinary deterministic save path writes the
-validated result later and preserves every unrelated part and relationship.
+facade resolves selected revision placements in the main document, headers,
+footers, comments, normal footnotes, endnotes, and nested text boxes. It patches
+each affected source part once and reparses the complete candidate package
+before replacing live typed state. Namespace declarations carried only by a
+removed revision or property owner are promoted to retained raw descendants.
+Any selector, revision-shape, namespace, parse, or serialization failure leaves
+all package part bytes and live document state unchanged. The ordinary
+deterministic save path writes the validated result later and preserves every
+unrelated part and relationship.
 
 Document comparison uses the same package boundary. It clones the complete
-typed document and package state, aligns only modeled main-body content, and
-serializes generated revisions with the canonical `w`, `xml`, and `mc`
-prefixes in schema order. Reparse remains prefix tolerant. Revision metadata
-is XML escaped, while unmodeled body, paragraph, table, cell, and
-content-control XML keeps its stored byte order. The staged candidate is
-accepted and rejected independently to prove both structural postconditions.
+typed document and package state, resolves identical story shells and
+relationships, and aligns modeled owners in each story. Generated revisions
+use canonical `w`, `xml`, and `mc` prefixes in schema order, while reparse
+remains prefix tolerant. Source-span patching interleaves changed owner bytes
+with the exact original gaps, preserving unowned whitespace, comments,
+processing instructions, foreign elements, prefix bindings, raw property
+children, and relationship targets. The staged package is accepted and
+rejected independently to prove both package-wide structural postconditions.
 Any metadata, alignment, unsupported-shell, parse, serialization, or
 postcondition failure leaves the original package, typed state, and caches
 unchanged.

@@ -666,8 +666,10 @@ exact-author pair, the inclusive RFC 3339 date-range pair, and the id pair.
 Each method returns the number of modeled revision elements resolved. Shared
 ids select every matching placement, author matching is case-sensitive, and
 missing dates do not match a date range. Invalid bounds and malformed selected
-changes return an error before mutation. These eight methods are additive on
-`rdocx::Document` only. Python, WASM, and CLI surfaces remain unchanged and
+changes return an error before mutation. Resolution covers the main document,
+headers, footers, comments, normal footnotes, endnotes, and nested text boxes.
+`Document::revisions` remains main-story-only. These eight methods are additive
+on `rdocx::Document` only. Python, WASM, and CLI surfaces remain unchanged and
 continue to preserve the resulting document when they save it.
 
 Native callers generate tracked changes with `Document::compare`, supplying an
@@ -676,9 +678,13 @@ edited document, author, and RFC 3339 timestamp. The additive
 messages without turning those differences into revisions. Comparison rejects
 existing modeled revisions and unsupported structural shell differences, and
 it commits only after accepting and rejecting staged copies reproduce their
-respective modeled baselines. This API is native Rust only. Python, WASM, and
-CLI surfaces gain no comparison method and preserve comparison output when
-they save their owned document.
+respective package-wide modeled baselines. The unchanged API compares the main
+document, relationship-resolved headers and footers, comments, normal
+footnotes, endnotes, fields, and nested text boxes. It emits same-story moves
+and supported run, paragraph, table, and section property revisions. Diagnostic
+locations retain the actual story identity and stable owner path. This API is
+native Rust only. Python, WASM, and CLI surfaces gain no comparison method and
+preserve comparison output when they save their owned document.
 
 Native Word rendering exposes `rdocx::RevisionView` and the concrete
 `rdocx::RenderOptions`, whose default selects the accepted view. Additive
