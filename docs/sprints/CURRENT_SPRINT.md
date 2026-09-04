@@ -29,7 +29,7 @@ ignore policies.
 |------|-------|------|--------|-------|
 | F-233 | Advanced mail merge | L | in-progress | codex |
 | F-234 | Full-story document comparison | L | done | - |
-| F-235 | Comparison granularity and ignore policy | M | pending | - |
+| F-235 | Comparison granularity and ignore policy | M | in-progress | codex |
 
 ## Sequencing note
 
