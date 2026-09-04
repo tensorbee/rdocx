@@ -81,6 +81,7 @@ defended.
 | S64 | M21, X | 5 | 5 | 0 | 12 | 2 | Completed M21 with bounded editable HTML and PDF import, the Issue 67 pagination correction, and the combined representative-deck PowerPoint gate. Published and independently verified the 15-package rpptx 0.9.0 family and seven-package rdocx 0.12.0 family. The full close gate passed with all 49 hashes unchanged, every package archive below 10 MiB, and sprint review pass 9 clean |
 | S65 | M22 | 3 | 3 | 0 | 8 | 1 | Opened M22 with typed OfficeMath authoring, deterministic layout and PDF rendering, and bounded MathML and LaTeX conversion. The full close gate passed with all 49 hashes unchanged, every package archive below 10 MiB, and sprint review pass 9 clean. M22 continues in S66 with extended field evaluation and dynamic table of contents rebuild |
 | S66 | M22 | 2 | 2 | 0 | 8 | 2 | Added structured extended field evaluation and deterministic dynamic table of contents rebuilding with pinned Word parity, final page targets, atomic failure, and source-preserving ownership. The full close gate passed with all 49 hashes unchanged, every package archive below 10 MiB, and final sprint review pass 3 clean. M22 continues in S67 with advanced automation and comparison |
+| S67 | M22 | 3 | 3 | 0 | 10 | 1 | Added advanced rich mail merge, full-story document comparison, and deterministic character, word, and ignore policies. The full close gate passed with all 49 hashes unchanged, every package archive below 10 MiB, prompt-free Word 16.104 parity, and global sprint review pass 2 clean. M22 continues in S68 with embedded content, forms, and building blocks |
 
 ## Completed features
 
@@ -465,6 +466,7 @@ five working days.
 | S64 | 5 | 2 | 12.50 |
 | S65 | 3 | 1 | 15.00 |
 | S66 | 2 | 2 | 5.00 |
+| S67 | 3 | 1 | 15.00 |
 
 ## Escalation record
 
@@ -534,3 +536,4 @@ was done about it. Empty is the expected state.
 | 2026-09-03 | Sprint estimate variance exceeded 30 percent | S64 | Record 2 actual days against 12 estimated. Isolated import and release worktrees, established external oracles, and retained milestone evidence allowed implementation, publication, and review to overlap safely. The resulting 12.50 stories per week is not a sustainable forecast, so retain the dependency-defined S65 boundary |
 | 2026-09-03 | Sprint estimate variance exceeded 30 percent | S65 | Record 1 actual day against 8 estimated. Isolated workers, the typed equation foundation, and established Word, Poppler, and Pandoc oracles allowed layout and conversion work to overlap after F-228. The resulting 15.00 stories per week is not a sustainable forecast, so retain the dependency-defined S66 boundary |
 | 2026-09-04 | Sprint estimate variance exceeded 30 percent | S66 | Record 2 actual days against 8 estimated. The strict dependency let F-232 reuse F-231's completed recursive field grammar, while the established Word differential and deterministic layout boundaries concentrated preservation and pagination corrections in one reviewed path. The resulting 5.00 stories per week matches the long-run delivery velocity, so retain the dependency-defined S67 boundary |
+| 2026-09-04 | Sprint estimate variance exceeded 30 percent | S67 | Record 1 actual day against 10 estimated. Isolated workers, the completed field and comparison foundations, and the established Word oracle concentrated review and verification across one integrated automation boundary. The resulting 15.00 stories per week is not a sustainable forecast, so retain the dependency-defined S68 boundary |
