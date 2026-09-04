@@ -28,7 +28,7 @@ ignore policies.
 | F-ID | Title | Size | Status | Owner |
 |------|-------|------|--------|-------|
 | F-233 | Advanced mail merge | L | pending | - |
-| F-234 | Full-story document comparison | L | pending | - |
+| F-234 | Full-story document comparison | L | in-progress | codex |
 | F-235 | Comparison granularity and ignore policy | M | pending | - |
 
 ## Sequencing note
