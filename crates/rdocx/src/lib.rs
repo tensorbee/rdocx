@@ -42,7 +42,9 @@ pub mod table;
 mod template;
 
 pub use comments::{BookmarkRef, CommentRef, RunPosition, RunRange};
-pub use comparison::ComparisonDiagnostic;
+pub use comparison::{
+    ComparisonDiagnostic, ComparisonGranularity, ComparisonOptions, ComparisonStoryKind,
+};
 pub use content_control::ContentControlRef;
 pub use document::{
     AccessibilityIssue, BodyContentRef, BodyItemRef, Document, ImageInfo, IssueSeverity, LinkInfo,

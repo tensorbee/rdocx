@@ -1,6 +1,6 @@
 # F-235, Comparison granularity and ignore policy
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S67
 **Size**: M
 **Depends on**: F-234
@@ -161,17 +161,17 @@ invokes it. Any delta is unexplained and blocks integration.
 
 ## Implementation checklist
 
-- [ ] Complete the F-234 dependency-prefix checkpoint before starting F-235.
-- [ ] Promote the ordered story category and add the granular policy types.
-- [ ] Add `compare_with_options` and preserve legacy defaults.
-- [ ] Thread one policy through story traversal and postconditions.
-- [ ] Implement deterministic attributed text units.
-- [ ] Serialize minimal run fragments without duplicating raw content.
-- [ ] Apply ignore policy in the declared precedence.
-- [ ] Preserve atomic staging, source maps, ids, and accept and reject proofs.
-- [ ] Add the named source-built tests to existing files.
-- [ ] Run focused checks and every risk rider.
-- [ ] Update exactly the four listed HLD files.
+- [x] Complete the F-234 dependency-prefix checkpoint before starting F-235.
+- [x] Promote the ordered story category and add the granular policy types.
+- [x] Add `compare_with_options` and preserve legacy defaults.
+- [x] Thread one policy through story traversal and postconditions.
+- [x] Implement deterministic attributed text units.
+- [x] Serialize minimal run fragments without duplicating raw content.
+- [x] Apply ignore policy in the declared precedence.
+- [x] Preserve atomic staging, source maps, ids, and accept and reject proofs.
+- [x] Add the named source-built tests to existing files.
+- [x] Run focused checks and every risk rider.
+- [x] Update exactly the four listed HLD files.
 
 ## Open questions
 

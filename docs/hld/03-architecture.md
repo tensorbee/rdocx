@@ -665,20 +665,30 @@ selected descendants before their enclosing subtree, reparses the complete
 candidate package, and commits once only after validation succeeds.
 
 The `rdocx` facade also owns deterministic comparison of those same stories. A
-private source index assigns stable story identities and owner paths to modeled
-paragraphs, tables, fields, and nested text boxes. A concrete hierarchical
-longest-common-subsequence alignment covers paragraphs, runs, table rows,
-nested tables, lists, and modeled content inside existing content-control
-shells. Unmatched identical owners become move pairs only within one story.
+source index assigns stable public story categories and private owner paths to
+modeled paragraphs, tables, fields, and nested text boxes. A concrete
+hierarchical longest-common-subsequence alignment covers paragraphs, runs,
+table rows, nested tables, lists, and modeled content inside existing
+content-control shells. The default path retains whole-run behavior. An
+additive options value selects Unicode-scalar character units or maximal
+Unicode word, whitespace, and punctuation-or-symbol units, and applies
+left-biased ignores for formatting, textual whitespace, fields, comments, and
+selected story categories. Selected categories leave the original story bytes
+untouched and are excluded before shell checks and revision-id allocation.
+Non-text content remains atomic. Unmatched identical owners become move pairs
+only within one story.
 Changed field results remain inside their field owner, while instruction or
 form changes replace that complete owner. Supported run, paragraph, table, and
 section properties emit property revisions that retain the original property
 sidecars. Unsupported formatting differences retain the original bytes and
 produce stable `ComparisonDiagnostic` values at the actual story path. Inputs
 with existing modeled revisions or differing story and control shells are
-rejected. Comparison patches only owned source spans, preserves every unowned
-byte, stages the complete package, proves that acceptance matches the edited
-modeled structure and rejection matches the original, then commits once.
+rejected unless their story category is ignored. Attributed text alignment
+retains owner, formatting, content position, and raw-child boundaries, then
+coalesces adjacent equal-owner edits into minimal revision wrappers.
+Comparison patches only owned source spans, preserves every unowned byte,
+stages the complete package, proves that acceptance matches the edited policy
+projection and rejection matches the original, then commits once.
 
 `rdocx-layout` owns the renderer-only revision projection. The
 `LayoutInput::revision_view` selector chooses an accepted or tracked view. The

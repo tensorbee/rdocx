@@ -559,14 +559,23 @@ endnotes, fields, and nested text boxes. It covers paragraphs, tables, cells,
 nested tables, lists, and modeled content inside existing content-control
 shells. Accepting the generated revisions must reproduce every edited modeled
 story, while rejection must reproduce the originals and leave no residual
-tracked containers. Focused coverage locks down deterministic repeated content
-alignment, same-story move pairing, cached-result and complete-field changes,
-escaped metadata and collision-free ids, supported run, paragraph, table, and
-section property revisions, stable story diagnostics, atomic failure, and
-absent property-owner cleanup. The source-span round-trip gate proves all
-unowned whitespace, comments, processing instructions, foreign elements,
-prefix bindings, raw property children, and relationships remain byte-exact in
-tracked, accepted, rejected, saved, and reopened views.
+tracked containers. The policy matrix fixes exact normalized revision kind,
+content, order, story, and owner records for run, Unicode-scalar character, and
+three-class Unicode word granularity. It independently covers formatting,
+textual-whitespace, field, comment, and every story-category ignore, with a
+rejecting mutation for each record dimension. Focused coverage locks down
+deterministic repeated content alignment, same-story move pairing,
+cached-result and complete-field changes, escaped metadata and collision-free
+ids, minimal adjacent wrappers, direct inline-content-control alignment,
+hyperlink shells, text-box source ownership, significant non-text boundaries,
+supported run, paragraph, table, and section property revisions, stable story
+diagnostics, atomic failure, and absent property-owner cleanup. The source-span
+round-trip gate proves all unowned whitespace, comments, processing
+instructions, foreign elements, prefix bindings, raw property children, and
+relationships remain byte-exact and appear once in tracked, accepted,
+rejected, saved, and reopened views. The legacy/default compatibility test
+keeps `Document::compare` byte-identical to default options. No sample invokes
+comparison, so the 49-entry hash harness remains unchanged.
 
 The source-built external differential pins Microsoft Word 16.104 build
 16.104.25121423 and locale `en-US`. Its 24 normalized records cover every

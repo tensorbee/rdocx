@@ -669,14 +669,20 @@ unrelated part and relationship.
 
 Document comparison uses the same package boundary. It clones the complete
 typed document and package state, resolves identical story shells and
-relationships, and aligns modeled owners in each story. Generated revisions
-use canonical `w`, `xml`, and `mc` prefixes in schema order, while reparse
-remains prefix tolerant. Source-span patching interleaves changed owner bytes
-with the exact original gaps, preserving unowned whitespace, comments,
-processing instructions, foreign elements, prefix bindings, raw property
-children, and relationship targets. The staged package is accepted and
-rejected independently to prove both package-wide structural postconditions.
-Any metadata, alignment, unsupported-shell, parse, serialization, or
+relationships, and aligns modeled owners in each nonignored story. Policy
+projection removes only the selected comparison facts. Ignored formatting,
+textual whitespace, fields, comments, and story categories retain the original
+bytes. Character and word alignment carries source ownership and raw-child
+boundaries, keeps non-text content atomic, and emits each preserved child once.
+Generated revisions use canonical `w`, `xml`, and `mc` prefixes in schema
+order, while reparse remains prefix tolerant. Source-span patching interleaves
+changed owner bytes with the exact original gaps, preserving unowned
+whitespace, comments, processing instructions, foreign elements, prefix
+bindings, raw property children, and relationship targets. Nested text-box
+projection uses one collision-safe marker selection across both staged inputs
+and restores only matched owned subtrees. The staged package is accepted and
+rejected independently to prove both package-wide policy postconditions. Any
+metadata, policy, alignment, unsupported-shell, parse, serialization, or
 postcondition failure leaves the original package, typed state, and caches
 unchanged.
 

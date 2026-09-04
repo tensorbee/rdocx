@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use quick_xml::Reader as XmlReader;
+use quick_xml::events::Event as XmlEvent;
 use rdocx::{
     BarcodeField, BarcodeKind, BodyContentRef, BodyItemRef, BreakKind, CellItemRef, CellRef,
     ChartData, ChartKind, Document, FieldDateTime, FieldEvaluationContext, FieldOutcome,
@@ -10153,6 +10155,119 @@ struct ComparisonOracleRecord {
     formatting: Option<&'static str>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PolicyComparisonRecord {
+    kind: String,
+    content: String,
+    story: String,
+    owner: String,
+    order: usize,
+}
+
+fn policy_comparison_records(xml: &str, story: &str) -> Vec<PolicyComparisonRecord> {
+    let mut reader = XmlReader::from_reader(xml.as_bytes());
+    reader.config_mut().trim_text(false);
+    let mut stack = Vec::<String>::new();
+    let mut active = None::<PolicyComparisonRecord>;
+    let mut records = Vec::new();
+    let mut buffer = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buffer).unwrap() {
+            XmlEvent::Start(element) => {
+                let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+                let local = name.rsplit(':').next().unwrap().to_owned();
+                if active.is_none()
+                    && matches!(
+                        local.as_str(),
+                        "del"
+                            | "ins"
+                            | "moveFrom"
+                            | "moveTo"
+                            | "pPrChange"
+                            | "rPrChange"
+                            | "tblPrChange"
+                            | "sectPrChange"
+                    )
+                {
+                    let owner = stack.join("/");
+                    active = Some(PolicyComparisonRecord {
+                        kind: local.clone(),
+                        content: String::new(),
+                        story: if owner.contains("txbxContent") {
+                            "text-box".to_owned()
+                        } else {
+                            story.to_owned()
+                        },
+                        owner,
+                        order: records.len(),
+                    });
+                }
+                stack.push(local);
+            }
+            XmlEvent::Empty(element) => {
+                let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+                let local = name.rsplit(':').next().unwrap();
+                if active.is_none()
+                    && matches!(
+                        local,
+                        "pPrChange" | "rPrChange" | "tblPrChange" | "sectPrChange"
+                    )
+                {
+                    records.push(PolicyComparisonRecord {
+                        kind: local.to_owned(),
+                        content: String::new(),
+                        story: story.to_owned(),
+                        owner: stack.join("/"),
+                        order: records.len(),
+                    });
+                }
+            }
+            XmlEvent::Text(text)
+                if active.is_some()
+                    && stack.last().is_some_and(|name| {
+                        matches!(name.as_str(), "t" | "delText" | "instrText")
+                    }) =>
+            {
+                active
+                    .as_mut()
+                    .unwrap()
+                    .content
+                    .push_str(&String::from_utf8_lossy(text.as_ref()));
+            }
+            XmlEvent::End(element) => {
+                let name = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+                let local = name.rsplit(':').next().unwrap();
+                if active.as_ref().is_some_and(|record| record.kind == local) {
+                    records.push(active.take().unwrap());
+                }
+                stack.pop();
+            }
+            XmlEvent::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    records
+}
+
+fn all_policy_story_records(document: &mut Document) -> Vec<PolicyComparisonRecord> {
+    let mut records = Vec::new();
+    for (part, story) in [
+        ("/word/document.xml", "main"),
+        ("/word/header1.xml", "header"),
+        ("/word/footer1.xml", "footer"),
+        ("/word/comments.xml", "comment"),
+        ("/word/footnotes.xml", "footnote"),
+        ("/word/endnotes.xml", "endnote"),
+    ] {
+        for mut record in policy_comparison_records(&comparison_part_xml(document, part), story) {
+            record.order = records.len();
+            records.push(record);
+        }
+    }
+    records
+}
+
 fn pinned_word_comparison_records() -> Vec<ComparisonOracleRecord> {
     let mut records = Vec::new();
     let mut push = |kind, story, pair, field_owner, formatting| {
@@ -13266,4 +13381,1402 @@ fn flat_mail_merge_output_remains_unchanged_after_rich_merge_is_added() {
     assert_eq!(separate.to_bytes().unwrap(), expected_bytes);
     let mut sectioned = document.mail_merge_sections(&records).unwrap();
     assert_eq!(sectioned.to_bytes().unwrap(), expected_bytes);
+}
+
+#[test]
+fn granular_insertions_stay_inside_leading_and_empty_paragraph_owners() {
+    for (before, after) in [("world", "hello world"), ("", "hello")] {
+        let original_xml = wrap_word_body(&format!("<w:p><w:r><w:t>{before}</w:t></w:r></w:p>"));
+        let edited_xml = wrap_word_body(&format!("<w:p><w:r><w:t>{after}</w:t></w:r></w:p>"));
+        let edited = document_with_content_controls(&edited_xml);
+        let mut tracked = document_with_content_controls(&original_xml);
+        tracked
+            .compare_with_options(
+                &edited,
+                "Ada",
+                "2026-09-04T09:00:00Z",
+                &rdocx::ComparisonOptions {
+                    granularity: rdocx::ComparisonGranularity::Word,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let bytes = tracked.to_bytes().unwrap();
+        let xml = document_xml(&mut tracked);
+        let paragraph = &xml[xml.find("<w:p>").unwrap()..xml.find("</w:p>").unwrap() + 6];
+        assert!(paragraph.contains("<w:ins "), "{xml}");
+        assert_eq!(xml.matches("<w:ins ").count(), 1, "{xml}");
+        let mut accepted = Document::from_bytes(&bytes).unwrap();
+        accepted.accept_all().unwrap();
+        assert_eq!(accepted.paragraphs()[0].text(), after);
+        let mut rejected = Document::from_bytes(&bytes).unwrap();
+        rejected.reject_all().unwrap();
+        assert_eq!(rejected.paragraphs()[0].text(), before);
+    }
+}
+
+#[test]
+fn ignored_formatting_keeps_original_numbering_left_biased() {
+    let numbered = |id| {
+        wrap_word_body(&format!(
+            r#"<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="{id}"/></w:numPr></w:pPr><w:r><w:t>same</w:t></w:r></w:p>"#
+        ))
+    };
+    let original_xml = numbered(1);
+    let edited_xml = numbered(2);
+    let edited = document_with_content_controls(&edited_xml);
+    let mut tracked = document_with_content_controls(&original_xml);
+    let diagnostics = tracked
+        .compare_with_options(
+            &edited,
+            "Ada",
+            "2026-09-04T09:00:00Z",
+            &rdocx::ComparisonOptions {
+                ignore_formatting: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let xml = document_xml(&mut tracked);
+    assert!(diagnostics.is_empty());
+    assert!(xml.contains(r#"<w:numId w:val="1"/>"#), "{xml}");
+    assert!(!xml.contains(r#"<w:numId w:val="2"/>"#), "{xml}");
+    assert!(
+        !xml.contains("<w:ins ") && !xml.contains("<w:del "),
+        "{xml}"
+    );
+}
+
+#[test]
+fn granular_hyperlink_edits_preserve_the_owner_shell() {
+    let hyperlink = |text| {
+        wrap_word_body(&format!(
+            r#"<w:p><w:hyperlink w:anchor="target" w:tooltip="keep"><w:r><w:t>{text}</w:t></w:r></w:hyperlink></w:p>"#
+        ))
+    };
+    let original_xml = hyperlink("old link");
+    let edited_xml = hyperlink("new link");
+    let edited = document_with_content_controls(&edited_xml);
+    let mut tracked = document_with_content_controls(&original_xml);
+    tracked
+        .compare_with_options(
+            &edited,
+            "Ada",
+            "2026-09-04T09:00:00Z",
+            &rdocx::ComparisonOptions {
+                granularity: rdocx::ComparisonGranularity::Word,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let xml = document_xml(&mut tracked);
+    assert_eq!(xml.matches("<w:hyperlink ").count(), 1, "{xml}");
+    let owner = &xml[xml.find("<w:hyperlink ").unwrap()..xml.find("</w:hyperlink>").unwrap()];
+    assert!(
+        owner.contains("<w:del ") && owner.contains("<w:ins "),
+        "{xml}"
+    );
+    assert!(
+        owner.contains(r#"w:anchor="target" w:tooltip="keep""#),
+        "{xml}"
+    );
+
+    let segmented = |runs: &str| {
+        wrap_word_body(&format!(
+            r#"<w:p><w:hyperlink w:anchor="target" w:tooltip="keep">{runs}</w:hyperlink></w:p>"#
+        ))
+    };
+    let one_run = segmented("<w:r><w:t>alpha beta</w:t></w:r>");
+    let two_runs = segmented("<w:r><w:t>alpha </w:t></w:r><w:r><w:t>beta</w:t></w:r>");
+    let mut tracked = document_with_content_controls(&one_run);
+    tracked
+        .compare_with_options(
+            &document_with_content_controls(&two_runs),
+            "Ada",
+            "2026-09-04T09:00:00Z",
+            &rdocx::ComparisonOptions {
+                granularity: rdocx::ComparisonGranularity::Word,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let segmented_xml = document_xml(&mut tracked);
+    assert_eq!(
+        segmented_xml.matches("<w:hyperlink ").count(),
+        1,
+        "{segmented_xml}"
+    );
+    assert!(
+        !segmented_xml.contains("<w:del ") && !segmented_xml.contains("<w:ins "),
+        "{segmented_xml}"
+    );
+
+    let raw = r#"<x:raw xmlns:x="urn:f235-hyperlink"><!--keep--></x:raw>"#;
+    let one_run = segmented(&format!("<w:r><w:t>alpha beta</w:t></w:r>{raw}"));
+    let two_runs = segmented(&format!(
+        "<w:r><w:t>alpha </w:t></w:r><w:r><w:t>beta</w:t></w:r>{raw}"
+    ));
+    let mut tracked = document_with_content_controls(&one_run);
+    tracked
+        .compare_with_options(
+            &document_with_content_controls(&two_runs),
+            "Ada",
+            "2026-09-04T09:00:00Z",
+            &rdocx::ComparisonOptions {
+                granularity: rdocx::ComparisonGranularity::Word,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let raw_boundary_xml = document_xml(&mut tracked);
+    assert_eq!(
+        raw_boundary_xml.matches(raw).count(),
+        1,
+        "{raw_boundary_xml}"
+    );
+    assert!(
+        !raw_boundary_xml.contains("<w:del ") && !raw_boundary_xml.contains("<w:ins "),
+        "{raw_boundary_xml}"
+    );
+}
+
+#[test]
+fn inline_control_runs_use_granularity_and_left_biased_ignores() {
+    let control = |text: &str| {
+        wrap_word_body(&format!(
+            r#"<w:p><w:sdt><w:sdtPr><w:tag w:val="keep-shell"/></w:sdtPr><w:sdtContent><w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:sdtContent></w:sdt></w:p>"#
+        ))
+    };
+    let original = control("alpha beta");
+    let edited = control("alpha brave beta");
+    let mut tracked = document_with_content_controls(&original);
+    tracked
+        .compare_with_options(
+            &document_with_content_controls(&edited),
+            "Ada",
+            "2026-09-04T09:00:00Z",
+            &rdocx::ComparisonOptions {
+                granularity: rdocx::ComparisonGranularity::Word,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let bytes = tracked.to_bytes().unwrap();
+    let xml = document_xml(&mut tracked);
+    assert_eq!(
+        xml.matches(r#"<w:tag w:val="keep-shell"/>"#).count(),
+        1,
+        "{xml}"
+    );
+    assert_eq!(xml.matches("<w:ins ").count(), 1, "{xml}");
+    assert!(!xml.contains("<w:del "), "{xml}");
+    let inserted = &xml[xml.find("<w:ins ").unwrap()..xml.find("</w:ins>").unwrap()];
+    assert!(inserted.contains("brave"), "{xml}");
+    assert!(
+        !inserted.contains("alpha") && !inserted.contains("beta"),
+        "{xml}"
+    );
+    let mut accepted = Document::from_bytes(&bytes).unwrap();
+    accepted.accept_all().unwrap();
+    assert_eq!(accepted.paragraphs()[0].text(), "alpha brave beta");
+    let mut rejected = Document::from_bytes(&bytes).unwrap();
+    rejected.reject_all().unwrap();
+    assert_eq!(rejected.paragraphs()[0].text(), "alpha beta");
+
+    let mut ignored = document_with_content_controls(&control("alpha  beta"));
+    ignored
+        .compare_with_options(
+            &document_with_content_controls(&control("alpha beta")),
+            "Ada",
+            "2026-09-04T09:00:00Z",
+            &rdocx::ComparisonOptions {
+                ignore_whitespace: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(ignored.paragraphs()[0].text(), "alpha  beta");
+    let ignored_xml = document_xml(&mut ignored);
+    assert!(
+        !ignored_xml.contains("<w:del ") && !ignored_xml.contains("<w:ins "),
+        "{ignored_xml}"
+    );
+
+    let segmented = |runs: &str| {
+        wrap_word_body(&format!(
+            r#"<w:p><w:sdt><w:sdtPr><w:tag w:val="segmented"/></w:sdtPr><w:sdtContent>{runs}</w:sdtContent></w:sdt></w:p>"#
+        ))
+    };
+    let one_run = segmented("<w:r><w:t>alpha beta</w:t></w:r>");
+    let two_runs = segmented("<w:r><w:t>alpha </w:t></w:r><w:r><w:t>beta</w:t></w:r>");
+    for granularity in [
+        rdocx::ComparisonGranularity::Word,
+        rdocx::ComparisonGranularity::Character,
+    ] {
+        let mut tracked = document_with_content_controls(&one_run);
+        tracked
+            .compare_with_options(
+                &document_with_content_controls(&two_runs),
+                "Ada",
+                "2026-09-04T09:00:00Z",
+                &rdocx::ComparisonOptions {
+                    granularity,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let xml = document_xml(&mut tracked);
+        assert!(
+            !xml.contains("<w:del ") && !xml.contains("<w:ins "),
+            "{xml}"
+        );
+        assert_eq!(xml.matches(r#"<w:tag w:val="segmented"/>"#).count(), 1);
+    }
+
+    let raw = r#"<x:raw xmlns:x="urn:f235-inline"><!--exact--><?keep value?></x:raw>"#;
+    let one_run_with_raw = segmented(&format!("<w:r><w:t>alpha beta</w:t></w:r>{raw}"));
+    let two_runs_with_raw = segmented(&format!(
+        "<w:r><w:t>alpha </w:t></w:r><w:r><w:t>beta</w:t></w:r>{raw}"
+    ));
+    for granularity in [
+        rdocx::ComparisonGranularity::Word,
+        rdocx::ComparisonGranularity::Character,
+    ] {
+        let mut tracked = document_with_content_controls(&one_run_with_raw);
+        tracked
+            .compare_with_options(
+                &document_with_content_controls(&two_runs_with_raw),
+                "Ada",
+                "2026-09-04T09:00:00Z",
+                &rdocx::ComparisonOptions {
+                    granularity,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let bytes = tracked.to_bytes().unwrap();
+        let tracked_xml = document_xml(&mut tracked);
+        assert_eq!(tracked_xml.matches(raw).count(), 1, "{tracked_xml}");
+        assert!(
+            !tracked_xml.contains("<w:del ") && !tracked_xml.contains("<w:ins "),
+            "{tracked_xml}"
+        );
+        let mut accepted = Document::from_bytes(&bytes).unwrap();
+        accepted.accept_all().unwrap();
+        let accepted_xml = document_xml(&mut accepted);
+        assert_eq!(accepted_xml.matches(raw).count(), 1, "{accepted_xml}");
+        assert_eq!(accepted.paragraphs()[0].text(), "alpha beta");
+        let mut rejected = Document::from_bytes(&bytes).unwrap();
+        rejected.reject_all().unwrap();
+        let rejected_xml = document_xml(&mut rejected);
+        assert_eq!(rejected_xml.matches(raw).count(), 1, "{rejected_xml}");
+        assert_eq!(rejected.paragraphs()[0].text(), "alpha beta");
+    }
+
+    let edited_with_raw = segmented(&format!(
+        "<w:r><w:t>alXha </w:t></w:r><w:r><w:t>beta</w:t></w:r>{raw}"
+    ));
+    for (granularity, expected) in [
+        (
+            rdocx::ComparisonGranularity::Word,
+            [("del", "alpha"), ("ins", "alXha")],
+        ),
+        (
+            rdocx::ComparisonGranularity::Character,
+            [("del", "p"), ("ins", "X")],
+        ),
+    ] {
+        let mut tracked = document_with_content_controls(&one_run_with_raw);
+        tracked
+            .compare_with_options(
+                &document_with_content_controls(&edited_with_raw),
+                "Ada",
+                "2026-09-04T09:00:00Z",
+                &rdocx::ComparisonOptions {
+                    granularity,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let bytes = tracked.to_bytes().unwrap();
+        let tracked_xml = document_xml(&mut tracked);
+        assert_eq!(tracked_xml.matches(raw).count(), 1, "{tracked_xml}");
+        assert_eq!(
+            policy_comparison_records(&tracked_xml, "main")
+                .iter()
+                .map(|record| (record.kind.as_str(), record.content.as_str()))
+                .collect::<Vec<_>>(),
+            expected,
+            "{tracked_xml}"
+        );
+        let mut accepted = Document::from_bytes(&bytes).unwrap();
+        accepted.accept_all().unwrap();
+        let accepted_xml = document_xml(&mut accepted);
+        assert_eq!(accepted_xml.matches(raw).count(), 1, "{accepted_xml}");
+        assert_eq!(accepted.paragraphs()[0].text(), "alXha beta");
+        let mut rejected = Document::from_bytes(&bytes).unwrap();
+        rejected.reject_all().unwrap();
+        let rejected_xml = document_xml(&mut rejected);
+        assert_eq!(rejected_xml.matches(raw).count(), 1, "{rejected_xml}");
+        assert_eq!(rejected.paragraphs()[0].text(), "alpha beta");
+    }
+
+    for changed in [
+        segmented(&format!(
+            "<w:r><w:t>alpha </w:t></w:r>{raw}<w:r><w:t>beta</w:t></w:r>"
+        )),
+        segmented(&format!(
+            "<w:r><w:t>alpha beta</w:t></w:r>{}",
+            raw.replace("<!--exact-->", "<!--changed-->")
+        )),
+    ] {
+        let mut detected = document_with_content_controls(&one_run_with_raw);
+        let result = detected.compare_with_options(
+            &document_with_content_controls(&changed),
+            "Ada",
+            "2026-09-04T09:00:00Z",
+            &rdocx::ComparisonOptions {
+                granularity: rdocx::ComparisonGranularity::Word,
+                ..Default::default()
+            },
+        );
+        assert!(
+            result.is_err() || {
+                let xml = document_xml(&mut detected);
+                xml.contains("<w:del ") || xml.contains("<w:ins ")
+            },
+            "raw movement or byte change was silently ignored"
+        );
+    }
+
+    let formatted = |text: &str, property: &str| {
+        wrap_word_body(&format!(
+            r#"<w:p><w:sdt><w:sdtPr><w:tag w:val="formatting"/></w:sdtPr><w:sdtContent><w:r><w:rPr>{property}</w:rPr><w:t>{text}</w:t></w:r></w:sdtContent></w:sdt></w:p>"#
+        ))
+    };
+    let mut left_biased = document_with_content_controls(&formatted("old", "<w:b/>"));
+    left_biased
+        .compare_with_options(
+            &document_with_content_controls(&formatted("new", "<w:i/>")),
+            "Ada",
+            "2026-09-04T09:00:00Z",
+            &rdocx::ComparisonOptions {
+                ignore_formatting: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let bytes = left_biased.to_bytes().unwrap();
+    let xml = document_xml(&mut left_biased);
+    assert!(xml.contains("<w:b/>"), "{xml}");
+    assert!(!xml.contains("<w:i/>"), "{xml}");
+    let mut accepted = Document::from_bytes(&bytes).unwrap();
+    accepted.accept_all().unwrap();
+    let accepted_xml = document_xml(&mut accepted);
+    assert!(accepted_xml.contains("<w:b/>"), "{accepted_xml}");
+    assert!(!accepted_xml.contains("<w:i/>"), "{accepted_xml}");
+    assert_eq!(accepted.paragraphs()[0].text(), "new");
+}
+
+#[test]
+fn ignored_text_units_keep_raw_children_significant_and_single() {
+    let raw = |value| format!(r#"<x:raw xmlns:x="urn:f235" x:value="{value}"/>"#);
+    let document = |value| {
+        wrap_word_body(&format!(
+            r#"<w:p><w:r><w:t xml:space="preserve"> </w:t>{}<w:t>same</w:t></w:r></w:p>"#,
+            raw(value)
+        ))
+    };
+    let original_xml = document("left");
+    let edited_xml = document("right");
+    let edited = document_with_content_controls(&edited_xml);
+    let mut tracked = document_with_content_controls(&original_xml);
+    tracked
+        .compare_with_options(
+            &edited,
+            "Ada",
+            "2026-09-04T09:00:00Z",
+            &rdocx::ComparisonOptions {
+                ignore_whitespace: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let bytes = tracked.to_bytes().unwrap();
+    let xml = document_xml(&mut tracked);
+    assert_eq!(xml.matches(&raw("left")).count(), 1, "{xml}");
+    assert_eq!(xml.matches(&raw("right")).count(), 1, "{xml}");
+    let mut accepted = Document::from_bytes(&bytes).unwrap();
+    accepted.accept_all().unwrap();
+    let accepted = document_xml(&mut accepted);
+    assert_eq!(accepted.matches(&raw("right")).count(), 1, "{accepted}");
+    assert!(!accepted.contains(&raw("left")), "{accepted}");
+    let mut rejected = Document::from_bytes(&bytes).unwrap();
+    rejected.reject_all().unwrap();
+    let rejected = document_xml(&mut rejected);
+    assert_eq!(rejected.matches(&raw("left")).count(), 1, "{rejected}");
+    assert!(!rejected.contains(&raw("right")), "{rejected}");
+}
+
+#[test]
+fn adjacent_character_edits_coalesce_to_one_revision_pair() {
+    let original_xml = wrap_word_body("<w:p><w:r><w:t>abc</w:t></w:r></w:p>");
+    let edited_xml = wrap_word_body("<w:p><w:r><w:t>xyz</w:t></w:r></w:p>");
+    let edited = document_with_content_controls(&edited_xml);
+    let mut tracked = document_with_content_controls(&original_xml);
+    tracked
+        .compare_with_options(
+            &edited,
+            "Ada",
+            "2026-09-04T09:00:00Z",
+            &rdocx::ComparisonOptions {
+                granularity: rdocx::ComparisonGranularity::Character,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let xml = document_xml(&mut tracked);
+    assert_eq!(xml.matches("<w:del ").count(), 1, "{xml}");
+    assert_eq!(xml.matches("<w:ins ").count(), 1, "{xml}");
+}
+
+#[test]
+fn run_mode_preserves_ignored_sub_run_content_beside_edits() {
+    let whitespace = |text| {
+        wrap_word_body(&format!(
+            r#"<w:p><w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:p>"#
+        ))
+    };
+    let mut whitespace_tracked = document_with_content_controls(&whitespace("old  tail"));
+    let whitespace_edited = document_with_content_controls(&whitespace("new tail"));
+    whitespace_tracked
+        .compare_with_options(
+            &whitespace_edited,
+            "Ada",
+            "2026-09-04T09:00:00Z",
+            &rdocx::ComparisonOptions {
+                ignore_whitespace: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let mut accepted = Document::from_bytes(&whitespace_tracked.to_bytes().unwrap()).unwrap();
+    accepted.accept_all().unwrap();
+    assert_eq!(accepted.paragraphs()[0].text(), "new  tail");
+
+    let commented = |text, id| {
+        wrap_word_body(&format!(
+            r#"<w:p><w:r><w:t>{text}</w:t><w:commentReference w:id="{id}"/></w:r></w:p>"#
+        ))
+    };
+    let mut comment_tracked = document_with_content_controls(&commented("old", 7));
+    let comment_edited = document_with_content_controls(&commented("new", 8));
+    comment_tracked
+        .compare_with_options(
+            &comment_edited,
+            "Ada",
+            "2026-09-04T09:00:00Z",
+            &rdocx::ComparisonOptions {
+                ignore_comments: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let comment_xml = document_xml(&mut comment_tracked);
+    assert!(
+        comment_xml.contains(r#"<w:commentReference w:id="7"/>"#),
+        "{comment_xml}"
+    );
+    assert!(
+        !comment_xml.contains(r#"<w:commentReference w:id="8"/>"#),
+        "{comment_xml}"
+    );
+}
+
+#[test]
+fn comparison_policy_matrix_changes_only_declared_records_and_is_deterministic() {
+    fn record(
+        kind: &str,
+        content: &str,
+        story: &str,
+        owner: &str,
+        order: usize,
+    ) -> PolicyComparisonRecord {
+        PolicyComparisonRecord {
+            kind: kind.to_owned(),
+            content: content.to_owned(),
+            story: story.to_owned(),
+            owner: owner.to_owned(),
+            order,
+        }
+    }
+
+    fn assert_exact_records(
+        actual: &[PolicyComparisonRecord],
+        expected: &[PolicyComparisonRecord],
+    ) {
+        assert_eq!(actual, expected);
+        if expected.is_empty() {
+            return;
+        }
+        for corrupt in ["kind", "content", "story", "owner", "order"] {
+            let mut mutation = expected.to_vec();
+            match corrupt {
+                "kind" => mutation[0].kind.push_str("-corrupt"),
+                "content" => mutation[0].content.push_str("-corrupt"),
+                "story" => mutation[0].story.push_str("-corrupt"),
+                "owner" => mutation[0].owner.push_str("-corrupt"),
+                "order" => mutation[0].order += 1,
+                _ => unreachable!(),
+            }
+            assert_ne!(
+                actual, mutation,
+                "{corrupt} mutation escaped the exact matrix"
+            );
+        }
+    }
+
+    fn compared_xml(
+        original: &str,
+        edited: &str,
+        options: &rdocx::ComparisonOptions,
+    ) -> (String, Vec<rdocx::ComparisonDiagnostic>) {
+        let mut first = document_with_content_controls(original);
+        let mut second = document_with_content_controls(original);
+        let edited = document_with_content_controls(edited);
+        let first_diagnostics = first
+            .compare_with_options(&edited, "Ada", "2026-09-04T09:00:00Z", options)
+            .unwrap();
+        let second_diagnostics = second
+            .compare_with_options(&edited, "Ada", "2026-09-04T09:00:00Z", options)
+            .unwrap();
+        assert_eq!(first_diagnostics, second_diagnostics);
+        assert_eq!(first.to_bytes().unwrap(), second.to_bytes().unwrap());
+        (document_xml(&mut first), first_diagnostics)
+    }
+
+    let original_xml = wrap_word_body("<w:p><w:r><w:t>alpha beta</w:t></w:r></w:p>");
+    let edited_xml = wrap_word_body("<w:p><w:r><w:t>alpha brave beta</w:t></w:r></w:p>");
+    let granular = [
+        rdocx::ComparisonOptions::default(),
+        rdocx::ComparisonOptions {
+            granularity: rdocx::ComparisonGranularity::Word,
+            ..Default::default()
+        },
+        rdocx::ComparisonOptions {
+            granularity: rdocx::ComparisonGranularity::Character,
+            ..Default::default()
+        },
+    ]
+    .map(|options| compared_xml(&original_xml, &edited_xml, &options).0);
+    let granular_records = granular
+        .iter()
+        .map(|xml| policy_comparison_records(xml, "main"))
+        .collect::<Vec<_>>();
+    assert_exact_records(
+        &granular_records[0],
+        &[("del", "alpha beta", 0), ("ins", "alpha brave beta", 1)].map(
+            |(kind, content, order)| PolicyComparisonRecord {
+                kind: kind.to_owned(),
+                content: content.to_owned(),
+                story: "main".to_owned(),
+                owner: "document/body/p".to_owned(),
+                order,
+            },
+        ),
+    );
+    assert_exact_records(
+        &granular_records[1],
+        &[record("ins", "brave ", "main", "document/body/p", 0)],
+    );
+    assert_exact_records(
+        &granular_records[2],
+        &[
+            record("ins", "rav", "main", "document/body/p", 0),
+            record("ins", " be", "main", "document/body/p", 1),
+        ],
+    );
+
+    let formatting_original =
+        wrap_word_body("<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>same</w:t></w:r></w:p>");
+    let formatting_edited =
+        wrap_word_body("<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>same</w:t></w:r></w:p>");
+    let (formatting_record, formatting_diagnostics) = compared_xml(
+        &formatting_original,
+        &formatting_edited,
+        &rdocx::ComparisonOptions::default(),
+    );
+    let (ignored_formatting, ignored_diagnostics) = compared_xml(
+        &formatting_original,
+        &formatting_edited,
+        &rdocx::ComparisonOptions {
+            ignore_formatting: true,
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        policy_comparison_records(&formatting_record, "main"),
+        [PolicyComparisonRecord {
+            kind: "rPrChange".to_owned(),
+            content: String::new(),
+            story: "main".to_owned(),
+            owner: "document/body/p/r/rPr".to_owned(),
+            order: 0,
+        }]
+    );
+    assert!(formatting_diagnostics.is_empty());
+    assert!(policy_comparison_records(&ignored_formatting, "main").is_empty());
+    assert!(ignored_diagnostics.is_empty());
+
+    for (before, after, ignored, expected) in [
+        (
+            r#"<w:p><w:r><w:t xml:space="preserve">a  b</w:t></w:r></w:p>"#,
+            r#"<w:p><w:r><w:t xml:space="preserve">a b</w:t></w:r></w:p>"#,
+            rdocx::ComparisonOptions {
+                ignore_whitespace: true,
+                ..Default::default()
+            },
+            [
+                ("del", "a  b", "main", "document/body/p", 0),
+                ("ins", "a b", "main", "document/body/p", 1),
+            ],
+        ),
+        (
+            r#"<w:p><w:fldSimple w:instr="DATE"><w:r><w:t>old cache</w:t></w:r></w:fldSimple></w:p>"#,
+            r#"<w:p><w:fldSimple w:instr="DATE"><w:r><w:t>new cache</w:t></w:r></w:fldSimple></w:p>"#,
+            rdocx::ComparisonOptions {
+                ignore_fields: true,
+                ..Default::default()
+            },
+            [
+                ("del", "old cache", "main", "document/body/p/fldSimple", 0),
+                ("ins", "new cache", "main", "document/body/p/fldSimple", 1),
+            ],
+        ),
+        (
+            r#"<w:p><w:r><w:t>same</w:t><w:commentReference w:id="7"/></w:r></w:p>"#,
+            r#"<w:p><w:r><w:t>same</w:t><w:commentReference w:id="8"/></w:r></w:p>"#,
+            rdocx::ComparisonOptions {
+                ignore_comments: true,
+                ..Default::default()
+            },
+            [
+                ("del", "same", "main", "document/body/p", 0),
+                ("ins", "same", "main", "document/body/p", 1),
+            ],
+        ),
+    ] {
+        let before = wrap_word_body(before);
+        let after = wrap_word_body(after);
+        let ordinary = compared_xml(&before, &after, &rdocx::ComparisonOptions::default()).0;
+        let ignored = compared_xml(&before, &after, &ignored).0;
+        let ordinary = policy_comparison_records(&ordinary, "main");
+        let expected = expected
+            .map(|(kind, content, story, owner, order)| record(kind, content, story, owner, order));
+        assert_exact_records(&ordinary, &expected);
+        assert_exact_records(&policy_comparison_records(&ignored, "main"), &[]);
+    }
+
+    let edited_stories = document_with_comparison_stories("new");
+    let mut ordinary_stories = document_with_comparison_stories("old");
+    ordinary_stories
+        .compare(&edited_stories, "Ada", "2026-09-04T09:00:00Z")
+        .unwrap();
+    let ordinary_records = all_policy_story_records(&mut ordinary_stories);
+    let expected_ordinary_records = vec![
+        record("del", "old body", "main", "document/body/p", 0),
+        record("ins", "new body", "main", "document/body/p", 1),
+        record("del", "old header", "header", "hdr/p", 2),
+        record("ins", "new header", "header", "hdr/p", 3),
+        record("del", "old footer", "footer", "ftr/p", 4),
+        record("ins", "new footer", "footer", "ftr/p", 5),
+        record("del", "old comment", "comment", "comments/comment/p", 6),
+        record("ins", "new comment", "comment", "comments/comment/p", 7),
+        record(
+            "del",
+            " old footnote",
+            "footnote",
+            "footnotes/footnote/p",
+            8,
+        ),
+        record(
+            "ins",
+            " new footnote",
+            "footnote",
+            "footnotes/footnote/p",
+            9,
+        ),
+        record("del", " old endnote", "endnote", "endnotes/endnote/p", 10),
+        record("ins", " new endnote", "endnote", "endnotes/endnote/p", 11),
+    ];
+    assert_exact_records(&ordinary_records, &expected_ordinary_records);
+    for (kind, selected_story) in [
+        (rdocx::ComparisonStoryKind::Main, "main"),
+        (rdocx::ComparisonStoryKind::Header, "header"),
+        (rdocx::ComparisonStoryKind::Footer, "footer"),
+        (rdocx::ComparisonStoryKind::Comment, "comment"),
+        (rdocx::ComparisonStoryKind::Footnote, "footnote"),
+        (rdocx::ComparisonStoryKind::Endnote, "endnote"),
+    ] {
+        let mut compared = document_with_comparison_stories("old");
+        compared
+            .compare_with_options(
+                &edited_stories,
+                "Ada",
+                "2026-09-04T09:00:00Z",
+                &rdocx::ComparisonOptions {
+                    ignored_stories: vec![kind],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let actual = all_policy_story_records(&mut compared);
+        let expected = expected_ordinary_records
+            .iter()
+            .filter(|record| record.story != selected_story)
+            .cloned()
+            .enumerate()
+            .map(|(order, mut record)| {
+                record.order = order;
+                record
+            })
+            .collect::<Vec<_>>();
+        assert_exact_records(&actual, &expected);
+    }
+
+    let text_box_story = |value: &str| {
+        document_with_comparison_header(&format!(
+            r#"<w:p><w:r><w:t>{value} header</w:t></w:r></w:p><w:p><w:r><w:pict><v:shape id="f234-box" style="width:100pt;height:50pt"><v:textbox><w:txbxContent><w:p><w:r><w:t>{value} box</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>"#
+        ))
+    };
+    let edited_text_box = text_box_story("new");
+    let mut ordinary_text_box = text_box_story("old");
+    ordinary_text_box
+        .compare(&edited_text_box, "Ada", "2026-09-04T09:00:00Z")
+        .unwrap();
+    let ordinary_text_box_records = policy_comparison_records(
+        &comparison_part_xml(&mut ordinary_text_box, "/word/header1.xml"),
+        "header",
+    );
+    let expected_text_box_records = vec![
+        record("del", "old header", "header", "hdr/p", 0),
+        record("ins", "new header", "header", "hdr/p", 1),
+        record(
+            "del",
+            "old box",
+            "text-box",
+            "hdr/p/r/pict/shape/textbox/txbxContent/p",
+            2,
+        ),
+        record(
+            "ins",
+            "new box",
+            "text-box",
+            "hdr/p/r/pict/shape/textbox/txbxContent/p",
+            3,
+        ),
+    ];
+    assert_exact_records(&ordinary_text_box_records, &expected_text_box_records);
+    for kind in [
+        rdocx::ComparisonStoryKind::Header,
+        rdocx::ComparisonStoryKind::TextBox,
+    ] {
+        let mut compared = text_box_story("old");
+        compared
+            .compare_with_options(
+                &edited_text_box,
+                "Ada",
+                "2026-09-04T09:00:00Z",
+                &rdocx::ComparisonOptions {
+                    ignored_stories: vec![kind],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let actual = policy_comparison_records(
+            &comparison_part_xml(&mut compared, "/word/header1.xml"),
+            "header",
+        );
+        let expected = if kind == rdocx::ComparisonStoryKind::Header {
+            Vec::new()
+        } else {
+            expected_text_box_records
+                .iter()
+                .filter(|record| record.story != "text-box")
+                .cloned()
+                .collect()
+        };
+        assert_exact_records(&actual, &expected);
+    }
+}
+
+#[test]
+fn comparison_granularity_preserves_accept_and_reject_postconditions() {
+    for granularity in [
+        rdocx::ComparisonGranularity::Run,
+        rdocx::ComparisonGranularity::Word,
+        rdocx::ComparisonGranularity::Character,
+    ] {
+        let original_xml = wrap_word_body("<w:p><w:r><w:t>alpha beta</w:t></w:r></w:p>");
+        let edited_xml = wrap_word_body("<w:p><w:r><w:t>alpha brave beta</w:t></w:r></w:p>");
+        let original = document_with_content_controls(&original_xml);
+        let edited = document_with_content_controls(&edited_xml);
+        let mut tracked = document_with_content_controls(&original_xml);
+        tracked
+            .compare_with_options(
+                &edited,
+                "Ada",
+                "2026-09-04T09:00:00Z",
+                &rdocx::ComparisonOptions {
+                    granularity,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let bytes = tracked.to_bytes().unwrap();
+        let mut accepted = Document::from_bytes(&bytes).unwrap();
+        accepted.accept_all().unwrap();
+        assert_eq!(
+            accepted.paragraphs()[0].text(),
+            edited.paragraphs()[0].text()
+        );
+        let mut rejected = Document::from_bytes(&bytes).unwrap();
+        rejected.reject_all().unwrap();
+        assert_eq!(
+            rejected.paragraphs()[0].text(),
+            original.paragraphs()[0].text()
+        );
+    }
+}
+
+#[test]
+fn ignored_formatting_suppresses_only_formatting_diagnostics() {
+    let original_xml = wrap_word_body("<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>old</w:t></w:r></w:p>");
+    let edited_xml = wrap_word_body("<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>new</w:t></w:r></w:p>");
+    let edited = document_with_content_controls(&edited_xml);
+    let mut tracked = document_with_content_controls(&original_xml);
+    let diagnostics = tracked
+        .compare_with_options(
+            &edited,
+            "Ada",
+            "2026-09-04T09:00:00Z",
+            &rdocx::ComparisonOptions {
+                granularity: rdocx::ComparisonGranularity::Word,
+                ignore_formatting: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert!(diagnostics.is_empty());
+    let tracked_xml = document_xml(&mut tracked);
+    assert!(tracked_xml.contains("<w:del"));
+    assert!(tracked_xml.contains("<w:ins"));
+    assert!(tracked_xml.contains("<w:b/>"));
+    assert!(!tracked_xml.contains("<w:i/>"));
+}
+
+#[test]
+fn ignored_whitespace_preserves_source_whitespace_without_hiding_structural_controls() {
+    let original_xml = wrap_word_body(
+        "<w:p><w:r><w:t xml:space=\"preserve\">a  b</w:t><w:tab/><w:t>tail</w:t></w:r></w:p>",
+    );
+    let edited_xml = wrap_word_body(
+        "<w:p><w:r><w:t xml:space=\"preserve\">a b</w:t><w:br/><w:t>tail</w:t></w:r></w:p>",
+    );
+    let edited = document_with_content_controls(&edited_xml);
+    let mut tracked = document_with_content_controls(&original_xml);
+    tracked
+        .compare_with_options(
+            &edited,
+            "Ada",
+            "2026-09-04T09:00:00Z",
+            &rdocx::ComparisonOptions {
+                granularity: rdocx::ComparisonGranularity::Word,
+                ignore_whitespace: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let xml = document_xml(&mut tracked);
+    assert!(xml.contains(">  </w:t>"), "{xml}");
+    assert!(xml.contains("<w:tab"), "{xml}");
+    assert!(xml.contains("<w:br"), "{xml}");
+}
+
+#[test]
+fn ignored_fields_preserve_field_sources_and_compare_neighbouring_text() {
+    let original_xml = wrap_word_body(
+        "<w:p><w:r><w:t>old neighbour</w:t></w:r><w:fldSimple w:instr=\"DATE\"><w:r><w:t>old cache</w:t></w:r></w:fldSimple></w:p>",
+    );
+    let edited_xml = wrap_word_body(
+        "<w:p><w:r><w:t>new neighbour</w:t></w:r><w:fldSimple w:instr=\"TIME\"><w:r><w:t>new cache</w:t></w:r></w:fldSimple></w:p>",
+    );
+    let edited = document_with_content_controls(&edited_xml);
+    let mut tracked = document_with_content_controls(&original_xml);
+    tracked
+        .compare_with_options(
+            &edited,
+            "Ada",
+            "2026-09-04T09:00:00Z",
+            &rdocx::ComparisonOptions {
+                ignore_fields: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let xml = document_xml(&mut tracked);
+    assert!(xml.contains("DATE"), "{xml}");
+    assert!(xml.contains("old cache"), "{xml}");
+    assert!(!xml.contains("TIME"), "{xml}");
+    assert!(xml.contains("new neighbour"), "{xml}");
+}
+
+#[test]
+fn ignored_comments_preserve_comment_parts_and_anchors() {
+    let mut original = document_with_comparison_story_values("old", "original");
+    let edited = document_with_comparison_story_values("new", "edited");
+    original
+        .compare_with_options(
+            &edited,
+            "Ada",
+            "2026-09-04T09:00:00Z",
+            &rdocx::ComparisonOptions {
+                ignore_comments: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let body = comparison_part_xml(&mut original, "/word/document.xml");
+    let comments = comparison_part_xml(&mut original, "/word/comments.xml");
+    assert!(body.contains("commentRangeStart"));
+    assert!(body.contains("commentReference"));
+    assert!(comments.contains("original comment"));
+    assert!(!comments.contains("edited comment"));
+    assert!(body.contains("new body"));
+}
+
+#[test]
+fn ignored_story_kinds_skip_only_selected_story_categories() {
+    let mut original = document_with_comparison_stories("old");
+    let edited = document_with_comparison_stories("new");
+    original
+        .compare_with_options(
+            &edited,
+            "Ada",
+            "2026-09-04T09:00:00Z",
+            &rdocx::ComparisonOptions {
+                ignored_stories: vec![
+                    rdocx::ComparisonStoryKind::Header,
+                    rdocx::ComparisonStoryKind::Footnote,
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let header = comparison_part_xml(&mut original, "/word/header1.xml");
+    let footnote = comparison_part_xml(&mut original, "/word/footnotes.xml");
+    assert!(header.contains("old header"));
+    assert!(
+        !header.contains("<w:del ") && !header.contains("<w:ins "),
+        "{header}"
+    );
+    assert!(footnote.contains("old footnote"));
+    assert!(
+        !footnote.contains("<w:del ") && !footnote.contains("<w:ins "),
+        "{footnote}"
+    );
+    let mut ordinary = document_with_comparison_stories("old");
+    ordinary
+        .compare(
+            &document_with_comparison_stories("new"),
+            "Ada",
+            "2026-09-04T09:00:00Z",
+        )
+        .unwrap();
+    for part in ["/word/header1.xml", "/word/footnotes.xml"] {
+        let xml = comparison_part_xml(&mut ordinary, part);
+        assert_eq!(xml.matches("<w:del ").count(), 1, "{part}: {xml}");
+        assert_eq!(xml.matches("<w:ins ").count(), 1, "{part}: {xml}");
+    }
+    assert!(comparison_part_xml(&mut original, "/word/footer1.xml").contains("new footer"));
+    assert!(comparison_part_xml(&mut original, "/word/endnotes.xml").contains("new endnote"));
+
+    for (kind, part, retained) in [
+        (
+            rdocx::ComparisonStoryKind::Main,
+            "/word/document.xml",
+            "old body",
+        ),
+        (
+            rdocx::ComparisonStoryKind::Footer,
+            "/word/footer1.xml",
+            "old footer",
+        ),
+        (
+            rdocx::ComparisonStoryKind::Comment,
+            "/word/comments.xml",
+            "old comment",
+        ),
+        (
+            rdocx::ComparisonStoryKind::Endnote,
+            "/word/endnotes.xml",
+            "old endnote",
+        ),
+    ] {
+        let mut ordinary = document_with_comparison_stories("old");
+        ordinary
+            .compare(
+                &document_with_comparison_stories("new"),
+                "Ada",
+                "2026-09-04T09:00:00Z",
+            )
+            .unwrap();
+        let ordinary = comparison_part_xml(&mut ordinary, part);
+        assert_eq!(
+            ordinary.matches("<w:del ").count(),
+            1,
+            "{kind:?}: {ordinary}"
+        );
+        assert_eq!(
+            ordinary.matches("<w:ins ").count(),
+            1,
+            "{kind:?}: {ordinary}"
+        );
+        let mut original = document_with_comparison_stories("old");
+        let edited = document_with_comparison_stories("new");
+        original
+            .compare_with_options(
+                &edited,
+                "Ada",
+                "2026-09-04T09:00:00Z",
+                &rdocx::ComparisonOptions {
+                    ignored_stories: vec![kind],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let selected = comparison_part_xml(&mut original, part);
+        assert!(selected.contains(retained), "{kind:?}");
+        assert!(
+            !selected.contains("<w:del ") && !selected.contains("<w:ins "),
+            "{kind:?}: {selected}"
+        );
+    }
+
+    let box_xml = |value: &str| {
+        format!(
+            r#"<w:p><w:r><w:drawing><wps:wsp><wps:txbx><w:txbxContent><w:p><w:r><w:t>{value} box</w:t></w:r></w:p></w:txbxContent></wps:txbx></wps:wsp></w:drawing></w:r></w:p>"#
+        )
+    };
+    let mut original = document_with_comparison_header(&box_xml("old"));
+    let edited = document_with_comparison_header(&box_xml("new"));
+    original
+        .compare_with_options(
+            &edited,
+            "Ada",
+            "2026-09-04T09:00:00Z",
+            &rdocx::ComparisonOptions {
+                ignored_stories: vec![rdocx::ComparisonStoryKind::TextBox],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let header = comparison_part_xml(&mut original, "/word/header1.xml");
+    assert!(header.contains("old box"), "{header}");
+    assert!(!header.contains("new box"), "{header}");
+    assert!(
+        !header.contains("<w:del ") && !header.contains("<w:ins "),
+        "{header}"
+    );
+    let mut ordinary = document_with_comparison_header(&box_xml("old"));
+    ordinary
+        .compare(
+            &document_with_comparison_header(&box_xml("new")),
+            "Ada",
+            "2026-09-04T09:00:00Z",
+        )
+        .unwrap();
+    let ordinary = comparison_part_xml(&mut ordinary, "/word/header1.xml");
+    assert_eq!(ordinary.matches("<w:del ").count(), 1, "{ordinary}");
+    assert_eq!(ordinary.matches("<w:ins ").count(), 1, "{ordinary}");
+}
+
+#[test]
+fn ignored_stories_are_excluded_before_revision_checks_and_id_seeding() {
+    fn add_main_revision(mut document: Document) -> Document {
+        let bytes = document.to_bytes().unwrap();
+        let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+        let main = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec())
+            .unwrap()
+            .replace(
+                "<w:r><w:t>same body</w:t></w:r>",
+                r#"<w:ins w:id="0" w:author="Earlier" w:date="2026-09-03T09:00:00Z"><w:r><w:t>same body</w:t></w:r></w:ins>"#,
+            );
+        package.set_part("/word/document.xml", main.into_bytes());
+        let mut output = std::io::Cursor::new(Vec::new());
+        package.write_to(&mut output).unwrap();
+        Document::from_bytes(output.get_ref()).unwrap()
+    }
+
+    let mut original = add_main_revision(document_with_comparison_header(
+        "<w:p><w:r><w:t>old header</w:t></w:r></w:p>",
+    ));
+    let edited = add_main_revision(document_with_comparison_header(
+        "<w:p><w:r><w:t>new header</w:t></w:r></w:p>",
+    ));
+    original
+        .compare_with_options(
+            &edited,
+            "Ada",
+            "2026-09-04T09:00:00Z",
+            &rdocx::ComparisonOptions {
+                ignored_stories: vec![rdocx::ComparisonStoryKind::Main],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let header = comparison_part_xml(&mut original, "/word/header1.xml");
+    assert!(header.contains(r#"<w:del w:id="0""#), "{header}");
+}
+
+#[test]
+fn ignored_text_boxes_skip_host_validation_and_preserve_original_bytes() {
+    let box_child = |value: &str| {
+        format!(
+            r#"<w:drawing><wps:wsp><wps:txbx><w:txbxContent><w:p><w:r><w:t>{value} box</w:t></w:r></w:p></w:txbxContent></wps:txbx></wps:wsp></w:drawing>"#
+        )
+    };
+    let mut original = document_with_comparison_header(&format!(
+        "<w:p><w:r><w:t>old host</w:t>{}<w:commentReference w:id=\"0\"/></w:r></w:p>",
+        box_child("original")
+    ));
+    let edited = document_with_comparison_header(&format!(
+        "<w:p><w:r><w:t>new host</w:t>{}<w:commentReference w:id=\"0\"/></w:r></w:p>",
+        box_child("edited")
+    ));
+    original
+        .compare_with_options(
+            &edited,
+            "Ada",
+            "2026-09-04T09:00:00Z",
+            &rdocx::ComparisonOptions {
+                ignored_stories: vec![rdocx::ComparisonStoryKind::TextBox],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let header = comparison_part_xml(&mut original, "/word/header1.xml");
+    assert_eq!(header.matches("original box").count(), 1, "{header}");
+    assert!(header.contains("new host"), "{header}");
+    assert!(header.contains(r#"<w:del w:id="1""#), "{header}");
+
+    let main_box = |value| {
+        format!(
+            r#"<w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml" id="main-box"><v:textbox><w:txbxContent><w:p><w:r><w:t>{value} box</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict>"#
+        )
+    };
+    let original_xml = wrap_word_body(&format!(
+        "<w:p><w:r><w:t>old main host</w:t>{}</w:r></w:p>",
+        main_box("original")
+    ));
+    let edited_xml = wrap_word_body(&format!(
+        "<w:p><w:r><w:t>new main host</w:t>{}</w:r></w:p>",
+        main_box("edited")
+    ));
+    let mut original = document_with_content_controls(&original_xml);
+    let edited = document_with_content_controls(&edited_xml);
+    original
+        .compare_with_options(
+            &edited,
+            "Ada",
+            "2026-09-04T09:00:00Z",
+            &rdocx::ComparisonOptions {
+                ignored_stories: vec![rdocx::ComparisonStoryKind::TextBox],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let main = document_xml(&mut original);
+    assert_eq!(main.matches("original box").count(), 1, "{main}");
+    assert!(main.contains("new main host"), "{main}");
+
+    let sentinel_original =
+        wrap_word_body("<w:p><w:r><w:t>__rdocx_f234_text_box_0__</w:t></w:r></w:p>");
+    let sentinel_edited =
+        wrap_word_body("<w:p><w:r><w:t>__rdocx_f234_text_box_1__</w:t></w:r></w:p>");
+    let mut sentinel = document_with_content_controls(&sentinel_original);
+    sentinel
+        .compare_with_options(
+            &document_with_content_controls(&sentinel_edited),
+            "Ada",
+            "2026-09-04T09:00:00Z",
+            &rdocx::ComparisonOptions {
+                ignored_stories: vec![rdocx::ComparisonStoryKind::TextBox],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let bytes = sentinel.to_bytes().unwrap();
+    let sentinel_xml = document_xml(&mut sentinel);
+    assert!(sentinel_xml.contains("<w:del ") && sentinel_xml.contains("<w:ins "));
+    let mut accepted = Document::from_bytes(&bytes).unwrap();
+    accepted.accept_all().unwrap();
+    assert_eq!(accepted.paragraphs()[0].text(), "__rdocx_f234_text_box_1__");
+
+    let producer = r#"<x:textBoxHost xmlns:x="urn:rdocx:comparison:private"><x:keep value="byte-exact"/></x:textBoxHost>"#;
+    let collision_story = |host: &str, box_value: &str| {
+        format!(
+            "<w:p><w:r><w:t>{host}</w:t>{producer}{}<w:tab/></w:r></w:p>",
+            box_child(box_value)
+        )
+    };
+    let mut collision = document_with_comparison_header(&collision_story("old host", "original"));
+    collision
+        .compare_with_options(
+            &document_with_comparison_header(&collision_story("new host", "edited")),
+            "Ada",
+            "2026-09-04T09:00:00Z",
+            &rdocx::ComparisonOptions {
+                ignored_stories: vec![rdocx::ComparisonStoryKind::TextBox],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let bytes = collision.to_bytes().unwrap();
+    let collision_xml = comparison_part_xml(&mut collision, "/word/header1.xml");
+    assert_eq!(
+        collision_xml.matches(producer).count(),
+        1,
+        "{collision_xml}"
+    );
+    assert_eq!(
+        collision_xml.matches("original box").count(),
+        1,
+        "{collision_xml}"
+    );
+    assert!(!collision_xml.contains("edited box"), "{collision_xml}");
+    let mut accepted = Document::from_bytes(&bytes).unwrap();
+    accepted.accept_all().unwrap();
+    let accepted_xml = comparison_part_xml(&mut accepted, "/word/header1.xml");
+    assert_eq!(accepted_xml.matches(producer).count(), 1, "{accepted_xml}");
+    assert_eq!(
+        accepted_xml.matches("original box").count(),
+        1,
+        "{accepted_xml}"
+    );
+
+    let colliding_inside_box = |host: &str, value: &str, collision: &str| {
+        format!(
+            r#"<w:p><w:r><w:t>{host}</w:t><w:drawing><wps:wsp><wps:txbx><w:txbxContent>{collision}<w:p><w:r><w:t>{value} box</w:t></w:r></w:p></w:txbxContent></wps:txbx></wps:wsp></w:drawing></w:r></w:p>"#
+        )
+    };
+    let inner_collision =
+        r#"<x:textBoxHost0 xmlns:x="urn:rdocx:comparison:private"><x:keep/></x:textBoxHost0>"#;
+    let mut original = document_with_comparison_header(&colliding_inside_box(
+        "old host",
+        "original",
+        inner_collision,
+    ));
+    original
+        .compare_with_options(
+            &document_with_comparison_header(&colliding_inside_box("new host", "edited", "")),
+            "Ada",
+            "2026-09-04T09:00:00Z",
+            &rdocx::ComparisonOptions {
+                ignored_stories: vec![rdocx::ComparisonStoryKind::TextBox],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let xml = comparison_part_xml(&mut original, "/word/header1.xml");
+    assert_eq!(xml.matches(inner_collision).count(), 1, "{xml}");
+    assert_eq!(xml.matches("original box").count(), 1, "{xml}");
+    assert!(!xml.contains("edited box"), "{xml}");
+}
+
+#[test]
+fn invalid_comparison_policy_leaves_package_and_caches_unchanged() {
+    let original_xml = wrap_word_body("<w:p><w:r><w:t>original</w:t></w:r></w:p>");
+    let edited_xml = wrap_word_body("<w:p><w:r><w:t>edited</w:t></w:r></w:p>");
+    let mut original = document_with_content_controls(&original_xml);
+    let edited = document_with_content_controls(&edited_xml);
+    let before = original.to_bytes().unwrap();
+    let before_layout = original.layout().unwrap();
+    assert!(
+        original
+            .compare_with_options(
+                &edited,
+                "Ada",
+                "2026-09-04T09:00:00Z",
+                &rdocx::ComparisonOptions {
+                    ignored_stories: vec![
+                        rdocx::ComparisonStoryKind::Header,
+                        rdocx::ComparisonStoryKind::Header,
+                    ],
+                    ..Default::default()
+                }
+            )
+            .is_err()
+    );
+    assert_eq!(original.to_bytes().unwrap(), before);
+    assert!(std::sync::Arc::ptr_eq(
+        &before_layout,
+        &original.layout().unwrap()
+    ));
+
+    let control = r#"<w:sdt><w:sdtPr><w:tag w:val="atomic"/></w:sdtPr><w:sdtContent><w:r><w:t>fixed</w:t></w:r></w:sdtContent></w:sdt>"#;
+    let staged_original_xml = wrap_word_body(&format!(
+        "<w:p><w:r><w:t>old text</w:t></w:r>{control}</w:p>"
+    ));
+    let staged_edited_xml = wrap_word_body(&format!(
+        "<w:p><w:r><w:t>new text</w:t></w:r>{control}</w:p>"
+    ));
+    let mut staged = document_with_content_controls(&staged_original_xml);
+    let staged_edited = document_with_content_controls(&staged_edited_xml);
+    staged
+        .compare_with_options(
+            &staged_edited,
+            "Ada",
+            "2026-09-04T09:00:00Z",
+            &rdocx::ComparisonOptions {
+                granularity: rdocx::ComparisonGranularity::Word,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let staged = staged.to_bytes().unwrap();
+    let mut accepted = Document::from_bytes(&staged).unwrap();
+    accepted.accept_all().unwrap();
+    assert_eq!(accepted.paragraphs()[0].text(), "new textfixed");
+    let mut rejected = Document::from_bytes(&staged).unwrap();
+    rejected.reject_all().unwrap();
+    assert_eq!(rejected.paragraphs()[0].text(), "old textfixed");
+}
+
+#[test]
+fn granular_comparison_preserves_unmodelled_xml_byte_for_byte() {
+    let raw = "<x:raw xmlns:x=\"urn:f235\"><!--keep--><?pi value?></x:raw>";
+    let original_xml = wrap_word_body(&format!("<w:p><w:r>{raw}<w:t>abc</w:t></w:r></w:p>"));
+    let edited_xml = wrap_word_body(&format!("<w:p><w:r>{raw}<w:t>axc</w:t></w:r></w:p>"));
+    let edited = document_with_content_controls(&edited_xml);
+    let mut tracked = document_with_content_controls(&original_xml);
+    tracked
+        .compare_with_options(
+            &edited,
+            "Ada",
+            "2026-09-04T09:00:00Z",
+            &rdocx::ComparisonOptions {
+                granularity: rdocx::ComparisonGranularity::Character,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let bytes = tracked.to_bytes().unwrap();
+    assert_eq!(document_xml(&mut tracked).matches(raw).count(), 1);
+    let mut accepted = Document::from_bytes(&bytes).unwrap();
+    accepted.accept_all().unwrap();
+    assert_eq!(document_xml(&mut accepted).matches(raw).count(), 1);
+    let mut rejected = Document::from_bytes(&bytes).unwrap();
+    rejected.reject_all().unwrap();
+    assert_eq!(document_xml(&mut rejected).matches(raw).count(), 1);
 }

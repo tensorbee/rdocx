@@ -678,13 +678,19 @@ edited document, author, and RFC 3339 timestamp. The additive
 messages without turning those differences into revisions. Comparison rejects
 existing modeled revisions and unsupported structural shell differences, and
 it commits only after accepting and rejecting staged copies reproduce their
-respective package-wide modeled baselines. The unchanged API compares the main
-document, relationship-resolved headers and footers, comments, normal
-footnotes, endnotes, fields, and nested text boxes. It emits same-story moves
-and supported run, paragraph, table, and section property revisions. Diagnostic
-locations retain the actual story identity and stable owner path. This API is
-native Rust only. Python, WASM, and CLI surfaces gain no comparison method and
-preserve comparison output when they save their owned document.
+respective package-wide modeled baselines. `Document::compare` keeps its
+source-compatible whole-run default and delegates to the additive
+`compare_with_options` method. The concrete `ComparisonOptions` value selects
+`Run`, `Word`, or `Character` granularity and left-biased ignores for
+formatting, textual whitespace, fields, comments, and any public
+`ComparisonStoryKind`. The non-exhaustive story enum names the main, header,
+footer, comment, text-box, footnote, and endnote categories. The comparison
+surface covers relationship-resolved stories, fields, and nested text boxes.
+It emits same-story moves and supported run, paragraph, table, and section
+property revisions. Diagnostic locations retain the actual story identity and
+stable owner path. This API is native Rust only. Python, WASM, and CLI surfaces
+gain no comparison method and preserve comparison output when they save their
+owned document.
 
 Native Word rendering exposes `rdocx::RevisionView` and the concrete
 `rdocx::RenderOptions`, whose default selects the accepted view. Additive
