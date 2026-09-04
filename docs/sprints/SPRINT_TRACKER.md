@@ -382,6 +382,8 @@ defended.
 | F-231 | S66 | L | 4 | 1 | 2026-09-03 | Added bounded formula, TOC, TC, mail-control, and barcode evaluation with structured native outcomes and pinned Word parity |
 | F-232 | S66 | L | 4 | 1 | 2026-09-04 | Added deterministic native TOC rebuilding with final page targets, owner-aware preservation, and pinned Word parity |
 | F-234 | S67 | L | 4 | 1 | 2026-09-04 | Added deterministic full-story comparison, package-wide revision resolution, source-span preservation, and pinned Word parity |
+| F-233 | S67 | L | 4 | 1 | 2026-09-04 | Added atomic nested rich mail merge with exact-size images, complete fragment imports, identity remapping, and flat API compatibility |
+| F-235 | S67 | M | 2 | 1 | 2026-09-04 | Added deterministic Word and Character comparison plus left-biased formatting, whitespace, field, comment, and story ignore policies |
 
 ## Velocity
 
