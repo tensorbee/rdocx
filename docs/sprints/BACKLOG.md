@@ -37,9 +37,9 @@ regenerated, never hand-edited.
 | M19, Advanced spreadsheets                     | 21 | 0 | 0 | 21 |
 | M20, Fidelity at scale                         | 7  | 7 | 0 | 0  |
 | M21, Presentation depth                        | 15 | 15 | 0 | 0  |
-| M22, Word depth                                | 12 | 5 | 2 | 5  |
+| M22, Word depth                                | 12 | 6 | 1 | 5  |
 | X, Cross-cutting (opportunistic)            | 79 | 71 | 3 | 2  |
-| **Total** | **326** | **287** | **8** | **28** |
+| **Total** | **326** | **288** | **7** | **28** |
 <!-- AUTOGEN:backlog-summary END -->
 
 ## All F-IDs
@@ -437,7 +437,7 @@ regenerated, never hand-edited.
 | F-231 | Extended field evaluation                    | S66 | L | done |
 | F-232 | Dynamic table of contents rebuild            | S66 | L | done |
 | F-233 | Advanced mail merge                          | S67 | L | in-progress |
-| F-234 | Full-story document comparison               | S67 | L | in-progress |
+| F-234 | Full-story document comparison               | S67 | L | done |
 | F-235 | Comparison granularity and ignore policy     | S67 | M | pending |
 | F-236 | Embedded object and macro inventory          | S68 | L | pending |
 | F-237 | Forms, glossary, and building blocks         | S68 | L | pending |

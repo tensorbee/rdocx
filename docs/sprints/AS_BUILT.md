@@ -11438,3 +11438,51 @@ integrated full-workspace verification passed.
 when extending TOC sources. Any new wrapper or story location needs one shared
 coordinate contract across parsing, bookmark facade access, layout, save and
 reopen, and in-memory mutation before reopen.
+
+### F-234, Full-story document comparison
+
+**Sprint.** S67
+**Completed.** 2026-09-04
+**Size.** L, estimated 4 days, actual 1 day
+
+**What was built.** Native document comparison and revision resolution now
+cover the main document, relationship-resolved headers and footers, comments,
+normal footnotes and endnotes, fields, and nested text boxes through one stable
+story index. Comparison emits deterministic same-story moves and supported run,
+paragraph, table, and section property revisions, then proves package-wide
+accept and reject postconditions before one atomic facade commit.
+
+**Non-obvious choices.** Existing story shells and stable identifiers are the
+tracked-change boundary. Cross-story moves and shell creation or removal reject
+atomically. Owned source spans are patched while every unowned byte remains in
+source order. The Word differential normalizes two producer representations:
+Word duplicates comments and anchors for comment replacement, and pairs moves
+through a shared range name with distinct wrapper ids. The native model keeps
+resolvable comment-story wrappers and one shared move id while preserving the
+same deletion, insertion, and move-pair semantics.
+
+**Deviations from the design plan.** None. Review strengthened the approved
+preservation boundary with exact raw property-owner, related-story diagnostic,
+and inter-owner source-byte coverage. The integration reconciliation retained
+the adjacent F-233 rich mail-merge test contract before the comparison contract
+in the shared testing HLD.
+
+**Spec sections touched.** `docs/hld/03-architecture.md`,
+`docs/hld/04-opc-and-packaging.md`, `docs/hld/10-bindings-spec.md`, and
+`docs/hld/12-testing-strategy.md`.
+
+**Tests.** The differential gate
+`full_story_comparison_matches_pinned_word_records` matches 24 normalized
+records from source-built cases against Microsoft Word 16.104 build
+16.104.25121423. Focused regressions cover mutation sensitivity, every supported
+story, package-wide resolution, deterministic moves, fields, modeled property
+owners, exact source paths, unowned XML and relationship preservation, stable
+diagnostic locations, and atomic failure. Nine microscope passes ended clean,
+and the dependency-prefix full-workspace verification passed.
+
+**Hash harness.** Unchanged, 49 of 49.
+
+**Notes for future sessions.** Reuse the single story index and owned-span
+patching boundary for comparison policy. Do not extend rendering provenance to
+comments or text boxes, and keep external Word representation differences
+explicitly normalized and mutation-sensitive.
