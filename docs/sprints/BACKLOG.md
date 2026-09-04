@@ -33,13 +33,13 @@ regenerated, never hand-edited.
 | M15, Charts beyond PowerPoint                  | 4  | 4 | 0 | 0  |
 | M16, Document automation                       | 10 | 10 | 0 | 0  |
 | M17, Security and compliance                   | 7  | 7 | 0 | 0  |
-| M18, Format breadth                            | 8  | 5 | 3 | 0  |
+| M18, Format breadth                            | 8  | 8 | 0 | 0  |
 | M19, Advanced spreadsheets                     | 21 | 0 | 0 | 21 |
 | M20, Fidelity at scale                         | 7  | 7 | 0 | 0  |
 | M21, Presentation depth                        | 15 | 15 | 0 | 0  |
-| M22, Word depth                                | 12 | 5 | 0 | 7  |
-| X, Cross-cutting (opportunistic)            | 79 | 71 | 3 | 2  |
-| **Total** | **326** | **287** | **6** | **30** |
+| M22, Word depth                                | 12 | 8 | 0 | 4  |
+| X, Cross-cutting (opportunistic)            | 79 | 76 | 0 | 0  |
+| **Total** | **326** | **298** | **0** | **25** |
 <!-- AUTOGEN:backlog-summary END -->
 
 ## All F-IDs
@@ -436,9 +436,9 @@ regenerated, never hand-edited.
 | F-230 | MathML and LaTeX conversion                  | S65 | M | done |
 | F-231 | Extended field evaluation                    | S66 | L | done |
 | F-232 | Dynamic table of contents rebuild            | S66 | L | done |
-| F-233 | Advanced mail merge                          | S67 | L | pending |
-| F-234 | Full-story document comparison               | S67 | L | pending |
-| F-235 | Comparison granularity and ignore policy     | S67 | M | pending |
+| F-233 | Advanced mail merge                          | S67 | L | done |
+| F-234 | Full-story document comparison               | S67 | L | done |
+| F-235 | Comparison granularity and ignore policy     | S67 | M | done |
 | F-236 | Embedded object and macro inventory          | S68 | L | pending |
 | F-237 | Forms, glossary, and building blocks         | S68 | L | pending |
 | F-238 | Flat OPC and modern Word package variants    | S69 | M | pending |

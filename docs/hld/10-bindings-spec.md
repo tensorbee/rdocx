@@ -528,6 +528,20 @@ Both methods are additive on the pre-1.0 native Rust facade. Python, WASM, and
 CLI surfaces gain no merge methods and continue to preserve documents already
 merged by native code.
 
+Native Word callers opt into advanced merge with `MailMergeData`,
+`MailMergeRecord`, and `MailMergeValue`, plus owned image and formatter result
+types. `Document::mail_merge_rich` returns one reopened document per top-level
+record. `Document::mail_merge_sections_rich` combines those validated bodies
+through the same section assembly contract as flat merge. Whole-block merge
+fields define nested paragraph and row regions. Text values use the established
+field switches, images use exact `Length` dimensions, and DOCX fragments import
+their internal relationship closure only from a field-only top-level
+paragraph. The optional `FnMut` formatter receives lexical source and ordered
+field context and may replace text and run properties. Invalid markers, value
+kinds, dimensions, XML text, fragments, relationships, or callback results fail
+atomically. These types and methods are additive native Rust APIs. The flat
+methods and Python, WASM, and CLI surfaces remain unchanged.
+
 Native Word callers render templates with
 `Document::render_template(&serde_json::Value)`. Scalar tags use
 `{{ path.to.value }}` syntax and may cross ordinary Word run boundaries.
@@ -652,8 +666,10 @@ exact-author pair, the inclusive RFC 3339 date-range pair, and the id pair.
 Each method returns the number of modeled revision elements resolved. Shared
 ids select every matching placement, author matching is case-sensitive, and
 missing dates do not match a date range. Invalid bounds and malformed selected
-changes return an error before mutation. These eight methods are additive on
-`rdocx::Document` only. Python, WASM, and CLI surfaces remain unchanged and
+changes return an error before mutation. Resolution covers the main document,
+headers, footers, comments, normal footnotes, endnotes, and nested text boxes.
+`Document::revisions` remains main-story-only. These eight methods are additive
+on `rdocx::Document` only. Python, WASM, and CLI surfaces remain unchanged and
 continue to preserve the resulting document when they save it.
 
 Native callers generate tracked changes with `Document::compare`, supplying an
@@ -662,9 +678,19 @@ edited document, author, and RFC 3339 timestamp. The additive
 messages without turning those differences into revisions. Comparison rejects
 existing modeled revisions and unsupported structural shell differences, and
 it commits only after accepting and rejecting staged copies reproduce their
-respective modeled baselines. This API is native Rust only. Python, WASM, and
-CLI surfaces gain no comparison method and preserve comparison output when
-they save their owned document.
+respective package-wide modeled baselines. `Document::compare` keeps its
+source-compatible whole-run default and delegates to the additive
+`compare_with_options` method. The concrete `ComparisonOptions` value selects
+`Run`, `Word`, or `Character` granularity and left-biased ignores for
+formatting, textual whitespace, fields, comments, and any public
+`ComparisonStoryKind`. The non-exhaustive story enum names the main, header,
+footer, comment, text-box, footnote, and endnote categories. The comparison
+surface covers relationship-resolved stories, fields, and nested text boxes.
+It emits same-story moves and supported run, paragraph, table, and section
+property revisions. Diagnostic locations retain the actual story identity and
+stable owner path. This API is native Rust only. Python, WASM, and CLI surfaces
+gain no comparison method and preserve comparison output when they save their
+owned document.
 
 Native Word rendering exposes `rdocx::RevisionView` and the concrete
 `rdocx::RenderOptions`, whose default selects the accepted view. Additive

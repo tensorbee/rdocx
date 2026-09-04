@@ -657,22 +657,32 @@ matching overrides and namespace declarations. A failed validation or
 allocation leaves anchors, typed parts, relationships, and overrides unchanged.
 
 Tracked-revision resolution is also staged above the package boundary. The
-facade serializes a candidate main-document tree, resolves selected revision
-placements, and reparses the complete candidate before replacing live typed
-state. Namespace declarations carried only by a removed revision or property
-owner are promoted to retained raw descendants. Any selector, revision-shape,
-namespace, parse, or serialization failure leaves the package part bytes and
-live document unchanged. The ordinary deterministic save path writes the
-validated result later and preserves every unrelated part and relationship.
+facade resolves selected revision placements in the main document, headers,
+footers, comments, normal footnotes, endnotes, and nested text boxes. It patches
+each affected source part once and reparses the complete candidate package
+before replacing live typed state. Namespace declarations carried only by a
+removed revision or property owner are promoted to retained raw descendants.
+Any selector, revision-shape, namespace, parse, or serialization failure leaves
+all package part bytes and live document state unchanged. The ordinary
+deterministic save path writes the validated result later and preserves every
+unrelated part and relationship.
 
 Document comparison uses the same package boundary. It clones the complete
-typed document and package state, aligns only modeled main-body content, and
-serializes generated revisions with the canonical `w`, `xml`, and `mc`
-prefixes in schema order. Reparse remains prefix tolerant. Revision metadata
-is XML escaped, while unmodeled body, paragraph, table, cell, and
-content-control XML keeps its stored byte order. The staged candidate is
-accepted and rejected independently to prove both structural postconditions.
-Any metadata, alignment, unsupported-shell, parse, serialization, or
+typed document and package state, resolves identical story shells and
+relationships, and aligns modeled owners in each nonignored story. Policy
+projection removes only the selected comparison facts. Ignored formatting,
+textual whitespace, fields, comments, and story categories retain the original
+bytes. Character and word alignment carries source ownership and raw-child
+boundaries, keeps non-text content atomic, and emits each preserved child once.
+Generated revisions use canonical `w`, `xml`, and `mc` prefixes in schema
+order, while reparse remains prefix tolerant. Source-span patching interleaves
+changed owner bytes with the exact original gaps, preserving unowned
+whitespace, comments, processing instructions, foreign elements, prefix
+bindings, raw property children, and relationship targets. Nested text-box
+projection uses one collision-safe marker selection across both staged inputs
+and restores only matched owned subtrees. The staged package is accepted and
+rejected independently to prove both package-wide policy postconditions. Any
+metadata, policy, alignment, unsupported-shell, parse, serialization, or
 postcondition failure leaves the original package, typed state, and caches
 unchanged.
 
@@ -730,6 +740,20 @@ patches only the field-source spans in the relationship-resolved part, so
 unmodelled siblings remain byte-preserved. Any rejected record, XML parse, or
 identity-allocation failure leaves the source and all prospective outputs
 uncommitted.
+
+Rich mail merge extends this staging boundary for typed values and repeated
+body regions. An image is embedded only after its exact positive EMU dimensions
+validate. A whole-paragraph DOCX fragment contributes body content without its
+final section properties. Before candidate mutation, the importer validates
+every main-body relationship reference, rejects dangling or external targets,
+and discovers the complete internal descendant closure. It allocates every
+destination part name first, copies bytes and content types, preserves
+part-local relationship ids, and rewrites main-body relationship ids to the
+new document scope. Reachable styles and numbering receive deterministic
+collision maps, and each repeated region or fragment occurrence receives fresh
+document identities before insertion. Any value-kind, marker, relationship,
+identity, callback, allocation, serialization, or reopen failure discards the
+entire prospective result.
 
 Dynamic table-of-contents rebuild uses the same staged package rule. It scans
 the relationship-resolved main document by expanded WordprocessingML names,

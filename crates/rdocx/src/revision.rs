@@ -99,12 +99,12 @@ struct RenderState<'a> {
 }
 
 impl Document {
-    /// Accept every modeled revision in the main document.
+    /// Accept every modeled revision in the main document and related stories.
     pub fn accept_all(&mut self) -> Result<usize> {
         self.resolve_revisions(Resolution::Accept, RevisionScope::All)
     }
 
-    /// Reject every modeled revision in the main document.
+    /// Reject every modeled revision in the main document and related stories.
     pub fn reject_all(&mut self) -> Result<usize> {
         self.resolve_revisions(Resolution::Reject, RevisionScope::All)
     }
@@ -146,15 +146,17 @@ impl Document {
         resolution: Resolution,
         scope: RevisionScope<'_>,
     ) -> Result<usize> {
-        let source = self.document.to_xml()?;
+        let mut candidate = self.clone_for_staging();
+        candidate.flush_to_package()?;
+        let source = candidate.document.to_xml()?;
         let mut tree = XmlTree::parse(&source)?;
-        if let Some(packaged_xml) = self.package.get_part(&self.doc_part_name) {
+        if let Some(packaged_xml) = candidate.package.get_part(&candidate.doc_part_name) {
             let packaged_tree = XmlTree::parse(packaged_xml)?;
             tree.recover_property_owner_namespaces(&packaged_tree);
         }
         let mut state = RenderState {
             resolution,
-            scope,
+            scope: scope.clone(),
             resolved: HashSet::new(),
         };
         let mut output = Vec::with_capacity(source.len());
@@ -162,15 +164,63 @@ impl Document {
         output.extend_from_slice(&tree.render(tree.root, &mut state, false)?);
         output.extend_from_slice(&source[tree.elements[tree.root].end..]);
 
-        if state.resolved.is_empty() {
+        let mut resolved = state.resolved.len();
+        if resolved > 0 {
+            let staged = CT_Document::from_xml(&output)?;
+            staged.to_xml()?;
+            candidate.document = staged;
+            candidate.package.set_part(&candidate.doc_part_name, output);
+        }
+
+        let story_parts = crate::comparison::related_story_part_names(&candidate)?;
+        for part_name in story_parts {
+            let part = candidate
+                .package
+                .get_part(&part_name)
+                .ok_or_else(|| Error::Other(format!("missing revision story part {part_name}")))?
+                .to_vec();
+            let (updated, count) = resolve_story_xml(&part, resolution, scope.clone())?;
+            if count > 0 {
+                candidate.package.set_part(&part_name, updated);
+                resolved = resolved
+                    .checked_add(count)
+                    .ok_or_else(|| Error::Other("resolved revision count overflowed".to_owned()))?;
+            }
+        }
+        if resolved == 0 {
             return Ok(0);
         }
-        let staged = CT_Document::from_xml(&output)?;
-        staged.to_xml()?;
-        self.document = staged;
-        self.invalidate_layout();
-        Ok(state.resolved.len())
+        candidate = crate::comparison::reopen_staged(candidate)?;
+        self.commit_staged_mutation(candidate);
+        Ok(resolved)
     }
+}
+
+fn resolve_story_xml(
+    source: &[u8],
+    resolution: Resolution,
+    scope: RevisionScope<'_>,
+) -> Result<(Vec<u8>, usize)> {
+    let tree = XmlTree::parse(source)?;
+    let mut state = RenderState {
+        resolution,
+        scope,
+        resolved: HashSet::new(),
+    };
+    let mut output = Vec::with_capacity(source.len());
+    output.extend_from_slice(&source[..tree.elements[tree.root].start]);
+    output.extend_from_slice(&tree.render(tree.root, &mut state, false)?);
+    output.extend_from_slice(&source[tree.elements[tree.root].end..]);
+    Ok((output, state.resolved.len()))
+}
+
+pub(crate) fn modeled_revision_count(source: &[u8]) -> Result<usize> {
+    let tree = XmlTree::parse(source)?;
+    Ok(tree
+        .elements
+        .iter()
+        .filter(|element| element.revision.is_some())
+        .count())
 }
 
 fn date_scope(start: &str, end: &str) -> Result<RevisionScope<'static>> {
@@ -596,7 +646,7 @@ impl<'a> XmlTree<'a> {
             self.render_retained_owner_children(owner, &selected, state, promoted_namespaces)?;
         let prior_element = &self.elements[prior];
         if prior_element.word
-            && prior_element.local == "pPr"
+            && matches!(prior_element.local.as_str(), "pPr" | "tblPr")
             && retained.is_empty()
             && !self.element_has_attributes(prior)?
             && (prior_element.empty
@@ -693,7 +743,10 @@ impl<'a> XmlTree<'a> {
                 .is_some_and(|metadata| {
                     matches!(
                         metadata.kind,
-                        RevisionKind::Insertion | RevisionKind::Deletion
+                        RevisionKind::Insertion
+                            | RevisionKind::Deletion
+                            | RevisionKind::MoveFrom
+                            | RevisionKind::MoveTo
                     ) && state.scope.matches(metadata)
                 })
                 || self.subtree_contains_selected_contextual_marker(*child, state)
@@ -788,7 +841,10 @@ impl<'a> XmlTree<'a> {
                 let metadata = self.elements[*child].revision.as_ref()?;
                 (matches!(
                     metadata.kind,
-                    RevisionKind::Insertion | RevisionKind::Deletion
+                    RevisionKind::Insertion
+                        | RevisionKind::Deletion
+                        | RevisionKind::MoveFrom
+                        | RevisionKind::MoveTo
                 ) && state.scope.matches(metadata))
                 .then_some(*child)
             })
@@ -849,7 +905,10 @@ impl<'a> XmlTree<'a> {
                 let metadata = self.elements[*child].revision.as_ref()?;
                 (matches!(
                     metadata.kind,
-                    RevisionKind::Insertion | RevisionKind::Deletion
+                    RevisionKind::Insertion
+                        | RevisionKind::Deletion
+                        | RevisionKind::MoveFrom
+                        | RevisionKind::MoveTo
                 ) && state.scope.matches(metadata))
                 .then_some(*child)
             })
@@ -908,9 +967,14 @@ fn push_element(
         .to_owned();
     let word = element_namespace(&name, scope) == Some(WORD_NS);
     let parent = stack.last().copied();
-    let mut modeled = parent.map_or(word && local == "document", |parent| {
-        modeled_child(&elements[parent], word, &local)
-    });
+    let mut modeled = (word && local == "txbxContent")
+        || parent.map_or(
+            word && matches!(
+                local.as_str(),
+                "document" | "hdr" | "ftr" | "comments" | "footnotes" | "endnotes"
+            ),
+            |parent| modeled_child(&elements[parent], word, &local),
+        );
     let revision = modeled
         .then(|| revision_metadata(start, &local, scope))
         .transpose()?
@@ -970,6 +1034,12 @@ fn modeled_child(parent: &XmlElement, word: bool, local: &str) -> bool {
     match parent.local.as_str() {
         "document" => local == "body",
         "body" => matches!(local, "p" | "tbl" | "sdt" | "sectPr"),
+        "hdr" | "ftr" | "comment" | "footnote" | "endnote" | "txbxContent" => {
+            matches!(local, "p" | "tbl" | "sdt")
+        }
+        "comments" => local == "comment",
+        "footnotes" => local == "footnote",
+        "endnotes" => local == "endnote",
         "p" => matches!(
             local,
             "pPr" | "r" | "hyperlink" | "sdt" | "ins" | "del" | "moveFrom" | "moveTo"
@@ -977,11 +1047,11 @@ fn modeled_child(parent: &XmlElement, word: bool, local: &str) -> bool {
         "hyperlink" => matches!(local, "r" | "ins" | "del" | "moveFrom" | "moveTo"),
         "pPr" => matches!(local, "rPr" | "numPr" | "sectPr" | "pPrChange"),
         "r" => local == "rPr",
-        "rPr" => matches!(local, "ins" | "del" | "rPrChange"),
+        "rPr" => matches!(local, "ins" | "del" | "moveFrom" | "moveTo" | "rPrChange"),
         "tbl" => matches!(local, "tblPr" | "tblGrid" | "tr" | "sdt"),
         "tblPr" => local == "tblPrChange",
         "tr" => matches!(local, "trPr" | "tc" | "sdt"),
-        "trPr" => matches!(local, "ins" | "del"),
+        "trPr" => matches!(local, "ins" | "del" | "moveFrom" | "moveTo"),
         "tc" => matches!(local, "tcPr" | "p" | "tbl" | "sdt"),
         "sdt" => matches!(local, "sdtPr" | "sdtContent"),
         "sdtContent" => matches!(

@@ -590,6 +590,21 @@ including values held in preserved raw XML. The operation does not evaluate
 structured template tags, and ordinary field traversal keeps its existing
 typed story scope.
 
+The same facade owns additive native rich mail merge over `MailMergeData` and
+owned text, image, and DOCX fragment values. Whole-paragraph and whole-row
+`TableStart:<name>` and `TableEnd:<name>` merge fields form bounded nested
+regions. Scalar lookup walks lexical records from inner to outer scope, while
+each region resolves first from the current record and then from the named
+top-level source. Text replacement retains the existing merge-field switch
+grammar, then an optional formatter receives the local source record number,
+region path, field name, and global emitted-field sequence number. Images and
+fragment relationship closures are imported into a staged candidate with
+collision-free package, style, numbering, bookmark, content-control, and
+drawing identities. Consumed markers and field shells are removed. Every
+candidate is serialized and reopened before publication, and rich section mode
+reuses the flat section assembler. The flat methods and non-body story scope
+remain unchanged.
+
 The `rdocx` facade owns structured template evaluation over
 `serde_json::Value`. The focused `template` module recognizes scalar tags
 across ordinary run boundaries and pairs nested `for` and `if` controls with a
@@ -638,25 +653,42 @@ for the next published stable family. The higher-level `rdocx::Document`
 revision API remains additive.
 
 The `rdocx` facade owns revision resolution because one operation can replace
-content wrappers, property owners, paragraph boundaries, and table rows.
+content wrappers, property owners, paragraph boundaries, and table rows across
+the main document, deduplicated headers and footers, comments, normal
+footnotes, endnotes, and text boxes nested in those stories.
 Accepting keeps insertions and move destinations, while rejecting keeps
 deletions and move sources and converts deleted text to ordinary text.
 Property rejection restores exactly one namespace-correct prior property
 value. Contextual markers act on their owning run, paragraph mark, numbering
-property, or row. Resolution stages the complete main-document XML, resolves
-selected descendants before their enclosing subtree, reparses the result, and
-commits once only after validation succeeds.
+property, or row. Resolution stages every affected package part, resolves
+selected descendants before their enclosing subtree, reparses the complete
+candidate package, and commits once only after validation succeeds.
 
-The `rdocx` facade also owns deterministic comparison of the modeled main
-body. A concrete hierarchical longest-common-subsequence alignment covers body
-content, paragraph runs, table rows, nested tables, lists, and modeled content
-inside existing content-control shells. It emits canonical fixed-prefix run,
-paragraph-mark, row, and numbering revisions at their schema-defined owners.
-Formatting-only differences retain the original formatting and produce stable
-`ComparisonDiagnostic` values instead. Inputs with existing modeled revisions
-or differing control shells are rejected. Comparison stages the candidate,
-proves that accepting it matches the edited modeled structure and rejecting it
-matches the original, then commits once.
+The `rdocx` facade also owns deterministic comparison of those same stories. A
+source index assigns stable public story categories and private owner paths to
+modeled paragraphs, tables, fields, and nested text boxes. A concrete
+hierarchical longest-common-subsequence alignment covers paragraphs, runs,
+table rows, nested tables, lists, and modeled content inside existing
+content-control shells. The default path retains whole-run behavior. An
+additive options value selects Unicode-scalar character units or maximal
+Unicode word, whitespace, and punctuation-or-symbol units, and applies
+left-biased ignores for formatting, textual whitespace, fields, comments, and
+selected story categories. Selected categories leave the original story bytes
+untouched and are excluded before shell checks and revision-id allocation.
+Non-text content remains atomic. Unmatched identical owners become move pairs
+only within one story.
+Changed field results remain inside their field owner, while instruction or
+form changes replace that complete owner. Supported run, paragraph, table, and
+section properties emit property revisions that retain the original property
+sidecars. Unsupported formatting differences retain the original bytes and
+produce stable `ComparisonDiagnostic` values at the actual story path. Inputs
+with existing modeled revisions or differing story and control shells are
+rejected unless their story category is ignored. Attributed text alignment
+retains owner, formatting, content position, and raw-child boundaries, then
+coalesces adjacent equal-owner edits into minimal revision wrappers.
+Comparison patches only owned source spans, preserves every unowned byte,
+stages the complete package, proves that acceptance matches the edited policy
+projection and rejection matches the original, then commits once.
 
 `rdocx-layout` owns the renderer-only revision projection. The
 `LayoutInput::revision_view` selector chooses an accepted or tracked view. The

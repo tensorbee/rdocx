@@ -539,17 +539,54 @@ references, entity-escaped bookmark names, collision-safe identity allocation,
 and foreign same-local-name attributes. The methods are opt-in and no sample
 invokes them, so the 49-entry hash harness must remain unchanged.
 
-The document-comparison regression gate compares paragraphs, tables, cells,
-nested tables, lists, and modeled content inside existing content-control
-shells. Accepting the generated revisions must reproduce the edited normalized
-modeled body exactly, while rejection must reproduce the original and leave no
-residual tracked containers. Focused coverage locks down deterministic repeated
-content alignment, escaped metadata and collision-free ids, schema placement
-for run, paragraph, row, and numbering markers, formatting-only diagnostics,
-atomic failure, and empty property-owner cleanup. The paired round-trip test
-proves that unmodeled XML and namespace declarations retain their exact bytes
-through comparison, save, and reopen. No sample invokes comparison, so the
+The rich mail-merge gate builds nested and named source records in code and
+compares exact paragraph, list, table, image, fragment, and formatted-run order
+with no remaining merge fields or region markers. Its unit matrix covers
+lexical shadowing, named-source fallback, sibling isolation, empty regions,
+crossed and missing markers, and local versus global callback counters. Focused
+regressions repeat images and DOCX fragments across conflicting relationships,
+styles, numbering, hyperlinks, bookmarks, content controls, and drawing ids.
+They also cover formatter isolation and errors, exact EMU dimensions,
+fixed-prefix schema order, byte-identical unrelated raw XML, external and
+dangling fragment relationships, wrong value kinds, invalid XML characters,
+and atomic failure. A compatibility regression compares both flat APIs against
+their F-166 bytes. The rich API is opt-in and no sample invokes it, so the
 49-entry hash harness remains unchanged.
+
+The document-comparison regression gate compares the main document,
+relationship-resolved headers and footers, comments, normal footnotes,
+endnotes, fields, and nested text boxes. It covers paragraphs, tables, cells,
+nested tables, lists, and modeled content inside existing content-control
+shells. Accepting the generated revisions must reproduce every edited modeled
+story, while rejection must reproduce the originals and leave no residual
+tracked containers. The policy matrix fixes exact normalized revision kind,
+content, order, story, and owner records for run, Unicode-scalar character, and
+three-class Unicode word granularity. It independently covers formatting,
+textual-whitespace, field, comment, and every story-category ignore, with a
+rejecting mutation for each record dimension. Focused coverage locks down
+deterministic repeated content alignment, same-story move pairing,
+cached-result and complete-field changes, escaped metadata and collision-free
+ids, minimal adjacent wrappers, direct inline-content-control alignment,
+hyperlink shells, text-box source ownership, significant non-text boundaries,
+supported run, paragraph, table, and section property revisions, stable story
+diagnostics, atomic failure, and absent property-owner cleanup. The source-span
+round-trip gate proves all unowned whitespace, comments, processing
+instructions, foreign elements, prefix bindings, raw property children, and
+relationships remain byte-exact and appear once in tracked, accepted,
+rejected, saved, and reopened views. The legacy/default compatibility test
+keeps `Document::compare` byte-identical to default options. No sample invokes
+comparison, so the 49-entry hash harness remains unchanged.
+
+The source-built external differential pins Microsoft Word 16.104 build
+16.104.25121423 and locale `en-US`. Its 24 normalized records cover every
+supported story, move, field owner, and property revision, and calibrated
+mutations reject kind, order, story, pair, owner, and formatting changes. Two
+producer representations are intentionally normalized. Word represents a
+comment replacement with duplicated comments and anchors rather than nested
+revision wrappers, while both forms carry the same deletion and insertion
+semantics. Word pairs moves with one shared range name and distinct wrapper
+ids, while rdocx uses one shared wrapper id. No sample invokes comparison, so
+the 49-entry hash harness remains unchanged.
 
 The redaction regression gate constructs one package in code with body,
 table, content-control, header, footer, footnote, endnote, comment, inserted,

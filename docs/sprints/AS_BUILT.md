@@ -11438,3 +11438,163 @@ integrated full-workspace verification passed.
 when extending TOC sources. Any new wrapper or story location needs one shared
 coordinate contract across parsing, bookmark facade access, layout, save and
 reopen, and in-memory mutation before reopen.
+
+### F-234, Full-story document comparison
+
+**Sprint.** S67
+**Completed.** 2026-09-04
+**Size.** L, estimated 4 days, actual 1 day
+
+**What was built.** Native document comparison and revision resolution now
+cover the main document, relationship-resolved headers and footers, comments,
+normal footnotes and endnotes, fields, and nested text boxes through one stable
+story index. Comparison emits deterministic same-story moves and supported run,
+paragraph, table, and section property revisions, then proves package-wide
+accept and reject postconditions before one atomic facade commit.
+
+**Non-obvious choices.** Existing story shells and stable identifiers are the
+tracked-change boundary. Cross-story moves and shell creation or removal reject
+atomically. Owned source spans are patched while every unowned byte remains in
+source order. The Word differential normalizes two producer representations:
+Word duplicates comments and anchors for comment replacement, and pairs moves
+through a shared range name with distinct wrapper ids. The native model keeps
+resolvable comment-story wrappers and one shared move id while preserving the
+same deletion, insertion, and move-pair semantics.
+
+**Deviations from the design plan.** None. Review strengthened the approved
+preservation boundary with exact raw property-owner, related-story diagnostic,
+and inter-owner source-byte coverage. The integration reconciliation retained
+the adjacent F-233 rich mail-merge test contract before the comparison contract
+in the shared testing HLD.
+
+**Spec sections touched.** `docs/hld/03-architecture.md`,
+`docs/hld/04-opc-and-packaging.md`, `docs/hld/10-bindings-spec.md`, and
+`docs/hld/12-testing-strategy.md`.
+
+**Tests.** The differential gate
+`full_story_comparison_matches_pinned_word_records` matches 24 normalized
+records from source-built cases against Microsoft Word 16.104 build
+16.104.25121423. Focused regressions cover mutation sensitivity, every supported
+story, package-wide resolution, deterministic moves, fields, modeled property
+owners, exact source paths, unowned XML and relationship preservation, stable
+diagnostic locations, and atomic failure. Nine microscope passes ended clean,
+and the dependency-prefix full-workspace verification passed.
+
+**Hash harness.** Unchanged, 49 of 49.
+
+**Notes for future sessions.** Reuse the single story index and owned-span
+patching boundary for comparison policy. Do not extend rendering provenance to
+comments or text boxes, and keep external Word representation differences
+explicitly normalized and mutation-sensitive.
+
+### F-233, Advanced mail merge
+
+**Sprint.** S67
+**Completed.** 2026-09-04
+**Size.** L, estimated 4 days, actual 1 day
+
+**What was built.** The native Word facade now accepts owned rich mail-merge
+records with nested lexical regions and named sources. The two additive rich
+methods expand paragraphs and table rows, replace scalar fields with text,
+exact-size images, or complete DOCX fragments, invoke an optional formatting
+callback in stable field order, remove consumed marker and field shells, and
+publish only fully reopened atomic candidates. The established flat merge
+methods retain their original source and behavior contracts.
+
+**Non-obvious choices.** Lexical region records shadow named sources, and
+whole-block start and end fields are paired through one bounded stack. A
+fragment must be a complete DOCX package and may replace only a whole-block
+field paragraph. Each occurrence imports its reachable internal relationship
+closure and remaps styles, numbering, bookmarks, hyperlink anchors, content
+controls, drawings, parts, and relationships independently. The callback uses
+the approved `FnMut` boundary instead of a formatter trait.
+
+**Deviations from the design plan.** None. The correctness reviews enforced
+the approved per-occurrence identity remapping, distinct nested record and
+output counters, shared section assembly, and complete collision regression
+before the third pass ended with zero defects and zero smells.
+
+**Spec sections touched.** `docs/hld/03-architecture.md`,
+`docs/hld/04-opc-and-packaging.md`, `docs/hld/10-bindings-spec.md`, and
+`docs/hld/12-testing-strategy.md`.
+
+**Tests.** The regression gate
+`nested_source_built_records_generate_ordered_rich_content_without_stale_fields`
+proves exact ordered paragraphs, lists, tables, formatted runs, fragments, and
+11 by 19 EMU images without stale fields. The additional named tests are
+`nested_merge_regions_resolve_lexically_before_named_sources`,
+`rich_merge_imports_images_and_fragments_without_relationship_or_identity_collisions`,
+`formatting_hooks_change_only_the_selected_merge_field_runs`,
+`rich_merge_preserves_schema_order_and_unmodelled_xml_after_reopen`,
+`invalid_rich_merge_input_leaves_the_template_and_outputs_uncommitted`, and
+`flat_mail_merge_output_remains_unchanged_after_rich_merge_is_added`. Final
+integrated `/verify --full` passed at
+`a719f742c2d720bae58981481819ab558c9a53f2`, including the parser, serializer,
+rustdoc, packaging, archive-size, supply-chain, LibreOffice, and canonical
+50-deck riders.
+
+**Hash harness.** Unchanged, 49 of 49.
+
+**Notes for future sessions.** Keep fragment imports package-complete and
+per-occurrence. New rich value forms must preserve the flat API, the lexical
+scope rule, bounded preflight, exact identity remapping, and candidate reopen
+before publication.
+
+### F-235, Comparison granularity and ignore policy
+
+**Sprint.** S67
+**Completed.** 2026-09-04
+**Size.** M, estimated 2 days, actual 1 day
+
+**What was built.** The native comparison facade now exposes public story and
+granularity enums, a concrete options value, and `compare_with_options` while
+the existing `compare` method delegates to unchanged Run-granularity defaults.
+Word and Character comparison, formatting, whitespace, field, comment, and
+story-category ignores all refine F-234's single source-mapped story traversal,
+staged package, revision allocator, and accept and reject proof boundary.
+
+**Non-obvious choices.** Character mode uses Unicode scalar values. Word mode
+uses maximal alphanumeric-or-underscore, whitespace, and punctuation-or-symbol
+classes. Ignore policies are left-biased and retain original bytes. Attributed
+units keep story, owner, run properties, text position, and raw-child boundary
+facts so the writer can coalesce minimal revisions without duplicating raw XML.
+Ignored text boxes use a shared collision-safe marker selected from both
+sources, while inline controls and hyperlinks align by logical attributed
+positions rather than physical run segmentation.
+
+**Deviations from the design plan.** None. Seven microscope passes strengthened
+the approved boundary for direct inline controls, unchanged raw-child
+positions, hyperlink shells, text-box marker collisions, owner placement,
+ignore precedence, exact policy records, and staged atomic failure before the
+final pass reported zero defects, zero smells, and zero nitpicks.
+
+**Spec sections touched.** `docs/hld/03-architecture.md`,
+`docs/hld/04-opc-and-packaging.md`, `docs/hld/10-bindings-spec.md`, and
+`docs/hld/12-testing-strategy.md`.
+
+**Tests.** The regression gate
+`comparison_policy_matrix_changes_only_declared_records_and_is_deterministic`
+fixes exact kind, content, order, story, and owner records for every
+granularity, ignore flag, and selected story category. The additional named
+tests are `comparison_defaults_preserve_run_granularity`,
+`word_and_character_granularity_split_only_text_content`,
+`comparison_granularity_preserves_accept_and_reject_postconditions`,
+`ignored_formatting_suppresses_only_formatting_diagnostics`,
+`ignored_whitespace_preserves_source_whitespace_without_hiding_structural_controls`,
+`ignored_fields_preserve_field_sources_and_compare_neighbouring_text`,
+`ignored_comments_preserve_comment_parts_and_anchors`,
+`ignored_story_kinds_skip_only_selected_story_categories`,
+`invalid_comparison_policy_leaves_package_and_caches_unchanged`, and
+`granular_comparison_preserves_unmodelled_xml_byte_for_byte`. Final integrated
+`/verify --full` passed at
+`a719f742c2d720bae58981481819ab558c9a53f2`, including all named gates, the
+complete `rdocx-oxml` parser and serializer suite, rustdoc, packaging,
+archive-size, supply-chain, LibreOffice, canonical 50-deck, and prompt-free
+Microsoft Word 16.104 seven-case riders.
+
+**Hash harness.** Unchanged, 49 of 49.
+
+**Notes for future sessions.** Keep every comparison policy on the one F-234
+story index and attributed source path. New ignores must remain left-biased,
+precede the checks they suppress, preserve significant raw and structural
+content exactly once, and prove package-wide accepted and rejected views.
