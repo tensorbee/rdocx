@@ -11397,3 +11397,44 @@ and the integrated full-workspace verification passed.
 structured until their owning workflow consumes them. Extend switch ownership
 in the shared field grammar and add a mutation-sensitive Word differential case
 for every new field rule.
+
+### F-232, Dynamic table of contents rebuild
+
+**Sprint.** S66
+**Completed.** 2026-09-04
+**Size.** L, estimated 4 days, actual 1 day
+
+**What was built.** The native `Document::rebuild_toc()` operation now rebuilds
+existing complex TOCs from headings, custom styles, outline levels, and TC
+fields. It allocates or reuses bookmarks, writes linked entries and PAGEREF
+fields, resolves final deterministic page numbers, and commits the staged
+package atomically with a structured report.
+
+**Non-obvious choices.** TOC source discovery, public bookmark correlation, and
+layout share owner-aware main-story traversal and explicit accepted and tracked
+coordinates. Byte-level replacement validates the same typed ownership grammar
+before editing, preserves unsupported XML verbatim, and rejects unresolved page
+targets instead of committing cached placeholders.
+
+**Deviations from the design plan.** None. Review expanded the approved parser,
+serializer, layout, and preservation riders into exact owner, namespace,
+bookmark-boundary, mutation, and atomicity coverage.
+
+**Spec sections touched.** `docs/hld/03-architecture.md`,
+`docs/hld/04-opc-and-packaging.md`, `docs/hld/08-rendering-spec.md`,
+`docs/hld/10-bindings-spec.md`, and `docs/hld/12-testing-strategy.md`.
+
+**Tests.** The differential gate
+`dynamic_toc_rebuild_matches_the_pinned_word_update` matches source-built cases
+against Microsoft Word 16.104. Focused regression coverage proves exact entry,
+link, level, bookmark, and final-page output across paragraphs, tables, content
+controls, revisions, nested fields, malformed owners, mutations, repeated
+rebuilds, and atomic failure. Twenty microscope passes ended clean, and the
+integrated full-workspace verification passed.
+
+**Hash harness.** Unchanged, 49 of 49.
+
+**Notes for future sessions.** Keep raw and typed ownership decisions aligned
+when extending TOC sources. Any new wrapper or story location needs one shared
+coordinate contract across parsing, bookmark facade access, layout, save and
+reopen, and in-memory mutation before reopen.

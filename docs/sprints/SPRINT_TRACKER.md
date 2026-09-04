@@ -379,6 +379,7 @@ defended.
 | F-229 | S65 | M | 2 | 1 | 2026-09-03 | Measured and rendered OfficeMath through shared baseline-aware layout groups with deterministic Word and Poppler oracle geometry |
 | F-230 | S65 | M | 2 | 1 | 2026-09-03 | Added bounded native MathML and LaTeX conversion with stable diagnostics and a pinned Pandoc structural differential |
 | F-231 | S66 | L | 4 | 1 | 2026-09-03 | Added bounded formula, TOC, TC, mail-control, and barcode evaluation with structured native outcomes and pinned Word parity |
+| F-232 | S66 | L | 4 | 1 | 2026-09-04 | Added deterministic native TOC rebuilding with final page targets, owner-aware preservation, and pinned Word parity |
 
 ## Velocity
 
