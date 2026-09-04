@@ -1,59 +1,59 @@
-# Current Sprint, S66
+# Current Sprint, S67
 
 **Milestone**: M22 Word depth.
 
-**Goal**: update the field-driven structures that real reports depend on.
-Extended evaluation must preserve unavailable instructions and intentional
-cached results, while TOC rebuild uses headings, styles, entries, bookmarks,
-and final page numbers without replacing unrelated field formatting.
+**Goal**: deepen the two flagship document-automation workflows. Mail merge
+must expand nested and named data into rich document content, while comparison
+must cover the complete supported Word story set with explicit granularity and
+ignore policies.
 
 ## Spec references
 
-- `docs/hld/03-architecture.md`, for recursive field grammar, pure facade
-  evaluation, story traversal, bookmark ownership, cache updates, and the
-  separation between Word field semantics and format-neutral page targets.
-- `docs/hld/04-opc-and-packaging.md`, for namespace-aware parsing,
-  schema-ordered mutation, fail-closed owner identity, and verbatim retention
-  of unmodelled field and paragraph XML.
-- `docs/hld/08-rendering-spec.md`, for displayed page numbers, bookmark target
-  resolution, field substitution after pagination, and exact invalidation of
-  cached field-bearing pages.
-- `docs/hld/10-bindings-spec.md`, for the additive native Word facade boundary
-  and explicit decisions about Python, WASM, and CLI exposure.
-- `docs/hld/12-testing-strategy.md`, for the pinned Word 16.104 field matrix,
-  source-built fixtures, deterministic pagination evidence, and external
-  differential rules.
-- `docs/hld/14-development-backlog.md`, for the F-231 and F-232 contracts,
-  their dependency chain, acceptance gates, and the M22 completion boundary.
+- `docs/hld/03-architecture.md`, for staged mail merge, deterministic
+  hierarchical comparison, story traversal, revision ownership, and atomic
+  facade commits.
+- `docs/hld/04-opc-and-packaging.md`, for relationship-resolved story and
+  fragment handling, collision-free identity allocation, source mapping, and
+  verbatim preservation of unmodelled package content.
+- `docs/hld/10-bindings-spec.md`, for the native Word automation and comparison
+  surfaces and the explicit Python, WASM, and CLI exposure boundaries.
+- `docs/hld/12-testing-strategy.md`, for source-built rich merge records,
+  pinned Word comparison differentials, policy matrices, save and reopen, and
+  unchanged hash-harness expectations.
+- `docs/hld/14-development-backlog.md`, for the F-233 through F-235 contracts,
+  dependency order, acceptance gates, and the remaining M22 boundary.
 
 ## The wave
 
 | F-ID | Title | Size | Status | Owner |
 |------|-------|------|--------|-------|
-| F-231 | Extended field evaluation | L | done | - |
-| F-232 | Dynamic table of contents rebuild | L | done | - |
+| F-233 | Advanced mail merge | L | pending | - |
+| F-234 | Full-story document comparison | L | pending | - |
+| F-235 | Comparison granularity and ignore policy | M | pending | - |
 
 ## Sequencing note
 
 Rows are listed in dependency order, not F-ID order.
 
-F-231 must complete first because F-232 depends on its TOC and TC field
-semantics as well as the existing bookmark, update-policy, and pagination
-foundations. The reviewed F-231 result then becomes the single evaluation
-boundary used by TOC discovery, entry construction, and final page-number
-substitution in F-232.
+F-233 and F-234 depend on separate completed foundations and may proceed
+independently. F-235 follows F-234 because its character, word, and ignore
+policies refine the full-story comparison model and must reuse that single
+alignment and source-mapping boundary.
 
 ## Definition of done for this sprint
 
-- TOC, TC, formula, mail-merge control, and barcode fields evaluate to the
-  pinned Word results across supported story locations and formatting forms.
-- Unavailable or unsupported instructions retain their original instruction
-  text and cached display, with stable diagnostics instead of guessed values.
-- An existing TOC rebuilds from headings, custom styles, outline levels, TC
-  entries, bookmarks, and final displayed page numbers.
-- Heading, style, and TC mutations produce the same entries, links, levels,
-  and page numbers as the pinned Word update.
-- TOC rebuild preserves unrelated field formatting, surrounding unmodelled
-  XML, and package content through save and reopen.
+- Nested merge regions and records resolve from multiple named data sources in
+  deterministic order without leaving stale merge fields.
+- Merge images, document fragments, paragraphs, lists, tables, and formatting
+  hooks produce the expected rich output while preserving unrelated package
+  parts and unmodelled XML.
+- Comparison covers headers, footers, comments, fields, text boxes, footnotes,
+  endnotes, formatting, and the main story in one stable source order.
+- Accepting or rejecting generated comparison revisions reproduces the edited
+  or original supported story content with source mappings intact.
+- Character and word granularity plus each ignore policy change only the
+  declared comparison records and remain deterministic across repeated runs.
+- Invalid data, unsupported shells, relationship failures, and policy errors
+  reject atomically without changing the source documents or their caches.
 - Full verification passes with every deterministic hash explained, every
   package archive below 10 MiB, and the bounded sprint review clean.
