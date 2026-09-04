@@ -539,6 +539,20 @@ references, entity-escaped bookmark names, collision-safe identity allocation,
 and foreign same-local-name attributes. The methods are opt-in and no sample
 invokes them, so the 49-entry hash harness must remain unchanged.
 
+The rich mail-merge gate builds nested and named source records in code and
+compares exact paragraph, list, table, image, fragment, and formatted-run order
+with no remaining merge fields or region markers. Its unit matrix covers
+lexical shadowing, named-source fallback, sibling isolation, empty regions,
+crossed and missing markers, and local versus global callback counters. Focused
+regressions repeat images and DOCX fragments across conflicting relationships,
+styles, numbering, hyperlinks, bookmarks, content controls, and drawing ids.
+They also cover formatter isolation and errors, exact EMU dimensions,
+fixed-prefix schema order, byte-identical unrelated raw XML, external and
+dangling fragment relationships, wrong value kinds, invalid XML characters,
+and atomic failure. A compatibility regression compares both flat APIs against
+their F-166 bytes. The rich API is opt-in and no sample invokes it, so the
+49-entry hash harness remains unchanged.
+
 The document-comparison regression gate compares paragraphs, tables, cells,
 nested tables, lists, and modeled content inside existing content-control
 shells. Accepting the generated revisions must reproduce the edited normalized

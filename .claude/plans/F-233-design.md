@@ -1,6 +1,6 @@
 # F-233, Advanced mail merge
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S67
 **Size**: L
 **Depends on**: F-166
@@ -177,19 +177,19 @@ invokes rich mail merge. Any delta is unexplained and blocks integration.
 
 ## Implementation checklist
 
-- [ ] Add and export the owned rich merge data and formatting types.
-- [ ] Add the two additive rich merge methods.
-- [ ] Parse and validate bounded nested block regions.
-- [ ] Resolve lexical records and named sources deterministically.
-- [ ] Replace scalar values and invoke formatting callbacks in field order.
-- [ ] Insert images with exact dimensions and collision-free relationships.
-- [ ] Import fragment body content and its internal relationship closure.
-- [ ] Remap package and document identities.
-- [ ] Remove consumed region and field shells.
-- [ ] Stage, serialize, reopen, and publish atomically.
-- [ ] Add source-built tests to the existing unit and regression binaries.
-- [ ] Run focused checks and every risk rider.
-- [ ] Update exactly the four listed HLD files.
+- [x] Add and export the owned rich merge data and formatting types.
+- [x] Add the two additive rich merge methods.
+- [x] Parse and validate bounded nested block regions.
+- [x] Resolve lexical records and named sources deterministically.
+- [x] Replace scalar values and invoke formatting callbacks in field order.
+- [x] Insert images with exact dimensions and collision-free relationships.
+- [x] Import fragment body content and its internal relationship closure.
+- [x] Remap package and document identities.
+- [x] Remove consumed region and field shells.
+- [x] Stage, serialize, reopen, and publish atomically.
+- [x] Add source-built tests to the existing unit and regression binaries.
+- [x] Run focused checks and every risk rider.
+- [x] Update exactly the four listed HLD files.
 
 ## Open questions
 

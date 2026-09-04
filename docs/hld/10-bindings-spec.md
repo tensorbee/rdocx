@@ -528,6 +528,20 @@ Both methods are additive on the pre-1.0 native Rust facade. Python, WASM, and
 CLI surfaces gain no merge methods and continue to preserve documents already
 merged by native code.
 
+Native Word callers opt into advanced merge with `MailMergeData`,
+`MailMergeRecord`, and `MailMergeValue`, plus owned image and formatter result
+types. `Document::mail_merge_rich` returns one reopened document per top-level
+record. `Document::mail_merge_sections_rich` combines those validated bodies
+through the same section assembly contract as flat merge. Whole-block merge
+fields define nested paragraph and row regions. Text values use the established
+field switches, images use exact `Length` dimensions, and DOCX fragments import
+their internal relationship closure only from a field-only top-level
+paragraph. The optional `FnMut` formatter receives lexical source and ordered
+field context and may replace text and run properties. Invalid markers, value
+kinds, dimensions, XML text, fragments, relationships, or callback results fail
+atomically. These types and methods are additive native Rust APIs. The flat
+methods and Python, WASM, and CLI surfaces remain unchanged.
+
 Native Word callers render templates with
 `Document::render_template(&serde_json::Value)`. Scalar tags use
 `{{ path.to.value }}` syntax and may cross ordinary Word run boundaries.

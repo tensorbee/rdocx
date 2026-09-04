@@ -53,8 +53,9 @@ pub use epub::{EpubDiagnostic, EpubWriteResult};
 pub use error::{Error, Result};
 pub use field::{
     BarcodeCaseStyle, BarcodeField, BarcodeKind, BarcodePointOfSaleStyle, FieldDateTime,
-    FieldEvaluation, FieldEvaluationContext, FieldOutcome, MailMergeControl, TcField,
-    TocEntrySelection, TocField, TocRebuildReport,
+    FieldEvaluation, FieldEvaluationContext, FieldOutcome, MailMergeControl, MailMergeData,
+    MailMergeFormatContext, MailMergeFormattedText, MailMergeImage, MailMergeRecord,
+    MailMergeValue, TcField, TocEntrySelection, TocField, TocRebuildReport,
 };
 pub use html::{HtmlDiagnostic, HtmlReadResult};
 pub use math::{

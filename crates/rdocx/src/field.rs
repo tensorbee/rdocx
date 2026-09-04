@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
+use oxml_core::Length;
 use oxml_core::custom_properties::CustomPropertyValue;
 use oxml_opc::OpcPackage;
 use oxml_opc::relationship::rel_types;
@@ -12,15 +13,17 @@ use quick_xml::name::{Namespace, NamespaceResolver, ResolveResult};
 use quick_xml::reader::NsReader;
 use rdocx_oxml::content_control::{CT_Sdt, SdtContent};
 use rdocx_oxml::document::{BodyContent, CT_Body, CT_Document, CT_SectPr};
+use rdocx_oxml::drawing::{CT_Drawing, CT_Inline};
 use rdocx_oxml::footnotes::{CT_Footnotes, NoteType};
 use rdocx_oxml::header_footer::CT_HdrFtr;
 use rdocx_oxml::namespace::{R_NS, W_NS, matches_local_name};
-use rdocx_oxml::properties::CT_PPr;
+use rdocx_oxml::properties::{CT_PPr, CT_RPr};
 use rdocx_oxml::revision::{CT_Revision, RevisionContent, RevisionKind};
 use rdocx_oxml::shared::ST_SectionType;
 use rdocx_oxml::table::{CT_Row, CT_Tbl, CT_Tc, CellContent};
 use rdocx_oxml::text::{
-    CT_P, CT_R, Field, FieldArgument, FieldInstruction, RunContent, hyperlink_revision_index,
+    CT_P, CT_R, CT_Text, Field, FieldArgument, FieldInstruction, RunContent,
+    hyperlink_revision_index,
 };
 
 use crate::{Document, Error, Result, style};
@@ -48,6 +51,52 @@ pub struct FieldEvaluationContext {
     pub merge_record_number: Option<u32>,
     /// One-based output sequence number for mail-merge control fields.
     pub merge_sequence_number: Option<u32>,
+}
+
+/// An image value embedded by a rich mail merge.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MailMergeImage {
+    pub data: Vec<u8>,
+    pub filename: String,
+    pub width: Length,
+    pub height: Length,
+}
+
+/// A scalar value accepted by a rich mail merge field.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MailMergeValue {
+    Text(String),
+    Image(MailMergeImage),
+    Fragment(Vec<u8>),
+}
+
+/// One rich mail merge record with nested lexical regions.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MailMergeRecord {
+    pub values: BTreeMap<String, MailMergeValue>,
+    pub regions: BTreeMap<String, Vec<MailMergeRecord>>,
+}
+
+/// Root records and reusable named sources for a rich mail merge.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MailMergeData {
+    pub records: Vec<MailMergeRecord>,
+    pub sources: BTreeMap<String, Vec<MailMergeRecord>>,
+}
+
+/// Stable location metadata supplied to a rich merge formatter.
+pub struct MailMergeFormatContext<'a> {
+    pub source_name: &'a str,
+    pub region_path: &'a [String],
+    pub field_name: &'a str,
+    pub record_number: u32,
+    pub output_sequence_number: u32,
+}
+
+/// Text and optional run properties exposed to a rich merge formatter.
+pub struct MailMergeFormattedText {
+    pub text: String,
+    pub run_properties: Option<CT_RPr>,
 }
 
 /// The result of evaluating one field in document order.
@@ -611,39 +660,68 @@ impl Document {
         for candidate in candidates.iter_mut().skip(1) {
             remap_body_identities(candidate, &mut identity_state)?;
         }
+        combine_mail_merge_sections(candidates)
+    }
 
-        let bodies = candidates
-            .iter()
-            .map(|candidate| candidate.document.body.clone())
-            .collect::<Vec<_>>();
-        let mut combined = candidates.remove(0);
-        combined.document.body.content.clear();
-        combined.document.body.sect_pr = None;
-
-        let final_index = bodies.len() - 1;
-        for (index, mut body) in bodies.into_iter().enumerate() {
-            combined.document.body.content.append(&mut body.content);
-            if index == final_index {
-                combined.document.body.sect_pr = body.sect_pr;
-            } else {
-                let mut section = body.sect_pr.unwrap_or_else(empty_section_properties);
-                section.section_type = Some(ST_SectionType::NextPage);
-                let mut paragraph = CT_P::new();
-                paragraph.properties = Some(CT_PPr {
-                    sect_pr: Some(section),
-                    ..Default::default()
-                });
-                combined
-                    .document
-                    .body
-                    .content
-                    .push(BodyContent::Paragraph(paragraph));
-            }
+    /// Materialize independent documents from nested, typed mail merge data.
+    #[allow(clippy::type_complexity)]
+    pub fn mail_merge_rich(
+        &self,
+        data: &MailMergeData,
+        mut formatter: Option<
+            &mut dyn FnMut(&MailMergeFormatContext<'_>, &mut MailMergeFormattedText) -> Result<()>,
+        >,
+    ) -> Result<Vec<Document>> {
+        if data.records.is_empty() {
+            return Err(Error::Other(
+                "rich mail merge requires at least one record".to_owned(),
+            ));
         }
-        combined.invalidate_layout();
 
-        let bytes = combined.to_bytes()?;
-        Document::from_bytes(&bytes)
+        let mut outputs = Vec::with_capacity(data.records.len());
+        for (record_index, record) in data.records.iter().enumerate() {
+            let record_number = one_based_record_number(record_index)?;
+            let mut candidate = self.clone_for_staging();
+            let mut identity_state =
+                BodyIdentityState::from_documents(std::slice::from_ref(&candidate))?;
+            let template = std::mem::take(&mut candidate.document.body.content);
+            let mut region_path = Vec::new();
+            let scopes = vec![record];
+            let mut output_sequence_number = 0;
+            candidate.document.body.content = expand_rich_body(
+                &mut candidate,
+                &template,
+                data,
+                &scopes,
+                "records",
+                &mut region_path,
+                record_number,
+                &mut output_sequence_number,
+                &mut identity_state,
+                &mut formatter,
+            )?;
+            candidate.invalidate_layout();
+            let bytes = candidate.to_bytes()?;
+            outputs.push(Document::from_bytes(&bytes)?);
+        }
+        Ok(outputs)
+    }
+
+    /// Materialize rich merge records as next-page sections in one document.
+    #[allow(clippy::type_complexity)]
+    pub fn mail_merge_sections_rich(
+        &self,
+        data: &MailMergeData,
+        formatter: Option<
+            &mut dyn FnMut(&MailMergeFormatContext<'_>, &mut MailMergeFormattedText) -> Result<()>,
+        >,
+    ) -> Result<Document> {
+        let mut candidates = self.mail_merge_rich(data, formatter)?;
+        let mut identity_state = BodyIdentityState::from_documents(&candidates)?;
+        for candidate in candidates.iter_mut().skip(1) {
+            remap_body_identities(candidate, &mut identity_state)?;
+        }
+        combine_mail_merge_sections(candidates)
     }
 
     /// Update typed field caches, then save the package to a file path.
@@ -664,6 +742,1226 @@ impl Document {
         self.update_fields(context)?;
         self.to_bytes()
     }
+}
+
+fn one_based_record_number(index: usize) -> Result<u32> {
+    u32::try_from(index)
+        .ok()
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| Error::Other("rich mail merge record count exceeds u32".to_owned()))
+}
+
+fn combine_mail_merge_sections(mut candidates: Vec<Document>) -> Result<Document> {
+    let bodies = candidates
+        .iter()
+        .map(|candidate| candidate.document.body.clone())
+        .collect::<Vec<_>>();
+    let mut combined = candidates.remove(0);
+    combined.document.body.content.clear();
+    combined.document.body.sect_pr = None;
+    let final_index = bodies.len() - 1;
+    for (index, mut body) in bodies.into_iter().enumerate() {
+        combined.document.body.content.append(&mut body.content);
+        if index == final_index {
+            combined.document.body.sect_pr = body.sect_pr;
+        } else {
+            let mut section = body.sect_pr.unwrap_or_else(empty_section_properties);
+            section.section_type = Some(ST_SectionType::NextPage);
+            let mut paragraph = CT_P::new();
+            paragraph.properties = Some(CT_PPr {
+                sect_pr: Some(section),
+                ..Default::default()
+            });
+            combined
+                .document
+                .body
+                .content
+                .push(BodyContent::Paragraph(paragraph));
+        }
+    }
+    combined.invalidate_layout();
+    let bytes = combined.to_bytes()?;
+    Document::from_bytes(&bytes)
+}
+
+type RichFormatter<'a> = Option<
+    &'a mut dyn FnMut(&MailMergeFormatContext<'_>, &mut MailMergeFormattedText) -> Result<()>,
+>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RichRegionMarker {
+    Start(String),
+    End(String),
+}
+
+struct RichExpandedRow {
+    source_index: usize,
+    row: CT_Row,
+}
+
+const RICH_MERGE_REGION_DEPTH_LIMIT: usize = 32;
+
+fn merge_field_name(field: &Field) -> Option<String> {
+    let instruction = field.effective_instruction();
+    if instruction.name != "MERGEFIELD" {
+        return None;
+    }
+    instruction
+        .arguments
+        .first()
+        .and_then(argument_text)
+        .map(str::to_owned)
+}
+
+fn rich_region_marker(paragraph: &CT_P) -> Option<RichRegionMarker> {
+    if paragraph
+        .extra_xml
+        .iter()
+        .any(|(_, raw)| !raw.iter().all(u8::is_ascii_whitespace))
+        || paragraph.properties.is_some()
+        || !paragraph.content_controls.is_empty()
+        || !paragraph.revisions.is_empty()
+        || !paragraph.hyperlinks.is_empty()
+        || !paragraph.comment_ranges.is_empty()
+        || !paragraph.bookmark_markers.is_empty()
+        || !paragraph.equations.is_empty()
+        || paragraph.runs.len() != 1
+    {
+        return None;
+    }
+    let run = &paragraph.runs[0];
+    if run
+        .extra_xml
+        .iter()
+        .any(|raw| !raw.iter().all(u8::is_ascii_whitespace))
+        || !run.alt_drawings.is_empty()
+    {
+        return None;
+    }
+    let [RunContent::Field(field)] = run.content.as_slice() else {
+        return None;
+    };
+    let instruction = field.effective_instruction();
+    if instruction.name != "MERGEFIELD"
+        || instruction.arguments.len() != 1
+        || !instruction.switches.is_empty()
+    {
+        return None;
+    }
+    let name = merge_field_name(field)?;
+    name.strip_prefix("TableStart:")
+        .map(|name| RichRegionMarker::Start(name.to_owned()))
+        .or_else(|| {
+            name.strip_prefix("TableEnd:")
+                .map(|name| RichRegionMarker::End(name.to_owned()))
+        })
+}
+
+fn find_body_region_end(items: &[BodyContent], start: usize, name: &str) -> Result<usize> {
+    let mut stack = vec![name.to_owned()];
+    for (index, item) in items.iter().enumerate().skip(start) {
+        let BodyContent::Paragraph(paragraph) = item else {
+            continue;
+        };
+        match rich_region_marker(paragraph) {
+            Some(RichRegionMarker::Start(nested)) => stack.push(nested),
+            Some(RichRegionMarker::End(end)) => {
+                if stack.last() != Some(&end) {
+                    return Err(Error::Other(format!(
+                        "crossed rich mail merge region marker TableEnd:{end}"
+                    )));
+                }
+                stack.pop();
+                if stack.is_empty() {
+                    return Ok(index);
+                }
+            }
+            None => {}
+        }
+    }
+    Err(Error::Other(format!(
+        "rich mail merge region TableStart:{name} has no matching end"
+    )))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn expand_rich_body(
+    document: &mut Document,
+    items: &[BodyContent],
+    data: &MailMergeData,
+    scopes: &[&MailMergeRecord],
+    source_name: &str,
+    region_path: &mut Vec<String>,
+    record_number: u32,
+    output_sequence_number: &mut u32,
+    identity_state: &mut BodyIdentityState,
+    formatter: &mut RichFormatter<'_>,
+) -> Result<Vec<BodyContent>> {
+    let mut output = Vec::new();
+    let mut index = 0;
+    while index < items.len() {
+        if let BodyContent::Paragraph(paragraph) = &items[index]
+            && let Some(marker) = rich_region_marker(paragraph)
+        {
+            match marker {
+                RichRegionMarker::Start(name) => {
+                    if region_path.len() >= RICH_MERGE_REGION_DEPTH_LIMIT {
+                        return Err(Error::Other(format!(
+                            "rich mail merge region depth exceeds {RICH_MERGE_REGION_DEPTH_LIMIT}"
+                        )));
+                    }
+                    let end = find_body_region_end(items, index + 1, &name)?;
+                    let records = resolve_region_records(scopes, data, &name)?;
+                    region_path.push(name.clone());
+                    for (child_index, child) in records.iter().enumerate() {
+                        let mut child_scopes = scopes.to_vec();
+                        child_scopes.push(child);
+                        let mut child_content = expand_rich_body(
+                            document,
+                            &items[index + 1..end],
+                            data,
+                            &child_scopes,
+                            &name,
+                            region_path,
+                            one_based_record_number(child_index)?,
+                            output_sequence_number,
+                            identity_state,
+                            formatter,
+                        )?;
+                        remap_rich_body_content(document, &mut child_content, identity_state)?;
+                        output.extend(child_content);
+                    }
+                    region_path.pop();
+                    index = end + 1;
+                    continue;
+                }
+                RichRegionMarker::End(name) => {
+                    return Err(Error::Other(format!(
+                        "unexpected rich mail merge region marker TableEnd:{name}"
+                    )));
+                }
+            }
+        }
+        if let BodyContent::Paragraph(paragraph) = &items[index]
+            && let Some(fragment) = whole_paragraph_fragment(paragraph, scopes)?
+        {
+            output.extend(import_rich_fragment(document, fragment, identity_state)?);
+            index += 1;
+            continue;
+        }
+        let mut item = items[index].clone();
+        replace_rich_body_item(
+            document,
+            &mut item,
+            data,
+            scopes,
+            source_name,
+            region_path,
+            record_number,
+            output_sequence_number,
+            identity_state,
+            formatter,
+        )?;
+        output.push(item);
+        index += 1;
+    }
+    Ok(output)
+}
+
+fn whole_paragraph_fragment<'a>(
+    paragraph: &CT_P,
+    scopes: &[&'a MailMergeRecord],
+) -> Result<Option<&'a [u8]>> {
+    if paragraph
+        .extra_xml
+        .iter()
+        .any(|(_, raw)| !raw.iter().all(u8::is_ascii_whitespace))
+        || !paragraph.content_controls.is_empty()
+        || !paragraph.revisions.is_empty()
+        || !paragraph.hyperlinks.is_empty()
+        || !paragraph.comment_ranges.is_empty()
+        || !paragraph.bookmark_markers.is_empty()
+        || !paragraph.equations.is_empty()
+        || paragraph.runs.len() != 1
+    {
+        return Ok(None);
+    }
+    let [RunContent::Field(field)] = paragraph.runs[0].content.as_slice() else {
+        return Ok(None);
+    };
+    let Some(name) = merge_field_name(field) else {
+        return Ok(None);
+    };
+    match resolve_rich_value(scopes, &name) {
+        Some(MailMergeValue::Fragment(bytes)) => Ok(Some(bytes)),
+        _ => Ok(None),
+    }
+}
+
+fn import_rich_fragment(
+    document: &mut Document,
+    bytes: &[u8],
+    identity_state: &mut BodyIdentityState,
+) -> Result<Vec<BodyContent>> {
+    let mut fragment = Document::from_bytes(bytes)
+        .map_err(|error| Error::Other(format!("invalid rich mail merge fragment: {error}")))?;
+    validate_fragment_numbering_allocation(document, &fragment)?;
+    let mut fragment_xml = fragment.document.to_xml()?;
+    let styles_changed =
+        remap_fragment_style_collisions(document, &mut fragment, &mut fragment_xml)?;
+    let used_relationships = relationship_ids_in_xml(&fragment_xml);
+    let source_rels = fragment
+        .package
+        .get_part_rels(&fragment.doc_part_name)
+        .cloned()
+        .unwrap_or_default();
+    let mut relationship_map = BTreeMap::new();
+    let mut part_map = HashMap::new();
+    for relationship_id in used_relationships {
+        let relationship = source_rels.get_by_id(&relationship_id).ok_or_else(|| {
+            Error::Other(format!(
+                "rich mail merge fragment relationship {relationship_id} is missing"
+            ))
+        })?;
+        if relationship.target_mode.as_deref() == Some("External") {
+            return Err(Error::Other(format!(
+                "rich mail merge fragment relationship {relationship_id} is external"
+            )));
+        }
+        let source_part =
+            OpcPackage::resolve_rel_target(&fragment.doc_part_name, &relationship.target);
+        let destination_part = copy_fragment_part(
+            &fragment.package,
+            &mut document.package,
+            &source_part,
+            &mut part_map,
+        )?;
+        let target = relative_fragment_target(&document.doc_part_name, &destination_part);
+        let destination_id = document
+            .package
+            .get_or_create_part_rels(&document.doc_part_name)
+            .add(&relationship.rel_type, &target);
+        relationship_map.insert(relationship_id, destination_id);
+    }
+    if !relationship_map.is_empty() {
+        fragment_xml = patch_relationship_ids(fragment_xml, &relationship_map);
+    }
+    if styles_changed || !relationship_map.is_empty() {
+        fragment
+            .package
+            .set_part(&fragment.doc_part_name, fragment_xml);
+        fragment = reopen_staged_document(fragment)?;
+    }
+    remap_body_identities(&mut fragment, identity_state)?;
+    let insert_at = document.document.body.content.len();
+    document.insert_document(insert_at, &fragment);
+    Ok(document.document.body.content.drain(insert_at..).collect())
+}
+
+fn validate_fragment_numbering_allocation(
+    destination: &Document,
+    fragment: &Document,
+) -> Result<()> {
+    let Some(fragment_numbering) = &fragment.numbering else {
+        return Ok(());
+    };
+    let abstract_offset = destination
+        .numbering
+        .as_ref()
+        .and_then(|numbering| {
+            numbering
+                .abstract_nums
+                .iter()
+                .map(|item| item.abstract_num_id)
+                .max()
+        })
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| {
+            Error::Other("rich mail merge abstract numbering ids are exhausted".to_owned())
+        })?;
+    let number_offset = destination
+        .numbering
+        .as_ref()
+        .and_then(|numbering| numbering.nums.iter().map(|item| item.num_id).max())
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| Error::Other("rich mail merge numbering ids are exhausted".to_owned()))?;
+    if fragment_numbering
+        .abstract_nums
+        .iter()
+        .any(|item| item.abstract_num_id.checked_add(abstract_offset).is_none())
+        || fragment_numbering.nums.iter().any(|item| {
+            item.num_id.checked_add(number_offset).is_none()
+                || item.abstract_num_id.checked_add(abstract_offset).is_none()
+        })
+    {
+        return Err(Error::Other(
+            "rich mail merge fragment numbering ids overflow the destination".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn remap_fragment_style_collisions(
+    destination: &Document,
+    fragment: &mut Document,
+    fragment_xml: &mut Vec<u8>,
+) -> Result<bool> {
+    let mut replacements = BTreeMap::new();
+    let mut used = destination
+        .styles
+        .styles
+        .iter()
+        .chain(fragment.styles.styles.iter())
+        .map(|style| style.style_id.clone())
+        .collect::<HashSet<_>>();
+    for style in &fragment.styles.styles {
+        let Some(existing) = destination.styles.get_by_id(&style.style_id) else {
+            continue;
+        };
+        if existing == style {
+            continue;
+        }
+        let mut ordinal = 1u64;
+        loop {
+            let candidate = format!("{}Merge{ordinal}", style.style_id);
+            if used.insert(candidate.clone()) {
+                replacements.insert(style.style_id.clone(), candidate);
+                break;
+            }
+            ordinal = ordinal.checked_add(1).ok_or_else(|| {
+                Error::Other("rich mail merge fragment style name space is exhausted".to_owned())
+            })?;
+        }
+    }
+    if replacements.is_empty() {
+        return Ok(false);
+    }
+    for style in &mut fragment.styles.styles {
+        if let Some(replacement) = replacements.get(&style.style_id) {
+            style.style_id = replacement.clone();
+        }
+        if let Some(replacement) = style
+            .based_on
+            .as_ref()
+            .and_then(|style_id| replacements.get(style_id))
+        {
+            style.based_on = Some(replacement.clone());
+        }
+        if let Some(replacement) = style
+            .next_style
+            .as_ref()
+            .and_then(|style_id| replacements.get(style_id))
+        {
+            style.next_style = Some(replacement.clone());
+        }
+    }
+    for (old, new) in &replacements {
+        for element in [b"w:pStyle".as_slice(), b"w:rStyle", b"w:tblStyle"] {
+            patch_word_value(fragment_xml, element, old, new);
+        }
+    }
+    let styles_part = fragment
+        .package
+        .get_part_rels(&fragment.doc_part_name)
+        .and_then(|relationships| relationships.get_by_type(rel_types::STYLES))
+        .map(|relationship| {
+            OpcPackage::resolve_rel_target(&fragment.doc_part_name, &relationship.target)
+        })
+        .ok_or_else(|| Error::Other("rich mail merge fragment has no styles part".to_owned()))?;
+    fragment
+        .package
+        .set_part(&styles_part, fragment.styles.to_xml()?);
+    Ok(true)
+}
+
+fn remap_rich_body_content(
+    document: &Document,
+    content: &mut Vec<BodyContent>,
+    identity_state: &mut BodyIdentityState,
+) -> Result<()> {
+    let mut occurrence = document.clone_for_staging();
+    occurrence.document.body.content = std::mem::take(content);
+    occurrence.document.body.sect_pr = None;
+    remap_body_identities(&mut occurrence, identity_state)?;
+    *content = occurrence.document.body.content;
+    Ok(())
+}
+
+fn remap_rich_rows(
+    document: &Document,
+    rows: &mut [RichExpandedRow],
+    identity_state: &mut BodyIdentityState,
+) -> Result<()> {
+    let mut table = CT_Tbl::new();
+    table.rows = rows
+        .iter_mut()
+        .map(|item| std::mem::take(&mut item.row))
+        .collect();
+    let mut content = vec![BodyContent::Table(table)];
+    remap_rich_body_content(document, &mut content, identity_state)?;
+    let Some(BodyContent::Table(table)) = content.pop() else {
+        return Err(Error::Other(
+            "rich mail merge row identity staging lost its table".to_owned(),
+        ));
+    };
+    for (item, row) in rows.iter_mut().zip(table.rows) {
+        item.row = row;
+    }
+    Ok(())
+}
+
+fn patch_word_value(xml: &mut Vec<u8>, element: &[u8], old: &str, new: &str) {
+    let mut search = Vec::new();
+    search.push(b'<');
+    search.extend_from_slice(element);
+    search.extend_from_slice(b" w:val=\"");
+    search.extend_from_slice(old.as_bytes());
+    search.push(b'"');
+    let mut replacement = Vec::new();
+    replacement.push(b'<');
+    replacement.extend_from_slice(element);
+    replacement.extend_from_slice(b" w:val=\"");
+    replacement.extend_from_slice(new.as_bytes());
+    replacement.push(b'"');
+    let mut offset = 0;
+    while let Some(found) = find_bytes(&xml[offset..], &search) {
+        let start = offset + found;
+        xml.splice(start..start + search.len(), replacement.iter().copied());
+        offset = start + replacement.len();
+    }
+}
+
+fn relationship_ids_in_xml(xml: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(xml);
+    let mut ids = Vec::new();
+    for attribute in ["r:id=\"", "r:embed=\"", "r:link=\""] {
+        let mut rest = text.as_ref();
+        while let Some(start) = rest.find(attribute) {
+            rest = &rest[start + attribute.len()..];
+            let Some(end) = rest.find('"') else {
+                break;
+            };
+            let id = rest[..end].to_owned();
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+            rest = &rest[end + 1..];
+        }
+    }
+    ids
+}
+
+fn patch_relationship_ids(mut xml: Vec<u8>, replacements: &BTreeMap<String, String>) -> Vec<u8> {
+    for (old, new) in replacements {
+        for attribute in [b"r:id=\"".as_slice(), b"r:embed=\"", b"r:link=\""] {
+            let mut search = Vec::with_capacity(attribute.len() + old.len() + 1);
+            search.extend_from_slice(attribute);
+            search.extend_from_slice(old.as_bytes());
+            search.push(b'"');
+            let mut replacement = Vec::with_capacity(attribute.len() + new.len() + 1);
+            replacement.extend_from_slice(attribute);
+            replacement.extend_from_slice(new.as_bytes());
+            replacement.push(b'"');
+            let mut offset = 0;
+            while let Some(found) = find_bytes(&xml[offset..], &search) {
+                let start = offset + found;
+                xml.splice(start..start + search.len(), replacement.iter().copied());
+                offset = start + replacement.len();
+            }
+        }
+    }
+    xml
+}
+
+fn copy_fragment_part(
+    source: &OpcPackage,
+    destination: &mut OpcPackage,
+    source_part: &str,
+    part_map: &mut HashMap<String, String>,
+) -> Result<String> {
+    if let Some(mapped) = part_map.get(source_part) {
+        return Ok(mapped.clone());
+    }
+    let bytes = source.get_part(source_part).ok_or_else(|| {
+        Error::Other(format!(
+            "rich mail merge fragment part {source_part} is missing"
+        ))
+    })?;
+    let destination_part = allocate_fragment_part_name(destination, source_part);
+    part_map.insert(source_part.to_owned(), destination_part.clone());
+    destination.set_part(&destination_part, bytes.to_vec());
+    if let Some(content_type) = source.content_types.content_type_for(source_part) {
+        destination
+            .content_types
+            .add_override(&destination_part, content_type);
+    }
+    if let Some(relationships) = source.get_part_rels(source_part) {
+        let relationships = relationships.clone();
+        for relationship in relationships.items {
+            if relationship.target_mode.as_deref() == Some("External") {
+                return Err(Error::Other(format!(
+                    "rich mail merge fragment part {source_part} has an external relationship"
+                )));
+            }
+            let child_source = OpcPackage::resolve_rel_target(source_part, &relationship.target);
+            let child_destination =
+                copy_fragment_part(source, destination, &child_source, part_map)?;
+            let target = relative_fragment_target(&destination_part, &child_destination);
+            destination
+                .get_or_create_part_rels(&destination_part)
+                .add_with_id(&relationship.id, &relationship.rel_type, &target);
+        }
+    }
+    Ok(destination_part)
+}
+
+fn allocate_fragment_part_name(package: &OpcPackage, source_part: &str) -> String {
+    if package.get_part(source_part).is_none() {
+        return source_part.to_owned();
+    }
+    let (stem, extension) = source_part
+        .rsplit_once('.')
+        .map_or((source_part, ""), |(stem, extension)| (stem, extension));
+    for ordinal in 1u64.. {
+        let candidate = if extension.is_empty() {
+            format!("{stem}-merge-{ordinal}")
+        } else {
+            format!("{stem}-merge-{ordinal}.{extension}")
+        };
+        if package.get_part(&candidate).is_none() {
+            return candidate;
+        }
+    }
+    unreachable!("fragment part name space is unbounded")
+}
+
+fn relative_fragment_target(source_part: &str, target_part: &str) -> String {
+    let directory = source_part
+        .rfind('/')
+        .map_or("/", |position| &source_part[..=position]);
+    target_part
+        .strip_prefix(directory)
+        .filter(|target| !target.contains('/'))
+        .unwrap_or(target_part)
+        .to_owned()
+}
+
+fn resolve_region_records<'a>(
+    scopes: &[&'a MailMergeRecord],
+    data: &'a MailMergeData,
+    name: &str,
+) -> Result<&'a [MailMergeRecord]> {
+    if let Some(records) = scopes.last().and_then(|record| record.regions.get(name)) {
+        return Ok(records);
+    }
+    data.sources
+        .get(name)
+        .map(Vec::as_slice)
+        .ok_or_else(|| Error::Other(format!("rich mail merge source {name} is missing")))
+}
+
+fn resolve_rich_value<'a>(
+    scopes: &[&'a MailMergeRecord],
+    name: &str,
+) -> Option<&'a MailMergeValue> {
+    scopes
+        .iter()
+        .rev()
+        .find_map(|record| record.values.get(name))
+}
+
+fn resolve_mergefield_text(
+    instruction: &FieldInstruction,
+    value: Option<&str>,
+    missing_as_empty: bool,
+) -> std::result::Result<String, String> {
+    if let Some(name) = unsupported_switch(instruction) {
+        return Err(format!("field MERGEFIELD uses unsupported switch \\{name}"));
+    }
+    validate_instruction_shape(instruction)?;
+    let name = text_argument(instruction, 0)
+        .ok_or_else(|| "MERGEFIELD requires a field name".to_owned())?;
+    let Some(value) = value else {
+        return if missing_as_empty {
+            Ok(String::new())
+        } else {
+            Err(format!("MERGEFIELD input {name} was not supplied"))
+        };
+    };
+    if value.is_empty() {
+        return Ok(String::new());
+    }
+    let mut result = String::new();
+    if let Some(prefix) = switch_text(instruction, "b") {
+        result.push_str(prefix);
+    }
+    result.push_str(value);
+    if let Some(suffix) = switch_text(instruction, "f") {
+        result.push_str(suffix);
+    }
+    Ok(result)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn replace_rich_body_item(
+    document: &mut Document,
+    item: &mut BodyContent,
+    data: &MailMergeData,
+    scopes: &[&MailMergeRecord],
+    source_name: &str,
+    region_path: &[String],
+    record_number: u32,
+    output_sequence_number: &mut u32,
+    identity_state: &mut BodyIdentityState,
+    formatter: &mut RichFormatter<'_>,
+) -> Result<()> {
+    match item {
+        BodyContent::Paragraph(paragraph) => replace_rich_paragraph(
+            document,
+            paragraph,
+            scopes,
+            source_name,
+            region_path,
+            record_number,
+            output_sequence_number,
+            identity_state,
+            formatter,
+        ),
+        BodyContent::Table(table) => replace_rich_table(
+            document,
+            table,
+            data,
+            scopes,
+            source_name,
+            region_path,
+            record_number,
+            output_sequence_number,
+            identity_state,
+            formatter,
+        ),
+        BodyContent::ContentControl(control) => replace_rich_control(
+            document,
+            control,
+            data,
+            scopes,
+            source_name,
+            region_path,
+            record_number,
+            output_sequence_number,
+            identity_state,
+            formatter,
+        ),
+        BodyContent::RawXml(_) => Ok(()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn replace_rich_paragraph(
+    document: &mut Document,
+    paragraph: &mut CT_P,
+    scopes: &[&MailMergeRecord],
+    source_name: &str,
+    region_path: &[String],
+    record_number: u32,
+    output_sequence_number: &mut u32,
+    identity_state: &mut BodyIdentityState,
+    formatter: &mut RichFormatter<'_>,
+) -> Result<()> {
+    for run in &mut paragraph.runs {
+        replace_rich_run(
+            document,
+            run,
+            scopes,
+            source_name,
+            region_path,
+            record_number,
+            output_sequence_number,
+            formatter,
+        )?;
+    }
+    for (_, _, _, control) in &mut paragraph.content_controls {
+        replace_rich_control(
+            document,
+            control,
+            &MailMergeData::default(),
+            scopes,
+            source_name,
+            region_path,
+            record_number,
+            output_sequence_number,
+            identity_state,
+            formatter,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn replace_rich_run(
+    document: &mut Document,
+    run: &mut CT_R,
+    scopes: &[&MailMergeRecord],
+    source_name: &str,
+    region_path: &[String],
+    record_number: u32,
+    output_sequence_number: &mut u32,
+    formatter: &mut RichFormatter<'_>,
+) -> Result<()> {
+    for content in &mut run.content {
+        let RunContent::Field(field) = content else {
+            continue;
+        };
+        let Some(field_name) = merge_field_name(field) else {
+            continue;
+        };
+        if field_name.starts_with("TableStart:") || field_name.starts_with("TableEnd:") {
+            return Err(Error::Other(format!(
+                "rich mail merge region field {field_name} must own its whole block"
+            )));
+        }
+        *output_sequence_number = output_sequence_number.checked_add(1).ok_or_else(|| {
+            Error::Other("rich mail merge output sequence exceeds u32".to_owned())
+        })?;
+        let merge_value = resolve_rich_value(scopes, &field_name);
+        if matches!(merge_value, Some(MailMergeValue::Text(_)) | None) {
+            let value = match merge_value {
+                Some(MailMergeValue::Text(value)) => Some(value.as_str()),
+                None => None,
+                _ => unreachable!(),
+            };
+            let instruction = field.effective_instruction();
+            let resolved = resolve_mergefield_text(&instruction, value, true)
+                .and_then(|value| apply_formats(&instruction, &value, None))
+                .map_err(Error::Other)?;
+            let mut formatted = MailMergeFormattedText {
+                text: resolved,
+                run_properties: run.properties.clone(),
+            };
+            if let Some(callback) = formatter.as_deref_mut() {
+                callback(
+                    &MailMergeFormatContext {
+                        source_name,
+                        region_path,
+                        field_name: &field_name,
+                        record_number,
+                        output_sequence_number: *output_sequence_number,
+                    },
+                    &mut formatted,
+                )?;
+            }
+            if let Some(character) = formatted
+                .text
+                .chars()
+                .find(|character| !valid_xml_character(*character))
+            {
+                return Err(Error::Other(format!(
+                    "rich mail merge field {field_name} contains invalid XML character U+{:04X}",
+                    u32::from(character)
+                )));
+            }
+            run.properties = formatted.run_properties;
+            *content = RunContent::Text(CT_Text::new(&formatted.text));
+            continue;
+        }
+        match merge_value {
+            Some(MailMergeValue::Image(image)) => {
+                if image.width.to_emu() <= 0 || image.height.to_emu() <= 0 {
+                    return Err(Error::Other(format!(
+                        "rich mail merge image {field_name} has non-positive dimensions"
+                    )));
+                }
+                let rel_id = document.embed_image(&image.data, &image.filename);
+                *content = RunContent::Drawing(CT_Drawing::inline(CT_Inline::new(
+                    &rel_id,
+                    image.width.to_emu(),
+                    image.height.to_emu(),
+                )));
+            }
+            Some(MailMergeValue::Fragment(_)) => {
+                return Err(Error::Other(format!(
+                    "rich mail merge fragment field {field_name} must own its whole paragraph"
+                )));
+            }
+            Some(MailMergeValue::Text(_)) | None => unreachable!(),
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn replace_rich_table(
+    document: &mut Document,
+    table: &mut CT_Tbl,
+    data: &MailMergeData,
+    scopes: &[&MailMergeRecord],
+    source_name: &str,
+    region_path: &[String],
+    record_number: u32,
+    output_sequence_number: &mut u32,
+    identity_state: &mut BodyIdentityState,
+    formatter: &mut RichFormatter<'_>,
+) -> Result<()> {
+    let template_rows = std::mem::take(&mut table.rows);
+    for (index, row) in template_rows.iter().enumerate() {
+        if rich_row_region_marker(row).is_some()
+            && (table.extra_xml.iter().any(|(at, _)| *at == index)
+                || table.content_controls.iter().any(|(at, _, _)| *at == index))
+        {
+            return Err(Error::Other(
+                "rich mail merge row marker cannot share a table boundary with preserved content"
+                    .to_owned(),
+            ));
+        }
+    }
+    let expanded = expand_rich_rows(
+        document,
+        &template_rows,
+        0,
+        data,
+        scopes,
+        source_name,
+        region_path,
+        record_number,
+        output_sequence_number,
+        identity_state,
+        formatter,
+    )?;
+    let old_extra = std::mem::take(&mut table.extra_xml);
+    let old_controls = std::mem::take(&mut table.content_controls);
+    for (output_index, expanded_row) in expanded.iter().enumerate() {
+        table.extra_xml.extend(
+            old_extra
+                .iter()
+                .filter(|(at, _)| *at == expanded_row.source_index)
+                .map(|(_, raw)| (output_index, raw.clone())),
+        );
+        table.content_controls.extend(
+            old_controls
+                .iter()
+                .filter(|(at, _, _)| *at == expanded_row.source_index)
+                .map(|(_, raw_before, control)| (output_index, *raw_before, control.clone())),
+        );
+    }
+    let output_end = expanded.len();
+    table.extra_xml.extend(
+        old_extra
+            .iter()
+            .filter(|(at, _)| *at == template_rows.len())
+            .map(|(_, raw)| (output_end, raw.clone())),
+    );
+    table.content_controls.extend(
+        old_controls
+            .iter()
+            .filter(|(at, _, _)| *at == template_rows.len())
+            .map(|(_, raw_before, control)| (output_end, *raw_before, control.clone())),
+    );
+    table.rows = expanded.into_iter().map(|item| item.row).collect();
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn expand_rich_rows(
+    document: &mut Document,
+    template_rows: &[CT_Row],
+    source_offset: usize,
+    data: &MailMergeData,
+    scopes: &[&MailMergeRecord],
+    source_name: &str,
+    region_path: &[String],
+    record_number: u32,
+    output_sequence_number: &mut u32,
+    identity_state: &mut BodyIdentityState,
+    formatter: &mut RichFormatter<'_>,
+) -> Result<Vec<RichExpandedRow>> {
+    let mut output = Vec::new();
+    let mut index = 0;
+    while index < template_rows.len() {
+        if let Some(RichRegionMarker::Start(name)) = rich_row_region_marker(&template_rows[index]) {
+            if region_path.len() >= RICH_MERGE_REGION_DEPTH_LIMIT {
+                return Err(Error::Other(format!(
+                    "rich mail merge row region depth exceeds {RICH_MERGE_REGION_DEPTH_LIMIT}"
+                )));
+            }
+            let end = find_row_region_end(template_rows, index + 1, &name)?;
+            let records = resolve_region_records(scopes, data, &name)?;
+            for (child_index, child) in records.iter().enumerate() {
+                let mut child_scopes = scopes.to_vec();
+                child_scopes.push(child);
+                let mut child_path = region_path.to_vec();
+                child_path.push(name.clone());
+                let mut child_rows = expand_rich_rows(
+                    document,
+                    &template_rows[index + 1..end],
+                    source_offset + index + 1,
+                    data,
+                    &child_scopes,
+                    &name,
+                    &child_path,
+                    one_based_record_number(child_index)?,
+                    output_sequence_number,
+                    identity_state,
+                    formatter,
+                )?;
+                remap_rich_rows(document, &mut child_rows, identity_state)?;
+                output.extend(child_rows);
+            }
+            index = end + 1;
+            continue;
+        }
+        if let Some(RichRegionMarker::End(name)) = rich_row_region_marker(&template_rows[index]) {
+            return Err(Error::Other(format!(
+                "unexpected rich mail merge row marker TableEnd:{name}"
+            )));
+        }
+        let mut row = template_rows[index].clone();
+        replace_rich_row(
+            document,
+            &mut row,
+            data,
+            scopes,
+            source_name,
+            region_path,
+            record_number,
+            output_sequence_number,
+            identity_state,
+            formatter,
+        )?;
+        output.push(RichExpandedRow {
+            source_index: source_offset + index,
+            row,
+        });
+        index += 1;
+    }
+    Ok(output)
+}
+
+fn rich_row_region_marker(row: &CT_Row) -> Option<RichRegionMarker> {
+    if !row.extra_xml.is_empty() || !row.content_controls.is_empty() || row.cells.len() != 1 {
+        return None;
+    }
+    let cell = &row.cells[0];
+    if !cell.extra_xml.is_empty() || cell.content.len() != 1 {
+        return None;
+    }
+    let CellContent::Paragraph(paragraph) = &cell.content[0] else {
+        return None;
+    };
+    rich_region_marker(paragraph)
+}
+
+fn find_row_region_end(rows: &[CT_Row], start: usize, name: &str) -> Result<usize> {
+    let mut stack = vec![name.to_owned()];
+    for (index, row) in rows.iter().enumerate().skip(start) {
+        match rich_row_region_marker(row) {
+            Some(RichRegionMarker::Start(nested)) => stack.push(nested),
+            Some(RichRegionMarker::End(end)) => {
+                if stack.last() != Some(&end) {
+                    return Err(Error::Other(format!(
+                        "crossed rich mail merge row marker TableEnd:{end}"
+                    )));
+                }
+                stack.pop();
+                if stack.is_empty() {
+                    return Ok(index);
+                }
+            }
+            None => {}
+        }
+    }
+    Err(Error::Other(format!(
+        "rich mail merge row region TableStart:{name} has no matching end"
+    )))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn replace_rich_row(
+    document: &mut Document,
+    row: &mut CT_Row,
+    data: &MailMergeData,
+    scopes: &[&MailMergeRecord],
+    source_name: &str,
+    region_path: &[String],
+    record_number: u32,
+    output_sequence_number: &mut u32,
+    identity_state: &mut BodyIdentityState,
+    formatter: &mut RichFormatter<'_>,
+) -> Result<()> {
+    for cell in &mut row.cells {
+        replace_rich_cell(
+            document,
+            cell,
+            data,
+            scopes,
+            source_name,
+            region_path,
+            record_number,
+            output_sequence_number,
+            identity_state,
+            formatter,
+        )?;
+    }
+    for (_, _, control) in &mut row.content_controls {
+        replace_rich_control(
+            document,
+            control,
+            data,
+            scopes,
+            source_name,
+            region_path,
+            record_number,
+            output_sequence_number,
+            identity_state,
+            formatter,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn replace_rich_cell(
+    document: &mut Document,
+    cell: &mut CT_Tc,
+    data: &MailMergeData,
+    scopes: &[&MailMergeRecord],
+    source_name: &str,
+    region_path: &[String],
+    record_number: u32,
+    output_sequence_number: &mut u32,
+    identity_state: &mut BodyIdentityState,
+    formatter: &mut RichFormatter<'_>,
+) -> Result<()> {
+    for content in &mut cell.content {
+        match content {
+            CellContent::Paragraph(paragraph) => replace_rich_paragraph(
+                document,
+                paragraph,
+                scopes,
+                source_name,
+                region_path,
+                record_number,
+                output_sequence_number,
+                identity_state,
+                formatter,
+            )?,
+            CellContent::Table(table) => replace_rich_table(
+                document,
+                table,
+                data,
+                scopes,
+                source_name,
+                region_path,
+                record_number,
+                output_sequence_number,
+                identity_state,
+                formatter,
+            )?,
+            CellContent::ContentControl(control) => replace_rich_control(
+                document,
+                control,
+                data,
+                scopes,
+                source_name,
+                region_path,
+                record_number,
+                output_sequence_number,
+                identity_state,
+                formatter,
+            )?,
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn replace_rich_control(
+    document: &mut Document,
+    control: &mut CT_Sdt,
+    data: &MailMergeData,
+    scopes: &[&MailMergeRecord],
+    source_name: &str,
+    region_path: &[String],
+    record_number: u32,
+    output_sequence_number: &mut u32,
+    identity_state: &mut BodyIdentityState,
+    formatter: &mut RichFormatter<'_>,
+) -> Result<()> {
+    for content in &mut control.content {
+        match content {
+            SdtContent::Paragraph(paragraph) => replace_rich_paragraph(
+                document,
+                paragraph,
+                scopes,
+                source_name,
+                region_path,
+                record_number,
+                output_sequence_number,
+                identity_state,
+                formatter,
+            )?,
+            SdtContent::Table(table) => replace_rich_table(
+                document,
+                table,
+                data,
+                scopes,
+                source_name,
+                region_path,
+                record_number,
+                output_sequence_number,
+                identity_state,
+                formatter,
+            )?,
+            SdtContent::Row(row) => replace_rich_row(
+                document,
+                row,
+                data,
+                scopes,
+                source_name,
+                region_path,
+                record_number,
+                output_sequence_number,
+                identity_state,
+                formatter,
+            )?,
+            SdtContent::Cell(cell) => replace_rich_cell(
+                document,
+                cell,
+                data,
+                scopes,
+                source_name,
+                region_path,
+                record_number,
+                output_sequence_number,
+                identity_state,
+                formatter,
+            )?,
+            SdtContent::Run(run) => replace_rich_run(
+                document,
+                run,
+                scopes,
+                source_name,
+                region_path,
+                record_number,
+                output_sequence_number,
+                formatter,
+            )?,
+            SdtContent::ContentControl(nested) => replace_rich_control(
+                document,
+                nested,
+                data,
+                scopes,
+                source_name,
+                region_path,
+                record_number,
+                output_sequence_number,
+                identity_state,
+                formatter,
+            )?,
+            SdtContent::RawXml(_) => {}
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -5498,27 +6796,13 @@ impl<'a> Evaluator<'a> {
     }
 
     fn evaluate_mergefield(&self, instruction: &FieldInstruction) -> FieldOutcome {
-        let Some(name) = text_argument(instruction, 0) else {
-            return keep("MERGEFIELD requires a field name");
-        };
-        let Some(value) = self.context.merge_fields.get(name) else {
-            if self.missing_merge_fields_as_empty {
-                return FieldOutcome::Resolved(String::new());
-            }
-            return keep(&format!("MERGEFIELD input {name} was not supplied"));
-        };
-        if value.is_empty() {
-            return FieldOutcome::Resolved(String::new());
+        let value = text_argument(instruction, 0)
+            .and_then(|name| self.context.merge_fields.get(name))
+            .map(String::as_str);
+        match resolve_mergefield_text(instruction, value, self.missing_merge_fields_as_empty) {
+            Ok(value) => FieldOutcome::Resolved(value),
+            Err(diagnostic) => keep(&diagnostic),
         }
-        let mut result = String::new();
-        if let Some(prefix) = switch_text(instruction, "b") {
-            result.push_str(prefix);
-        }
-        result.push_str(value);
-        if let Some(suffix) = switch_text(instruction, "f") {
-            result.push_str(suffix);
-        }
-        FieldOutcome::Resolved(result)
     }
 
     fn evaluate_formula(
@@ -9278,5 +10562,93 @@ mod tests {
             evaluator.results[1].outcome,
             FieldOutcome::Resolved("first\nsecond".to_owned())
         );
+    }
+
+    #[test]
+    fn nested_merge_regions_resolve_lexically_before_named_sources() {
+        let record = |value: &str| MailMergeRecord {
+            values: BTreeMap::from([("Value".to_owned(), MailMergeValue::Text(value.to_owned()))]),
+            ..Default::default()
+        };
+        let root = MailMergeRecord {
+            regions: BTreeMap::from([("Items".to_owned(), vec![record("root")])]),
+            ..Default::default()
+        };
+        let inner = MailMergeRecord {
+            regions: BTreeMap::from([("Items".to_owned(), vec![record("inner")])]),
+            ..Default::default()
+        };
+        let sibling = MailMergeRecord {
+            regions: BTreeMap::from([("Items".to_owned(), vec![record("sibling")])]),
+            ..Default::default()
+        };
+        let empty = MailMergeRecord {
+            regions: BTreeMap::from([("Items".to_owned(), Vec::new())]),
+            ..Default::default()
+        };
+        let no_local_region = MailMergeRecord::default();
+        let data = MailMergeData {
+            sources: BTreeMap::from([
+                ("Items".to_owned(), vec![record("named items")]),
+                ("Fallback".to_owned(), vec![record("named fallback")]),
+            ]),
+            ..Default::default()
+        };
+        let scopes = [&root, &inner];
+        assert_eq!(
+            resolve_region_records(&scopes, &data, "Items").unwrap()[0]
+                .values
+                .get("Value"),
+            Some(&MailMergeValue::Text("inner".to_owned()))
+        );
+        let sibling_scopes = [&root, &sibling];
+        assert_eq!(
+            resolve_region_records(&sibling_scopes, &data, "Items").unwrap()[0]
+                .values
+                .get("Value"),
+            Some(&MailMergeValue::Text("sibling".to_owned()))
+        );
+        let fallback_scopes = [&root, &no_local_region];
+        assert_eq!(
+            resolve_region_records(&fallback_scopes, &data, "Items").unwrap()[0]
+                .values
+                .get("Value"),
+            Some(&MailMergeValue::Text("named items".to_owned()))
+        );
+        assert_eq!(
+            resolve_region_records(&fallback_scopes, &data, "Fallback").unwrap()[0]
+                .values
+                .get("Value"),
+            Some(&MailMergeValue::Text("named fallback".to_owned()))
+        );
+        assert!(
+            resolve_region_records(&[&empty], &data, "Items")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(resolve_region_records(&scopes, &data, "Missing").is_err());
+        assert_eq!(one_based_record_number(0).unwrap(), 1);
+        assert!(one_based_record_number(u32::MAX as usize).is_err());
+
+        let marker = |name: &str| {
+            let instruction = format!("MERGEFIELD {name}");
+            let mut paragraph = CT_P::new();
+            paragraph.runs.push(CT_R {
+                properties: None,
+                content: vec![RunContent::Field(Field::new(&instruction, "marker"))],
+                extra_xml: Vec::new(),
+                extra_xml_positions: Vec::new(),
+                alt_drawings: Vec::new(),
+            });
+            BodyContent::Paragraph(paragraph)
+        };
+        let crossed = [
+            marker("TableStart:Outer"),
+            marker("TableStart:Inner"),
+            marker("TableEnd:Outer"),
+        ];
+        assert!(find_body_region_end(&crossed, 1, "Outer").is_err());
+        let missing = [marker("TableStart:Outer")];
+        assert!(find_body_region_end(&missing, 1, "Outer").is_err());
     }
 }

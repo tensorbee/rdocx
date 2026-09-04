@@ -590,6 +590,21 @@ including values held in preserved raw XML. The operation does not evaluate
 structured template tags, and ordinary field traversal keeps its existing
 typed story scope.
 
+The same facade owns additive native rich mail merge over `MailMergeData` and
+owned text, image, and DOCX fragment values. Whole-paragraph and whole-row
+`TableStart:<name>` and `TableEnd:<name>` merge fields form bounded nested
+regions. Scalar lookup walks lexical records from inner to outer scope, while
+each region resolves first from the current record and then from the named
+top-level source. Text replacement retains the existing merge-field switch
+grammar, then an optional formatter receives the local source record number,
+region path, field name, and global emitted-field sequence number. Images and
+fragment relationship closures are imported into a staged candidate with
+collision-free package, style, numbering, bookmark, content-control, and
+drawing identities. Consumed markers and field shells are removed. Every
+candidate is serialized and reopened before publication, and rich section mode
+reuses the flat section assembler. The flat methods and non-body story scope
+remain unchanged.
+
 The `rdocx` facade owns structured template evaluation over
 `serde_json::Value`. The focused `template` module recognizes scalar tags
 across ordinary run boundaries and pairs nested `for` and `if` controls with a

@@ -731,6 +731,20 @@ unmodelled siblings remain byte-preserved. Any rejected record, XML parse, or
 identity-allocation failure leaves the source and all prospective outputs
 uncommitted.
 
+Rich mail merge extends this staging boundary for typed values and repeated
+body regions. An image is embedded only after its exact positive EMU dimensions
+validate. A whole-paragraph DOCX fragment contributes body content without its
+final section properties. Before candidate mutation, the importer validates
+every main-body relationship reference, rejects dangling or external targets,
+and discovers the complete internal descendant closure. It allocates every
+destination part name first, copies bytes and content types, preserves
+part-local relationship ids, and rewrites main-body relationship ids to the
+new document scope. Reachable styles and numbering receive deterministic
+collision maps, and each repeated region or fragment occurrence receives fresh
+document identities before insertion. Any value-kind, marker, relationship,
+identity, callback, allocation, serialization, or reopen failure discards the
+entire prospective result.
+
 Dynamic table-of-contents rebuild uses the same staged package rule. It scans
 the relationship-resolved main document by expanded WordprocessingML names,
 correlates the existing complex TOC begin, separator, and end markers, and

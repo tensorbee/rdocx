@@ -4,7 +4,7 @@
 //! from the test name alone rather than from a diff.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -12,10 +12,11 @@ use std::time::{Duration, Instant};
 use rdocx::{
     BarcodeField, BarcodeKind, BodyContentRef, BodyItemRef, BreakKind, CellItemRef, CellRef,
     ChartData, ChartKind, Document, FieldDateTime, FieldEvaluationContext, FieldOutcome,
-    HyperlinkItemRef, HyperlinkRef, Length, MailMergeControl, ParagraphItemRef, ParagraphRef,
-    RasterFormat, RasterOptions, RasterOutput, RenderOptions, RevisionView, RunItemRef,
-    RunPosition, RunRange, RunRef, TableRef, TcField, TocEntrySelection, TocField,
-    TocRebuildReport, UnsupportedXmlRef,
+    HyperlinkItemRef, HyperlinkRef, Length, ListLevel, MailMergeControl, MailMergeData,
+    MailMergeFormattedText, MailMergeImage, MailMergeRecord, MailMergeValue, ParagraphItemRef,
+    ParagraphRef, RasterFormat, RasterOptions, RasterOutput, RenderOptions, RevisionView,
+    RunItemRef, RunPosition, RunRange, RunRef, StyleBuilder, TableRef, TcField, TocEntrySelection,
+    TocField, TocRebuildReport, UnsupportedXmlRef,
 };
 use rdocx_oxml::CT_Document;
 use rdocx_oxml::document::{BodyContent, CT_Body};
@@ -11286,4 +11287,557 @@ fn legacy_equation_editor_objects_remain_unmodelled_raw_xml() {
             .windows(legacy.len())
             .any(|window| window == legacy.as_bytes())
     );
+}
+
+#[test]
+fn nested_source_built_records_generate_ordered_rich_content_without_stale_fields() {
+    let mut seed = Document::new();
+    let num_id = seed.add_list_definition(&[ListLevel::decimal()]);
+    let body = format!(
+        r#"
+        <w:p><w:r><w:t>before</w:t></w:r></w:p>
+        <w:p><w:fldSimple w:instr="MERGEFIELD TableStart:Lines"><w:r><w:t>start</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="MERGEFIELD Name"><w:r><w:t>stored</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="{num_id}"/></w:numPr></w:pPr><w:fldSimple w:instr="MERGEFIELD ListItem"><w:r><w:t>stored list</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="MERGEFIELD Formatted \b &quot;[&quot; \f &quot;]&quot; \* Upper"><w:r><w:t>stored format</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="MERGEFIELD Logo"><w:r><w:t>stored logo</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="MERGEFIELD Insert"><w:r><w:t>stored fragment</w:t></w:r></w:fldSimple></w:p>
+        <w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="1000"/></w:tblGrid>
+          <w:tr><w:tc><w:p><w:fldSimple w:instr="MERGEFIELD TableStart:Rows"><w:r><w:t>row start</w:t></w:r></w:fldSimple></w:p></w:tc></w:tr>
+          <w:tr><w:tc><w:p><w:fldSimple w:instr="MERGEFIELD RowValue"><w:r><w:t>stored row</w:t></w:r></w:fldSimple></w:p></w:tc></w:tr>
+          <w:tr><w:tc><w:p><w:fldSimple w:instr="MERGEFIELD TableEnd:Rows"><w:r><w:t>row end</w:t></w:r></w:fldSimple></w:p></w:tc></w:tr>
+        </w:tbl>
+        <w:p><w:fldSimple w:instr="MERGEFIELD TableEnd:Lines"><w:r><w:t>end</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:r><w:t>after</w:t></w:r></w:p>
+        <w:sectPr/>
+    "#
+    );
+    let mut package =
+        oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(seed.to_bytes().unwrap())).unwrap();
+    package.set_part("/word/document.xml", wrap_word_body(&body).into_bytes());
+    let mut template_bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut template_bytes).unwrap();
+    let document = Document::from_bytes(template_bytes.get_ref()).unwrap();
+    let mut fragment = Document::new();
+    fragment.add_paragraph("fragment");
+    let fragment = fragment.to_bytes().unwrap();
+    let lines = [
+        (
+            "alpha",
+            "list-a",
+            "format-a",
+            ["row-a1", "row-a2"].as_slice(),
+        ),
+        ("beta", "list-b", "format-b", ["row-b1"].as_slice()),
+    ]
+    .into_iter()
+    .map(|(name, list, formatted, rows)| MailMergeRecord {
+        values: BTreeMap::from([
+            ("Name".to_owned(), MailMergeValue::Text(name.to_owned())),
+            ("ListItem".to_owned(), MailMergeValue::Text(list.to_owned())),
+            (
+                "Formatted".to_owned(),
+                MailMergeValue::Text(formatted.to_owned()),
+            ),
+        ]),
+        regions: BTreeMap::from([(
+            "Rows".to_owned(),
+            rows.iter()
+                .map(|value| MailMergeRecord {
+                    values: BTreeMap::from([(
+                        "RowValue".to_owned(),
+                        MailMergeValue::Text((*value).to_owned()),
+                    )]),
+                    ..Default::default()
+                })
+                .collect(),
+        )]),
+    })
+    .collect();
+    let data = MailMergeData {
+        records: vec![MailMergeRecord {
+            values: BTreeMap::from([
+                (
+                    "Logo".to_owned(),
+                    MailMergeValue::Image(MailMergeImage {
+                        data: b"\x89PNG\r\n\x1a\nlogo".to_vec(),
+                        filename: "logo.png".to_owned(),
+                        width: Length::emu(11),
+                        height: Length::emu(19),
+                    }),
+                ),
+                ("Insert".to_owned(), MailMergeValue::Fragment(fragment)),
+            ]),
+            ..Default::default()
+        }],
+        sources: BTreeMap::from([("Lines".to_owned(), lines)]),
+    };
+    let mut formatter = |context: &rdocx::MailMergeFormatContext<'_>,
+                         value: &mut MailMergeFormattedText| {
+        if context.field_name == "Formatted" {
+            value.text.push('!');
+        }
+        Ok(())
+    };
+    let mut output = document
+        .mail_merge_rich(&data, Some(&mut formatter))
+        .unwrap()
+        .remove(0);
+    let paragraph_text = output
+        .paragraphs()
+        .into_iter()
+        .map(|paragraph| paragraph.text())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paragraph_text,
+        [
+            "before",
+            "alpha",
+            "list-a",
+            "[FORMAT-A]!",
+            "fragment",
+            "beta",
+            "list-b",
+            "[FORMAT-B]!",
+            "fragment",
+            "after",
+        ]
+    );
+    assert_eq!(output.table_count(), 2);
+    let first_table = output.table(0).unwrap();
+    assert_eq!(first_table.row_count(), 2);
+    assert_eq!(first_table.cell(0, 0).unwrap().text(), "row-a1");
+    assert_eq!(first_table.cell(1, 0).unwrap().text(), "row-a2");
+    let second_table = output.table(1).unwrap();
+    assert_eq!(second_table.row_count(), 1);
+    assert_eq!(second_table.cell(0, 0).unwrap().text(), "row-b1");
+    let xml = document_xml(&mut output);
+    assert_eq!(
+        xml.matches(r#"<wp:extent cx="11" cy="19"/>"#).count(),
+        2,
+        "{xml}"
+    );
+    assert_eq!(xml.matches(r#"<w:numId w:val=""#).count(), 2, "{xml}");
+    assert!(!xml.contains("MERGEFIELD"), "{xml}");
+    assert!(!xml.contains("TableStart:"), "{xml}");
+    assert!(!xml.contains("TableEnd:"), "{xml}");
+    assert!(!xml.contains("stored"), "{xml}");
+}
+
+#[test]
+fn rich_merge_imports_images_and_fragments_without_relationship_or_identity_collisions() {
+    let body = r#"
+        <w:p><w:fldSimple w:instr="MERGEFIELD Logo"><w:r><w:t>logo</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="MERGEFIELD InsertA"><w:r><w:t>insert</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="MERGEFIELD InsertB"><w:r><w:t>insert</w:t></w:r></w:fldSimple></w:p>
+        <w:sectPr/>
+    "#;
+    let mut document = document_with_content_controls(&wrap_word_body(body));
+    document.add_style(StyleBuilder::paragraph("Collision", "Destination style"));
+    let mut fragment = Document::new();
+    fragment.add_style(StyleBuilder::paragraph("Collision", "Fragment style"));
+    fragment.add_paragraph("fragment text").style("Collision");
+    let fragment_num_id = fragment.add_list_definition(&[ListLevel::decimal()]);
+    fragment
+        .add_paragraph("fragment list")
+        .set_numbering(fragment_num_id, 0);
+    fragment.add_picture(
+        b"\x89PNG\r\n\x1a\n",
+        "fragment.png",
+        Length::emu(31),
+        Length::emu(47),
+    );
+    let mut fragment_package =
+        oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(fragment.to_bytes().unwrap()))
+            .unwrap();
+    let fragment_image = fragment_package
+        .get_part_rels("/word/document.xml")
+        .unwrap()
+        .get_by_type(oxml_opc::relationship::rel_types::IMAGE)
+        .unwrap()
+        .clone();
+    let fragment_image_part =
+        oxml_opc::OpcPackage::resolve_rel_target("/word/document.xml", &fragment_image.target);
+    fragment_package.set_part(
+        "/word/media/fragment-payload.bin",
+        b"fragment payload".to_vec(),
+    );
+    fragment_package.content_types.add_override(
+        "/word/media/fragment-payload.bin",
+        "application/octet-stream",
+    );
+    fragment_package
+        .get_or_create_part_rels(&fragment_image_part)
+        .add("urn:rdocx:test:fragment-payload", "fragment-payload.bin");
+    let fragment_xml = String::from_utf8(
+        fragment_package
+            .get_part("/word/document.xml")
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap()
+    .replace(
+        "<w:body>",
+        r#"<w:body><w:p><w:bookmarkStart w:id="7" w:name="fragmentMark"/><w:hyperlink w:anchor="fragmentMark"><w:r><w:t>linked</w:t></w:r></w:hyperlink><w:bookmarkEnd w:id="7"/></w:p><w:sdt><w:sdtPr><w:id w:val="11"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>controlled</w:t></w:r></w:p></w:sdtContent></w:sdt>"#,
+    );
+    fragment_package.set_part("/word/document.xml", fragment_xml.into_bytes());
+    let mut fragment_output = std::io::Cursor::new(Vec::new());
+    fragment_package.write_to(&mut fragment_output).unwrap();
+    let fragment_bytes = fragment_output.into_inner();
+    let record = MailMergeRecord {
+        values: BTreeMap::from([
+            (
+                "Logo".to_owned(),
+                MailMergeValue::Image(MailMergeImage {
+                    data: b"\x89PNG\r\n\x1a\nlogo".to_vec(),
+                    filename: "logo.png".to_owned(),
+                    width: Length::emu(11),
+                    height: Length::emu(19),
+                }),
+            ),
+            (
+                "InsertA".to_owned(),
+                MailMergeValue::Fragment(fragment_bytes.clone()),
+            ),
+            (
+                "InsertB".to_owned(),
+                MailMergeValue::Fragment(fragment_bytes),
+            ),
+        ]),
+        ..Default::default()
+    };
+    let mut output = document
+        .mail_merge_rich(
+            &MailMergeData {
+                records: vec![record],
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap()
+        .remove(0);
+    let bytes = output.to_bytes().unwrap();
+    let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+    let image_relationships = package
+        .get_part_rels("/word/document.xml")
+        .unwrap()
+        .items
+        .iter()
+        .filter(|relationship| relationship.rel_type == oxml_opc::relationship::rel_types::IMAGE)
+        .count();
+    assert_eq!(image_relationships, 3);
+    let payload_parts = package
+        .parts
+        .iter()
+        .filter(|(_, bytes)| bytes.as_slice() == b"fragment payload")
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>();
+    assert_eq!(payload_parts.len(), 2);
+    let nested_payload_relationships = package
+        .parts
+        .keys()
+        .filter(|name| name.ends_with(".png"))
+        .filter_map(|name| package.get_part_rels(name))
+        .flat_map(|relationships| &relationships.items)
+        .filter(|relationship| relationship.rel_type == "urn:rdocx:test:fragment-payload")
+        .count();
+    assert_eq!(nested_payload_relationships, 2);
+    assert!(
+        output
+            .paragraphs()
+            .iter()
+            .any(|p| p.text() == "fragment text")
+    );
+    let xml = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    let attribute_values = |prefix: &str| {
+        xml.match_indices(prefix)
+            .filter_map(|(start, _)| {
+                let value = &xml[start + prefix.len()..];
+                value.find('"').map(|end| value[..end].to_owned())
+            })
+            .collect::<Vec<_>>()
+    };
+    let bookmark_ids = attribute_values(r#"w:bookmarkStart w:id=""#);
+    let bookmark_names = attribute_values(r#"w:name=""#);
+    let hyperlink_anchors = attribute_values(r#"w:anchor=""#);
+    let content_control_ids = attribute_values(r#"<w:id w:val=""#);
+    let drawing_ids = attribute_values(r#"wp:docPr id=""#);
+    assert_eq!(bookmark_ids.len(), 2, "{xml}");
+    assert_ne!(bookmark_ids[0], bookmark_ids[1], "{xml}");
+    assert_eq!(bookmark_names.len(), 2, "{xml}");
+    assert_eq!(hyperlink_anchors, bookmark_names, "{xml}");
+    assert_eq!(content_control_ids.len(), 2, "{xml}");
+    assert_ne!(content_control_ids[0], content_control_ids[1], "{xml}");
+    assert_eq!(drawing_ids.len(), 3, "{xml}");
+    assert_eq!(drawing_ids.iter().collect::<HashSet<_>>().len(), 3, "{xml}");
+    assert_eq!(xml.matches(">controlled<").count(), 2, "{xml}");
+    let fragment_numbering = output
+        .paragraphs()
+        .into_iter()
+        .filter(|paragraph| paragraph.text() == "fragment list")
+        .map(|paragraph| paragraph.numbering().unwrap().0)
+        .collect::<Vec<_>>();
+    assert_eq!(fragment_numbering.len(), 2);
+    assert_ne!(fragment_numbering[0], fragment_numbering[1]);
+    assert!(output.style("Collision").is_some());
+    assert!(output.style("CollisionMerge1").is_some());
+    assert!(output.style("CollisionMerge2").is_some());
+    assert_eq!(
+        xml.matches(r#"<w:pStyle w:val="CollisionMerge1"/>"#)
+            .count(),
+        1,
+        "{xml}"
+    );
+    assert_eq!(
+        xml.matches(r#"<w:pStyle w:val="CollisionMerge2"/>"#)
+            .count(),
+        1,
+        "{xml}"
+    );
+}
+
+#[test]
+fn formatting_hooks_change_only_the_selected_merge_field_runs() {
+    let body = r#"
+        <w:p><w:r><w:t>fixed</w:t></w:r></w:p>
+        <w:p><w:fldSimple w:instr="MERGEFIELD Name \* Upper"><w:r><w:t>stored</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="MERGEFIELD TableStart:Items"><w:r><w:t>start</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="MERGEFIELD Value"><w:r><w:t>item</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="MERGEFIELD TableEnd:Items"><w:r><w:t>end</w:t></w:r></w:fldSimple></w:p>
+        <w:sectPr/>
+    "#;
+    let document = document_with_content_controls(&wrap_word_body(body));
+    let data = MailMergeData {
+        records: vec![MailMergeRecord {
+            values: BTreeMap::from([("Name".to_owned(), MailMergeValue::Text("ada".to_owned()))]),
+            regions: BTreeMap::from([(
+                "Items".to_owned(),
+                ["one", "two"]
+                    .into_iter()
+                    .map(|text| MailMergeRecord {
+                        values: BTreeMap::from([(
+                            "Value".to_owned(),
+                            MailMergeValue::Text(text.to_owned()),
+                        )]),
+                        ..Default::default()
+                    })
+                    .collect(),
+            )]),
+        }],
+        ..Default::default()
+    };
+    let mut observed = Vec::new();
+    let mut formatter = |context: &rdocx::MailMergeFormatContext<'_>,
+                         value: &mut MailMergeFormattedText| {
+        observed.push((
+            context.source_name.to_owned(),
+            context.region_path.to_vec(),
+            context.field_name.to_owned(),
+            context.record_number,
+            context.output_sequence_number,
+        ));
+        value.text.push('!');
+        value
+            .run_properties
+            .get_or_insert_with(Default::default)
+            .bold = Some(true);
+        Ok(())
+    };
+    let mut output = document
+        .mail_merge_rich(&data, Some(&mut formatter))
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        observed,
+        [
+            ("records".to_owned(), vec![], "Name".to_owned(), 1, 1),
+            (
+                "Items".to_owned(),
+                vec!["Items".to_owned()],
+                "Value".to_owned(),
+                1,
+                2,
+            ),
+            (
+                "Items".to_owned(),
+                vec!["Items".to_owned()],
+                "Value".to_owned(),
+                2,
+                3,
+            ),
+        ]
+    );
+    let xml = document_xml(&mut output);
+    assert!(xml.contains(">fixed<"), "{xml}");
+    assert!(xml.contains(">ADA!<"), "{xml}");
+    assert!(xml.contains(">one!<"), "{xml}");
+    assert!(xml.contains(">two!<"), "{xml}");
+    assert_eq!(xml.matches("<w:b/>").count(), 3, "{xml}");
+}
+
+#[test]
+fn rich_merge_preserves_schema_order_and_unmodelled_xml_after_reopen() {
+    let body = r#"
+        <w:p><w:pPr><w:keepNext/></w:pPr><w:fldSimple w:instr="MERGEFIELD Name"><w:r><w:t>stored</w:t></w:r></w:fldSimple><producer:opaque producer:v="1"/></w:p>
+        <w:sectPr/>
+    "#;
+    let document = document_with_content_controls(&wrap_word_body(body));
+    let data = MailMergeData {
+        records: vec![MailMergeRecord {
+            values: BTreeMap::from([("Name".to_owned(), MailMergeValue::Text("value".to_owned()))]),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let mut output = document.mail_merge_rich(&data, None).unwrap().remove(0);
+    let xml = document_xml(&mut output);
+    let opaque = r#"<producer:opaque producer:v="1"/>"#;
+    assert_eq!(xml.matches(opaque).count(), 1, "{xml}");
+    assert!(xml.find("<w:pPr").unwrap() < xml.find(">value<").unwrap());
+    CT_Document::from_xml(xml.as_bytes()).unwrap();
+}
+
+#[test]
+fn invalid_rich_merge_input_leaves_the_template_and_outputs_uncommitted() {
+    let assert_atomic_error = |mut document: Document, data: MailMergeData| {
+        let before = document.to_bytes().unwrap();
+        assert!(document.mail_merge_rich(&data, None).is_err());
+        assert_eq!(document.to_bytes().unwrap(), before);
+    };
+    let one_value = |name: &str, value: MailMergeValue| MailMergeData {
+        records: vec![MailMergeRecord {
+            values: BTreeMap::from([(name.to_owned(), value)]),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let linked_fragment = |external: bool| {
+        let mut fragment = Document::new();
+        fragment.add_paragraph("fragment link");
+        let mut package =
+            oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(fragment.to_bytes().unwrap()))
+                .unwrap();
+        let relationship_id = if external {
+            package
+                .get_or_create_part_rels("/word/document.xml")
+                .add_external(
+                    oxml_opc::relationship::rel_types::HYPERLINK,
+                    "https://example.invalid",
+                )
+        } else {
+            "rIdMissing".to_owned()
+        };
+        let xml = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec())
+            .unwrap()
+            .replace(
+                "<w:body>",
+                &format!(
+                    r#"<w:body><w:p><w:hyperlink r:id="{relationship_id}"><w:r><w:t>linked</w:t></w:r></w:hyperlink></w:p>"#
+                ),
+            );
+        package.set_part("/word/document.xml", xml.into_bytes());
+        let mut output = std::io::Cursor::new(Vec::new());
+        package.write_to(&mut output).unwrap();
+        output.into_inner()
+    };
+
+    let body = r#"
+        <w:p><w:fldSimple w:instr="MERGEFIELD TableStart:Lines"><w:r><w:t>start</w:t></w:r></w:fldSimple></w:p>
+        <w:p><w:fldSimple w:instr="MERGEFIELD Value"><w:r><w:t>stored</w:t></w:r></w:fldSimple></w:p>
+        <w:sectPr/>
+    "#;
+    assert_atomic_error(
+        document_with_content_controls(&wrap_word_body(body)),
+        MailMergeData {
+            records: vec![MailMergeRecord::default()],
+            ..Default::default()
+        },
+    );
+
+    let image_body = r#"<w:p><w:fldSimple w:instr="MERGEFIELD Logo"><w:r><w:t>stored</w:t></w:r></w:fldSimple></w:p><w:sectPr/>"#;
+    assert_atomic_error(
+        document_with_content_controls(&wrap_word_body(image_body)),
+        one_value(
+            "Logo",
+            MailMergeValue::Image(MailMergeImage {
+                data: vec![1],
+                filename: "x.png".to_owned(),
+                width: Length::emu(0),
+                height: Length::emu(1),
+            }),
+        ),
+    );
+
+    let scalar_body = r#"<w:p><w:fldSimple w:instr="MERGEFIELD Value"><w:r><w:t>stored</w:t></w:r></w:fldSimple></w:p><w:sectPr/>"#;
+    assert_atomic_error(
+        document_with_content_controls(&wrap_word_body(scalar_body)),
+        MailMergeData::default(),
+    );
+    assert_atomic_error(
+        document_with_content_controls(&wrap_word_body(scalar_body)),
+        one_value("Value", MailMergeValue::Text("\0".to_owned())),
+    );
+    assert_atomic_error(
+        document_with_content_controls(&wrap_word_body(scalar_body)),
+        one_value("Value", MailMergeValue::Fragment(vec![1, 2, 3])),
+    );
+    assert_atomic_error(
+        document_with_content_controls(&wrap_word_body(scalar_body)),
+        one_value("Value", MailMergeValue::Fragment(linked_fragment(false))),
+    );
+    assert_atomic_error(
+        document_with_content_controls(&wrap_word_body(scalar_body)),
+        one_value("Value", MailMergeValue::Fragment(linked_fragment(true))),
+    );
+
+    let inline_fragment_body = r#"<w:p><w:r><w:t>prefix</w:t></w:r><w:fldSimple w:instr="MERGEFIELD Value"><w:r><w:t>stored</w:t></w:r></w:fldSimple></w:p><w:sectPr/>"#;
+    let mut valid_fragment = Document::new();
+    valid_fragment.add_paragraph("fragment");
+    assert_atomic_error(
+        document_with_content_controls(&wrap_word_body(inline_fragment_body)),
+        one_value(
+            "Value",
+            MailMergeValue::Fragment(valid_fragment.to_bytes().unwrap()),
+        ),
+    );
+
+    let mut callback_document = document_with_content_controls(&wrap_word_body(scalar_body));
+    let callback_before = callback_document.to_bytes().unwrap();
+    let callback_data = one_value("Value", MailMergeValue::Text("valid".to_owned()));
+    let mut formatter = |_context: &rdocx::MailMergeFormatContext<'_>,
+                         _value: &mut MailMergeFormattedText| {
+        Err(rdocx::Error::Other("formatter rejected value".to_owned()))
+    };
+    assert!(
+        callback_document
+            .mail_merge_rich(&callback_data, Some(&mut formatter))
+            .is_err()
+    );
+    assert_eq!(callback_document.to_bytes().unwrap(), callback_before);
+}
+
+#[test]
+fn flat_mail_merge_output_remains_unchanged_after_rich_merge_is_added() {
+    let body = r#"<w:p><w:fldSimple w:instr="MERGEFIELD Name \* Upper"><w:r><w:t>stored</w:t></w:r></w:fldSimple></w:p><w:p><w:fldSimple w:instr="MERGEFIELD Amount \# 0.00"><w:r><w:t>stored amount</w:t></w:r></w:fldSimple></w:p><w:sectPr/>"#;
+    let mut document = document_with_content_controls(&wrap_word_body(body));
+    let records = [mail_merge_record(&[("Name", "Ada"), ("Amount", "12.5")])];
+    let original = document.to_bytes().unwrap();
+    let mut expected = Document::from_bytes(&original).unwrap();
+    expected
+        .update_fields(&FieldEvaluationContext {
+            merge_fields: records[0].clone(),
+            merge_record_number: Some(1),
+            merge_sequence_number: Some(1),
+            ..Default::default()
+        })
+        .unwrap();
+    let expected = Document::from_bytes(&expected.to_bytes().unwrap()).unwrap();
+    let mut expected_bytes = expected;
+    let expected_bytes = expected_bytes.to_bytes().unwrap();
+
+    let mut separate = document.mail_merge(&records).unwrap().remove(0);
+    assert_eq!(separate.to_bytes().unwrap(), expected_bytes);
+    let mut sectioned = document.mail_merge_sections(&records).unwrap();
+    assert_eq!(sectioned.to_bytes().unwrap(), expected_bytes);
 }
