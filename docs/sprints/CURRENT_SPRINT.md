@@ -31,7 +31,7 @@ gate is clean, publish the exact stable Rust family at v0.13.0.
 
 | F-ID | Title | Size | Status | Owner |
 |------|-------|------|--------|-------|
-| F-X077 | Share strict XML lexical validation | M | pending | - |
+| F-X077 | Share strict XML lexical validation | M | in-progress | codex |
 | F-X079 | Tag rpptx-v0.10.0 | S | pending | - |
 | F-238 | Flat OPC and modern Word package variants | M | pending | - |
 | F-239 | MHTML import and export | M | pending | - |
