@@ -1441,6 +1441,50 @@ fn decode_css_escapes(css: &str) -> Result<String> {
     Ok(decoded)
 }
 
+fn css_url_reference(css: &str, mut position: usize) -> Result<(String, usize)> {
+    let bytes = css.as_bytes();
+    while bytes.get(position).is_some_and(u8::is_ascii_whitespace) {
+        position += 1;
+    }
+    let (reference, end) = match bytes.get(position) {
+        Some(&quote @ (b'\'' | b'"')) => {
+            let start = position + 1;
+            let end = css[start..]
+                .find(char::from(quote))
+                .map(|relative| start + relative)
+                .ok_or_else(|| mhtml_error(None, 0, "unterminated quoted CSS resource URL"))?;
+            position = end + 1;
+            while bytes.get(position).is_some_and(u8::is_ascii_whitespace) {
+                position += 1;
+            }
+            if bytes.get(position) != Some(&b')') {
+                return Err(mhtml_error(
+                    None,
+                    0,
+                    "quoted CSS resource URL has trailing syntax",
+                ));
+            }
+            (&css[start..end], position + 1)
+        }
+        _ => {
+            let end = css[position..]
+                .find(')')
+                .map(|relative| position + relative)
+                .ok_or_else(|| mhtml_error(None, 0, "unterminated CSS resource URL"))?;
+            let reference = css[position..end].trim();
+            if reference.contains(['\'', '"']) {
+                return Err(mhtml_error(None, 0, "invalid unquoted CSS resource URL"));
+            }
+            (reference, end + 1)
+        }
+    };
+    let reference = reference.trim();
+    if reference.is_empty() {
+        return Err(mhtml_error(None, 0, "empty CSS resource URL"));
+    }
+    Ok((reference.to_owned(), end))
+}
+
 fn css_resource_references(css: &str) -> Result<Vec<String>> {
     if css.contains('\\') {
         let decoded = decode_css_escapes(css)?;
@@ -1454,16 +1498,9 @@ fn css_resource_references(css: &str) -> Result<Vec<String>> {
     let mut position = 0_usize;
     while let Some(relative) = lower[position..].find("url(") {
         let start = position + relative + 4;
-        let end = css[start..]
-            .find(')')
-            .map(|relative| start + relative)
-            .ok_or_else(|| mhtml_error(None, 0, "unterminated CSS resource URL"))?;
-        let reference = css[start..end].trim().trim_matches(['\'', '"']).trim();
-        if reference.is_empty() {
-            return Err(mhtml_error(None, 0, "empty CSS resource URL"));
-        }
-        references.push(reference.to_owned());
-        position = end + 1;
+        let (reference, end) = css_url_reference(css, start)?;
+        references.push(reference);
+        position = end;
     }
 
     position = 0;
@@ -3495,6 +3532,12 @@ mod tests {
             .into_iter()
             .map(char::from)
             .collect(),
+            mhtml_fixture(
+                r#"<style>@import url("https://example.test/index.html)outside");</style><p>x</p>"#,
+            )
+            .into_iter()
+            .map(char::from)
+            .collect(),
             mhtml_fixture("<p>x</p>")
                 .into_iter()
                 .map(char::from)
@@ -3527,6 +3570,13 @@ mod tests {
                 "accepted {input:?}"
             );
         }
+        assert_eq!(
+            super::css_resource_references(
+                r#"background-image: url("https://example.test/image)one.png")"#,
+            )
+            .unwrap(),
+            vec!["https://example.test/image)one.png"]
+        );
 
         let two_parts = "MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=x\r\n\r\n--x\r\nContent-Type: text/html\r\n\r\n<p>x</p>\r\n--x\r\nContent-Type: image/png\r\nContent-ID: <image>\r\n\r\nbytes\r\n--x--\r\n";
         for limits in [
