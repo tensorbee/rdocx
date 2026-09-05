@@ -10,7 +10,7 @@ use rdocx::{
     BodyItemRef, BorderStyle, Length, ListLevel, MhtmlDiagnostic, ParagraphRef, RunPosition,
     RunRange, SectionBreak, StyleBuilder, TabAlignment, TabLeader, UnderlineStyle,
 };
-use rdocx::{Document, PackageReadLimits, RevisionKind};
+use rdocx::{Document, PackageReadLimits, RevisionKind, WordPackageClass};
 
 const ODT_ORACLE_VERSION: &str = "LibreOffice 26.2.5.2 cd7284b4cbbfeb507e630c1aac019f4157393acb";
 const MHTML_ORACLE_VERSION: &str = "Microsoft Word 16.104 build 16.104.25121423";
@@ -25,6 +25,544 @@ struct MhtmlOracleRecord {
     image_sizes: Vec<(i64, i64)>,
     links: Vec<(String, Option<String>, Option<String>)>,
     diagnostics: Vec<MhtmlDiagnostic>,
+}
+
+mod flat_opc_package_class_tests {
+    use super::*;
+    use oxml_opc::content_types;
+
+    const WORD_NS: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    const WORD_ORACLE_VERSION: &str = "Microsoft Word 16.104 build 16.104.25121423";
+    const VBA_BYTES: &[u8] = b"source-built-vba-project";
+
+    fn content_type(class: WordPackageClass) -> &'static str {
+        match class {
+            WordPackageClass::Document => content_types::WORD_DOCUMENT,
+            WordPackageClass::MacroEnabledDocument => content_types::WORD_DOCUMENT_MACRO_ENABLED,
+            WordPackageClass::Template => content_types::WORD_TEMPLATE,
+            WordPackageClass::MacroEnabledTemplate => content_types::WORD_TEMPLATE_MACRO_ENABLED,
+        }
+    }
+
+    fn package_bytes(package: &OpcPackage) -> Vec<u8> {
+        let mut output = std::io::Cursor::new(Vec::new());
+        package.write_to(&mut output).unwrap();
+        output.into_inner()
+    }
+
+    fn source_package(class: WordPackageClass) -> OpcPackage {
+        let mut package = OpcPackage::with_main_part("word/document.xml", content_type(class));
+        package.set_part(
+            "/word/document.xml",
+            format!(
+                r#"<w:document xmlns:w="{WORD_NS}"><w:body><w:p><w:r><w:t>class fixture</w:t></w:r></w:p><w:sectPr/></w:body></w:document>"#,
+            )
+            .into_bytes(),
+        );
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .add(rel_types::VBA_PROJECT, "vbaProject.bin");
+        package.set_part("/word/vbaProject.bin", VBA_BYTES.to_vec());
+        package.content_types.add_override(
+            "/word/vbaProject.bin",
+            "application/vnd.ms-office.vbaProject",
+        );
+        package.set_part(
+            "/custom/preserved.xml",
+            br#"<preserved xmlns="urn:rdocx:f238"><opaque a="1"> bytes </opaque></preserved>"#
+                .to_vec(),
+        );
+        package
+            .content_types
+            .add_override("/custom/preserved.xml", "application/xml");
+        package.set_part(
+            "/custom/text-xml.xml",
+            br#"<text-xml xmlns="urn:rdocx:f238:text">preserved</text-xml>"#.to_vec(),
+        );
+        package
+            .content_types
+            .add_override("/custom/text-xml.xml", "text/xml");
+        package.set_part("/custom/empty.bin", Vec::new());
+        package
+            .content_types
+            .add_override("/custom/empty.bin", "application/octet-stream");
+        package
+    }
+
+    fn add_package_signature_graph(package: &mut OpcPackage) {
+        package.set_part("/_xmlsignatures/origin.sigs", Vec::new());
+        package.set_part(
+            "/_xmlsignatures/sig1.xml",
+            br#"<Signature xmlns="http://www.w3.org/2000/09/xmldsig#"/>"#.to_vec(),
+        );
+        package.content_types.add_override(
+            "/_xmlsignatures/origin.sigs",
+            "application/vnd.openxmlformats-package.digital-signature-origin",
+        );
+        package.content_types.add_override(
+            "/_xmlsignatures/sig1.xml",
+            "application/vnd.openxmlformats-package.digital-signature-xmlsignature+xml",
+        );
+        package.package_rels.add_with_id(
+            "package-signature-origin",
+            rel_types::DIGITAL_SIGNATURE_ORIGIN,
+            "_xmlsignatures/origin.sigs",
+        );
+        package
+            .get_or_create_part_rels("/_xmlsignatures/origin.sigs")
+            .add_with_id(
+                "package-signature",
+                rel_types::DIGITAL_SIGNATURE,
+                "sig1.xml",
+            );
+    }
+
+    fn has_package_signature_invalidation_marker(package: &OpcPackage) -> bool {
+        package.package_rels.items.iter().any(|relationship| {
+            relationship.rel_type == "urn:rdocx:relationships/invalidated-package-signature"
+        })
+    }
+
+    fn all_classes() -> [WordPackageClass; 4] {
+        [
+            WordPackageClass::Document,
+            WordPackageClass::MacroEnabledDocument,
+            WordPackageClass::Template,
+            WordPackageClass::MacroEnabledTemplate,
+        ]
+    }
+
+    #[test]
+    fn flat_opc_and_modern_word_package_classes_reopen_without_repair_and_preserve_payloads() {
+        for class in all_classes() {
+            let document = Document::from_bytes(&package_bytes(&source_package(class))).unwrap();
+            assert_eq!(document.package_class().unwrap(), class);
+            let flat = document.to_flat_opc_bytes().unwrap();
+            let imported = Document::from_flat_opc_bytes(&flat).unwrap();
+            assert_eq!(imported.package_class().unwrap(), class);
+            let zip = imported.to_bytes_as(class).unwrap();
+            let reopened = Document::from_bytes(&zip).unwrap();
+            assert_eq!(reopened.package_class().unwrap(), class);
+            let package = OpcPackage::from_reader(std::io::Cursor::new(zip)).unwrap();
+            assert_eq!(package.get_part("/word/vbaProject.bin"), Some(VBA_BYTES));
+            assert_eq!(
+                package.get_part("/custom/preserved.xml"),
+                source_package(class).get_part("/custom/preserved.xml")
+            );
+            assert_eq!(
+                package
+                    .get_part_rels("/word/document.xml")
+                    .unwrap()
+                    .get_by_type(rel_types::VBA_PROJECT)
+                    .unwrap()
+                    .target,
+                "vbaProject.bin"
+            );
+        }
+    }
+
+    #[test]
+    fn flat_opc_xml_and_binary_parts_round_trip_without_loss() {
+        let document = Document::from_bytes(&package_bytes(&source_package(
+            WordPackageClass::MacroEnabledDocument,
+        )))
+        .unwrap();
+        let canonical = document.to_flat_opc_bytes().unwrap();
+        let aliased = String::from_utf8(canonical)
+            .unwrap()
+            .replace("pkg:", "alias:")
+            .replace("xmlns:pkg=", "xmlns:alias=");
+        let aliased = aliased
+            .replace(
+                "<alias:binaryData></alias:binaryData>",
+                "<alias:binaryData/>",
+            )
+            .replacen(
+                "<alias:part ",
+                "<alias:part xmlns:local=\"urn:rdocx:f238:local\" ",
+                1,
+            )
+            .replacen(
+                "<Relationship ",
+                "<Relationship xmlns:localRelationship=\"urn:rdocx:f238:relationship\" ",
+                1,
+            );
+        let relationship_start = aliased.find("<Relationship ").unwrap();
+        let relationship_end =
+            relationship_start + aliased[relationship_start..].find("/>").unwrap();
+        let mut equivalent_relationship_syntax = aliased;
+        equivalent_relationship_syntax
+            .replace_range(relationship_end..relationship_end + 2, "></Relationship>");
+        let imported =
+            Document::from_flat_opc_bytes(equivalent_relationship_syntax.as_bytes()).unwrap();
+        let output = imported.to_flat_opc_bytes().unwrap();
+        let xml = std::str::from_utf8(&output).unwrap();
+        assert!(xml.contains("<pkg:package"));
+        assert!(xml.contains("<pkg:xmlData>"));
+        assert!(xml.contains("<pkg:binaryData>"));
+        assert!(xml.contains("pkg:contentType=\"text/xml\"><pkg:xmlData>"));
+        assert!(!xml.contains("alias:"));
+        let reopened = OpcPackage::from_reader(std::io::Cursor::new(
+            imported
+                .to_bytes_as(WordPackageClass::MacroEnabledDocument)
+                .unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(reopened.get_part("/word/vbaProject.bin"), Some(VBA_BYTES));
+        assert_eq!(
+            reopened.get_part("/custom/preserved.xml"),
+            source_package(WordPackageClass::MacroEnabledDocument)
+                .get_part("/custom/preserved.xml")
+        );
+        assert_eq!(reopened.get_part("/custom/empty.bin"), Some(&[][..]));
+    }
+
+    #[test]
+    fn ordinary_save_preserves_opened_word_template_and_macro_classes() {
+        for class in all_classes() {
+            let mut document =
+                Document::from_bytes(&package_bytes(&source_package(class))).unwrap();
+            let ordinary = document.to_bytes().unwrap();
+            assert_eq!(
+                Document::from_bytes(&ordinary)
+                    .unwrap()
+                    .package_class()
+                    .unwrap(),
+                class
+            );
+            let flat = document.to_flat_opc_bytes().unwrap();
+            assert_eq!(
+                Document::from_flat_opc_bytes(&flat)
+                    .unwrap()
+                    .package_class()
+                    .unwrap(),
+                class
+            );
+        }
+    }
+
+    #[test]
+    fn word_package_class_conversion_changes_only_the_main_content_type() {
+        let source = source_package(WordPackageClass::MacroEnabledTemplate);
+        let document = Document::from_bytes(&package_bytes(&source)).unwrap();
+        let baseline = OpcPackage::from_reader(std::io::Cursor::new(
+            document
+                .to_bytes_as(WordPackageClass::MacroEnabledTemplate)
+                .unwrap(),
+        ))
+        .unwrap();
+        for class in all_classes() {
+            let converted = document.to_bytes_as(class).unwrap();
+            let package = OpcPackage::from_reader(std::io::Cursor::new(converted)).unwrap();
+            assert_eq!(
+                package.content_types.overrides["/word/document.xml"],
+                content_type(class)
+            );
+            assert_eq!(package.parts, baseline.parts);
+            assert_eq!(
+                package.package_rels.to_xml().unwrap(),
+                baseline.package_rels.to_xml().unwrap()
+            );
+            assert_eq!(package.part_rels.len(), baseline.part_rels.len());
+            for (part_name, expected) in &baseline.part_rels {
+                assert_eq!(
+                    package.part_rels[part_name].to_xml().unwrap(),
+                    expected.to_xml().unwrap()
+                );
+            }
+            let mut expected_types = baseline.content_types.clone();
+            expected_types.add_override("/word/document.xml", content_type(class));
+            assert_eq!(package.content_types, expected_types);
+        }
+        assert_eq!(
+            document.package_class().unwrap(),
+            WordPackageClass::MacroEnabledTemplate
+        );
+
+        let mut signed_package = baseline;
+        add_package_signature_graph(&mut signed_package);
+        let signed_document = Document::from_bytes(&package_bytes(&signed_package)).unwrap();
+        let same_class = OpcPackage::from_reader(std::io::Cursor::new(
+            signed_document
+                .to_bytes_as(WordPackageClass::MacroEnabledTemplate)
+                .unwrap(),
+        ))
+        .unwrap();
+        let changed_class = OpcPackage::from_reader(std::io::Cursor::new(
+            signed_document
+                .to_bytes_as(WordPackageClass::Document)
+                .unwrap(),
+        ))
+        .unwrap();
+        assert!(!has_package_signature_invalidation_marker(&same_class));
+        assert!(has_package_signature_invalidation_marker(&changed_class));
+        assert!(changed_class.parts.contains_key("/_xmlsignatures/sig1.xml"));
+        let flat = signed_document.to_flat_opc_bytes().unwrap();
+        let imported_flat = Document::from_flat_opc_bytes(&flat).unwrap();
+        let flat_reopened = OpcPackage::from_reader(std::io::Cursor::new(
+            imported_flat
+                .to_bytes_as(WordPackageClass::MacroEnabledTemplate)
+                .unwrap(),
+        ))
+        .unwrap();
+        assert!(has_package_signature_invalidation_marker(&flat_reopened));
+    }
+
+    #[test]
+    fn unknown_word_main_content_type_fails_closed() {
+        let mut unknown = source_package(WordPackageClass::Document);
+        unknown
+            .content_types
+            .add_override("/word/document.xml", "application/x-unknown-word-main+xml");
+        assert!(Document::from_bytes(&package_bytes(&unknown)).is_err());
+
+        let mut fallback = source_package(WordPackageClass::Document);
+        fallback
+            .content_types
+            .overrides
+            .remove("/word/document.xml");
+        assert!(Document::from_bytes(&package_bytes(&fallback)).is_err());
+
+        let mut ambiguous = source_package(WordPackageClass::Document);
+        ambiguous
+            .package_rels
+            .add(rel_types::DOCUMENT, "word/second.xml");
+        ambiguous.set_part(
+            "/word/second.xml",
+            format!(r#"<w:document xmlns:w="{WORD_NS}"><w:body/></w:document>"#).into_bytes(),
+        );
+        ambiguous
+            .content_types
+            .add_override("/word/second.xml", content_types::WORD_DOCUMENT);
+        assert!(Document::from_bytes(&package_bytes(&ambiguous)).is_err());
+
+        let mut external = source_package(WordPackageClass::Document);
+        external.package_rels.items[0].target_mode = Some("External".to_owned());
+        assert!(Document::from_bytes(&package_bytes(&external)).is_err());
+
+        let mut unsafe_target = source_package(WordPackageClass::Document);
+        unsafe_target.package_rels.items[0].target = "word/../document.xml".to_owned();
+        assert!(Document::from_bytes(&package_bytes(&unsafe_target)).is_err());
+    }
+
+    #[test]
+    fn office_document_relationship_modes_accept_internal_and_reject_others() {
+        let mut internal = source_package(WordPackageClass::Document);
+        internal.package_rels.items[0].target_mode = Some("Internal".to_owned());
+        let opened = Document::from_bytes(&package_bytes(&internal)).unwrap();
+        assert_eq!(opened.package_class().unwrap(), WordPackageClass::Document);
+
+        for rejected_mode in ["External", "ProducerDefined"] {
+            let mut rejected = source_package(WordPackageClass::Document);
+            rejected.package_rels.items[0].target_mode = Some(rejected_mode.to_owned());
+            assert!(Document::from_bytes(&package_bytes(&rejected)).is_err());
+        }
+    }
+
+    #[test]
+    fn malformed_or_unsafe_flat_opc_fails_before_document_publication() {
+        let mut source = source_package(WordPackageClass::MacroEnabledDocument);
+        source.set_part(
+            "/word/sub/document.xml",
+            format!(r#"<w:document xmlns:w="{WORD_NS}"><w:body/></w:document>"#).into_bytes(),
+        );
+        source
+            .content_types
+            .add_override("/word/sub/document.xml", content_types::WORD_DOCUMENT);
+        let document = Document::from_bytes(&package_bytes(&source)).unwrap();
+        let valid = String::from_utf8(document.to_flat_opc_bytes().unwrap()).unwrap();
+        let first_part_end = valid.find("</pkg:part>").unwrap() + "</pkg:part>".len();
+        let duplicate = format!(
+            "{}{}{}",
+            &valid[..first_part_end],
+            valid[..first_part_end]
+                .rsplit_once("<pkg:part")
+                .map(|(_, part)| format!("<pkg:part{part}"))
+                .unwrap(),
+            &valid[first_part_end..]
+        );
+        let mismatched_data = valid
+            .replacen("<pkg:xmlData>", "<pkg:binaryData>", 1)
+            .replacen("</pkg:xmlData>", "</pkg:binaryData>", 1);
+        let extra_data = valid.replacen(
+            "</pkg:xmlData></pkg:part>",
+            "</pkg:xmlData><pkg:binaryData></pkg:binaryData></pkg:part>",
+            1,
+        );
+        let first_part = &valid[valid.find("<pkg:part").unwrap()..first_part_end];
+        let malformed_relationship = valid.replacen(
+            "</pkg:package>",
+            &format!(
+                "{}</pkg:package>",
+                first_part.replacen("/_rels/.rels", "/bad/_rels/.rels", 1)
+            ),
+            1,
+        );
+        let nested_relationship_filename = valid.replacen(
+            "</pkg:package>",
+            &format!(
+                "{}</pkg:package>",
+                first_part.replacen("/_rels/.rels", "/word/_rels/sub/document.xml.rels", 1,)
+            ),
+            1,
+        );
+        let mutations = [
+            valid.replacen(
+                "http://schemas.microsoft.com/office/2006/xmlPackage",
+                "urn:wrong-package",
+                1,
+            ),
+            valid.replacen("/word/document.xml", "/word/../document.xml", 1),
+            valid.replacen("/word/document.xml", "/word/%2e%2e/document.xml", 1),
+            valid.replacen("<pkg:binaryData>", "<pkg:binaryData>!", 1),
+            mismatched_data,
+            extra_data,
+            duplicate,
+            malformed_relationship,
+            nested_relationship_filename,
+            valid.replacen(
+                "application/vnd.ms-office.vbaProject",
+                "application/vnd.ms-office.vbaProject/extra",
+                1,
+            ),
+            valid.replacen(
+                "http://schemas.openxmlformats.org/package/2006/relationships",
+                "urn:wrong-relationships",
+                1,
+            ),
+        ];
+        for malformed in mutations {
+            assert!(Document::from_flat_opc_bytes(malformed.as_bytes()).is_err());
+        }
+        let lexical = valid.replacen("class fixture", "class\u{1}fixture", 1);
+        assert!(Document::from_flat_opc_bytes(lexical.as_bytes()).is_err());
+        for limits in [
+            PackageReadLimits {
+                max_entries: 1,
+                max_part_uncompressed_bytes: u64::MAX,
+                max_total_uncompressed_bytes: u64::MAX,
+            },
+            PackageReadLimits {
+                max_entries: usize::MAX,
+                max_part_uncompressed_bytes: 8,
+                max_total_uncompressed_bytes: u64::MAX,
+            },
+            PackageReadLimits {
+                max_entries: usize::MAX,
+                max_part_uncompressed_bytes: u64::MAX,
+                max_total_uncompressed_bytes: 8,
+            },
+        ] {
+            assert!(Document::from_flat_opc_bytes_with_limits(valid.as_bytes(), limits).is_err());
+        }
+    }
+
+    #[test]
+    fn flat_opc_and_package_class_path_apis_publish_reopenable_files() {
+        let document = Document::from_bytes(&package_bytes(&source_package(
+            WordPackageClass::MacroEnabledDocument,
+        )))
+        .unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "rdocx-f238-paths-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let flat_path = directory.join("document.xml");
+        let template_path = directory.join("extension-is-not-authority.docx");
+        document.save_flat_opc(&flat_path).unwrap();
+        let reopened = Document::open_flat_opc(&flat_path).unwrap();
+        assert_eq!(
+            reopened.package_class().unwrap(),
+            WordPackageClass::MacroEnabledDocument
+        );
+        reopened
+            .save_as_package_class(&template_path, WordPackageClass::MacroEnabledTemplate)
+            .unwrap();
+        assert_eq!(
+            Document::open(&template_path)
+                .unwrap()
+                .package_class()
+                .unwrap(),
+            WordPackageClass::MacroEnabledTemplate
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires installed Microsoft Word 16.104 GUI automation"]
+    fn flat_opc_and_modern_word_package_classes_open_in_pinned_word_without_repair() {
+        let plist = "/Applications/Microsoft Word.app/Contents/Info.plist";
+        let version = std::process::Command::new("plutil")
+            .args(["-extract", "CFBundleShortVersionString", "raw", plist])
+            .output()
+            .unwrap();
+        let build = std::process::Command::new("plutil")
+            .args(["-extract", "CFBundleVersion", "raw", plist])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&version.stdout).trim(), "16.104");
+        assert_eq!(
+            String::from_utf8_lossy(&build.stdout).trim(),
+            "16.104.25121423"
+        );
+        assert_eq!(
+            WORD_ORACLE_VERSION,
+            "Microsoft Word 16.104 build 16.104.25121423"
+        );
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::path::Path::new(
+            "/Users/atulsharma/Library/Containers/com.microsoft.Word/Data/Documents/rdocx-f238-word-oracle",
+        )
+        .join(format!("{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let document = Document::new();
+        let mut paths = Vec::new();
+        for (class, extension) in [
+            (WordPackageClass::Document, "docx"),
+            (WordPackageClass::MacroEnabledDocument, "docm"),
+            (WordPackageClass::Template, "dotx"),
+            (WordPackageClass::MacroEnabledTemplate, "dotm"),
+        ] {
+            let path = directory.join(format!("candidate.{extension}"));
+            document.save_as_package_class(&path, class).unwrap();
+            paths.push(path);
+        }
+        let flat_path = directory.join("candidate.xml");
+        document.save_flat_opc(&flat_path).unwrap();
+        paths.push(flat_path);
+
+        for path in &paths {
+            let script = format!(
+                r#"with timeout of 60 seconds
+tell application "Microsoft Word"
+activate
+set candidatePath to (POSIX file "{}") as text
+set candidateDocument to open file name candidatePath read only true add to recent files false
+delay 1
+close candidateDocument saving no
+end tell
+end timeout"#,
+                path.display()
+            );
+            let opened = std::process::Command::new("osascript")
+                .args(["-e", &script])
+                .output()
+                .unwrap();
+            assert!(
+                opened.status.success(),
+                "Word rejected {}: {}",
+                path.display(),
+                String::from_utf8_lossy(&opened.stderr)
+            );
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 }
 
 fn normalized_mhtml_record(

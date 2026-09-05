@@ -28,6 +28,24 @@ and macro-enabled slideshow values. `rpptx` accepts only those six values.
 Changing an output class replaces only that override in a staged package.
 Executable and unrelated parts remain opaque and byte-preserved.
 
+Modern Word package identity follows the same content-type authority at the
+common `Document` package-open boundary. Exactly one normalized internal
+`officeDocument` relationship must resolve to an existing part with an exact
+override for DOCX, DOCM, DOTX, or DOTM. Extension defaults, external targets,
+unsafe targets, duplicate relationships, and unknown types fail closed. An
+output class conversion changes only that override on a staged clone and uses
+the existing signature invalidation path.
+
+Flat OPC is a private Word facade codec over `OpcPackage`. Import first applies
+the shared strict XML 1.0 lexical gate, then resolves expanded package names,
+unique canonical absolute part names, exact data-kind selection, strict base64,
+relationship ownership, and entry, part, and cumulative decoded-size limits.
+Relationship parts populate `package_rels` and `part_rels`, never ordinary
+parts. Export flushes a staged document and emits sorted fixed-prefix parts.
+XML uses `pkg:xmlData` and opaque bytes use `pkg:binaryData`. A reopened Flat
+package cannot claim retained cryptographic signature validity because the
+original content-types byte ordering is unavailable.
+
 ODT is a ZIP package but not an OPC package. The private `rdocx` ODT reader
 therefore indexes it directly with the workspace `zip` dependency and does not
 create an `OpcPackage`. The index rejects unsafe or duplicate names, non-files,
@@ -560,6 +578,11 @@ and reopens the generated DOCX. Export reparses the complete MIME result and
 serializes and reopens the source document before returning bytes. Path writes
 stage the complete result through the shared portable atomic replacement path,
 so an error cannot truncate an existing destination.
+
+Word package-class and Flat OPC path saves use that same atomic replacement
+helper. Both byte writers stage, serialize, and reopen their output before it
+is returned or published. Flat OPC import constructs the complete package and
+validates its Word class before a `Document` becomes observable.
 
 PDF conversion has the same publication boundary. It builds a fresh candidate,
 adds every source page in order, serializes, reopens, validates, and only then

@@ -890,6 +890,13 @@ changes only a staged content-type override, retains opaque executable parts
 and relationships, and invalidates retained package signature evidence when
 the signed table changes. Binary `.ppt` never enters this OPC path.
 
+The `rdocx` facade owns the corresponding Word package identity and its private
+Flat OPC boundary. `oxml-opc` supplies the four exact Word main content types
+and the existing in-memory package. The facade validates DOCX, DOCM, DOTX, or
+DOTM before building a `Document`, while `flat_opc.rs` projects XML package
+parts directly into that same package owner. No second public package model or
+format dependency edge is introduced.
+
 `rpptx-*` crates carry their own `keywords` and `categories`, because the
 workspace values say `["docx", "word"]` which would be wrong on a presentation
 crate. Once publication is approved, the rpptx family uses its own pre-1.0

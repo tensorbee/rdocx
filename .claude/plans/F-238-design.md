@@ -1,6 +1,6 @@
 # F-238, Flat OPC and modern Word package variants
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S69
 **Size**: M
 **Depends on**: F-236, F-X077, F-X079
@@ -157,19 +157,19 @@ serialization or rendering. Any delta blocks integration.
 
 ## Implementation checklist
 
-- [ ] Complete F-X077 and publish its shared API through F-X079.
-- [ ] Add the approved private Flat OPC module.
-- [ ] Add exact modern Word content-type constants and package-class mapping.
-- [ ] Validate class during every package open and preserve it on ordinary
+- [x] Complete F-X077 and publish its shared API through F-X079.
+- [x] Add the approved private Flat OPC module.
+- [x] Add exact modern Word content-type constants and package-class mapping.
+- [x] Validate class during every package open and preserve it on ordinary
       saves.
-- [ ] Implement staged output-only class conversion with signature
+- [x] Implement staged output-only class conversion with signature
       invalidation.
-- [ ] Implement bounded strict Flat OPC import into the existing `OpcPackage`.
-- [ ] Implement deterministic fixed-prefix Flat OPC export and atomic path
+- [x] Implement bounded strict Flat OPC import into the existing `OpcPackage`.
+- [x] Implement deterministic fixed-prefix Flat OPC export and atomic path
       save.
-- [ ] Add all source-built round-trip, preservation, malformed, and limit cases
+- [x] Add all source-built round-trip, preservation, malformed, and limit cases
       to existing test binaries.
-- [ ] Capture pinned Word no-repair evidence and run every routed gate.
+- [x] Capture pinned Word no-repair evidence and run every routed gate.
 
 ## Open questions
 

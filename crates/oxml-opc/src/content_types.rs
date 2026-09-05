@@ -19,6 +19,14 @@ pub const THEME: &str = "application/vnd.openxmlformats-officedocument.theme+xml
 pub const CHART: &str = "application/vnd.openxmlformats-officedocument.drawingml.chart+xml";
 pub const WORD_GLOSSARY: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document.glossary+xml";
+pub const WORD_DOCUMENT: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml";
+pub const WORD_DOCUMENT_MACRO_ENABLED: &str =
+    "application/vnd.ms-word.document.macroEnabled.main+xml";
+pub const WORD_TEMPLATE: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.template.main+xml";
+pub const WORD_TEMPLATE_MACRO_ENABLED: &str =
+    "application/vnd.ms-word.template.macroEnabledTemplate.main+xml";
 
 pub const PRESENTATION: &str =
     "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml";

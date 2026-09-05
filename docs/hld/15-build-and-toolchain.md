@@ -187,6 +187,14 @@ asset. The additive pre-1.0 `rpptx` enum and methods plus the new `oxml-opc`
 content-type constants require rustdoc, README inventory, patched publish
 dry-run, archive-size, and release review before publication.
 
+Modern Word package classes add one approved private `rdocx` module and four
+`oxml-opc` content-type constants, with no dependency, feature, executable, or
+asset. The additive pre-1.0 native enum and methods require both WASM target
+checks, rustdoc with warnings denied, dependency policy, patched workspace
+publish dry runs, the 10 MiB archive ceiling, and the unchanged 49-entry hash
+harness. Microsoft Word 16.104 build 16.104.25121423 is an ignored no-repair
+oracle only.
+
 ## Feature flags
 
 | Crate | Feature | Default | Notes |

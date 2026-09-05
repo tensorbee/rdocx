@@ -1252,6 +1252,17 @@ sample identity, dimensions, normalization provenance, or case coverage.
 
 ## The Word corpus
 
+The modern Word package-class gate source-builds DOCX, DOCM, DOTX, and DOTM
+from one valid WordprocessingML graph. ZIP, `Document`, Flat OPC, and converted
+ZIP round trips must retain the exact class, VBA bytes, relationship scopes,
+and unrelated XML payloads. A four-way conversion comparison proves the main
+override is the only package difference and that the live document is
+unchanged. Malformed expanded names, duplicate parts, unsafe paths, wrong data
+kinds, invalid base64, malformed relationship owners, permissive-parser
+lookalikes, and each resource limit fail before publication. Microsoft Word
+16.104 build 16.104.25121423 supplies only the ignored no-repair acceptance
+fact. Source-built assertions remain the structural authority.
+
 Five real `.docx` files are stored outside the published crates and fetched by
 `scripts/fetch_docx_corpus.py` into the ignored `corpus/docx` directory. The
 tracked manifest pins one document for each of `business-letter`, `report`,

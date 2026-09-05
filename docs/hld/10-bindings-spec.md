@@ -227,6 +227,16 @@ mutation for a larger value. `Document::set_list_level` can redefine an
 existing level without rebuilding the document. A rejected redefinition is
 side-effect free.
 
+Native Rust also exposes `WordPackageClass` for DOCX, DOCM, DOTX, and DOTM.
+`Document::package_class` reads the exact main-part override.
+`to_bytes_as` and `save_as_package_class` select an output class on a staged
+copy without removing executable or opaque parts. `from_flat_opc_bytes`, its
+limits overload, `open_flat_opc`, `to_flat_opc_bytes`, and `save_flat_opc`
+provide bounded strict Flat OPC interchange through the same `Document` and
+`OpcPackage` owners. These are additive pre-1.0 native APIs. Python, WASM, and
+CLI bindings preserve opened class identity through their existing saves but
+gain no selector or Flat OPC entry point.
+
 `Document::rebuild_toc()` is an additive pre-1.0 native Rust operation. It
 updates only supported existing main-story TOC fields with deterministic
 bundled-font page targets and returns `TocRebuildReport` with entry, newly

@@ -54,6 +54,40 @@ pub struct RenderOptions {
     pub revision_view: rdocx_layout::RevisionView,
 }
 
+/// The package class declared by a Word main document part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WordPackageClass {
+    /// A macro-free `.docx` document.
+    Document,
+    /// A macro-enabled `.docm` document.
+    MacroEnabledDocument,
+    /// A macro-free `.dotx` template.
+    Template,
+    /// A macro-enabled `.dotm` template.
+    MacroEnabledTemplate,
+}
+
+impl WordPackageClass {
+    pub(crate) fn content_type(self) -> &'static str {
+        match self {
+            Self::Document => content_types::WORD_DOCUMENT,
+            Self::MacroEnabledDocument => content_types::WORD_DOCUMENT_MACRO_ENABLED,
+            Self::Template => content_types::WORD_TEMPLATE,
+            Self::MacroEnabledTemplate => content_types::WORD_TEMPLATE_MACRO_ENABLED,
+        }
+    }
+
+    fn from_content_type(content_type: &str) -> Option<Self> {
+        match content_type {
+            content_types::WORD_DOCUMENT => Some(Self::Document),
+            content_types::WORD_DOCUMENT_MACRO_ENABLED => Some(Self::MacroEnabledDocument),
+            content_types::WORD_TEMPLATE => Some(Self::Template),
+            content_types::WORD_TEMPLATE_MACRO_ENABLED => Some(Self::MacroEnabledTemplate),
+            _ => None,
+        }
+    }
+}
+
 /// One direct child of a document body, in source order.
 pub enum BodyItemRef<'a> {
     /// A body paragraph.
@@ -1434,8 +1468,6 @@ enum ChartPackageSource<'a> {
 const DEFAULT_STYLES_PART: &str = "/word/styles.xml";
 const DEFAULT_NUMBERING_PART: &str = "/word/numbering.xml";
 const DEFAULT_CORE_PROPERTIES_PART: &str = "/docProps/core.xml";
-const DOCUMENT_CONTENT_TYPE: &str =
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml";
 const STYLES_CONTENT_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml";
 const NUMBERING_CONTENT_TYPE: &str =
@@ -1499,11 +1531,65 @@ fn owned_font_aliases(font_aliases: &[(&str, &str)]) -> Vec<(String, String)> {
 }
 
 fn new_word_package() -> OpcPackage {
-    let mut package = OpcPackage::with_main_part("word/document.xml", DOCUMENT_CONTENT_TYPE);
+    let mut package = OpcPackage::with_main_part("word/document.xml", content_types::WORD_DOCUMENT);
     package
         .content_types
         .add_override(DEFAULT_STYLES_PART, STYLES_CONTENT_TYPE);
     package
+}
+
+fn validated_word_package_class(package: &OpcPackage) -> Result<(String, WordPackageClass)> {
+    let relationships: Vec<_> = package
+        .package_rels
+        .items
+        .iter()
+        .filter(|relationship| relationship.rel_type == rel_types::DOCUMENT)
+        .collect();
+    let relationship = match relationships.as_slice() {
+        [relationship] => *relationship,
+        [] => return Err(Error::NoDocumentPart),
+        _ => {
+            return Err(Error::Other(
+                "Word package has multiple officeDocument relationships".to_owned(),
+            ));
+        }
+    };
+    if !matches!(relationship.target_mode.as_deref(), None | Some("Internal")) {
+        return Err(Error::Other(
+            "Word package officeDocument relationship must be internal".to_owned(),
+        ));
+    }
+    let target = relationship.target.as_str();
+    if !crate::embedded::relationship_target_is_normalized_pack_uri(target)
+        || target
+            .split('/')
+            .any(|segment| segment == "." || segment == "..")
+    {
+        return Err(Error::Other(
+            "Word package officeDocument relationship has an unsafe target".to_owned(),
+        ));
+    }
+    let doc_part_name = if target.starts_with('/') {
+        target.to_owned()
+    } else {
+        format!("/{target}")
+    };
+    if !package.parts.contains_key(&doc_part_name) {
+        return Err(Error::NoDocumentPart);
+    }
+    let content_type = package
+        .content_types
+        .overrides
+        .get(&doc_part_name)
+        .ok_or_else(|| {
+            Error::Other("Word main part requires an exact content-type override".to_owned())
+        })?;
+    let class = WordPackageClass::from_content_type(content_type).ok_or_else(|| {
+        Error::Other(format!(
+            "unsupported Word main-part content type: {content_type}"
+        ))
+    })?;
+    Ok((doc_part_name, class))
 }
 
 fn take_paragraph<'a>(paragraph: &'a mut CT_P, index: &mut usize) -> Option<&'a mut CT_P> {
@@ -1909,6 +1995,56 @@ impl Document {
         Self::from_package(package)
     }
 
+    /// Return the exact Word package class declared for the main document part.
+    pub fn package_class(&self) -> Result<WordPackageClass> {
+        validated_word_package_class(&self.package).map(|(_, class)| class)
+    }
+
+    /// Serialize a staged copy as the requested Word package class.
+    ///
+    /// This changes only the main part's content-type override. Macro projects
+    /// and all other package payloads remain present.
+    pub fn to_bytes_as(&self, class: WordPackageClass) -> Result<Vec<u8>> {
+        let mut candidate = self.clone_for_staging();
+        candidate.package_signatures_invalidated |=
+            candidate.retained_package_signature_would_be_invalidated()?;
+        candidate.flush_to_package()?;
+        candidate
+            .package
+            .content_types
+            .add_override(&candidate.doc_part_name, class.content_type());
+        candidate.package_signatures_invalidated |=
+            crate::embedded::synchronized_package_mutation_invalidates_signature(
+                &self.package,
+                &candidate.package,
+            );
+        crate::embedded::persist_invalidated_package_signature(
+            &mut candidate.package,
+            candidate.package_signatures_invalidated,
+        )?;
+        let mut output = std::io::Cursor::new(Vec::new());
+        candidate.package.write_to(&mut output)?;
+        let bytes = output.into_inner();
+        Self::from_bytes(&bytes)?;
+        Ok(bytes)
+    }
+
+    /// Save a staged copy as the requested Word package class.
+    pub fn save_as_package_class<P: AsRef<Path>>(
+        &self,
+        path: P,
+        class: WordPackageClass,
+    ) -> Result<()> {
+        let bytes = self.to_bytes_as(class)?;
+        write_atomic_file(
+            path.as_ref(),
+            &bytes,
+            "invalid Word package file name",
+            "could not allocate Word package save staging file",
+        )?;
+        Ok(())
+    }
+
     /// Verify package signatures without asserting certificate-chain trust.
     #[cfg(feature = "digital-signatures")]
     pub fn verify_signatures(
@@ -1938,8 +2074,8 @@ impl Document {
         Ok(report)
     }
 
-    fn from_package(package: OpcPackage) -> Result<Self> {
-        let doc_part_name = package.main_document_part().ok_or(Error::NoDocumentPart)?;
+    pub(crate) fn from_package(package: OpcPackage) -> Result<Self> {
+        let (doc_part_name, _) = validated_word_package_class(&package)?;
 
         let doc_xml = package
             .get_part(&doc_part_name)

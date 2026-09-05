@@ -948,7 +948,7 @@ fn safe_internal_target(source_part: &str, relationship: &Relationship) -> Resul
     ))
 }
 
-fn relationship_target_is_normalized_pack_uri(target: &str) -> bool {
+pub(crate) fn relationship_target_is_normalized_pack_uri(target: &str) -> bool {
     if target.is_empty()
         || target.ends_with('/')
         || target.contains("//")

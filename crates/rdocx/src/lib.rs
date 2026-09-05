@@ -30,6 +30,7 @@ mod embedded;
 mod epub;
 mod error;
 mod field;
+mod flat_opc;
 mod html;
 mod math;
 mod odt;
@@ -52,7 +53,7 @@ pub use content_control::ContentControlRef;
 pub use document::{
     AccessibilityIssue, BodyContentRef, BodyItemRef, Document, ImageInfo, IssueSeverity, LinkInfo,
     ListLevel, ListLevelSuffix, ListNumberFormat, NumberingFormat, NumberingLevel, OutlineNode,
-    RenderOptions, UnsupportedXmlRef,
+    RenderOptions, UnsupportedXmlRef, WordPackageClass,
 };
 pub use embedded::{
     EmbeddedContentInfo, EmbeddedContentKind, EmbeddedMutationPolicy, EmbeddedSignatureState,
