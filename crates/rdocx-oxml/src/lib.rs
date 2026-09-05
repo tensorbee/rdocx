@@ -10,6 +10,7 @@ pub mod content_control;
 pub mod document;
 pub mod drawing;
 pub mod footnotes;
+pub mod glossary;
 pub mod header_footer;
 pub mod math;
 pub mod namespace;

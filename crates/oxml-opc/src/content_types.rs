@@ -17,6 +17,8 @@ pub const CUSTOM_PROPERTIES: &str =
     "application/vnd.openxmlformats-officedocument.custom-properties+xml";
 pub const THEME: &str = "application/vnd.openxmlformats-officedocument.theme+xml";
 pub const CHART: &str = "application/vnd.openxmlformats-officedocument.drawingml.chart+xml";
+pub const WORD_GLOSSARY: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document.glossary+xml";
 
 pub const PRESENTATION: &str =
     "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml";

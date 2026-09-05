@@ -11598,3 +11598,103 @@ Microsoft Word 16.104 seven-case riders.
 story index and attributed source path. New ignores must remain left-biased,
 precede the checks they suppress, preserve significant raw and structural
 content exactly once, and prove package-wide accepted and rejected views.
+
+### F-236, Embedded object and macro inventory
+
+**Sprint.** S68
+**Completed.** 2026-09-05
+**Size.** L, estimated 4 days, actual 1 day
+
+**What was built.** The native Word facade now inventories relationship-owned
+OLE objects, ActiveX controls, and VBA projects by stable source-part and
+relationship identity. It reports exact target paths, content types, byte
+lengths, SHA-256 hashes, and signature state, supports byte-exact extraction,
+and applies staged replacement or ownership-aware removal without decoding or
+executing any payload.
+
+**Non-obvious choices.** Inventory begins from a synchronized staged package
+and validates schema-positioned owners, normalized internal relationships,
+content types, reachability, and signature graphs before exposing an item.
+Removal deletes only newly unreachable owned content. Callers choose whether
+invalidated package and VBA signature evidence is preserved or removed, and
+every mutation reopens and re-inventories the candidate before publication.
+
+**Deviations from the design plan.** None. Seventeen microscope passes
+strengthened the approved fail-closed boundary across XML grammar, markup
+compatibility, nested text-box ownership, relationship cardinality, shared
+targets, content types, and signature cleanup before the final pass reported
+zero defects, zero smells, and zero nitpicks.
+
+**Spec sections touched.** `docs/hld/02-scope-and-non-goals.md`,
+`docs/hld/03-architecture.md`, `docs/hld/04-opc-and-packaging.md`,
+`docs/hld/10-bindings-spec.md`, and `docs/hld/12-testing-strategy.md`.
+
+**Tests.** The regression gate
+`word_embedded_inventory_reports_exact_hashes_relationship_paths_and_signature_state`
+proves stable identity, metadata, hashes, and signature state. The principal
+additional gates are `word_embedded_extract_replace_and_remove_are_atomic`,
+`ordinary_document_edits_preserve_every_embedded_payload_byte`,
+`word_embedded_removal_deletes_only_newly_unreachable_owned_candidates`,
+`word_embedded_mutation_policy_preserves_or_removes_invalidated_signature_evidence`,
+`unsafe_or_malformed_word_embedded_graphs_fail_closed_without_mutation`, and
+`word_embedded_owner_removal_preserves_every_unrelated_raw_xml_byte`. The
+integrated `/verify --full` passed at
+`c5cbeb3b1867aaffb213ef4a6d6523cd00b9ad2b`, including both focused suites,
+LibreOffice, the canonical 50-deck corpus, rustdoc, packaging, archive-size,
+supply-chain, and dependency-direction riders.
+
+**Hash harness.** Unchanged, 49 of 49.
+
+**Notes for future sessions.** Keep executable payloads opaque and identities
+relationship-owned. Any new owner vocabulary must prove complete schema
+position, XML grammar, normalized package paths, target reachability, and
+failure atomicity before it becomes actionable.
+
+### F-237, Forms, glossary, and building blocks
+
+**Sprint.** S68
+**Completed.** 2026-09-05
+**Size.** L, estimated 4 days, actual 1 day
+
+**What was built.** The native Word facade now inventories and edits legacy
+text, checkbox, and drop-down form fields across package-owned stories using
+part plus source ordinal identity. It also resolves the glossary part and
+exposes typed building-block and AutoText metadata and body content with
+atomic selected-entry replacement.
+
+**Non-obvious choices.** Form names and building-block names are not treated
+as unique identities. Form edits rewrite only the owned `w:ffData` value and
+its cached display, while glossary edits use parser-recorded structural spans.
+Both paths validate complete XML documents, relationship roles, normalized
+targets, exact content types, schema sequences, value facets, and stale
+ordinals before committing a reopened staged package.
+
+**Deviations from the design plan.** None. Sixteen microscope passes expanded
+the approved preservation and validation boundary for namespace scope, XML
+grammar, form cardinality and facets, story ordering, glossary structure, and
+source-span replacement. The combined integration reconciliation then ended
+clean with both stories' document state and signature invalidation paths
+coexisting.
+
+**Spec sections touched.** `docs/hld/02-scope-and-non-goals.md`,
+`docs/hld/03-architecture.md`, `docs/hld/04-opc-and-packaging.md`,
+`docs/hld/10-bindings-spec.md`, and `docs/hld/12-testing-strategy.md`.
+
+**Tests.** The round-trip gates
+`legacy_form_fields_round_trip_typed_values_and_preserve_unmodelled_ffdata`
+and `glossary_entries_autotext_and_building_blocks_round_trip` prove typed
+editing through save and reopen. The additional contract tests are
+`legacy_form_field_identity_is_story_part_and_source_ordinal`,
+`invalid_legacy_form_mutations_are_atomic`,
+`unrelated_building_block_edits_preserve_every_unsupported_subtree_byte`, and
+`unsafe_or_malformed_glossary_graphs_fail_closed`. The integrated
+`/verify --full` passed at `c5cbeb3b1867aaffb213ef4a6d6523cd00b9ad2b`,
+including all parser, serializer, package, facade, LibreOffice, canonical
+50-deck, rustdoc, packaging, archive-size, and dependency-direction riders.
+
+**Hash harness.** Unchanged, 49 of 49.
+
+**Notes for future sessions.** Preserve part plus source ordinal as the public
+identity boundary. Keep binary `.doc`, field execution, and implicit reusable
+content expansion out of scope, and retain raw unsupported properties, bodies,
+and sibling entries byte-for-byte through unrelated edits.

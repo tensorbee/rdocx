@@ -1398,6 +1398,16 @@ pub struct Document {
     pub(crate) comments_owned: bool,
     /// Whether this facade created the comments-extended part and may remove it when empty.
     pub(crate) comments_extended_owned: bool,
+    /// Embedded identities whose retained signature evidence is known invalid.
+    pub(crate) embedded_invalidated_signatures: HashSet<(String, String)>,
+    /// Whether retained package signature evidence is known invalid.
+    pub(crate) package_signatures_invalidated: bool,
+    /// Relationship-resolved glossary and building-block entries.
+    pub(crate) glossary: Option<rdocx_oxml::glossary::CT_GlossaryDocument>,
+    /// Existing glossary relationship target.
+    pub(crate) glossary_part_name: Option<String>,
+    /// Whether a bounded facade replacement changed the glossary model.
+    pub(crate) glossary_dirty: bool,
     /// Normal layout, including system font discovery, computed on first use.
     layout_cache: Mutex<Option<Arc<rdocx_layout::WordLayoutResult>>>,
     /// Reusable normal-font engine retained across document edits.
@@ -1779,6 +1789,11 @@ impl Document {
             comments_extended_part_name: None,
             comments_owned: false,
             comments_extended_owned: false,
+            embedded_invalidated_signatures: HashSet::new(),
+            package_signatures_invalidated: false,
+            glossary: None,
+            glossary_part_name: None,
+            glossary_dirty: false,
             layout_cache: Mutex::new(None),
             normal_layout_engine: Mutex::new(None),
             deterministic_layout_cache: Mutex::new(None),
@@ -1814,6 +1829,11 @@ impl Document {
             comments_extended_part_name: self.comments_extended_part_name.clone(),
             comments_owned: self.comments_owned,
             comments_extended_owned: self.comments_extended_owned,
+            embedded_invalidated_signatures: self.embedded_invalidated_signatures.clone(),
+            package_signatures_invalidated: self.package_signatures_invalidated,
+            glossary: self.glossary.clone(),
+            glossary_part_name: self.glossary_part_name.clone(),
+            glossary_dirty: self.glossary_dirty,
             layout_cache: Mutex::new(None),
             normal_layout_engine: Mutex::new(None),
             deterministic_layout_cache: Mutex::new(None),
@@ -1823,6 +1843,17 @@ impl Document {
 
     /// Commit staged package state without discarding reusable layout work.
     pub(crate) fn commit_staged_mutation(&mut self, mut candidate: Self) {
+        candidate.package_signatures_invalidated |= candidate
+            .package
+            .package_rels
+            .items
+            .iter()
+            .any(|relationship| relationship.rel_type == rel_types::DIGITAL_SIGNATURE_ORIGIN)
+            && (self.package_signatures_invalidated
+                || crate::embedded::synchronized_package_mutation_invalidates_signature(
+                    &self.package,
+                    &candidate.package,
+                ));
         std::mem::swap(
             &mut self.normal_layout_engine,
             &mut candidate.normal_layout_engine,
@@ -1998,7 +2029,14 @@ impl Document {
             Some(xml) => Some(rdocx_oxml::comments_extended::CT_CommentsEx::from_xml(xml)?),
             None => None,
         };
+        let glossary = crate::building_block::load_glossary(&package, &doc_part_name)?;
+        let (glossary_part_name, glossary) = match glossary {
+            Some((part_name, glossary)) => (Some(part_name), Some(glossary)),
+            None => (None, None),
+        };
 
+        let package_signatures_invalidated =
+            crate::embedded::known_invalid_package_signature_on_open(&package);
         Ok(Document {
             package,
             document,
@@ -2027,6 +2065,11 @@ impl Document {
             comments_extended_part_name,
             comments_owned: false,
             comments_extended_owned: false,
+            embedded_invalidated_signatures: HashSet::new(),
+            package_signatures_invalidated,
+            glossary,
+            glossary_part_name,
+            glossary_dirty: false,
             layout_cache: Mutex::new(None),
             normal_layout_engine: Mutex::new(None),
             deterministic_layout_cache: Mutex::new(None),
@@ -2154,14 +2197,26 @@ impl Document {
 
     /// Save the document to a file path.
     pub fn save<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
+        self.package_signatures_invalidated |=
+            self.retained_package_signature_would_be_invalidated()?;
         self.flush_to_package()?;
+        crate::embedded::persist_invalidated_package_signature(
+            &mut self.package,
+            self.package_signatures_invalidated,
+        )?;
         self.package.save(path)?;
         Ok(())
     }
 
     /// Save the document to a byte vector.
     pub fn to_bytes(&mut self) -> Result<Vec<u8>> {
+        self.package_signatures_invalidated |=
+            self.retained_package_signature_would_be_invalidated()?;
         self.flush_to_package()?;
+        crate::embedded::persist_invalidated_package_signature(
+            &mut self.package,
+            self.package_signatures_invalidated,
+        )?;
         let mut buf = std::io::Cursor::new(Vec::new());
         self.package.write_to(&mut buf)?;
         Ok(buf.into_inner())
@@ -2184,7 +2239,13 @@ impl Document {
     #[cfg(all(feature = "agile-encryption", not(target_arch = "wasm32")))]
     pub fn to_encrypted_bytes(&self, password: &str) -> Result<Vec<u8>> {
         let mut candidate = self.clone_for_staging();
+        candidate.package_signatures_invalidated |=
+            candidate.retained_package_signature_would_be_invalidated()?;
         candidate.flush_to_package()?;
+        crate::embedded::persist_invalidated_package_signature(
+            &mut candidate.package,
+            candidate.package_signatures_invalidated,
+        )?;
         let mut encrypted = Vec::new();
         candidate
             .package
@@ -2299,6 +2360,18 @@ impl Document {
                 crate::comments::COMMENTS_EXTENDED_REL_TYPE,
                 crate::comments::COMMENTS_EXTENDED_CONTENT_TYPE,
             );
+        }
+
+        if self.glossary_dirty {
+            let glossary = self
+                .glossary
+                .as_ref()
+                .ok_or_else(|| Error::Other("dirty glossary model is missing".to_owned()))?;
+            let part_name = self
+                .glossary_part_name
+                .as_ref()
+                .ok_or_else(|| Error::Other("dirty glossary part name is missing".to_owned()))?;
+            self.package.set_part(part_name, glossary.to_xml()?);
         }
 
         // Serialize core properties to the package relationship's target.

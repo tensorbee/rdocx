@@ -3695,6 +3695,27 @@ publishes exactly `rdocx-opc`, `rdocx-oxml`, `rdocx-layout`, `rdocx-html`,
 release-body byte, selected-family exclusion, and all seven notification URLs
 must verify before completion.
 
+### F-X077, Share strict XML lexical validation (M)
+
+The F-236 embedded scanner, the F-237 glossary parser, and the F-237
+package-story scanner each carry independent XML 1.0 lexical validation for
+declarations, literal characters, references, names, namespace declarations,
+expanded attributes, and processing instructions. S68 sprint review pass 1,
+`.claude/reviews/S68-sprint-review-pass-1.md`, finding S1, found that the three
+copies make every security correction a three-site change and review burden.
+
+Move the format-neutral checks to the lowest existing shared crate that all
+three consumers already use. Keep owner-specific document roots, schema
+positions, error variants, and diagnostic labels local. Do not add a new crate,
+parser model, trait, generic, feature, or permissive recovery path.
+
+**Depends on**: F-236, F-237.
+**Test gate**: regression. The existing embedded, glossary, and package-story
+malformed XML matrices all execute through one shared lexical validator, keep
+their current error surfaces, and retain byte-identical mutation rollback.
+Removing any shared declaration, character, reference, name, namespace, or
+processing-instruction check makes at least one matrix fail.
+
 ### F-X021, The hash harness should cover PDF output (M)
 The output-stability harness records `page1.png` and three `word/*.xml` parts
 for each of the seven samples, and no PDF. PDF is a first-class output of this

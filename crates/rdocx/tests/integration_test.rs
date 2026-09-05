@@ -6288,3 +6288,1725 @@ mod header_footer_pdf {
         );
     }
 }
+
+mod legacy_forms_and_building_blocks {
+    use oxml_opc::OpcPackage;
+    use oxml_opc::relationship::rel_types;
+    use rdocx::{BuildingBlockKind, Document, LegacyFormFieldKind, LegacyFormFieldValue};
+
+    const WORD_NS: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    const GLOSSARY_CONTENT_TYPE: &str =
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document.glossary+xml";
+    const HEADER_CONTENT_TYPE: &str =
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml";
+    const FOOTER_CONTENT_TYPE: &str =
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml";
+    const FOOTNOTES_CONTENT_TYPE: &str =
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml";
+    const ENDNOTES_CONTENT_TYPE: &str =
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml";
+
+    fn package_bytes(package: OpcPackage) -> Vec<u8> {
+        let mut output = std::io::Cursor::new(Vec::new());
+        package.write_to(&mut output).expect("package writes");
+        output.into_inner()
+    }
+
+    fn base_package() -> OpcPackage {
+        let mut document = Document::new();
+        let bytes = document.to_bytes().expect("base document");
+        OpcPackage::from_reader(std::io::Cursor::new(bytes)).expect("base package")
+    }
+
+    fn story_content_type(relationship_type: &str) -> &'static str {
+        match relationship_type {
+            rel_types::HEADER => HEADER_CONTENT_TYPE,
+            rel_types::FOOTER => FOOTER_CONTENT_TYPE,
+            rel_types::FOOTNOTES => FOOTNOTES_CONTENT_TYPE,
+            rel_types::ENDNOTES => ENDNOTES_CONTENT_TYPE,
+            _ => panic!("unsupported story relationship type"),
+        }
+    }
+
+    fn add_story_content_type(package: &mut OpcPackage, part_name: &str, relationship_type: &str) {
+        package
+            .content_types
+            .add_override(part_name, story_content_type(relationship_type));
+    }
+
+    #[test]
+    fn legacy_form_fields_round_trip_typed_values_and_preserve_unmodelled_ffdata() {
+        let mut package = base_package();
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="{WORD_NS}" xmlns:q="{WORD_NS}" xmlns:x="urn:producer"><w:body><w:p><w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="TextField"/><w:enabled/><w:calcOnExit w:val="0"/><x:producer keep="yes"><x:nested/></x:producer><w:textInput><w:default w:val="old"/><w:maxLength w:val="12"/></w:textInput></w:ffData></w:fldChar></w:r><w:r><w:instrText> FORMTEXT </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>old</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p><q:p><q:r><q:fldChar q:fldCharType="begin"><q:ffData><q:name q:val="Check"/><q:checkBox><q:sizeAuto/><q:default q:val="0"/><q:checked q:val="1"/></q:checkBox></q:ffData></q:fldChar></q:r><q:r><q:instrText> FORMCHECKBOX </q:instrText></q:r><q:r><q:fldChar q:fldCharType="end"/></q:r></q:p><q:p><q:r><q:fldChar q:fldCharType="begin"><q:ffData><q:name q:val="Choice"/><q:ddList><q:result q:val="0"/><q:listEntry q:val="one"/><q:listEntry q:val="two"/></q:ddList></q:ffData></q:fldChar></q:r><q:r><q:instrText> FORMDROPDOWN </q:instrText></q:r><q:r><q:fldChar q:fldCharType="separate"/></q:r><q:r><q:t>one</q:t></q:r><q:r><q:fldChar q:fldCharType="end"/></q:r></q:p><w:sectPr/></w:body></w:document>"#
+        );
+        package.set_part("/word/document.xml", xml.into_bytes());
+
+        let mut document = Document::from_bytes(&package_bytes(package)).expect("form document");
+        let fields = document.legacy_form_fields().expect("form inventory");
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0].source_part, "/word/document.xml");
+        assert_eq!(fields[0].ordinal, 0);
+        assert_eq!(fields[0].kind, LegacyFormFieldKind::TextInput);
+        assert_eq!(fields[0].value, LegacyFormFieldValue::Text("old".into()));
+        assert_eq!(fields[1].kind, LegacyFormFieldKind::CheckBox);
+        assert_eq!(fields[1].value, LegacyFormFieldValue::Checked(true));
+        assert_eq!(fields[2].kind, LegacyFormFieldKind::DropDownList);
+        assert_eq!(fields[2].choices, ["one", "two"]);
+
+        document
+            .set_legacy_form_field_value(
+                "/word/document.xml",
+                0,
+                LegacyFormFieldValue::Text("new".into()),
+            )
+            .expect("valid text replacement");
+        document
+            .set_legacy_form_field_value(
+                "/word/document.xml",
+                2,
+                LegacyFormFieldValue::SelectedIndex(1),
+            )
+            .expect("valid drop-down replacement");
+        let saved = document.to_bytes().expect("save form document");
+        let reopened = Document::from_bytes(&saved).expect("reopen form document");
+        assert_eq!(
+            reopened.legacy_form_fields().unwrap()[0].value,
+            LegacyFormFieldValue::Text("new".into())
+        );
+        assert_eq!(
+            reopened.legacy_form_fields().unwrap()[2].value,
+            LegacyFormFieldValue::SelectedIndex(1)
+        );
+        let package = OpcPackage::from_reader(std::io::Cursor::new(saved)).unwrap();
+        let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+        assert!(xml.contains(r#"<x:producer keep="yes"><x:nested/></x:producer>"#));
+    }
+
+    #[test]
+    fn glossary_entries_autotext_and_building_blocks_round_trip() {
+        let mut package = base_package();
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .add(rel_types::GLOSSARY_DOCUMENT, "../custom/glossary.xml");
+        package
+            .content_types
+            .add_override("/custom/glossary.xml", GLOSSARY_CONTENT_TYPE);
+        package.set_part(
+            "/custom/glossary.xml",
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><q:glossaryDocument xmlns:q="{WORD_NS}" xmlns:x="urn:producer"><q:docParts><q:docPart><q:docPartPr><q:name q:val="Greeting"/><q:types><q:type q:val="autoExp"/></q:types><q:description q:val="old description"/><x:property keep="yes"/></q:docPartPr><q:docPartBody><q:p><q:r><q:t>Hello</q:t></q:r></q:p><x:body keep="yes"/></q:docPartBody></q:docPart><q:docPart><q:docPartPr><q:name q:val="Clause"/><q:types><q:type q:val="bbPlcHdr"/></q:types></q:docPartPr><q:docPartBody><q:p><q:r><q:t>Clause body</q:t></q:r></q:p></q:docPartBody></q:docPart></q:docParts></q:glossaryDocument>"#
+            )
+            .into_bytes(),
+        );
+
+        let mut document =
+            Document::from_bytes(&package_bytes(package)).expect("glossary document");
+        let entries = document
+            .building_blocks()
+            .expect("building block inventory");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].glossary_part, "/custom/glossary.xml");
+        assert_eq!(entries[0].ordinal, 0);
+        assert_eq!(entries[0].block.kind, BuildingBlockKind::AutoText);
+        assert_eq!(entries[0].block.name, "Greeting");
+
+        let mut replacement = entries[0].block.clone();
+        replacement.description = Some("new description".into());
+        document
+            .replace_building_block("/custom/glossary.xml", 0, replacement)
+            .expect("building block replacement");
+        let saved = document.to_bytes().expect("save glossary document");
+        let reopened = Document::from_bytes(&saved).expect("reopen glossary document");
+        assert_eq!(
+            reopened.building_blocks().unwrap()[0]
+                .block
+                .description
+                .as_deref(),
+            Some("new description")
+        );
+        let package = OpcPackage::from_reader(std::io::Cursor::new(saved)).unwrap();
+        let xml = std::str::from_utf8(package.get_part("/custom/glossary.xml").unwrap()).unwrap();
+        assert!(xml.contains(r#"<x:property keep="yes"/>"#));
+        assert!(xml.contains(r#"<x:body keep="yes"/>"#));
+    }
+
+    #[test]
+    fn explicit_internal_glossary_relationship_is_supported() {
+        let mut package = base_package();
+        let relationships = package.get_or_create_part_rels("/word/document.xml");
+        let id = relationships.add(rel_types::GLOSSARY_DOCUMENT, "glossary/document.xml");
+        relationships
+            .items
+            .iter_mut()
+            .find(|relationship| relationship.id == id)
+            .unwrap()
+            .target_mode = Some("Internal".into());
+        package
+            .content_types
+            .add_override("/word/glossary/document.xml", GLOSSARY_CONTENT_TYPE);
+        package.set_part(
+            "/word/glossary/document.xml",
+            format!(r#"<w:glossaryDocument xmlns:w="{WORD_NS}"><w:docParts><w:docPart><w:docPartPr><w:name w:val="entry"/></w:docPartPr><w:docPartBody><w:p/></w:docPartBody></w:docPart></w:docParts></w:glossaryDocument>"#).into_bytes(),
+        );
+        let document = Document::from_bytes(&package_bytes(package)).unwrap();
+        assert_eq!(document.building_blocks().unwrap().len(), 1);
+    }
+
+    fn text_form_runs(name: &str, value: &str) -> String {
+        format!(
+            r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="{name}"/><w:textInput><w:default w:val="{value}"/></w:textInput></w:ffData></w:fldChar></w:r><w:r><w:instrText> FORMTEXT </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>{value}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+        )
+    }
+
+    fn text_form(name: &str, value: &str) -> String {
+        format!(r#"<w:p>{}</w:p>"#, text_form_runs(name, value))
+    }
+
+    fn inline_text_form(name: &str, value: &str) -> String {
+        format!(
+            r#"<w:p><w:sdt><w:sdtContent>{}</w:sdtContent></w:sdt></w:p>"#,
+            text_form_runs(name, value)
+        )
+    }
+
+    fn nested_inline_form_runs(
+        outer_name: Option<&str>,
+        nested_name: &str,
+        nested_value: &str,
+    ) -> String {
+        let (outer_data, instruction, tail, outer_result) = if let Some(name) = outer_name {
+            (
+                format!(
+                    r#"<w:ffData><w:name w:val="{name}"/><w:textInput><w:default w:val="outer-old"/></w:textInput></w:ffData>"#
+                ),
+                " FORMTEXT ",
+                " ",
+                "outer-old",
+            )
+        } else {
+            (
+                String::new(),
+                " IF ",
+                r#" = &quot;x&quot; &quot;yes&quot; &quot;no&quot; "#,
+                "yes",
+            )
+        };
+        format!(
+            concat!(
+                r#"<w:r><w:fldChar w:fldCharType="begin">{outer_data}</w:fldChar></w:r>"#,
+                r#"<w:r><w:instrText xml:space="preserve">{instruction}</w:instrText></w:r>"#,
+                "{}",
+                r#"<w:r><w:instrText xml:space="preserve">{tail}</w:instrText></w:r>"#,
+                r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+                r#"<w:r><w:t>{outer_result}</w:t></w:r>"#,
+                r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+            ),
+            text_form_runs(nested_name, nested_value),
+            outer_data = outer_data,
+            instruction = instruction,
+            tail = tail,
+            outer_result = outer_result,
+        )
+    }
+
+    fn nested_instruction_form_runs() -> String {
+        format!(
+            concat!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r>"#,
+                r#"<w:r><w:instrText xml:space="preserve"> TOC \t </w:instrText></w:r>"#,
+                "{}",
+                r#"<w:r><w:instrText xml:space="preserve"> </w:instrText></w:r>"#,
+                "{}",
+                r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r>"#,
+                r#"<w:r><w:t>result</w:t></w:r>"#,
+                r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+            ),
+            text_form_runs("switch-first", "switch-old"),
+            text_form_runs("positional-second", "positional-old"),
+        )
+    }
+
+    fn drop_down_form(name: &str) -> String {
+        format!(
+            r#"<w:p><w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:name w:val="{name}"/><w:ddList><w:result w:val="0"/><w:listEntry w:val="one"/><w:listEntry w:val="two"/></w:ddList></w:ffData></w:fldChar></w:r><w:r><w:instrText> FORMDROPDOWN </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>one</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#
+        )
+    }
+
+    #[test]
+    fn legacy_form_field_identity_is_story_part_and_source_ordinal() {
+        let mut package = base_package();
+        let document_xml = format!(
+            r#"<?xml version="1.0"?><w:document xmlns:w="{WORD_NS}"><w:body>{}<w:sectPr/></w:body></w:document>"#,
+            text_form("duplicate", "main")
+        );
+        package.set_part("/word/document.xml", document_xml.into_bytes());
+        let stories = [
+            (rel_types::HEADER, "/word/header-one.xml", "header", "hdr"),
+            (rel_types::FOOTER, "/word/footer-one.xml", "footer", "ftr"),
+            (
+                rel_types::FOOTNOTES,
+                "/word/footnotes-one.xml",
+                "footnote",
+                "footnotes",
+            ),
+            (
+                rel_types::ENDNOTES,
+                "/word/endnotes-one.xml",
+                "endnote",
+                "endnotes",
+            ),
+        ];
+        for (relationship_type, part_name, value, root) in stories {
+            let target = part_name.strip_prefix("/word/").unwrap();
+            package
+                .get_or_create_part_rels("/word/document.xml")
+                .add(relationship_type, target);
+            add_story_content_type(&mut package, part_name, relationship_type);
+            let content = if matches!(root, "hdr" | "ftr") {
+                format!(
+                    r#"<?xml version="1.0"?><w:{root} xmlns:w="{WORD_NS}">{}{}</w:{root}>"#,
+                    text_form("duplicate", value),
+                    if root == "hdr" {
+                        text_form("duplicate", "header-2")
+                    } else {
+                        String::new()
+                    },
+                )
+            } else {
+                let item = if root == "footnotes" {
+                    "footnote"
+                } else {
+                    "endnote"
+                };
+                format!(
+                    r#"<?xml version="1.0"?><w:{root} xmlns:w="{WORD_NS}"><w:{item} w:id="2">{}</w:{item}></w:{root}>"#,
+                    text_form("duplicate", value),
+                )
+            };
+            package.set_part(part_name, content.into_bytes());
+        }
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        let fields = document.legacy_form_fields().unwrap();
+        assert_eq!(fields.len(), 6);
+        assert_eq!(fields[0].source_part, "/word/document.xml");
+        let header = fields
+            .iter()
+            .find(|field| field.source_part == "/word/header-one.xml" && field.ordinal == 1)
+            .expect("second duplicate-named header field");
+        assert_eq!(header.value, LegacyFormFieldValue::Text("header-2".into()));
+
+        document
+            .set_legacy_form_field_value(
+                "/word/header-one.xml",
+                1,
+                LegacyFormFieldValue::Text("changed".into()),
+            )
+            .unwrap();
+        let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        let changed = reopened
+            .legacy_form_fields()
+            .unwrap()
+            .into_iter()
+            .find(|field| field.source_part == "/word/header-one.xml" && field.ordinal == 1)
+            .unwrap();
+        assert_eq!(changed.value, LegacyFormFieldValue::Text("changed".into()));
+    }
+
+    #[test]
+    fn unsafe_legacy_form_story_relationships_fail_closed() {
+        for case in ["unknown-mode", "traversal"] {
+            let mut package = base_package();
+            let relationships = package.get_or_create_part_rels("/word/document.xml");
+            let target = if case == "traversal" {
+                "../../outside.xml"
+            } else {
+                "header.xml"
+            };
+            let id = relationships.add(rel_types::HEADER, target);
+            if case == "unknown-mode" {
+                relationships
+                    .items
+                    .iter_mut()
+                    .find(|relationship| relationship.id == id)
+                    .unwrap()
+                    .target_mode = Some("ProducerDefined".into());
+            }
+            let part_name = if case == "traversal" {
+                "/outside.xml"
+            } else {
+                "/word/header.xml"
+            };
+            package.set_part(
+                part_name,
+                format!(
+                    r#"<w:hdr xmlns:w="{WORD_NS}">{}</w:hdr>"#,
+                    text_form("field", "old")
+                )
+                .into_bytes(),
+            );
+            let document = Document::from_bytes(&package_bytes(package)).unwrap();
+            assert!(document.legacy_form_fields().is_err(), "{case}");
+        }
+    }
+
+    #[test]
+    fn forms_in_table_and_row_owned_content_controls_keep_their_ordinals() {
+        let mut package = base_package();
+        let table_control = format!(
+            r#"<w:sdt><w:sdtContent><w:tr><w:tc>{}</w:tc></w:tr></w:sdtContent></w:sdt>"#,
+            text_form("table-control", "first")
+        );
+        let row_control = format!(
+            r#"<w:sdt><w:sdtContent><w:tc>{}</w:tc></w:sdtContent></w:sdt>"#,
+            text_form("row-control", "second")
+        );
+        package.set_part(
+            "/word/document.xml",
+            format!(
+                r#"<w:document xmlns:w="{WORD_NS}"><w:body><w:tbl>{table_control}<w:tr>{row_control}<w:tc>{}</w:tc></w:tr></w:tbl><w:sectPr/></w:body></w:document>"#,
+                text_form("later", "third")
+            )
+            .into_bytes(),
+        );
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        let fields = document.legacy_form_fields().unwrap();
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[0].name.as_deref(), Some("table-control"));
+        assert_eq!(fields[1].name.as_deref(), Some("row-control"));
+        document
+            .set_legacy_form_field_value(
+                "/word/document.xml",
+                0,
+                LegacyFormFieldValue::Text("first changed".into()),
+            )
+            .unwrap();
+        document
+            .set_legacy_form_field_value(
+                "/word/document.xml",
+                1,
+                LegacyFormFieldValue::Text("second changed".into()),
+            )
+            .unwrap();
+        let fields = Document::from_bytes(&document.to_bytes().unwrap())
+            .unwrap()
+            .legacy_form_fields()
+            .unwrap();
+        assert_eq!(
+            fields[0].value,
+            LegacyFormFieldValue::Text("first changed".into())
+        );
+        assert_eq!(
+            fields[1].value,
+            LegacyFormFieldValue::Text("second changed".into())
+        );
+        assert_eq!(fields[2].value, LegacyFormFieldValue::Text("third".into()));
+    }
+
+    #[test]
+    fn invalid_legacy_form_mutations_are_atomic() {
+        let mut package = base_package();
+        let xml = format!(
+            r#"<?xml version="1.0"?><w:document xmlns:w="{WORD_NS}"><w:body>{}{}<w:sectPr/></w:body></w:document>"#,
+            text_form("text", "old"),
+            drop_down_form("choice")
+        );
+        package.set_part("/word/document.xml", xml.into_bytes());
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        assert!(
+            document
+                .set_legacy_form_field_value(
+                    "/word/document.xml",
+                    0,
+                    LegacyFormFieldValue::Checked(true),
+                )
+                .is_err()
+        );
+        assert!(
+            document
+                .set_legacy_form_field_value(
+                    "/word/document.xml",
+                    1,
+                    LegacyFormFieldValue::SelectedIndex(9),
+                )
+                .is_err()
+        );
+        assert!(
+            document
+                .set_legacy_form_field_value(
+                    "/word/document.xml",
+                    9,
+                    LegacyFormFieldValue::Text("missing".into()),
+                )
+                .is_err()
+        );
+        assert_eq!(document.to_bytes().unwrap(), before);
+    }
+
+    #[test]
+    fn unsafe_or_malformed_glossary_graphs_fail_closed() {
+        let glossary_xml = format!(
+            r#"<?xml version="1.0"?><w:glossaryDocument xmlns:w="{WORD_NS}"><w:docParts/></w:glossaryDocument>"#
+        );
+        for case in [
+            "duplicate",
+            "external",
+            "traversal",
+            "missing",
+            "wrong-type",
+            "wrong-root",
+        ] {
+            let mut package = base_package();
+            let relationships = package.get_or_create_part_rels("/word/document.xml");
+            let target = if case == "traversal" {
+                "../../outside.xml"
+            } else {
+                "glossary/document.xml"
+            };
+            let id = relationships.add(rel_types::GLOSSARY_DOCUMENT, target);
+            if case == "duplicate" {
+                relationships.add(rel_types::GLOSSARY_DOCUMENT, "glossary/other.xml");
+            }
+            if case == "external" {
+                relationships
+                    .items
+                    .iter_mut()
+                    .find(|relationship| relationship.id == id)
+                    .unwrap()
+                    .target_mode = Some("External".into());
+            }
+            let part_name = "/word/glossary/document.xml";
+            if case != "missing" && case != "traversal" {
+                package.set_part(
+                    part_name,
+                    if case == "wrong-root" {
+                        format!(r#"<w:document xmlns:w="{WORD_NS}"/>"#).into_bytes()
+                    } else {
+                        glossary_xml.as_bytes().to_vec()
+                    },
+                );
+                package.content_types.add_override(
+                    part_name,
+                    if case == "wrong-type" {
+                        "application/xml"
+                    } else {
+                        GLOSSARY_CONTENT_TYPE
+                    },
+                );
+            }
+            assert!(
+                Document::from_bytes(&package_bytes(package)).is_err(),
+                "{case} glossary graph must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn glossary_requires_an_explicit_content_type_override() {
+        let mut package = base_package();
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .add(rel_types::GLOSSARY_DOCUMENT, "glossary/document.xml");
+        package
+            .content_types
+            .defaults
+            .insert("xml".to_owned(), GLOSSARY_CONTENT_TYPE.to_owned());
+        package.set_part(
+            "/word/glossary/document.xml",
+            format!(
+                r#"<w:glossaryDocument xmlns:w="{WORD_NS}"><w:docParts/></w:glossaryDocument>"#
+            )
+            .into_bytes(),
+        );
+        assert!(Document::from_bytes(&package_bytes(package)).is_err());
+    }
+
+    #[test]
+    fn inline_run_content_control_forms_are_inventoried_and_mutated() {
+        let mut package = base_package();
+        let inline_runs = text_form_runs("inline-control", "old").replacen(
+            "</w:r>",
+            r#"</w:r><w:proofErr w:type="spellStart"/>"#,
+            1,
+        );
+        package.set_part(
+            "/word/document.xml",
+            format!(
+                r#"<w:document xmlns:w="{WORD_NS}"><w:body><w:p><w:sdt><w:sdtContent>{}</w:sdtContent></w:sdt></w:p><w:sectPr/></w:body></w:document>"#,
+                inline_runs
+            )
+            .into_bytes(),
+        );
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        let fields = document.legacy_form_fields().unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].name.as_deref(), Some("inline-control"));
+        document
+            .set_legacy_form_field_value(
+                "/word/document.xml",
+                0,
+                LegacyFormFieldValue::Text("changed".into()),
+            )
+            .unwrap();
+        let mut reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            reopened.legacy_form_fields().unwrap()[0].value,
+            LegacyFormFieldValue::Text("changed".into())
+        );
+        let saved = reopened.to_bytes().unwrap();
+        let package = OpcPackage::from_reader(std::io::Cursor::new(saved)).unwrap();
+        let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+        let begin = xml.find(r#"w:fldCharType="begin""#).unwrap();
+        let proofing = xml.find(r#"<w:proofErr w:type="spellStart"/>"#).unwrap();
+        let instruction = xml.find("<w:instrText> FORMTEXT </w:instrText>").unwrap();
+        assert!(
+            begin < proofing && proofing < instruction,
+            "saved XML moved the interleaved proofing marker: {xml}"
+        );
+    }
+
+    #[test]
+    fn inline_form_mutation_preserves_run_root_namespace_context() {
+        let mut package = base_package();
+        let inline_runs = text_form_runs("context", "old")
+            .replacen("<w:r>", r#"<w:r xmlns:x="urn:producer" x:run="keep">"#, 1)
+            .replacen("</w:ffData>", "<x:retained/></w:ffData>", 1);
+        package.set_part(
+            "/word/document.xml",
+            format!(
+                r#"<w:document xmlns:w="{WORD_NS}"><w:body><w:p><w:sdt><w:sdtContent>{inline_runs}</w:sdtContent></w:sdt></w:p><w:sectPr/></w:body></w:document>"#
+            )
+            .into_bytes(),
+        );
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        document
+            .set_legacy_form_field_value(
+                "/word/document.xml",
+                0,
+                LegacyFormFieldValue::Text("changed".into()),
+            )
+            .unwrap();
+        let saved = document.to_bytes().unwrap();
+        let package = OpcPackage::from_reader(std::io::Cursor::new(saved)).unwrap();
+        let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+        assert!(xml.contains(r#"xmlns:x="urn:producer" x:run="keep""#));
+        assert!(xml.contains("<x:retained/>"));
+        let reopened = Document::from_bytes(&package_bytes(package)).unwrap();
+        assert_eq!(
+            reopened.legacy_form_fields().unwrap()[0].value,
+            LegacyFormFieldValue::Text("changed".into())
+        );
+    }
+
+    #[test]
+    fn package_story_inline_forms_persist_in_every_supported_story() {
+        let mut package = base_package();
+        let stories = [
+            (rel_types::HEADER, "/word/header-inline.xml", "hdr"),
+            (rel_types::FOOTER, "/word/footer-inline.xml", "ftr"),
+            (
+                rel_types::FOOTNOTES,
+                "/word/footnotes-inline.xml",
+                "footnotes",
+            ),
+            (rel_types::ENDNOTES, "/word/endnotes-inline.xml", "endnotes"),
+        ];
+        for (relationship_type, part_name, root) in stories {
+            package
+                .get_or_create_part_rels("/word/document.xml")
+                .add(relationship_type, part_name.strip_prefix("/word/").unwrap());
+            add_story_content_type(&mut package, part_name, relationship_type);
+            let name = root.to_owned();
+            let content = if matches!(root, "hdr" | "ftr") {
+                format!(
+                    r#"<w:{root} xmlns:w="{WORD_NS}">{}</w:{root}>"#,
+                    inline_text_form(&name, "old")
+                )
+            } else {
+                let item = if root == "footnotes" {
+                    "footnote"
+                } else {
+                    "endnote"
+                };
+                format!(
+                    r#"<w:{root} xmlns:w="{WORD_NS}"><w:{item} w:id="2">{}</w:{item}></w:{root}>"#,
+                    inline_text_form(&name, "old")
+                )
+            };
+            package.set_part(part_name, content.into_bytes());
+        }
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        for (_, part_name, root) in stories {
+            document
+                .set_legacy_form_field_value(
+                    part_name,
+                    0,
+                    LegacyFormFieldValue::Text(format!("{root}-changed")),
+                )
+                .unwrap();
+        }
+        let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        let fields = reopened.legacy_form_fields().unwrap();
+        for (_, part_name, root) in stories {
+            assert!(fields.iter().any(|field| {
+                field.source_part == part_name
+                    && field.value == LegacyFormFieldValue::Text(format!("{root}-changed"))
+            }));
+        }
+    }
+
+    #[test]
+    fn package_form_stories_require_one_relationship_appropriate_root() {
+        for (relationship_type, root, suffix) in [
+            (rel_types::HEADER, "ftr", "wrong-header"),
+            (rel_types::FOOTER, "hdr", "wrong-footer"),
+        ] {
+            let mut package = base_package();
+            let part = format!("/word/{suffix}.xml");
+            package
+                .get_or_create_part_rels("/word/document.xml")
+                .add(relationship_type, &format!("{suffix}.xml"));
+            add_story_content_type(&mut package, &part, relationship_type);
+            package.set_part(
+                &part,
+                format!(
+                    r#"<w:{root} xmlns:w="{WORD_NS}">{}</w:{root}>"#,
+                    text_form("wrong-root", "old")
+                )
+                .into_bytes(),
+            );
+            let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+            assert!(document.legacy_form_fields().is_err(), "{suffix}");
+            let before = document.to_bytes().unwrap();
+            assert!(
+                document
+                    .set_legacy_form_field_value(
+                        &part,
+                        0,
+                        LegacyFormFieldValue::Text("changed".to_owned()),
+                    )
+                    .is_err(),
+                "{suffix}"
+            );
+            assert_eq!(document.to_bytes().unwrap(), before, "{suffix}");
+        }
+
+        let mut package = base_package();
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .add(rel_types::HEADER, "two-roots.xml");
+        add_story_content_type(&mut package, "/word/two-roots.xml", rel_types::HEADER);
+        package.set_part(
+            "/word/two-roots.xml",
+            format!(
+                r#"<w:hdr xmlns:w="{WORD_NS}">{}</w:hdr><w:hdr xmlns:w="{WORD_NS}">{}</w:hdr>"#,
+                text_form("first-root", "first"),
+                text_form("second-root", "second")
+            )
+            .into_bytes(),
+        );
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        assert!(document.legacy_form_fields().is_err());
+        let before = document.to_bytes().unwrap();
+        assert!(
+            document
+                .set_legacy_form_field_value(
+                    "/word/two-roots.xml",
+                    0,
+                    LegacyFormFieldValue::Text("changed".to_owned()),
+                )
+                .is_err()
+        );
+        assert_eq!(document.to_bytes().unwrap(), before);
+    }
+
+    #[test]
+    fn package_story_character_references_outside_the_root_are_rejected() {
+        for (case, xml) in [
+            (
+                "leading",
+                format!(
+                    r#"&#65;<w:hdr xmlns:w="{WORD_NS}">{}</w:hdr>"#,
+                    text_form("leading", "old")
+                ),
+            ),
+            (
+                "trailing",
+                format!(
+                    r#"<w:hdr xmlns:w="{WORD_NS}">{}</w:hdr>&#65;"#,
+                    text_form("trailing", "old")
+                ),
+            ),
+        ] {
+            let mut package = base_package();
+            package
+                .get_or_create_part_rels("/word/document.xml")
+                .add(rel_types::HEADER, &format!("{case}.xml"));
+            let part_name = format!("/word/{case}.xml");
+            add_story_content_type(&mut package, &part_name, rel_types::HEADER);
+            package.set_part(&part_name, xml.into_bytes());
+            let document = Document::from_bytes(&package_bytes(package)).unwrap();
+            assert!(document.legacy_form_fields().is_err(), "{case}");
+        }
+    }
+
+    #[test]
+    fn note_identity_and_type_require_word_namespace_attributes() {
+        let mut package = base_package();
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .add(rel_types::FOOTNOTES, "footnotes-namespaces.xml");
+        add_story_content_type(
+            &mut package,
+            "/word/footnotes-namespaces.xml",
+            rel_types::FOOTNOTES,
+        );
+        package.set_part(
+            "/word/footnotes-namespaces.xml",
+            format!(
+                r#"<w:footnotes xmlns:w="{WORD_NS}" xmlns:x="urn:foreign"><w:footnote x:id="2">{}</w:footnote><w:footnote w:id="-1" x:id="3">{}</w:footnote><w:footnote w:id="4" w:type="separator" x:type="normal">{}</w:footnote><w:footnote w:id="5" x:id="-1" x:type="separator">{}</w:footnote></w:footnotes>"#,
+                text_form("foreign-id", "old"),
+                text_form("foreign-override", "old"),
+                text_form("foreign-type-override", "old"),
+                text_form("valid", "old"),
+            )
+            .into_bytes(),
+        );
+        let document = Document::from_bytes(&package_bytes(package)).unwrap();
+        let fields = document.legacy_form_fields().unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].name.as_deref(), Some("valid"));
+    }
+
+    #[test]
+    fn explicitly_normal_note_ids_are_supported_regardless_of_sign() {
+        let mut package = base_package();
+        let relationships = package.get_or_create_part_rels("/word/document.xml");
+        relationships.add(rel_types::FOOTNOTES, "footnotes-signed.xml");
+        relationships.add(rel_types::ENDNOTES, "endnotes-signed.xml");
+        add_story_content_type(
+            &mut package,
+            "/word/footnotes-signed.xml",
+            rel_types::FOOTNOTES,
+        );
+        add_story_content_type(
+            &mut package,
+            "/word/endnotes-signed.xml",
+            rel_types::ENDNOTES,
+        );
+        package.set_part(
+            "/word/footnotes-signed.xml",
+            format!(
+                r#"<w:footnotes xmlns:w="{WORD_NS}"><w:footnote w:id="0" w:type="normal">{}</w:footnote><w:footnote w:id="-9" w:type="normal">{}</w:footnote></w:footnotes>"#,
+                text_form("zero-footnote", "zero"),
+                text_form("negative-footnote", "negative"),
+            )
+            .into_bytes(),
+        );
+        package.set_part(
+            "/word/endnotes-signed.xml",
+            format!(
+                r#"<w:endnotes xmlns:w="{WORD_NS}"><w:endnote w:id="0" w:type="normal">{}</w:endnote><w:endnote w:id="-11" w:type="normal">{}</w:endnote></w:endnotes>"#,
+                text_form("zero-endnote", "zero"),
+                text_form("negative-endnote", "negative"),
+            )
+            .into_bytes(),
+        );
+        let document = Document::from_bytes(&package_bytes(package)).unwrap();
+        let fields = document.legacy_form_fields().unwrap();
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| field.name.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "zero-endnote",
+                "negative-endnote",
+                "zero-footnote",
+                "negative-footnote",
+            ]
+        );
+    }
+
+    #[test]
+    fn duplicate_footnotes_and_endnotes_relationships_fail_closed() {
+        for (relationship_type, root, item) in [
+            (rel_types::FOOTNOTES, "footnotes", "footnote"),
+            (rel_types::ENDNOTES, "endnotes", "endnote"),
+        ] {
+            let mut package = base_package();
+            let relationships = package.get_or_create_part_rels("/word/document.xml");
+            relationships.add(relationship_type, &format!("{root}-one.xml"));
+            relationships.add(relationship_type, &format!("{root}-two.xml"));
+            for suffix in ["one", "two"] {
+                package.set_part(
+                    &format!("/word/{root}-{suffix}.xml"),
+                    format!(
+                        r#"<w:{root} xmlns:w="{WORD_NS}"><w:{item} w:id="2">{}</w:{item}></w:{root}>"#,
+                        text_form(suffix, "old")
+                    )
+                    .into_bytes(),
+                );
+            }
+            let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+            let before = document.to_bytes().unwrap();
+            assert!(document.legacy_form_fields().is_err(), "{root}");
+            assert!(
+                document
+                    .set_legacy_form_field_value(
+                        &format!("/word/{root}-one.xml"),
+                        0,
+                        LegacyFormFieldValue::Text("changed".to_owned()),
+                    )
+                    .is_err(),
+                "{root}"
+            );
+            assert_eq!(document.to_bytes().unwrap(), before, "{root}");
+        }
+    }
+
+    #[test]
+    fn package_story_declarations_and_doctypes_require_document_positions() {
+        for (case, xml) in [
+            (
+                "nested-declaration",
+                format!(
+                    r#"<w:hdr xmlns:w="{WORD_NS}"><?xml version="1.0"?>{}</w:hdr>"#,
+                    text_form("nested", "old")
+                ),
+            ),
+            (
+                "trailing-declaration",
+                format!(
+                    r#"<w:hdr xmlns:w="{WORD_NS}">{}</w:hdr><?xml version="1.0"?>"#,
+                    text_form("trailing", "old")
+                ),
+            ),
+            (
+                "trailing-doctype",
+                format!(
+                    r#"<w:hdr xmlns:w="{WORD_NS}">{}</w:hdr><!DOCTYPE hdr>"#,
+                    text_form("doctype", "old")
+                ),
+            ),
+        ] {
+            let mut package = base_package();
+            let part_name = format!("/word/{case}.xml");
+            package
+                .get_or_create_part_rels("/word/document.xml")
+                .add(rel_types::HEADER, &format!("{case}.xml"));
+            package
+                .content_types
+                .add_override(&part_name, HEADER_CONTENT_TYPE);
+            package.set_part(&part_name, xml.into_bytes());
+            assert!(
+                Document::from_bytes(&package_bytes(package))
+                    .unwrap()
+                    .legacy_form_fields()
+                    .is_err(),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn package_story_document_type_declarations_fail_closed_atomically() {
+        for (case, declaration) in [
+            ("uppercase-simple", "<!DOCTYPE w:hdr>"),
+            ("lowercase-keyword", "<!doctype w:hdr>"),
+            ("invalid-root-name", "<!DOCTYPE 1producer>"),
+            (
+                "external-system-identifier",
+                r#"<!DOCTYPE w:hdr SYSTEM "urn:producer">"#,
+            ),
+            (
+                "external-public-identifier",
+                r#"<!DOCTYPE w:hdr PUBLIC "producer" "urn:producer">"#,
+            ),
+            ("internal-subset", "<!DOCTYPE w:hdr [<!ELEMENT w:hdr ANY>]>"),
+            (
+                "truncated-internal-subset",
+                "<!DOCTYPE w:hdr [<!ELEMENT w:hdr ANY>",
+            ),
+        ] {
+            let mut package = base_package();
+            let part_name = format!("/word/doctype-{case}.xml");
+            package
+                .get_or_create_part_rels("/word/document.xml")
+                .add(rel_types::HEADER, &format!("doctype-{case}.xml"));
+            package
+                .content_types
+                .add_override(&part_name, HEADER_CONTENT_TYPE);
+            package.set_part(
+                &part_name,
+                format!(
+                    r#"{declaration}<w:hdr xmlns:w="{WORD_NS}">{}</w:hdr>"#,
+                    text_form(case, "old")
+                )
+                .into_bytes(),
+            );
+            let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+            let before = document.to_bytes().unwrap();
+            assert!(document.legacy_form_fields().is_err(), "{case}");
+            assert!(
+                document
+                    .set_legacy_form_field_value(
+                        &part_name,
+                        0,
+                        LegacyFormFieldValue::Text("changed".to_owned()),
+                    )
+                    .is_err(),
+                "{case}"
+            );
+            assert_eq!(document.to_bytes().unwrap(), before, "{case}");
+        }
+    }
+
+    #[test]
+    fn package_story_xml_declarations_require_valid_pseudo_attributes() {
+        for (case, declaration) in [
+            ("missing-version", r#"<?xml?>"#),
+            (
+                "encoding-first",
+                r#"<?xml encoding="UTF-8" version="1.0"?>"#,
+            ),
+            (
+                "duplicate-version",
+                r#"<?xml version="1.0" version="1.0"?>"#,
+            ),
+            (
+                "invalid-standalone",
+                r#"<?xml version="1.0" standalone="maybe"?>"#,
+            ),
+        ] {
+            let mut package = base_package();
+            let part_name = format!("/word/{case}.xml");
+            package
+                .get_or_create_part_rels("/word/document.xml")
+                .add(rel_types::HEADER, &format!("{case}.xml"));
+            package
+                .content_types
+                .add_override(&part_name, HEADER_CONTENT_TYPE);
+            package.set_part(
+                &part_name,
+                format!(
+                    r#"{declaration}<w:hdr xmlns:w="{WORD_NS}">{}</w:hdr>"#,
+                    text_form(case, "old")
+                )
+                .into_bytes(),
+            );
+            assert!(
+                Document::from_bytes(&package_bytes(package))
+                    .unwrap()
+                    .legacy_form_fields()
+                    .is_err(),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn ooxml_package_stories_reject_xml_1_1_declarations() {
+        let mut package = base_package();
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .add(rel_types::HEADER, "xml-1-1.xml");
+        package
+            .content_types
+            .add_override("/word/xml-1-1.xml", HEADER_CONTENT_TYPE);
+        package.set_part(
+            "/word/xml-1-1.xml",
+            format!(
+                r#"<?xml version="1.1"?><w:hdr xmlns:w="{WORD_NS}">{}</w:hdr>"#,
+                text_form("xml-1-1", "old")
+            )
+            .into_bytes(),
+        );
+        assert!(
+            Document::from_bytes(&package_bytes(package))
+                .unwrap()
+                .legacy_form_fields()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn package_story_relationship_role_requires_exact_content_type_override() {
+        for (case, content_type) in [
+            ("missing", None),
+            ("generic", Some("application/xml")),
+            ("wrong-role", Some(FOOTER_CONTENT_TYPE)),
+        ] {
+            let mut package = base_package();
+            let part_name = format!("/word/header-{case}.xml");
+            package
+                .get_or_create_part_rels("/word/document.xml")
+                .add(rel_types::HEADER, &format!("header-{case}.xml"));
+            if let Some(content_type) = content_type {
+                package.content_types.add_override(&part_name, content_type);
+            }
+            package.set_part(
+                &part_name,
+                format!(
+                    r#"<w:hdr xmlns:w="{WORD_NS}">{}</w:hdr>"#,
+                    text_form(case, "old")
+                )
+                .into_bytes(),
+            );
+            let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+            let before = document.to_bytes().unwrap();
+            assert!(document.legacy_form_fields().is_err(), "{case}");
+            assert!(
+                document
+                    .set_legacy_form_field_value(
+                        &part_name,
+                        0,
+                        LegacyFormFieldValue::Text("changed".to_owned()),
+                    )
+                    .is_err(),
+                "{case}"
+            );
+            assert_eq!(document.to_bytes().unwrap(), before, "{case}");
+        }
+    }
+
+    #[test]
+    fn encoded_note_identity_and_type_attributes_are_decoded() {
+        let mut package = base_package();
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .add(rel_types::FOOTNOTES, "footnotes-encoded.xml");
+        package
+            .content_types
+            .add_override("/word/footnotes-encoded.xml", FOOTNOTES_CONTENT_TYPE);
+        package.set_part(
+            "/word/footnotes-encoded.xml",
+            format!(r#"<w:footnotes xmlns:w="{WORD_NS}"><w:footnote w:id="&#49;" w:type="norm&#97;l">{}</w:footnote></w:footnotes>"#, text_form("encoded", "old")).into_bytes(),
+        );
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        let fields = document.legacy_form_fields().unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].name.as_deref(), Some("encoded"));
+        document
+            .set_legacy_form_field_value(
+                "/word/footnotes-encoded.xml",
+                0,
+                LegacyFormFieldValue::Text("changed".to_owned()),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn duplicate_package_story_relationship_ids_fail_closed() {
+        let mut package = base_package();
+        let relationships = package.get_or_create_part_rels("/word/document.xml");
+        relationships.add(rel_types::HEADER, "header-id-one.xml");
+        relationships.add(rel_types::HEADER, "header-id-two.xml");
+        let duplicate_id = relationships.items[relationships.items.len() - 2]
+            .id
+            .clone();
+        relationships.items.last_mut().unwrap().id = duplicate_id;
+        for suffix in ["one", "two"] {
+            let part_name = format!("/word/header-id-{suffix}.xml");
+            package
+                .content_types
+                .add_override(&part_name, HEADER_CONTENT_TYPE);
+            package.set_part(
+                &part_name,
+                format!(
+                    r#"<w:hdr xmlns:w="{WORD_NS}">{}</w:hdr>"#,
+                    text_form(suffix, "old")
+                )
+                .into_bytes(),
+            );
+        }
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        assert!(document.legacy_form_fields().is_err());
+        assert!(
+            document
+                .set_legacy_form_field_value(
+                    "/word/header-id-one.xml",
+                    0,
+                    LegacyFormFieldValue::Text("changed".to_owned()),
+                )
+                .is_err()
+        );
+        assert_eq!(document.to_bytes().unwrap(), before);
+    }
+
+    #[test]
+    fn conflicting_package_story_relationship_roles_are_rejected() {
+        let mut package = base_package();
+        let relationships = package.get_or_create_part_rels("/word/document.xml");
+        relationships.add(rel_types::HEADER, "shared-story.xml");
+        relationships.add(rel_types::FOOTER, "shared-story.xml");
+        package.set_part(
+            "/word/shared-story.xml",
+            format!(
+                r#"<w:hdr xmlns:w="{WORD_NS}">{}</w:hdr>"#,
+                text_form("shared", "old")
+            )
+            .into_bytes(),
+        );
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        assert!(document.legacy_form_fields().is_err());
+        let before = document.to_bytes().unwrap();
+        assert!(
+            document
+                .set_legacy_form_field_value(
+                    "/word/shared-story.xml",
+                    0,
+                    LegacyFormFieldValue::Text("changed".to_owned()),
+                )
+                .is_err()
+        );
+        assert_eq!(document.to_bytes().unwrap(), before);
+    }
+
+    #[test]
+    fn default_namespace_valueless_header_form_persists_false() {
+        let mut package = base_package();
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .add(rel_types::HEADER, "header-default.xml");
+        add_story_content_type(&mut package, "/word/header-default.xml", rel_types::HEADER);
+        package.set_part(
+            "/word/header-default.xml",
+            format!(
+                concat!(
+                    r#"<hdr xmlns="{WORD_NS}" xmlns:q="{WORD_NS}"><p><sdt><sdtContent>"#,
+                    r#"<r><fldChar q:fldCharType="begin"><ffData><name q:val="default"/><checkBox><sizeAuto/><checked/></checkBox></ffData></fldChar></r>"#,
+                    r#"<r><instrText> FORMCHECKBOX </instrText></r><r><fldChar q:fldCharType="separate"/></r>"#,
+                    r#"<r><t>☒</t></r><r><fldChar q:fldCharType="end"/></r>"#,
+                    r#"</sdtContent></sdt></p></hdr>"#,
+                ),
+                WORD_NS = WORD_NS,
+            )
+            .into_bytes(),
+        );
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        document
+            .set_legacy_form_field_value(
+                "/word/header-default.xml",
+                0,
+                LegacyFormFieldValue::Checked(false),
+            )
+            .unwrap();
+        let saved = document.to_bytes().unwrap();
+        let package = OpcPackage::from_reader(std::io::Cursor::new(saved.clone())).unwrap();
+        let xml =
+            std::str::from_utf8(package.get_part("/word/header-default.xml").unwrap()).unwrap();
+        assert!(xml.contains(r#"<checked q:val="0"/>"#), "{xml}");
+        let reopened = Document::from_bytes(&saved).unwrap();
+        assert_eq!(
+            reopened.legacy_form_fields().unwrap()[0].value,
+            LegacyFormFieldValue::Checked(false)
+        );
+    }
+
+    #[test]
+    fn nested_inline_forms_have_mutable_source_ordinals() {
+        let mut package = base_package();
+        let nested_only = nested_inline_form_runs(None, "nested-only", "first");
+        let outer_and_nested =
+            nested_inline_form_runs(Some("outer"), "nested-under-form", "second");
+        package.set_part(
+            "/word/document.xml",
+            format!(
+                concat!(
+                    r#"<w:document xmlns:w="{WORD_NS}"><w:body>"#,
+                    r#"<w:p><w:sdt><w:sdtContent>{nested_only}</w:sdtContent></w:sdt></w:p>"#,
+                    r#"<w:p><w:sdt><w:sdtContent>{outer_and_nested}</w:sdtContent></w:sdt></w:p>"#,
+                    r#"<w:sectPr/></w:body></w:document>"#,
+                ),
+                WORD_NS = WORD_NS,
+                nested_only = nested_only,
+                outer_and_nested = outer_and_nested,
+            )
+            .into_bytes(),
+        );
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        let fields = document.legacy_form_fields().unwrap();
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| field.name.as_deref())
+                .collect::<Vec<_>>(),
+            [
+                Some("nested-only"),
+                Some("outer"),
+                Some("nested-under-form")
+            ]
+        );
+        document
+            .set_legacy_form_field_value(
+                "/word/document.xml",
+                0,
+                LegacyFormFieldValue::Text("first-changed".into()),
+            )
+            .unwrap();
+        document
+            .set_legacy_form_field_value(
+                "/word/document.xml",
+                2,
+                LegacyFormFieldValue::Text("second-changed".into()),
+            )
+            .unwrap();
+        let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        let fields = reopened.legacy_form_fields().unwrap();
+        assert_eq!(
+            fields[0].value,
+            LegacyFormFieldValue::Text("first-changed".into())
+        );
+        assert_eq!(
+            fields[2].value,
+            LegacyFormFieldValue::Text("second-changed".into())
+        );
+    }
+
+    #[test]
+    fn nested_instruction_forms_keep_source_order_identity() {
+        let mut package = base_package();
+        package.set_part(
+            "/word/document.xml",
+            format!(
+                r#"<w:document xmlns:w="{WORD_NS}"><w:body><w:p>{}</w:p><w:sectPr/></w:body></w:document>"#,
+                nested_instruction_form_runs()
+            )
+            .into_bytes(),
+        );
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        let fields = document.legacy_form_fields().unwrap();
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| field.name.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("switch-first"), Some("positional-second")]
+        );
+        document
+            .set_legacy_form_field_value(
+                "/word/document.xml",
+                0,
+                LegacyFormFieldValue::Text("switch-changed".into()),
+            )
+            .unwrap();
+        let fields = Document::from_bytes(&document.to_bytes().unwrap())
+            .unwrap()
+            .legacy_form_fields()
+            .unwrap();
+        assert_eq!(
+            fields[0].value,
+            LegacyFormFieldValue::Text("switch-changed".into())
+        );
+        assert_eq!(
+            fields[1].value,
+            LegacyFormFieldValue::Text("positional-old".into())
+        );
+    }
+
+    #[test]
+    fn interleaved_nested_inline_controls_keep_source_order_identity() {
+        let mut package = base_package();
+        let nested = format!(
+            r#"<w:sdt><w:sdtContent>{}</w:sdtContent></w:sdt>"#,
+            text_form_runs("middle", "middle-old")
+        );
+        package.set_part(
+            "/word/document.xml",
+            format!(
+                concat!(
+                    r#"<w:document xmlns:w="{WORD_NS}"><w:body><w:p><w:sdt><w:sdtContent>"#,
+                    "{}{}{}",
+                    r#"</w:sdtContent></w:sdt></w:p><w:sectPr/></w:body></w:document>"#,
+                ),
+                text_form_runs("first", "first-old"),
+                nested,
+                text_form_runs("last", "last-old"),
+                WORD_NS = WORD_NS,
+            )
+            .into_bytes(),
+        );
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        let fields = document.legacy_form_fields().unwrap();
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| field.name.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("first"), Some("middle"), Some("last")]
+        );
+        document
+            .set_legacy_form_field_value(
+                "/word/document.xml",
+                1,
+                LegacyFormFieldValue::Text("middle-changed".into()),
+            )
+            .unwrap();
+        let fields = Document::from_bytes(&document.to_bytes().unwrap())
+            .unwrap()
+            .legacy_form_fields()
+            .unwrap();
+        assert_eq!(
+            fields.iter().map(|field| &field.value).collect::<Vec<_>>(),
+            [
+                &LegacyFormFieldValue::Text("first-old".into()),
+                &LegacyFormFieldValue::Text("middle-changed".into()),
+                &LegacyFormFieldValue::Text("last-old".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn duplicate_ffdata_owner_is_rejected_without_mutating_preserved_source() {
+        let mut package = base_package();
+        let duplicate_owner = concat!(
+            r#"<w:r><w:fldChar w:fldCharType="begin">"#,
+            r#"<w:ffData><w:name w:val="first"/><w:textInput><w:default w:val="old"/></w:textInput></w:ffData>"#,
+            r#"<w:ffData><w:name w:val="duplicate"/><w:textInput><w:default w:val="other"/></w:textInput></w:ffData>"#,
+            r#"</w:fldChar></w:r><w:r><w:instrText> FORMTEXT </w:instrText></w:r>"#,
+            r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>old</w:t></w:r>"#,
+            r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+        );
+        package.set_part(
+            "/word/document.xml",
+            format!(
+                r#"<w:document xmlns:w="{WORD_NS}"><w:body><w:p>{duplicate_owner}</w:p><w:sectPr/></w:body></w:document>"#
+            )
+            .into_bytes(),
+        );
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        assert!(document.legacy_form_fields().is_err());
+        assert!(
+            document
+                .set_legacy_form_field_value(
+                    "/word/document.xml",
+                    0,
+                    LegacyFormFieldValue::Text("changed".into()),
+                )
+                .is_err()
+        );
+        assert_eq!(document.to_bytes().unwrap(), before);
+    }
+
+    #[test]
+    fn empty_doc_part_properties_accept_valid_building_block_replacement() {
+        let mut package = base_package();
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .add(rel_types::GLOSSARY_DOCUMENT, "glossary/document.xml");
+        package
+            .content_types
+            .add_override("/word/glossary/document.xml", GLOSSARY_CONTENT_TYPE);
+        package.set_part(
+            "/word/glossary/document.xml",
+            format!(
+                r#"<w:glossaryDocument xmlns:w="{WORD_NS}"><w:docParts><w:docPart><w:docPartPr/><w:docPartBody><w:p/></w:docPartBody></w:docPart></w:docParts></w:glossaryDocument>"#
+            )
+            .into_bytes(),
+        );
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        let mut replacement = document.building_blocks().unwrap()[0].block.clone();
+        replacement.name = "named".to_owned();
+        document
+            .replace_building_block("/word/glossary/document.xml", 0, replacement)
+            .unwrap();
+        let saved = document.to_bytes().unwrap();
+        let reopened = Document::from_bytes(&saved).unwrap();
+        assert_eq!(reopened.building_blocks().unwrap()[0].block.name, "named");
+        let package = OpcPackage::from_reader(std::io::Cursor::new(saved)).unwrap();
+        let xml =
+            std::str::from_utf8(package.get_part("/word/glossary/document.xml").unwrap()).unwrap();
+        assert!(xml.contains("<w:docPartPr>"));
+        assert!(xml.contains(r#"<w:name w:val="named"/>"#));
+    }
+
+    #[test]
+    fn package_story_block_content_forms_keep_source_order_and_mutate() {
+        let mut package = base_package();
+        for (relationship_type, target) in [
+            (rel_types::HEADER, "header-block.xml"),
+            (rel_types::FOOTER, "footer-block.xml"),
+            (rel_types::FOOTNOTES, "footnotes-block.xml"),
+            (rel_types::ENDNOTES, "endnotes-block.xml"),
+        ] {
+            package
+                .get_or_create_part_rels("/word/document.xml")
+                .add(relationship_type, target);
+            add_story_content_type(&mut package, &format!("/word/{target}"), relationship_type);
+        }
+        package.set_part(
+            "/word/header-block.xml",
+            format!(
+                r#"<w:hdr xmlns:w="{WORD_NS}">{}<w:tbl><w:tr><w:tc>{}</w:tc></w:tr></w:tbl></w:hdr>"#,
+                text_form("header-direct", "direct-old"),
+                text_form("header-table", "header-old")
+            )
+            .into_bytes(),
+        );
+        package.set_part(
+            "/word/footer-block.xml",
+            format!(
+                r#"<w:ftr xmlns:w="{WORD_NS}"><w:sdt><w:sdtContent>{}</w:sdtContent></w:sdt></w:ftr>"#,
+                text_form("footer-control", "footer-old")
+            )
+            .into_bytes(),
+        );
+        package.set_part(
+            "/word/footnotes-block.xml",
+            format!(
+                r#"<w:footnotes xmlns:w="{WORD_NS}"><w:footnote w:id="2"><w:tbl><w:tr><w:tc>{}</w:tc></w:tr></w:tbl></w:footnote></w:footnotes>"#,
+                text_form("footnote-table", "footnote-old")
+            )
+            .into_bytes(),
+        );
+        package.set_part(
+            "/word/endnotes-block.xml",
+            format!(
+                r#"<w:endnotes xmlns:w="{WORD_NS}"><w:endnote w:id="2"><w:sdt><w:sdtContent>{}</w:sdtContent></w:sdt></w:endnote></w:endnotes>"#,
+                text_form("endnote-control", "endnote-old")
+            )
+            .into_bytes(),
+        );
+
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        let fields = document.legacy_form_fields().unwrap();
+        let names = |part: &str| {
+            fields
+                .iter()
+                .filter(|field| field.source_part == part)
+                .map(|field| field.name.as_deref())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names("/word/header-block.xml"),
+            [Some("header-direct"), Some("header-table")]
+        );
+        assert_eq!(names("/word/footer-block.xml"), [Some("footer-control")]);
+        assert_eq!(names("/word/footnotes-block.xml"), [Some("footnote-table")]);
+        assert_eq!(names("/word/endnotes-block.xml"), [Some("endnote-control")]);
+
+        for (part, ordinal, value) in [
+            ("/word/header-block.xml", 1, "header-changed"),
+            ("/word/footer-block.xml", 0, "footer-changed"),
+            ("/word/footnotes-block.xml", 0, "footnote-changed"),
+            ("/word/endnotes-block.xml", 0, "endnote-changed"),
+        ] {
+            document
+                .set_legacy_form_field_value(
+                    part,
+                    ordinal,
+                    LegacyFormFieldValue::Text(value.to_owned()),
+                )
+                .unwrap();
+        }
+        let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        let fields = reopened.legacy_form_fields().unwrap();
+        assert!(fields.iter().any(|field| {
+            field.source_part == "/word/header-block.xml"
+                && field.ordinal == 0
+                && field.value == LegacyFormFieldValue::Text("direct-old".into())
+        }));
+        for (part, value) in [
+            ("/word/header-block.xml", "header-changed"),
+            ("/word/footer-block.xml", "footer-changed"),
+            ("/word/footnotes-block.xml", "footnote-changed"),
+            ("/word/endnotes-block.xml", "endnote-changed"),
+        ] {
+            assert!(fields.iter().any(|field| {
+                field.source_part == part
+                    && field.value == LegacyFormFieldValue::Text(value.to_owned())
+            }));
+        }
+    }
+
+    #[test]
+    fn unrelated_building_block_edits_preserve_every_unsupported_subtree_byte() {
+        let mut package = base_package();
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .add(rel_types::GLOSSARY_DOCUMENT, "glossary/document.xml");
+        package
+            .content_types
+            .add_override("/word/glossary/document.xml", GLOSSARY_CONTENT_TYPE);
+        let untouched = r#"<w:docPart producer="untouched"><w:docPartPr><w:name w:val="second"/><x:property> exact </x:property></w:docPartPr><w:docPartBody><w:p/><mc:AlternateContent><mc:Fallback><x:body/></mc:Fallback></mc:AlternateContent></w:docPartBody></w:docPart>"#;
+        package.set_part(
+            "/word/glossary/document.xml",
+            format!(
+                r#"<w:glossaryDocument xmlns:w="{WORD_NS}" xmlns:x="urn:producer" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><w:docParts><w:docPart><w:docPartPr><w:name w:val="first"/><x:selected keep="exact"/></w:docPartPr><w:docPartBody><w:p/></w:docPartBody></w:docPart>{untouched}</w:docParts></w:glossaryDocument>"#
+            )
+            .into_bytes(),
+        );
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        let mut replacement = document.building_blocks().unwrap()[0].block.clone();
+        replacement.description = Some("changed".into());
+        document
+            .replace_building_block("/word/glossary/document.xml", 0, replacement)
+            .unwrap();
+        let saved = document.to_bytes().unwrap();
+        let package = OpcPackage::from_reader(std::io::Cursor::new(saved)).unwrap();
+        let xml =
+            std::str::from_utf8(package.get_part("/word/glossary/document.xml").unwrap()).unwrap();
+        assert!(xml.contains(r#"<x:selected keep="exact"/>"#));
+        assert!(xml.contains(untouched));
+    }
+
+    #[test]
+    fn failed_building_block_replacements_leave_document_bytes_unchanged() {
+        let mut package = base_package();
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .add(rel_types::GLOSSARY_DOCUMENT, "glossary/document.xml");
+        package
+            .content_types
+            .add_override("/word/glossary/document.xml", GLOSSARY_CONTENT_TYPE);
+        package.set_part(
+            "/word/glossary/document.xml",
+            format!(r#"<w:glossaryDocument xmlns:w="{WORD_NS}"><w:docParts><w:docPart><w:docPartPr><w:name w:val="entry"/></w:docPartPr><w:docPartBody><w:p/></w:docPartBody></w:docPart></w:docParts></w:glossaryDocument>"#).into_bytes(),
+        );
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        let mut invalid = document.building_blocks().unwrap()[0].block.clone();
+        invalid.name.clear();
+        assert!(
+            document
+                .replace_building_block("/word/glossary/document.xml", 0, invalid)
+                .is_err()
+        );
+        assert!(
+            document
+                .replace_building_block(
+                    "/word/glossary/document.xml",
+                    4,
+                    document.building_blocks().unwrap()[0].block.clone(),
+                )
+                .is_err()
+        );
+        assert_eq!(document.to_bytes().unwrap(), before);
+    }
+
+    #[test]
+    fn building_block_replacement_rejects_partial_category_pairs_atomically() {
+        let mut package = base_package();
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .add(rel_types::GLOSSARY_DOCUMENT, "glossary/document.xml");
+        package
+            .content_types
+            .add_override("/word/glossary/document.xml", GLOSSARY_CONTENT_TYPE);
+        package.set_part(
+            "/word/glossary/document.xml",
+            format!(r#"<w:glossaryDocument xmlns:w="{WORD_NS}"><w:docParts><w:docPart><w:docPartPr><w:name w:val="entry"/><w:category><w:name w:val="category"/><w:gallery w:val="autoTxt"/></w:category></w:docPartPr><w:docPartBody/></w:docPart></w:docParts></w:glossaryDocument>"#).into_bytes(),
+        );
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        for clear_category in [true, false] {
+            let mut invalid = document.building_blocks().unwrap()[0].block.clone();
+            if clear_category {
+                invalid.category = None;
+            } else {
+                invalid.gallery = None;
+            }
+            assert!(
+                document
+                    .replace_building_block("/word/glossary/document.xml", 0, invalid)
+                    .is_err()
+            );
+            assert_eq!(document.to_bytes().unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn building_block_replacement_rejects_invalid_gallery_and_behavior_enums_atomically() {
+        let mut package = base_package();
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .add(rel_types::GLOSSARY_DOCUMENT, "glossary/document.xml");
+        package
+            .content_types
+            .add_override("/word/glossary/document.xml", GLOSSARY_CONTENT_TYPE);
+        package.set_part(
+            "/word/glossary/document.xml",
+            format!(r#"<w:glossaryDocument xmlns:w="{WORD_NS}"><w:docParts><w:docPart><w:docPartPr><w:name w:val="entry"/><w:category><w:name w:val="category"/><w:gallery w:val="autoTxt"/></w:category><w:behaviors><w:behavior w:val="content"/></w:behaviors></w:docPartPr><w:docPartBody/></w:docPart></w:docParts></w:glossaryDocument>"#).into_bytes(),
+        );
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        for invalid_gallery in [true, false] {
+            let mut invalid = document.building_blocks().unwrap()[0].block.clone();
+            if invalid_gallery {
+                invalid.gallery = Some("not-a-gallery".to_owned());
+            } else {
+                invalid.behaviors = vec!["not-a-behavior".to_owned()];
+            }
+            assert!(
+                document
+                    .replace_building_block("/word/glossary/document.xml", 0, invalid)
+                    .is_err()
+            );
+            assert_eq!(document.to_bytes().unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn building_block_replacement_rejects_invalid_guid_atomically() {
+        let mut package = base_package();
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .add(rel_types::GLOSSARY_DOCUMENT, "glossary/document.xml");
+        package
+            .content_types
+            .add_override("/word/glossary/document.xml", GLOSSARY_CONTENT_TYPE);
+        package.set_part(
+            "/word/glossary/document.xml",
+            format!(r#"<w:glossaryDocument xmlns:w="{WORD_NS}"><w:docParts><w:docPart><w:docPartPr><w:name w:val="entry"/><w:guid w:val="{{01234567-89AB-CDEF-0123-456789ABCDEF}}"/></w:docPartPr><w:docPartBody/></w:docPart></w:docParts></w:glossaryDocument>"#).into_bytes(),
+        );
+        let mut document = Document::from_bytes(&package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        let mut invalid = document.building_blocks().unwrap()[0].block.clone();
+        invalid.guid = Some("not-a-guid".to_owned());
+        assert!(
+            document
+                .replace_building_block("/word/glossary/document.xml", 0, invalid)
+                .is_err()
+        );
+        assert_eq!(document.to_bytes().unwrap(), before);
+    }
+
+    #[test]
+    fn glossary_and_story_relationship_targets_must_be_normalized() {
+        for target in ["glossary//document.xml", "glossary/./document.xml"] {
+            let mut package = base_package();
+            package
+                .get_or_create_part_rels("/word/document.xml")
+                .add(rel_types::GLOSSARY_DOCUMENT, target);
+            package
+                .content_types
+                .add_override("/word/glossary/document.xml", GLOSSARY_CONTENT_TYPE);
+            package.set_part(
+                "/word/glossary/document.xml",
+                format!(r#"<w:glossaryDocument xmlns:w="{WORD_NS}"><w:docParts><w:docPart><w:docPartPr><w:name w:val="entry"/></w:docPartPr><w:docPartBody/></w:docPart></w:docParts></w:glossaryDocument>"#).into_bytes(),
+            );
+            if let Ok(document) = Document::from_bytes(&package_bytes(package)) {
+                assert!(document.building_blocks().is_err(), "{target}");
+            }
+        }
+
+        for target in ["stories//header.xml", "stories/./header.xml"] {
+            let mut package = base_package();
+            package
+                .get_or_create_part_rels("/word/document.xml")
+                .add(rel_types::HEADER, target);
+            add_story_content_type(&mut package, "/word/stories/header.xml", rel_types::HEADER);
+            package.set_part(
+                "/word/stories/header.xml",
+                format!(r#"<w:hdr xmlns:w="{WORD_NS}"><w:p/></w:hdr>"#).into_bytes(),
+            );
+            if let Ok(document) = Document::from_bytes(&package_bytes(package)) {
+                assert!(document.legacy_form_fields().is_err(), "{target}");
+            }
+        }
+    }
+}

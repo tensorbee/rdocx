@@ -82,6 +82,7 @@ defended.
 | S65 | M22 | 3 | 3 | 0 | 8 | 1 | Opened M22 with typed OfficeMath authoring, deterministic layout and PDF rendering, and bounded MathML and LaTeX conversion. The full close gate passed with all 49 hashes unchanged, every package archive below 10 MiB, and sprint review pass 9 clean. M22 continues in S66 with extended field evaluation and dynamic table of contents rebuild |
 | S66 | M22 | 2 | 2 | 0 | 8 | 2 | Added structured extended field evaluation and deterministic dynamic table of contents rebuilding with pinned Word parity, final page targets, atomic failure, and source-preserving ownership. The full close gate passed with all 49 hashes unchanged, every package archive below 10 MiB, and final sprint review pass 3 clean. M22 continues in S67 with advanced automation and comparison |
 | S67 | M22 | 3 | 3 | 0 | 10 | 1 | Added advanced rich mail merge, full-story document comparison, and deterministic character, word, and ignore policies. The full close gate passed with all 49 hashes unchanged, every package archive below 10 MiB, prompt-free Word 16.104 parity, and global sprint review pass 2 clean. M22 continues in S68 with embedded content, forms, and building blocks |
+| S68 | M22, X | 2 | 2 | 0 | 8 | 1 | Added relationship-owned embedded-content and macro inventory, typed legacy forms, and glossary and building-block editing with atomic source preservation. The full close gate passed with all 49 hashes unchanged, every package archive below 10 MiB, and sprint review pass 2 clean after normalized Pack URI handling was corrected and shared XML validation was filed as F-X077. M22 continues in S69 with modern package and web variants |
 
 ## Completed features
 
@@ -385,6 +386,8 @@ defended.
 | F-234 | S67 | L | 4 | 1 | 2026-09-04 | Added deterministic full-story comparison, package-wide revision resolution, source-span preservation, and pinned Word parity |
 | F-233 | S67 | L | 4 | 1 | 2026-09-04 | Added atomic nested rich mail merge with exact-size images, complete fragment imports, identity remapping, and flat API compatibility |
 | F-235 | S67 | M | 2 | 1 | 2026-09-04 | Added deterministic Word and Character comparison plus left-biased formatting, whitespace, field, comment, and story ignore policies |
+| F-236 | S68 | L | 4 | 1 | 2026-09-05 | Added relationship-owned OLE, ActiveX, and VBA inventory with exact hashes, byte-preserving mutation, and explicit signature policy |
+| F-237 | S68 | L | 4 | 1 | 2026-09-05 | Added typed legacy form editing and relationship-owned glossary, AutoText, and building-block inventory and replacement |
 
 ## Velocity
 
@@ -467,6 +470,7 @@ five working days.
 | S65 | 3 | 1 | 15.00 |
 | S66 | 2 | 2 | 5.00 |
 | S67 | 3 | 1 | 15.00 |
+| S68 | 2 | 1 | 10.00 |
 
 ## Escalation record
 
@@ -537,3 +541,4 @@ was done about it. Empty is the expected state.
 | 2026-09-03 | Sprint estimate variance exceeded 30 percent | S65 | Record 1 actual day against 8 estimated. Isolated workers, the typed equation foundation, and established Word, Poppler, and Pandoc oracles allowed layout and conversion work to overlap after F-228. The resulting 15.00 stories per week is not a sustainable forecast, so retain the dependency-defined S66 boundary |
 | 2026-09-04 | Sprint estimate variance exceeded 30 percent | S66 | Record 2 actual days against 8 estimated. The strict dependency let F-232 reuse F-231's completed recursive field grammar, while the established Word differential and deterministic layout boundaries concentrated preservation and pagination corrections in one reviewed path. The resulting 5.00 stories per week matches the long-run delivery velocity, so retain the dependency-defined S67 boundary |
 | 2026-09-04 | Sprint estimate variance exceeded 30 percent | S67 | Record 1 actual day against 10 estimated. Isolated workers, the completed field and comparison foundations, and the established Word oracle concentrated review and verification across one integrated automation boundary. The resulting 15.00 stories per week is not a sustainable forecast, so retain the dependency-defined S68 boundary |
+| 2026-09-05 | Sprint estimate variance exceeded 30 percent | S68 | Record 1 actual day against 8 estimated. Two isolated workers reused the completed package-signature, field, and preservation foundations, while exhaustive feature reviews and the integrated sprint review concentrated fail-closed corrections in the owned Word package paths. The resulting 10.00 stories per week is not a sustainable forecast, so retain the dependency-defined S69 boundary |

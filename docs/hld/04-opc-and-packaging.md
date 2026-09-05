@@ -138,6 +138,7 @@ CORE_PROPERTIES, THUMBNAIL, DIGITAL_SIGNATURE_ORIGIN, DIGITAL_SIGNATURE
 EXTENDED_PROPERTIES   // docProps/app.xml
 CUSTOM_PROPERTIES     // docProps/custom.xml
 COMMENTS              // Word comments part
+GLOSSARY_DOCUMENT     // Word glossary document part
 DIAGRAM_DATA, DIAGRAM_LAYOUT, DIAGRAM_QUICK_STYLE, DIAGRAM_COLORS
 DIAGRAM_DRAWING       // Microsoft 2007 cached diagram drawing
 OLE_OBJECT, CONTROL, STRICT_OLE_OBJECT, STRICT_CONTROL
@@ -160,6 +161,12 @@ relationship type before staging package changes.
 A `content_types` constants module is added alongside, so neither format crate
 hand-types the long MIME strings. It includes the modern PowerPoint comments
 and authors MIME types as well as the handout-master type.
+
+The Word facade resolves at most one glossary relationship from the main
+document. The relationship must be internal, its normalized target must not
+escape the package root, the part must exist, and its override must use the
+Word glossary content type. Duplicate, external, traversal-shaped, missing,
+wrong-type, and malformed-root graphs fail before document mutation.
 
 Both facades resolve core properties through the package-level
 `CORE_PROPERTIES` relationship and retain its normalized target. Immutable
@@ -547,6 +554,26 @@ internal origin whose relationship set contains only one or more internal
 digital-signature relationships with distinct existing targets. Unrelated,
 misplaced, duplicate, external, missing, or traversal-shaped signature graph
 edges fail closed before signature evidence can be retained or removed.
+
+The Word facade applies the same package rules from schema-positioned owners in
+supported story parts. An OLE payload requires exactly one relationship-owned
+`o:OLEObject` inside a valid run-owned `w:object`. An ActiveX control requires
+one valid `w:control`, an exact properties content type, and exactly one
+internal ActiveX binary relationship. A VBA project is owned by at most one
+main-document relationship and may own at most one legacy or Agile signature.
+Targets must be normalized internal Pack URI references with the exact
+relationship and content types. Missing relationship scopes, ambiguous or
+overlapping owners, shared removal targets, malformed signature graphs, and
+malformed owner XML fail before a package mutation becomes observable.
+
+Replacement preserves the normalized source-part and relationship identity,
+target name, content type, and owner XML. Removal patches only the validated
+complete owner range or the main-document VBA relationship, then deletes only
+owned candidates made newly unreachable by that operation. Signature policy
+either retains exact package and VBA signature bytes behind deterministic
+invalidation markers or removes only the validated signature infrastructure.
+Every mutation serializes, reopens, and re-inventories a staged package before
+commit, so failure leaves the original package byte-identical.
 
 The bounded SmartArt copy graph accepts only the five diagram relationship
 types and internal images whose parts own no relationships. Traversal has cycle

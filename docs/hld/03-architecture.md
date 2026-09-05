@@ -182,6 +182,16 @@ layout, or master model, while ActiveX and VBA ownership is resolved through
 their package relationships. No OLE, ActiveX, or VBA decoder enters an
 `oxml-*`, layout, renderer, binding, WASM, or CLI crate.
 
+Word executable-content editing follows that boundary independently.
+`rdocx` owns schema-positioned story-owner discovery, relationship-graph and
+content-type validation, exact payload hashing and extraction, and staged
+replacement or removal. The private `embedded` module scans supported Word
+story parts without promoting executable XML or bytes into the typed document
+model. It commits only a serialized, reopened, and re-inventoried candidate.
+The facade uses the existing `oxml-opc` relationship vocabulary and a direct
+`sha2` dependency. It adds no cross-family edge, decoder, binding, WASM, or CLI
+surface.
+
 Deterministic animation export also belongs to the `rpptx` facade. It validates
 and samples explicit segments, prepares the package, resolver, font, chart,
 picture, and media state once, then evaluates and lowers one timeline sample at
@@ -361,6 +371,13 @@ text. The numbering grammar retains producer-defined `w:numFmt` tokens in
 `ST_NumberFormat::Other(String)`. Its writer emits those tokens unchanged,
 while render and export consumers decline to invent a marker for an unknown
 format.
+
+The same grammar owns the bounded `w:ffData` projection on complex legacy form
+fields and the `w:glossaryDocument` root model. Typed form values and glossary
+properties are namespace aware, while retained XML remains the serialization
+source for every unsupported attribute and subtree. The `rdocx` facade owns
+relationship resolution, story-part identity, staged validation, and package
+commit for form-value and existing building-block replacement.
 
 The same grammar crate owns Transitional OfficeMath. One concrete recursive
 tree covers inline and display equations, math runs, fractions, scripts,

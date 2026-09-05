@@ -65,6 +65,15 @@ a reintroduction is obvious from the test name alone rather than from a diff.
 The existing file is the model: `zero_column_tables_do_not_panic`,
 `saving_is_reproducible`.
 
+The legacy form and glossary round-trip gate constructs every package in
+source. It covers typed text, checkbox, and drop-down values, deterministic
+part-scoped ordinal identity across supported internal Word stories, AutoText
+classification, and selected building-block replacement. Prefix aliases,
+fixed-prefix changed output, schema-order insertion, structural reopen,
+byte-exact unsupported subtree retention, unsafe relationship graphs, stale
+identities, wrong value kinds, bounds, and atomic failure are focused checks.
+The Python, WASM, and CLI surfaces and the 49-entry hash set remain unchanged.
+
 The Presentation collaboration round-trip gate is
 `modern_comments_replies_sections_and_handout_settings_survive_ordered_mutation_save_and_reopen`.
 It builds a noncanonical package in the existing `rpptx` integration binary,
@@ -93,6 +102,18 @@ and removal, ownership-aware reachability, retained raw XML and signature
 evidence, producing-scope selection, namespace and compatibility handling,
 malformed graph rejection, and byte-for-byte failure atomicity. No payload is
 decoded or executed.
+
+The Word executable-content regression gate is
+`word_embedded_inventory_reports_exact_hashes_relationship_paths_and_signature_state`.
+It source-builds OLE, ActiveX, VBA, package-signature, legacy VBA-signature,
+and Agile VBA-signature graphs in the existing `rdocx` regression binary. The
+gate requires deterministic ordering and stable kind, source, relationship,
+target, content type, byte length, exact SHA-256, and signature state. Adjacent
+tests cover extraction, staged replacement, ownership-aware removal,
+newly-unreachable cleanup, both signature policies, schema-position and
+markup-compatibility grammar, strict XML lexical and namespace validation,
+prefix-alias and unsupported-subtree preservation, save and reopen, and
+byte-for-byte failure atomicity. Payload bytes are never decoded or executed.
 
 The Presentation timing round-trip gate is
 `the_corpus_timeline_preserves_every_unsupported_sibling`. It walks every
