@@ -18,7 +18,7 @@ use scraper::{ElementRef, Html, Node, Selector};
 use sha2::{Digest, Sha256};
 
 use crate::paragraph::{Alignment, Paragraph};
-use crate::run::Run;
+use crate::run::{DrawingKind, DrawingRelationshipKind, Run};
 use crate::table::Cell;
 use crate::{
     BodyItemRef, CellItemRef, Document, Error, HyperlinkItemRef, HyperlinkRef, Length, ListLevel,
@@ -408,7 +408,13 @@ fn base64_lines(bytes: &[u8]) -> String {
 
 fn mhtml_export_html(document: &Document) -> Result<(String, Vec<MhtmlResource>)> {
     let html = document.to_html();
-    let image_sizes = document.images();
+    let image_sizes = document
+        .images()
+        .into_iter()
+        .filter(|image| {
+            !image.embed_id.is_empty() && document.image_data(&image.embed_id).is_some()
+        })
+        .collect::<Vec<_>>();
     let mut image_size_index = 0_usize;
     let mut output = String::with_capacity(html.len());
     let mut remainder = html.as_str();
@@ -540,6 +546,7 @@ fn push_mhtml_loss(
 }
 
 fn paragraph_mhtml_losses(
+    document: &Document,
     paragraph: ParagraphRef<'_>,
     location: &str,
     diagnostics: &mut Vec<MhtmlDiagnostic>,
@@ -547,11 +554,17 @@ fn paragraph_mhtml_losses(
     for (index, item) in paragraph.items().enumerate() {
         let message = match item {
             ParagraphItemRef::Run(run) => {
-                run_mhtml_losses(run, &format!("{location}/item[{index}]/run"), diagnostics)?;
+                run_mhtml_losses(
+                    document,
+                    run,
+                    &format!("{location}/item[{index}]/run"),
+                    diagnostics,
+                )?;
                 continue;
             }
             ParagraphItemRef::Hyperlink(hyperlink) => {
                 hyperlink_mhtml_losses(
+                    document,
                     hyperlink,
                     &format!("{location}/item[{index}]/hyperlink"),
                     diagnostics,
@@ -573,16 +586,31 @@ fn paragraph_mhtml_losses(
 }
 
 fn run_mhtml_losses(
+    document: &Document,
     run: RunRef<'_>,
     location: &str,
     diagnostics: &mut Vec<MhtmlDiagnostic>,
 ) -> Result<()> {
     for (index, item) in run.items().enumerate() {
         let message = match item {
-            RunItemRef::Text(_)
-            | RunItemRef::Tab
-            | RunItemRef::Break(_)
-            | RunItemRef::Drawing(_) => continue,
+            RunItemRef::Text(_) | RunItemRef::Tab | RunItemRef::Break(_) => continue,
+            RunItemRef::Drawing(drawing) => match drawing.kind() {
+                DrawingKind::Shape => "dropped Word DrawingML shape",
+                DrawingKind::Other => "dropped unsupported Word drawing",
+                DrawingKind::Image => match drawing.relationship_kind() {
+                    Some(DrawingRelationshipKind::Linked) => "dropped linked Word image",
+                    Some(DrawingRelationshipKind::Embedded)
+                        if drawing
+                            .relationship_id()
+                            .is_some_and(|id| document.image_data(id).is_some()) =>
+                    {
+                        continue;
+                    }
+                    Some(DrawingRelationshipKind::Embedded) | None => {
+                        "dropped unresolved Word image"
+                    }
+                },
+            },
             RunItemRef::DeletedText(_) => "dropped Word deleted-text semantics",
             RunItemRef::Field(_) => "dropped Word field semantics",
             RunItemRef::FootnoteReference(_) => "dropped Word footnote reference",
@@ -597,6 +625,7 @@ fn run_mhtml_losses(
 }
 
 fn hyperlink_mhtml_losses(
+    document: &Document,
     hyperlink: HyperlinkRef<'_>,
     location: &str,
     diagnostics: &mut Vec<MhtmlDiagnostic>,
@@ -631,9 +660,12 @@ fn hyperlink_mhtml_losses(
     }
     for (index, item) in hyperlink.items().enumerate() {
         match item {
-            HyperlinkItemRef::Run(run) => {
-                run_mhtml_losses(run, &format!("{location}/item[{index}]/run"), diagnostics)?
-            }
+            HyperlinkItemRef::Run(run) => run_mhtml_losses(
+                document,
+                run,
+                &format!("{location}/item[{index}]/run"),
+                diagnostics,
+            )?,
             HyperlinkItemRef::Revision(_) => push_mhtml_loss(
                 diagnostics,
                 format!("{location}/item[{index}]"),
@@ -650,6 +682,7 @@ fn hyperlink_mhtml_losses(
 }
 
 fn table_mhtml_losses(
+    document: &Document,
     table: TableRef<'_>,
     location: &str,
     diagnostics: &mut Vec<MhtmlDiagnostic>,
@@ -676,11 +709,13 @@ fn table_mhtml_losses(
             for (item_index, item) in cell.items().enumerate() {
                 match item {
                     CellItemRef::Paragraph(paragraph) => paragraph_mhtml_losses(
+                        document,
                         paragraph,
                         &format!("{cell_location}/paragraph[{item_index}]"),
                         diagnostics,
                     )?,
                     CellItemRef::Table(table) => table_mhtml_losses(
+                        document,
                         table,
                         &format!("{cell_location}/table[{item_index}]"),
                         diagnostics,
@@ -707,13 +742,17 @@ fn mhtml_write_diagnostics(document: &Document) -> Result<Vec<MhtmlDiagnostic>> 
     for (index, item) in document.body_items().enumerate() {
         match item {
             BodyItemRef::Paragraph(paragraph) => paragraph_mhtml_losses(
+                document,
                 paragraph,
                 &format!("body[{index}]/paragraph"),
                 &mut diagnostics,
             )?,
-            BodyItemRef::Table(table) => {
-                table_mhtml_losses(table, &format!("body[{index}]/table"), &mut diagnostics)?
-            }
+            BodyItemRef::Table(table) => table_mhtml_losses(
+                document,
+                table,
+                &format!("body[{index}]/table"),
+                &mut diagnostics,
+            )?,
             BodyItemRef::ContentControl(_) => push_mhtml_loss(
                 &mut diagnostics,
                 format!("body[{index}]"),
@@ -3583,7 +3622,7 @@ mod tests {
         let mut package = OpcPackage::from_reader(Cursor::new(bytes)).unwrap();
         package.set_part(
             "/word/document.xml",
-            br#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:x="urn:producer" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><w:body><w:p><w:r><w:t>before</w:t></w:r><w:r><w:delText>deleted</w:delText></w:r><w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple><w:r><w:footnoteReference w:id="1"/></w:r><w:r><w:endnoteReference w:id="2"/></w:r><w:r><w:commentReference w:id="3"/></w:r><w:r><w:t>kept</w:t><x:run/></w:r><w:r><w:pict><v:rect o:hr="t"/></w:pict></w:r><w:hyperlink w:anchor="bookmark" w:tooltip="tip" w:docLocation="there" x:flag="yes"><x:link/><w:ins w:id="4" w:author="Ada"><w:r><w:t>revision</w:t></w:r></w:ins><w:r><w:t>linked</w:t><x:nested/></w:r></w:hyperlink><w:r><w:t>after</w:t></w:r></w:p><w:sectPr/></w:body></w:document>"#.to_vec(),
+            br#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:x="urn:producer" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>before</w:t></w:r><w:r><w:delText>deleted</w:delText></w:r><w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple><w:r><w:footnoteReference w:id="1"/></w:r><w:r><w:endnoteReference w:id="2"/></w:r><w:r><w:commentReference w:id="3"/></w:r><w:r><w:t>kept</w:t><x:run/></w:r><w:r><w:pict><v:rect o:hr="t"/></w:pict></w:r><w:r><w:drawing><wp:inline><wp:extent cx="10" cy="20"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:link="rIdLinked"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r><w:r><w:drawing><wp:inline><wp:extent cx="10" cy="20"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="rIdMissing"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r><w:r><w:drawing><wp:anchor><wps:wsp><wps:spPr><a:blipFill><a:blip r:embed="rIdFill"/></a:blipFill></wps:spPr></wps:wsp></wp:anchor></w:drawing></w:r><w:r><w:drawing><wp:inline><wp:extent cx="10" cy="20"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r><w:hyperlink w:anchor="bookmark" w:tooltip="tip" w:docLocation="there" x:flag="yes"><x:link/><w:ins w:id="4" w:author="Ada"><w:r><w:t>revision</w:t></w:r></w:ins><w:r><w:t>linked</w:t><x:nested/></w:r></w:hyperlink><w:r><w:t>after</w:t></w:r></w:p><w:sectPr/></w:body></w:document>"#.to_vec(),
         );
         let mut saved = Cursor::new(Vec::new());
         package.write_to(&mut saved).unwrap();
@@ -3625,31 +3664,47 @@ mod tests {
                     "dropped Word legacy horizontal rule",
                 ),
                 (
-                    "body[0]/paragraph/item[8]/hyperlink/anchor",
+                    "body[0]/paragraph/item[8]/run/item[0]",
+                    "dropped linked Word image",
+                ),
+                (
+                    "body[0]/paragraph/item[9]/run/item[0]",
+                    "dropped unresolved Word image",
+                ),
+                (
+                    "body[0]/paragraph/item[10]/run/item[0]",
+                    "dropped Word DrawingML shape",
+                ),
+                (
+                    "body[0]/paragraph/item[11]/run/item[0]",
+                    "dropped unsupported Word drawing",
+                ),
+                (
+                    "body[0]/paragraph/item[12]/hyperlink/anchor",
                     "dropped Word internal hyperlink anchor",
                 ),
                 (
-                    "body[0]/paragraph/item[8]/hyperlink/tooltip",
+                    "body[0]/paragraph/item[12]/hyperlink/tooltip",
                     "dropped Word hyperlink tooltip",
                 ),
                 (
-                    "body[0]/paragraph/item[8]/hyperlink/doc-location",
+                    "body[0]/paragraph/item[12]/hyperlink/doc-location",
                     "dropped Word hyperlink document location",
                 ),
                 (
-                    "body[0]/paragraph/item[8]/hyperlink/attributes",
+                    "body[0]/paragraph/item[12]/hyperlink/attributes",
                     "dropped unsupported Word hyperlink attributes",
                 ),
                 (
-                    "body[0]/paragraph/item[8]/hyperlink/item[0]",
+                    "body[0]/paragraph/item[12]/hyperlink/item[0]",
                     "dropped unsupported Word hyperlink XML",
                 ),
                 (
-                    "body[0]/paragraph/item[8]/hyperlink/item[1]",
+                    "body[0]/paragraph/item[12]/hyperlink/item[1]",
                     "dropped Word hyperlink revision",
                 ),
                 (
-                    "body[0]/paragraph/item[8]/hyperlink/item[2]/run/item[1]",
+                    "body[0]/paragraph/item[12]/hyperlink/item[2]/run/item[1]",
                     "dropped unsupported Word run XML",
                 ),
             ]
