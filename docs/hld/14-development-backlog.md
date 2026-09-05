@@ -3723,26 +3723,27 @@ processing-instruction check makes at least one matrix fail.
 
 ### F-X079, Tag rpptx-v0.10.0 (S)
 
-Publish the shared strict XML lexical validator required by the stable M22
-Word family as the exact 15-package incubating family at 0.10.0. Move every
+The shared strict XML lexical validator required by the stable M22 Word family
+is published as the exact 15-package incubating family at 0.10.0. Every
 incubating manifest, workspace pin, lock record, README requirement, source
 assertion, CI literal, workflow preflight, release regression, and the
-unpublished `rpptx-wasm` preparation carrier in lockstep. Update stable source
-dependency pins to the published shared 0.10.0 boundary without changing the
+unpublished `rpptx-wasm` preparation carrier moved in lockstep. Stable source
+dependency pins use the published shared 0.10.0 boundary without changing the
 stable family version or granting it publication authority.
 
-Prepare exact `rpptx-v0.10.0` release notes from the reviewed selected-family
+The exact `rpptx-v0.10.0` release notes come from the reviewed selected-family
 diff and contribution inventory. That diff contains the shared lexical
 validator, baseline-aware inline groups, and Word glossary package constants.
 No external issue or pull request belongs to those selected changes, so the
 reviewed contribution inventory is empty. Stable Word, Python, WASM, npm, and
-PyPI packages remain outside publication authority. After one clean full
-verification and sprint review at the exact prepared SHA, `/release
-rpptx-v0.10.0` obtains separate final approval immediately before external
-mutation.
+PyPI packages remain outside publication authority. The immutable annotated
+tag `rpptx-v0.10.0` targets reviewed SHA
+`1e409c553b950eb8029e3e78e39ff775f18ba3ab`, and every registry entry reports
+sole owner `mantissaman (Atul Sharma)`.
 
 **Depends on**: F-X077, F-X080.
-**Test gate**: release. Publish exactly the 15-package incubating family. Every
+**Test gate**: release, passed. Exactly the 15-package incubating family is
+published. Every
 registry entry, owner, annotated tag target, GitHub release-body byte,
 stable-family exclusion, absent `rpptx-wasm@0.10.0`, and applicable
 contribution notification URL must verify before completion.

@@ -332,10 +332,9 @@ and PowerPoint packages. They are
 `oxml-core`, `oxml-opc`, `oxml-media`, `oxml-layout`, `oxml-drawing`,
 `oxml-pdf`, `oxml-sml`, `oxml-cli-support`, `oxml-chart`, `rpptx-oxml`,
 `rpptx-chart`, `rpptx-layout`, `rpptx-render`, `rpptx`, and `rpptx-cli`. All 15
-are prepared at 0.10.0. Their last published coherent boundary remains 0.9.0
-from immutable annotated `rpptx-v0.9.0` tag at reviewed SHA
-`45b4f277ff5fd6d1b032e929c5dcee7fb9d2c550`. The earlier 0.8.0, 0.7.0,
-0.6.0, 0.5.0,
+are published at 0.10.0 from immutable annotated `rpptx-v0.10.0` tag at
+reviewed SHA `1e409c553b950eb8029e3e78e39ff775f18ba3ab`. The earlier 0.9.0,
+0.8.0, 0.7.0, 0.6.0, 0.5.0,
 and 0.4.0 registry releases remain available, and no existing version or tag
 was moved. Manifest eligibility and allowlist membership do not authorize a
 later publication without a separately approved `/release` invocation at the
@@ -354,7 +353,7 @@ leave-open notifications are verified. After separate approval, exactly
 `rdocx-opc@0.11.0` and `rdocx-oxml@0.11.0` are yanked. Complete coherent stable
 releases remain live and unyanked. The tag is never moved or deleted, no
 v0.11.0 GitHub release exists, and no other external state changes. Current
-stable source is prepared at 0.12.0 and pins the prepared shared 0.10.0
+stable source is prepared at 0.12.0 and pins the published shared 0.10.0
 boundary without granting stable publication authority.
 
 `publish.yml` accepts stable `v*` and incubating `rpptx-v*` tags. Before either
@@ -449,7 +448,7 @@ published exact seven-package stable family is the immutable annotated
 `v0.12.0` tag at reviewed SHA
 `19adaacfcf82e3918bba4f8c3648747f1969b746`. Its published archives retain
 their shared 0.9.0 requirements, while current source pins shared dependencies
-to the prepared 0.10.0 boundary.
+to the published 0.10.0 boundary.
 The immutable v0.11.0 attempt published only `rdocx-opc` and `rdocx-oxml`
 before package verification failed against the published shared 0.7.0 API.
 The remaining five packages and GitHub release were not published at that
@@ -463,9 +462,9 @@ incubating package gained publication authority from the stable release.
 The 16 implemented `oxml-*` and `rpptx*` package manifests use explicit version
 0.10.0, the named `incubating` group, and the `rpptx-v{{version}}` template. The
 preparation group contains unpublished `rpptx-wasm`, while the crates.io
-allowlist remains exactly 15 packages. The last published complete family is
-the immutable `rpptx-v0.9.0` release at reviewed SHA
-`45b4f277ff5fd6d1b032e929c5dcee7fb9d2c550`, and earlier registry releases
+allowlist remains exactly 15 packages. The latest published complete family is
+the immutable `rpptx-v0.10.0` release at reviewed SHA
+`1e409c553b950eb8029e3e78e39ff775f18ba3ab`, and earlier registry releases
 remain available. The stable 0.10.1 registry consumer proof remains pinned to
 the immutable `oxml-layout@0.6.0` dependency rather than the current workspace
 family.

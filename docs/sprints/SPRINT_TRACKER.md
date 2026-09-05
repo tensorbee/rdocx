@@ -391,6 +391,7 @@ defended.
 | F-X077 | S69 | M | 2 | 1 | 2026-09-05 | Consolidated strict XML 1.0 lexical validation in oxml-core while preserving glossary, embedded, and package-story error and rollback contracts |
 | F-239 | S69 | M | 2 | 1 | 2026-09-05 | Added bounded MHTML import and deterministic export with contained resources, stable diagnostics, and pinned Word parity |
 | F-X080 | S69 | S | 1 | 1 | 2026-09-05 | Restored release-ready CI package inventory, bounded authenticated Pandoc extraction, and exhaustive Python error mapping |
+| F-X079 | S69 | S | 1 | 1 | 2026-09-05 | Published and independently verified the exact 15-package rpptx 0.10.0 family with no external contribution notifications |
 
 ## Velocity
 

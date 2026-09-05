@@ -531,6 +531,6 @@ regenerated, never hand-edited.
 | F-X076 | Tag v0.12.0                               | S64 | S | done |
 | F-X077 | Share strict XML lexical validation       | S69 | M | done |
 | F-X078 | Tag v0.13.0                               | S69 | S | pending |
-| F-X079 | Tag rpptx-v0.10.0                         | S69 | S | in-progress |
+| F-X079 | Tag rpptx-v0.10.0                         | S69 | S | done |
 | F-X080 | Restore CI release readiness              | S69 | S | done |
 <!-- AUTOGEN:backlog-MX END -->

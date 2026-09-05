@@ -1,6 +1,6 @@
 # F-X079, Tag rpptx-v0.10.0
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S69
 **Size**: S
 **Depends on**: F-X077, F-X080
@@ -123,8 +123,8 @@ release metadata only. Any output delta blocks preparation.
 - [x] Prepare exact `rpptx-v0.10.0` release notes and compatibility guidance.
 - [x] Run `/verify --full`, packaging, assets, bindings, WASM, dependency,
       supply-chain, notes, and hash gates at one exact SHA.
-- [ ] Stop at `/release rpptx-v0.10.0` for separate final approval.
-- [ ] Verify every publication, owner, tag, body, exclusion, and applicable
+- [x] Stop at `/release rpptx-v0.10.0` for separate final approval.
+- [x] Verify every publication, owner, tag, body, exclusion, and applicable
       notification before completion.
 
 ## Open questions

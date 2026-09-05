@@ -1822,16 +1822,15 @@ owner `mantissaman (Atul Sharma)`, immutable annotated tag `rpptx-v0.9.0` at
 reviewed SHA `45b4f277ff5fd6d1b032e929c5dcee7fb9d2c550`, byte-identical GitHub
 release notes, selected-family exclusion, and absent `rpptx-wasm@0.9.0`. Its
 selected-family inventory is empty, so it requires no notification.
-The 0.10.0 preparation gate pins all 16 incubating manifest and lock carriers,
-the 15 workspace requirements and crates.io candidates, the stable 0.12.0
-source dependency boundary, README examples, source assertions, the CI WASM
-literal, and the selected-family changelog section. The selected diff contains
-no external issue or pull request, so its reviewed contribution inventory is
-empty and no notification is prepared. Real registry, owner, tag, release-body,
-exclusion, and absence proofs remain deferred to separately approved
-publication.
+The 0.10.0 release gate verified all 15 incubating registry entries under sole
+owner `mantissaman (Atul Sharma)`, immutable annotated tag
+`rpptx-v0.10.0` at reviewed SHA
+`1e409c553b950eb8029e3e78e39ff775f18ba3ab`, byte-identical GitHub release
+notes, stable-family exclusion, and absent `rpptx-wasm@0.10.0`. Its selected
+diff contains no external issue or pull request, so its reviewed contribution
+inventory is empty and no notification is required.
 The stable 0.12.0 preparation gate pins the exact seven-package family, the
-prepared shared 0.10.0 source dependency boundary, all binding exclusions, and the
+published shared 0.10.0 source dependency boundary, all binding exclusions, and the
 seven-record PR 61 through 64 and Issue 65 through 67 contribution inventory.
 It requires full verification and clean review at one SHA before a separate
 release approval.

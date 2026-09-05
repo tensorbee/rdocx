@@ -11834,3 +11834,47 @@ archive-size, and supply-chain riders.
 calibrate extraction bounds only against digest-authenticated payloads. A new
 Pandoc archive shape requires a new reviewed policy rather than a general
 symlink allowance.
+
+### F-X079, Tag rpptx-v0.10.0
+
+**Sprint.** S69
+**Completed.** 2026-09-05
+**Size.** S, estimated 1 day, actual 1 day
+
+**What was built.** The exact 15-package shared OOXML and PowerPoint family is
+published at 0.10.0. The immutable annotated `rpptx-v0.10.0` tag dereferences
+to reviewed SHA `1e409c553b950eb8029e3e78e39ff775f18ba3ab`. The successful
+publication workflow is
+https://github.com/tensorbee/rdocx/actions/runs/33984024736 and the release is
+https://github.com/tensorbee/rdocx/releases/tag/rpptx-v0.10.0.
+
+**Non-obvious choices.** Publication followed the exact 15-package dependency
+order and waited for every registry entry before continuing. Stable Word,
+bindings, WASM, Python, npm, and PyPI remained outside publication authority.
+Current stable source now resolves the separately published shared 0.10.0
+boundary without changing the stable workspace version.
+
+**Deviations from the design plan.** None.
+
+**Spec sections touched.** `docs/hld/03-architecture.md`,
+`docs/hld/10-bindings-spec.md`, `docs/hld/12-testing-strategy.md`,
+`docs/hld/14-development-backlog.md`, and
+`docs/hld/15-build-and-toolchain.md`.
+
+**Tests.** Full verification passed at the exact reviewed SHA. The GitHub
+workflow published all 15 selected crates and created the release. Every
+registry package downloaded at 0.10.0 and reported sole owner `mantissaman
+(Atul Sharma)`. The remote annotated tag dereferences to the reviewed SHA. The
+GitHub release body matches the reviewed render with SHA-256
+`af97bb5020b8cdaa5f7982bea55e471f89483e6fc3fe692929bb29a55199c43f`.
+`rpptx-wasm@0.10.0` and `rdocx@0.13.0` remain absent from crates.io.
+
+**Contribution inventory.** Empty. Every selected-family commit is authored
+by Atul Sharma, no linked external issue or pull request implements the
+selected changes, and no release notification is required.
+
+**Hash harness.** Unchanged, 49 of 49.
+
+**Notes for future sessions.** Treat the published 0.10.0 shared family as the
+registry boundary for stable 0.13.0. Do not extend this release's authority to
+the unpublished WASM member or either binding family.
