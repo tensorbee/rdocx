@@ -152,8 +152,11 @@ The Linux x86-64 release archive is pinned to SHA-256
 `e0f8af62d0f267d22baa5bcefe6d5dda3a097ccc60de794b759fe03159923244`.
 The bounded installer rejects an unexpected platform, archive layout, member,
 size, digest, or executable identity, then exposes the verified binary only to
-CI. Pandoc and texmath are absent from every published crate and production
-dependency graph.
+CI. Its 160 MiB extracted-size ceiling admits the authenticated 162,406,703-byte
+payload. The installer skips without materializing only the archive's exact
+`pandoc-lua -> pandoc` and `pandoc-server -> pandoc` symlinks and rejects every
+other unsupported member type. Pandoc and texmath are absent from every
+published crate and production dependency graph.
 
 ODP conversion adds no external production tool and reuses the workspace
 `zip`, `quick-xml`, and `oxml-media` dependencies. LibreOffice 26.2.5.2 remains
@@ -242,10 +245,11 @@ include = [
 
 The dedicated package CI job compares `cargo package -p oxml-layout --list`
 against all 24 TTFs, the four family licence files, the Caladea and Noto
-notices, and the Simplified Chinese subset record. It then runs verified
-packaging without `--no-verify` and rejects a missing archive or one larger
-than the crates.io 10 MiB limit. `oxml-layout` is a published 0.1.2 package,
-while the release workflow remains the authority for every later publication.
+notices. The manifest also includes the Simplified Chinese subset record. The
+job then runs verified packaging without `--no-verify` and rejects a missing
+archive or one larger than the crates.io 10 MiB limit. `oxml-layout` is a
+published 0.1.2 package, while the release workflow remains the authority for
+every later publication.
 
 The external PowerPoint and Word corpora remain outside every published crate
 under the ignored `corpus/` directory. Their tracked manifests pin immutable
@@ -573,9 +577,9 @@ disposable pull requests are closed and unmerged. Their verified remote head
 refs were deleted and are absent. Their disposable worktrees and local branches
 were removed cleanly.
 
-**A dedicated `oxml-layout` package job.** It checks the exact bundled font and
-legal-file inventory, builds and verifies the generated archive, and enforces
-the crates.io 10 MiB limit.
+**A dedicated `oxml-layout` package job.** It checks the exact 24-font and six
+licence-and-notice-file inventory, builds and verifies the generated archive,
+and enforces the crates.io 10 MiB limit.
 
 **`--exclude rdocx-py --exclude rpptx-py` on every `--all-features` job.**
 `pyo3/extension-module` tells the linker the Python symbols come from the host
@@ -593,8 +597,10 @@ and propagates a decoded-pixel mismatch as a CI failure.
 **The Pandoc texmath gate in the test job.** The Ubuntu 24.04 runner installs
 the exact SHA-256-pinned Pandoc 3.10 archive, verifies the executable identity,
 and runs the ignored `rdocx` structural differential by its exact unit-test
-path before the workspace suite. The installer and gate have mutation coverage
-in the release-regression suite.
+path before the workspace suite. The installer caps extraction at 160 MiB and
+skips only the exact unneeded `pandoc-lua` and `pandoc-server` aliases to the
+verified `pandoc` executable. The installer and gate have mutation coverage in
+the release-regression suite.
 
 **The large-document gate in the test job.** The Ubuntu 24.04 runner executes
 the exact locked `rdocx` regression binary in release mode, selects only the

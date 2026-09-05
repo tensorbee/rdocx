@@ -1,6 +1,6 @@
 # F-X080, Restore CI release readiness
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S69
 **Size**: S
 **Depends on**: F-X077, F-239
@@ -39,7 +39,13 @@ inventory explicit so an unexpected package asset remains a reviewed change.
 Raise only the authenticated Pandoc extracted-size ceiling from 128 MiB to 160
 MiB. The exact archive sums to 162,406,703 bytes, while 160 MiB is 167,772,160
 bytes. Keep the existing 40 MiB download, 256-member, SHA-256, root-layout,
-member-type, path, and executable-identity checks unchanged.
+path, and executable-identity checks unchanged. The authenticated archive also
+contains exactly two symlink aliases,
+`pandoc-3.10/bin/pandoc-server -> pandoc` and
+`pandoc-3.10/bin/pandoc-lua -> pandoc`. Recognize only those exact name and
+target pairs and skip materializing them because CI installs only the verified
+`pandoc` executable. Continue rejecting every other symlink, hardlink, device,
+FIFO, and unsupported non-file member type.
 
 Retain the current generic Python exception surface while mapping both
 `Error::Mhtml` and `Error::InvalidEmbeddedMutation` explicitly. Add standard
@@ -56,6 +62,8 @@ asset.
   bounded extraction.
 - Raise the ceiling far above the reviewed payload. A 160 MiB ceiling admits
   the exact archive with less than 4 percent headroom.
+- Materialize or generally permit archive symlinks. CI needs only the verified
+  `pandoc` executable, and a broad symlink policy would weaken extraction.
 - Add Python MHTML or embedded mutation APIs. The binding contract requires the
   generic exception mapping only.
 - Treat the failures as transient and rerun GitHub Actions. All three causes
@@ -66,10 +74,10 @@ asset.
 | Category | Test | Asserts |
 |---|---|---|
 | regression | `test_ci_oxml_layout_package_inventory_matches_bundled_assets` | The workflow lists all 24 TTFs and all six required legal files, and removing any Noto entry fails. |
-| regression | `test_pinned_pandoc_installer_accepts_authenticated_archive_with_bounded_headroom` | The ceiling is exactly 160 MiB, exceeds the authenticated 162,406,703-byte payload, and the existing safe extraction checks remain. |
+| regression | `test_pinned_pandoc_installer_accepts_authenticated_archive_with_bounded_headroom` | The ceiling is exactly 160 MiB, exceeds the authenticated 162,406,703-byte payload, the two exact alias symlinks are accepted without materialization, and wrong-name, wrong-target, hardlink, device, FIFO, and unsupported non-file member types remain rejected. |
 | unit | `import_errors_map_to_the_generic_public_error_class` | MHTML and embedded mutation errors map to the established Python exception class. |
 | integration | reconstructed `package-oxml-layout` commands | The exact packaged font and legal inventories compare cleanly and the archive is below 10 MiB. |
-| integration | pinned Pandoc installer against the reviewed archive | Download hash, extraction limits, and executable identity pass together. |
+| integration | pinned Pandoc installer against the reviewed archive | Download hash, extraction limits, exact skipped aliases, and executable identity pass together. |
 | integration | `cargo check -p rdocx-py --all-targets` | The exhaustive Python adapter compiles against the current native error enum. |
 
 The **test gate is regression**. Deleting any Noto inventory entry, lowering
@@ -102,12 +110,13 @@ output delta blocks completion.
 
 ## Implementation checklist
 
-- [ ] Add failing workflow inventory and authenticated Pandoc-bound regressions.
-- [ ] Update the explicit package inventory and Pandoc extraction ceiling.
-- [ ] Confirm both current native errors retain the generic Python mapping.
-- [ ] Reconstruct all three failed hosted commands locally.
-- [ ] Run focused checks, the risk riders, `/microscope`, and `/verify --full`.
-- [ ] Update exactly the three HLD impact files and complete the sprint record.
+- [x] Add failing workflow inventory and authenticated Pandoc-bound regressions.
+- [x] Update the explicit package inventory, Pandoc extraction ceiling, and
+  exact skipped alias handling.
+- [x] Confirm both current native errors retain the generic Python mapping.
+- [x] Reconstruct all three failed hosted commands locally.
+- [x] Run focused checks, the risk riders, `/microscope`, and `/verify --full`.
+- [x] Update exactly the three HLD impact files and prepare the worker handoff.
 
 ## Open questions
 

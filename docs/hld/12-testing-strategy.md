@@ -1667,6 +1667,8 @@ required, and no binary fixture enters the repository.
 
 MHTML remains native Rust only. The existing Python, WASM, and CLI surface
 inventories therefore assert no new method, error, dependency, or feature. The
+exhaustive Python error adapter maps native MHTML and invalid embedded-mutation
+failures to the established generic `RdocxError` class. The
 published-crate riders compile both WASM graphs, deny rustdoc warnings, verify
 the patched workspace package graph, and enforce the 10 MiB archive ceiling.
 
@@ -1872,7 +1874,7 @@ parallel, or failure-swallowing invocation.
 | clippy | `cargo clippy --workspace --all-targets --all-features --exclude rdocx-py --exclude rpptx-py -- -D warnings` |
 | fmt | `cargo fmt --all -- --check` |
 | doc | `cargo doc --workspace --no-deps --all-features --exclude rdocx-py --exclude rpptx-py` with `RUSTDOCFLAGS=-D warnings`, then `python3 scripts/readme_doctests.py` |
-| package-oxml-layout | Verify the exact font and legal-file inventory, then build and size-check the verified archive |
+| package-oxml-layout | Verify the exact 24-font and six licence-and-notice-file inventory, then build and size-check the verified archive |
 | msrv | Install exact uv 0.10.2, fetch both pinned corpora, then run `cargo test --workspace --all-features --exclude rdocx-py --exclude rpptx-py` under Rust 1.93 with an isolated uv cache and 8 MiB Rust test-thread stack |
 | python-bindings | On pull requests, build each Python package with `maturin develop --locked` in its own Python 3.12.9 environment, then run its complete pytest directory |
 | supply-chain | `cargo-deny check` |
@@ -1882,6 +1884,12 @@ parallel, or failure-swallowing invocation.
 MHTML uses the existing test, clippy, fmt, doc, wasm, hash-harness, and package
 routes. Its Microsoft Word differential remains an explicit ignored local
 oracle because that exact Word build is not available on the Ubuntu CI runners.
+
+The checksum-pinned Pandoc 3.10 installer admits the authenticated
+162,406,703-byte archive under an exact 160 MiB extracted-size ceiling. It skips
+without materializing only the archive's two exact in-root executable aliases,
+`pandoc-lua -> pandoc` and `pandoc-server -> pandoc`, while every other
+symlink, hardlink, device, FIFO, and unsupported member type remains rejected.
 
 The `changes` job routes `test`, `msrv`, `wasm`, `python-bindings`,
 `presentation-fidelity`, `word-fidelity`, `hash-harness`, `supply-chain`, and

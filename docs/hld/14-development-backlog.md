@@ -3749,15 +3749,18 @@ contribution notification URL must verify before completion.
 Restore the hosted release gates that drifted from their reviewed inputs. The
 `oxml-layout` package job must compare against every bundled Noto font and legal
 file. The checksum-pinned Pandoc 3.10 installer must admit its reviewed
-162,406,703-byte extracted archive under a still-bounded ceiling. The Python
-adapter must compile exhaustively against the current native `rdocx::Error`
-surface without exposing new MHTML or embedded-mutation methods.
+162,406,703-byte extracted archive under a 160 MiB ceiling. It skips without
+materializing only the exact `pandoc-lua -> pandoc` and
+`pandoc-server -> pandoc` aliases and rejects every other unsupported member
+type. The Python adapter must compile exhaustively against the current native
+`rdocx::Error` surface without exposing new MHTML or embedded-mutation methods.
 
 **Depends on**: F-X077, F-239.
 **Test gate**: regression. Mutation-sensitive workflow tests fail if any Noto
 font or legal file is removed from the expected package inventory, if the
-Pandoc extracted-size ceiling falls below the authenticated payload, or if
-either current native error mapping is omitted. The reconstructed package,
+Pandoc extracted-size ceiling falls below the authenticated payload, if either
+exact Pandoc alias changes, if another unsupported member type is accepted, or
+if either current native error mapping is omitted. The reconstructed package,
 Pandoc, and Python binding CI commands all pass before release preparation.
 
 ### F-X078, Tag v0.13.0 (S)

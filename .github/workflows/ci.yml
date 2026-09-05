@@ -555,7 +555,11 @@ jobs:
             fonts/LiberationSerif-Bold.ttf \
             fonts/LiberationSerif-BoldItalic.ttf \
             fonts/LiberationSerif-Italic.ttf \
-            fonts/LiberationSerif-Regular.ttf)"
+            fonts/LiberationSerif-Regular.ttf \
+            fonts/NotoSansArabic.ttf \
+            fonts/NotoSansDevanagari.ttf \
+            fonts/NotoSansSC-FX058-subset.ttf \
+            fonts/NotoSansThai.ttf)"
           diff -u \
             <(printf '%s\n' "$expected_fonts") \
             <(printf '%s\n' "$packaged_fonts")
@@ -569,7 +573,9 @@ jobs:
             fonts/LICENSE-Caladea \
             fonts/LICENSE-Carlito \
             fonts/LICENSE-Liberation \
-            fonts/NOTICE-Caladea)"
+            fonts/LICENSE-Noto \
+            fonts/NOTICE-Caladea \
+            fonts/NOTICE-Noto)"
           diff -u \
             <(printf '%s\n' "$expected_legal") \
             <(printf '%s\n' "$packaged_legal")

@@ -26,7 +26,11 @@ ARCHIVE_ROOT = f"pandoc-{PANDOC_VERSION}"
 MAX_DOWNLOAD_BYTES = 40 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 256
 MEBIBYTE = 1024 * 1024
-MAX_EXTRACTED_BYTES = 128 * MEBIBYTE
+MAX_EXTRACTED_BYTES = 160 * MEBIBYTE
+AUTHENTICATED_SKIPPED_SYMLINKS = {
+    f"{ARCHIVE_ROOT}/bin/pandoc-lua": "pandoc",
+    f"{ARCHIVE_ROOT}/bin/pandoc-server": "pandoc",
+}
 
 
 def download_archive(destination: Path) -> None:
@@ -72,6 +76,12 @@ def safe_extract(archive_path: Path, destination: Path) -> Path:
                 target.relative_to(destination)
             except ValueError as error:
                 raise RuntimeError("Pandoc archive contains an unsafe path") from error
+            if (
+                member.issym()
+                and AUTHENTICATED_SKIPPED_SYMLINKS.get(member.name) == member.linkname
+            ):
+                # CI installs only pandoc, so the two authenticated aliases are unnecessary.
+                continue
             if member.isdir():
                 target.mkdir(parents=True, exist_ok=True)
                 continue

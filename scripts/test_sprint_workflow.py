@@ -524,6 +524,11 @@ class SprintWorkflowTests(unittest.TestCase):
             'PANDOC_SHA256 = "e0f8af62d0f267d22baa5bcefe6d5dda3a097ccc60de794b759fe03159923244"',
             "MAX_DOWNLOAD_BYTES = 40 * 1024 * 1024",
             "MAX_ARCHIVE_MEMBERS = 256",
+            "MAX_EXTRACTED_BYTES = 160 * MEBIBYTE",
+            'f"{ARCHIVE_ROOT}/bin/pandoc-lua": "pandoc"',
+            'f"{ARCHIVE_ROOT}/bin/pandoc-server": "pandoc"',
+            "member.issym()",
+            "AUTHENTICATED_SKIPPED_SYMLINKS.get(member.name) == member.linkname",
             "if extracted_bytes > MAX_EXTRACTED_BYTES:",
             "if not member_path.parts or member_path.parts[0] != ARCHIVE_ROOT:",
             "if not member.isfile():",
@@ -535,6 +540,38 @@ class SprintWorkflowTests(unittest.TestCase):
             'os.environ.get("GITHUB_ENV")',
         ):
             self.assertIn(required, installer)
+
+    def assert_ci_oxml_layout_package_inventory(self, ci: str) -> None:
+        job = self.yaml_block(ci, "  package-oxml-layout:")
+        inventory = self.yaml_step(job, "Check package inventory")
+        script = self.yaml_run_script(inventory)
+        listed_fonts = tuple(
+            re.findall(
+                r"^\s+(fonts/[^\s]+\.ttf)(?:\s*\\|\)\")$",
+                script,
+                re.MULTILINE,
+            )
+        )
+        listed_legal = tuple(
+            re.findall(
+                r"^\s+(fonts/(?:LICENSE|NOTICE)-[^\s\\\)]+)(?:\s*\\|\)\")$",
+                script,
+                re.MULTILINE,
+            )
+        )
+        fonts = workflow.REPO / "crates/oxml-layout/fonts"
+        expected_fonts = tuple(
+            f"fonts/{path.name}" for path in sorted(fonts.glob("*.ttf"))
+        )
+        expected_legal = tuple(
+            f"fonts/{path.name}"
+            for path in sorted((*fonts.glob("LICENSE-*"), *fonts.glob("NOTICE-*")))
+        )
+        self.assertEqual(len(expected_fonts), 24)
+        self.assertEqual(len(expected_legal), 6)
+        self.assertEqual(listed_fonts, expected_fonts)
+        self.assertEqual(listed_legal, expected_legal)
+        self.assertIn("diff -u", script)
 
     def assert_pinned_libreoffice_installer_contract(self, installer: str) -> None:
         self.assertIn('LIBREOFFICE_VERSION = "26.2.5.2"', installer)
@@ -1069,6 +1106,116 @@ class SprintWorkflowTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assert_pinned_pandoc_ci_gate(ci)
+
+    def test_ci_oxml_layout_package_inventory_matches_bundled_assets(self) -> None:
+        ci = (workflow.REPO / ".github/workflows/ci.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assert_ci_oxml_layout_package_inventory(ci)
+
+        noto_entries = (
+            "fonts/NotoSansArabic.ttf",
+            "fonts/NotoSansDevanagari.ttf",
+            "fonts/NotoSansSC-FX058-subset.ttf",
+            "fonts/NotoSansThai.ttf",
+            "fonts/LICENSE-Noto",
+            "fonts/NOTICE-Noto",
+        )
+        for entry in noto_entries:
+            mutated = ci.replace(entry, "", 1)
+            self.assertNotEqual(mutated, ci, entry)
+            with self.subTest(missing=entry), self.assertRaises(AssertionError):
+                self.assert_ci_oxml_layout_package_inventory(mutated)
+
+    def test_pinned_pandoc_installer_accepts_authenticated_archive_with_bounded_headroom(
+        self,
+    ) -> None:
+        installer = (
+            workflow.REPO / "scripts/install_pinned_pandoc.py"
+        ).read_text(encoding="utf-8")
+        self.assert_pinned_pandoc_installer_contract(installer)
+
+        authenticated_payload_bytes = 162_406_703
+        ceiling = install_pinned_pandoc.MAX_EXTRACTED_BYTES
+        self.assertEqual(ceiling, 160 * install_pinned_pandoc.MEBIBYTE)
+        self.assertGreater(ceiling, authenticated_payload_bytes)
+        self.assertLess(ceiling - authenticated_payload_bytes, ceiling // 25)
+
+        for replacement in ("154 * MEBIBYTE", "256 * MEBIBYTE"):
+            mutated = installer.replace("160 * MEBIBYTE", replacement, 1)
+            self.assertNotEqual(mutated, installer, replacement)
+            with self.subTest(bound=replacement), self.assertRaises(AssertionError):
+                self.assert_pinned_pandoc_installer_contract(mutated)
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+
+            def write_archive(
+                path: Path,
+                members: tuple[tuple[str, bytes, str], ...],
+            ) -> None:
+                with tarfile.open(path, mode="w:gz") as archive:
+                    executable = tarfile.TarInfo("pandoc-3.10/bin/pandoc")
+                    executable.mode = 0o755
+                    executable.size = len(b"reviewed pandoc")
+                    archive.addfile(executable, io.BytesIO(b"reviewed pandoc"))
+                    for name, member_type, linkname in members:
+                        member = tarfile.TarInfo(name)
+                        member.type = member_type
+                        member.linkname = linkname
+                        archive.addfile(member)
+
+            exact_aliases = (
+                ("pandoc-3.10/bin/pandoc-server", tarfile.SYMTYPE, "pandoc"),
+                ("pandoc-3.10/bin/pandoc-lua", tarfile.SYMTYPE, "pandoc"),
+            )
+            accepted_archive = root / "accepted.tar.gz"
+            write_archive(accepted_archive, exact_aliases)
+            accepted_root = root / "accepted"
+            executable = install_pinned_pandoc.safe_extract(
+                accepted_archive,
+                accepted_root,
+            )
+            self.assertEqual(executable.read_bytes(), b"reviewed pandoc")
+            for name, _, _ in exact_aliases:
+                alias = accepted_root / name
+                self.assertFalse(alias.exists(), name)
+                self.assertFalse(alias.is_symlink(), name)
+
+            rejected_members = (
+                (
+                    "wrong-name",
+                    "pandoc-3.10/bin/pandoc-other",
+                    tarfile.SYMTYPE,
+                    "pandoc",
+                ),
+                (
+                    "wrong-target",
+                    "pandoc-3.10/bin/pandoc-server",
+                    tarfile.SYMTYPE,
+                    "other",
+                ),
+                (
+                    "hardlink",
+                    "pandoc-3.10/bin/pandoc-server",
+                    tarfile.LNKTYPE,
+                    "pandoc",
+                ),
+                ("character-device", "pandoc-3.10/dev", tarfile.CHRTYPE, ""),
+                ("block-device", "pandoc-3.10/block", tarfile.BLKTYPE, ""),
+                ("fifo", "pandoc-3.10/fifo", tarfile.FIFOTYPE, ""),
+            )
+            for label, name, member_type, linkname in rejected_members:
+                archive = root / f"{label}.tar.gz"
+                write_archive(archive, ((name, member_type, linkname),))
+                with self.subTest(member=label), self.assertRaisesRegex(
+                    RuntimeError,
+                    "non-file entry",
+                ):
+                    install_pinned_pandoc.safe_extract(
+                        archive,
+                        root / f"extract-{label}",
+                    )
 
     def test_pinned_pandoc_ci_gate_rejects_disabled_or_noop_steps(self) -> None:
         ci = (workflow.REPO / ".github/workflows/ci.yml").read_text(
