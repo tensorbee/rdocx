@@ -5,8 +5,8 @@
 ```
 crates/
   # format-neutral infrastructure
-  oxml-core          units, xml helpers, entity decoding, raw-XML capture,
-                     core / app / custom properties
+  oxml-core          units, XML helpers and strict lexical validation, entity
+                     decoding, raw-XML capture, core / app / custom properties
   oxml-opc           ZIP and OPC package, relationships, content types
   oxml-media         image and media sniffing, dimensions and DPI, MIME, naming
   oxml-drawing       DrawingML: colour, transforms, geometry, fills, lines,
@@ -378,6 +378,15 @@ properties are namespace aware, while retained XML remains the serialization
 source for every unsupported attribute and subtree. The `rdocx` facade owns
 relationship resolution, story-part identity, staged validation, and package
 commit for form-value and existing building-block replacement.
+
+Strict XML 1.0 lexical policy is shared by these glossary and facade scanners
+through `oxml_core::xml::validate_strict_xml_1_0`. The shared pass owns UTF-8,
+declaration grammar, literal characters, names, namespace bindings, expanded
+attribute uniqueness, references, comments, and processing instruction
+targets. Each format owner keeps its document roots, schema positions,
+declaration placement, doctype policy, semantic whitespace, diagnostic labels,
+and public error variants.
+The validator and its concrete error enum are additive pre-1.0 Rust APIs.
 
 The same grammar crate owns Transitional OfficeMath. One concrete recursive
 tree covers inline and display equations, math runs, fractions, scripts,

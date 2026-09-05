@@ -5,10 +5,11 @@ use std::path::Path;
 
 use oxml_core::Length;
 use oxml_core::custom_properties::CustomPropertyValue;
+use oxml_core::xml::{XmlLexicalError, validate_strict_xml_1_0};
 use oxml_opc::OpcPackage;
 use oxml_opc::relationship::rel_types;
 use quick_xml::XmlVersion;
-use quick_xml::events::{BytesDecl, BytesRef, BytesStart, Event};
+use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::{Namespace, NamespaceResolver, ResolveResult};
 use quick_xml::reader::NsReader;
 use rdocx_oxml::content_control::{CT_Sdt, SdtContent};
@@ -7949,10 +7950,9 @@ fn legacy_story_paragraphs(
 }
 
 fn validate_story_document_declarations_and_doctype(xml: &[u8]) -> Result<()> {
-    validate_story_literal_xml_characters(xml)?;
+    validate_strict_xml_1_0(xml).map_err(package_story_lexical_error)?;
     let mut reader = NsReader::from_reader(xml);
     reader.config_mut().trim_text(false);
-    reader.config_mut().check_comments = true;
     let mut buffer = Vec::new();
     let mut declaration_allowed = true;
     let mut declaration_seen = false;
@@ -7962,15 +7962,13 @@ fn validate_story_document_declarations_and_doctype(xml: &[u8]) -> Result<()> {
             .read_resolved_event_into(&mut buffer)
             .map_err(|error| Error::Other(format!("invalid package story XML: {error}")))?;
         let event = event.into_owned();
-        validate_story_scanned_xml_event(&reader, &event)?;
         match event {
-            Event::Decl(declaration) => {
+            Event::Decl(_) => {
                 if !declaration_allowed || declaration_seen {
                     return Err(Error::Other(
                         "misplaced or duplicate package story XML declaration".to_owned(),
                     ));
                 }
-                validate_story_xml_declaration(&declaration)?;
                 declaration_seen = true;
                 declaration_allowed = false;
             }
@@ -7990,14 +7988,8 @@ fn validate_story_document_declarations_and_doctype(xml: &[u8]) -> Result<()> {
                 declaration_allowed = false;
                 depth = depth.saturating_sub(1);
             }
-            Event::GeneralRef(reference) => {
-                require_story_predefined_or_character_reference(&reference)?;
+            Event::GeneralRef(_) => {
                 declaration_allowed = false;
-            }
-            Event::PI(instruction) if instruction.target().eq_ignore_ascii_case(b"xml") => {
-                return Err(Error::Other(
-                    "reserved package story XML processing instruction".to_owned(),
-                ));
             }
             Event::Eof => return Ok(()),
             _ => declaration_allowed = false,
@@ -8006,250 +7998,80 @@ fn validate_story_document_declarations_and_doctype(xml: &[u8]) -> Result<()> {
     }
 }
 
-fn validate_story_xml_declaration(declaration: &BytesDecl<'_>) -> Result<()> {
-    let content = std::str::from_utf8(declaration.as_ref())
-        .map_err(|error| Error::Other(format!("invalid package story XML declaration: {error}")))?;
-    let start = BytesStart::from_content(content, 3);
-    let attributes = start
-        .attributes()
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|error| Error::Other(format!("invalid package story XML declaration: {error}")))?;
-    if attributes.first().map(|attribute| attribute.key.as_ref()) != Some(b"version".as_ref()) {
-        return Err(Error::Other(
-            "package story XML declaration must begin with version".to_owned(),
-        ));
-    }
-    let mut encoding_seen = false;
-    let mut standalone_seen = false;
-    for (index, attribute) in attributes.iter().enumerate() {
-        let value = attribute
-            .normalized_value(XmlVersion::Explicit1_0)
-            .map_err(|error| {
-                Error::Other(format!("invalid package story XML declaration: {error}"))
-            })?
-            .into_owned();
-        match attribute.key.as_ref() {
-            b"version" if index == 0 && value == "1.0" => {}
-            b"encoding"
-                if !encoding_seen && !standalone_seen && valid_story_encoding_name(&value) =>
-            {
-                encoding_seen = true;
-            }
-            b"standalone" if !standalone_seen && matches!(value.as_str(), "yes" | "no") => {
-                standalone_seen = true;
-            }
-            _ => {
-                return Err(Error::Other(
-                    "invalid package story XML declaration".to_owned(),
-                ));
-            }
+fn package_story_lexical_error(error: XmlLexicalError) -> Error {
+    let message = match error {
+        XmlLexicalError::InvalidUtf8 => "invalid package story XML: input is not UTF-8".to_owned(),
+        XmlLexicalError::InvalidDeclaration(reason) if reason == "must begin with version" => {
+            "package story XML declaration must begin with version".to_owned()
         }
-    }
-    Ok(())
-}
-
-fn valid_story_encoding_name(value: &str) -> bool {
-    let mut bytes = value.bytes();
-    bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic())
-        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-}
-
-fn validate_story_literal_xml_characters(xml: &[u8]) -> Result<()> {
-    let xml = std::str::from_utf8(xml)
-        .map_err(|error| Error::Other(format!("invalid package story XML: {error}")))?;
-    if xml.chars().all(story_xml_1_0_character_is_valid) {
-        return Ok(());
-    }
-    Err(Error::Other(
-        "package story XML contains a forbidden literal XML 1.0 character".to_owned(),
-    ))
-}
-
-fn story_xml_1_0_character_is_valid(character: char) -> bool {
-    matches!(character, '\t' | '\n' | '\r')
-        || ('\u{20}'..='\u{D7FF}').contains(&character)
-        || ('\u{E000}'..='\u{FFFD}').contains(&character)
-        || ('\u{10000}'..='\u{10FFFF}').contains(&character)
-}
-
-fn validate_story_scanned_xml_event(reader: &NsReader<&[u8]>, event: &Event<'_>) -> Result<()> {
-    match event {
-        Event::Start(element) | Event::Empty(element) => {
-            validate_story_scanned_element(reader, element)
+        XmlLexicalError::InvalidDeclaration(reason)
+            if reason == "attributes are invalid, duplicated, or out of order" =>
+        {
+            "invalid package story XML declaration".to_owned()
         }
-        Event::End(element) => {
-            let name = element.name();
-            let prefix = validate_story_xml_qname(name.as_ref())?;
-            validate_story_bound_prefix(&reader.resolver().resolve_element(name).0, prefix)
-                .map(|_| ())
+        XmlLexicalError::InvalidDeclaration(reason) => {
+            format!("invalid package story XML declaration: {reason}")
         }
-        Event::PI(instruction) => validate_story_xml_name(instruction.target()),
-        _ => Ok(()),
-    }
-}
-
-fn validate_story_scanned_element(
-    reader: &NsReader<&[u8]>,
-    element: &BytesStart<'_>,
-) -> Result<()> {
-    let element_name = element.name();
-    let prefix = validate_story_xml_qname(element_name.as_ref())?;
-    if prefix == Some(b"xmlns".as_slice()) {
-        return Err(Error::Other(
-            "package story XML element uses the reserved xmlns prefix".to_owned(),
-        ));
-    }
-    validate_story_bound_prefix(&reader.resolver().resolve_element(element_name).0, prefix)?;
-    let mut expanded_names = HashSet::new();
-    for attribute in element.attributes() {
-        let attribute = attribute
-            .map_err(|error| Error::Other(format!("invalid package story XML: {error}")))?;
-        let name = attribute.key.as_ref();
-        let prefix = validate_story_xml_qname(name)?;
-        if attribute.value.contains(&b'<') {
-            return Err(Error::Other(
-                "package story XML attribute contains a literal less-than sign".to_owned(),
-            ));
+        XmlLexicalError::ForbiddenLiteralCharacter => {
+            "package story XML contains a forbidden literal XML 1.0 character".to_owned()
         }
-        let value = attribute
-            .decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())
-            .map_err(|error| Error::Other(format!("invalid package story XML: {error}")))?;
-        if !value.chars().all(story_xml_1_0_character_is_valid) {
-            return Err(Error::Other(
-                "package story XML attribute contains a forbidden XML 1.0 character".to_owned(),
-            ));
+        XmlLexicalError::InvalidName(reason) if reason.starts_with("qualified name ") => {
+            format!("invalid package story XML {reason}")
         }
-        if name == b"xmlns" {
-            validate_story_namespace_declaration(None, value.as_bytes())?;
-            continue;
+        XmlLexicalError::InvalidName(reason) if reason.starts_with("name ") => {
+            format!("invalid package story XML {reason}")
         }
-        if prefix == Some(b"xmlns".as_slice()) {
-            validate_story_namespace_declaration(Some(local_name(name)), value.as_bytes())?;
-            continue;
+        XmlLexicalError::InvalidName(reason) => format!("invalid package story XML: {reason}"),
+        XmlLexicalError::InvalidNamespace(reason)
+            if reason == "element uses the reserved xmlns prefix" =>
+        {
+            "package story XML element uses the reserved xmlns prefix".to_owned()
         }
-        let (namespace, local) = reader.resolver().resolve_attribute(attribute.key);
-        let resolved = validate_story_bound_prefix(&namespace, prefix)?;
-        if !expanded_names.insert((resolved, local.as_ref().to_vec())) {
-            return Err(Error::Other(
-                "package story XML element has duplicate expanded-name attributes".to_owned(),
-            ));
+        XmlLexicalError::InvalidNamespace(reason) if reason == "invalid namespace declaration" => {
+            "package story XML contains an invalid namespace declaration".to_owned()
         }
-    }
-    Ok(())
-}
-
-fn validate_story_namespace_declaration(prefix: Option<&[u8]>, namespace: &[u8]) -> Result<()> {
-    const XML_NS: &[u8] = b"http://www.w3.org/XML/1998/namespace";
-    const XMLNS_NS: &[u8] = b"http://www.w3.org/2000/xmlns/";
-    let valid = match prefix {
-        None => namespace != XML_NS && namespace != XMLNS_NS,
-        Some(b"xml") => namespace == XML_NS,
-        Some(b"xmlns") => false,
-        Some(_) => !namespace.is_empty() && namespace != XML_NS && namespace != XMLNS_NS,
+        XmlLexicalError::InvalidNamespace(_) => {
+            "package story XML uses an unbound namespace prefix".to_owned()
+        }
+        XmlLexicalError::DuplicateExpandedAttribute => {
+            "package story XML element has duplicate expanded-name attributes".to_owned()
+        }
+        XmlLexicalError::InvalidReference(reason)
+            if reason == "attribute contains a literal less-than sign" =>
+        {
+            "package story XML attribute contains a literal less-than sign".to_owned()
+        }
+        XmlLexicalError::InvalidReference(reason)
+            if reason == "character reference is not legal in XML 1.0" =>
+        {
+            "package story character reference is not legal in XML 1.0".to_owned()
+        }
+        XmlLexicalError::InvalidReference(reason)
+            if reason.starts_with("undeclared entity reference ") =>
+        {
+            reason.replacen(
+                "undeclared entity reference ",
+                "undeclared package story XML entity reference ",
+                1,
+            )
+        }
+        XmlLexicalError::InvalidReference(reason) => {
+            format!("invalid package story XML: {reason}")
+        }
+        XmlLexicalError::InvalidProcessingInstruction(reason)
+            if reason == "reserved XML target" =>
+        {
+            "reserved package story XML processing instruction".to_owned()
+        }
+        XmlLexicalError::InvalidProcessingInstruction(reason) if reason.starts_with("name ") => {
+            format!("invalid package story XML {reason}")
+        }
+        XmlLexicalError::InvalidProcessingInstruction(reason) => {
+            format!("invalid package story XML processing instruction: {reason}")
+        }
+        XmlLexicalError::InvalidComment(reason) => format!("invalid package story XML: {reason}"),
     };
-    if valid {
-        Ok(())
-    } else {
-        Err(Error::Other(
-            "package story XML contains an invalid namespace declaration".to_owned(),
-        ))
-    }
-}
-
-fn validate_story_bound_prefix(
-    namespace: &ResolveResult<'_>,
-    prefix: Option<&[u8]>,
-) -> Result<Option<Vec<u8>>> {
-    match namespace {
-        ResolveResult::Bound(Namespace(namespace)) => Ok(Some(namespace.to_vec())),
-        ResolveResult::Unbound if prefix.is_none() => Ok(None),
-        ResolveResult::Unbound | ResolveResult::Unknown(_) => Err(Error::Other(
-            "package story XML uses an unbound namespace prefix".to_owned(),
-        )),
-    }
-}
-
-fn validate_story_xml_qname(name: &[u8]) -> Result<Option<&[u8]>> {
-    let name = std::str::from_utf8(name)
-        .map_err(|error| Error::Other(format!("invalid package story XML name: {error}")))?;
-    let mut parts = name.split(':');
-    let first = parts.next().unwrap_or_default();
-    let second = parts.next();
-    if !story_xml_ncname_is_valid(first)
-        || second.is_some_and(|local| !story_xml_ncname_is_valid(local))
-        || parts.next().is_some()
-    {
-        return Err(Error::Other(format!(
-            "invalid package story XML qualified name {name}"
-        )));
-    }
-    Ok(second.map(|_| first.as_bytes()))
-}
-
-fn validate_story_xml_name(name: &[u8]) -> Result<()> {
-    let name = std::str::from_utf8(name)
-        .map_err(|error| Error::Other(format!("invalid package story XML name: {error}")))?;
-    let mut characters = name.chars();
-    if characters
-        .next()
-        .is_some_and(|character| character == ':' || story_xml_ncname_start(character))
-        && characters.all(|character| character == ':' || story_xml_ncname_character(character))
-    {
-        Ok(())
-    } else {
-        Err(Error::Other(format!(
-            "invalid package story XML name {name}"
-        )))
-    }
-}
-
-fn story_xml_ncname_is_valid(value: &str) -> bool {
-    let mut characters = value.chars();
-    characters.next().is_some_and(story_xml_ncname_start)
-        && characters.all(story_xml_ncname_character)
-}
-
-fn story_xml_ncname_start(character: char) -> bool {
-    matches!(
-        character,
-        'A'..='Z' | '_' | 'a'..='z' | '\u{00C0}'..='\u{00D6}' | '\u{00D8}'..='\u{00F6}'
-            | '\u{00F8}'..='\u{02FF}' | '\u{0370}'..='\u{037D}' | '\u{037F}'..='\u{1FFF}'
-            | '\u{200C}'..='\u{200D}' | '\u{2070}'..='\u{218F}' | '\u{2C00}'..='\u{2FEF}'
-            | '\u{3001}'..='\u{D7FF}' | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}'
-            | '\u{10000}'..='\u{EFFFF}'
-    )
-}
-
-fn story_xml_ncname_character(character: char) -> bool {
-    story_xml_ncname_start(character)
-        || matches!(character, '-' | '.' | '0'..='9' | '\u{00B7}' | '\u{0300}'..='\u{036F}' | '\u{203F}'..='\u{2040}')
-}
-
-fn require_story_predefined_or_character_reference(reference: &BytesRef<'_>) -> Result<char> {
-    if let Some(character) = reference
-        .resolve_char_ref()
-        .map_err(|error| Error::Other(format!("invalid package story XML: {error}")))?
-    {
-        if story_xml_1_0_character_is_valid(character) {
-            return Ok(character);
-        }
-        return Err(Error::Other(
-            "package story character reference is not legal in XML 1.0".to_owned(),
-        ));
-    }
-    let name = reference
-        .decode()
-        .map_err(|error| Error::Other(format!("invalid package story XML: {error}")))?;
-    match name.as_ref() {
-        "amp" => Ok('&'),
-        "lt" => Ok('<'),
-        "gt" => Ok('>'),
-        "apos" => Ok('\''),
-        "quot" => Ok('"'),
-        _ => Err(Error::Other(format!(
-            "undeclared package story XML entity reference &{name};"
-        ))),
-    }
+    Error::Other(message)
 }
 
 fn legacy_story_element_kind(
@@ -11957,6 +11779,40 @@ mod tests {
             assert!(
                 validate_story_document_declarations_and_doctype(xml.as_bytes()).is_err(),
                 "{malformed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn package_story_shared_lexical_failures_keep_the_other_error_surface() {
+        for (xml, expected) in [
+            (
+                &b"<root>\x01</root>"[..],
+                "package story XML contains a forbidden literal XML 1.0 character",
+            ),
+            (
+                &b"<producer:item/>"[..],
+                "package story XML uses an unbound namespace prefix",
+            ),
+            (
+                &b"<root xmlns:a=\"urn:same\" xmlns:b=\"urn:same\" a:id=\"1\" b:id=\"2\"/>"[..],
+                "package story XML element has duplicate expanded-name attributes",
+            ),
+            (
+                &b"<root>&undefined;</root>"[..],
+                "undeclared package story XML entity reference &undefined;",
+            ),
+            (
+                &b"<?XML value?><root/>"[..],
+                "reserved package story XML processing instruction",
+            ),
+        ] {
+            assert!(
+                matches!(
+                    validate_story_document_declarations_and_doctype(xml),
+                    Err(Error::Other(message)) if message == expected
+                ),
+                "{xml:?}"
             );
         }
     }

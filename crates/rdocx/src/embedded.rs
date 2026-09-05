@@ -2,10 +2,11 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::Cursor;
 use std::ops::Range;
 
+use oxml_core::xml::{XmlLexicalError, validate_strict_xml_1_0};
 use oxml_opc::OpcPackage;
 use oxml_opc::relationship::{Relationship, rel_types};
 use quick_xml::XmlVersion;
-use quick_xml::events::{BytesDecl, BytesRef, BytesStart, Event};
+use quick_xml::events::{BytesDecl, BytesStart, Event};
 use quick_xml::name::{Namespace, QName, ResolveResult};
 use quick_xml::reader::NsReader;
 use sha2::{Digest, Sha256};
@@ -20,7 +21,6 @@ const STRICT_R_NS: &str = "http://purl.oclc.org/ooxml/officeDocument/relationshi
 const ACTIVEX_NS: &str = "http://schemas.microsoft.com/office/2006/activeX";
 const MC_NS: &str = "http://schemas.openxmlformats.org/markup-compatibility/2006";
 const XML_NS: &str = "http://www.w3.org/XML/1998/namespace";
-const XMLNS_NS: &str = "http://www.w3.org/2000/xmlns/";
 const VML_NS: &str = "urn:schemas-microsoft-com:vml";
 const WP_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
 const A_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
@@ -1077,263 +1077,102 @@ fn validate_identity_source(source_part: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_xml_declaration(declaration: &BytesDecl<'_>, operation: &'static str) -> Result<()> {
-    let version = declaration
-        .xml_version()
-        .map_err(|error| invalid(operation, format!("invalid XML declaration: {error}")))?;
-    if version != XmlVersion::Explicit1_0 {
-        return Err(invalid(
-            operation,
-            "XML declaration version must be 1.0".to_owned(),
-        ));
-    }
-    let declaration_text = std::str::from_utf8(declaration.as_ref())
-        .map_err(|error| invalid(operation, format!("invalid XML declaration: {error}")))?;
-    let start = BytesStart::from_content(declaration_text, 3);
-    let mut position = 0usize;
-    for attribute in start.attributes() {
-        let attribute = attribute
-            .map_err(|error| invalid(operation, format!("invalid XML declaration: {error}")))?;
-        let value = std::str::from_utf8(attribute.value.as_ref())
-            .map_err(|error| invalid(operation, format!("invalid XML declaration: {error}")))?;
-        let valid = match (position, attribute.key.as_ref()) {
-            (0, b"version") => value == "1.0",
-            (1, b"encoding") => value.eq_ignore_ascii_case("UTF-8"),
-            (1 | 2, b"standalone") => matches!(value, "yes" | "no"),
-            _ => false,
-        };
-        if !valid {
-            return Err(invalid(
-                operation,
-                "XML declaration attributes are invalid, duplicated, or out of order".to_owned(),
-            ));
-        }
-        position = position.saturating_add(1);
-    }
-    if position == 0 {
-        return Err(invalid(
-            operation,
-            "XML declaration is missing its version".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_literal_xml_characters(xml: &[u8], operation: &'static str) -> Result<()> {
-    let xml = std::str::from_utf8(xml)
-        .map_err(|error| invalid(operation, format!("XML is not UTF-8: {error}")))?;
-    if xml.chars().all(xml_1_0_character_is_valid) {
-        return Ok(());
-    }
-    Err(invalid(
-        operation,
-        "XML contains a forbidden literal XML 1.0 character".to_owned(),
-    ))
-}
-
-fn xml_1_0_character_is_valid(character: char) -> bool {
-    matches!(character, '\t' | '\n' | '\r')
-        || ('\u{20}'..='\u{D7FF}').contains(&character)
-        || ('\u{E000}'..='\u{FFFD}').contains(&character)
-        || ('\u{10000}'..='\u{10FFFF}').contains(&character)
-}
-
-fn validate_scanned_xml_event(
-    reader: &NsReader<&[u8]>,
-    event: &Event<'_>,
+fn validate_utf8_xml_declaration(
+    declaration: &BytesDecl<'_>,
     operation: &'static str,
 ) -> Result<()> {
-    match event {
-        Event::Start(element) | Event::Empty(element) => {
-            validate_scanned_element(reader, element, operation)
-        }
-        Event::End(element) => {
-            let element_name = element.name();
-            let prefix = validate_xml_qname(element_name.as_ref(), operation)?;
-            let namespace = reader.resolver().resolve_element(element_name).0;
-            validate_bound_prefix(&namespace, prefix, operation).map(|_| ())
-        }
-        Event::PI(instruction) => validate_xml_name(instruction.target(), operation),
-        _ => Ok(()),
-    }
-}
-
-fn validate_scanned_element(
-    reader: &NsReader<&[u8]>,
-    element: &BytesStart<'_>,
-    operation: &'static str,
-) -> Result<()> {
-    let element_name = element.name();
-    let prefix = validate_xml_qname(element_name.as_ref(), operation)?;
-    if prefix == Some(b"xmlns".as_slice()) {
-        return Err(invalid(
+    match declaration.encoding() {
+        Some(Ok(encoding)) if !encoding.eq_ignore_ascii_case(b"UTF-8") => Err(invalid(
             operation,
-            "XML element uses the reserved xmlns prefix".to_owned(),
-        ));
+            "XML declaration attributes are invalid, duplicated, or out of order".to_owned(),
+        )),
+        Some(Err(error)) => Err(invalid(
+            operation,
+            format!("invalid XML declaration: {error}"),
+        )),
+        None | Some(Ok(_)) => Ok(()),
     }
-    let namespace = reader.resolver().resolve_element(element_name).0;
-    validate_bound_prefix(&namespace, prefix, operation)?;
-
-    let mut expanded_names = HashSet::new();
-    for attribute in element.attributes() {
-        let attribute = attribute.map_err(|error| invalid(operation, error.to_string()))?;
-        let name = attribute.key.as_ref();
-        let prefix = validate_xml_qname(name, operation)?;
-        if attribute.value.contains(&b'<') {
-            return Err(invalid(
-                operation,
-                "XML attribute contains a literal less-than sign".to_owned(),
-            ));
-        }
-        let value = attribute
-            .decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())
-            .map_err(|error| invalid(operation, error.to_string()))?;
-        if !value.chars().all(xml_1_0_character_is_valid) {
-            return Err(invalid(
-                operation,
-                "XML attribute contains a forbidden XML 1.0 character".to_owned(),
-            ));
-        }
-
-        if name == b"xmlns" {
-            validate_namespace_declaration(None, value.as_bytes(), operation)?;
-            continue;
-        }
-        if prefix == Some(b"xmlns".as_slice()) {
-            validate_namespace_declaration(Some(local_name(name)), value.as_bytes(), operation)?;
-            continue;
-        }
-
-        let (namespace, local) = reader.resolver().resolve_attribute(attribute.key);
-        let resolved = validate_bound_prefix(&namespace, prefix, operation)?;
-        if !expanded_names.insert((resolved, local.as_ref().to_vec())) {
-            return Err(invalid(
-                operation,
-                "XML element has duplicate expanded-name attributes".to_owned(),
-            ));
-        }
-    }
-    Ok(())
 }
 
-fn validate_namespace_declaration(
-    prefix: Option<&[u8]>,
-    namespace: &[u8],
-    operation: &'static str,
-) -> Result<()> {
-    let valid = match prefix {
-        None => namespace != XML_NS.as_bytes() && namespace != XMLNS_NS.as_bytes(),
-        Some(b"xml") => namespace == XML_NS.as_bytes(),
-        Some(b"xmlns") => false,
-        Some(_) => {
-            !namespace.is_empty()
-                && namespace != XML_NS.as_bytes()
-                && namespace != XMLNS_NS.as_bytes()
+fn validate_embedded_lexical(xml: &[u8], operation: &'static str) -> Result<()> {
+    validate_strict_xml_1_0(xml).map_err(|error| embedded_lexical_error(xml, operation, error))
+}
+
+fn embedded_lexical_error(xml: &[u8], operation: &'static str, error: XmlLexicalError) -> Error {
+    let message = match error {
+        XmlLexicalError::InvalidUtf8 => {
+            let detail = std::str::from_utf8(xml)
+                .err()
+                .map_or_else(|| "invalid UTF-8".to_owned(), |error| error.to_string());
+            format!("XML is not UTF-8: {detail}")
         }
+        XmlLexicalError::InvalidDeclaration(reason) if reason == "version must be 1.0" => {
+            "XML declaration version must be 1.0".to_owned()
+        }
+        XmlLexicalError::InvalidDeclaration(reason)
+            if reason == "attributes are invalid, duplicated, or out of order" =>
+        {
+            "XML declaration attributes are invalid, duplicated, or out of order".to_owned()
+        }
+        XmlLexicalError::InvalidDeclaration(reason) if reason == "must begin with version" => {
+            "XML declaration is missing its version".to_owned()
+        }
+        XmlLexicalError::InvalidDeclaration(reason) => {
+            format!("invalid XML declaration: {reason}")
+        }
+        XmlLexicalError::ForbiddenLiteralCharacter => {
+            "XML contains a forbidden literal XML 1.0 character".to_owned()
+        }
+        XmlLexicalError::InvalidName(reason) if reason.starts_with("qualified name ") => {
+            format!("invalid XML {reason}")
+        }
+        XmlLexicalError::InvalidName(reason) if reason.starts_with("name ") => {
+            format!("invalid XML {reason}")
+        }
+        XmlLexicalError::InvalidName(reason) => reason,
+        XmlLexicalError::InvalidNamespace(reason)
+            if reason == "element uses the reserved xmlns prefix" =>
+        {
+            "XML element uses the reserved xmlns prefix".to_owned()
+        }
+        XmlLexicalError::InvalidNamespace(reason) if reason == "invalid namespace declaration" => {
+            "XML contains an invalid namespace declaration".to_owned()
+        }
+        XmlLexicalError::InvalidNamespace(reason) => format!("XML uses {reason}"),
+        XmlLexicalError::DuplicateExpandedAttribute => {
+            "XML element has duplicate expanded-name attributes".to_owned()
+        }
+        XmlLexicalError::InvalidReference(reason)
+            if reason == "attribute contains a literal less-than sign" =>
+        {
+            "XML attribute contains a literal less-than sign".to_owned()
+        }
+        XmlLexicalError::InvalidReference(reason)
+            if reason.starts_with("undeclared entity reference ") =>
+        {
+            reason.replacen(
+                "undeclared entity reference ",
+                "undeclared general entity reference ",
+                1,
+            )
+        }
+        XmlLexicalError::InvalidReference(reason) => reason,
+        XmlLexicalError::InvalidProcessingInstruction(reason)
+            if reason == "reserved XML target" =>
+        {
+            if operation == "inventory embedded content" {
+                "ActiveX properties contain a reserved XML processing instruction".to_owned()
+            } else {
+                "reserved XML processing instruction target".to_owned()
+            }
+        }
+        XmlLexicalError::InvalidProcessingInstruction(reason) if reason.starts_with("name ") => {
+            format!("invalid XML {reason}")
+        }
+        XmlLexicalError::InvalidProcessingInstruction(reason) => reason,
+        XmlLexicalError::InvalidComment(reason) => reason,
     };
-    if valid {
-        Ok(())
-    } else {
-        Err(invalid(
-            operation,
-            "XML contains an invalid namespace declaration".to_owned(),
-        ))
-    }
-}
-
-fn validate_bound_prefix(
-    namespace: &ResolveResult<'_>,
-    prefix: Option<&[u8]>,
-    operation: &'static str,
-) -> Result<Option<Vec<u8>>> {
-    match namespace {
-        ResolveResult::Bound(Namespace(namespace)) => Ok(Some(namespace.to_vec())),
-        ResolveResult::Unbound if prefix.is_none() => Ok(None),
-        ResolveResult::Unbound => Err(invalid(
-            operation,
-            format!(
-                "XML uses unbound namespace prefix {}",
-                String::from_utf8_lossy(prefix.unwrap_or_default())
-            ),
-        )),
-        ResolveResult::Unknown(prefix) => Err(invalid(
-            operation,
-            format!(
-                "XML uses unbound namespace prefix {}",
-                String::from_utf8_lossy(prefix)
-            ),
-        )),
-    }
-}
-
-fn validate_xml_qname<'a>(name: &'a [u8], operation: &'static str) -> Result<Option<&'a [u8]>> {
-    let name_text = std::str::from_utf8(name)
-        .map_err(|error| invalid(operation, format!("invalid XML qualified name: {error}")))?;
-    let mut parts = name_text.split(':');
-    let first = parts.next().unwrap_or_default();
-    let second = parts.next();
-    if !xml_ncname_is_valid(first)
-        || second.is_some_and(|local| !xml_ncname_is_valid(local))
-        || parts.next().is_some()
-    {
-        return Err(invalid(
-            operation,
-            format!("invalid XML qualified name {name_text}"),
-        ));
-    }
-    Ok(second.map(|_| first.as_bytes()))
-}
-
-fn validate_xml_name(name: &[u8], operation: &'static str) -> Result<()> {
-    let name = std::str::from_utf8(name)
-        .map_err(|error| invalid(operation, format!("invalid XML name: {error}")))?;
-    let mut characters = name.chars();
-    let valid = characters
-        .next()
-        .is_some_and(|character| character == ':' || xml_ncname_start_character(character))
-        && characters.all(|character| character == ':' || xml_ncname_character(character));
-    if valid {
-        Ok(())
-    } else {
-        Err(invalid(operation, format!("invalid XML name {name}")))
-    }
-}
-
-fn require_predefined_or_character_reference(reference: &BytesRef<'_>) -> Result<char> {
-    if let Some(character) = reference
-        .resolve_char_ref()
-        .map_err(|error| invalid("scan embedded XML", error.to_string()))?
-    {
-        if matches!(
-            character,
-            '\u{9}'
-                | '\u{A}'
-                | '\u{D}'
-                | '\u{20}'..='\u{D7FF}'
-                | '\u{E000}'..='\u{FFFD}'
-                | '\u{10000}'..='\u{10FFFF}'
-        ) {
-            return Ok(character);
-        }
-        return Err(invalid(
-            "scan embedded XML",
-            "character reference is not legal in XML 1.0".to_owned(),
-        ));
-    }
-    let name = reference
-        .decode()
-        .map_err(|error| invalid("scan embedded XML", error.to_string()))?;
-    match name.as_ref() {
-        "amp" => Ok('&'),
-        "lt" => Ok('<'),
-        "gt" => Ok('>'),
-        "apos" => Ok('\''),
-        "quot" => Ok('"'),
-        _ => Err(invalid(
-            "scan embedded XML",
-            format!("undeclared general entity reference &{name};"),
-        )),
-    }
+    invalid(operation, message)
 }
 
 fn remove_xml_reference(
@@ -1436,9 +1275,8 @@ fn relationship_is_internal(source_part: &str, relationship: &Relationship) -> R
 }
 
 fn active_x_binary_relationship_id(xml: &[u8]) -> Result<Option<String>> {
-    validate_literal_xml_characters(xml, "inventory embedded content")?;
+    validate_embedded_lexical(xml, "inventory embedded content")?;
     let mut reader = NsReader::from_reader(xml);
-    reader.config_mut().check_comments = true;
     let mut buffer = Vec::new();
     let mut depth = 0usize;
     let mut root_seen = false;
@@ -1452,7 +1290,6 @@ fn active_x_binary_relationship_id(xml: &[u8]) -> Result<Option<String>> {
         let root_namespace = namespace_is(&namespace, &[ACTIVEX_NS]);
         let event = event.into_owned();
         drop(namespace);
-        validate_scanned_xml_event(&reader, &event, "inventory embedded content")?;
         match event {
             Event::Start(element) if depth == 0 => {
                 if root_seen || !root_namespace || local_name(element.name().as_ref()) != b"ocx" {
@@ -1499,22 +1336,13 @@ fn active_x_binary_relationship_id(xml: &[u8]) -> Result<Option<String>> {
                         "ActiveX properties contain a misplaced XML declaration".to_owned(),
                     ));
                 }
-                validate_xml_declaration(&declaration, "inventory embedded content")?;
+                validate_utf8_xml_declaration(&declaration, "inventory embedded content")?;
                 declaration_seen = true;
             }
             Event::DocType(_) => {
                 return Err(invalid(
                     "inventory embedded content",
                     "ActiveX properties cannot contain a document type".to_owned(),
-                ));
-            }
-            Event::GeneralRef(reference) if depth > 0 => {
-                require_predefined_or_character_reference(&reference)?;
-            }
-            Event::PI(instruction) if instruction.target().eq_ignore_ascii_case(b"xml") => {
-                return Err(invalid(
-                    "inventory embedded content",
-                    "ActiveX properties contain a reserved XML processing instruction".to_owned(),
                 ));
             }
             Event::Comment(_) | Event::PI(_) if depth == 0 => {
@@ -1556,9 +1384,8 @@ fn xml_references(
     kind: XmlReferenceKind,
     expected_root: StoryRootKind,
 ) -> Result<Vec<XmlReference>> {
-    validate_literal_xml_characters(xml, "scan embedded XML")?;
+    validate_embedded_lexical(xml, "scan embedded XML")?;
     let mut reader = NsReader::from_reader(xml);
-    reader.config_mut().check_comments = true;
     let mut buffer = Vec::new();
     let mut nodes = Vec::<OpenNode>::new();
     let mut references = Vec::new();
@@ -1606,7 +1433,6 @@ fn xml_references(
         let event = event.into_owned();
         drop(namespace);
         let event_end = reader.buffer_position() as usize;
-        validate_scanned_xml_event(&reader, &event, "scan embedded XML")?;
         match event {
             Event::Start(element) => {
                 let is_document_element = nodes.is_empty()
@@ -1927,10 +1753,13 @@ fn xml_references(
                 outside_document_content_seen = true;
             }
             Event::GeneralRef(reference) => {
-                let character = require_predefined_or_character_reference(&reference)?;
+                let non_whitespace = reference
+                    .resolve_char_ref()
+                    .ok()
+                    .flatten()
+                    .is_none_or(|character| !character.is_ascii_whitespace());
                 if nodes.last().is_some_and(|node| {
-                    node.mc_path_kind == McPathKind::AlternateContent
-                        && !character.is_ascii_whitespace()
+                    node.mc_path_kind == McPathKind::AlternateContent && non_whitespace
                 }) {
                     nodes
                         .last_mut()
@@ -1949,7 +1778,7 @@ fn xml_references(
                 if misplaced {
                     outside_document_content_seen = true;
                 } else {
-                    validate_xml_declaration(&declaration, "scan embedded XML")?;
+                    validate_utf8_xml_declaration(&declaration, "scan embedded XML")?;
                 }
                 declaration_seen = true;
             }
@@ -1957,12 +1786,6 @@ fn xml_references(
                 return Err(invalid(
                     "scan embedded XML",
                     "Word story XML cannot contain a document type".to_owned(),
-                ));
-            }
-            Event::PI(instruction) if instruction.target().eq_ignore_ascii_case(b"xml") => {
-                return Err(invalid(
-                    "scan embedded XML",
-                    "reserved XML processing instruction target".to_owned(),
                 ));
             }
             Event::Comment(_) | Event::PI(_) if nodes.is_empty() && document_element_count == 0 => {
@@ -3461,4 +3284,55 @@ pub(crate) fn synchronized_package_mutation_invalidates_signature(
 
 fn invalid(operation: &'static str, message: String) -> Error {
     Error::InvalidEmbeddedMutation { operation, message }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_shared_lexical_failures_keep_operation_and_message_surfaces() {
+        for (xml, expected) in [
+            (
+                &b"<root>\x01</root>"[..],
+                "XML contains a forbidden literal XML 1.0 character",
+            ),
+            (
+                &b"<producer:item/>"[..],
+                "XML uses unbound namespace prefix producer",
+            ),
+            (
+                &b"<root xmlns:a=\"urn:same\" xmlns:b=\"urn:same\" a:id=\"1\" b:id=\"2\"/>"[..],
+                "XML element has duplicate expanded-name attributes",
+            ),
+            (
+                &b"<root>&undefined;</root>"[..],
+                "undeclared general entity reference &undefined;",
+            ),
+            (
+                &b"<?XML value?><root/>"[..],
+                "reserved XML processing instruction target",
+            ),
+        ] {
+            assert!(
+                matches!(
+                    validate_embedded_lexical(xml, "scan embedded XML"),
+                    Err(Error::InvalidEmbeddedMutation { operation: "scan embedded XML", message })
+                        if message == expected
+                ),
+                "{xml:?}"
+            );
+        }
+
+        assert!(matches!(
+            validate_embedded_lexical(
+                b"<?XML value?><root/>",
+                "inventory embedded content"
+            ),
+            Err(Error::InvalidEmbeddedMutation {
+                operation: "inventory embedded content",
+                message,
+            }) if message == "ActiveX properties contain a reserved XML processing instruction"
+        ));
+    }
 }

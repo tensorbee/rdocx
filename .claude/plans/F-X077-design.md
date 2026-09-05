@@ -1,6 +1,6 @@
 # F-X077, Share strict XML lexical validation
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S69
 **Size**: M
 **Depends on**: F-236, F-237
@@ -128,19 +128,19 @@ serialization or rendering. Any output delta blocks the story.
 
 ## Implementation checklist
 
-- [ ] Add the concrete shared error and validator to the existing
+- [x] Add the concrete shared error and validator to the existing
       `oxml-core/src/xml.rs` file.
-- [ ] Add one mutation-sensitive shared unit matrix covering every lexical
+- [x] Add one mutation-sensitive shared unit matrix covering every lexical
       branch.
-- [ ] Map shared failures back to the exact glossary error surface.
-- [ ] Map shared failures back to the exact embedded scanner operation and
+- [x] Map shared failures back to the exact glossary error surface.
+- [x] Map shared failures back to the exact embedded scanner operation and
       error surface.
-- [ ] Map shared failures back to the exact package-story error surface.
-- [ ] Remove all three duplicated helper stacks while retaining local roots,
+- [x] Map shared failures back to the exact package-story error surface.
+- [x] Remove all three duplicated helper stacks while retaining local roots,
       schema positions, doctypes, declaration placement, and whitespace rules.
-- [ ] Prove byte-identical failed mutation rollback and valid raw subtree
+- [x] Prove byte-identical failed mutation rollback and valid raw subtree
       preservation.
-- [ ] Run focused crate checks, every routed rider, and full verification.
+- [x] Run focused crate checks, every routed rider, and full verification.
 
 ## Open questions
 

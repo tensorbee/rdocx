@@ -1,10 +1,10 @@
 //! WordprocessingML glossary document parts and building-block entries.
 
-use quick_xml::events::{BytesDecl, BytesEnd, BytesRef, BytesStart, Event};
+use oxml_core::xml::{XmlLexicalError, validate_strict_xml_1_0};
+use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::name::{Namespace, ResolveResult};
 use quick_xml::reader::NsReader;
-use quick_xml::{Reader, Writer, XmlVersion};
-use std::collections::HashSet;
+use quick_xml::{Reader, Writer};
 use std::ops::Range;
 
 use crate::document::CT_Body;
@@ -478,9 +478,8 @@ fn is_glossary_element_only_container(stack: &[Option<String>]) -> bool {
 }
 
 fn validate_document_declarations_and_doctype(xml: &[u8]) -> Result<()> {
-    validate_literal_xml_characters(xml, "glossary")?;
+    validate_strict_xml_1_0(xml).map_err(glossary_lexical_error)?;
     let mut reader = NsReader::from_reader(xml);
-    reader.config_mut().check_comments = true;
     let mut buffer = Vec::new();
     let mut declaration_allowed = true;
     let mut declaration_seen = false;
@@ -490,15 +489,13 @@ fn validate_document_declarations_and_doctype(xml: &[u8]) -> Result<()> {
         let is_word = namespace_is(&namespace, W_NS);
         let event = event.into_owned();
         drop(namespace);
-        validate_scanned_xml_event(&reader, &event, "glossary")?;
         match event {
-            Event::Decl(declaration) => {
+            Event::Decl(_) => {
                 if !declaration_allowed || declaration_seen {
                     return Err(OxmlError::InvalidValue(
                         "misplaced or duplicate glossary XML declaration".to_owned(),
                     ));
                 }
-                validate_xml_declaration(&declaration, "glossary")?;
                 declaration_seen = true;
                 declaration_allowed = false;
             }
@@ -539,23 +536,98 @@ fn validate_document_declarations_and_doctype(xml: &[u8]) -> Result<()> {
                 ));
             }
             Event::GeneralRef(reference) => {
-                let character = require_predefined_or_character_reference(&reference, "glossary")?;
-                if stack.last().is_some_and(Option::is_some) && !character.is_ascii_whitespace() {
+                let non_whitespace = reference
+                    .resolve_char_ref()
+                    .ok()
+                    .flatten()
+                    .is_none_or(|character| !character.is_ascii_whitespace());
+                if stack.last().is_some_and(Option::is_some) && non_whitespace {
                     return Err(OxmlError::InvalidValue(
                         "character reference in glossary element-only content".to_owned(),
                     ));
                 }
-            }
-            Event::PI(instruction) if instruction.target().eq_ignore_ascii_case(b"xml") => {
-                return Err(OxmlError::InvalidValue(
-                    "reserved glossary XML processing instruction".to_owned(),
-                ));
             }
             Event::Eof => return Ok(()),
             _ => declaration_allowed = false,
         }
         buffer.clear();
     }
+}
+
+fn glossary_lexical_error(error: XmlLexicalError) -> OxmlError {
+    let message = match error {
+        XmlLexicalError::InvalidUtf8 => "glossary XML is not UTF-8".to_owned(),
+        XmlLexicalError::InvalidDeclaration(reason) if reason == "must begin with version" => {
+            "glossary XML declaration must begin with version".to_owned()
+        }
+        XmlLexicalError::InvalidDeclaration(reason)
+            if reason == "attributes are invalid, duplicated, or out of order" =>
+        {
+            "invalid glossary XML declaration".to_owned()
+        }
+        XmlLexicalError::InvalidDeclaration(reason) => {
+            format!("invalid glossary XML declaration: {reason}")
+        }
+        XmlLexicalError::ForbiddenLiteralCharacter => {
+            "glossary XML contains a forbidden literal XML 1.0 character".to_owned()
+        }
+        XmlLexicalError::InvalidName(reason) if reason.starts_with("qualified name ") => {
+            format!("invalid glossary XML {reason}")
+        }
+        XmlLexicalError::InvalidName(reason) if reason.starts_with("name ") => {
+            format!("invalid glossary XML {reason}")
+        }
+        XmlLexicalError::InvalidName(reason) => format!("invalid glossary XML: {reason}"),
+        XmlLexicalError::InvalidNamespace(reason)
+            if reason == "element uses the reserved xmlns prefix" =>
+        {
+            "glossary XML element uses the reserved xmlns prefix".to_owned()
+        }
+        XmlLexicalError::InvalidNamespace(reason) if reason == "invalid namespace declaration" => {
+            "glossary XML contains an invalid namespace declaration".to_owned()
+        }
+        XmlLexicalError::InvalidNamespace(_) => {
+            "glossary XML uses an unbound namespace prefix".to_owned()
+        }
+        XmlLexicalError::DuplicateExpandedAttribute => {
+            "glossary XML element has duplicate expanded-name attributes".to_owned()
+        }
+        XmlLexicalError::InvalidReference(reason)
+            if reason == "attribute contains a literal less-than sign" =>
+        {
+            "glossary XML attribute contains a literal less-than sign".to_owned()
+        }
+        XmlLexicalError::InvalidReference(reason)
+            if reason == "character reference is not legal in XML 1.0" =>
+        {
+            "glossary character reference is not legal in XML 1.0".to_owned()
+        }
+        XmlLexicalError::InvalidReference(reason)
+            if reason.starts_with("undeclared entity reference ") =>
+        {
+            reason.replacen(
+                "undeclared entity reference ",
+                "undeclared glossary XML entity reference ",
+                1,
+            )
+        }
+        XmlLexicalError::InvalidReference(reason) => format!("invalid glossary XML: {reason}"),
+        XmlLexicalError::InvalidProcessingInstruction(reason)
+            if reason == "reserved XML target" =>
+        {
+            "reserved glossary XML processing instruction".to_owned()
+        }
+        XmlLexicalError::InvalidProcessingInstruction(reason) if reason.starts_with("name ") => {
+            format!("invalid glossary XML {reason}")
+        }
+        XmlLexicalError::InvalidProcessingInstruction(reason) => {
+            format!("invalid glossary XML processing instruction: {reason}")
+        }
+        XmlLexicalError::InvalidComment(reason) => {
+            format!("invalid glossary XML comment: {reason}")
+        }
+    };
+    OxmlError::InvalidValue(message)
 }
 
 fn glossary_container_is_element_only(local: &[u8]) -> bool {
@@ -571,263 +643,12 @@ fn glossary_container_is_element_only(local: &[u8]) -> bool {
     )
 }
 
-fn validate_literal_xml_characters(xml: &[u8], owner: &str) -> Result<()> {
-    let xml = std::str::from_utf8(xml)?;
-    if xml.chars().all(xml_1_0_character_is_valid) {
-        return Ok(());
-    }
-    Err(OxmlError::InvalidValue(format!(
-        "{owner} XML contains a forbidden literal XML 1.0 character"
-    )))
-}
-
-fn xml_1_0_character_is_valid(character: char) -> bool {
-    matches!(character, '\t' | '\n' | '\r')
-        || ('\u{20}'..='\u{D7FF}').contains(&character)
-        || ('\u{E000}'..='\u{FFFD}').contains(&character)
-        || ('\u{10000}'..='\u{10FFFF}').contains(&character)
-}
-
-fn validate_scanned_xml_event(
-    reader: &NsReader<&[u8]>,
-    event: &Event<'_>,
-    owner: &str,
-) -> Result<()> {
-    match event {
-        Event::Start(element) | Event::Empty(element) => {
-            validate_scanned_element(reader, element, owner)
-        }
-        Event::End(element) => {
-            let name = element.name();
-            let prefix = validate_xml_qname(name.as_ref(), owner)?;
-            validate_bound_prefix(&reader.resolver().resolve_element(name).0, prefix, owner)
-                .map(|_| ())
-        }
-        Event::PI(instruction) => validate_xml_name(instruction.target(), owner),
-        _ => Ok(()),
-    }
-}
-
-fn validate_scanned_element(
-    reader: &NsReader<&[u8]>,
-    element: &BytesStart<'_>,
-    owner: &str,
-) -> Result<()> {
-    let element_name = element.name();
-    let prefix = validate_xml_qname(element_name.as_ref(), owner)?;
-    if prefix == Some(b"xmlns".as_slice()) {
-        return Err(OxmlError::InvalidValue(format!(
-            "{owner} XML element uses the reserved xmlns prefix"
-        )));
-    }
-    validate_bound_prefix(
-        &reader.resolver().resolve_element(element_name).0,
-        prefix,
-        owner,
-    )?;
-    let mut expanded_names = HashSet::new();
-    for attribute in element.attributes() {
-        let attribute = attribute?;
-        let name = attribute.key.as_ref();
-        let prefix = validate_xml_qname(name, owner)?;
-        if attribute.value.contains(&b'<') {
-            return Err(OxmlError::InvalidValue(format!(
-                "{owner} XML attribute contains a literal less-than sign"
-            )));
-        }
-        let value =
-            attribute.decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())?;
-        if !value.chars().all(xml_1_0_character_is_valid) {
-            return Err(OxmlError::InvalidValue(format!(
-                "{owner} XML attribute contains a forbidden XML 1.0 character"
-            )));
-        }
-        if name == b"xmlns" {
-            validate_namespace_declaration(None, value.as_bytes(), owner)?;
-            continue;
-        }
-        if prefix == Some(b"xmlns".as_slice()) {
-            validate_namespace_declaration(Some(local_name(name)), value.as_bytes(), owner)?;
-            continue;
-        }
-        let (namespace, local) = reader.resolver().resolve_attribute(attribute.key);
-        let resolved = validate_bound_prefix(&namespace, prefix, owner)?;
-        if !expanded_names.insert((resolved, local.as_ref().to_vec())) {
-            return Err(OxmlError::InvalidValue(format!(
-                "{owner} XML element has duplicate expanded-name attributes"
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn validate_namespace_declaration(
-    prefix: Option<&[u8]>,
-    namespace: &[u8],
-    owner: &str,
-) -> Result<()> {
-    const XML_NS: &[u8] = b"http://www.w3.org/XML/1998/namespace";
-    const XMLNS_NS: &[u8] = b"http://www.w3.org/2000/xmlns/";
-    let valid = match prefix {
-        None => namespace != XML_NS && namespace != XMLNS_NS,
-        Some(b"xml") => namespace == XML_NS,
-        Some(b"xmlns") => false,
-        Some(_) => !namespace.is_empty() && namespace != XML_NS && namespace != XMLNS_NS,
-    };
-    if valid {
-        Ok(())
-    } else {
-        Err(OxmlError::InvalidValue(format!(
-            "{owner} XML contains an invalid namespace declaration"
-        )))
-    }
-}
-
-fn validate_bound_prefix(
-    namespace: &ResolveResult<'_>,
-    prefix: Option<&[u8]>,
-    owner: &str,
-) -> Result<Option<Vec<u8>>> {
-    match namespace {
-        ResolveResult::Bound(Namespace(namespace)) => Ok(Some(namespace.to_vec())),
-        ResolveResult::Unbound if prefix.is_none() => Ok(None),
-        ResolveResult::Unbound => Err(OxmlError::InvalidValue(format!(
-            "{owner} XML uses an unbound namespace prefix"
-        ))),
-        ResolveResult::Unknown(_) => Err(OxmlError::InvalidValue(format!(
-            "{owner} XML uses an unbound namespace prefix"
-        ))),
-    }
-}
-
-fn validate_xml_qname<'a>(name: &'a [u8], owner: &str) -> Result<Option<&'a [u8]>> {
-    let name = std::str::from_utf8(name)?;
-    let mut parts = name.split(':');
-    let first = parts.next().unwrap_or_default();
-    let second = parts.next();
-    if !xml_ncname_is_valid(first)
-        || second.is_some_and(|local| !xml_ncname_is_valid(local))
-        || parts.next().is_some()
-    {
-        return Err(OxmlError::InvalidValue(format!(
-            "invalid {owner} XML qualified name {name}"
-        )));
-    }
-    Ok(second.map(|_| first.as_bytes()))
-}
-
-fn validate_xml_name(name: &[u8], owner: &str) -> Result<()> {
-    let name = std::str::from_utf8(name)?;
-    let mut characters = name.chars();
-    if characters
-        .next()
-        .is_some_and(|character| character == ':' || xml_ncname_start_character(character))
-        && characters.all(|character| character == ':' || xml_ncname_character(character))
-    {
-        Ok(())
-    } else {
-        Err(OxmlError::InvalidValue(format!(
-            "invalid {owner} XML name {name}"
-        )))
-    }
-}
-
-fn xml_ncname_is_valid(value: &str) -> bool {
-    let mut characters = value.chars();
-    characters.next().is_some_and(xml_ncname_start_character)
-        && characters.all(xml_ncname_character)
-}
-
-fn xml_ncname_start_character(character: char) -> bool {
-    matches!(
-        character,
-        'A'..='Z' | '_' | 'a'..='z' | '\u{00C0}'..='\u{00D6}' | '\u{00D8}'..='\u{00F6}'
-            | '\u{00F8}'..='\u{02FF}' | '\u{0370}'..='\u{037D}' | '\u{037F}'..='\u{1FFF}'
-            | '\u{200C}'..='\u{200D}' | '\u{2070}'..='\u{218F}' | '\u{2C00}'..='\u{2FEF}'
-            | '\u{3001}'..='\u{D7FF}' | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}'
-            | '\u{10000}'..='\u{EFFFF}'
-    )
-}
-
-fn xml_ncname_character(character: char) -> bool {
-    xml_ncname_start_character(character)
-        || matches!(character, '-' | '.' | '0'..='9' | '\u{00B7}' | '\u{0300}'..='\u{036F}' | '\u{203F}'..='\u{2040}')
-}
-
-fn require_predefined_or_character_reference(
-    reference: &BytesRef<'_>,
-    owner: &str,
-) -> Result<char> {
-    if let Some(character) = reference.resolve_char_ref()? {
-        if xml_1_0_character_is_valid(character) {
-            return Ok(character);
-        }
-        return Err(OxmlError::InvalidValue(format!(
-            "{owner} character reference is not legal in XML 1.0"
-        )));
-    }
-    let name = reference
-        .decode()
-        .map_err(|error| OxmlError::InvalidValue(format!("invalid {owner} XML: {error}")))?;
-    match name.as_ref() {
-        "amp" => Ok('&'),
-        "lt" => Ok('<'),
-        "gt" => Ok('>'),
-        "apos" => Ok('\''),
-        "quot" => Ok('"'),
-        _ => Err(OxmlError::InvalidValue(format!(
-            "undeclared {owner} XML entity reference &{name};"
-        ))),
-    }
-}
-
 fn namespace_is(namespace: &ResolveResult<'_>, expected: &str) -> bool {
     matches!(namespace, ResolveResult::Bound(Namespace(uri)) if *uri == expected.as_bytes())
 }
 
 fn local_name(name: &[u8]) -> &[u8] {
     name.rsplit(|byte| *byte == b':').next().unwrap_or(name)
-}
-
-fn validate_xml_declaration(declaration: &BytesDecl<'_>, owner: &str) -> Result<()> {
-    let content = std::str::from_utf8(declaration.as_ref())?;
-    let start = BytesStart::from_content(content, 3);
-    let attributes = start
-        .attributes()
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    if attributes.first().map(|attribute| attribute.key.as_ref()) != Some(b"version".as_ref()) {
-        return Err(OxmlError::InvalidValue(format!(
-            "{owner} XML declaration must begin with version"
-        )));
-    }
-    let mut encoding_seen = false;
-    let mut standalone_seen = false;
-    for (index, attribute) in attributes.iter().enumerate() {
-        let value = attribute
-            .normalized_value(XmlVersion::Explicit1_0)?
-            .into_owned();
-        match attribute.key.as_ref() {
-            b"version" if index == 0 && value == "1.0" => {}
-            b"encoding" if !encoding_seen && !standalone_seen && valid_encoding_name(&value) => {
-                encoding_seen = true;
-            }
-            b"standalone" if !standalone_seen && matches!(value.as_str(), "yes" | "no") => {
-                standalone_seen = true;
-            }
-            _ => {
-                return Err(OxmlError::InvalidValue(format!(
-                    "invalid {owner} XML declaration"
-                )));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn valid_encoding_name(value: &str) -> bool {
-    let mut bytes = value.bytes();
-    bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic())
-        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 fn parse_doc_part(
@@ -2580,6 +2401,40 @@ mod tests {
             assert!(
                 CT_GlossaryDocument::from_xml(xml.as_bytes()).is_err(),
                 "{malformed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn glossary_shared_lexical_failures_keep_the_invalid_value_surface() {
+        for (xml, expected) in [
+            (
+                &b"<root>\x01</root>"[..],
+                "glossary XML contains a forbidden literal XML 1.0 character",
+            ),
+            (
+                &b"<producer:item/>"[..],
+                "glossary XML uses an unbound namespace prefix",
+            ),
+            (
+                &b"<root xmlns:a=\"urn:same\" xmlns:b=\"urn:same\" a:id=\"1\" b:id=\"2\"/>"[..],
+                "glossary XML element has duplicate expanded-name attributes",
+            ),
+            (
+                &b"<root>&undefined;</root>"[..],
+                "undeclared glossary XML entity reference &undefined;",
+            ),
+            (
+                &b"<?XML value?><root/>"[..],
+                "reserved glossary XML processing instruction",
+            ),
+        ] {
+            assert!(
+                matches!(
+                    validate_document_declarations_and_doctype(xml),
+                    Err(OxmlError::InvalidValue(message)) if message == expected
+                ),
+                "{xml:?}"
             );
         }
     }

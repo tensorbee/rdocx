@@ -74,6 +74,14 @@ byte-exact unsupported subtree retention, unsafe relationship graphs, stale
 identities, wrong value kinds, bounds, and atomic failure are focused checks.
 The Python, WASM, and CLI surfaces and the 49-entry hash set remain unchanged.
 
+The glossary, embedded-content, and package-story malformed XML matrices run
+through the single strict XML 1.0 lexical validator in `oxml-core`. A shared
+unit matrix covers declarations, literal characters, names, namespaces,
+duplicate expanded attributes, references, comments, and processing
+instructions. Consumer regressions pin `OxmlError::InvalidValue`,
+`Error::InvalidEmbeddedMutation`, and `Error::Other` mapping, while the
+embedded cases also require byte-identical rollback after rejected mutation.
+
 The Presentation collaboration round-trip gate is
 `modern_comments_replies_sections_and_handout_settings_survive_ordered_mutation_save_and_reopen`.
 It builds a noncanonical package in the existing `rpptx` integration binary,
