@@ -11878,3 +11878,53 @@ selected changes, and no release notification is required.
 **Notes for future sessions.** Treat the published 0.10.0 shared family as the
 registry boundary for stable 0.13.0. Do not extend this release's authority to
 the unpublished WASM member or either binding family.
+
+### F-238, Flat OPC and modern Word package variants
+
+**Sprint.** S69
+**Completed.** 2026-09-05
+**Size.** M, estimated 2 days, actual 1 day
+
+**What was built.** The native Word facade now reads and writes bounded Flat
+OPC packages and exposes exact DOCX, DOCM, DOTX, and DOTM package identity.
+Ordinary saves preserve the opened class, while staged output-only conversion
+changes only the authoritative main-part content type and retains executable
+payloads, relationships, unrelated content types, and unsupported XML.
+
+**Non-obvious choices.** Flat OPC is converted directly into the existing OPC
+package rather than retained as a second model. The parser accepts namespace
+aliases but validates expanded names, routes relationship parts to their
+owners, applies package limits before publication, and fails closed on unsafe
+targets, ambiguous main parts, malformed data forms, and unknown package
+classes. Deterministic output uses fixed `pkg:` markup, XML data for XML parts,
+base64 binary data for opaque parts, atomic path replacement, and a reopen gate.
+
+**Deviations from the design plan.** None. Microscope review strengthened
+relationship target-mode handling, relationship-owner validation, local
+namespace declaration handling, allocation bounds, MIME classification, empty
+binary representation, and signature invalidation evidence. Pass 5 reported
+zero defects, zero smells, and zero nitpicks.
+
+**Spec sections touched.** `docs/hld/02-scope-and-non-goals.md`,
+`docs/hld/03-architecture.md`, `docs/hld/04-opc-and-packaging.md`,
+`docs/hld/10-bindings-spec.md`, `docs/hld/12-testing-strategy.md`, and
+`docs/hld/15-build-and-toolchain.md`.
+
+**Tests.** The gate
+`flat_opc_and_modern_word_package_classes_reopen_without_repair_and_preserve_payloads`
+covers all four package classes through ZIP, Flat OPC, document, and ZIP
+conversion. Focused malformed-package, namespace, relationship, limit,
+conversion-isolation, signature-invalidation, path-save, XML, and binary tests
+cover the strict boundary. Microsoft Word 16.104 build 16.104.25121423 opened
+the generated DOCX, DOCM, DOTX, DOTM, and Flat OPC outputs without repair.
+Integrated `/verify --full` passed at
+`f4c5bb07e0680c85f446e3df06fed44802005e83`, including all tests, WASM,
+rustdoc, dependency direction, packaging, archive-size, and supply-chain
+riders.
+
+**Hash harness.** Unchanged, 49 of 49.
+
+**Notes for future sessions.** Treat the main-part override as the sole package
+class authority. Keep class conversion staged and preservation-first, and do
+not infer identity from filenames or remove executable content when selecting
+an ordinary document or template class.
