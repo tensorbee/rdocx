@@ -1372,6 +1372,45 @@ fn css_resource_references(css: &str) -> Result<Vec<String>> {
         references.push(reference.to_owned());
         position = end + 1;
     }
+
+    position = 0;
+    while let Some(relative) = lower[position..].find("@import") {
+        let mut start = position + relative + "@import".len();
+        while css
+            .as_bytes()
+            .get(start)
+            .is_some_and(u8::is_ascii_whitespace)
+        {
+            start += 1;
+        }
+        if lower[start..].starts_with("url(") {
+            position = start + 4;
+            continue;
+        }
+        let Some(&quote @ (b'\'' | b'"')) = css.as_bytes().get(start) else {
+            return Err(mhtml_error(None, 0, "unsupported CSS import resource"));
+        };
+        start += 1;
+        let mut end = start;
+        while let Some(&byte) = css.as_bytes().get(end) {
+            if byte == b'\\' {
+                return Err(mhtml_error(None, 0, "escaped CSS import resource"));
+            }
+            if byte == quote {
+                break;
+            }
+            end += 1;
+        }
+        if css.as_bytes().get(end) != Some(&quote) {
+            return Err(mhtml_error(None, 0, "unterminated CSS import resource"));
+        }
+        let reference = css[start..end].trim();
+        if reference.is_empty() {
+            return Err(mhtml_error(None, 0, "empty CSS import resource"));
+        }
+        references.push(reference.to_owned());
+        position = end + 1;
+    }
     Ok(references)
 }
 
@@ -1711,6 +1750,19 @@ fn parse_mhtml(bytes: &[u8], limits: MhtmlLimits) -> Result<(String, MhtmlProjec
                     ));
                 }
             }
+        }
+    }
+    let background_selector = Selector::parse("[background]").expect("static selector");
+    for element in dom.select(&background_selector) {
+        let reference = element.attr("background").unwrap_or_default().trim();
+        if resolve_resource_reference(reference, root_location.as_deref(), &ids, &locations)?
+            .is_none()
+        {
+            return Err(mhtml_error(
+                None,
+                0,
+                format!("unresolved or external subresource `{reference}`"),
+            ));
         }
     }
     let styled_selector = Selector::parse("[style], style").expect("static selector");
@@ -3308,7 +3360,23 @@ mod tests {
                 .into_iter()
                 .map(char::from)
                 .collect(),
+            mhtml_fixture("<body background='https://outside.test/background.png'><p>x</p></body>")
+                .into_iter()
+                .map(char::from)
+                .collect(),
+            mhtml_fixture("<body background='cid:missing@rdocx'><p>x</p></body>")
+                .into_iter()
+                .map(char::from)
+                .collect(),
             mhtml_fixture("<p style=\"background-image:url('https://outside.test/a.png')\">x</p>")
+                .into_iter()
+                .map(char::from)
+                .collect(),
+            mhtml_fixture("<style>@import \"https://outside.test/a.css\";</style><p>x</p>")
+                .into_iter()
+                .map(char::from)
+                .collect(),
+            mhtml_fixture("<style>@import 'cid:missing@rdocx';</style><p>x</p>")
                 .into_iter()
                 .map(char::from)
                 .collect(),

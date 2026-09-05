@@ -11776,7 +11776,7 @@ body order, formatting, lists, tables, images, links, and diagnostics. Focused
 parser, transfer, resource, limit, deterministic-writer, and loss tests cover
 failure atomicity and mutation sensitivity. Microsoft Word 16.104 build
 16.104.25121423 passed the exact integrated oracle at
-`7462b363e96df64adc8fea68aebd2778a9e130d8`, and `/verify --full` passed at the
+`7fde4033b7cdf17f7c6e309dfccf7d1b9a6b1d44`, and `/verify --full` passed at the
 same SHA. The remediated oracle sends one source-built input through rdocx and
 Word, then compares every shared structural field with one acceptance predicate.
 It pins the intentional image difference: Word drops the contained PNG while
