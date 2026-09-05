@@ -11698,3 +11698,89 @@ including all parser, serializer, package, facade, LibreOffice, canonical
 identity boundary. Keep binary `.doc`, field execution, and implicit reusable
 content expansion out of scope, and retain raw unsupported properties, bodies,
 and sibling entries byte-for-byte through unrelated edits.
+
+### F-X077, Share strict XML lexical validation
+
+**Sprint.** S69
+**Completed.** 2026-09-05
+**Size.** M, estimated 2 days, actual 1 day
+
+**What was built.** `oxml-core` now owns one strict XML 1.0 lexical validator
+for declaration grammar, characters, names, namespace bindings, duplicate
+expanded attributes, references, comments, and processing-instruction targets.
+Glossary, embedded-content, and package-story scanners all call that shared
+entry point while retaining their existing format-specific validation passes.
+
+**Non-obvious choices.** The validator lives in the existing `xml.rs` owner and
+returns a concrete shared error. Each consumer maps that error back to its
+established variant and message, so the refactor does not change public failure
+surfaces. Root, schema-position, doctype, declaration-placement, and semantic
+whitespace rules remain local to their owning scanners.
+
+**Deviations from the design plan.** None. Microscope pass 1 found declaration
+entity normalization that would have accepted an invalid pseudo-attribute.
+The correction retained raw declaration values until shared validation, and
+pass 3 reported zero defects, zero smells, and zero nitpicks.
+
+**Spec sections touched.** `docs/hld/03-architecture.md` and
+`docs/hld/12-testing-strategy.md`.
+
+**Tests.** The gate
+`strict_xml_1_0_validator_rejects_every_shared_lexical_class` covers every
+shared branch. The glossary, package-story, and embedded malformed matrices
+also prove exact local error mapping, source preservation, and byte-identical
+mutation rollback. Integrated `/verify --full` passed at
+`7462b363e96df64adc8fea68aebd2778a9e130d8`, including the dependency-direction,
+rustdoc, packaging, archive-size, and supply-chain riders.
+
+**Hash harness.** Unchanged, 49 of 49.
+
+**Notes for future sessions.** Keep format-neutral lexical policy in
+`oxml-core`. New consumers should adapt shared errors locally and must not move
+owner-specific document structure or mutation policy into the shared helper.
+
+### F-239, MHTML import and export
+
+**Sprint.** S69
+**Completed.** 2026-09-05
+**Size.** M, estimated 2 days, actual 1 day
+
+**What was built.** The native Word facade now imports bounded
+`multipart/related` MHTML into the existing document model and exports
+deterministic MHTML with diagnostic-bearing byte and path APIs. Supported body
+structure, formatting, lists, tables, contained images, and links survive
+conversion, save, and reopen.
+
+**Non-obvious choices.** MIME parsing and HTML projection remain in the
+existing HTML owner. Imports pre-index and validate the complete contained
+resource graph before publication, never fetch external resources, and accept
+safe external anchors only as navigation. Export uses stable CRLF MIME,
+content-derived boundaries, referenced resources, bounded base64, atomic path
+writes, and an immediate reparse and DOCX reopen check.
+
+**Deviations from the design plan.** None. Microscope pass 1 strengthened CSS
+and `srcset` resource preflight, MIME and whitespace validation, closing-boundary
+handling, export loss diagnostics, and mutation-sensitive image and diagnostic
+coverage. Pass 2 reported zero defects, zero smells, and zero nitpicks.
+
+**Spec sections touched.** `docs/hld/02-scope-and-non-goals.md`,
+`docs/hld/03-architecture.md`, `docs/hld/04-opc-and-packaging.md`,
+`docs/hld/10-bindings-spec.md`, `docs/hld/12-testing-strategy.md`,
+`docs/hld/14-development-backlog.md`, and
+`docs/hld/15-build-and-toolchain.md`.
+
+**Tests.** The differential gate
+`mhtml_conversions_match_the_pinned_word_structure` and integration gate
+`mhtml_import_and_export_preserve_supported_word_structure` cover normalized
+body order, formatting, lists, tables, images, links, and diagnostics. Focused
+parser, transfer, resource, limit, deterministic-writer, and loss tests cover
+failure atomicity and mutation sensitivity. Microsoft Word 16.104 build
+16.104.25121423 passed the exact integrated oracle at
+`7462b363e96df64adc8fea68aebd2778a9e130d8`, and `/verify --full` passed at the
+same SHA.
+
+**Hash harness.** Unchanged, 49 of 49.
+
+**Notes for future sessions.** Keep MHTML resource resolution contained and
+fail closed before document publication. Ordinary HTML behavior and output are
+separate compatibility surfaces and must remain unchanged.

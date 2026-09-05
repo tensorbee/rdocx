@@ -37,9 +37,9 @@ regenerated, never hand-edited.
 | M19, Advanced spreadsheets                     | 21 | 0 | 0 | 21 |
 | M20, Fidelity at scale                         | 7  | 7 | 0 | 0  |
 | M21, Presentation depth                        | 15 | 15 | 0 | 0  |
-| M22, Word depth                                | 12 | 10 | 1 | 1  |
-| X, Cross-cutting (opportunistic)            | 82 | 76 | 1 | 2  |
-| **Total** | **329** | **300** | **2** | **24** |
+| M22, Word depth                                | 12 | 11 | 0 | 1  |
+| X, Cross-cutting (opportunistic)            | 82 | 77 | 0 | 2  |
+| **Total** | **329** | **302** | **0** | **24** |
 <!-- AUTOGEN:backlog-summary END -->
 
 ## All F-IDs
@@ -442,7 +442,7 @@ regenerated, never hand-edited.
 | F-236 | Embedded object and macro inventory          | S68 | L | done |
 | F-237 | Forms, glossary, and building blocks         | S68 | L | done |
 | F-238 | Flat OPC and modern Word package variants    | S69 | M | pending |
-| F-239 | MHTML import and export                      | S69 | M | in-progress |
+| F-239 | MHTML import and export                      | S69 | M | done |
 <!-- AUTOGEN:backlog-M22 END -->
 
 ### X, Cross-cutting
@@ -529,7 +529,7 @@ regenerated, never hand-edited.
 | F-X074 | Tag rpptx-v0.9.0                          | S64 | S | done |
 | F-X075 | Preserve restart pagination across page-spanning paragraphs | S64 | M | done |
 | F-X076 | Tag v0.12.0                               | S64 | S | done |
-| F-X077 | Share strict XML lexical validation       | S69 | M | in-progress |
+| F-X077 | Share strict XML lexical validation       | S69 | M | done |
 | F-X078 | Tag v0.13.0                               | S69 | S | pending |
 | F-X079 | Tag rpptx-v0.10.0                         | S69 | S | pending |
 <!-- AUTOGEN:backlog-MX END -->

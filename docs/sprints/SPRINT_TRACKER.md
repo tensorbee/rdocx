@@ -388,6 +388,8 @@ defended.
 | F-235 | S67 | M | 2 | 1 | 2026-09-04 | Added deterministic Word and Character comparison plus left-biased formatting, whitespace, field, comment, and story ignore policies |
 | F-236 | S68 | L | 4 | 1 | 2026-09-05 | Added relationship-owned OLE, ActiveX, and VBA inventory with exact hashes, byte-preserving mutation, and explicit signature policy |
 | F-237 | S68 | L | 4 | 1 | 2026-09-05 | Added typed legacy form editing and relationship-owned glossary, AutoText, and building-block inventory and replacement |
+| F-X077 | S69 | M | 2 | 1 | 2026-09-05 | Consolidated strict XML 1.0 lexical validation in oxml-core while preserving glossary, embedded, and package-story error and rollback contracts |
+| F-239 | S69 | M | 2 | 1 | 2026-09-05 | Added bounded MHTML import and deterministic export with contained resources, stable diagnostics, and pinned Word parity |
 
 ## Velocity
 
