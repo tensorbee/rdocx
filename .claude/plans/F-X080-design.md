@@ -17,9 +17,9 @@ exceed the 128 MiB ceiling (`scripts/install_pinned_pandoc.py`,
 exhaustive native error adapter omitted current error variants
 (`crates/rdocx-py/src/lib.rs`, `impl From<rdocx::Error> for PyErr`).
 
-These failures have persisted since S58, S65, and S68 respectively. They block
-the aggregate `CI gate`, so neither S69 release should begin while the tracked
-hosted contract is known to be red.
+These failures have persisted since S58, S65, and S68 respectively. They leave
+the overall hosted workflow and its release-readiness checks red, so neither
+S69 release should begin while the tracked hosted contract is known to be red.
 
 ## Spec reference
 
