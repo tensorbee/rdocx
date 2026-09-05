@@ -390,6 +390,7 @@ defended.
 | F-237 | S68 | L | 4 | 1 | 2026-09-05 | Added typed legacy form editing and relationship-owned glossary, AutoText, and building-block inventory and replacement |
 | F-X077 | S69 | M | 2 | 1 | 2026-09-05 | Consolidated strict XML 1.0 lexical validation in oxml-core while preserving glossary, embedded, and package-story error and rollback contracts |
 | F-239 | S69 | M | 2 | 1 | 2026-09-05 | Added bounded MHTML import and deterministic export with contained resources, stable diagnostics, and pinned Word parity |
+| F-X080 | S69 | S | 1 | 1 | 2026-09-05 | Restored release-ready CI package inventory, bounded authenticated Pandoc extraction, and exhaustive Python error mapping |
 
 ## Velocity
 

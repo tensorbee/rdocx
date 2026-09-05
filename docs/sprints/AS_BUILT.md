@@ -11787,3 +11787,50 @@ rdocx retains it under the supported MHTML image contract.
 **Notes for future sessions.** Keep MHTML resource resolution contained and
 fail closed before document publication. Ordinary HTML behavior and output are
 separate compatibility surfaces and must remain unchanged.
+
+### F-X080, Restore CI release readiness
+
+**Sprint.** S69
+**Completed.** 2026-09-05
+**Size.** S, estimated 1 day, actual 1 day
+
+**What was built.** Hosted CI now checks the complete explicit 24-font and
+six-file legal inventory for `oxml-layout`. The pinned Pandoc 3.10 installer
+admits its authenticated 162,406,703-byte payload under a 160 MiB ceiling and
+skips only its two reviewed in-root executable aliases. The Python adapter also
+maps every current native import error to its established generic exception.
+
+**Non-obvious choices.** The package inventory remains explicit so unexpected
+assets still fail review. Pandoc extraction retains its digest, download,
+member-count, path, layout, and executable checks. It does not materialize the
+two aliases and continues to reject every other symlink, hardlink, device,
+FIFO, and unsupported member type.
+
+**Deviations from the design plan.** Live reconstruction showed that the
+authenticated archive contains two symlink aliases. The plan was amended before
+completion to admit and skip only those exact name and target pairs. Microscope
+pass 2 reported zero defects, zero smells, and zero nitpicks.
+
+**Spec sections touched.** `docs/hld/12-testing-strategy.md`,
+`docs/hld/14-development-backlog.md`, and
+`docs/hld/15-build-and-toolchain.md`.
+
+**Tests.** The regression gates
+`test_ci_oxml_layout_package_inventory_matches_bundled_assets` and
+`test_pinned_pandoc_installer_accepts_authenticated_archive_with_bounded_headroom`
+are mutation-sensitive for every repaired hosted contract. The integrated
+package reconstruction produced the exact 24 fonts and six legal files in a
+4,603,463-byte archive. The authenticated Pandoc archive reconstructed at
+162,406,703 bytes with exactly the two approved aliases skipped, and the exact
+Pandoc 3.10 texmath oracle passed. `rdocx-py` check, tests, and Clippy passed.
+Integrated `/verify --full` passed at
+`8e0abcc5035a0819199795559ad4c5f553b1c4ec`, including Microsoft Word 16.104,
+all 50 pinned presentation decks, LibreOffice, WASM, rustdoc, packaging,
+archive-size, and supply-chain riders.
+
+**Hash harness.** Unchanged, 49 of 49.
+
+**Notes for future sessions.** Keep hosted package inventories explicit and
+calibrate extraction bounds only against digest-authenticated payloads. A new
+Pandoc archive shape requires a new reviewed policy rather than a general
+symlink allowance.
