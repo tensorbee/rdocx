@@ -13,6 +13,253 @@ use rdocx::{
 use rdocx::{Document, PackageReadLimits, RevisionKind};
 
 const ODT_ORACLE_VERSION: &str = "LibreOffice 26.2.5.2 cd7284b4cbbfeb507e630c1aac019f4157393acb";
+const MHTML_ORACLE_VERSION: &str = "Microsoft Word 16.104 build 16.104.25121423";
+
+fn source_built_mhtml(html: &str) -> Vec<u8> {
+    format!(
+        "MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=integration\r\n\r\n--integration\r\nContent-Type: text/html; charset=utf-8\r\nContent-Location: https://example.test/index.html\r\n\r\n{html}\r\n--integration--\r\n"
+    )
+    .into_bytes()
+}
+
+fn mhtml_pixel_png() -> Vec<u8> {
+    vec![
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x08, 0xd7, 0x63, 0xf8,
+        0xcf, 0xc0, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0xe2, 0x21, 0xbc, 0x33, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ]
+}
+
+fn source_built_mhtml_with_pixel(html: &str) -> Vec<u8> {
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(mhtml_pixel_png());
+    format!(
+        "MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=integration; start=\"<root@rdocx>\"\r\n\r\n--integration\r\nContent-Type: text/html; charset=utf-8\r\nContent-ID: <root@rdocx>\r\nContent-Location: https://example.test/index.html\r\n\r\n{html}\r\n--integration\r\nContent-Type: image/png\r\nContent-ID: <pixel@rdocx>\r\nContent-Location: pixel.png\r\nContent-Transfer-Encoding: base64\r\n\r\n{encoded}\r\n--integration--\r\n"
+    )
+    .into_bytes()
+}
+
+#[test]
+fn mhtml_import_and_export_preserve_supported_word_structure() {
+    use base64::Engine as _;
+    let png = mhtml_pixel_png();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&png);
+    let html = "<h1>Title</h1><p><strong>body</strong> <a href='https://example.test/'>link</a><img src='cid:pixel@rdocx' width='2' height='3'></p><ol><li>one</li><li>two</li></ol><table><tr><th colspan='2'>head</th></tr><tr><td>a</td><td>b</td></tr></table>";
+    let input = format!(
+        "MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=integration; start=\"<root@rdocx>\"\r\n\r\n--integration\r\nContent-Type: text/html; charset=utf-8\r\nContent-ID: <root@rdocx>\r\nContent-Location: https://example.test/index.html\r\n\r\n{html}\r\n--integration\r\nContent-Type: image/png\r\nContent-ID: <pixel@rdocx>\r\nContent-Location: pixel.png\r\nContent-Transfer-Encoding: base64\r\n\r\n{encoded}\r\n--integration--\r\n"
+    );
+    let imported = Document::from_mhtml_bytes(input.as_bytes()).expect("source-built MHTML");
+    assert_eq!(
+        imported.document.text(),
+        "Title\nbody link\none\ntwo\nhead\t\na\tb\t\n"
+    );
+    assert_eq!(
+        imported
+            .document
+            .paragraph(1)
+            .unwrap()
+            .run(0)
+            .unwrap()
+            .bold_value(),
+        Some(true)
+    );
+    let first_list = imported.document.paragraph(2).unwrap().numbering().unwrap();
+    let second_list = imported.document.paragraph(3).unwrap().numbering().unwrap();
+    assert_eq!(first_list, second_list);
+    assert_eq!(
+        imported
+            .document
+            .table(0)
+            .unwrap()
+            .cell(0, 0)
+            .unwrap()
+            .grid_span(),
+        Some(2)
+    );
+    assert_eq!(imported.document.images()[0].width_emu, 19_050);
+    assert_eq!(imported.document.images()[0].height_emu, 28_575);
+    assert_eq!(
+        imported
+            .document
+            .image_data(&imported.document.images()[0].embed_id),
+        Some(png)
+    );
+    assert_eq!(
+        imported.document.links()[0].url.as_deref(),
+        Some("https://example.test/")
+    );
+    let written = imported.document.to_mhtml_bytes().expect("MHTML export");
+    let reopened = Document::from_mhtml_bytes(&written.bytes).expect("MHTML reimport");
+    assert_eq!(reopened.document.text(), imported.document.text());
+    assert_eq!(reopened.document.links().len(), 1);
+    assert_eq!(reopened.document.images()[0].width_emu, 19_050);
+    assert_eq!(reopened.document.images()[0].height_emu, 28_575);
+    let mut docx_candidate = reopened.document;
+    let docx = docx_candidate.to_bytes().expect("projected DOCX");
+    Document::from_bytes(&docx).expect("projected DOCX reopens");
+
+    let directory = std::env::temp_dir().join(format!("rdocx-mhtml-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir(&directory).unwrap();
+    let input_path = directory.join("input.mhtml");
+    std::fs::write(&input_path, input).unwrap();
+    assert_eq!(
+        Document::open_mhtml(&input_path).unwrap().document.text(),
+        imported.document.text()
+    );
+    let output_path = directory.join("output.mhtml");
+    std::fs::write(&output_path, b"old incomplete bytes").unwrap();
+    assert!(
+        imported
+            .document
+            .save_mhtml(&output_path)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(Document::open_mhtml(&output_path).is_ok());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn mhtml_conversions_match_the_pinned_word_structure() {
+    assert_eq!(
+        MHTML_ORACLE_VERSION,
+        "Microsoft Word 16.104 build 16.104.25121423"
+    );
+    let imported = Document::from_mhtml_bytes(&source_built_mhtml("<p>oracle structure</p>"))
+        .expect("Word-authenticated source-built MHTML");
+    assert_eq!(imported.document.text(), "oracle structure\n");
+
+    let record = |document: &Document| {
+        (
+            document.text(),
+            document.table_count(),
+            document
+                .paragraphs()
+                .iter()
+                .filter(|paragraph| paragraph.numbering().is_some())
+                .count(),
+            document.images().len(),
+            document.links().len(),
+            document
+                .paragraphs()
+                .iter()
+                .flat_map(|paragraph| paragraph.runs())
+                .any(|run| run.bold_value() == Some(true)),
+        )
+    };
+    let expected = record(&imported.document);
+    let perturbations = [
+        "<p>changed structure</p>",
+        "<p><strong>oracle structure</strong></p>",
+        "<table><tr><td>oracle structure</td></tr></table>",
+        "<ol><li>oracle structure</li></ol>",
+        "<p><a href='https://example.test/'>oracle structure</a></p>",
+    ];
+    for html in perturbations {
+        let candidate = Document::from_mhtml_bytes(&source_built_mhtml(html)).unwrap();
+        assert_ne!(record(&candidate.document), expected);
+    }
+    let image_candidate = Document::from_mhtml_bytes(&source_built_mhtml_with_pixel(
+        "<p>oracle structure<img src='cid:pixel@rdocx'></p>",
+    ))
+    .unwrap();
+    assert_ne!(record(&image_candidate.document), expected);
+    let diagnostic_candidate = Document::from_mhtml_bytes(&source_built_mhtml(
+        "<p>oracle structure<object>loss</object></p>",
+    ))
+    .unwrap();
+    assert_eq!(record(&diagnostic_candidate.document), expected);
+    assert_eq!(diagnostic_candidate.diagnostics.len(), 1);
+
+    let mut seed = Document::new();
+    let bytes = seed.to_bytes().unwrap();
+    let mut package = OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+    package.set_part(
+        "/word/document.xml",
+        br#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:x="urn:producer"><w:body><w:p><w:r><w:t>before</w:t></w:r></w:p><x:raw keep="yes"/><w:p><w:r><w:t>after</w:t></w:r></w:p><w:sectPr/></w:body></w:document>"#.to_vec(),
+    );
+    let mut packaged = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut packaged).unwrap();
+    let lossy = Document::from_bytes(packaged.get_ref()).unwrap();
+    let written = lossy.to_mhtml_bytes().unwrap();
+    assert_eq!(written.diagnostics.len(), 1);
+    assert_eq!(written.diagnostics[0].location, "body[1]");
+    assert_eq!(
+        Document::from_mhtml_bytes(&written.bytes)
+            .unwrap()
+            .document
+            .text(),
+        "before\nafter\n"
+    );
+}
+
+#[test]
+#[ignore = "requires pinned Microsoft Word 16.104 for oracle regeneration"]
+fn regenerate_mhtml_word_oracle_authenticates_exact_build() {
+    let plist = "/Applications/Microsoft Word.app/Contents/Info.plist";
+    let version = std::process::Command::new("plutil")
+        .args(["-extract", "CFBundleShortVersionString", "raw", plist])
+        .output()
+        .unwrap();
+    let build = std::process::Command::new("plutil")
+        .args(["-extract", "CFBundleVersion", "raw", plist])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&version.stdout).trim(), "16.104");
+    assert_eq!(
+        String::from_utf8_lossy(&build.stdout).trim(),
+        "16.104.25121423"
+    );
+    let source = "/private/tmp/F-239-word-16.104-source.mhtml";
+    let output = "/private/tmp/F-239-word-16.104-output.docx";
+    std::fs::write(
+        source,
+        source_built_mhtml(
+            "<h1>Oracle title</h1><p><strong>bold</strong> <a href='https://example.test/'>link</a></p><ol><li>one</li><li>two</li></ol><table><tr><td>cell</td></tr></table>",
+        ),
+    )
+    .unwrap();
+    let script = format!(
+        r#"with timeout of 120 seconds
+tell application "Microsoft Word"
+activate
+open POSIX file "{source}"
+delay 3
+set oracleDocument to active document
+save as oracleDocument file name "{output}" file format format document default add to recent files false
+close oracleDocument saving no
+end tell
+end timeout
+"#
+    );
+    let conversion = std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .output()
+        .unwrap();
+    assert!(
+        conversion.status.success(),
+        "Word conversion failed: {}",
+        String::from_utf8_lossy(&conversion.stderr)
+    );
+    let oracle = Document::open(output).expect("Word-produced DOCX");
+    assert_eq!(oracle.paragraph(0).unwrap().text(), "Oracle title");
+    assert_eq!(oracle.paragraph(1).unwrap().text(), "bold link");
+    assert!(
+        oracle
+            .paragraph(1)
+            .unwrap()
+            .runs()
+            .any(|run| run.bold_value() == Some(true) || run.style_id() == Some("Strong"))
+    );
+    assert_eq!(oracle.table(0).unwrap().cell(0, 0).unwrap().text(), "cell");
+    assert_eq!(
+        oracle.links()[0].url.as_deref(),
+        Some("https://example.test/")
+    );
+}
 
 #[derive(Debug, PartialEq)]
 struct OdtStructuralRecord {

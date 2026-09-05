@@ -1,6 +1,6 @@
 # F-239, MHTML import and export
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S69
 **Size**: M
 **Depends on**: F-178
@@ -159,17 +159,17 @@ conversion, not MHTML. Any delta blocks the story.
 
 ## Implementation checklist
 
-- [ ] Add the native result, diagnostic, error, re-export, and method surfaces.
-- [ ] Implement bounded MIME header, multipart, transfer, and resource indexing
+- [x] Add the native result, diagnostic, error, re-export, and method surfaces.
+- [x] Implement bounded MIME header, multipart, transfer, and resource indexing
       in the existing HTML module.
-- [ ] Add safe contained resource resolution and MHTML-only image and link
+- [x] Add safe contained resource resolution and MHTML-only image and link
       projection.
-- [ ] Implement deterministic MHTML writing and the internal emitter resource
+- [x] Implement deterministic MHTML writing and the internal emitter resource
       mapping while keeping default HTML bytes unchanged.
-- [ ] Reparse MHTML, save and reopen DOCX, and publish only complete results.
-- [ ] Add source-built unit, regression, integration, differential, limit, and
+- [x] Reparse MHTML, save and reopen DOCX, and publish only complete results.
+- [x] Add source-built unit, regression, integration, differential, limit, and
       perturbation coverage to existing binaries.
-- [ ] Run focused checks, the pinned oracle gate, every routed rider, and full
+- [x] Run focused checks, the pinned oracle gate, every routed rider, and full
       verification.
 
 ## Open questions

@@ -168,6 +168,13 @@ properties remain visible through ordered diagnostics. Python, WASM, CLI,
 legacy equation formats, and a second conversion model remain outside this
 surface.
 
+Bounded MHTML import and export is part of the post-v1 native Word interchange
+surface. It carries the supported document structure, contained PNG and JPEG
+resources, safe links, and ordered loss diagnostics through the existing Word
+model. Conversion never fetches a network or filesystem resource. Binary
+`.doc`, executable web content, unrestricted MIME processing, and new Python,
+WASM, or CLI entry points remain outside this scope.
+
 Modern OOXML legacy form fields and glossary entries are part of the post-v1
 native Word surface. Native Rust callers can inventory supported form fields
 across internal Word stories, update their typed values, and replace existing

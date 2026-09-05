@@ -299,6 +299,16 @@ spanned tables plus the bounded inline and embedded CSS subset. It does not
 fetch external resources. Python, WASM, and CLI surfaces gain no HTML import
 entry point and retain their existing methods and error contracts.
 
+Native Rust callers can import and export bounded MHTML through
+`Document::from_mhtml_bytes`, `Document::open_mhtml`,
+`Document::to_mhtml_bytes`, and `Document::save_mhtml`. Concrete
+`MhtmlReadResult`, `MhtmlWriteResult`, and `MhtmlDiagnostic` values expose the
+converted document or bytes and stable path-aware loss records. Malformed,
+ambiguous, unsafe, or over-limit MIME returns contextual `Error::Mhtml` without
+publishing a partial result. Export is deterministic and a path save is atomic.
+These are additive native pre-1.0 APIs. Python, WASM, and CLI surfaces gain no
+MHTML entry point and retain their existing method and error contracts.
+
 Native Rust callers can import OpenDocument Text through
 `Document::from_odt_bytes`, `Document::from_odt_bytes_with_limits`, and
 `Document::open_odt`. Each returns an `OdtReadResult` containing a fresh

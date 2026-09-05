@@ -445,6 +445,24 @@ gate serializes and reopens the generated DOCX before comparing its public
 structure. No binary fixture or sample is added, so all 49 hash entries remain
 unchanged.
 
+The MHTML gate stays in the existing `rdocx` HTML unit tests and Word
+integration binary. Source-built MIME cases cover folded headers, root
+selection, Content-ID and Content-Location resolution, every supported transfer
+encoding, unsafe or unresolved resources, image MIME sniffing, 96 DPI sizing,
+all parser and writer ceilings, deterministic CRLF output, source order,
+deduplication, boundary collision avoidance, 76-column base64, and atomic path
+saves. The integration record compares body order, formatting, tables, lists,
+images, links, and ordered loss diagnostics after MHTML reparse and DOCX reopen.
+Default HTML bytes and all 49 hash entries remain unchanged.
+
+The ignored MHTML differential authenticates Microsoft Word 16.104 build
+16.104.25121423 before opening one source-built MHTML document and saving DOCX.
+It compares normalized public structure rather than package bytes. Independent
+mutations to body text, formatting, table content, list identity, hyperlink,
+image, and diagnostic records each fail the same acceptance predicate. Word's
+`Strong` run style is accepted as the normalized representation of source
+`strong` markup.
+
 The PDF import regression gate builds PDF objects, content streams, embedded
 Carlito bytes, paths, text, and URI annotations in source. Unit coverage locks
 strict parsing, page and object bounds, aggregate decompression, operation,
@@ -1644,6 +1662,11 @@ required, and no binary fixture enters the repository.
 
 ## Binding tests
 
+MHTML remains native Rust only. The existing Python, WASM, and CLI surface
+inventories therefore assert no new method, error, dependency, or feature. The
+published-crate riders compile both WASM graphs, deny rustdoc warnings, verify
+the patched workspace package graph, and enforce the 10 MiB archive ceiling.
+
 The parity suites are worth more than any number of Rust-side assertions,
 because the whole value proposition is compatibility:
 
@@ -1852,6 +1875,10 @@ parallel, or failure-swallowing invocation.
 | supply-chain | `cargo-deny check` |
 | ci-gate | Always validate that every selected filtered job succeeded and every unselected filtered job was skipped |
 | python-wheels | On manual dispatch or a `py-v*` tag, build six cp39-abi3 wheels for each Python package and one source distribution per package, then install and test every compatible artifact in a fresh environment |
+
+MHTML uses the existing test, clippy, fmt, doc, wasm, hash-harness, and package
+routes. Its Microsoft Word differential remains an explicit ignored local
+oracle because that exact Word build is not available on the Ubuntu CI runners.
 
 The `changes` job routes `test`, `msrv`, `wasm`, `python-bindings`,
 `presentation-fidelity`, `word-fidelity`, `hash-harness`, `supply-chain`, and

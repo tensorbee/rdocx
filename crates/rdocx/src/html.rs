@@ -1,11 +1,13 @@
 //! Bounded HTML and CSS import into the native Word document model.
 
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use rdocx_oxml::document::BodyContent;
 use rdocx_oxml::table::{
     CT_Row, CT_Tbl, CT_TblGrid, CT_TblGridCol, CT_TblPr, CT_TblWidth, CT_Tc, VMerge,
@@ -13,13 +15,20 @@ use rdocx_oxml::table::{
 use rdocx_oxml::text::CT_P;
 use rdocx_oxml::units::Twips;
 use scraper::{ElementRef, Html, Node, Selector};
+use sha2::{Digest, Sha256};
 
 use crate::paragraph::{Alignment, Paragraph};
 use crate::run::Run;
 use crate::table::Cell;
-use crate::{Document, Error, Length, ListLevel, Result};
+use crate::{
+    BodyItemRef, CellItemRef, Document, Error, Length, ListLevel, ParagraphItemRef, ParagraphRef,
+    Result, TableRef,
+};
 
 const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_MHTML_PARTS: usize = 1_024;
+const MAX_MHTML_HEADER_BYTES: usize = 64 * 1024;
+const MAX_MHTML_OUTPUT_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HtmlDiagnostic {
@@ -31,6 +40,65 @@ pub struct HtmlDiagnostic {
 pub struct HtmlReadResult {
     pub document: Document,
     pub diagnostics: Vec<HtmlDiagnostic>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct MhtmlDiagnostic {
+    pub location: String,
+    pub property: Option<String>,
+    pub message: String,
+}
+
+pub struct MhtmlReadResult {
+    pub document: Document,
+    pub diagnostics: Vec<MhtmlDiagnostic>,
+}
+
+pub struct MhtmlWriteResult {
+    pub bytes: Vec<u8>,
+    pub diagnostics: Vec<MhtmlDiagnostic>,
+}
+
+#[derive(Clone, Copy)]
+struct MhtmlLimits {
+    input_bytes: usize,
+    header_bytes: usize,
+    parts: usize,
+    part_bytes: usize,
+    total_decoded_bytes: usize,
+    output_bytes: usize,
+}
+
+impl Default for MhtmlLimits {
+    fn default() -> Self {
+        Self {
+            input_bytes: MAX_INPUT_BYTES,
+            header_bytes: MAX_MHTML_HEADER_BYTES,
+            parts: MAX_MHTML_PARTS,
+            part_bytes: MAX_INPUT_BYTES,
+            total_decoded_bytes: MAX_INPUT_BYTES,
+            output_bytes: MAX_MHTML_OUTPUT_BYTES,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct MhtmlResource {
+    bytes: Vec<u8>,
+    content_type: String,
+    filename: String,
+}
+
+struct MhtmlProjection {
+    resources: HashMap<String, MhtmlResource>,
+    hyperlinks: HashMap<String, String>,
+}
+
+#[derive(Clone, Debug)]
+struct EmbeddedMhtmlImage {
+    rel_id: String,
+    width: Length,
+    height: Length,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -81,6 +149,7 @@ struct ComputedStyle {
     indent_right: Option<Length>,
     first_line_indent: Option<Length>,
     vertical: Option<VerticalText>,
+    hyperlink: Option<String>,
 }
 
 impl ComputedStyle {
@@ -95,6 +164,7 @@ impl ComputedStyle {
             color: self.color.clone(),
             alignment: self.alignment,
             vertical: self.vertical,
+            hyperlink: self.hyperlink.clone(),
             ..Self::default()
         }
     }
@@ -157,6 +227,7 @@ struct CssRule {
 enum InlinePiece {
     Text(String, Box<ComputedStyle>, bool),
     Break,
+    Image(EmbeddedMhtmlImage),
 }
 
 #[derive(Debug)]
@@ -189,6 +260,14 @@ struct ActiveSpan {
 }
 
 fn from_html_with_limits(html: &str, limits: Limits) -> Result<HtmlReadResult> {
+    from_html_with_resources(html, limits, None)
+}
+
+fn from_html_with_resources(
+    html: &str,
+    limits: Limits,
+    projection: Option<&MhtmlProjection>,
+) -> Result<HtmlReadResult> {
     if html.len() > limits.input_bytes {
         return Err(html_error("input", "HTML input exceeds the 64 MiB limit"));
     }
@@ -214,6 +293,8 @@ fn from_html_with_limits(html: &str, limits: Limits) -> Result<HtmlReadResult> {
         runs: 0,
         rows: 0,
         cells: 0,
+        projection,
+        embedded_images: HashMap::new(),
     };
     importer.record_parser_repairs()?;
     importer.record_head_resources()?;
@@ -239,6 +320,358 @@ impl Document {
             .map_err(|_| html_error("input", "HTML input is not valid UTF-8"))?;
         Self::from_html(html)
     }
+
+    pub fn from_mhtml_bytes(bytes: &[u8]) -> Result<MhtmlReadResult> {
+        from_mhtml_with_limits(bytes, MhtmlLimits::default())
+    }
+
+    pub fn open_mhtml<P: AsRef<Path>>(path: P) -> Result<MhtmlReadResult> {
+        let mut file = File::open(path)?;
+        let size = usize::try_from(file.metadata()?.len())
+            .map_err(|_| mhtml_error(None, 0, "MHTML input size is not representable"))?;
+        if size > MAX_INPUT_BYTES {
+            return Err(mhtml_error(None, 0, "MHTML input exceeds the 64 MiB limit"));
+        }
+        let bytes = read_mhtml_bounded(&mut file, size, MAX_INPUT_BYTES)?;
+        Self::from_mhtml_bytes(&bytes)
+    }
+
+    pub fn to_mhtml_bytes(&self) -> Result<MhtmlWriteResult> {
+        to_mhtml_with_limits(self, MhtmlLimits::default())
+    }
+
+    pub fn save_mhtml<P: AsRef<Path>>(&self, path: P) -> Result<Vec<MhtmlDiagnostic>> {
+        let result = self.to_mhtml_bytes()?;
+        crate::document::write_atomic_file(
+            path.as_ref(),
+            &result.bytes,
+            "MHTML output path has no file name",
+            "could not allocate an MHTML temporary file",
+        )?;
+        Ok(result.diagnostics)
+    }
+}
+
+fn from_mhtml_with_limits(bytes: &[u8], limits: MhtmlLimits) -> Result<MhtmlReadResult> {
+    let (html, projection) = parse_mhtml(bytes, limits)?;
+    let parsed =
+        from_html_with_resources(&html, Limits::default(), Some(&projection)).map_err(|error| {
+            match error {
+                Error::Html { location, message } => mhtml_error(
+                    Some("HTML root"),
+                    0,
+                    format!("HTML projection failed at {location}: {message}"),
+                ),
+                other => other,
+            }
+        })?;
+    Ok(MhtmlReadResult {
+        document: parsed.document,
+        diagnostics: parsed
+            .diagnostics
+            .into_iter()
+            .map(|diagnostic| MhtmlDiagnostic {
+                location: diagnostic.location,
+                property: diagnostic.property,
+                message: diagnostic.message,
+            })
+            .collect(),
+    })
+}
+
+fn read_mhtml_bounded<R: Read>(
+    reader: &mut R,
+    expected_size: usize,
+    limit: usize,
+) -> Result<Vec<u8>> {
+    let read_limit = u64::try_from(limit)
+        .ok()
+        .and_then(|limit| limit.checked_add(1))
+        .ok_or_else(|| mhtml_error(None, 0, "MHTML input limit is not representable"))?;
+    let mut bytes = Vec::with_capacity(expected_size.min(limit));
+    reader.take(read_limit).read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(mhtml_error(None, 0, "MHTML input exceeds the 64 MiB limit"));
+    }
+    Ok(bytes)
+}
+
+fn base64_lines(bytes: &[u8]) -> String {
+    let encoded = BASE64.encode(bytes);
+    let mut output = String::with_capacity(encoded.len() + encoded.len() / 76 * 2 + 2);
+    for chunk in encoded.as_bytes().chunks(76) {
+        output.push_str(std::str::from_utf8(chunk).expect("base64 is ASCII"));
+        output.push_str("\r\n");
+    }
+    output
+}
+
+fn mhtml_export_html(document: &Document) -> Result<(String, Vec<MhtmlResource>)> {
+    let html = document.to_html();
+    let image_sizes = document.images();
+    let mut image_size_index = 0_usize;
+    let mut output = String::with_capacity(html.len());
+    let mut remainder = html.as_str();
+    let prefix = "<img src=\"data:";
+    let mut resources = Vec::<MhtmlResource>::new();
+    let mut by_digest = HashMap::<[u8; 32], usize>::new();
+    while let Some(position) = remainder.find(prefix) {
+        output.push_str(&remainder[..position]);
+        let data_start = position + prefix.len();
+        let tail = &remainder[data_start..];
+        let quote = tail.find('"').ok_or_else(|| {
+            mhtml_error(
+                None,
+                0,
+                "HTML emitter produced an unterminated image source",
+            )
+        })?;
+        let data_uri = &tail[..quote];
+        let (content_type, encoded) = data_uri.split_once(";base64,").ok_or_else(|| {
+            mhtml_error(None, 0, "HTML emitter produced an unsupported image source")
+        })?;
+        let bytes = BASE64
+            .decode(encoded)
+            .map_err(|_| mhtml_error(None, 0, "HTML emitter produced invalid base64 image data"))?;
+        let format = oxml_media::ImageFormat::sniff(&bytes)
+            .ok_or_else(|| mhtml_error(None, 0, "document image has an unsupported format"))?;
+        if format.content_type() != content_type {
+            return Err(mhtml_error(
+                None,
+                0,
+                "document image MIME type does not match its bytes",
+            ));
+        }
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        let index = if let Some(index) = by_digest.get(&digest) {
+            *index
+        } else {
+            let index = resources.len();
+            resources.push(MhtmlResource {
+                bytes,
+                content_type: content_type.to_owned(),
+                filename: format!("image-{index}.{}", format.extension()),
+            });
+            by_digest.insert(digest, index);
+            index
+        };
+        let image = image_sizes.get(image_size_index).ok_or_else(|| {
+            mhtml_error(
+                None,
+                0,
+                "HTML image order does not match document image order",
+            )
+        })?;
+        image_size_index += 1;
+        output.push_str(&format!(
+            "<img src=\"cid:image-{index}@rdocx\" width=\"{:.12}\" height=\"{:.12}\"",
+            image.width_emu as f64 / 9_525.0,
+            image.height_emu as f64 / 9_525.0,
+        ));
+        remainder = &tail[quote + 1..];
+    }
+    output.push_str(remainder);
+    if image_size_index != image_sizes.len() {
+        return Err(mhtml_error(
+            None,
+            0,
+            "document contains images the HTML emitter did not serialize",
+        ));
+    }
+    Ok((output, resources))
+}
+
+fn choose_boundary(html: &[u8], resources: &[MhtmlResource]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(html);
+    for resource in resources {
+        digest.update(&resource.bytes);
+    }
+    let hash = digest.finalize();
+    for suffix in 0_u32.. {
+        let candidate = format!(
+            "----=_rdocx_{:02x}{:02x}{:02x}{:02x}_{suffix}",
+            hash[0], hash[1], hash[2], hash[3]
+        );
+        if !html
+            .windows(candidate.len())
+            .any(|window| window == candidate.as_bytes())
+            && resources.iter().all(|resource| {
+                !resource
+                    .bytes
+                    .windows(candidate.len())
+                    .any(|window| window == candidate.as_bytes())
+            })
+        {
+            return candidate;
+        }
+    }
+    unreachable!("u32 boundary suffix space cannot be exhausted")
+}
+
+fn push_mhtml_loss(
+    diagnostics: &mut Vec<MhtmlDiagnostic>,
+    location: String,
+    message: &'static str,
+) -> Result<()> {
+    if diagnostics.len() >= Limits::default().diagnostics {
+        return Err(mhtml_error(
+            None,
+            0,
+            "MHTML export exceeds the diagnostic limit",
+        ));
+    }
+    diagnostics.push(MhtmlDiagnostic {
+        location,
+        property: None,
+        message: message.to_owned(),
+    });
+    Ok(())
+}
+
+fn paragraph_mhtml_losses(
+    paragraph: ParagraphRef<'_>,
+    location: &str,
+    diagnostics: &mut Vec<MhtmlDiagnostic>,
+) -> Result<()> {
+    for (index, item) in paragraph.items().enumerate() {
+        let message = match item {
+            ParagraphItemRef::Run(_) | ParagraphItemRef::Hyperlink(_) => continue,
+            ParagraphItemRef::Equation(_) => "dropped Word equation",
+            ParagraphItemRef::ContentControl(_) => "dropped Word paragraph content control",
+            ParagraphItemRef::Revision(_) => "dropped Word revision",
+            ParagraphItemRef::CommentRangeStart(_) => "dropped Word comment range start",
+            ParagraphItemRef::CommentRangeEnd(_) => "dropped Word comment range end",
+            ParagraphItemRef::BookmarkStart { .. } => "dropped Word bookmark start",
+            ParagraphItemRef::BookmarkEnd { .. } => "dropped Word bookmark end",
+            ParagraphItemRef::UnsupportedXml(_) => "dropped unsupported Word paragraph XML",
+        };
+        push_mhtml_loss(diagnostics, format!("{location}/item[{index}]"), message)?;
+    }
+    Ok(())
+}
+
+fn table_mhtml_losses(
+    table: TableRef<'_>,
+    location: &str,
+    diagnostics: &mut Vec<MhtmlDiagnostic>,
+) -> Result<()> {
+    if table.has_unsupported_content() {
+        push_mhtml_loss(
+            diagnostics,
+            format!("{location}/content"),
+            "dropped unsupported Word table content",
+        )?;
+    }
+    for row_index in 0..table.row_count() {
+        let row = table.row(row_index).expect("bounded table row index");
+        if row.has_unsupported_content() {
+            push_mhtml_loss(
+                diagnostics,
+                format!("{location}/row[{row_index}]/content"),
+                "dropped unsupported Word table row content",
+            )?;
+        }
+        for cell_index in 0..row.cell_count() {
+            let cell = row.cell(cell_index).expect("bounded table cell index");
+            let cell_location = format!("{location}/row[{row_index}]/cell[{cell_index}]");
+            for (item_index, item) in cell.items().enumerate() {
+                match item {
+                    CellItemRef::Paragraph(paragraph) => paragraph_mhtml_losses(
+                        paragraph,
+                        &format!("{cell_location}/paragraph[{item_index}]"),
+                        diagnostics,
+                    )?,
+                    CellItemRef::Table(table) => table_mhtml_losses(
+                        table,
+                        &format!("{cell_location}/table[{item_index}]"),
+                        diagnostics,
+                    )?,
+                    CellItemRef::ContentControl(_) => push_mhtml_loss(
+                        diagnostics,
+                        format!("{cell_location}/item[{item_index}]"),
+                        "dropped Word table cell content control",
+                    )?,
+                    CellItemRef::UnsupportedXml(_) => push_mhtml_loss(
+                        diagnostics,
+                        format!("{cell_location}/item[{item_index}]"),
+                        "dropped unsupported Word table cell XML",
+                    )?,
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn mhtml_write_diagnostics(document: &Document) -> Result<Vec<MhtmlDiagnostic>> {
+    let mut diagnostics = Vec::new();
+    for (index, item) in document.body_items().enumerate() {
+        match item {
+            BodyItemRef::Paragraph(paragraph) => paragraph_mhtml_losses(
+                paragraph,
+                &format!("body[{index}]/paragraph"),
+                &mut diagnostics,
+            )?,
+            BodyItemRef::Table(table) => {
+                table_mhtml_losses(table, &format!("body[{index}]/table"), &mut diagnostics)?
+            }
+            BodyItemRef::ContentControl(_) => push_mhtml_loss(
+                &mut diagnostics,
+                format!("body[{index}]"),
+                "dropped Word body content control",
+            )?,
+            BodyItemRef::UnsupportedXml(_) => push_mhtml_loss(
+                &mut diagnostics,
+                format!("body[{index}]"),
+                "dropped unsupported Word body XML",
+            )?,
+        }
+    }
+    Ok(diagnostics)
+}
+
+fn to_mhtml_with_limits(document: &Document, limits: MhtmlLimits) -> Result<MhtmlWriteResult> {
+    let diagnostics = mhtml_write_diagnostics(document)?;
+    let (html, resources) = mhtml_export_html(document)?;
+    let boundary = choose_boundary(html.as_bytes(), &resources);
+    let mut output = Vec::new();
+    let mut append = |value: &[u8]| -> Result<()> {
+        let length = output
+            .len()
+            .checked_add(value.len())
+            .ok_or_else(|| mhtml_error(None, 0, "MHTML output size overflowed"))?;
+        if length > limits.output_bytes {
+            return Err(mhtml_error(None, 0, "MHTML output exceeds the limit"));
+        }
+        output.extend_from_slice(value);
+        Ok(())
+    };
+    append(format!(
+        "MIME-Version: 1.0\r\nContent-Type: multipart/related; type=\"text/html\"; boundary=\"{boundary}\"; start=\"<document@rdocx>\"\r\n\r\n"
+    ).as_bytes())?;
+    append(format!(
+        "--{boundary}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\nContent-ID: <document@rdocx>\r\nContent-Location: https://rdocx.invalid/document.html\r\n\r\n"
+    ).as_bytes())?;
+    append(base64_lines(html.as_bytes()).as_bytes())?;
+    for (index, resource) in resources.iter().enumerate() {
+        append(format!(
+            "--{boundary}\r\nContent-Type: {}\r\nContent-Transfer-Encoding: base64\r\nContent-ID: <image-{index}@rdocx>\r\nContent-Location: https://rdocx.invalid/{}\r\n\r\n",
+            resource.content_type, resource.filename
+        ).as_bytes())?;
+        append(base64_lines(&resource.bytes).as_bytes())?;
+    }
+    append(format!("--{boundary}--\r\n").as_bytes())?;
+    let MhtmlReadResult {
+        mut document,
+        diagnostics: _,
+    } = from_mhtml_with_limits(&output, limits)?;
+    let bytes = document.to_bytes()?;
+    Document::from_bytes(&bytes)?;
+    Ok(MhtmlWriteResult {
+        bytes: output,
+        diagnostics,
+    })
 }
 
 fn read_bounded<R: Read>(reader: &mut R, expected_size: usize, limit: usize) -> Result<Vec<u8>> {
@@ -352,6 +785,862 @@ fn contains_ascii_case_insensitive(haystack: &str, needle: &[u8]) -> bool {
         .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
+#[derive(Default)]
+struct MimeHeaders {
+    fields: Vec<(String, String)>,
+}
+
+impl MimeHeaders {
+    fn one(&self, name: &str, part: Option<&str>, offset: usize) -> Result<Option<&str>> {
+        let mut values = self
+            .fields
+            .iter()
+            .filter(|(field, _)| field == name)
+            .map(|(_, value)| value.as_str());
+        let first = values.next();
+        if values.next().is_some() {
+            return Err(mhtml_error(
+                part,
+                offset,
+                format!("duplicate {name} header"),
+            ));
+        }
+        Ok(first)
+    }
+}
+
+struct MimePart {
+    content_type: String,
+    charset: Option<String>,
+    content_id: Option<String>,
+    content_location: Option<String>,
+    bytes: Vec<u8>,
+    offset: usize,
+}
+
+fn mhtml_error(part: Option<&str>, offset: usize, message: impl Into<String>) -> Error {
+    Error::Mhtml {
+        part: part.map(str::to_owned),
+        offset: offset as u64,
+        message: message.into(),
+    }
+}
+
+fn header_end(
+    bytes: &[u8],
+    limit: usize,
+    part: Option<&str>,
+    offset: usize,
+) -> Result<(usize, usize)> {
+    let search = bytes.len().min(limit.saturating_add(4));
+    if let Some(position) = bytes[..search]
+        .windows(4)
+        .position(|value| value == b"\r\n\r\n")
+    {
+        return Ok((position, 4));
+    }
+    if let Some(position) = bytes[..search]
+        .windows(2)
+        .position(|value| value == b"\n\n")
+    {
+        return Ok((position, 2));
+    }
+    Err(mhtml_error(part, offset, "missing MIME header terminator"))
+}
+
+fn parse_headers(
+    bytes: &[u8],
+    limit: usize,
+    part: Option<&str>,
+    offset: usize,
+) -> Result<(MimeHeaders, usize)> {
+    let (end, separator) = header_end(bytes, limit, part, offset)?;
+    if end > limit {
+        return Err(mhtml_error(part, offset, "MIME headers exceed the limit"));
+    }
+    let text = std::str::from_utf8(&bytes[..end])
+        .map_err(|_| mhtml_error(part, offset, "MIME headers are not valid UTF-8"))?;
+    if !text.is_ascii() {
+        return Err(mhtml_error(part, offset, "MIME headers are not ASCII"));
+    }
+    let mut unfolded: Vec<String> = Vec::new();
+    for line in text.replace("\r\n", "\n").split('\n') {
+        if line.starts_with([' ', '\t']) {
+            let previous = unfolded
+                .last_mut()
+                .ok_or_else(|| mhtml_error(part, offset, "orphan folded MIME header"))?;
+            previous.push(' ');
+            previous.push_str(line.trim());
+        } else if !line.is_empty() {
+            unfolded.push(line.to_owned());
+        }
+    }
+    let mut headers = MimeHeaders::default();
+    for line in unfolded {
+        let (name, value) = line
+            .split_once(':')
+            .ok_or_else(|| mhtml_error(part, offset, "malformed MIME header"))?;
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(mhtml_error(part, offset, "invalid MIME header name"));
+        }
+        if value
+            .bytes()
+            .any(|byte| byte == 0 || byte == b'\r' || byte == b'\n')
+        {
+            return Err(mhtml_error(part, offset, "invalid MIME header value"));
+        }
+        headers
+            .fields
+            .push((name.to_ascii_lowercase(), value.trim().to_owned()));
+    }
+    Ok((headers, end + separator))
+}
+
+fn parse_content_type(value: &str) -> Result<(String, HashMap<String, String>)> {
+    let mut sections = Vec::new();
+    let mut start = 0_usize;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, character) in value.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if quoted && character == '\\' {
+            escaped = true;
+        } else if character == '"' {
+            quoted = !quoted;
+        } else if character == ';' && !quoted {
+            sections.push(&value[start..index]);
+            start = index + 1;
+        }
+    }
+    if quoted || escaped {
+        return Err(mhtml_error(None, 0, "unterminated MIME parameter"));
+    }
+    sections.push(&value[start..]);
+    let media_type = sections
+        .first()
+        .copied()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if !media_type.contains('/') {
+        return Err(mhtml_error(None, 0, "invalid MIME content type"));
+    }
+    let mut parameters = HashMap::new();
+    for section in sections.into_iter().skip(1) {
+        let Some((name, raw_value)) = section.split_once('=') else {
+            return Err(mhtml_error(None, 0, "invalid MIME content type parameter"));
+        };
+        let name = name.trim().to_ascii_lowercase();
+        let raw_value = raw_value.trim();
+        let parameter = if raw_value.starts_with('"') {
+            if raw_value.len() < 2 || !raw_value.ends_with('"') {
+                return Err(mhtml_error(None, 0, "unterminated MIME parameter"));
+            }
+            let mut output = String::new();
+            let mut escaped = false;
+            for character in raw_value[1..raw_value.len() - 1].chars() {
+                if escaped {
+                    output.push(character);
+                    escaped = false;
+                } else if character == '\\' {
+                    escaped = true;
+                } else {
+                    output.push(character);
+                }
+            }
+            if escaped {
+                return Err(mhtml_error(None, 0, "invalid MIME parameter escape"));
+            }
+            output
+        } else {
+            raw_value.to_owned()
+        };
+        if name.is_empty() || parameter.is_empty() || parameters.insert(name, parameter).is_some() {
+            return Err(mhtml_error(None, 0, "invalid or duplicate MIME parameter"));
+        }
+    }
+    Ok((media_type, parameters))
+}
+
+fn trim_part_body(mut bytes: &[u8]) -> &[u8] {
+    if bytes.ends_with(b"\r\n") {
+        bytes = &bytes[..bytes.len() - 2];
+    } else if bytes.ends_with(b"\n") {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes
+}
+
+fn multipart_segments<'a>(
+    body: &'a [u8],
+    boundary: &str,
+    offset: usize,
+) -> Result<Vec<(usize, &'a [u8])>> {
+    if boundary.is_empty()
+        || boundary.len() > 70
+        || boundary.bytes().any(|byte| byte <= b' ' || byte >= 0x7f)
+    {
+        return Err(mhtml_error(None, offset, "invalid multipart boundary"));
+    }
+    let marker = format!("--{boundary}").into_bytes();
+    let mut boundaries = Vec::new();
+    let mut position = 0;
+    while position <= body.len() {
+        let line_end = body[position..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(body.len(), |length| position + length + 1);
+        let mut line = &body[position..line_end];
+        if line.ends_with(b"\n") {
+            line = &line[..line.len() - 1];
+        }
+        if line.ends_with(b"\r") {
+            line = &line[..line.len() - 1];
+        }
+        let line = line.trim_ascii_end();
+        let closing = line == [marker.as_slice(), b"--"].concat();
+        if line == marker || closing {
+            boundaries.push((position, line_end, closing));
+        }
+        if line_end == body.len() {
+            break;
+        }
+        position = line_end;
+    }
+    let first = boundaries
+        .first()
+        .ok_or_else(|| mhtml_error(None, offset, "multipart boundary was not found"))?;
+    if body[..first.0]
+        .iter()
+        .any(|byte| !byte.is_ascii_whitespace())
+    {
+        return Err(mhtml_error(
+            None,
+            offset,
+            "non-whitespace multipart preamble",
+        ));
+    }
+    let closing: Vec<_> = boundaries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.2)
+        .collect();
+    if closing.len() != 1 || closing[0].0 + 1 != boundaries.len() {
+        return Err(mhtml_error(
+            None,
+            offset,
+            "multipart must contain one final closing boundary",
+        ));
+    }
+    let closing_end = boundaries.last().map(|entry| entry.1).unwrap_or(body.len());
+    if body[closing_end..]
+        .iter()
+        .any(|byte| !byte.is_ascii_whitespace())
+    {
+        return Err(mhtml_error(
+            None,
+            offset + closing_end,
+            "non-whitespace multipart epilogue",
+        ));
+    }
+    let mut result = Vec::new();
+    for pair in boundaries.windows(2) {
+        let start = pair[0].1;
+        if pair[0].2 {
+            break;
+        }
+        result.push((offset + start, trim_part_body(&body[start..pair[1].0])));
+    }
+    Ok(result)
+}
+
+fn decode_quoted_printable(bytes: &[u8], part: Option<&str>, offset: usize) -> Result<Vec<u8>> {
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut position = 0;
+    while position < bytes.len() {
+        if bytes[position] != b'=' {
+            output.push(bytes[position]);
+            position += 1;
+            continue;
+        }
+        if bytes.get(position + 1..position + 3) == Some(b"\r\n") {
+            position += 3;
+            continue;
+        }
+        if bytes.get(position + 1) == Some(&b'\n') {
+            position += 2;
+            continue;
+        }
+        let hex = bytes.get(position + 1..position + 3).ok_or_else(|| {
+            mhtml_error(part, offset + position, "truncated quoted-printable escape")
+        })?;
+        let digit = |byte: u8| match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        };
+        let high = digit(hex[0]).ok_or_else(|| {
+            mhtml_error(part, offset + position, "invalid quoted-printable escape")
+        })?;
+        let low = digit(hex[1]).ok_or_else(|| {
+            mhtml_error(part, offset + position, "invalid quoted-printable escape")
+        })?;
+        output.push((high << 4) | low);
+        position += 3;
+    }
+    Ok(output)
+}
+
+fn decode_transfer(
+    encoding: Option<&str>,
+    bytes: &[u8],
+    part: Option<&str>,
+    offset: usize,
+) -> Result<Vec<u8>> {
+    match encoding
+        .unwrap_or("7bit")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "7bit" => {
+            if bytes.iter().any(|byte| *byte > 0x7f) {
+                return Err(mhtml_error(
+                    part,
+                    offset,
+                    "7bit MIME part contains non-ASCII bytes",
+                ));
+            }
+            Ok(bytes.to_vec())
+        }
+        "8bit" => Ok(bytes.to_vec()),
+        "base64" => {
+            let compact: Vec<_> = bytes
+                .iter()
+                .copied()
+                .filter(|byte| !byte.is_ascii_whitespace())
+                .collect();
+            BASE64
+                .decode(compact)
+                .map_err(|_| mhtml_error(part, offset, "invalid base64 MIME body"))
+        }
+        "quoted-printable" => decode_quoted_printable(bytes, part, offset),
+        other => Err(mhtml_error(
+            part,
+            offset,
+            format!("unsupported content-transfer-encoding `{other}`"),
+        )),
+    }
+}
+
+fn normalize_content_id(value: &str) -> Result<String> {
+    let value = value.trim();
+    let value = value
+        .strip_prefix('<')
+        .and_then(|value| value.strip_suffix('>'))
+        .unwrap_or(value);
+    if value.is_empty()
+        || value.bytes().any(|byte| {
+            byte.is_ascii_whitespace() || byte.is_ascii_control() || matches!(byte, b'<' | b'>')
+        })
+    {
+        return Err(mhtml_error(None, 0, "invalid Content-ID"));
+    }
+    Ok(value.to_owned())
+}
+
+fn normalized_absolute_location(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value
+        .bytes()
+        .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace() || byte == b'\\')
+    {
+        return None;
+    }
+    let (scheme, remainder) = value.split_once("://")?;
+    if !matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https") {
+        return None;
+    }
+    let end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
+    let authority = &remainder[..end];
+    if authority.is_empty() || authority.contains('@') {
+        return None;
+    }
+    let tail = &remainder[end..];
+    let tail = tail.split('#').next().unwrap_or_default();
+    let (path, query) = tail
+        .split_once('?')
+        .map_or((tail, None), |(path, query)| (path, Some(query)));
+    let path = normalize_path(if path.is_empty() { "/" } else { path })?;
+    let query = query.map_or(String::new(), |query| format!("?{query}"));
+    Some(format!(
+        "{}://{}{}{}",
+        scheme.to_ascii_lowercase(),
+        authority.to_ascii_lowercase(),
+        path,
+        query
+    ))
+}
+
+fn normalize_path(path: &str) -> Option<String> {
+    let absolute = path.starts_with('/');
+    let mut segments = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop()?;
+            }
+            _ if segment
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte == b'\\') =>
+            {
+                return None;
+            }
+            _ => segments.push(segment),
+        }
+    }
+    let mut output = if absolute {
+        "/".to_owned()
+    } else {
+        String::new()
+    };
+    output.push_str(&segments.join("/"));
+    if path.ends_with('/') && !output.ends_with('/') {
+        output.push('/');
+    }
+    Some(output)
+}
+
+fn resolve_location(base: Option<&str>, value: &str) -> Option<String> {
+    let value = value.trim();
+    if let Some(absolute) = normalized_absolute_location(value) {
+        return Some(absolute);
+    }
+    if value.starts_with("//") || value.starts_with('/') || value.contains(':') || value.is_empty()
+    {
+        return None;
+    }
+    let base = base?;
+    let base = normalized_absolute_location(base)?;
+    let scheme_end = base.find("://")? + 3;
+    let path_start = base[scheme_end..]
+        .find('/')
+        .map_or(base.len(), |index| scheme_end + index);
+    let origin = &base[..path_start];
+    let base_path = base[path_start..].split('?').next().unwrap_or("/");
+    let directory = base_path
+        .rsplit_once('/')
+        .map_or("/", |(directory, _)| directory);
+    let joined = format!("{directory}/{value}");
+    Some(format!("{origin}{}", normalize_path(&joined)?))
+}
+
+fn resolve_resource_reference(
+    reference: &str,
+    root_location: Option<&str>,
+    ids: &HashMap<String, usize>,
+    locations: &HashMap<String, usize>,
+) -> Result<Option<usize>> {
+    if reference.to_ascii_lowercase().starts_with("cid:") {
+        let id = normalize_content_id(&reference[4..])?;
+        Ok(ids.get(&id).copied())
+    } else {
+        Ok(resolve_location(root_location, reference)
+            .and_then(|location| locations.get(&location).copied()))
+    }
+}
+
+fn css_resource_references(css: &str) -> Result<Vec<String>> {
+    let lower = css.to_ascii_lowercase();
+    let mut references = Vec::new();
+    let mut position = 0_usize;
+    while let Some(relative) = lower[position..].find("url(") {
+        let start = position + relative + 4;
+        let end = css[start..]
+            .find(')')
+            .map(|relative| start + relative)
+            .ok_or_else(|| mhtml_error(None, 0, "unterminated CSS resource URL"))?;
+        let reference = css[start..end].trim().trim_matches(['\'', '"']).trim();
+        if reference.is_empty() {
+            return Err(mhtml_error(None, 0, "empty CSS resource URL"));
+        }
+        references.push(reference.to_owned());
+        position = end + 1;
+    }
+    Ok(references)
+}
+
+fn safe_hyperlink(value: &str, base: Option<&str>) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty()
+        || value
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+    {
+        return None;
+    }
+    if value.starts_with('#') {
+        return Some(value.to_owned());
+    }
+    if value.to_ascii_lowercase().starts_with("mailto:") {
+        return Some(value.to_owned());
+    }
+    normalized_absolute_location(value).or_else(|| resolve_location(base, value))
+}
+
+fn image_dimension(element: ElementRef<'_>, name: &str) -> Result<Option<Length>> {
+    let Some(value) = element.attr(name) else {
+        return Ok(None);
+    };
+    let pixels = value
+        .trim()
+        .trim_end_matches("px")
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| mhtml_error(None, 0, format!("invalid MHTML image {name} `{value}`")))?;
+    if !pixels.is_finite() || pixels <= 0.0 || pixels > 1_000_000.0 {
+        return Err(mhtml_error(
+            None,
+            0,
+            format!("MHTML image {name} is outside the supported range"),
+        ));
+    }
+    let emu = pixels * 9_525.0;
+    if !emu.is_finite() || emu >= i64::MAX as f64 {
+        return Err(mhtml_error(None, 0, "MHTML image dimension overflowed"));
+    }
+    Ok(Some(Length::emu(emu as i64)))
+}
+
+fn parse_mhtml(bytes: &[u8], limits: MhtmlLimits) -> Result<(String, MhtmlProjection)> {
+    if bytes.len() > limits.input_bytes {
+        return Err(mhtml_error(None, 0, "MHTML input exceeds the 64 MiB limit"));
+    }
+    let (headers, body_start) = parse_headers(bytes, limits.header_bytes, None, 0)?;
+    let mime_version = headers
+        .one("mime-version", None, 0)?
+        .ok_or_else(|| mhtml_error(None, 0, "MIME-Version header is required"))?;
+    if mime_version != "1.0" {
+        return Err(mhtml_error(None, 0, "unsupported MIME-Version"));
+    }
+    let content_type = headers
+        .one("content-type", None, 0)?
+        .ok_or_else(|| mhtml_error(None, 0, "missing MHTML Content-Type header"))?;
+    let (media_type, parameters) = parse_content_type(content_type)?;
+    if media_type != "multipart/related" {
+        return Err(mhtml_error(None, 0, "MHTML root is not multipart/related"));
+    }
+    if parameters
+        .get("type")
+        .is_some_and(|value| !value.eq_ignore_ascii_case("text/html"))
+    {
+        return Err(mhtml_error(
+            None,
+            0,
+            "multipart/related type does not declare text/html",
+        ));
+    }
+    let boundary = parameters
+        .get("boundary")
+        .ok_or_else(|| mhtml_error(None, 0, "multipart/related boundary is required"))?;
+    let segments = multipart_segments(&bytes[body_start..], boundary, body_start)?;
+    if segments.is_empty() || segments.len() > limits.parts {
+        return Err(mhtml_error(
+            None,
+            body_start,
+            "MHTML part count is outside the supported limit",
+        ));
+    }
+    let mut parts = Vec::with_capacity(segments.len());
+    let mut total_decoded = 0_usize;
+    for (index, (part_offset, segment)) in segments.into_iter().enumerate() {
+        let identity = format!("part[{index}]");
+        let (part_headers, content_start) =
+            parse_headers(segment, limits.header_bytes, Some(&identity), part_offset)?;
+        let content_type = part_headers
+            .one("content-type", Some(&identity), part_offset)?
+            .ok_or_else(|| {
+                mhtml_error(
+                    Some(&identity),
+                    part_offset,
+                    "part Content-Type is required",
+                )
+            })?;
+        let (content_type, content_parameters) = parse_content_type(content_type)?;
+        let content_id = part_headers
+            .one("content-id", Some(&identity), part_offset)?
+            .map(normalize_content_id)
+            .transpose()?;
+        let content_location = part_headers
+            .one("content-location", Some(&identity), part_offset)?
+            .map(str::trim)
+            .map(str::to_owned);
+        let transfer =
+            part_headers.one("content-transfer-encoding", Some(&identity), part_offset)?;
+        let decoded = decode_transfer(
+            transfer,
+            &segment[content_start..],
+            content_id.as_deref().or(Some(&identity)),
+            part_offset + content_start,
+        )?;
+        if decoded.len() > limits.part_bytes {
+            return Err(mhtml_error(
+                content_id.as_deref(),
+                part_offset,
+                "decoded MIME part exceeds the limit",
+            ));
+        }
+        total_decoded = total_decoded
+            .checked_add(decoded.len())
+            .ok_or_else(|| mhtml_error(None, part_offset, "decoded MIME size overflowed"))?;
+        if total_decoded > limits.total_decoded_bytes {
+            return Err(mhtml_error(
+                None,
+                part_offset,
+                "decoded MHTML content exceeds the total limit",
+            ));
+        }
+        parts.push(MimePart {
+            content_type,
+            charset: content_parameters.get("charset").cloned(),
+            content_id,
+            content_location,
+            bytes: decoded,
+            offset: part_offset,
+        });
+    }
+
+    let root_index = if let Some(start) = parameters.get("start") {
+        let start = normalize_content_id(start)?;
+        let matches: Vec<_> = parts
+            .iter()
+            .enumerate()
+            .filter(|(_, part)| part.content_id.as_deref() == Some(start.as_str()))
+            .map(|(index, _)| index)
+            .collect();
+        if matches.len() != 1 {
+            return Err(mhtml_error(
+                Some(&start),
+                0,
+                "MHTML start does not select exactly one part",
+            ));
+        }
+        matches[0]
+    } else {
+        let roots: Vec<_> = parts
+            .iter()
+            .enumerate()
+            .filter(|(_, part)| part.content_type == "text/html")
+            .map(|(index, _)| index)
+            .collect();
+        if roots.len() != 1 {
+            return Err(mhtml_error(
+                None,
+                0,
+                "MHTML must contain exactly one HTML root",
+            ));
+        }
+        roots[0]
+    };
+    if parts[root_index].content_type != "text/html" {
+        return Err(mhtml_error(
+            parts[root_index].content_id.as_deref(),
+            parts[root_index].offset,
+            "selected MHTML root is not text/html",
+        ));
+    }
+    if parts[root_index]
+        .charset
+        .as_deref()
+        .is_some_and(|charset| !charset.eq_ignore_ascii_case("utf-8"))
+    {
+        return Err(mhtml_error(
+            parts[root_index].content_id.as_deref(),
+            parts[root_index].offset,
+            "HTML root charset is not UTF-8",
+        ));
+    }
+    let root_location = match parts[root_index].content_location.as_deref() {
+        Some(location) => Some(normalized_absolute_location(location).ok_or_else(|| {
+            mhtml_error(
+                None,
+                parts[root_index].offset,
+                "invalid HTML root Content-Location",
+            )
+        })?),
+        None => None,
+    };
+
+    let mut ids = HashMap::new();
+    let mut locations = HashMap::new();
+    for (index, part) in parts.iter().enumerate() {
+        if let Some(id) = &part.content_id
+            && ids.insert(id.clone(), index).is_some()
+        {
+            return Err(mhtml_error(Some(id), part.offset, "duplicate Content-ID"));
+        }
+        if let Some(location) = &part.content_location {
+            let normalized = normalized_absolute_location(location)
+                .or_else(|| resolve_location(root_location.as_deref(), location))
+                .ok_or_else(|| {
+                    mhtml_error(
+                        part.content_id.as_deref(),
+                        part.offset,
+                        "unsafe Content-Location",
+                    )
+                })?;
+            if locations.insert(normalized, index).is_some() {
+                return Err(mhtml_error(
+                    part.content_id.as_deref(),
+                    part.offset,
+                    "duplicate normalized Content-Location",
+                ));
+            }
+        }
+    }
+    let html = std::str::from_utf8(&parts[root_index].bytes)
+        .map_err(|_| {
+            mhtml_error(
+                parts[root_index].content_id.as_deref(),
+                parts[root_index].offset,
+                "HTML root is not UTF-8",
+            )
+        })?
+        .to_owned();
+    let dom = Html::parse_document(&html);
+    let mut resources = HashMap::new();
+    let resource_selector = Selector::parse(
+        "img[src], link[href], script[src], iframe[src], frame[src], embed[src], object[data]",
+    )
+    .expect("static selector");
+    for element in dom.select(&resource_selector) {
+        let attribute = if element.value().name() == "object" {
+            "data"
+        } else if element.value().name() == "link" {
+            "href"
+        } else {
+            "src"
+        };
+        let reference = element.attr(attribute).unwrap_or_default().trim();
+        let resource_index =
+            resolve_resource_reference(reference, root_location.as_deref(), &ids, &locations)?
+                .ok_or_else(|| {
+                    mhtml_error(
+                        None,
+                        0,
+                        format!("unresolved or external subresource `{reference}`"),
+                    )
+                })?;
+        if resource_index == root_index {
+            return Err(mhtml_error(
+                None,
+                0,
+                "HTML root cannot be used as a subresource",
+            ));
+        }
+        if element.value().name() == "img" {
+            let part = &parts[resource_index];
+            let format = oxml_media::ImageFormat::sniff(&part.bytes).ok_or_else(|| {
+                mhtml_error(
+                    part.content_id.as_deref(),
+                    part.offset,
+                    "image bytes have an unsupported format",
+                )
+            })?;
+            if format.content_type() != part.content_type {
+                return Err(mhtml_error(
+                    part.content_id.as_deref(),
+                    part.offset,
+                    "declared image MIME type does not match its bytes",
+                ));
+            }
+            resources.insert(
+                reference.to_owned(),
+                MhtmlResource {
+                    bytes: part.bytes.clone(),
+                    content_type: part.content_type.clone(),
+                    filename: format!("resource.{}", format.extension()),
+                },
+            );
+        }
+    }
+    let responsive_selector =
+        Selector::parse("img[srcset], source[src], source[srcset], video[poster], input[src]")
+            .expect("static selector");
+    for element in dom.select(&responsive_selector) {
+        for attribute in ["src", "srcset", "poster"] {
+            let Some(value) = element.attr(attribute) else {
+                continue;
+            };
+            let candidates: Vec<_> = if attribute == "srcset" {
+                value
+                    .split(',')
+                    .filter_map(|candidate| candidate.split_whitespace().next())
+                    .collect()
+            } else {
+                vec![value.trim()]
+            };
+            for reference in candidates {
+                if resolve_resource_reference(
+                    reference,
+                    root_location.as_deref(),
+                    &ids,
+                    &locations,
+                )?
+                .is_none()
+                {
+                    return Err(mhtml_error(
+                        None,
+                        0,
+                        format!("unresolved or external subresource `{reference}`"),
+                    ));
+                }
+            }
+        }
+    }
+    let styled_selector = Selector::parse("[style], style").expect("static selector");
+    for element in dom.select(&styled_selector) {
+        let css = if element.value().name() == "style" {
+            element.text().collect::<String>()
+        } else {
+            element.attr("style").unwrap_or_default().to_owned()
+        };
+        for reference in css_resource_references(&css)? {
+            if resolve_resource_reference(&reference, root_location.as_deref(), &ids, &locations)?
+                .is_none()
+            {
+                return Err(mhtml_error(
+                    None,
+                    0,
+                    format!("unresolved or external subresource `{reference}`"),
+                ));
+            }
+        }
+    }
+    let anchor_selector = Selector::parse("a[href]").expect("static selector");
+    let mut hyperlinks = HashMap::new();
+    for anchor in dom.select(&anchor_selector) {
+        let href = anchor.attr("href").unwrap_or_default();
+        let normalized = safe_hyperlink(href, root_location.as_deref())
+            .ok_or_else(|| mhtml_error(None, 0, format!("unsafe hyperlink target `{href}`")))?;
+        hyperlinks.insert(href.to_owned(), normalized);
+    }
+    Ok((
+        html,
+        MhtmlProjection {
+            resources,
+            hyperlinks,
+        },
+    ))
+}
+
 struct Importer<'a> {
     dom: &'a Html,
     document: Document,
@@ -363,6 +1652,8 @@ struct Importer<'a> {
     runs: usize,
     rows: usize,
     cells: usize,
+    projection: Option<&'a MhtmlProjection>,
+    embedded_images: HashMap<String, String>,
 }
 
 impl Importer<'_> {
@@ -1080,6 +2371,69 @@ impl Importer<'_> {
             }
             "style" | "head" | "title" => return Ok(()),
             "img" => {
+                if let Some(projection) = self.projection {
+                    let source = element
+                        .attr("src")
+                        .ok_or_else(|| mhtml_error(None, 0, "MHTML image has no src"))?;
+                    let resource = projection.resources.get(source).ok_or_else(|| {
+                        mhtml_error(None, 0, format!("unresolved image resource `{source}`"))
+                    })?;
+                    let declared_width = image_dimension(element, "width")?;
+                    let declared_height = image_dimension(element, "height")?;
+                    let (width, height) = match (declared_width, declared_height) {
+                        (Some(width), Some(height)) => (width, height),
+                        dimensions => {
+                            let size = oxml_media::probe(&resource.bytes)
+                                .and_then(|info| info.native_size(96.0))
+                                .ok_or_else(|| {
+                                    mhtml_error(
+                                        None,
+                                        0,
+                                        format!("image dimensions are unavailable for `{source}`"),
+                                    )
+                                })?;
+                            match dimensions {
+                                (Some(width), None) => (
+                                    width,
+                                    Length::emu(
+                                        (width.to_emu() as f64 * size.height_emu as f64
+                                            / size.width_emu as f64)
+                                            as i64,
+                                    ),
+                                ),
+                                (None, Some(height)) => (
+                                    Length::emu(
+                                        (height.to_emu() as f64 * size.width_emu as f64
+                                            / size.height_emu as f64)
+                                            as i64,
+                                    ),
+                                    height,
+                                ),
+                                (None, None) => {
+                                    (Length::emu(size.width_emu), Length::emu(size.height_emu))
+                                }
+                                (Some(_), Some(_)) => unreachable!(),
+                            }
+                        }
+                    };
+                    let rel_id = if let Some(rel_id) = self.embedded_images.get(source) {
+                        rel_id.clone()
+                    } else {
+                        let rel_id = self
+                            .document
+                            .embed_image(&resource.bytes, &resource.filename);
+                        self.embedded_images
+                            .insert(source.to_owned(), rel_id.clone());
+                        rel_id
+                    };
+                    let image = EmbeddedMhtmlImage {
+                        rel_id,
+                        width,
+                        height,
+                    };
+                    pieces.push(InlinePiece::Image(image));
+                    return Ok(());
+                }
                 self.diagnostic(
                     &location,
                     None,
@@ -1120,11 +2474,13 @@ impl Importer<'_> {
                 return Ok(());
             }
             "a" if element.attr("href").is_some() => {
-                self.diagnostic(
-                    &location,
-                    None,
-                    "dropped HTML link target and retained anchor text".to_string(),
-                )?;
+                if self.projection.is_none() {
+                    self.diagnostic(
+                        &location,
+                        None,
+                        "dropped HTML link target and retained anchor text".to_string(),
+                    )?;
+                }
             }
             "form" => {
                 self.diagnostic(
@@ -1143,7 +2499,21 @@ impl Importer<'_> {
             _ => {}
         }
 
-        let style = self.computed_style(element, inherited)?;
+        let mut style = self.computed_style(element, inherited)?;
+        if name == "a"
+            && let Some(href) = element.attr("href")
+            && let Some(projection) = self.projection
+        {
+            style.hyperlink = Some(
+                projection
+                    .hyperlinks
+                    .get(href)
+                    .ok_or_else(|| {
+                        mhtml_error(None, 0, format!("unsafe hyperlink target `{href}`"))
+                    })?
+                    .clone(),
+            );
+        }
         self.collect_inline_children(element, &style, pre, pieces)
     }
 
@@ -1193,6 +2563,16 @@ impl Importer<'_> {
 
     fn build_paragraph(&mut self, model: ParagraphModel) -> Result<CT_P> {
         self.bump_blocks("html")?;
+        let mut hyperlink_ids = HashMap::new();
+        for piece in &model.pieces {
+            if let InlinePiece::Text(_, style, _) = piece
+                && let Some(url) = &style.hyperlink
+                && !hyperlink_ids.contains_key(url)
+            {
+                let relationship_id = self.document.add_hyperlink_relationship(url);
+                hyperlink_ids.insert(url.clone(), relationship_id);
+            }
+        }
         let mut output = CT_P::new();
         {
             let mut paragraph = Paragraph { inner: &mut output };
@@ -1215,12 +2595,22 @@ impl Importer<'_> {
                         emitted = true;
                         pending_space = false;
                     }
+                    InlinePiece::Image(image) => {
+                        self.bump_runs()?;
+                        paragraph.add_picture(&image.rel_id, image.width, image.height);
+                        emitted = true;
+                        pending_space = false;
+                    }
                     InlinePiece::Text(text, style, true) => {
                         let mut lines = text.split('\n').peekable();
                         while let Some(line) = lines.next() {
                             if !line.is_empty() {
                                 self.bump_runs()?;
-                                let mut run = paragraph.add_run(line);
+                                let mut run = if let Some(url) = &style.hyperlink {
+                                    paragraph.add_hyperlink(line, &hyperlink_ids[url])
+                                } else {
+                                    paragraph.add_run(line)
+                                };
                                 apply_run_style(&mut run, &style);
                                 emitted = true;
                             }
@@ -1236,7 +2626,11 @@ impl Importer<'_> {
                         let normalized = collapse_text(&text, &mut pending_space, emitted);
                         if !normalized.is_empty() {
                             self.bump_runs()?;
-                            let mut run = paragraph.add_run(&normalized);
+                            let mut run = if let Some(url) = &style.hyperlink {
+                                paragraph.add_hyperlink(&normalized, &hyperlink_ids[url])
+                            } else {
+                                paragraph.add_run(&normalized)
+                            };
                             apply_run_style(&mut run, &style);
                             emitted = true;
                         }
@@ -1382,6 +2776,7 @@ fn inline_piece_is_visible(piece: &InlinePiece) -> bool {
     match piece {
         InlinePiece::Text(text, _, pre) => *pre || !text.trim().is_empty(),
         InlinePiece::Break => true,
+        InlinePiece::Image(_) => true,
     }
 }
 
@@ -1710,7 +3105,201 @@ fn parse_color(value: &str) -> std::result::Result<String, String> {
 mod tests {
     use std::io::Cursor;
 
-    use super::{Document, Limits, from_html_with_limits, preflight_markup, read_bounded};
+    use base64::Engine as _;
+
+    use super::{
+        Document, Length, Limits, MhtmlLimits, from_html_with_limits, from_mhtml_with_limits,
+        parse_mhtml, preflight_markup, read_bounded, to_mhtml_with_limits,
+    };
+
+    fn one_pixel_png() -> Vec<u8> {
+        vec![
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x08,
+            0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0xe2, 0x21, 0xbc,
+            0x33, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ]
+    }
+
+    fn mhtml_fixture(html: &str) -> Vec<u8> {
+        format!(
+            "MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=fixture\r\n\r\n--fixture\r\nContent-Type: text/html; charset=utf-8\r\nContent-Location: https://example.test/index.html\r\n\r\n{html}\r\n--fixture--\r\n"
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn mhtml_parser_rejects_ambiguous_unsafe_and_over_limit_resources_before_projection() {
+        let malformed = [
+            "MIME-Version: 1.0\r\nContent-Type: multipart/related\r\n\r\npartial".to_owned(),
+            mhtml_fixture("<p>one</p>")
+                .into_iter()
+                .map(char::from)
+                .collect::<String>()
+                .replace("--fixture--", "--fixture\r\nContent-Type: text/html\r\n\r\n<p>two</p>\r\n--fixture--"),
+            mhtml_fixture("<img src='https://outside.test/missing.png'>")
+                .into_iter()
+                .map(char::from)
+                .collect(),
+            mhtml_fixture("<a href='javascript:alert(1)'>unsafe</a>")
+                .into_iter()
+                .map(char::from)
+                .collect(),
+            mhtml_fixture("<img srcset='https://outside.test/a.png 1x'>")
+                .into_iter()
+                .map(char::from)
+                .collect(),
+            mhtml_fixture("<p style=\"background-image:url('https://outside.test/a.png')\">x</p>")
+                .into_iter()
+                .map(char::from)
+                .collect(),
+            mhtml_fixture("<p>x</p>")
+                .into_iter()
+                .map(char::from)
+                .collect::<String>()
+                .replace("boundary=fixture", "type=image/png; boundary=fixture"),
+            mhtml_fixture("<p>x</p>")
+                .into_iter()
+                .map(char::from)
+                .collect::<String>()
+                .replace("charset=utf-8", "charset=iso-8859-1"),
+            mhtml_fixture("<p>x</p>")
+                .into_iter()
+                .map(char::from)
+                .collect::<String>()
+                .replace(
+                    "https://example.test/index.html",
+                    "https://example.test/bad path.html",
+                ),
+            mhtml_fixture("<p>x</p>")
+                .into_iter()
+                .map(char::from)
+                .collect::<String>()
+                .replace("--fixture--\r\n", "--fixture--\r\n--fixture--\r\n"),
+            "MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=x\r\n\r\n--x\r\nContent-Type: text/html\r\nContent-ID: <same>\r\n\r\n<p>x</p>\r\n--x\r\nContent-Type: image/png\r\nContent-ID: <same>\r\n\r\nbytes\r\n--x--\r\n".to_owned(),
+            "MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=x\r\n\r\n--x\r\nContent-Type: text/html\r\nContent-Transfer-Encoding: binary\r\n\r\n<p>x</p>\r\n--x--\r\n".to_owned(),
+        ];
+        for input in malformed {
+            assert!(
+                Document::from_mhtml_bytes(input.as_bytes()).is_err(),
+                "accepted {input:?}"
+            );
+        }
+
+        let two_parts = "MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=x\r\n\r\n--x\r\nContent-Type: text/html\r\n\r\n<p>x</p>\r\n--x\r\nContent-Type: image/png\r\nContent-ID: <image>\r\n\r\nbytes\r\n--x--\r\n";
+        for limits in [
+            MhtmlLimits {
+                input_bytes: 1,
+                ..MhtmlLimits::default()
+            },
+            MhtmlLimits {
+                header_bytes: 1,
+                ..MhtmlLimits::default()
+            },
+            MhtmlLimits {
+                parts: 1,
+                ..MhtmlLimits::default()
+            },
+            MhtmlLimits {
+                part_bytes: 1,
+                ..MhtmlLimits::default()
+            },
+            MhtmlLimits {
+                total_decoded_bytes: 1,
+                ..MhtmlLimits::default()
+            },
+        ] {
+            assert!(from_mhtml_with_limits(two_parts.as_bytes(), limits).is_err());
+        }
+    }
+
+    #[test]
+    fn mhtml_transfer_decoding_and_resource_resolution_are_exact() {
+        let png = super::BASE64.encode(one_pixel_png());
+        let input = format!(
+            "MIME-Version: 1.0\r\nContent-Type: multipart/related;\r\n boundary=folded; start=\"<root@rdocx>\"\r\n\r\n--folded\r\nContent-Type: text/html; charset=utf-8\r\nContent-ID: <root@rdocx>\r\nContent-Location: https://Example.Test/folder/index.html\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n<p>before<img src=3D\"images/pixel.png\" width=3D\"1\"><a href=3D\"next.html\">link</a>after</p>\r\n--folded\r\nContent-Type: image/png; name=pixel.png\r\nContent-ID: <pixel@rdocx>\r\nContent-Location: images/./pixel.png\r\nContent-Transfer-Encoding: base64\r\n\r\n{png}\r\n--folded--\r\n"
+        );
+        let parsed =
+            Document::from_mhtml_bytes(input.as_bytes()).expect("bounded multipart fixture");
+        assert_eq!(parsed.document.text(), "beforelinkafter\n");
+        assert!(parsed.diagnostics.is_empty());
+        let image = &parsed.document.images()[0];
+        assert_eq!((image.width_emu, image.height_emu), (9_525, 9_525));
+        assert_eq!(
+            parsed.document.image_data(&image.embed_id),
+            Some(one_pixel_png())
+        );
+        assert_eq!(
+            parsed.document.links()[0].url.as_deref(),
+            Some("https://example.test/folder/next.html")
+        );
+
+        let cid_input = input.replace("images/pixel.png\" width", "cid:pixel@rdocx\" width");
+        let cid = Document::from_mhtml_bytes(cid_input.as_bytes()).expect("exact cid lookup");
+        assert_eq!(cid.document.images().len(), 1);
+    }
+
+    #[test]
+    fn mhtml_writer_is_deterministic_bounded_and_collision_safe() {
+        let mut document = Document::new();
+        document.add_paragraph("deterministic");
+        document.add_picture(
+            &one_pixel_png(),
+            "same.png",
+            Length::emu(19_050),
+            Length::emu(28_575),
+        );
+        document.add_picture(
+            &one_pixel_png(),
+            "same-again.png",
+            Length::emu(19_050),
+            Length::emu(28_575),
+        );
+        let default_html = document.to_html();
+        let first = document.to_mhtml_bytes().expect("first MHTML write");
+        let second = document.to_mhtml_bytes().expect("second MHTML write");
+        assert_eq!(first.bytes, second.bytes);
+        assert_eq!(document.to_html(), default_html);
+        assert!(first.bytes.windows(2).all(|window| window != b"\n\n"));
+        for (index, byte) in first.bytes.iter().enumerate() {
+            if *byte == b'\n' {
+                assert!(index > 0 && first.bytes[index - 1] == b'\r');
+            }
+        }
+        let text = std::str::from_utf8(&first.bytes).unwrap();
+        assert_eq!(text.matches("Content-ID: <image-0@rdocx>").count(), 1);
+        let (html, _) = parse_mhtml(&first.bytes, MhtmlLimits::default()).unwrap();
+        assert_eq!(html.matches("cid:image-0@rdocx").count(), 2);
+        for section in text.split("Content-Transfer-Encoding: base64\r\n").skip(1) {
+            let body = section.split("\r\n\r\n").nth(1).unwrap();
+            for line in body.lines().take_while(|line| !line.starts_with("--")) {
+                assert!(line.len() <= 76);
+            }
+        }
+        let reopened = Document::from_mhtml_bytes(&first.bytes).unwrap();
+        assert_eq!(reopened.document.images()[0].width_emu, 19_050);
+        assert_eq!(reopened.document.images()[0].height_emu, 28_575);
+        assert!(
+            to_mhtml_with_limits(
+                &document,
+                MhtmlLimits {
+                    output_bytes: 16,
+                    ..MhtmlLimits::default()
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn mhtml_loss_records_do_not_hide_supported_siblings() {
+        let parsed =
+            Document::from_mhtml_bytes(&mhtml_fixture("<p>before<object>loss</object>after</p>"))
+                .expect("safe lossy MHTML import");
+        assert_eq!(parsed.document.text(), "beforeafter\n");
+        assert_eq!(parsed.diagnostics.len(), 1);
+    }
 
     #[test]
     fn html_import_rejects_each_declared_resource_limit() {

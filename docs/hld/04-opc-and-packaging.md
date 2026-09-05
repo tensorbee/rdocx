@@ -44,6 +44,15 @@ names exactly the root, content, and emitted images. Ordered style allocation,
 fixed namespace prefixes, fixed ZIP metadata, and bounded retained output make
 two writes of one document byte-identical.
 
+MHTML is MIME rather than OPC. Its private `rdocx` reader requires one bounded
+`multipart/related` entity with a unique HTML root and unique normalized
+Content-ID and Content-Location identities. It accepts folded headers and the
+base64, quoted-printable, 7bit, and 8bit transfer forms, but rejects ambiguous
+roots, duplicate identities, trailing delimiter material, unsupported charsets,
+unresolved contained resources, and every resource fetch. The writer emits
+CRLF, stable source order, 76-column base64, deduplicated image resources, and
+a collision-scanned content-derived boundary.
+
 ODP uses the same non-OPC ownership rule in `rpptx`. Its reader requires the
 first stored presentation mimetype, indexes all safe unique entries before XML
 projection, and enforces caller-selected entry, part, and total expansion
@@ -490,6 +499,12 @@ closed, and no URL or filesystem path from markup is fetched. Successful
 images enter the normal presentation media insertion path with caller-supplied
 filenames and explicit CSS geometry.
 
+The Word MHTML importer accepts contained PNG and JPEG resources only when the
+declared MIME type agrees with byte sniffing. Missing CSS pixel dimensions use
+the Word 96 DPI native-size rule and explicit width or height attributes retain
+their exact CSS pixel projection. Repeated equal image bytes reuse the same
+MIME resource on export while each drawing keeps its own display geometry.
+
 The PDF importer routes decoded JPEG and PNG image content through the same
 package-wide presentation media store. JPEG bytes with `DCTDecode` are retained
 directly. Bounded 8-bit `DeviceGray` and `DeviceRGB` image streams become PNG.
@@ -538,6 +553,13 @@ candidate. Projection failure returns `Error::Html` or an existing package
 error before any partial presentation escapes. Default master, layout, and
 theme parts remain byte-identical while new slide children follow the existing
 fixed-prefix PresentationML serializers and shape-tree sequence.
+
+Word MHTML conversion also publishes atomically. Import projects the selected
+HTML root only after all resource references pass bounded preflight, then saves
+and reopens the generated DOCX. Export reparses the complete MIME result and
+serializes and reopens the source document before returning bytes. Path writes
+stage the complete result through the shared portable atomic replacement path,
+so an error cannot truncate an existing destination.
 
 PDF conversion has the same publication boundary. It builds a fresh candidate,
 adds every source page in order, serializes, reopens, validates, and only then

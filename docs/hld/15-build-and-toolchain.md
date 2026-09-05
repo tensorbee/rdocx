@@ -166,6 +166,13 @@ module reuses workspace `scraper` 0.27 behind `default-template`. Google Chrome
 152.0.7977.65 is an ignored differential oracle only. The native archive,
 WASM, rustdoc, dependency policy, and 10 MiB package ceiling remain gates.
 
+Word MHTML conversion adds no dependency, module, feature, executable, or
+asset. It reuses the private `rdocx` HTML owner, existing `scraper` and `base64`
+dependencies, and the shared atomic path writer. Microsoft Word 16.104 build
+16.104.25121423 is an ignored differential oracle only. The exact native
+oracle, both WASM checks, rustdoc, the patched workspace publish dry run, the
+10 MiB archive ceiling, and the unchanged 49-entry hash harness are gates.
+
 PDF presentation import adds no production executable. The private `rpptx`
 module uses `lopdf` 0.44.0 with default features disabled behind the existing
 `render` feature. Poppler 26.01.0 is an ignored differential oracle only. The

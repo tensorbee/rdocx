@@ -2183,11 +2183,16 @@ and binary `.doc` remain out of scope.
 retains its executable payload and template semantics.
 
 ### F-239, MHTML import and export (M)
-Convert the supported modern Word document surface to and from bounded MHTML
-with safe resource resolution and stable diagnostics.
+The native Word facade converts its supported document surface to and from one
+bounded `multipart/related` MHTML entity. Import resolves only unique contained
+Content-ID and Content-Location resources, never fetches external content, and
+publishes after DOCX save and reopen. Export is deterministic, deduplicates
+equal image bytes, reparses before publication, writes paths atomically, and
+reports stable loss diagnostics.
 **Depends on**: F-178.
 **Test gate**: differential. Source-built MHTML and DOCX conversions preserve
-body order, formatting, tables, lists, images, links, and declared loss records.
+body order, formatting, tables, lists, images, links, and declared loss records
+against Microsoft Word 16.104 build 16.104.25121423.
 
 ---
 

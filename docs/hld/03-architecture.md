@@ -98,6 +98,13 @@ content directly into the one owned WordprocessingML document model. The edge
 does not enter `rdocx-html`, which remains an outbound emitter. This avoids a
 dependency cycle and avoids a second public intermediate document model.
 
+Bounded MHTML import and export use that same seam. The private MIME reader and
+writer live in the existing `rdocx` HTML owner, project through the existing
+HTML import path, and use `rdocx-html` only through its existing outbound
+facade. MIME resource indexing, transfer decoding, content-derived boundaries,
+and loss diagnostics add no crate, dependency edge, feature flag, or second
+document model.
+
 **ODT conversion belongs to the `rdocx` facade.** The private importer validates
 the complete bounded ZIP index, parses ODF XML by expanded namespace, and
 projects supported content directly into the one owned WordprocessingML
@@ -965,6 +972,13 @@ skipped visible constructs. Input, DOM, projection, text, table, and diagnostic
 limits fail closed before a partial document is published. The importer saves
 and reopens its candidate through the typed Word package model before returning
 it.
+
+`Document::from_mhtml_bytes`, `Document::open_mhtml`,
+`Document::to_mhtml_bytes`, and `Document::save_mhtml` are additive native
+facade methods. Concrete read and write results carry the converted document or
+bytes plus stable diagnostics. Read and write failures use one contextual
+`Error::Mhtml` variant. The paths publish only after bounded conversion,
+MHTML reparse, and DOCX save and reopen checks succeed.
 
 `Document::from_odt_bytes`, `Document::from_odt_bytes_with_limits`, and
 `Document::open_odt` are additive native facade constructors. They return a

@@ -66,7 +66,9 @@ pub use field::{
     MailMergeFormatContext, MailMergeFormattedText, MailMergeImage, MailMergeRecord,
     MailMergeValue, TcField, TocEntrySelection, TocField, TocRebuildReport,
 };
-pub use html::{HtmlDiagnostic, HtmlReadResult};
+pub use html::{
+    HtmlDiagnostic, HtmlReadResult, MhtmlDiagnostic, MhtmlReadResult, MhtmlWriteResult,
+};
 pub use math::{
     MathConversionDiagnostic, MathConversionResult, equation_from_latex, equation_from_mathml,
     equation_to_latex, equation_to_mathml,
