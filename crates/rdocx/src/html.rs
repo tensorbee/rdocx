@@ -1442,8 +1442,13 @@ fn decode_css_escapes(css: &str) -> Result<String> {
 }
 
 fn css_resource_references(css: &str) -> Result<Vec<String>> {
-    let decoded = decode_css_escapes(css)?;
-    let css = decoded.as_str();
+    if css.contains('\\') {
+        let decoded = decode_css_escapes(css)?;
+        let decoded_lower = decoded.to_ascii_lowercase();
+        if decoded_lower.contains("url(") || decoded_lower.contains("@import") {
+            return Err(mhtml_error(None, 0, "escaped CSS resource syntax"));
+        }
+    }
     let lower = css.to_ascii_lowercase();
     let mut references = Vec::new();
     let mut position = 0_usize;
@@ -3478,6 +3483,18 @@ mod tests {
                 .into_iter()
                 .map(char::from)
                 .collect(),
+            mhtml_fixture(
+                r#"<p style="background-image:url(https://example.test/index.html\)outside)">x</p>"#,
+            )
+            .into_iter()
+            .map(char::from)
+            .collect(),
+            mhtml_fixture(
+                r#"<style>@import "https://example.test/index.html\"outside";</style><p>x</p>"#,
+            )
+            .into_iter()
+            .map(char::from)
+            .collect(),
             mhtml_fixture("<p>x</p>")
                 .into_iter()
                 .map(char::from)
