@@ -5591,7 +5591,7 @@ rdocx-layout = "=0.10.1"
             "baseline-aware inline groups",
             "Word glossary",
             "0.10.0",
-            "stable Word family remains prepared at 0.12.0",
+            "stable Word family remains at 0.12.0",
             "No external issue or pull request belongs to the selected family",
         ):
             self.assertIn(claim, normalized, claim)

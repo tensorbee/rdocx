@@ -444,18 +444,19 @@ that inherit `[workspace.package].version`, including the unpublished
 `rdocx-wasm`, `rdocx-py`, `rpptx-py`, and `oxml-py-support` packages, use
 cargo-release's effective `workspace` shared-version group and the
 `v{{version}}` tag template. That shared-version group, its two Python project
-versions, and the rdocx WASM contract literals are prepared at 0.12.0. The last
-published exact seven-package stable family remains the immutable annotated
-`v0.11.1` tag at reviewed SHA
-`5a850ce9ae6c31f8365594ed2970193266f8b2a6` until the separately approved
-`v0.12.0` release completes.
+versions, and the rdocx WASM contract literals are at 0.12.0. The latest
+published exact seven-package stable family is the immutable annotated
+`v0.12.0` tag at reviewed SHA
+`19adaacfcf82e3918bba4f8c3648747f1969b746`. Its published archives retain
+their shared 0.9.0 requirements, while current source pins shared dependencies
+to the prepared 0.10.0 boundary.
 The immutable v0.11.0 attempt published only `rdocx-opc` and `rdocx-oxml`
 before package verification failed against the published shared 0.7.0 API.
 The remaining five packages and GitHub release were not published at that
 version. Shared 0.8.0 and stable 0.11.1 form the published recovery sequence.
 After separate immediate approval, the post-recovery cleanup yanked exactly
 `rdocx-opc@0.11.0` and `rdocx-oxml@0.11.0`. Complete coherent stable releases
-remain live and unyanked. The last published complete stable family is 0.11.1.
+remain live and unyanked. The last published complete stable family is 0.12.0.
 Earlier immutable
 registry releases remain available. No binding, WASM, Python, npm, or
 incubating package gained publication authority from the stable release.

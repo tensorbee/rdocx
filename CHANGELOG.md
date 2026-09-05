@@ -25,8 +25,6 @@ instruction checks while keeping their schema rules and public errors local.
 
 ### Fixed
 
-- Replace three independently maintained lexical checks with the shared
-  validator while retaining each consumer's established failure surface.
 - Reject malformed declarations, forbidden XML 1.0 characters, invalid names
   and namespace bindings, duplicate expanded attributes, invalid references,
   malformed comments, and reserved processing instruction targets through one
@@ -45,7 +43,7 @@ Callers constructing `InlineItem::Group` or `LineItem::Group` literals must
 initialize the new `baseline` field. `None` preserves the established
 top-aligned group behavior.
 
-The stable Word family remains prepared at 0.12.0 and now pins shared source
+The stable Word family remains at 0.12.0 and current source now pins shared
 dependencies to 0.10.0. It is outside this release's publication authority.
 Python, WASM, npm, and PyPI publication authority is unchanged, and
 `rpptx-wasm@0.10.0` is not a crates.io package.

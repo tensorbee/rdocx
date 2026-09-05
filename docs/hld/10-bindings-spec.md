@@ -1147,11 +1147,12 @@ The Rust package trains remain separate. The exact 15-package shared OOXML and
 PowerPoint workspace family is prepared at 0.10.0. Its last published boundary
 remains 0.9.0 from immutable annotated tag `rpptx-v0.9.0` at reviewed SHA
 `45b4f277ff5fd6d1b032e929c5dcee7fb9d2c550` until the separately approved
-0.10.0 release completes. The stable workspace is prepared at 0.12.0 and pins
-shared source dependencies to the prepared 0.10.0 boundary. Its
-last published family remains 0.11.1 from immutable annotated `v0.11.1` tag at
-reviewed SHA `5a850ce9ae6c31f8365594ed2970193266f8b2a6`, whose archives retain their
-0.8.0 requirements. The immutable v0.11.0 attempt at
+0.10.0 release completes. The stable workspace and its latest published exact
+seven-package family are at 0.12.0. The immutable annotated `v0.12.0` tag
+dereferences to reviewed SHA `19adaacfcf82e3918bba4f8c3648747f1969b746`.
+Its published archives retain their shared 0.9.0 requirements, while current
+source pins shared dependencies to the prepared 0.10.0 boundary. The immutable
+v0.11.0 attempt at
 reviewed SHA `25350d000ed7ed96bf4f6e371f01f8fbc8e2cec4` published only
 `rdocx-opc` and `rdocx-oxml`. It created no GitHub release and posted no
 contribution notifications. The complete seven-package recovery is published
