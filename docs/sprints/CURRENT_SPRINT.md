@@ -24,14 +24,15 @@ gate is clean, publish the exact stable Rust family at v0.13.0.
   differential import and export evidence, save and reopen, byte preservation,
   and deterministic harness expectations.
 - `docs/hld/14-development-backlog.md`, for the F-238, F-239, F-X077, F-X078,
-  and F-X079 contracts, completed prerequisites, acceptance gates, and the M22
-  end gate.
+  F-X079, and F-X080 contracts, completed prerequisites, acceptance gates, and
+  the M22 end gate.
 
 ## The wave
 
 | F-ID | Title | Size | Status | Owner |
 |------|-------|------|--------|-------|
 | F-X077 | Share strict XML lexical validation | M | done | - |
+| F-X080 | Restore CI release readiness | S | pending | - |
 | F-X079 | Tag rpptx-v0.10.0 | S | pending | - |
 | F-238 | Flat OPC and modern Word package variants | M | pending | - |
 | F-239 | MHTML import and export | M | done | - |
@@ -40,11 +41,12 @@ gate is clean, publish the exact stable Rust family at v0.13.0.
 ## Sequencing note
 
 Rows are listed in dependency order. F-X077 builds on the completed F-236 and
-F-237 scanners and establishes the shared lexical boundary first. F-X079 then
-publishes that new `oxml-core` API as the incubating family at 0.10.0. F-238
-builds on F-236, F-X077, and the published F-X079 graph, while F-239 builds on
-F-178's HTML import foundation and may proceed independently once its design is
-approved.
+F-237 scanners and establishes the shared lexical boundary first. F-X080
+restores the hosted CI release gates after F-X077 and F-239 have settled their
+binding surface. F-X079 then publishes the new `oxml-core` API as the
+incubating family at 0.10.0 only after CI is locally reconstructed and clean.
+F-238 builds on F-236, F-X077, and the published F-X079 graph, while F-239
+builds on F-178's HTML import foundation.
 
 F-X078 runs last and depends on F-238, F-239, F-X077, and F-X079. It starts
 only after the representative M22 end gate passes. The incubating release uses
@@ -66,6 +68,9 @@ Each pauses for separate final approval at its exact reviewed SHA.
 - Embedded, glossary, and package-story malformed XML matrices execute through
   one shared lexical validator while retaining their existing error surfaces
   and byte-identical mutation rollback.
+- Hosted CI package inventory, Pandoc installation, and Python binding jobs
+  have mutation-sensitive local regressions and pass their reconstructed
+  release-readiness gates.
 - Binary `.doc`, Word 2003 XML, executable payload interpretation, and
   permissive XML recovery remain out of scope.
 - The representative modern M22 document authors and renders equations,

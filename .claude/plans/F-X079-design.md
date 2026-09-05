@@ -3,7 +3,7 @@
 **Status**: approved
 **Sprint**: S69
 **Size**: S
-**Depends on**: F-X077
+**Depends on**: F-X077, F-X080
 
 ## Problem
 
@@ -30,7 +30,7 @@ the selected-family diff rather than borrowing stable-only outcomes.
 
 ## Approach
 
-After F-X077 completes, move the exact 15 publishable shared and PowerPoint
+After F-X077 and F-X080 complete, move the exact 15 publishable shared and PowerPoint
 manifests, workspace pins, lock records, README requirements, CI literals,
 source assertions, release regression, and unpublished `rpptx-wasm`
 preparation carrier from 0.9.0 to 0.10.0. Update stable source dependency pins
@@ -114,6 +114,7 @@ release metadata only. Any output delta blocks preparation.
 ## Implementation checklist
 
 - [ ] Complete and verify F-X077.
+- [ ] Complete and verify F-X080 so hosted CI release gates are current.
 - [ ] Move every incubating version carrier and stable shared dependency pin
       to 0.10.0.
 - [ ] Update exact carrier, isolation, workflow, package, and release-note

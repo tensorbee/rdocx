@@ -3738,11 +3738,27 @@ verification and sprint review at the exact prepared SHA, `/release
 rpptx-v0.10.0` obtains separate final approval immediately before external
 mutation.
 
-**Depends on**: F-X077.
+**Depends on**: F-X077, F-X080.
 **Test gate**: release. Publish exactly the 15-package incubating family. Every
 registry entry, owner, annotated tag target, GitHub release-body byte,
 stable-family exclusion, absent `rpptx-wasm@0.10.0`, and applicable
 contribution notification URL must verify before completion.
+
+### F-X080, Restore CI release readiness (S)
+
+Restore the hosted release gates that drifted from their reviewed inputs. The
+`oxml-layout` package job must compare against every bundled Noto font and legal
+file. The checksum-pinned Pandoc 3.10 installer must admit its reviewed
+162,406,703-byte extracted archive under a still-bounded ceiling. The Python
+adapter must compile exhaustively against the current native `rdocx::Error`
+surface without exposing new MHTML or embedded-mutation methods.
+
+**Depends on**: F-X077, F-239.
+**Test gate**: regression. Mutation-sensitive workflow tests fail if any Noto
+font or legal file is removed from the expected package inventory, if the
+Pandoc extracted-size ceiling falls below the authenticated payload, or if
+either current native error mapping is omitted. The reconstructed package,
+Pandoc, and Python binding CI commands all pass before release preparation.
 
 ### F-X078, Tag v0.13.0 (S)
 

@@ -1276,18 +1276,20 @@ form fields are modeled only where they occur inside modern OOXML packages.
 | F-238 | Flat OPC and modern Word package variants | M |
 | F-239 | MHTML import and export | M |
 | F-X077 | Share strict XML lexical validation | M |
+| F-X080 | Restore CI release readiness | S |
 | F-X079 | Tag rpptx-v0.10.0 | S |
 | F-X078 | Tag v0.13.0 | S |
 
 Flat OPC, DOCM, DOTX, DOTM, and bounded MHTML share the current document model.
 Binary `.doc` and Word 2003 XML remain permanent non-goals. The shared strict
 XML lexical validator removes the three copies exposed by S68 without changing
-their fail-closed owner contracts. F-X079 publishes that new shared API as the
-incubating family at rpptx-v0.10.0 before F-238 consumes it through the stable
-graph. The M22 end gate then runs only modern package fixtures. F-X078 runs
-last and prepares and publishes the exact seven-package stable family at
-v0.13.0 only after that gate is clean. Each publication uses `/release` and
-its own separate final approval at the reviewed SHA.
+their fail-closed owner contracts. F-X080 restores the hosted package, Pandoc,
+and Python binding gates before either release begins. F-X079 publishes the new
+shared API as the incubating family at rpptx-v0.10.0 before F-238 consumes it
+through the stable graph. The M22 end gate then runs only modern package
+fixtures. F-X078 runs last and prepares and publishes the exact seven-package
+stable family at v0.13.0 only after that gate is clean. Each publication uses
+`/release` and its own separate final approval at the reviewed SHA.
 
 ### M19, Advanced spreadsheets
 
