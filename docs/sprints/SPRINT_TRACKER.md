@@ -385,6 +385,8 @@ defended.
 | F-234 | S67 | L | 4 | 1 | 2026-09-04 | Added deterministic full-story comparison, package-wide revision resolution, source-span preservation, and pinned Word parity |
 | F-233 | S67 | L | 4 | 1 | 2026-09-04 | Added atomic nested rich mail merge with exact-size images, complete fragment imports, identity remapping, and flat API compatibility |
 | F-235 | S67 | M | 2 | 1 | 2026-09-04 | Added deterministic Word and Character comparison plus left-biased formatting, whitespace, field, comment, and story ignore policies |
+| F-236 | S68 | L | 4 | 1 | 2026-09-05 | Added relationship-owned OLE, ActiveX, and VBA inventory with exact hashes, byte-preserving mutation, and explicit signature policy |
+| F-237 | S68 | L | 4 | 1 | 2026-09-05 | Added typed legacy form editing and relationship-owned glossary, AutoText, and building-block inventory and replacement |
 
 ## Velocity
 
