@@ -1394,7 +1394,56 @@ fn resolve_resource_reference(
     }
 }
 
+fn decode_css_escapes(css: &str) -> Result<String> {
+    let mut decoded = String::with_capacity(css.len());
+    let mut characters = css.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            decoded.push(character);
+            continue;
+        }
+
+        let Some(&next) = characters.peek() else {
+            return Err(mhtml_error(None, 0, "unterminated CSS escape"));
+        };
+        if next.is_ascii_hexdigit() {
+            let mut value = 0_u32;
+            for _ in 0..6 {
+                let Some(&digit) = characters.peek() else {
+                    break;
+                };
+                let Some(nibble) = digit.to_digit(16) else {
+                    break;
+                };
+                characters.next();
+                value = value * 16 + nibble;
+            }
+            if characters.peek().is_some_and(|next| next.is_whitespace()) {
+                let whitespace = characters.next();
+                if whitespace == Some('\r') && characters.peek() == Some(&'\n') {
+                    characters.next();
+                }
+            }
+            decoded.push(
+                char::from_u32(value)
+                    .filter(|value| *value != '\0')
+                    .unwrap_or('\u{fffd}'),
+            );
+        } else if matches!(next, '\n' | '\r' | '\u{000c}') {
+            characters.next();
+            if next == '\r' && characters.peek() == Some(&'\n') {
+                characters.next();
+            }
+        } else {
+            decoded.push(characters.next().expect("peeked CSS escape"));
+        }
+    }
+    Ok(decoded)
+}
+
 fn css_resource_references(css: &str) -> Result<Vec<String>> {
+    let decoded = decode_css_escapes(css)?;
+    let css = decoded.as_str();
     let lower = css.to_ascii_lowercase();
     let mut references = Vec::new();
     let mut position = 0_usize;
@@ -3416,6 +3465,16 @@ mod tests {
                 .map(char::from)
                 .collect(),
             mhtml_fixture("<style>@import 'cid:missing@rdocx';</style><p>x</p>")
+                .into_iter()
+                .map(char::from)
+                .collect(),
+            mhtml_fixture(
+                r#"<p style="background-image:u\72l(https://outside.test/a.png)">x</p>"#,
+            )
+            .into_iter()
+            .map(char::from)
+            .collect(),
+            mhtml_fixture(r#"<style>@\69mport 'cid:missing@rdocx';</style><p>x</p>"#)
                 .into_iter()
                 .map(char::from)
                 .collect(),

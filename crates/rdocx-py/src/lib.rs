@@ -73,7 +73,9 @@ pub(crate) fn rdocx_to_pyerr(py: Python<'_>, error: rdocx::Error) -> PyErr {
         rdocx::Error::Layout(_) | rdocx::Error::Pdf(_) | rdocx::Error::Raster(_) => "LayoutError",
         rdocx::Error::Rtf { .. }
         | rdocx::Error::Html { .. }
+        | rdocx::Error::Mhtml { .. }
         | rdocx::Error::Odt { .. }
+        | rdocx::Error::InvalidEmbeddedMutation { .. }
         | rdocx::Error::Other(_) => "RdocxError",
     };
     public_error(py, class_name, error.to_string())
@@ -154,6 +156,15 @@ mod tests {
                     part: Some("content.xml".to_owned()),
                     offset: 0,
                     message: "invalid ODT".to_owned(),
+                },
+                rdocx::Error::Mhtml {
+                    part: Some("HTML root".to_owned()),
+                    offset: 0,
+                    message: "invalid MHTML".to_owned(),
+                },
+                rdocx::Error::InvalidEmbeddedMutation {
+                    operation: "replace",
+                    message: "invalid embedded mutation".to_owned(),
                 },
             ] {
                 assert!(rdocx_to_pyerr(py, error).get_type(py).is(&expected));
