@@ -2178,7 +2178,7 @@ unsupported subtree survives unrelated document edits.
 Read and write Flat OPC plus DOCM, DOTX, and DOTM while preserving package
 identity, macros, templates, relationships, and content types. Word 2003 XML
 and binary `.doc` remain out of scope.
-**Depends on**: F-236.
+**Depends on**: F-236, F-X077, F-X079.
 **Test gate**: round-trip. Each modern package class reopens without repair and
 retains its executable payload and template semantics.
 
@@ -3715,6 +3715,52 @@ malformed XML matrices all execute through one shared lexical validator, keep
 their current error surfaces, and retain byte-identical mutation rollback.
 Removing any shared declaration, character, reference, name, namespace, or
 processing-instruction check makes at least one matrix fail.
+
+### F-X079, Tag rpptx-v0.10.0 (S)
+
+Publish the shared strict XML lexical validator required by the stable M22
+Word family as the exact 15-package incubating family at 0.10.0. Move every
+incubating manifest, workspace pin, lock record, README requirement, source
+assertion, CI literal, workflow preflight, release regression, and the
+unpublished `rpptx-wasm` preparation carrier in lockstep. Update stable source
+dependency pins to the published shared 0.10.0 boundary without changing the
+stable family version or granting it publication authority.
+
+Prepare exact `rpptx-v0.10.0` release notes from the reviewed selected-family
+diff and contribution inventory. Stable Word, Python, WASM, npm, and PyPI
+packages remain outside publication authority. After one clean full
+verification and sprint review at the exact prepared SHA, `/release
+rpptx-v0.10.0` obtains separate final approval immediately before external
+mutation.
+
+**Depends on**: F-X077.
+**Test gate**: release. Publish exactly the 15-package incubating family. Every
+registry entry, owner, annotated tag target, GitHub release-body byte,
+stable-family exclusion, absent `rpptx-wasm@0.10.0`, and applicable
+contribution notification URL must verify before completion.
+
+### F-X078, Tag v0.13.0 (S)
+
+Publish the reviewed M22 Word-depth outcomes as the exact seven-package stable
+family at 0.13.0. Move every stable manifest, workspace pin, lock record,
+README requirement, source assertion, CI literal, Python and WASM metadata
+carrier, workflow preflight, and release regression in lockstep. Prepare exact
+`v0.13.0` release notes from the reviewed public API and contribution diff.
+Python, WASM, npm, and PyPI remain outside publication authority.
+
+Before version preparation, inspect the reviewed dependency diff. If a shared
+crate version or stable dependency pin moved, add and complete a separate
+incubating-family release F-ID first. Do not mix the stable and incubating
+families under one tag. After the M22 end gate, one clean full verification and
+sprint review must cover the exact prepared SHA. `/release v0.13.0` then
+obtains its separate final approval immediately before external mutation.
+
+**Depends on**: F-238, F-239, F-X077, F-X079.
+**Test gate**: release. Publish exactly `rdocx-opc`, `rdocx-oxml`,
+`rdocx-layout`, `rdocx-html`, `rdocx-pdf`, `rdocx`, and `rdocx-cli`. Every
+registry entry, owner, annotated tag target, GitHub release-body byte,
+selected-family exclusion, and applicable contribution notification URL must
+verify before completion.
 
 ### F-X021, The hash harness should cover PDF output (M)
 The output-stability harness records `page1.png` and three `word/*.xml` parts

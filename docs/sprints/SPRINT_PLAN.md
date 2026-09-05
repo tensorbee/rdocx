@@ -1276,12 +1276,18 @@ form fields are modeled only where they occur inside modern OOXML packages.
 | F-238 | Flat OPC and modern Word package variants | M |
 | F-239 | MHTML import and export | M |
 | F-X077 | Share strict XML lexical validation | M |
+| F-X079 | Tag rpptx-v0.10.0 | S |
+| F-X078 | Tag v0.13.0 | S |
 
 Flat OPC, DOCM, DOTX, DOTM, and bounded MHTML share the current document model.
 Binary `.doc` and Word 2003 XML remain permanent non-goals. The shared strict
 XML lexical validator removes the three copies exposed by S68 without changing
-their fail-closed owner contracts. The M22 end gate runs only modern package
-fixtures.
+their fail-closed owner contracts. F-X079 publishes that new shared API as the
+incubating family at rpptx-v0.10.0 before F-238 consumes it through the stable
+graph. The M22 end gate then runs only modern package fixtures. F-X078 runs
+last and prepares and publishes the exact seven-package stable family at
+v0.13.0 only after that gate is clean. Each publication uses `/release` and
+its own separate final approval at the reviewed SHA.
 
 ### M19, Advanced spreadsheets
 
@@ -1445,7 +1451,7 @@ at the fully verified SHA.
 |---|---|---|
 | End of S58, M20 | Stable `rdocx` family. Publish the incubating shared family first only if a shared crate version or stable dependency pin moved. | The Word corpus, shaping, pagination, and incremental layout gates have all settled, so the stable family can describe one measured fidelity boundary. |
 | End of S64, M21 | Incubating `rpptx` family. Publish the stable family too only when the reviewed dependency diff requires new shared pins. | Collaboration, security, timing, media, SmartArt, ODP, handouts, HTML import, and PDF import form one complete presentation-depth boundary. |
-| End of S69, M22 | Stable `rdocx` family. Publish the incubating shared family first only if a shared crate version or stable dependency pin moved. | OfficeMath, fields, dynamic TOC, automation, comparison, embedded content, and modern package variants complete the planned Word-depth boundary. |
+| End of S69, M22 | Stable `rdocx` family at v0.13.0 through F-X078. Publish the incubating shared family first only if a shared crate version or stable dependency pin moved. | OfficeMath, fields, dynamic TOC, automation, comparison, embedded content, and modern package variants complete the planned Word-depth boundary. |
 | End of S79, conditional M19 | The new `rxlsx` distribution family defined by F-195, plus only the existing families whose reviewed dependency pins moved. | F-195 is the first point where the conditional spreadsheet programme has a complete facade, CLI, WASM, Python, rendering, and advanced lifecycle gate. |
 
 No intermediate sprint publishes merely because one subsystem compiles. A

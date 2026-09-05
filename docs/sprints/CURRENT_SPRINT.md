@@ -1,61 +1,80 @@
-# Current Sprint, S68
+# Current Sprint, S69
 
 **Milestone**: M22 Word depth.
 
-**Goal**: expose modern Word package content that is currently preserved but
-opaque. Executable objects and macros remain non-executing inventory surfaces,
-while forms, glossary entries, AutoText, and building blocks gain bounded typed
-access only inside modern OOXML packages.
+**Goal**: close Word depth without opening a legacy `.doc` programme. Flat OPC,
+DOCM, DOTX, DOTM, and bounded MHTML share the current document model, while the
+strict XML lexical checks exposed by S68 move to one existing shared layer
+without weakening any owner-specific fail-closed contract. After the M22 end
+gate is clean, publish the exact stable Rust family at v0.13.0.
 
 ## Spec references
 
-- `docs/hld/02-scope-and-non-goals.md`, for the permanent exclusion of binary
-  `.doc` and execution of embedded OLE, ActiveX, or VBA payloads.
-- `docs/hld/03-architecture.md`, for relationship-owned payload identity,
-  facade ownership, bounded staged mutation, and preservation of unsupported
-  document content.
-- `docs/hld/04-opc-and-packaging.md`, for normalized internal relationships,
-  content-type validation, signature infrastructure, fail-closed package
-  graphs, and atomic publication.
-- `docs/hld/10-bindings-spec.md`, for additive native Rust inventory and
-  mutation surfaces without implicit Python, WASM, or CLI exposure.
-- `docs/hld/12-testing-strategy.md`, for stable payload hashes, relationship
-  paths, source-built malformed graphs, save and reopen, and byte-exact
-  unsupported-subtree preservation.
-- `docs/hld/14-development-backlog.md`, for the F-236 and F-237 contracts,
-  dependency boundary, acceptance gates, and the remaining M22 work.
+- `docs/hld/02-scope-and-non-goals.md`, for modern OOXML package-class support,
+  bounded interchange, and the permanent exclusion of binary `.doc`, Word 2003
+  XML, and executable payload execution.
+- `docs/hld/03-architecture.md`, for the lowest shared crate boundary, facade
+  ownership, source-preserving mutation, and avoiding duplicate parser policy.
+- `docs/hld/04-opc-and-packaging.md`, for normalized relationships, content-type
+  ownership, package-class identity, safe resource resolution, and atomic
+  package publication.
+- `docs/hld/10-bindings-spec.md`, for additive native Rust surfaces and explicit
+  binding boundaries for new package and interchange operations.
+- `docs/hld/12-testing-strategy.md`, for source-built malformed inputs,
+  differential import and export evidence, save and reopen, byte preservation,
+  and deterministic harness expectations.
+- `docs/hld/14-development-backlog.md`, for the F-238, F-239, F-X077, F-X078,
+  and F-X079 contracts, completed prerequisites, acceptance gates, and the M22
+  end gate.
 
 ## The wave
 
 | F-ID | Title | Size | Status | Owner |
 |------|-------|------|--------|-------|
-| F-236 | Embedded object and macro inventory | L | done | - |
-| F-237 | Forms, glossary, and building blocks | L | done | - |
+| F-X077 | Share strict XML lexical validation | M | pending | - |
+| F-X079 | Tag rpptx-v0.10.0 | S | pending | - |
+| F-238 | Flat OPC and modern Word package variants | M | pending | - |
+| F-239 | MHTML import and export | M | pending | - |
+| F-X078 | Tag v0.13.0 | S | pending | - |
 
 ## Sequencing note
 
-Rows are listed in dependency order, not F-ID order.
+Rows are listed in dependency order. F-X077 builds on the completed F-236 and
+F-237 scanners and establishes the shared lexical boundary first. F-X079 then
+publishes that new `oxml-core` API as the incubating family at 0.10.0. F-238
+builds on F-236, F-X077, and the published F-X079 graph, while F-239 builds on
+F-178's HTML import foundation and may proceed independently once its design is
+approved.
 
-F-236 depends on the completed digital-signature verification and creation
-foundations, F-171 and F-172. F-237 has no unfinished dependency. The two S68
-stories may proceed independently because one owns relationship-backed opaque
-payloads and the other owns typed WordprocessingML forms and reusable content.
+F-X078 runs last and depends on F-238, F-239, F-X077, and F-X079. It starts
+only after the representative M22 end gate passes. The incubating release uses
+`/release rpptx-v0.10.0`, and the stable release uses `/release v0.13.0`.
+Each pauses for separate final approval at its exact reviewed SHA.
 
 ## Definition of done for this sprint
 
-- Embedded objects, ActiveX controls, VBA projects, and their signatures have
-  a stable relationship-owned inventory with exact hashes and package paths.
-- Extraction and bounded replacement return or retain exact payload bytes
-  without decoding or executing them.
-- Safe removal leaves a valid document, applies the declared signature policy,
-  and preserves every unrelated part, relationship, and owner subtree.
-- Legacy form fields inside modern OOXML, glossary entries, AutoText, and
-  building blocks are typed and editable without adding a binary `.doc`
-  reader.
-- Supported entries survive save and reopen, and every unsupported subtree
-  remains byte-identical through unrelated edits.
-- Invalid identities, external or malformed relationship graphs, wrong content
-  types, signature inconsistencies, and failed staged mutations reject
-  atomically.
+- Flat OPC, DOCM, DOTX, and DOTM read and write through the current document
+  model while retaining package identity, macros, template semantics,
+  relationships, content types, and unsupported XML.
+- Every modern package class saves, reopens, and passes its no-repair structural
+  gate without changing executable payload bytes.
+- Bounded MHTML import and export preserve body order, formatting, tables,
+  lists, images, links, and stable declared loss records through source-built
+  differential fixtures.
+- MHTML resource resolution rejects unsafe, malformed, external, or over-limit
+  inputs before publishing partial output.
+- Embedded, glossary, and package-story malformed XML matrices execute through
+  one shared lexical validator while retaining their existing error surfaces
+  and byte-identical mutation rollback.
+- Binary `.doc`, Word 2003 XML, executable payload interpretation, and
+  permissive XML recovery remain out of scope.
+- The representative modern M22 document authors and renders equations,
+  rebuilds fields and a table of contents, performs advanced merge and
+  comparison, inventories embedded content, and round-trips its modern package
+  variant without losing unsupported XML or executable payloads.
+- The exact seven-package stable Rust family is prepared at 0.13.0, receives
+  separate final release approval, publishes under v0.13.0, and has its
+  registry entries, owner, annotated tag, GitHub release body, selected-family
+  exclusions, and applicable contribution notifications verified.
 - Full verification passes with every deterministic hash explained, every
   package archive below 10 MiB, and the bounded sprint review clean.
