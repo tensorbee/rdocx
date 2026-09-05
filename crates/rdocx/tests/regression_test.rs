@@ -17234,6 +17234,7 @@ fn word_embedded_relationship_targets_require_normalized_pack_uris() {
         ("query", "embeddings/object1.bin?query"),
         ("encoded-slash", "embeddings%2Fobject1.bin"),
         ("encoded-unreserved", "embeddings/%6Fobject1.bin"),
+        ("dot-segment", "embeddings/./object1.bin"),
         ("empty-segment", "embeddings//object1.bin"),
         ("trailing-slash", "embeddings/object1.bin/"),
         ("scheme", "https:object1.bin"),
@@ -17263,6 +17264,35 @@ fn word_embedded_relationship_targets_require_normalized_pack_uris() {
         );
         assert_eq!(document.to_bytes().unwrap(), before, "{label}: {target}");
     }
+
+    let mut package = f236_embedded_package(false);
+    let bytes = package
+        .parts
+        .remove("/word/embeddings/object1.bin")
+        .unwrap();
+    package.set_part("/embeddings/object1.bin", bytes);
+    package
+        .content_types
+        .overrides
+        .remove("/word/embeddings/object1.bin");
+    package.content_types.add_override(
+        "/embeddings/object1.bin",
+        "application/vnd.openxmlformats-officedocument.oleObject",
+    );
+    package
+        .get_or_create_part_rels("/word/document.xml")
+        .items
+        .iter_mut()
+        .find(|relationship| relationship.id == "ole-rel")
+        .unwrap()
+        .target = "../embeddings/object1.bin".to_owned();
+    assert_eq!(
+        Document::from_bytes(&f236_package_bytes(package))
+            .unwrap()
+            .extract_embedded_content("/word/document.xml", "ole-rel")
+            .unwrap(),
+        b"ole-executable"
+    );
 
     let mut package = f236_embedded_package(false);
     let bytes = package

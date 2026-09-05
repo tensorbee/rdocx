@@ -1016,7 +1016,7 @@ fn relationship_target_is_normalized_pack_uri(target: &str) -> bool {
     target
         .split('/')
         .filter(|segment| !segment.is_empty())
-        .all(|segment| matches!(segment, "." | "..") || !segment.ends_with('.'))
+        .all(|segment| segment == ".." || (segment != "." && !segment.ends_with('.')))
 }
 
 fn hex_value(byte: u8) -> u8 {

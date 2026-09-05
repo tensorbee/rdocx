@@ -1275,10 +1275,13 @@ form fields are modeled only where they occur inside modern OOXML packages.
 |------|-------|------|
 | F-238 | Flat OPC and modern Word package variants | M |
 | F-239 | MHTML import and export | M |
+| F-X077 | Share strict XML lexical validation | M |
 
 Flat OPC, DOCM, DOTX, DOTM, and bounded MHTML share the current document model.
-Binary `.doc` and Word 2003 XML remain permanent non-goals. The M22 end gate
-runs only modern package fixtures.
+Binary `.doc` and Word 2003 XML remain permanent non-goals. The shared strict
+XML lexical validator removes the three copies exposed by S68 without changing
+their fail-closed owner contracts. The M22 end gate runs only modern package
+fixtures.
 
 ### M19, Advanced spreadsheets
 
