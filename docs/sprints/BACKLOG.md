@@ -37,9 +37,9 @@ regenerated, never hand-edited.
 | M19, Advanced spreadsheets                     | 21 | 0 | 0 | 21 |
 | M20, Fidelity at scale                         | 7  | 7 | 0 | 0  |
 | M21, Presentation depth                        | 15 | 15 | 0 | 0  |
-| M22, Word depth                                | 12 | 11 | 0 | 1  |
-| X, Cross-cutting (opportunistic)            | 83 | 78 | 1 | 1  |
-| **Total** | **330** | **303** | **1** | **23** |
+| M22, Word depth                                | 12 | 11 | 1 | 0  |
+| X, Cross-cutting (opportunistic)            | 83 | 79 | 0 | 1  |
+| **Total** | **330** | **304** | **1** | **22** |
 <!-- AUTOGEN:backlog-summary END -->
 
 ## All F-IDs
@@ -441,7 +441,7 @@ regenerated, never hand-edited.
 | F-235 | Comparison granularity and ignore policy     | S67 | M | done |
 | F-236 | Embedded object and macro inventory          | S68 | L | done |
 | F-237 | Forms, glossary, and building blocks         | S68 | L | done |
-| F-238 | Flat OPC and modern Word package variants    | S69 | M | pending |
+| F-238 | Flat OPC and modern Word package variants    | S69 | M | in-progress |
 | F-239 | MHTML import and export                      | S69 | M | done |
 <!-- AUTOGEN:backlog-M22 END -->
 

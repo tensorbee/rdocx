@@ -35,7 +35,7 @@ gate is clean, publish the exact stable Rust family at v0.13.0.
 | F-239 | MHTML import and export | M | done | - |
 | F-X080 | Restore CI release readiness | S | done | - |
 | F-X079 | Tag rpptx-v0.10.0 | S | done | - |
-| F-238 | Flat OPC and modern Word package variants | M | pending | - |
+| F-238 | Flat OPC and modern Word package variants | M | in-progress | codex |
 | F-X078 | Tag v0.13.0 | S | pending | - |
 
 ## Sequencing note
