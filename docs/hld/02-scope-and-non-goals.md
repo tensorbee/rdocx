@@ -168,6 +168,13 @@ properties remain visible through ordered diagnostics. Python, WASM, CLI,
 legacy equation formats, and a second conversion model remain outside this
 surface.
 
+Modern OOXML legacy form fields and glossary entries are part of the post-v1
+native Word surface. Native Rust callers can inventory supported form fields
+across internal Word stories, update their typed values, and replace existing
+AutoText and building-block entries. Binary `.doc` input, field execution,
+implicit entry expansion, new glossary authoring, and additional binding
+surfaces remain outside this scope.
+
 ### Superseded
 
 | v1 position | Superseded by | Why it changed |

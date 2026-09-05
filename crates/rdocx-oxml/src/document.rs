@@ -707,7 +707,7 @@ impl CT_Body {
         Self::from_xml_with_prefixes_and_owner_bindings(reader, &["w".to_string()], &[])
     }
 
-    fn from_xml_with_prefixes_and_owner_bindings(
+    pub(crate) fn from_xml_with_prefixes_and_owner_bindings(
         reader: &mut Reader<&[u8]>,
         word_prefixes: &[String],
         owner_bindings: &[(String, String)],

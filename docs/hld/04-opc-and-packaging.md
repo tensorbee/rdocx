@@ -138,6 +138,7 @@ CORE_PROPERTIES, THUMBNAIL, DIGITAL_SIGNATURE_ORIGIN, DIGITAL_SIGNATURE
 EXTENDED_PROPERTIES   // docProps/app.xml
 CUSTOM_PROPERTIES     // docProps/custom.xml
 COMMENTS              // Word comments part
+GLOSSARY_DOCUMENT     // Word glossary document part
 DIAGRAM_DATA, DIAGRAM_LAYOUT, DIAGRAM_QUICK_STYLE, DIAGRAM_COLORS
 DIAGRAM_DRAWING       // Microsoft 2007 cached diagram drawing
 OLE_OBJECT, CONTROL, STRICT_OLE_OBJECT, STRICT_CONTROL
@@ -160,6 +161,12 @@ relationship type before staging package changes.
 A `content_types` constants module is added alongside, so neither format crate
 hand-types the long MIME strings. It includes the modern PowerPoint comments
 and authors MIME types as well as the handout-master type.
+
+The Word facade resolves at most one glossary relationship from the main
+document. The relationship must be internal, its normalized target must not
+escape the package root, the part must exist, and its override must use the
+Word glossary content type. Duplicate, external, traversal-shaped, missing,
+wrong-type, and malformed-root graphs fail before document mutation.
 
 Both facades resolve core properties through the package-level
 `CORE_PROPERTIES` relationship and retain its normalized target. Immutable

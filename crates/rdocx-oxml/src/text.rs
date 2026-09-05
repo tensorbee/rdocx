@@ -41,11 +41,42 @@ pub struct Field {
     pub instruction: FieldInstruction,
     pub cached_result: String,
     pub dirty: Option<bool>,
+    /// Typed legacy form metadata retained below the begin `w:fldChar`.
+    pub legacy_form: Option<LegacyFormFieldData>,
+    legacy_form_parse_error: bool,
     nested_order: Vec<NestedFieldPosition>,
     source: FieldSource,
 }
 
-#[derive(Debug, Clone, Copy)]
+/// The bounded legacy form kind projected from `w:ffData`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegacyFormFieldKind {
+    TextInput,
+    CheckBox,
+    DropDownList,
+}
+
+/// The current value stored by one legacy form field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LegacyFormFieldValue {
+    Text(String),
+    Checked(bool),
+    SelectedIndex(usize),
+}
+
+/// Supported metadata from one structurally valid `w:ffData` subtree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyFormFieldData {
+    pub name: Option<String>,
+    pub enabled: bool,
+    pub calculate_on_exit: bool,
+    pub kind: LegacyFormFieldKind,
+    pub value: LegacyFormFieldValue,
+    pub choices: Vec<String>,
+    pub max_length: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NestedFieldPosition {
     Argument(usize),
     Switch(usize),
@@ -62,6 +93,8 @@ impl Field {
             instruction,
             cached_result: cached_result.to_owned(),
             dirty: None,
+            legacy_form: None,
+            legacy_form_parse_error: false,
             nested_order: Vec::new(),
         }
     }
@@ -77,10 +110,21 @@ impl Field {
     ) -> Self {
         let original_instruction = instruction.clone();
         let original_cached_result = cached_result.clone();
+        let (legacy_form, legacy_form_parse_error) = match parse_legacy_form_data(
+            &raw_xml,
+            &word_prefixes,
+            &instruction.name,
+            &cached_result,
+        ) {
+            Ok(legacy_form) => (legacy_form, false),
+            Err(_) => (None, true),
+        };
         Self {
             instruction,
             cached_result,
             dirty,
+            legacy_form: legacy_form.clone(),
+            legacy_form_parse_error,
             nested_order: Vec::new(),
             source: FieldSource::Parsed {
                 source_id: NEXT_FIELD_SOURCE_ID.fetch_add(1, Ordering::Relaxed),
@@ -90,6 +134,7 @@ impl Field {
                 original_cached_result,
                 cached_segments,
                 original_dirty: dirty,
+                original_legacy_form: legacy_form,
                 word_prefixes,
             },
         }
@@ -104,6 +149,81 @@ impl Field {
             return Vec::new();
         }
         self.nested_fields_from_instruction(&self.instruction, structured_unchanged)
+    }
+
+    /// Reject a malformed legacy-form owner retained by this field.
+    #[doc(hidden)]
+    pub fn validate_legacy_form_owner(&self) -> Result<()> {
+        if self.legacy_form_parse_error {
+            return Err(OxmlError::InvalidValue(
+                "malformed legacy form owner".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Replace the selected legacy form while retaining original nested-field order.
+    #[doc(hidden)]
+    pub fn set_nth_legacy_form_value_in_source_order(
+        &mut self,
+        remaining: &mut usize,
+        value: &LegacyFormFieldValue,
+    ) -> Result<bool> {
+        self.validate_legacy_form_owner()?;
+        if self.legacy_form.is_some() {
+            if *remaining == 0 {
+                self.set_legacy_form_value(value.clone())?;
+                return Ok(true);
+            }
+            *remaining -= 1;
+        }
+
+        let original = self.original_instruction().clone();
+        let structured_unchanged = instruction_structure_eq(&self.instruction, &original);
+        if structured_unchanged && self.instruction.raw != original.raw {
+            return Ok(false);
+        }
+        let ordered = if structured_unchanged {
+            self.nested_order.clone()
+        } else {
+            Vec::new()
+        };
+        for position in &ordered {
+            let nested = match *position {
+                NestedFieldPosition::Argument(index) => self.instruction.arguments.get_mut(index),
+                NestedFieldPosition::Switch(index) => self
+                    .instruction
+                    .switches
+                    .get_mut(index)
+                    .and_then(|field_switch| field_switch.argument.as_mut()),
+            };
+            if let Some(FieldArgument::Nested(field)) = nested
+                && field.set_nth_legacy_form_value_in_source_order(remaining, value)?
+            {
+                return Ok(true);
+            }
+        }
+        for (index, argument) in self.instruction.arguments.iter_mut().enumerate() {
+            if ordered.contains(&NestedFieldPosition::Argument(index)) {
+                continue;
+            }
+            if let FieldArgument::Nested(field) = argument
+                && field.set_nth_legacy_form_value_in_source_order(remaining, value)?
+            {
+                return Ok(true);
+            }
+        }
+        for (index, field_switch) in self.instruction.switches.iter_mut().enumerate() {
+            if ordered.contains(&NestedFieldPosition::Switch(index)) {
+                continue;
+            }
+            if let Some(FieldArgument::Nested(field)) = &mut field_switch.argument
+                && field.set_nth_legacy_form_value_in_source_order(remaining, value)?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// Return the instruction selected by the public raw-versus-structured edit rules.
@@ -182,11 +302,13 @@ impl Field {
                 original_instruction,
                 original_cached_result,
                 original_dirty,
+                original_legacy_form,
                 ..
             } => {
                 self.instruction == *original_instruction
                     && self.cached_result == *original_cached_result
                     && self.dirty == *original_dirty
+                    && self.legacy_form == *original_legacy_form
             }
         }
     }
@@ -267,6 +389,45 @@ impl Field {
         write_field(&mut writer, self, None)?;
         Ok(Some((raw_xml, writer.into_inner())))
     }
+
+    /// Change the typed value of a legacy form field and its cached display.
+    #[doc(hidden)]
+    pub fn set_legacy_form_value(&mut self, value: LegacyFormFieldValue) -> Result<()> {
+        let form = self
+            .legacy_form
+            .as_mut()
+            .ok_or_else(|| OxmlError::MissingElement("w:ffData".to_owned()))?;
+        let display = match (&form.kind, &value) {
+            (LegacyFormFieldKind::TextInput, LegacyFormFieldValue::Text(value)) => {
+                if form
+                    .max_length
+                    .is_some_and(|maximum| value.chars().count() > maximum)
+                {
+                    return Err(OxmlError::InvalidValue(
+                        "legacy text form value exceeds w:maxLength".to_owned(),
+                    ));
+                }
+                value.clone()
+            }
+            (LegacyFormFieldKind::CheckBox, LegacyFormFieldValue::Checked(checked)) => {
+                if *checked { "☒" } else { "☐" }.to_owned()
+            }
+            (LegacyFormFieldKind::DropDownList, LegacyFormFieldValue::SelectedIndex(index)) => {
+                let choice = form.choices.get(*index).ok_or_else(|| {
+                    OxmlError::InvalidValue("legacy drop-down selection is out of range".to_owned())
+                })?;
+                choice.clone()
+            }
+            _ => {
+                return Err(OxmlError::InvalidValue(
+                    "legacy form value kind does not match the field kind".to_owned(),
+                ));
+            }
+        };
+        form.value = value;
+        self.cached_result = display;
+        Ok(())
+    }
 }
 
 impl PartialEq for Field {
@@ -274,6 +435,8 @@ impl PartialEq for Field {
         self.instruction == other.instruction
             && self.cached_result == other.cached_result
             && self.dirty == other.dirty
+            && self.legacy_form == other.legacy_form
+            && self.legacy_form_parse_error == other.legacy_form_parse_error
     }
 }
 
@@ -311,6 +474,7 @@ enum FieldSource {
         original_cached_result: String,
         cached_segments: Vec<CachedDisplaySegment>,
         original_dirty: Option<bool>,
+        original_legacy_form: Option<LegacyFormFieldData>,
         word_prefixes: Vec<String>,
     },
 }
@@ -1336,6 +1500,794 @@ fn parse_field_bool(value: &str) -> Option<bool> {
         "0" | "false" | "off" => Some(false),
         _ => None,
     }
+}
+
+#[derive(Default)]
+struct LegacyFormProjection {
+    ff_data_last_slot: Option<usize>,
+    kind_last_slot: Option<usize>,
+    name: Option<String>,
+    name_seen: bool,
+    enabled: Option<bool>,
+    enabled_seen: bool,
+    calculate_on_exit: Option<bool>,
+    calculate_on_exit_seen: bool,
+    entry_macro_seen: bool,
+    exit_macro_seen: bool,
+    help_text_seen: bool,
+    status_text_seen: bool,
+    kind: Option<LegacyFormFieldKind>,
+    text_type_seen: bool,
+    text_format_seen: bool,
+    checkbox_size_seen: bool,
+    default_text: Option<String>,
+    default_text_seen: bool,
+    checked: Option<bool>,
+    checked_seen: bool,
+    check_default: Option<bool>,
+    check_default_seen: bool,
+    selected_index: Option<usize>,
+    selected_index_seen: bool,
+    selected_default: Option<usize>,
+    selected_default_seen: bool,
+    choices: Vec<String>,
+    max_length: Option<usize>,
+    max_length_seen: bool,
+}
+
+fn parse_legacy_form_data(
+    raw: &[u8],
+    word_prefixes: &[String],
+    instruction_name: &str,
+    cached_result: &str,
+) -> Result<Option<LegacyFormFieldData>> {
+    let mut reader = Reader::from_reader(raw);
+    reader.config_mut().trim_text(false);
+    let mut buffer = Vec::new();
+    let mut stack = Vec::<Option<String>>::new();
+    let mut prefixes = word_prefixes.to_vec();
+    let mut prefix_scopes = Vec::new();
+    let mut begin_depth = None;
+    let mut ff_data_depth = None;
+    let mut ff_data_count = 0usize;
+    let mut kind_depth = None;
+    let mut leaf_depth = None;
+    let mut projection = LegacyFormProjection::default();
+
+    loop {
+        match reader.read_event_into(&mut buffer)? {
+            Event::Start(element) => {
+                if leaf_depth.is_some() {
+                    return Err(OxmlError::InvalidValue(
+                        "legacy form leaf property contains an element".to_owned(),
+                    ));
+                }
+                let local_prefixes = word_prefixes_at(&element, &prefixes)?;
+                let word = is_word_element(
+                    element.name().as_ref(),
+                    local_name(element.name().as_ref()),
+                    &local_prefixes,
+                );
+                let local = word.then(|| {
+                    String::from_utf8_lossy(local_name(element.name().as_ref())).into_owned()
+                });
+                stack.push(local.clone());
+                prefix_scopes.push(std::mem::replace(&mut prefixes, local_prefixes));
+                let depth = stack.len() - 1;
+                if local.as_deref() == Some("fldChar")
+                    && begin_depth.is_none()
+                    && optional_word_attribute(&element, b"fldCharType", &prefixes).as_deref()
+                        == Some("begin")
+                {
+                    begin_depth = Some(depth);
+                } else if local.as_deref() == Some("ffData") && begin_depth == depth.checked_sub(1)
+                {
+                    ff_data_count += 1;
+                    if ff_data_count > 1 {
+                        return Err(OxmlError::InvalidValue(
+                            "duplicate direct w:ffData owner".to_owned(),
+                        ));
+                    }
+                    ff_data_depth = Some(depth);
+                } else if let Some(ff_depth) = ff_data_depth {
+                    leaf_depth = project_legacy_form_element(
+                        &element,
+                        local.as_deref(),
+                        depth,
+                        ff_depth,
+                        &prefixes,
+                        &mut kind_depth,
+                        &mut projection,
+                    )?
+                    .then_some(depth);
+                }
+            }
+            Event::Empty(element) => {
+                if leaf_depth.is_some() {
+                    return Err(OxmlError::InvalidValue(
+                        "legacy form leaf property contains an element".to_owned(),
+                    ));
+                }
+                let local_prefixes = word_prefixes_at(&element, &prefixes)?;
+                let word = is_word_element(
+                    element.name().as_ref(),
+                    local_name(element.name().as_ref()),
+                    &local_prefixes,
+                );
+                let local = word.then(|| {
+                    String::from_utf8_lossy(local_name(element.name().as_ref())).into_owned()
+                });
+                let depth = stack.len();
+                if local.as_deref() == Some("fldChar")
+                    && begin_depth.is_none()
+                    && optional_word_attribute(&element, b"fldCharType", &local_prefixes).as_deref()
+                        == Some("begin")
+                {
+                    begin_depth = Some(depth);
+                } else if local.as_deref() == Some("ffData") && begin_depth == depth.checked_sub(1)
+                {
+                    ff_data_count += 1;
+                    if ff_data_count > 1 {
+                        return Err(OxmlError::InvalidValue(
+                            "duplicate direct w:ffData owner".to_owned(),
+                        ));
+                    }
+                } else if let Some(ff_depth) = ff_data_depth {
+                    project_legacy_form_element(
+                        &element,
+                        local.as_deref(),
+                        depth,
+                        ff_depth,
+                        &local_prefixes,
+                        &mut kind_depth,
+                        &mut projection,
+                    )?;
+                    if depth == ff_depth + 1
+                        && matches!(local.as_deref(), Some("checkBox" | "ddList" | "textInput"))
+                    {
+                        kind_depth = None;
+                    }
+                }
+            }
+            Event::End(_) => {
+                let depth = stack.len().saturating_sub(1);
+                if leaf_depth == Some(depth) {
+                    leaf_depth = None;
+                }
+                if kind_depth == Some(depth) {
+                    kind_depth = None;
+                }
+                if ff_data_depth == Some(depth) {
+                    ff_data_depth = None;
+                }
+                let closes_begin = begin_depth == Some(depth);
+                stack.pop();
+                prefixes = prefix_scopes
+                    .pop()
+                    .unwrap_or_else(|| word_prefixes.to_vec());
+                if closes_begin {
+                    break;
+                }
+            }
+            Event::Text(text)
+                if (leaf_depth.is_some()
+                    || is_legacy_form_element_only_container(
+                        stack.len(),
+                        ff_data_depth,
+                        kind_depth,
+                    ))
+                    && text.iter().any(|byte| !byte.is_ascii_whitespace()) =>
+            {
+                return Err(OxmlError::InvalidValue(
+                    "legacy form element-only content contains character data".to_owned(),
+                ));
+            }
+            Event::CData(text)
+                if leaf_depth.is_some()
+                    || (is_legacy_form_element_only_container(
+                        stack.len(),
+                        ff_data_depth,
+                        kind_depth,
+                    ) && text.iter().any(|byte| !byte.is_ascii_whitespace())) =>
+            {
+                return Err(OxmlError::InvalidValue(
+                    "legacy form element-only content contains character data".to_owned(),
+                ));
+            }
+            Event::GeneralRef(reference) => {
+                let in_element_only_container =
+                    is_legacy_form_element_only_container(stack.len(), ff_data_depth, kind_depth);
+                let non_whitespace = match reference.resolve_char_ref() {
+                    Ok(Some(character)) => !character.is_ascii_whitespace(),
+                    Ok(None) | Err(_) => true,
+                };
+                if leaf_depth.is_some() || (in_element_only_container && non_whitespace) {
+                    return Err(OxmlError::InvalidValue(
+                        "legacy form element-only content contains character data".to_owned(),
+                    ));
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+
+    let Some(kind) = projection.kind else {
+        if ff_data_count == 0 {
+            return Ok(None);
+        }
+        return Err(OxmlError::MissingElement("w:ffData form kind".to_owned()));
+    };
+    let matches_instruction = matches!(
+        (kind, instruction_name),
+        (LegacyFormFieldKind::TextInput, "FORMTEXT")
+            | (LegacyFormFieldKind::CheckBox, "FORMCHECKBOX")
+            | (LegacyFormFieldKind::DropDownList, "FORMDROPDOWN")
+    );
+    if !matches_instruction {
+        return Err(OxmlError::InvalidValue(
+            "w:ffData kind contradicts its field instruction".to_owned(),
+        ));
+    }
+    if kind == LegacyFormFieldKind::CheckBox && !projection.checkbox_size_seen {
+        return Err(OxmlError::MissingElement(
+            "w:checkBox requires w:size or w:sizeAuto".to_owned(),
+        ));
+    }
+    let value = match kind {
+        LegacyFormFieldKind::TextInput => LegacyFormFieldValue::Text(
+            projection
+                .default_text
+                .unwrap_or_else(|| cached_result.to_owned()),
+        ),
+        LegacyFormFieldKind::CheckBox => LegacyFormFieldValue::Checked(
+            projection
+                .checked
+                .or(projection.check_default)
+                .unwrap_or(false),
+        ),
+        LegacyFormFieldKind::DropDownList => {
+            let index = projection
+                .selected_index
+                .or(projection.selected_default)
+                .unwrap_or(0);
+            if projection.choices.get(index).is_none() {
+                return Err(OxmlError::InvalidValue(
+                    "w:ddList selection is outside its entry list".to_owned(),
+                ));
+            }
+            LegacyFormFieldValue::SelectedIndex(index)
+        }
+    };
+    Ok(Some(LegacyFormFieldData {
+        name: projection.name,
+        enabled: projection.enabled.unwrap_or(true),
+        calculate_on_exit: projection.calculate_on_exit.unwrap_or(true),
+        kind,
+        value,
+        choices: projection.choices,
+        max_length: projection.max_length,
+    }))
+}
+
+fn project_legacy_form_element(
+    element: &BytesStart<'_>,
+    local: Option<&str>,
+    depth: usize,
+    ff_depth: usize,
+    word_prefixes: &[String],
+    kind_depth: &mut Option<usize>,
+    projection: &mut LegacyFormProjection,
+) -> Result<bool> {
+    if let Some(local) = local
+        && is_known_legacy_form_vocabulary(local)
+    {
+        let valid_position = if depth == ff_depth + 1 {
+            legacy_form_ff_data_slot(Some(local)).is_some()
+        } else if kind_depth.is_some_and(|kind| depth == kind + 1) {
+            projection
+                .kind
+                .is_some_and(|kind| legacy_form_kind_child_slot(kind, local).is_some())
+        } else {
+            false
+        };
+        if !valid_position {
+            return Err(OxmlError::InvalidValue(format!(
+                "w:{local} is at the wrong legacy form container level"
+            )));
+        }
+    }
+    let is_leaf = (depth == ff_depth + 1
+        && matches!(
+            local,
+            Some(
+                "name"
+                    | "enabled"
+                    | "calcOnExit"
+                    | "entryMacro"
+                    | "exitMacro"
+                    | "helpText"
+                    | "statusText"
+            )
+        ))
+        || (kind_depth.is_some_and(|kind| depth == kind + 1)
+            && matches!(
+                local,
+                Some(
+                    "type"
+                        | "default"
+                        | "maxLength"
+                        | "format"
+                        | "size"
+                        | "sizeAuto"
+                        | "checked"
+                        | "result"
+                        | "listEntry"
+                )
+            ));
+    if depth == ff_depth + 1 {
+        if let Some(slot) = legacy_form_ff_data_slot(local) {
+            validate_legacy_form_child_order(&mut projection.ff_data_last_slot, slot, "w:ffData")?;
+        }
+        match local {
+            Some("name") => {
+                mark_legacy_form_singleton(&mut projection.name_seen, "w:name")?;
+                projection.name = Some(required_bounded_legacy_form_value(
+                    element,
+                    word_prefixes,
+                    "w:name",
+                    20,
+                )?);
+            }
+            Some("enabled") => {
+                mark_legacy_form_singleton(&mut projection.enabled_seen, "w:enabled")?;
+                projection.enabled = Some(legacy_form_boolean_value(
+                    element,
+                    word_prefixes,
+                    "w:enabled",
+                )?);
+            }
+            Some("calcOnExit") => {
+                mark_legacy_form_singleton(&mut projection.calculate_on_exit_seen, "w:calcOnExit")?;
+                projection.calculate_on_exit = Some(legacy_form_boolean_value(
+                    element,
+                    word_prefixes,
+                    "w:calcOnExit",
+                )?);
+            }
+            Some("entryMacro") => {
+                mark_legacy_form_singleton(&mut projection.entry_macro_seen, "w:entryMacro")?;
+                required_bounded_legacy_form_value(element, word_prefixes, "w:entryMacro", 33)?;
+            }
+            Some("exitMacro") => {
+                mark_legacy_form_singleton(&mut projection.exit_macro_seen, "w:exitMacro")?;
+                required_bounded_legacy_form_value(element, word_prefixes, "w:exitMacro", 33)?;
+            }
+            Some("helpText") => {
+                mark_legacy_form_singleton(&mut projection.help_text_seen, "w:helpText")?;
+                validate_legacy_info_text(element, word_prefixes, "w:helpText", 255)?;
+            }
+            Some("statusText") => {
+                mark_legacy_form_singleton(&mut projection.status_text_seen, "w:statusText")?;
+                validate_legacy_info_text(element, word_prefixes, "w:statusText", 140)?;
+            }
+            Some("textInput") => set_legacy_form_kind(
+                projection,
+                LegacyFormFieldKind::TextInput,
+                depth,
+                kind_depth,
+            )?,
+            Some("checkBox") => {
+                set_legacy_form_kind(projection, LegacyFormFieldKind::CheckBox, depth, kind_depth)?
+            }
+            Some("ddList") => set_legacy_form_kind(
+                projection,
+                LegacyFormFieldKind::DropDownList,
+                depth,
+                kind_depth,
+            )?,
+            _ => {}
+        }
+    } else if kind_depth.is_some_and(|kind| depth == kind + 1) {
+        if let (Some(kind), Some(local)) = (projection.kind, local) {
+            if let Some(slot) = legacy_form_kind_child_slot(kind, local) {
+                validate_legacy_form_child_order(
+                    &mut projection.kind_last_slot,
+                    slot,
+                    "legacy form kind",
+                )?;
+            } else if is_known_legacy_form_kind_child(local) {
+                return Err(OxmlError::InvalidValue(format!(
+                    "w:{local} is not valid for this legacy form kind"
+                )));
+            }
+        }
+        match (projection.kind, local) {
+            (Some(LegacyFormFieldKind::TextInput), Some("type")) => {
+                mark_legacy_form_singleton(&mut projection.text_type_seen, "w:textInput/w:type")?;
+                let value =
+                    required_legacy_form_value(element, word_prefixes, "w:textInput/w:type")?;
+                if !matches!(
+                    value.as_str(),
+                    "regular" | "number" | "date" | "currentTime" | "currentDate" | "calculated"
+                ) {
+                    return Err(OxmlError::InvalidValue(
+                        "invalid w:textInput/w:type token".to_owned(),
+                    ));
+                }
+            }
+            (Some(LegacyFormFieldKind::TextInput), Some("default")) => {
+                mark_legacy_form_singleton(
+                    &mut projection.default_text_seen,
+                    "w:textInput/w:default",
+                )?;
+                projection.default_text = Some(required_bounded_legacy_form_value(
+                    element,
+                    word_prefixes,
+                    "w:textInput/w:default",
+                    255,
+                )?);
+            }
+            (Some(LegacyFormFieldKind::TextInput), Some("maxLength")) => {
+                mark_legacy_form_singleton(
+                    &mut projection.max_length_seen,
+                    "w:textInput/w:maxLength",
+                )?;
+                let value =
+                    legacy_form_usize_value(element, word_prefixes, "w:textInput/w:maxLength")?;
+                if !(1..=32_767).contains(&value) {
+                    return Err(OxmlError::InvalidValue(
+                        "w:textInput/w:maxLength must be between 1 and 32767".to_owned(),
+                    ));
+                }
+                projection.max_length = Some(value);
+            }
+            (Some(LegacyFormFieldKind::TextInput), Some("format")) => {
+                mark_legacy_form_singleton(
+                    &mut projection.text_format_seen,
+                    "w:textInput/w:format",
+                )?;
+                required_bounded_legacy_form_value(
+                    element,
+                    word_prefixes,
+                    "w:textInput/w:format",
+                    64,
+                )?;
+            }
+            (Some(LegacyFormFieldKind::CheckBox), Some("size")) => {
+                mark_legacy_form_singleton(
+                    &mut projection.checkbox_size_seen,
+                    "w:checkBox size choice",
+                )?;
+                legacy_form_hps_measure_value(element, word_prefixes, "w:checkBox/w:size")?;
+            }
+            (Some(LegacyFormFieldKind::CheckBox), Some("sizeAuto")) => {
+                mark_legacy_form_singleton(
+                    &mut projection.checkbox_size_seen,
+                    "w:checkBox size choice",
+                )?;
+                legacy_form_boolean_value(element, word_prefixes, "w:checkBox/w:sizeAuto")?;
+            }
+            (Some(LegacyFormFieldKind::CheckBox), Some("checked")) => {
+                mark_legacy_form_singleton(&mut projection.checked_seen, "w:checkBox/w:checked")?;
+                projection.checked = Some(legacy_form_boolean_value(
+                    element,
+                    word_prefixes,
+                    "w:checkBox/w:checked",
+                )?);
+            }
+            (Some(LegacyFormFieldKind::CheckBox), Some("default")) => {
+                mark_legacy_form_singleton(
+                    &mut projection.check_default_seen,
+                    "w:checkBox/w:default",
+                )?;
+                projection.check_default = Some(legacy_form_boolean_value(
+                    element,
+                    word_prefixes,
+                    "w:checkBox/w:default",
+                )?);
+            }
+            (Some(LegacyFormFieldKind::DropDownList), Some("result")) => {
+                mark_legacy_form_singleton(
+                    &mut projection.selected_index_seen,
+                    "w:ddList/w:result",
+                )?;
+                projection.selected_index = Some(legacy_form_usize_value(
+                    element,
+                    word_prefixes,
+                    "w:ddList/w:result",
+                )?);
+            }
+            (Some(LegacyFormFieldKind::DropDownList), Some("default")) => {
+                mark_legacy_form_singleton(
+                    &mut projection.selected_default_seen,
+                    "w:ddList/w:default",
+                )?;
+                let value = legacy_form_usize_value(element, word_prefixes, "w:ddList/w:default")?;
+                if value > 24 {
+                    return Err(OxmlError::InvalidValue(
+                        "w:ddList/w:default must be between 0 and 24".to_owned(),
+                    ));
+                }
+                projection.selected_default = Some(value);
+            }
+            (Some(LegacyFormFieldKind::DropDownList), Some("listEntry")) => {
+                if projection.choices.len() == 25 {
+                    return Err(OxmlError::InvalidValue(
+                        "w:ddList contains more than 25 list entries".to_owned(),
+                    ));
+                }
+                projection.choices.push(required_bounded_legacy_form_value(
+                    element,
+                    word_prefixes,
+                    "w:ddList/w:listEntry",
+                    255,
+                )?);
+            }
+            _ => {}
+        }
+    }
+    Ok(is_leaf)
+}
+
+fn legacy_form_ff_data_slot(local: Option<&str>) -> Option<usize> {
+    match local? {
+        "name" => Some(0),
+        "enabled" => Some(1),
+        "calcOnExit" => Some(2),
+        "entryMacro" => Some(3),
+        "exitMacro" => Some(4),
+        "helpText" => Some(5),
+        "statusText" => Some(6),
+        "checkBox" | "ddList" | "textInput" => Some(7),
+        _ => None,
+    }
+}
+
+fn legacy_form_kind_child_slot(kind: LegacyFormFieldKind, local: &str) -> Option<usize> {
+    match kind {
+        LegacyFormFieldKind::TextInput => match local {
+            "type" => Some(0),
+            "default" => Some(1),
+            "maxLength" => Some(2),
+            "format" => Some(3),
+            _ => None,
+        },
+        LegacyFormFieldKind::CheckBox => match local {
+            "size" | "sizeAuto" => Some(0),
+            "default" => Some(1),
+            "checked" => Some(2),
+            _ => None,
+        },
+        LegacyFormFieldKind::DropDownList => match local {
+            "result" => Some(0),
+            "default" => Some(1),
+            "listEntry" => Some(2),
+            _ => None,
+        },
+    }
+}
+
+fn is_known_legacy_form_kind_child(local: &str) -> bool {
+    matches!(
+        local,
+        "type"
+            | "default"
+            | "maxLength"
+            | "format"
+            | "size"
+            | "sizeAuto"
+            | "checked"
+            | "result"
+            | "listEntry"
+    )
+}
+
+fn is_known_legacy_form_vocabulary(local: &str) -> bool {
+    local == "ffData"
+        || legacy_form_ff_data_slot(Some(local)).is_some()
+        || is_known_legacy_form_kind_child(local)
+}
+
+fn is_legacy_form_element_only_container(
+    stack_len: usize,
+    ff_data_depth: Option<usize>,
+    kind_depth: Option<usize>,
+) -> bool {
+    ff_data_depth.is_some_and(|depth| stack_len == depth + 1)
+        || kind_depth.is_some_and(|depth| stack_len == depth + 1)
+}
+
+fn validate_legacy_form_child_order(
+    last_slot: &mut Option<usize>,
+    slot: usize,
+    owner: &str,
+) -> Result<()> {
+    if last_slot.is_some_and(|last| slot < last) {
+        return Err(OxmlError::InvalidValue(format!(
+            "out-of-order modeled child in {owner}"
+        )));
+    }
+    *last_slot = Some(slot);
+    Ok(())
+}
+
+fn mark_legacy_form_singleton(seen: &mut bool, name: &str) -> Result<()> {
+    if std::mem::replace(seen, true) {
+        return Err(OxmlError::InvalidValue(format!(
+            "duplicate legacy form singleton {name}"
+        )));
+    }
+    Ok(())
+}
+
+fn required_legacy_form_value(
+    element: &BytesStart<'_>,
+    word_prefixes: &[String],
+    name: &str,
+) -> Result<String> {
+    legacy_form_value_attribute(element, word_prefixes)?
+        .ok_or_else(|| OxmlError::MissingElement(format!("{name} w:val attribute")))
+}
+
+fn required_bounded_legacy_form_value(
+    element: &BytesStart<'_>,
+    word_prefixes: &[String],
+    name: &str,
+    max_characters: usize,
+) -> Result<String> {
+    let value = required_legacy_form_value(element, word_prefixes, name)?;
+    if value.chars().count() > max_characters {
+        return Err(OxmlError::InvalidValue(format!(
+            "{name} exceeds {max_characters} characters"
+        )));
+    }
+    Ok(value)
+}
+
+fn legacy_form_boolean_value(
+    element: &BytesStart<'_>,
+    word_prefixes: &[String],
+    name: &str,
+) -> Result<bool> {
+    let Some(value) = legacy_form_value_attribute(element, word_prefixes)? else {
+        return Ok(true);
+    };
+    parse_field_bool(&value)
+        .ok_or_else(|| OxmlError::InvalidValue(format!("invalid {name} boolean token")))
+}
+
+fn legacy_form_value_attribute(
+    element: &BytesStart<'_>,
+    word_prefixes: &[String],
+) -> Result<Option<String>> {
+    legacy_form_word_attribute(element, word_prefixes, b"val", "w:val")
+}
+
+fn legacy_form_word_attribute(
+    element: &BytesStart<'_>,
+    word_prefixes: &[String],
+    wanted: &[u8],
+    name: &str,
+) -> Result<Option<String>> {
+    let mut value = None;
+    for attribute in element.attributes() {
+        let attribute = attribute?;
+        let key = attribute.key.as_ref();
+        let Some(separator) = key.iter().position(|byte| *byte == b':') else {
+            continue;
+        };
+        if key.get(separator + 1..) == Some(wanted)
+            && word_prefixes
+                .iter()
+                .any(|prefix| prefix.as_bytes() == &key[..separator])
+        {
+            if value.is_some() {
+                return Err(OxmlError::InvalidValue(format!(
+                    "duplicate legacy form {name} attribute"
+                )));
+            }
+            let raw = std::str::from_utf8(&attribute.value)?;
+            value = Some(
+                quick_xml::escape::unescape(raw)
+                    .map_err(|error| {
+                        OxmlError::InvalidValue(format!(
+                            "invalid legacy form {name} attribute: {error}"
+                        ))
+                    })?
+                    .into_owned(),
+            );
+        }
+    }
+    Ok(value)
+}
+
+fn validate_legacy_info_text(
+    element: &BytesStart<'_>,
+    word_prefixes: &[String],
+    name: &str,
+    max_characters: usize,
+) -> Result<()> {
+    if legacy_form_word_attribute(element, word_prefixes, b"type", "w:type")?
+        .is_some_and(|value| !matches!(value.as_str(), "text" | "autoText"))
+    {
+        return Err(OxmlError::InvalidValue(format!(
+            "invalid {name} w:type token"
+        )));
+    }
+    if legacy_form_word_attribute(element, word_prefixes, b"val", "w:val")?
+        .is_some_and(|value| value.chars().count() > max_characters)
+    {
+        return Err(OxmlError::InvalidValue(format!(
+            "{name} w:val exceeds {max_characters} characters"
+        )));
+    }
+    Ok(())
+}
+
+fn legacy_form_usize_value(
+    element: &BytesStart<'_>,
+    word_prefixes: &[String],
+    name: &str,
+) -> Result<usize> {
+    required_legacy_form_value(element, word_prefixes, name)?
+        .parse()
+        .map_err(|_| OxmlError::InvalidValue(format!("invalid {name} numeric token")))
+}
+
+fn legacy_form_hps_measure_value(
+    element: &BytesStart<'_>,
+    word_prefixes: &[String],
+    name: &str,
+) -> Result<()> {
+    let value = required_legacy_form_value(element, word_prefixes, name)?;
+    if value.parse::<u64>().is_ok() {
+        return Ok(());
+    }
+    let Some(unit) = ["mm", "cm", "in", "pt", "pc", "pi"]
+        .into_iter()
+        .find(|unit| value.ends_with(unit))
+    else {
+        return Err(OxmlError::InvalidValue(format!(
+            "invalid {name} measure token"
+        )));
+    };
+    let number = &value[..value.len() - unit.len()];
+    let valid_number = number.split_once('.').map_or_else(
+        || !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()),
+        |(integer, fraction)| {
+            !integer.is_empty()
+                && !fraction.is_empty()
+                && integer.bytes().all(|byte| byte.is_ascii_digit())
+                && fraction.bytes().all(|byte| byte.is_ascii_digit())
+        },
+    );
+    if !valid_number {
+        return Err(OxmlError::InvalidValue(format!(
+            "invalid {name} measure token"
+        )));
+    }
+    Ok(())
+}
+
+fn set_legacy_form_kind(
+    projection: &mut LegacyFormProjection,
+    kind: LegacyFormFieldKind,
+    depth: usize,
+    kind_depth: &mut Option<usize>,
+) -> Result<()> {
+    if projection.kind.replace(kind).is_some() {
+        return Err(OxmlError::InvalidValue(
+            "w:ffData contains more than one form kind".to_owned(),
+        ));
+    }
+    *kind_depth = Some(depth);
+    Ok(())
+}
+
+fn local_name(name: &[u8]) -> &[u8] {
+    name.rsplit(|byte| *byte == b':').next().unwrap_or(name)
 }
 
 #[derive(Debug)]
@@ -2608,6 +3560,35 @@ impl CT_P {
         )
     }
 
+    /// Parse a standalone paragraph fragment with declarations on its root.
+    #[doc(hidden)]
+    pub fn from_xml_fragment(xml: &[u8]) -> Result<Self> {
+        let mut reader = Reader::from_reader(xml);
+        reader.config_mut().trim_text(false);
+        let mut buffer = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buffer)? {
+                Event::Start(element) => {
+                    let prefixes = word_prefixes_at(&element, &[])?;
+                    if !is_word_element(element.name().as_ref(), b"p", &prefixes) {
+                        return Err(OxmlError::MissingElement("w:p root".to_owned()));
+                    }
+                    return Self::from_xml_with_prefixes(&mut reader, &prefixes);
+                }
+                Event::Empty(element) => {
+                    let prefixes = word_prefixes_at(&element, &[])?;
+                    if is_word_element(element.name().as_ref(), b"p", &prefixes) {
+                        return Ok(Self::new());
+                    }
+                    return Err(OxmlError::MissingElement("w:p root".to_owned()));
+                }
+                Event::Eof => return Err(OxmlError::MissingElement("w:p root".to_owned())),
+                _ => {}
+            }
+            buffer.clear();
+        }
+    }
+
     pub(crate) fn from_xml_with_prefixes(
         reader: &mut Reader<&[u8]>,
         word_prefixes: &[String],
@@ -3106,6 +4087,7 @@ fn write_field<W: std::io::Write>(
         original_instruction,
         original_cached_result,
         original_dirty,
+        original_legacy_form,
         word_prefixes,
         ..
     } = &field.source
@@ -3114,12 +4096,19 @@ fn write_field<W: std::io::Write>(
         && field.instruction.raw == original_instruction.raw
     {
         let cached_changed = field.cached_result != *original_cached_result;
+        let legacy_form_changed = field.legacy_form != *original_legacy_form;
         let updated = match form {
             FieldForm::Simple => {
                 update_simple_field_source(field, raw_xml, word_prefixes, cached_changed)?
             }
             FieldForm::Complex => {
-                let updated = update_nested_field_sources(field, raw_xml, word_prefixes)?;
+                let mut updated = update_nested_field_sources(field, raw_xml, word_prefixes)?;
+                if legacy_form_changed {
+                    let form = field.legacy_form.as_ref().ok_or_else(|| {
+                        OxmlError::MissingElement("typed legacy form data".to_owned())
+                    })?;
+                    updated = rewrite_legacy_form_source(&updated, word_prefixes, form)?;
+                }
                 if cached_changed || field.dirty != *original_dirty {
                     update_complex_field_source(field, &updated, word_prefixes, cached_changed)?
                 } else {
@@ -3146,6 +4135,357 @@ fn write_field<W: std::io::Write>(
         FieldForm::Simple => write_simple_field(writer, &field, foreign_word_namespace),
         FieldForm::Complex => write_complex_field(writer, &field, foreign_word_namespace),
     }
+}
+
+fn rewrite_legacy_form_source(
+    raw: &[u8],
+    word_prefixes: &[String],
+    form: &LegacyFormFieldData,
+) -> Result<Vec<u8>> {
+    let (kind_name, value_name, value) = match (&form.kind, &form.value) {
+        (LegacyFormFieldKind::TextInput, LegacyFormFieldValue::Text(value)) => {
+            ("textInput", "default", value.clone())
+        }
+        (LegacyFormFieldKind::CheckBox, LegacyFormFieldValue::Checked(value)) => (
+            "checkBox",
+            "checked",
+            if *value { "1" } else { "0" }.to_owned(),
+        ),
+        (LegacyFormFieldKind::DropDownList, LegacyFormFieldValue::SelectedIndex(value)) => {
+            ("ddList", "result", value.to_string())
+        }
+        _ => {
+            return Err(OxmlError::InvalidValue(
+                "legacy form value kind does not match the field kind".to_owned(),
+            ));
+        }
+    };
+    let mut reader = Reader::from_reader(raw);
+    reader.config_mut().trim_text(false);
+    let mut writer = Writer::new(Vec::with_capacity(raw.len() + value.len()));
+    let mut buffer = Vec::new();
+    let mut prefixes = word_prefixes.to_vec();
+    let mut prefix_scopes = Vec::new();
+    let mut stack = Vec::<Option<String>>::new();
+    let mut begin_depth = None;
+    let mut begin_seen = false;
+    let mut ff_depth = None;
+    let mut kind_depth = None;
+    let mut kind_prefix = "w".to_owned();
+    let mut wrote_value = false;
+
+    loop {
+        match reader.read_event_into(&mut buffer)? {
+            Event::Start(element) => {
+                let local_prefixes = word_prefixes_at(&element, &prefixes)?;
+                let local = word_local_name(&element, &local_prefixes);
+                let depth = stack.len();
+                if kind_depth.is_some_and(|kind| depth == kind + 1)
+                    && !wrote_value
+                    && form.kind == LegacyFormFieldKind::TextInput
+                    && matches!(local.as_deref(), Some("maxLength" | "format"))
+                {
+                    write_legacy_form_value_element(
+                        writer.get_mut(),
+                        &kind_prefix,
+                        value_name,
+                        &value,
+                    );
+                    wrote_value = true;
+                }
+                if kind_depth.is_some_and(|kind| depth == kind + 1)
+                    && !wrote_value
+                    && form.kind == LegacyFormFieldKind::DropDownList
+                    && local.as_deref() != Some(value_name)
+                {
+                    write_legacy_form_value_element(
+                        writer.get_mut(),
+                        &kind_prefix,
+                        value_name,
+                        &value,
+                    );
+                    wrote_value = true;
+                }
+                if kind_depth.is_some_and(|kind| depth == kind + 1)
+                    && local.as_deref() == Some(value_name)
+                {
+                    write_patched_value_event(
+                        writer.get_mut(),
+                        &element,
+                        &local_prefixes,
+                        &value,
+                        false,
+                    )?;
+                    wrote_value = true;
+                } else {
+                    writer.write_event(Event::Start(element.clone()))?;
+                }
+                stack.push(local.clone());
+                prefix_scopes.push(std::mem::replace(&mut prefixes, local_prefixes));
+                if local.as_deref() == Some("fldChar")
+                    && !begin_seen
+                    && optional_word_attribute(&element, b"fldCharType", &prefixes).as_deref()
+                        == Some("begin")
+                {
+                    begin_depth = Some(depth);
+                    begin_seen = true;
+                } else if local.as_deref() == Some("ffData") && begin_depth == depth.checked_sub(1)
+                {
+                    ff_depth = Some(depth);
+                } else if ff_depth.is_some_and(|ff| depth == ff + 1)
+                    && local.as_deref() == Some(kind_name)
+                {
+                    kind_depth = Some(depth);
+                    kind_prefix = qname_prefix(element.name().as_ref())
+                        .unwrap_or("w")
+                        .to_owned();
+                }
+            }
+            Event::Empty(element) => {
+                let local_prefixes = word_prefixes_at(&element, &prefixes)?;
+                let local = word_local_name(&element, &local_prefixes);
+                let depth = stack.len();
+                if ff_depth.is_some_and(|ff| depth == ff + 1) && local.as_deref() == Some(kind_name)
+                {
+                    kind_prefix = qname_prefix(element.name().as_ref())
+                        .unwrap_or("w")
+                        .to_owned();
+                    writer.write_event(Event::Start(element.clone()))?;
+                    write_legacy_form_value_element(
+                        writer.get_mut(),
+                        &kind_prefix,
+                        value_name,
+                        &value,
+                    );
+                    writer.write_event(Event::End(element.to_end()))?;
+                    wrote_value = true;
+                    buffer.clear();
+                    continue;
+                }
+                if kind_depth.is_some_and(|kind| depth == kind + 1)
+                    && !wrote_value
+                    && form.kind == LegacyFormFieldKind::TextInput
+                    && matches!(local.as_deref(), Some("maxLength" | "format"))
+                {
+                    write_legacy_form_value_element(
+                        writer.get_mut(),
+                        &kind_prefix,
+                        value_name,
+                        &value,
+                    );
+                    wrote_value = true;
+                }
+                if kind_depth.is_some_and(|kind| depth == kind + 1)
+                    && !wrote_value
+                    && form.kind == LegacyFormFieldKind::DropDownList
+                    && local.as_deref() != Some(value_name)
+                {
+                    write_legacy_form_value_element(
+                        writer.get_mut(),
+                        &kind_prefix,
+                        value_name,
+                        &value,
+                    );
+                    wrote_value = true;
+                }
+                if kind_depth.is_some_and(|kind| depth == kind + 1)
+                    && local.as_deref() == Some(value_name)
+                {
+                    write_patched_value_event(
+                        writer.get_mut(),
+                        &element,
+                        &local_prefixes,
+                        &value,
+                        true,
+                    )?;
+                    wrote_value = true;
+                } else {
+                    writer.write_event(Event::Empty(element))?;
+                }
+            }
+            Event::End(element) => {
+                let depth = stack.len().saturating_sub(1);
+                if kind_depth == Some(depth) {
+                    if !wrote_value {
+                        write_legacy_form_value_element(
+                            writer.get_mut(),
+                            &kind_prefix,
+                            value_name,
+                            &value,
+                        );
+                        wrote_value = true;
+                    }
+                    kind_depth = None;
+                }
+                if ff_depth == Some(depth) {
+                    ff_depth = None;
+                }
+                if begin_depth == Some(depth) {
+                    begin_depth = None;
+                }
+                writer.write_event(Event::End(element))?;
+                stack.pop();
+                prefixes = prefix_scopes
+                    .pop()
+                    .unwrap_or_else(|| word_prefixes.to_vec());
+            }
+            Event::Eof => break,
+            event => writer.write_event(event)?,
+        }
+        buffer.clear();
+    }
+    if !wrote_value {
+        return Err(OxmlError::MissingElement(format!(
+            "legacy form {kind_name} value"
+        )));
+    }
+    Ok(writer.into_inner())
+}
+
+fn word_local_name(element: &BytesStart<'_>, word_prefixes: &[String]) -> Option<String> {
+    let name = element.name();
+    let local = local_name(name.as_ref());
+    is_word_element(name.as_ref(), local, word_prefixes)
+        .then(|| String::from_utf8_lossy(local).into_owned())
+}
+
+fn qname_prefix(name: &[u8]) -> Option<&str> {
+    let separator = name.iter().position(|byte| *byte == b':')?;
+    std::str::from_utf8(&name[..separator]).ok()
+}
+
+fn write_legacy_form_value_element(output: &mut Vec<u8>, prefix: &str, name: &str, value: &str) {
+    let value = quick_xml::escape::escape(value);
+    output.extend_from_slice(
+        format!(
+            "<{prefix}:{name} xmlns:{prefix}=\"{}\" {prefix}:val=\"{value}\"/>",
+            crate::namespace::W_NS,
+        )
+        .as_bytes(),
+    );
+}
+
+fn write_patched_value_event(
+    output: &mut Vec<u8>,
+    element: &BytesStart<'_>,
+    word_prefixes: &[String],
+    value: &str,
+    empty: bool,
+) -> Result<()> {
+    let mut tag_writer = Writer::new(Vec::new());
+    tag_writer.write_event(if empty {
+        Event::Empty(element.clone())
+    } else {
+        Event::Start(element.clone())
+    })?;
+    let mut tag = tag_writer.into_inner();
+    let escaped = quick_xml::escape::escape(value);
+    for attribute in element.attributes() {
+        let attribute = attribute?;
+        if is_word_attribute(attribute.key.as_ref(), b"val", word_prefixes) {
+            let key = attribute.key.as_ref();
+            if let Some(range) = lexical_attribute_value_range(&tag, key) {
+                tag.splice(range, escaped.as_bytes().iter().copied());
+                output.extend_from_slice(&tag);
+                return Ok(());
+            }
+        }
+    }
+    let name = element.name();
+    let preferred = qname_prefix(name.as_ref()).unwrap_or("w");
+    let (prefix, declare) = usable_qualified_word_prefix(word_prefixes, &tag, preferred);
+    if declare {
+        let insert_at = if empty { tag.len() - 2 } else { tag.len() - 1 };
+        tag.splice(
+            insert_at..insert_at,
+            format!(r#" xmlns:{prefix}="{}""#, crate::namespace::W_NS).bytes(),
+        );
+    }
+    let insert_at = if empty { tag.len() - 2 } else { tag.len() - 1 };
+    tag.splice(
+        insert_at..insert_at,
+        format!(" {prefix}:val=\"{escaped}\"").bytes(),
+    );
+    output.extend_from_slice(&tag);
+    Ok(())
+}
+
+fn usable_qualified_word_prefix(
+    word_prefixes: &[String],
+    tag: &[u8],
+    preferred: &str,
+) -> (String, bool) {
+    if !preferred.is_empty() && word_prefixes.iter().any(|prefix| prefix == preferred) {
+        return (preferred.to_owned(), false);
+    }
+    if let Some(prefix) = word_prefixes
+        .iter()
+        .find(|prefix| !prefix.is_empty() && !prefix.starts_with('\0'))
+    {
+        return (prefix.clone(), false);
+    }
+    for index in 0usize.. {
+        let candidate = if index == 0 {
+            "w".to_owned()
+        } else {
+            format!("w{index}")
+        };
+        if !tag
+            .windows(candidate.len() + 6)
+            .any(|window| window.starts_with(b"xmlns:") && window[6..] == *candidate.as_bytes())
+        {
+            return (candidate, true);
+        }
+    }
+    unreachable!()
+}
+
+fn lexical_attribute_value_range(tag: &[u8], wanted: &[u8]) -> Option<std::ops::Range<usize>> {
+    let mut cursor = tag.iter().position(|byte| byte.is_ascii_whitespace())?;
+    while cursor < tag.len() {
+        while tag.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        if matches!(tag.get(cursor), Some(b'>' | b'/')) {
+            return None;
+        }
+        let name_start = cursor;
+        while tag
+            .get(cursor)
+            .is_some_and(|byte| !byte.is_ascii_whitespace() && !matches!(byte, b'=' | b'>' | b'/'))
+        {
+            cursor += 1;
+        }
+        let name = &tag[name_start..cursor];
+        while tag.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        if tag.get(cursor) != Some(&b'=') {
+            return None;
+        }
+        cursor += 1;
+        while tag.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        let quote = *tag.get(cursor)?;
+        if !matches!(quote, b'\"' | b'\'') {
+            return None;
+        }
+        cursor += 1;
+        let value_start = cursor;
+        while tag.get(cursor) != Some(&quote) {
+            cursor += 1;
+            if cursor >= tag.len() {
+                return None;
+            }
+        }
+        let value_end = cursor;
+        cursor += 1;
+        if name == wanted {
+            return Some(value_start..value_end);
+        }
+    }
+    None
 }
 
 fn update_nested_field_sources(
@@ -3427,6 +4767,7 @@ fn rewrite_isolated_nested_field(
         original_instruction,
         original_cached_result,
         original_dirty,
+        original_legacy_form,
         ..
     } = &field.source
     else {
@@ -3443,6 +4784,13 @@ fn rewrite_isolated_nested_field(
     };
     if raw_only_instruction_changed {
         updated = update_complex_instruction_source(field, &updated, word_prefixes)?;
+    }
+    if field.legacy_form != *original_legacy_form {
+        let form = field
+            .legacy_form
+            .as_ref()
+            .ok_or_else(|| OxmlError::MissingElement("typed legacy form data".to_owned()))?;
+        updated = rewrite_legacy_form_source(&updated, word_prefixes, form)?;
     }
     let cached_changed = field.cached_result != *original_cached_result;
     if cached_changed || field.dirty != *original_dirty {
@@ -8183,5 +9531,785 @@ mod tests {
         for retained in ["paragraph", "table", "row", "cell", "inline"] {
             assert!(output.contains(retained), "{output}");
         }
+    }
+
+    #[test]
+    fn legacy_form_data_accepts_aliases_and_rewrites_only_the_typed_value() {
+        let mut paragraph = parse_paragraph(&format!(
+            r#"<q:r xmlns:q="{word}" xmlns:x="urn:test"><q:fldChar q:fldCharType="begin"><q:ffData><q:name q:val="Choice"/><x:raw keep="yes"/><q:ddList><q:result q:val="0"/><q:default q:val="0"/><q:listEntry q:val="one"/><q:listEntry q:val="two"/></q:ddList></q:ffData></q:fldChar></q:r><q:r xmlns:q="{word}"><q:instrText> FORMDROPDOWN </q:instrText></q:r><q:r xmlns:q="{word}"><q:fldChar q:fldCharType="separate"/></q:r><q:r xmlns:q="{word}"><q:t>one</q:t></q:r><q:r xmlns:q="{word}"><q:fldChar q:fldCharType="end"/></q:r>"#,
+            word = crate::namespace::W_NS,
+        ));
+        let RunContent::Field(field) = &mut paragraph.runs[0].content[0] else {
+            panic!("legacy field")
+        };
+        let form = field.legacy_form.as_ref().expect("typed form data");
+        assert_eq!(form.kind, LegacyFormFieldKind::DropDownList);
+        assert_eq!(form.value, LegacyFormFieldValue::SelectedIndex(0));
+        assert_eq!(form.choices, ["one", "two"]);
+        field
+            .set_legacy_form_value(LegacyFormFieldValue::SelectedIndex(1))
+            .unwrap();
+        assert_eq!(field.cached_result, "two");
+        let output = serialized_paragraph(&paragraph);
+        assert!(output.contains(r#"<x:raw keep="yes"/>"#));
+        assert!(output.contains(r#"q:result q:val="1""#));
+        assert_eq!(output.matches("q:result").count(), 1);
+    }
+
+    #[test]
+    fn sibling_namespace_shadow_does_not_hide_a_later_legacy_form_kind() {
+        let paragraph = parse_paragraph(&format!(
+            r#"<q:r xmlns:q="{word}" xmlns:x="urn:test"><q:fldChar q:fldCharType="begin"><q:ffData><x:raw xmlns:q="urn:producer"/><q:ddList><q:result q:val="0"/><q:listEntry q:val="one"/></q:ddList></q:ffData></q:fldChar></q:r><q:r xmlns:q="{word}"><q:instrText> FORMDROPDOWN </q:instrText></q:r><q:r xmlns:q="{word}"><q:fldChar q:fldCharType="end"/></q:r>"#,
+            word = crate::namespace::W_NS,
+        ));
+        let RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+            panic!("legacy field")
+        };
+        assert_eq!(
+            field.legacy_form.as_ref().map(|form| form.kind),
+            Some(LegacyFormFieldKind::DropDownList)
+        );
+    }
+
+    #[test]
+    fn legacy_form_value_patch_targets_the_expanded_value_attribute_only() {
+        let mut paragraph = parse_paragraph(&format!(
+            r#"<q:r xmlns:q="{word}" xmlns:x="urn:test"><q:fldChar q:fldCharType="begin"><q:ffData><q:ddList><q:result x:a="q:val" x:b="keep" q:val="0"/><q:listEntry q:val="one"/><q:listEntry q:val="two"/></q:ddList></q:ffData></q:fldChar></q:r><q:r xmlns:q="{word}"><q:instrText> FORMDROPDOWN </q:instrText></q:r><q:r xmlns:q="{word}"><q:fldChar q:fldCharType="end"/></q:r>"#,
+            word = crate::namespace::W_NS,
+        ));
+        let RunContent::Field(field) = &mut paragraph.runs[0].content[0] else {
+            panic!("legacy field")
+        };
+        field
+            .set_legacy_form_value(LegacyFormFieldValue::SelectedIndex(1))
+            .unwrap();
+        let output = serialized_paragraph(&paragraph);
+        assert!(output.contains(r#"x:a="q:val" x:b="keep" q:val="1""#));
+    }
+
+    #[test]
+    fn default_namespace_missing_form_value_insertion_declares_its_prefix() {
+        let mut paragraph = parse_paragraph(&format!(
+            r#"<r xmlns="{word}" xmlns:q="{word}"><fldChar q:fldCharType="begin"><ffData><checkBox><sizeAuto/><default q:val="0"/></checkBox></ffData></fldChar></r><r xmlns="{word}"><instrText> FORMCHECKBOX </instrText></r><r xmlns="{word}" xmlns:q="{word}"><fldChar q:fldCharType="end"/></r>"#,
+            word = crate::namespace::W_NS,
+        ));
+        let RunContent::Field(field) = &mut paragraph.runs[0].content[0] else {
+            panic!("legacy field")
+        };
+        field
+            .set_legacy_form_value(LegacyFormFieldValue::Checked(true))
+            .unwrap();
+        let output = serialized_paragraph(&paragraph);
+        assert!(output.contains(&format!(
+            r#"<w:checked xmlns:w="{}" w:val="1"/>"#,
+            crate::namespace::W_NS
+        )));
+        let scoped = output.replacen(
+            "<w:p>",
+            &format!(r#"<w:p xmlns="{0}" xmlns:q="{0}">"#, crate::namespace::W_NS),
+            1,
+        );
+        let mut reader = Reader::from_str(&scoped);
+        let mut buffer = Vec::new();
+        let Event::Start(start) = reader.read_event_into(&mut buffer).unwrap() else {
+            panic!("reparsed paragraph start")
+        };
+        let prefixes = word_prefixes_at(&start, &["w".to_owned()]).unwrap();
+        let reparsed = CT_P::from_xml_with_prefixes(&mut reader, &prefixes).unwrap();
+        let RunContent::Field(field) = &reparsed.runs[0].content[0] else {
+            panic!("reparsed legacy field")
+        };
+        assert_eq!(
+            field.legacy_form.as_ref().map(|form| form.value.clone()),
+            Some(LegacyFormFieldValue::Checked(true))
+        );
+    }
+
+    #[test]
+    fn default_namespace_valueless_form_element_gets_a_declared_value_prefix() {
+        let xml = format!(
+            r#"<p xmlns="{word}" xmlns:q="{word}"><r><fldChar q:fldCharType="begin"><ffData><checkBox><sizeAuto/><checked/></checkBox></ffData></fldChar></r><r><instrText> FORMCHECKBOX </instrText></r><r><fldChar q:fldCharType="end"/></r></p>"#,
+            word = crate::namespace::W_NS,
+        );
+        let mut reader = Reader::from_str(&xml);
+        let mut buffer = Vec::new();
+        let Event::Start(start) = reader.read_event_into(&mut buffer).unwrap() else {
+            panic!("paragraph start")
+        };
+        let prefixes = word_prefixes_at(&start, &[]).unwrap();
+        let mut paragraph = CT_P::from_xml_with_prefixes(&mut reader, &prefixes).unwrap();
+        let RunContent::Field(field) = &mut paragraph.runs[0].content[0] else {
+            panic!("legacy field")
+        };
+        field
+            .set_legacy_form_value(LegacyFormFieldValue::Checked(false))
+            .unwrap();
+        let output = serialized_paragraph(&paragraph);
+        assert!(output.contains(r#"<checked q:val="0"/>"#), "{output}");
+        let scoped = output.replacen(
+            "<w:p>",
+            &format!(r#"<w:p xmlns="{0}" xmlns:q="{0}">"#, crate::namespace::W_NS),
+            1,
+        );
+        let mut reader = Reader::from_str(&scoped);
+        let mut buffer = Vec::new();
+        let Event::Start(start) = reader.read_event_into(&mut buffer).unwrap() else {
+            panic!("reparsed paragraph start")
+        };
+        let prefixes = word_prefixes_at(&start, &["w".to_owned()]).unwrap();
+        let reparsed = CT_P::from_xml_with_prefixes(&mut reader, &prefixes).unwrap();
+        let RunContent::Field(field) = &reparsed.runs[0].content[0] else {
+            panic!("reparsed legacy field")
+        };
+        assert_eq!(
+            field.legacy_form.as_ref().map(|form| form.value.clone()),
+            Some(LegacyFormFieldValue::Checked(false))
+        );
+    }
+
+    #[test]
+    fn malformed_or_duplicate_legacy_form_singletons_fail_closed() {
+        let cases = [
+            (
+                "duplicate-name",
+                r#"<w:name w:val="one"/><w:name w:val="two"/><w:textInput><w:default w:val="old"/></w:textInput>"#,
+                "FORMTEXT",
+            ),
+            (
+                "duplicate-enabled",
+                r#"<w:enabled/><w:enabled w:val="0"/><w:textInput><w:default w:val="old"/></w:textInput>"#,
+                "FORMTEXT",
+            ),
+            (
+                "duplicate-calculate",
+                r#"<w:calcOnExit/><w:calcOnExit w:val="0"/><w:textInput><w:default w:val="old"/></w:textInput>"#,
+                "FORMTEXT",
+            ),
+            (
+                "duplicate-text-default",
+                r#"<w:textInput><w:default w:val="one"/><w:default w:val="two"/></w:textInput>"#,
+                "FORMTEXT",
+            ),
+            (
+                "duplicate-max-length",
+                r#"<w:textInput><w:maxLength w:val="1"/><w:maxLength w:val="2"/></w:textInput>"#,
+                "FORMTEXT",
+            ),
+            (
+                "duplicate-checked",
+                r#"<w:checkBox><w:checked/><w:checked w:val="0"/></w:checkBox>"#,
+                "FORMCHECKBOX",
+            ),
+            (
+                "duplicate-check-default",
+                r#"<w:checkBox><w:default/><w:default w:val="0"/></w:checkBox>"#,
+                "FORMCHECKBOX",
+            ),
+            (
+                "duplicate-result",
+                r#"<w:ddList><w:result w:val="0"/><w:result w:val="1"/><w:listEntry w:val="one"/><w:listEntry w:val="two"/></w:ddList>"#,
+                "FORMDROPDOWN",
+            ),
+            (
+                "duplicate-list-default",
+                r#"<w:ddList><w:default w:val="0"/><w:default w:val="1"/><w:listEntry w:val="one"/><w:listEntry w:val="two"/></w:ddList>"#,
+                "FORMDROPDOWN",
+            ),
+            (
+                "invalid-enabled-token",
+                r#"<w:enabled w:val="maybe"/><w:textInput><w:default w:val="old"/></w:textInput>"#,
+                "FORMTEXT",
+            ),
+            (
+                "invalid-calculate-token",
+                r#"<w:calcOnExit w:val="2"/><w:textInput><w:default w:val="old"/></w:textInput>"#,
+                "FORMTEXT",
+            ),
+            (
+                "invalid-checked-token",
+                r#"<w:checkBox><w:checked w:val="maybe"/></w:checkBox>"#,
+                "FORMCHECKBOX",
+            ),
+            (
+                "invalid-check-default-token",
+                r#"<w:checkBox><w:default w:val="maybe"/></w:checkBox>"#,
+                "FORMCHECKBOX",
+            ),
+            (
+                "invalid-max-length",
+                r#"<w:textInput><w:maxLength w:val="many"/></w:textInput>"#,
+                "FORMTEXT",
+            ),
+            (
+                "invalid-result",
+                r#"<w:ddList><w:result w:val="first"/><w:listEntry w:val="one"/></w:ddList>"#,
+                "FORMDROPDOWN",
+            ),
+            (
+                "invalid-list-default",
+                r#"<w:ddList><w:default w:val="first"/><w:listEntry w:val="one"/></w:ddList>"#,
+                "FORMDROPDOWN",
+            ),
+            (
+                "missing-name-value",
+                r#"<w:name/><w:textInput><w:default w:val="old"/></w:textInput>"#,
+                "FORMTEXT",
+            ),
+            (
+                "missing-text-default-value",
+                r#"<w:textInput><w:default/></w:textInput>"#,
+                "FORMTEXT",
+            ),
+            (
+                "missing-max-length-value",
+                r#"<w:textInput><w:maxLength/></w:textInput>"#,
+                "FORMTEXT",
+            ),
+            (
+                "missing-result-value",
+                r#"<w:ddList><w:result/><w:listEntry w:val="one"/></w:ddList>"#,
+                "FORMDROPDOWN",
+            ),
+            (
+                "missing-list-entry-value",
+                r#"<w:ddList><w:listEntry/></w:ddList>"#,
+                "FORMDROPDOWN",
+            ),
+        ];
+        for (case, ff_data, instruction) in cases {
+            let paragraph = parse_paragraph(&format!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData>{ff_data}</w:ffData></w:fldChar></w:r><w:r><w:instrText> {instruction} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+            ));
+            let RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+                panic!("{case}: legacy field")
+            };
+            assert!(field.validate_legacy_form_owner().is_err(), "{case}");
+        }
+    }
+
+    #[test]
+    fn legacy_form_ffdata_and_kind_children_require_schema_order() {
+        let cases = [
+            (
+                "common-after-kind",
+                r#"<w:checkBox><w:checked/></w:checkBox><w:name w:val="late"/>"#,
+                "FORMCHECKBOX",
+            ),
+            (
+                "checkbox-default-after-checked",
+                r#"<w:checkBox><w:checked/><w:default/></w:checkBox>"#,
+                "FORMCHECKBOX",
+            ),
+            (
+                "text-default-after-max-length",
+                r#"<w:textInput><w:maxLength w:val="12"/><w:default w:val="late"/></w:textInput>"#,
+                "FORMTEXT",
+            ),
+            (
+                "dropdown-result-after-entry",
+                r#"<w:ddList><w:listEntry w:val="one"/><w:result w:val="0"/></w:ddList>"#,
+                "FORMDROPDOWN",
+            ),
+        ];
+        for (case, ff_data, instruction) in cases {
+            let paragraph = parse_paragraph(&format!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData>{ff_data}</w:ffData></w:fldChar></w:r><w:r><w:instrText> {instruction} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+            ));
+            let RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+                panic!("{case}: legacy field")
+            };
+            assert!(field.validate_legacy_form_owner().is_err(), "{case}");
+        }
+    }
+
+    #[test]
+    fn missing_contradictory_and_out_of_range_legacy_form_kinds_fail_closed() {
+        let cases = [
+            ("missing-kind", r#"<w:name w:val="missing"/>"#, "FORMTEXT"),
+            (
+                "contradictory-kind",
+                r#"<w:checkBox><w:checked/></w:checkBox>"#,
+                "FORMTEXT",
+            ),
+            (
+                "out-of-range-selection",
+                r#"<w:ddList><w:result w:val="2"/><w:listEntry w:val="one"/></w:ddList>"#,
+                "FORMDROPDOWN",
+            ),
+        ];
+        for (case, ff_data, instruction) in cases {
+            let paragraph = parse_paragraph(&format!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData>{ff_data}</w:ffData></w:fldChar></w:r><w:r><w:instrText> {instruction} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+            ));
+            let RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+                panic!("{case}: legacy field")
+            };
+            assert!(field.validate_legacy_form_owner().is_err(), "{case}");
+        }
+    }
+
+    #[test]
+    fn known_form_descendants_under_unmodeled_wrappers_are_rejected() {
+        let paragraph = parse_paragraph(concat!(
+            r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData>"#,
+            r#"<w:checkBox><w:sizeAuto/></w:checkBox><w:unsupported><w:checked/></w:unsupported>"#,
+            r#"</w:ffData></w:fldChar></w:r>"#,
+            r#"<w:r><w:instrText> FORMCHECKBOX </w:instrText></w:r>"#,
+            r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+        ));
+        let RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+            panic!("legacy field")
+        };
+        assert!(field.validate_legacy_form_owner().is_err());
+    }
+
+    #[test]
+    fn known_legacy_form_singletons_and_checkbox_size_choice_are_exclusive() {
+        let cases = [
+            (
+                r#"<w:entryMacro/><w:entryMacro/><w:textInput/>"#,
+                "FORMTEXT",
+            ),
+            (r#"<w:exitMacro/><w:exitMacro/><w:textInput/>"#, "FORMTEXT"),
+            (r#"<w:helpText/><w:helpText/><w:textInput/>"#, "FORMTEXT"),
+            (
+                r#"<w:statusText/><w:statusText/><w:textInput/>"#,
+                "FORMTEXT",
+            ),
+            (
+                r#"<w:textInput><w:type/><w:type/></w:textInput>"#,
+                "FORMTEXT",
+            ),
+            (
+                r#"<w:textInput><w:format/><w:format/></w:textInput>"#,
+                "FORMTEXT",
+            ),
+            (
+                r#"<w:checkBox><w:size/><w:size/></w:checkBox>"#,
+                "FORMCHECKBOX",
+            ),
+            (
+                r#"<w:checkBox><w:sizeAuto/><w:sizeAuto/></w:checkBox>"#,
+                "FORMCHECKBOX",
+            ),
+            (
+                r#"<w:checkBox><w:size/><w:sizeAuto/></w:checkBox>"#,
+                "FORMCHECKBOX",
+            ),
+        ];
+        for (ff_data, instruction) in cases {
+            let paragraph = parse_paragraph(&format!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData>{ff_data}</w:ffData></w:fldChar></w:r><w:r><w:instrText> {instruction} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+            ));
+            let RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+                panic!("legacy field")
+            };
+            assert!(field.validate_legacy_form_owner().is_err(), "{ff_data}");
+        }
+
+        for ff_data in [
+            r#"&#x20;<w:textInput/>"#,
+            r#"<w:textInput><![CDATA[ ]]></w:textInput>"#,
+        ] {
+            let paragraph = parse_paragraph(&format!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData>{ff_data}</w:ffData></w:fldChar></w:r><w:r><w:instrText> FORMTEXT </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+            ));
+            let RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+                panic!("legacy field")
+            };
+            assert!(field.validate_legacy_form_owner().is_ok(), "{ff_data}");
+        }
+    }
+
+    #[test]
+    fn typed_legacy_form_values_reject_duplicate_or_unescape_failing_attributes() {
+        for ff_data in [
+            r#"<w:name xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" w:val="one" q:val="two"/><w:textInput/>"#,
+            r#"<w:textInput><w:default w:val="&undefined;"/></w:textInput>"#,
+        ] {
+            let paragraph = parse_paragraph(&format!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData>{ff_data}</w:ffData></w:fldChar></w:r><w:r><w:instrText> FORMTEXT </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+            ));
+            let RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+                panic!("legacy field")
+            };
+            assert!(field.validate_legacy_form_owner().is_err(), "{ff_data}");
+        }
+        let malformed = BytesStart::from_content("w:name w:val", 6);
+        assert!(legacy_form_value_attribute(&malformed, &["w".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn known_legacy_form_leaf_properties_require_values_tokens_and_empty_content() {
+        let cases = [
+            (r#"<w:entryMacro/><w:textInput/>"#, "FORMTEXT"),
+            (r#"<w:exitMacro/><w:textInput/>"#, "FORMTEXT"),
+            (r#"<w:textInput><w:type/></w:textInput>"#, "FORMTEXT"),
+            (
+                r#"<w:textInput><w:type w:val="wrong"/></w:textInput>"#,
+                "FORMTEXT",
+            ),
+            (r#"<w:textInput><w:format/></w:textInput>"#, "FORMTEXT"),
+            (r#"<w:checkBox><w:size/></w:checkBox>"#, "FORMCHECKBOX"),
+            (
+                r#"<w:checkBox><w:size w:val="large"/></w:checkBox>"#,
+                "FORMCHECKBOX",
+            ),
+            (
+                r#"<w:checkBox><w:sizeAuto w:val="maybe"/></w:checkBox>"#,
+                "FORMCHECKBOX",
+            ),
+            (
+                r#"<w:checkBox><w:size w:val="20"><w:checked/></w:size></w:checkBox>"#,
+                "FORMCHECKBOX",
+            ),
+        ];
+        for (ff_data, instruction) in cases {
+            let paragraph = parse_paragraph(&format!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData>{ff_data}</w:ffData></w:fldChar></w:r><w:r><w:instrText> {instruction} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+            ));
+            let RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+                panic!("legacy field")
+            };
+            assert!(field.validate_legacy_form_owner().is_err(), "{ff_data}");
+        }
+        for size in [
+            r#"<w:size w:val="20"/>"#,
+            r#"<w:size w:val="10.5pt"/>"#,
+            r#"<w:sizeAuto/>"#,
+        ] {
+            let paragraph = parse_paragraph(&format!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:checkBox>{size}</w:checkBox></w:ffData></w:fldChar></w:r><w:r><w:instrText> FORMCHECKBOX </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+            ));
+            let RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+                panic!("legacy field")
+            };
+            assert!(field.validate_legacy_form_owner().is_ok(), "{size}");
+        }
+    }
+
+    #[test]
+    fn legacy_help_and_status_text_types_accept_only_schema_tokens() {
+        for leaf in [
+            r#"<w:helpText w:type="bogus"/>"#,
+            r#"<w:statusText w:type="bogus"/>"#,
+        ] {
+            let paragraph = parse_paragraph(&format!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData>{leaf}<w:textInput/></w:ffData></w:fldChar></w:r><w:r><w:instrText> FORMTEXT </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+            ));
+            let RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+                panic!("legacy field")
+            };
+            assert!(field.validate_legacy_form_owner().is_err(), "{leaf}");
+        }
+        for leaf in [
+            r#"<w:helpText w:type="text"/>"#,
+            r#"<w:statusText w:type="autoText"/>"#,
+            r#"<w:helpText/>"#,
+        ] {
+            let paragraph = parse_paragraph(&format!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData>{leaf}<w:textInput/></w:ffData></w:fldChar></w:r><w:r><w:instrText> FORMTEXT </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+            ));
+            let RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+                panic!("legacy field")
+            };
+            assert!(field.validate_legacy_form_owner().is_ok(), "{leaf}");
+        }
+    }
+
+    #[test]
+    fn legacy_form_schema_facets_bound_strings_ranges_and_dropdown_cardinality() {
+        let too_long_name = "n".repeat(21);
+        let too_long_macro = "m".repeat(34);
+        let too_long_string = "s".repeat(256);
+        let too_many_entries = (0..26)
+            .map(|index| format!(r#"<w:listEntry w:val="{index}"/>"#))
+            .collect::<String>();
+        let cases = [
+            (
+                format!(r#"<w:name w:val="{too_long_name}"/><w:textInput/>"#),
+                "FORMTEXT",
+            ),
+            (
+                format!(r#"<w:entryMacro w:val="{too_long_macro}"/><w:textInput/>"#),
+                "FORMTEXT",
+            ),
+            (
+                format!(r#"<w:textInput><w:default w:val="{too_long_string}"/></w:textInput>"#),
+                "FORMTEXT",
+            ),
+            (
+                format!(r#"<w:textInput><w:format w:val="{too_long_string}"/></w:textInput>"#),
+                "FORMTEXT",
+            ),
+            (
+                r#"<w:textInput><w:maxLength w:val="0"/></w:textInput>"#.to_owned(),
+                "FORMTEXT",
+            ),
+            (
+                r#"<w:textInput><w:maxLength w:val="32768"/></w:textInput>"#.to_owned(),
+                "FORMTEXT",
+            ),
+            (
+                format!(r#"<w:ddList><w:listEntry w:val="{too_long_string}"/></w:ddList>"#),
+                "FORMDROPDOWN",
+            ),
+            (
+                format!(r#"<w:ddList>{too_many_entries}</w:ddList>"#),
+                "FORMDROPDOWN",
+            ),
+        ];
+        for (ff_data, instruction) in cases {
+            let paragraph = parse_paragraph(&format!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData>{ff_data}</w:ffData></w:fldChar></w:r><w:r><w:instrText> {instruction} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+            ));
+            let RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+                panic!("legacy field")
+            };
+            assert!(field.validate_legacy_form_owner().is_err(), "{ff_data}");
+        }
+        let boundary_entries = (0..25)
+            .map(|index| format!(r#"<w:listEntry w:val="{index}"/>"#))
+            .collect::<String>();
+        for (ff_data, instruction) in [
+            (
+                format!(
+                    r#"<w:name w:val="{}"/><w:entryMacro w:val="{}"/><w:textInput><w:default w:val="{}"/><w:maxLength w:val="32767"/><w:format w:val="{}"/></w:textInput>"#,
+                    "n".repeat(20),
+                    "m".repeat(33),
+                    "s".repeat(255),
+                    "f".repeat(64),
+                ),
+                "FORMTEXT",
+            ),
+            (
+                format!(r#"<w:ddList>{boundary_entries}</w:ddList>"#),
+                "FORMDROPDOWN",
+            ),
+        ] {
+            let paragraph = parse_paragraph(&format!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData>{ff_data}</w:ffData></w:fldChar></w:r><w:r><w:instrText> {instruction} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+            ));
+            let RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+                panic!("legacy field")
+            };
+            assert!(field.validate_legacy_form_owner().is_ok(), "{ff_data}");
+        }
+    }
+
+    #[test]
+    fn legacy_form_name_and_format_use_schema_maxima() {
+        for (ff_data, instruction) in [
+            (
+                format!(r#"<w:name w:val="{}"/><w:textInput/>"#, "n".repeat(21)),
+                "FORMTEXT",
+            ),
+            (
+                format!(
+                    r#"<w:textInput><w:format w:val="{}"/></w:textInput>"#,
+                    "f".repeat(65)
+                ),
+                "FORMTEXT",
+            ),
+        ] {
+            let paragraph = parse_paragraph(&format!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData>{ff_data}</w:ffData></w:fldChar></w:r><w:r><w:instrText> {instruction} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+            ));
+            let RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+                panic!("legacy field")
+            };
+            assert!(field.validate_legacy_form_owner().is_err(), "{ff_data}");
+        }
+
+        let boundary = format!(
+            r#"<w:name w:val="{}"/><w:textInput><w:format w:val="{}"/></w:textInput>"#,
+            "n".repeat(20),
+            "f".repeat(64)
+        );
+        let paragraph = parse_paragraph(&format!(
+            r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData>{boundary}</w:ffData></w:fldChar></w:r><w:r><w:instrText> FORMTEXT </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+        ));
+        let RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+            panic!("legacy field")
+        };
+        assert!(field.validate_legacy_form_owner().is_ok());
+    }
+
+    #[test]
+    fn legacy_help_and_status_values_obey_schema_maxima() {
+        for (leaf, max) in [("helpText", 255), ("statusText", 140)] {
+            for (length, valid) in [(max, true), (max + 1, false)] {
+                let value = "v".repeat(length);
+                let paragraph = parse_paragraph(&format!(
+                    r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:{leaf} w:type="text" w:val="{value}"/><w:textInput/></w:ffData></w:fldChar></w:r><w:r><w:instrText> FORMTEXT </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+                ));
+                let RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+                    panic!("legacy field")
+                };
+                assert_eq!(
+                    field.validate_legacy_form_owner().is_ok(),
+                    valid,
+                    "{leaf} {length}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dropdown_default_index_is_validated_even_when_result_is_present() {
+        let entries = (0..25)
+            .map(|index| format!(r#"<w:listEntry w:val="{index}"/>"#))
+            .collect::<String>();
+        let paragraph = parse_paragraph(&format!(
+            r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:ddList><w:result w:val="0"/><w:default w:val="25"/>{entries}</w:ddList></w:ffData></w:fldChar></w:r><w:r><w:instrText> FORMDROPDOWN </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+        ));
+        let RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+            panic!("legacy field")
+        };
+        assert!(field.validate_legacy_form_owner().is_err());
+    }
+
+    #[test]
+    fn checkbox_requires_exactly_one_size_choice() {
+        for ff_data in [
+            r#"<w:checkBox/>"#,
+            r#"<w:checkBox><w:default/></w:checkBox>"#,
+        ] {
+            let paragraph = parse_paragraph(&format!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData>{ff_data}</w:ffData></w:fldChar></w:r><w:r><w:instrText> FORMCHECKBOX </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+            ));
+            let RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+                panic!("legacy field")
+            };
+            assert!(field.validate_legacy_form_owner().is_err(), "{ff_data}");
+        }
+    }
+
+    #[test]
+    fn cross_kind_known_legacy_form_children_are_rejected() {
+        for (ff_data, instruction) in [
+            (r#"<w:textInput><w:checked/></w:textInput>"#, "FORMTEXT"),
+            (
+                r#"<w:checkBox><w:sizeAuto/><w:listEntry w:val="foreign"/></w:checkBox>"#,
+                "FORMCHECKBOX",
+            ),
+            (
+                r#"<w:ddList><w:format w:val="foreign"/><w:listEntry w:val="one"/></w:ddList>"#,
+                "FORMDROPDOWN",
+            ),
+        ] {
+            let paragraph = parse_paragraph(&format!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData>{ff_data}</w:ffData></w:fldChar></w:r><w:r><w:instrText> {instruction} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+            ));
+            let RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+                panic!("legacy field")
+            };
+            assert!(field.validate_legacy_form_owner().is_err(), "{ff_data}");
+        }
+    }
+
+    #[test]
+    fn legacy_form_element_only_containers_reject_character_data() {
+        for (ff_data, instruction) in [
+            (r#"text<w:textInput/>"#, "FORMTEXT"),
+            (r#"<w:textInput>text</w:textInput>"#, "FORMTEXT"),
+            (
+                r#"<w:checkBox><w:sizeAuto/><![CDATA[text]]></w:checkBox>"#,
+                "FORMCHECKBOX",
+            ),
+            (
+                r#"<w:ddList>&amp;<w:listEntry w:val="one"/></w:ddList>"#,
+                "FORMDROPDOWN",
+            ),
+        ] {
+            let paragraph = parse_paragraph(&format!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData>{ff_data}</w:ffData></w:fldChar></w:r><w:r><w:instrText> {instruction} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+            ));
+            let RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+                panic!("legacy field")
+            };
+            assert!(field.validate_legacy_form_owner().is_err(), "{ff_data}");
+        }
+    }
+
+    #[test]
+    fn legacy_form_rewriter_targets_only_direct_ffdata_owner() {
+        let mut paragraph = parse_paragraph(concat!(
+            r#"<w:r xmlns:x="urn:producer"><w:fldChar w:fldCharType="begin">"#,
+            r#"<x:producer><w:ffData><w:textInput><w:default w:val="decoy"/></w:textInput></w:ffData></x:producer>"#,
+            r#"<w:ffData><w:textInput><w:default w:val="old"/></w:textInput></w:ffData>"#,
+            r#"</w:fldChar></w:r><w:r><w:instrText> FORMTEXT </w:instrText></w:r>"#,
+            r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+        ));
+        let RunContent::Field(field) = &mut paragraph.runs[0].content[0] else {
+            panic!("legacy field")
+        };
+        field
+            .set_legacy_form_value(LegacyFormFieldValue::Text("new".to_owned()))
+            .unwrap();
+        let output = serialized_paragraph(&paragraph);
+        assert!(
+            output.contains(
+                r#"<x:producer><w:ffData><w:textInput><w:default w:val="decoy"/></w:textInput></w:ffData></x:producer>"#
+            ),
+            "{output}"
+        );
+        assert!(
+            output.contains(
+                r#"<w:ffData><w:textInput><w:default w:val="new"/></w:textInput></w:ffData>"#
+            ),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn known_legacy_form_vocabulary_at_wrong_container_levels_is_rejected() {
+        for (ff_data, instruction) in [
+            (r#"<w:checked/><w:textInput/>"#, "FORMTEXT"),
+            (
+                r#"<w:textInput><w:name w:val="nested"/></w:textInput>"#,
+                "FORMTEXT",
+            ),
+            (
+                r#"<w:textInput><w:checkBox><w:sizeAuto/></w:checkBox></w:textInput>"#,
+                "FORMTEXT",
+            ),
+            (r#"<w:textInput><w:ffData/></w:textInput>"#, "FORMTEXT"),
+        ] {
+            let paragraph = parse_paragraph(&format!(
+                r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData>{ff_data}</w:ffData></w:fldChar></w:r><w:r><w:instrText> {instruction} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+            ));
+            let RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+                panic!("legacy field")
+            };
+            assert!(field.validate_legacy_form_owner().is_err(), "{ff_data}");
+        }
+    }
+
+    #[test]
+    fn empty_text_input_form_can_be_expanded_for_value_mutation() {
+        let mut paragraph = parse_paragraph(concat!(
+            r#"<w:r><w:fldChar w:fldCharType="begin"><w:ffData><w:textInput/></w:ffData></w:fldChar></w:r>"#,
+            r#"<w:r><w:instrText> FORMTEXT </w:instrText></w:r>"#,
+            r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>old</w:t></w:r>"#,
+            r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+        ));
+        let RunContent::Field(field) = &mut paragraph.runs[0].content[0] else {
+            panic!("legacy field")
+        };
+        assert_eq!(
+            field.legacy_form.as_ref().unwrap().value,
+            LegacyFormFieldValue::Text("old".to_owned())
+        );
+        field
+            .set_legacy_form_value(LegacyFormFieldValue::Text("new".to_owned()))
+            .unwrap();
+        let output = serialized_paragraph(&paragraph);
+        assert!(
+            output.contains(
+                r#"<w:ffData><w:textInput><w:default xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" w:val="new"/></w:textInput></w:ffData>"#
+            ),
+            "{output}"
+        );
     }
 }

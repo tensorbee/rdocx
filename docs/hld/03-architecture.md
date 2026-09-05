@@ -372,6 +372,13 @@ text. The numbering grammar retains producer-defined `w:numFmt` tokens in
 while render and export consumers decline to invent a marker for an unknown
 format.
 
+The same grammar owns the bounded `w:ffData` projection on complex legacy form
+fields and the `w:glossaryDocument` root model. Typed form values and glossary
+properties are namespace aware, while retained XML remains the serialization
+source for every unsupported attribute and subtree. The `rdocx` facade owns
+relationship resolution, story-part identity, staged validation, and package
+commit for form-value and existing building-block replacement.
+
 The same grammar crate owns Transitional OfficeMath. One concrete recursive
 tree covers inline and display equations, math runs, fractions, scripts,
 radicals, matrices, limits, n-ary operators, delimiters, accents, and the

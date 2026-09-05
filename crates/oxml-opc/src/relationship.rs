@@ -54,6 +54,8 @@ pub mod rel_types {
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes";
     pub const COMMENTS: &str =
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments";
+    pub const GLOSSARY_DOCUMENT: &str =
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/glossaryDocument";
     pub const CHART: &str =
         "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart";
     pub const DIAGRAM_DATA: &str =
@@ -356,6 +358,7 @@ mod tests {
             rel_types::HYPERLINK,
             rel_types::FOOTNOTES,
             rel_types::ENDNOTES,
+            rel_types::GLOSSARY_DOCUMENT,
             rel_types::CHART,
             rel_types::DIAGRAM_DATA,
             rel_types::DIAGRAM_LAYOUT,
@@ -425,6 +428,7 @@ mod tests {
             crate::content_types::CUSTOM_PROPERTIES,
             crate::content_types::THEME,
             crate::content_types::CHART,
+            crate::content_types::WORD_GLOSSARY,
             crate::content_types::PRESENTATION,
             crate::content_types::SLIDESHOW,
             crate::content_types::SLIDE,

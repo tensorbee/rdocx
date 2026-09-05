@@ -1,6 +1,6 @@
 # F-237, Forms, glossary, and building blocks
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S68
 **Size**: L
 **Depends on**: none
@@ -211,22 +211,22 @@ harness.
 
 ## Implementation checklist
 
-- [ ] Add typed `w:ffData` parsing and exact-slot serialization to the existing
+- [x] Add typed `w:ffData` parsing and exact-slot serialization to the existing
   field model.
-- [ ] Inventory legacy forms in deterministic story-part order with explicit
+- [x] Inventory legacy forms in deterministic story-part order with explicit
   source-part and ordinal identity.
-- [ ] Implement bounded staged form-value mutation and cached-display updates.
-- [ ] Add the glossary relationship and content-type constants.
-- [ ] Add the approved glossary OXML model and facade building-block module.
-- [ ] Parse and serialize bounded building-block metadata and body content
+- [x] Implement bounded staged form-value mutation and cached-display updates.
+- [x] Add the glossary relationship and content-type constants.
+- [x] Add the approved glossary OXML model and facade building-block module.
+- [x] Parse and serialize bounded building-block metadata and body content
   while preserving every unsupported subtree.
-- [ ] Implement deterministic glossary inventory and atomic selected-entry
+- [x] Implement deterministic glossary inventory and atomic selected-entry
   replacement.
-- [ ] Reject unsafe graphs, stale identities, malformed values, and partial
+- [x] Reject unsafe graphs, stale identities, malformed values, and partial
   mutations.
-- [ ] Add source-built unit, round-trip, regression, and atomicity cases to
+- [x] Add source-built unit, round-trip, regression, and atomicity cases to
   existing test targets.
-- [ ] Run focused checks, every risk rider, and `/verify`.
+- [x] Run focused checks, every risk rider, and `/verify`.
 
 ## Open questions
 

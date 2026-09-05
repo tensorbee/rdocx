@@ -8,7 +8,7 @@ use oxml_core::custom_properties::CustomPropertyValue;
 use oxml_opc::OpcPackage;
 use oxml_opc::relationship::rel_types;
 use quick_xml::XmlVersion;
-use quick_xml::events::{BytesStart, Event};
+use quick_xml::events::{BytesDecl, BytesRef, BytesStart, Event};
 use quick_xml::name::{Namespace, NamespaceResolver, ResolveResult};
 use quick_xml::reader::NsReader;
 use rdocx_oxml::content_control::{CT_Sdt, SdtContent};
@@ -26,7 +26,548 @@ use rdocx_oxml::text::{
     hyperlink_revision_index,
 };
 
+pub use rdocx_oxml::text::{LegacyFormFieldKind, LegacyFormFieldValue};
+
 use crate::{Document, Error, Result, style};
+
+/// One legacy form field and its stable story-part identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyFormFieldInfo {
+    pub source_part: String,
+    pub ordinal: usize,
+    pub name: Option<String>,
+    pub enabled: bool,
+    pub calculate_on_exit: bool,
+    pub kind: LegacyFormFieldKind,
+    pub value: LegacyFormFieldValue,
+    pub choices: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LegacyStoryKind {
+    Header,
+    Footer,
+    Footnotes,
+    Endnotes,
+}
+
+impl LegacyStoryKind {
+    fn package_kind(self) -> PackageStoryKind {
+        match self {
+            Self::Header => PackageStoryKind::Header,
+            Self::Footer => PackageStoryKind::Footer,
+            Self::Footnotes => PackageStoryKind::Footnotes,
+            Self::Endnotes => PackageStoryKind::Endnotes,
+        }
+    }
+
+    fn content_type(self) -> &'static str {
+        match self {
+            Self::Header => {
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"
+            }
+            Self::Footer => {
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"
+            }
+            Self::Footnotes => {
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"
+            }
+            Self::Endnotes => {
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml"
+            }
+        }
+    }
+}
+
+impl Document {
+    /// Inventory typed legacy form fields in deterministic story-part order.
+    pub fn legacy_form_fields(&self) -> Result<Vec<LegacyFormFieldInfo>> {
+        let mut fields = Vec::new();
+        let mut paragraphs = Vec::new();
+        collect_body_paragraphs(&self.document.body, &mut paragraphs);
+        append_legacy_form_infos(&mut fields, &self.doc_part_name, &paragraphs)?;
+
+        for (part_name, kind, xml) in legacy_story_parts(self)? {
+            let story = legacy_story_paragraphs(&xml, kind.package_kind())?;
+            let paragraphs = story
+                .iter()
+                .map(|paragraph| &paragraph.paragraph)
+                .collect::<Vec<_>>();
+            append_legacy_form_infos(&mut fields, &part_name, &paragraphs)?;
+        }
+        Ok(fields)
+    }
+
+    /// Set the typed value of one existing legacy form field atomically.
+    pub fn set_legacy_form_field_value(
+        &mut self,
+        source_part: &str,
+        ordinal: usize,
+        value: LegacyFormFieldValue,
+    ) -> Result<LegacyFormFieldInfo> {
+        let mut candidate = self.clone_for_staging();
+        candidate.flush_to_package()?;
+        if source_part == candidate.doc_part_name {
+            let mut remaining = ordinal;
+            if !set_nth_legacy_form_in_body(
+                &mut candidate.document.body,
+                &mut remaining,
+                value.clone(),
+            )? {
+                return Err(Error::Other("stale legacy form identity".to_owned()));
+            }
+        } else {
+            let (_, kind, xml) = legacy_story_parts(&candidate)?
+                .into_iter()
+                .find(|(part_name, _, _)| part_name == source_part)
+                .ok_or_else(|| Error::Other("stale legacy form story part".to_owned()))?;
+            let mut story = legacy_story_paragraphs(&xml, kind.package_kind())?;
+            let mut remaining = ordinal;
+            let mut changed = false;
+            for paragraph in &mut story {
+                if set_nth_legacy_form_in_paragraph(
+                    &mut paragraph.paragraph,
+                    &mut remaining,
+                    value.clone(),
+                )? {
+                    changed = true;
+                    break;
+                }
+            }
+            if !changed {
+                return Err(Error::Other("stale legacy form identity".to_owned()));
+            }
+            let updated = patch_legacy_story_field_sources(&xml, &story)?;
+            candidate.package.set_part(source_part, updated);
+        }
+
+        let bytes = candidate.to_bytes()?;
+        let reopened = Document::from_bytes(&bytes)?;
+        let result = reopened
+            .legacy_form_fields()?
+            .into_iter()
+            .find(|field| field.source_part == source_part && field.ordinal == ordinal)
+            .ok_or_else(|| {
+                Error::Other("legacy form identity did not survive reopen".to_owned())
+            })?;
+        if result.value != value {
+            return Err(Error::Other(
+                "legacy form value did not survive reopen".to_owned(),
+            ));
+        }
+        self.commit_staged_mutation(reopened);
+        Ok(result)
+    }
+}
+
+fn legacy_story_parts(document: &Document) -> Result<Vec<(String, LegacyStoryKind, Vec<u8>)>> {
+    let Some(relationships) = document.package.get_part_rels(&document.doc_part_name) else {
+        return Ok(Vec::new());
+    };
+    let story_relationship_types = [
+        rel_types::HEADER,
+        rel_types::FOOTER,
+        rel_types::FOOTNOTES,
+        rel_types::ENDNOTES,
+    ];
+    let mut relationship_ids = HashSet::new();
+    if relationships
+        .items
+        .iter()
+        .any(|relationship| story_relationship_types.contains(&relationship.rel_type.as_str()))
+        && relationships
+            .items
+            .iter()
+            .any(|relationship| !relationship_ids.insert(&relationship.id))
+    {
+        return Err(Error::Other(
+            "duplicate legacy form story relationship id".to_owned(),
+        ));
+    }
+    let mut parts = Vec::new();
+    for (relationship_type, kind) in [
+        (rel_types::HEADER, LegacyStoryKind::Header),
+        (rel_types::FOOTER, LegacyStoryKind::Footer),
+        (rel_types::FOOTNOTES, LegacyStoryKind::Footnotes),
+        (rel_types::ENDNOTES, LegacyStoryKind::Endnotes),
+    ] {
+        let matching_relationships = relationships
+            .items
+            .iter()
+            .filter(|relationship| relationship.rel_type == relationship_type)
+            .collect::<Vec<_>>();
+        if matches!(kind, LegacyStoryKind::Footnotes | LegacyStoryKind::Endnotes)
+            && matching_relationships.len() > 1
+        {
+            return Err(Error::Other(format!(
+                "legacy form story has {} {relationship_type} relationships, expected at most one",
+                matching_relationships.len()
+            )));
+        }
+        for relationship in matching_relationships {
+            if relationship
+                .target_mode
+                .as_deref()
+                .is_some_and(|mode| mode != "Internal")
+            {
+                return Err(Error::Other(
+                    "legacy form story relationship must be internal".to_owned(),
+                ));
+            }
+            crate::building_block::validate_internal_target(
+                &document.doc_part_name,
+                &relationship.target,
+            )?;
+            let part_name =
+                OpcPackage::resolve_rel_target(&document.doc_part_name, &relationship.target);
+            if document
+                .package
+                .content_types
+                .overrides
+                .get(&part_name)
+                .map(String::as_str)
+                != Some(kind.content_type())
+            {
+                return Err(Error::Other(
+                    "legacy form story requires its exact content type override".to_owned(),
+                ));
+            }
+            if parts.iter().any(|(existing_part, existing_kind, _)| {
+                existing_part == &part_name && existing_kind != &kind
+            }) {
+                return Err(Error::Other(
+                    "legacy form story part has conflicting relationship roles".to_owned(),
+                ));
+            }
+            let xml = document.package.get_part(&part_name).ok_or_else(|| {
+                Error::Other("legacy form story relationship target is missing".to_owned())
+            })?;
+            parts.push((part_name, kind, xml.to_vec()));
+        }
+    }
+    parts.sort_by(|left, right| left.0.cmp(&right.0));
+    parts.dedup_by(|left, right| left.0 == right.0);
+    Ok(parts)
+}
+
+fn append_legacy_form_infos(
+    output: &mut Vec<LegacyFormFieldInfo>,
+    source_part: &str,
+    paragraphs: &[&CT_P],
+) -> Result<()> {
+    let mut ordinal = 0usize;
+    for paragraph in paragraphs {
+        append_legacy_form_infos_in_paragraph(output, source_part, &mut ordinal, paragraph)?;
+    }
+    Ok(())
+}
+
+fn append_legacy_form_infos_in_paragraph(
+    output: &mut Vec<LegacyFormFieldInfo>,
+    source_part: &str,
+    ordinal: &mut usize,
+    paragraph: &CT_P,
+) -> Result<()> {
+    for boundary in 0..=paragraph.runs.len() {
+        for (_, _, _, control) in paragraph
+            .content_controls
+            .iter()
+            .filter(|(position, _, _, _)| *position == boundary)
+        {
+            append_legacy_form_infos_in_control(output, source_part, ordinal, control)?;
+        }
+        if let Some(run) = paragraph.runs.get(boundary) {
+            append_legacy_form_infos_in_run(output, source_part, ordinal, run)?;
+        }
+    }
+    Ok(())
+}
+
+fn append_legacy_form_infos_in_run(
+    output: &mut Vec<LegacyFormFieldInfo>,
+    source_part: &str,
+    ordinal: &mut usize,
+    run: &CT_R,
+) -> Result<()> {
+    for content in &run.content {
+        if let RunContent::Field(field) = content {
+            append_legacy_form_field_info(output, source_part, ordinal, field)?;
+        }
+    }
+    Ok(())
+}
+
+fn append_legacy_form_infos_in_control(
+    output: &mut Vec<LegacyFormFieldInfo>,
+    source_part: &str,
+    ordinal: &mut usize,
+    control: &CT_Sdt,
+) -> Result<()> {
+    let inline_fields = control.inline_legacy_form_fields_with_content_indices()?;
+    let mut inline_index = 0usize;
+    for (content_index, content) in control.content.iter().enumerate() {
+        while inline_fields
+            .get(inline_index)
+            .is_some_and(|(position, _)| *position == content_index)
+        {
+            append_one_legacy_form_field_info(
+                output,
+                source_part,
+                ordinal,
+                &inline_fields[inline_index].1,
+            );
+            inline_index += 1;
+        }
+        match content {
+            SdtContent::Run(_) => {}
+            SdtContent::ContentControl(control) => {
+                append_legacy_form_infos_in_control(output, source_part, ordinal, control)?
+            }
+            SdtContent::Paragraph(paragraph) => {
+                append_legacy_form_infos_in_paragraph(output, source_part, ordinal, paragraph)?
+            }
+            SdtContent::Table(_)
+            | SdtContent::Row(_)
+            | SdtContent::Cell(_)
+            | SdtContent::RawXml(_) => {}
+        }
+    }
+    if inline_index != inline_fields.len() {
+        return Err(Error::Other(
+            "inline legacy form source boundary is invalid".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn append_legacy_form_field_info(
+    output: &mut Vec<LegacyFormFieldInfo>,
+    source_part: &str,
+    ordinal: &mut usize,
+    field: &Field,
+) -> Result<()> {
+    field.validate_legacy_form_owner()?;
+    append_one_legacy_form_field_info(output, source_part, ordinal, field);
+    for nested in field.nested_fields_in_source_order() {
+        append_legacy_form_field_info(output, source_part, ordinal, nested)?;
+    }
+    Ok(())
+}
+
+fn append_one_legacy_form_field_info(
+    output: &mut Vec<LegacyFormFieldInfo>,
+    source_part: &str,
+    ordinal: &mut usize,
+    field: &Field,
+) {
+    if let Some(form) = &field.legacy_form {
+        output.push(LegacyFormFieldInfo {
+            source_part: source_part.to_owned(),
+            ordinal: *ordinal,
+            name: form.name.clone(),
+            enabled: form.enabled,
+            calculate_on_exit: form.calculate_on_exit,
+            kind: form.kind,
+            value: form.value.clone(),
+            choices: form.choices.clone(),
+        });
+        *ordinal += 1;
+    }
+}
+
+fn set_nth_legacy_form_in_body(
+    body: &mut CT_Body,
+    remaining: &mut usize,
+    value: LegacyFormFieldValue,
+) -> Result<bool> {
+    for content in &mut body.content {
+        let changed = match content {
+            BodyContent::Paragraph(paragraph) => {
+                set_nth_legacy_form_in_paragraph(paragraph, remaining, value.clone())?
+            }
+            BodyContent::Table(table) => {
+                set_nth_legacy_form_in_table(table, remaining, value.clone())?
+            }
+            BodyContent::ContentControl(control) => {
+                set_nth_legacy_form_in_control(control, remaining, value.clone())?
+            }
+            BodyContent::RawXml(_) => false,
+        };
+        if changed {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn set_nth_legacy_form_in_paragraph(
+    paragraph: &mut CT_P,
+    remaining: &mut usize,
+    value: LegacyFormFieldValue,
+) -> Result<bool> {
+    for boundary in 0..=paragraph.runs.len() {
+        for (_, _, _, control) in paragraph
+            .content_controls
+            .iter_mut()
+            .filter(|(position, _, _, _)| *position == boundary)
+        {
+            if set_nth_legacy_form_in_control(control, remaining, value.clone())? {
+                return Ok(true);
+            }
+        }
+        if let Some(run) = paragraph.runs.get_mut(boundary) {
+            for content in &mut run.content {
+                if let RunContent::Field(field) = content
+                    && set_nth_legacy_form_in_field(field, remaining, value.clone())?
+                {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn set_nth_legacy_form_in_field(
+    field: &mut Field,
+    remaining: &mut usize,
+    value: LegacyFormFieldValue,
+) -> Result<bool> {
+    field
+        .set_nth_legacy_form_value_in_source_order(remaining, &value)
+        .map_err(Into::into)
+}
+
+fn set_nth_legacy_form_in_table(
+    table: &mut CT_Tbl,
+    remaining: &mut usize,
+    value: LegacyFormFieldValue,
+) -> Result<bool> {
+    for boundary in 0..=table.rows.len() {
+        for (_, _, control) in table
+            .content_controls
+            .iter_mut()
+            .filter(|(position, _, _)| *position == boundary)
+        {
+            if set_nth_legacy_form_in_control(control, remaining, value.clone())? {
+                return Ok(true);
+            }
+        }
+        if let Some(row) = table.rows.get_mut(boundary)
+            && set_nth_legacy_form_in_row(row, remaining, value.clone())?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn set_nth_legacy_form_in_row(
+    row: &mut CT_Row,
+    remaining: &mut usize,
+    value: LegacyFormFieldValue,
+) -> Result<bool> {
+    for boundary in 0..=row.cells.len() {
+        for (_, _, control) in row
+            .content_controls
+            .iter_mut()
+            .filter(|(position, _, _)| *position == boundary)
+        {
+            if set_nth_legacy_form_in_control(control, remaining, value.clone())? {
+                return Ok(true);
+            }
+        }
+        if let Some(cell) = row.cells.get_mut(boundary) {
+            for content in &mut cell.content {
+                let changed = match content {
+                    CellContent::Paragraph(paragraph) => {
+                        set_nth_legacy_form_in_paragraph(paragraph, remaining, value.clone())?
+                    }
+                    CellContent::Table(table) => {
+                        set_nth_legacy_form_in_table(table, remaining, value.clone())?
+                    }
+                    CellContent::ContentControl(control) => {
+                        set_nth_legacy_form_in_control(control, remaining, value.clone())?
+                    }
+                };
+                if changed {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn set_nth_legacy_form_in_control(
+    control: &mut CT_Sdt,
+    remaining: &mut usize,
+    value: LegacyFormFieldValue,
+) -> Result<bool> {
+    let inline_positions = control
+        .inline_legacy_form_fields_with_content_indices()?
+        .into_iter()
+        .map(|(content_index, _)| content_index)
+        .collect::<Vec<_>>();
+    let mut inline_index = 0usize;
+    for content_index in 0..control.content.len() {
+        while inline_positions
+            .get(inline_index)
+            .is_some_and(|position| *position == content_index)
+        {
+            if *remaining == 0 {
+                return control
+                    .set_inline_legacy_form_value(inline_index, value)
+                    .map_err(Into::into);
+            }
+            *remaining -= 1;
+            inline_index += 1;
+        }
+        let content = &mut control.content[content_index];
+        let changed = match content {
+            SdtContent::Paragraph(paragraph) => {
+                set_nth_legacy_form_in_paragraph(paragraph, remaining, value.clone())?
+            }
+            SdtContent::Table(table) => {
+                set_nth_legacy_form_in_table(table, remaining, value.clone())?
+            }
+            SdtContent::Row(row) => {
+                let mut table = CT_Tbl::new();
+                table.rows.push(row.clone());
+                let changed = set_nth_legacy_form_in_table(&mut table, remaining, value.clone())?;
+                if changed {
+                    *row = table.rows.remove(0);
+                }
+                changed
+            }
+            SdtContent::Cell(cell) => {
+                let mut row = CT_Row::new();
+                row.cells.push(cell.clone());
+                let mut table = CT_Tbl::new();
+                table.rows.push(row);
+                let changed = set_nth_legacy_form_in_table(&mut table, remaining, value.clone())?;
+                if changed {
+                    *cell = table.rows.remove(0).cells.remove(0);
+                }
+                changed
+            }
+            SdtContent::Run(_) => false,
+            SdtContent::ContentControl(control) => {
+                set_nth_legacy_form_in_control(control, remaining, value.clone())?
+            }
+            SdtContent::RawXml(_) => false,
+        };
+        if changed {
+            return Ok(true);
+        }
+    }
+    if inline_index != inline_positions.len() {
+        return Err(Error::Other(
+            "inline legacy form source boundary is invalid".to_owned(),
+        ));
+    }
+    Ok(false)
+}
 
 /// A deterministic civil date and time supplied to field evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -540,11 +1081,8 @@ impl Document {
                 apply_updates_to_paragraphs(&mut part.paragraphs, &updates, &mut update_index);
                 if update_index > part_start {
                     let paragraphs = part.paragraphs.iter().collect::<Vec<_>>();
-                    let updated = patch_story_field_sources(
-                        &xml,
-                        &paragraphs,
-                        PackageStoryKind::HeaderFooter,
-                    )?;
+                    let updated =
+                        patch_story_field_sources(&xml, &paragraphs, PackageStoryKind::Header)?;
                     CT_HdrFtr::from_xml(&updated)?;
                     staged_parts.push((part_name, updated));
                 }
@@ -556,11 +1094,8 @@ impl Document {
                 apply_updates_to_paragraphs(&mut part.paragraphs, &updates, &mut update_index);
                 if update_index > part_start {
                     let paragraphs = part.paragraphs.iter().collect::<Vec<_>>();
-                    let updated = patch_story_field_sources(
-                        &xml,
-                        &paragraphs,
-                        PackageStoryKind::HeaderFooter,
-                    )?;
+                    let updated =
+                        patch_story_field_sources(&xml, &paragraphs, PackageStoryKind::Footer)?;
                     CT_HdrFtr::from_xml(&updated)?;
                     staged_parts.push((part_name, updated));
                 }
@@ -7246,9 +7781,647 @@ fn normal_note_paragraphs(notes: &CT_Footnotes) -> Vec<&CT_P> {
 
 #[derive(Clone, Copy)]
 enum PackageStoryKind {
-    HeaderFooter,
+    Header,
+    Footer,
     Footnotes,
     Endnotes,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LegacyBlockOwner {
+    Root,
+    Table,
+    Row,
+    Cell,
+}
+
+#[derive(Clone, Copy)]
+enum LegacyStoryElementKind {
+    HeaderFooterRoot,
+    FootnotesRoot,
+    EndnotesRoot,
+    NormalNote,
+    Table,
+    Row,
+    Cell,
+    ContentControl(LegacyBlockOwner),
+    ContentControlContent(LegacyBlockOwner),
+    Other,
+}
+
+struct LegacyStoryParagraph {
+    start: usize,
+    end: usize,
+    paragraph: CT_P,
+}
+
+fn legacy_story_paragraphs(
+    xml: &[u8],
+    story_kind: PackageStoryKind,
+) -> Result<Vec<LegacyStoryParagraph>> {
+    validate_story_document_declarations_and_doctype(xml)?;
+    let mut reader = NsReader::from_reader(xml);
+    reader.config_mut().trim_text(false);
+    let mut buffer = Vec::new();
+    let mut stack = Vec::<LegacyStoryElementKind>::new();
+    let mut bindings = BTreeMap::<String, Vec<u8>>::new();
+    let mut binding_scopes = Vec::new();
+    let mut paragraphs = Vec::new();
+    let mut root_seen = false;
+    let mut root_closed = false;
+    loop {
+        let before = reader.buffer_position() as usize;
+        let (namespace, event) = reader
+            .read_resolved_event_into(&mut buffer)
+            .map_err(|error| Error::Other(format!("invalid package story XML: {error}")))?;
+        match event {
+            Event::Start(element) => {
+                let word = namespace_is_word(&namespace);
+                let name = element.name();
+                let local = local_name(name.as_ref());
+                if stack.is_empty() {
+                    if root_seen || !package_story_root_matches(story_kind, word, local) {
+                        return Err(Error::Other(
+                            "package story must contain exactly one relationship-appropriate root"
+                                .to_owned(),
+                        ));
+                    }
+                    root_seen = true;
+                }
+                let kind = legacy_story_element_kind(
+                    story_kind,
+                    &stack,
+                    word,
+                    local,
+                    &element,
+                    reader.resolver(),
+                );
+                if matches!(kind, Some(LegacyStoryElementKind::Other)) && word && local == b"p" {
+                    reader
+                        .read_to_end_into(element.name(), &mut Vec::new())
+                        .map_err(|error| {
+                            Error::Other(format!("invalid package story paragraph: {error}"))
+                        })?;
+                } else if kind.is_none() && word && local == b"p" {
+                    let start_after = reader.buffer_position() as usize;
+                    reader
+                        .read_to_end_into(element.name(), &mut Vec::new())
+                        .map_err(|error| {
+                            Error::Other(format!("invalid package story paragraph: {error}"))
+                        })?;
+                    let end = reader.buffer_position() as usize;
+                    let fragment = paragraph_fragment_with_bindings(
+                        &xml[before..end],
+                        start_after - before,
+                        &bindings,
+                    )?;
+                    paragraphs.push(LegacyStoryParagraph {
+                        start: before,
+                        end,
+                        paragraph: CT_P::from_xml_fragment(&fragment)?,
+                    });
+                } else {
+                    let mut local_bindings = bindings.clone();
+                    apply_namespace_declarations(&element, &mut local_bindings)?;
+                    binding_scopes.push(std::mem::replace(&mut bindings, local_bindings));
+                    stack.push(kind.unwrap_or(LegacyStoryElementKind::Other));
+                }
+            }
+            Event::End(_) => {
+                if stack.pop().is_none() {
+                    return Err(Error::Other(
+                        "package story XML has an unmatched end element".to_owned(),
+                    ));
+                }
+                bindings = binding_scopes.pop().unwrap_or_default();
+                if stack.is_empty() {
+                    root_closed = true;
+                }
+            }
+            Event::Empty(element) if stack.is_empty() => {
+                let word = namespace_is_word(&namespace);
+                let name = element.name();
+                let local = local_name(name.as_ref());
+                if root_seen || !package_story_root_matches(story_kind, word, local) {
+                    return Err(Error::Other(
+                        "package story must contain exactly one relationship-appropriate root"
+                            .to_owned(),
+                    ));
+                }
+                root_seen = true;
+                root_closed = true;
+            }
+            Event::Text(text)
+                if stack.is_empty() && text.iter().any(|byte| !byte.is_ascii_whitespace()) =>
+            {
+                return Err(Error::Other(
+                    "package story has non-whitespace text outside its root".to_owned(),
+                ));
+            }
+            Event::CData(_) if stack.is_empty() => {
+                return Err(Error::Other(
+                    "package story has character data outside its root".to_owned(),
+                ));
+            }
+            Event::GeneralRef(_) if stack.is_empty() => {
+                return Err(Error::Other(
+                    "package story has a character reference outside its root".to_owned(),
+                ));
+            }
+            Event::Eof => {
+                if !stack.is_empty() {
+                    return Err(Error::Other(
+                        "package story XML has an unclosed element".to_owned(),
+                    ));
+                }
+                if !root_seen || !root_closed {
+                    return Err(Error::Other(
+                        "package story must contain exactly one relationship-appropriate root"
+                            .to_owned(),
+                    ));
+                }
+                return Ok(paragraphs);
+            }
+            _ => {}
+        }
+        buffer.clear();
+    }
+}
+
+fn validate_story_document_declarations_and_doctype(xml: &[u8]) -> Result<()> {
+    validate_story_literal_xml_characters(xml)?;
+    let mut reader = NsReader::from_reader(xml);
+    reader.config_mut().trim_text(false);
+    reader.config_mut().check_comments = true;
+    let mut buffer = Vec::new();
+    let mut declaration_allowed = true;
+    let mut declaration_seen = false;
+    let mut depth = 0usize;
+    loop {
+        let (_, event) = reader
+            .read_resolved_event_into(&mut buffer)
+            .map_err(|error| Error::Other(format!("invalid package story XML: {error}")))?;
+        let event = event.into_owned();
+        validate_story_scanned_xml_event(&reader, &event)?;
+        match event {
+            Event::Decl(declaration) => {
+                if !declaration_allowed || declaration_seen {
+                    return Err(Error::Other(
+                        "misplaced or duplicate package story XML declaration".to_owned(),
+                    ));
+                }
+                validate_story_xml_declaration(&declaration)?;
+                declaration_seen = true;
+                declaration_allowed = false;
+            }
+            Event::DocType(_) => {
+                return Err(Error::Other(
+                    "package story XML cannot contain a document type".to_owned(),
+                ));
+            }
+            Event::Start(_) => {
+                declaration_allowed = false;
+                depth += 1;
+            }
+            Event::Empty(_) => {
+                declaration_allowed = false;
+            }
+            Event::End(_) => {
+                declaration_allowed = false;
+                depth = depth.saturating_sub(1);
+            }
+            Event::GeneralRef(reference) => {
+                require_story_predefined_or_character_reference(&reference)?;
+                declaration_allowed = false;
+            }
+            Event::PI(instruction) if instruction.target().eq_ignore_ascii_case(b"xml") => {
+                return Err(Error::Other(
+                    "reserved package story XML processing instruction".to_owned(),
+                ));
+            }
+            Event::Eof => return Ok(()),
+            _ => declaration_allowed = false,
+        }
+        buffer.clear();
+    }
+}
+
+fn validate_story_xml_declaration(declaration: &BytesDecl<'_>) -> Result<()> {
+    let content = std::str::from_utf8(declaration.as_ref())
+        .map_err(|error| Error::Other(format!("invalid package story XML declaration: {error}")))?;
+    let start = BytesStart::from_content(content, 3);
+    let attributes = start
+        .attributes()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| Error::Other(format!("invalid package story XML declaration: {error}")))?;
+    if attributes.first().map(|attribute| attribute.key.as_ref()) != Some(b"version".as_ref()) {
+        return Err(Error::Other(
+            "package story XML declaration must begin with version".to_owned(),
+        ));
+    }
+    let mut encoding_seen = false;
+    let mut standalone_seen = false;
+    for (index, attribute) in attributes.iter().enumerate() {
+        let value = attribute
+            .normalized_value(XmlVersion::Explicit1_0)
+            .map_err(|error| {
+                Error::Other(format!("invalid package story XML declaration: {error}"))
+            })?
+            .into_owned();
+        match attribute.key.as_ref() {
+            b"version" if index == 0 && value == "1.0" => {}
+            b"encoding"
+                if !encoding_seen && !standalone_seen && valid_story_encoding_name(&value) =>
+            {
+                encoding_seen = true;
+            }
+            b"standalone" if !standalone_seen && matches!(value.as_str(), "yes" | "no") => {
+                standalone_seen = true;
+            }
+            _ => {
+                return Err(Error::Other(
+                    "invalid package story XML declaration".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn valid_story_encoding_name(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic())
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn validate_story_literal_xml_characters(xml: &[u8]) -> Result<()> {
+    let xml = std::str::from_utf8(xml)
+        .map_err(|error| Error::Other(format!("invalid package story XML: {error}")))?;
+    if xml.chars().all(story_xml_1_0_character_is_valid) {
+        return Ok(());
+    }
+    Err(Error::Other(
+        "package story XML contains a forbidden literal XML 1.0 character".to_owned(),
+    ))
+}
+
+fn story_xml_1_0_character_is_valid(character: char) -> bool {
+    matches!(character, '\t' | '\n' | '\r')
+        || ('\u{20}'..='\u{D7FF}').contains(&character)
+        || ('\u{E000}'..='\u{FFFD}').contains(&character)
+        || ('\u{10000}'..='\u{10FFFF}').contains(&character)
+}
+
+fn validate_story_scanned_xml_event(reader: &NsReader<&[u8]>, event: &Event<'_>) -> Result<()> {
+    match event {
+        Event::Start(element) | Event::Empty(element) => {
+            validate_story_scanned_element(reader, element)
+        }
+        Event::End(element) => {
+            let name = element.name();
+            let prefix = validate_story_xml_qname(name.as_ref())?;
+            validate_story_bound_prefix(&reader.resolver().resolve_element(name).0, prefix)
+                .map(|_| ())
+        }
+        Event::PI(instruction) => validate_story_xml_name(instruction.target()),
+        _ => Ok(()),
+    }
+}
+
+fn validate_story_scanned_element(
+    reader: &NsReader<&[u8]>,
+    element: &BytesStart<'_>,
+) -> Result<()> {
+    let element_name = element.name();
+    let prefix = validate_story_xml_qname(element_name.as_ref())?;
+    if prefix == Some(b"xmlns".as_slice()) {
+        return Err(Error::Other(
+            "package story XML element uses the reserved xmlns prefix".to_owned(),
+        ));
+    }
+    validate_story_bound_prefix(&reader.resolver().resolve_element(element_name).0, prefix)?;
+    let mut expanded_names = HashSet::new();
+    for attribute in element.attributes() {
+        let attribute = attribute
+            .map_err(|error| Error::Other(format!("invalid package story XML: {error}")))?;
+        let name = attribute.key.as_ref();
+        let prefix = validate_story_xml_qname(name)?;
+        if attribute.value.contains(&b'<') {
+            return Err(Error::Other(
+                "package story XML attribute contains a literal less-than sign".to_owned(),
+            ));
+        }
+        let value = attribute
+            .decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())
+            .map_err(|error| Error::Other(format!("invalid package story XML: {error}")))?;
+        if !value.chars().all(story_xml_1_0_character_is_valid) {
+            return Err(Error::Other(
+                "package story XML attribute contains a forbidden XML 1.0 character".to_owned(),
+            ));
+        }
+        if name == b"xmlns" {
+            validate_story_namespace_declaration(None, value.as_bytes())?;
+            continue;
+        }
+        if prefix == Some(b"xmlns".as_slice()) {
+            validate_story_namespace_declaration(Some(local_name(name)), value.as_bytes())?;
+            continue;
+        }
+        let (namespace, local) = reader.resolver().resolve_attribute(attribute.key);
+        let resolved = validate_story_bound_prefix(&namespace, prefix)?;
+        if !expanded_names.insert((resolved, local.as_ref().to_vec())) {
+            return Err(Error::Other(
+                "package story XML element has duplicate expanded-name attributes".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_story_namespace_declaration(prefix: Option<&[u8]>, namespace: &[u8]) -> Result<()> {
+    const XML_NS: &[u8] = b"http://www.w3.org/XML/1998/namespace";
+    const XMLNS_NS: &[u8] = b"http://www.w3.org/2000/xmlns/";
+    let valid = match prefix {
+        None => namespace != XML_NS && namespace != XMLNS_NS,
+        Some(b"xml") => namespace == XML_NS,
+        Some(b"xmlns") => false,
+        Some(_) => !namespace.is_empty() && namespace != XML_NS && namespace != XMLNS_NS,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(Error::Other(
+            "package story XML contains an invalid namespace declaration".to_owned(),
+        ))
+    }
+}
+
+fn validate_story_bound_prefix(
+    namespace: &ResolveResult<'_>,
+    prefix: Option<&[u8]>,
+) -> Result<Option<Vec<u8>>> {
+    match namespace {
+        ResolveResult::Bound(Namespace(namespace)) => Ok(Some(namespace.to_vec())),
+        ResolveResult::Unbound if prefix.is_none() => Ok(None),
+        ResolveResult::Unbound | ResolveResult::Unknown(_) => Err(Error::Other(
+            "package story XML uses an unbound namespace prefix".to_owned(),
+        )),
+    }
+}
+
+fn validate_story_xml_qname(name: &[u8]) -> Result<Option<&[u8]>> {
+    let name = std::str::from_utf8(name)
+        .map_err(|error| Error::Other(format!("invalid package story XML name: {error}")))?;
+    let mut parts = name.split(':');
+    let first = parts.next().unwrap_or_default();
+    let second = parts.next();
+    if !story_xml_ncname_is_valid(first)
+        || second.is_some_and(|local| !story_xml_ncname_is_valid(local))
+        || parts.next().is_some()
+    {
+        return Err(Error::Other(format!(
+            "invalid package story XML qualified name {name}"
+        )));
+    }
+    Ok(second.map(|_| first.as_bytes()))
+}
+
+fn validate_story_xml_name(name: &[u8]) -> Result<()> {
+    let name = std::str::from_utf8(name)
+        .map_err(|error| Error::Other(format!("invalid package story XML name: {error}")))?;
+    let mut characters = name.chars();
+    if characters
+        .next()
+        .is_some_and(|character| character == ':' || story_xml_ncname_start(character))
+        && characters.all(|character| character == ':' || story_xml_ncname_character(character))
+    {
+        Ok(())
+    } else {
+        Err(Error::Other(format!(
+            "invalid package story XML name {name}"
+        )))
+    }
+}
+
+fn story_xml_ncname_is_valid(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters.next().is_some_and(story_xml_ncname_start)
+        && characters.all(story_xml_ncname_character)
+}
+
+fn story_xml_ncname_start(character: char) -> bool {
+    matches!(
+        character,
+        'A'..='Z' | '_' | 'a'..='z' | '\u{00C0}'..='\u{00D6}' | '\u{00D8}'..='\u{00F6}'
+            | '\u{00F8}'..='\u{02FF}' | '\u{0370}'..='\u{037D}' | '\u{037F}'..='\u{1FFF}'
+            | '\u{200C}'..='\u{200D}' | '\u{2070}'..='\u{218F}' | '\u{2C00}'..='\u{2FEF}'
+            | '\u{3001}'..='\u{D7FF}' | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}'
+            | '\u{10000}'..='\u{EFFFF}'
+    )
+}
+
+fn story_xml_ncname_character(character: char) -> bool {
+    story_xml_ncname_start(character)
+        || matches!(character, '-' | '.' | '0'..='9' | '\u{00B7}' | '\u{0300}'..='\u{036F}' | '\u{203F}'..='\u{2040}')
+}
+
+fn require_story_predefined_or_character_reference(reference: &BytesRef<'_>) -> Result<char> {
+    if let Some(character) = reference
+        .resolve_char_ref()
+        .map_err(|error| Error::Other(format!("invalid package story XML: {error}")))?
+    {
+        if story_xml_1_0_character_is_valid(character) {
+            return Ok(character);
+        }
+        return Err(Error::Other(
+            "package story character reference is not legal in XML 1.0".to_owned(),
+        ));
+    }
+    let name = reference
+        .decode()
+        .map_err(|error| Error::Other(format!("invalid package story XML: {error}")))?;
+    match name.as_ref() {
+        "amp" => Ok('&'),
+        "lt" => Ok('<'),
+        "gt" => Ok('>'),
+        "apos" => Ok('\''),
+        "quot" => Ok('"'),
+        _ => Err(Error::Other(format!(
+            "undeclared package story XML entity reference &{name};"
+        ))),
+    }
+}
+
+fn legacy_story_element_kind(
+    story_kind: PackageStoryKind,
+    stack: &[LegacyStoryElementKind],
+    word: bool,
+    local: &[u8],
+    element: &BytesStart<'_>,
+    resolver: &NamespaceResolver,
+) -> Option<LegacyStoryElementKind> {
+    if stack.is_empty() {
+        return Some(match story_kind {
+            PackageStoryKind::Header if word && local == b"hdr" => {
+                LegacyStoryElementKind::HeaderFooterRoot
+            }
+            PackageStoryKind::Footer if word && local == b"ftr" => {
+                LegacyStoryElementKind::HeaderFooterRoot
+            }
+            PackageStoryKind::Footnotes if word && local == b"footnotes" => {
+                LegacyStoryElementKind::FootnotesRoot
+            }
+            PackageStoryKind::Endnotes if word && local == b"endnotes" => {
+                LegacyStoryElementKind::EndnotesRoot
+            }
+            _ => LegacyStoryElementKind::Other,
+        });
+    }
+    if word
+        && matches!(
+            (story_kind, stack.last()),
+            (
+                PackageStoryKind::Footnotes,
+                Some(LegacyStoryElementKind::FootnotesRoot)
+            ) | (
+                PackageStoryKind::Endnotes,
+                Some(LegacyStoryElementKind::EndnotesRoot)
+            )
+        )
+        && matches!(local, b"footnote" | b"endnote")
+        && note_is_normal(element, resolver)
+    {
+        return Some(LegacyStoryElementKind::NormalNote);
+    }
+    if let Some(LegacyStoryElementKind::ContentControl(owner)) = stack.last()
+        && word
+        && local == b"sdtContent"
+    {
+        return Some(LegacyStoryElementKind::ContentControlContent(*owner));
+    }
+    let owner = match stack.last()? {
+        LegacyStoryElementKind::HeaderFooterRoot | LegacyStoryElementKind::NormalNote => {
+            LegacyBlockOwner::Root
+        }
+        LegacyStoryElementKind::Table => LegacyBlockOwner::Table,
+        LegacyStoryElementKind::Row => LegacyBlockOwner::Row,
+        LegacyStoryElementKind::Cell => LegacyBlockOwner::Cell,
+        LegacyStoryElementKind::ContentControlContent(owner) => *owner,
+        _ => return Some(LegacyStoryElementKind::Other),
+    };
+    if !word {
+        return Some(LegacyStoryElementKind::Other);
+    }
+    match local {
+        b"p" if matches!(owner, LegacyBlockOwner::Root | LegacyBlockOwner::Cell) => None,
+        b"tbl" if matches!(owner, LegacyBlockOwner::Root | LegacyBlockOwner::Cell) => {
+            Some(LegacyStoryElementKind::Table)
+        }
+        b"tr" if owner == LegacyBlockOwner::Table => Some(LegacyStoryElementKind::Row),
+        b"tc" if owner == LegacyBlockOwner::Row => Some(LegacyStoryElementKind::Cell),
+        b"sdt" => Some(LegacyStoryElementKind::ContentControl(owner)),
+        _ => Some(LegacyStoryElementKind::Other),
+    }
+}
+
+fn package_story_root_matches(story_kind: PackageStoryKind, word: bool, local: &[u8]) -> bool {
+    word && match story_kind {
+        PackageStoryKind::Header => local == b"hdr",
+        PackageStoryKind::Footer => local == b"ftr",
+        PackageStoryKind::Footnotes => local == b"footnotes",
+        PackageStoryKind::Endnotes => local == b"endnotes",
+    }
+}
+
+fn apply_namespace_declarations(
+    element: &BytesStart<'_>,
+    bindings: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<()> {
+    for attribute in element.attributes() {
+        let attribute = attribute
+            .map_err(|error| Error::Other(format!("invalid namespace declaration: {error}")))?;
+        let key = attribute.key.as_ref();
+        if key == b"xmlns" || key.starts_with(b"xmlns:") {
+            bindings.insert(
+                String::from_utf8_lossy(key).into_owned(),
+                attribute.value.as_ref().to_vec(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn paragraph_fragment_with_bindings(
+    raw: &[u8],
+    start_len: usize,
+    bindings: &BTreeMap<String, Vec<u8>>,
+) -> Result<Vec<u8>> {
+    let insert_at = start_len
+        .checked_sub(1)
+        .ok_or_else(|| Error::Other("package story paragraph start tag is missing".to_owned()))?;
+    let mut output = raw[..insert_at].to_vec();
+    for (key, value) in bindings {
+        if start_tag_has_raw_attribute(&raw[..start_len], key.as_bytes()) {
+            continue;
+        }
+        output.push(b' ');
+        output.extend_from_slice(key.as_bytes());
+        output.extend_from_slice(b"=\"");
+        output.extend_from_slice(value);
+        output.push(b'"');
+    }
+    output.extend_from_slice(&raw[insert_at..]);
+    Ok(output)
+}
+
+fn start_tag_has_raw_attribute(start: &[u8], name: &[u8]) -> bool {
+    let mut reader = quick_xml::Reader::from_reader(start);
+    let mut buffer = Vec::new();
+    matches!(
+        reader.read_event_into(&mut buffer),
+        Ok(Event::Start(element) | Event::Empty(element))
+            if element
+                .attributes()
+                .flatten()
+                .any(|attribute| attribute.key.as_ref() == name)
+    )
+}
+
+fn patch_legacy_story_field_sources(
+    xml: &[u8],
+    paragraphs: &[LegacyStoryParagraph],
+) -> Result<Vec<u8>> {
+    let mut edits = Vec::new();
+    for paragraph in paragraphs {
+        let mut search_start = 0usize;
+        for (source, replacement) in paragraph_field_source_replacements(&paragraph.paragraph)? {
+            let Some(start) = find_typed_field_source(
+                xml,
+                paragraph.start,
+                paragraph.end,
+                &source,
+                search_start,
+            )?
+            else {
+                return Err(Error::Other(
+                    "package story field source was not found at its typed paragraph boundary"
+                        .to_owned(),
+                ));
+            };
+            let end = start + source.len();
+            edits.push(FieldSourceEdit {
+                start: paragraph.start + start,
+                end: paragraph.start + end,
+                replacement,
+            });
+            search_start = end;
+        }
+    }
+    let mut updated = xml.to_vec();
+    for edit in edits.into_iter().rev() {
+        updated.splice(edit.start..edit.end, edit.replacement);
+    }
+    Ok(updated)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -7288,37 +8461,27 @@ fn patch_story_field_sources(
     let mut edits = Vec::new();
     for (paragraph, (paragraph_start, paragraph_end)) in paragraphs.iter().zip(paragraph_spans) {
         let mut search_start = 0usize;
-        for run in paragraph.runs() {
-            for content in &run.content {
-                let RunContent::Field(field) = content else {
-                    continue;
-                };
-                let Some((source, replacement)) = field.source_replacement()? else {
-                    return Err(Error::Other(
-                        "parsed package story field has no source XML".to_owned(),
-                    ));
-                };
-                let Some(start) = find_typed_field_source(
-                    xml,
-                    paragraph_start,
-                    paragraph_end,
-                    source,
-                    search_start,
-                )?
-                else {
-                    return Err(Error::Other(
-                        "package story field source was not found at its typed paragraph boundary"
-                            .to_owned(),
-                    ));
-                };
-                let end = start + source.len();
-                edits.push(FieldSourceEdit {
-                    start: paragraph_start + start,
-                    end: paragraph_start + end,
-                    replacement,
-                });
-                search_start = end;
-            }
+        for (source, replacement) in paragraph_field_source_replacements(paragraph)? {
+            let Some(start) = find_typed_field_source(
+                xml,
+                paragraph_start,
+                paragraph_end,
+                &source,
+                search_start,
+            )?
+            else {
+                return Err(Error::Other(
+                    "package story field source was not found at its typed paragraph boundary"
+                        .to_owned(),
+                ));
+            };
+            let end = start + source.len();
+            edits.push(FieldSourceEdit {
+                start: paragraph_start + start,
+                end: paragraph_start + end,
+                replacement,
+            });
+            search_start = end;
         }
     }
 
@@ -7327,6 +8490,69 @@ fn patch_story_field_sources(
         updated.splice(edit.start..edit.end, edit.replacement);
     }
     Ok(updated)
+}
+
+fn paragraph_field_source_replacements(paragraph: &CT_P) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    let mut replacements = Vec::new();
+    for boundary in 0..=paragraph.runs.len() {
+        for (_, _, _, control) in paragraph
+            .content_controls
+            .iter()
+            .filter(|(position, _, _, _)| *position == boundary)
+        {
+            append_control_field_source_replacements(control, &mut replacements)?;
+        }
+        if let Some(run) = paragraph.runs.get(boundary) {
+            append_run_field_source_replacements(run, &mut replacements)?;
+        }
+    }
+    Ok(replacements)
+}
+
+fn append_run_field_source_replacements(
+    run: &CT_R,
+    output: &mut Vec<(Vec<u8>, Vec<u8>)>,
+) -> Result<()> {
+    for content in &run.content {
+        let RunContent::Field(field) = content else {
+            continue;
+        };
+        let Some((source, replacement)) = field.source_replacement()? else {
+            return Err(Error::Other(
+                "parsed package story field has no source XML".to_owned(),
+            ));
+        };
+        output.push((source.to_vec(), replacement));
+    }
+    Ok(())
+}
+
+fn append_control_field_source_replacements(
+    control: &CT_Sdt,
+    output: &mut Vec<(Vec<u8>, Vec<u8>)>,
+) -> Result<()> {
+    output.extend(
+        control
+            .inline_field_source_replacements()
+            .into_iter()
+            .map(|(source, replacement)| (source.to_vec(), replacement.to_vec())),
+    );
+    for content in &control.content {
+        match content {
+            SdtContent::ContentControl(control) => {
+                append_control_field_source_replacements(control, output)?
+            }
+            SdtContent::Paragraph(paragraph) => {
+                output.extend(paragraph_field_source_replacements(paragraph)?);
+            }
+            SdtContent::Table(_)
+            | SdtContent::Row(_)
+            | SdtContent::Cell(_)
+            | SdtContent::Run(_)
+            | SdtContent::RawXml(_) => {}
+        }
+    }
+    Ok(())
 }
 
 fn story_paragraph_spans(xml: &[u8], story_kind: PackageStoryKind) -> Result<Vec<(usize, usize)>> {
@@ -7345,11 +8571,17 @@ fn story_paragraph_spans(xml: &[u8], story_kind: PackageStoryKind) -> Result<Vec
             Event::Start(element) => {
                 let parent = stack.last().map(|element| element.kind);
                 let kind = match story_kind {
-                    PackageStoryKind::HeaderFooter
+                    PackageStoryKind::Header
                         if stack.is_empty()
                             && word
-                            && (matches_local_name(element.name().as_ref(), b"hdr")
-                                || matches_local_name(element.name().as_ref(), b"ftr")) =>
+                            && matches_local_name(element.name().as_ref(), b"hdr") =>
+                    {
+                        StoryElementKind::HeaderFooterRoot
+                    }
+                    PackageStoryKind::Footer
+                        if stack.is_empty()
+                            && word
+                            && matches_local_name(element.name().as_ref(), b"ftr") =>
                     {
                         StoryElementKind::HeaderFooterRoot
                     }
@@ -7371,7 +8603,7 @@ fn story_paragraph_spans(xml: &[u8], story_kind: PackageStoryKind) -> Result<Vec
                         if parent == Some(StoryElementKind::FootnotesRoot)
                             && word
                             && matches_local_name(element.name().as_ref(), b"footnote")
-                            && note_is_normal(&element) =>
+                            && note_is_normal(&element, reader.resolver()) =>
                     {
                         StoryElementKind::NormalNote
                     }
@@ -7379,11 +8611,11 @@ fn story_paragraph_spans(xml: &[u8], story_kind: PackageStoryKind) -> Result<Vec
                         if parent == Some(StoryElementKind::EndnotesRoot)
                             && word
                             && matches_local_name(element.name().as_ref(), b"endnote")
-                            && note_is_normal(&element) =>
+                            && note_is_normal(&element, reader.resolver()) =>
                     {
                         StoryElementKind::NormalNote
                     }
-                    PackageStoryKind::HeaderFooter
+                    PackageStoryKind::Header | PackageStoryKind::Footer
                         if parent == Some(StoryElementKind::HeaderFooterRoot)
                             && word
                             && matches_local_name(element.name().as_ref(), b"p") =>
@@ -7435,23 +8667,48 @@ fn story_paragraph_spans(xml: &[u8], story_kind: PackageStoryKind) -> Result<Vec
     }
 }
 
-fn note_is_normal(element: &BytesStart<'_>) -> bool {
-    let mut id = 0i32;
+fn note_is_normal(element: &BytesStart<'_>, resolver: &NamespaceResolver) -> bool {
+    let mut id = None;
     let mut note_type = None;
-    for attribute in element.attributes().flatten() {
-        if matches_local_name(attribute.key.as_ref(), b"id") {
-            id = std::str::from_utf8(&attribute.value)
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(0);
-        } else if matches_local_name(attribute.key.as_ref(), b"type") {
-            note_type = Some(String::from_utf8_lossy(&attribute.value).into_owned());
+    for attribute in element.attributes() {
+        let Ok(attribute) = attribute else {
+            return false;
+        };
+        let (namespace, local) = resolver.resolve_attribute(attribute.key);
+        if !namespace_is_word(&namespace) {
+            continue;
+        }
+        if local.as_ref() == b"id" {
+            let Ok(raw) = std::str::from_utf8(&attribute.value) else {
+                return false;
+            };
+            let Ok(value) = quick_xml::escape::unescape(raw) else {
+                return false;
+            };
+            let Ok(value) = value.parse::<i32>() else {
+                return false;
+            };
+            if id.replace(value).is_some() {
+                return false;
+            }
+        } else if local.as_ref() == b"type" {
+            let Ok(raw) = std::str::from_utf8(&attribute.value) else {
+                return false;
+            };
+            let Ok(value) = quick_xml::escape::unescape(raw) else {
+                return false;
+            };
+            if note_type.replace(value.into_owned()).is_some() {
+                return false;
+            }
         }
     }
-    !matches!(
-        note_type.as_deref(),
-        Some("separator" | "continuationSeparator" | "continuationNotice")
-    ) && id > 0
+    match note_type.as_deref() {
+        Some("separator" | "continuationSeparator" | "continuationNotice") => false,
+        Some("normal") => id.is_some(),
+        Some(_) => false,
+        None => id.is_some_and(|id| id > 0),
+    }
 }
 
 fn find_typed_field_source(
@@ -10650,5 +11907,57 @@ mod tests {
         assert!(find_body_region_end(&crossed, 1, "Outer").is_err());
         let missing = [marker("TableStart:Outer")];
         assert!(find_body_region_end(&missing, 1, "Outer").is_err());
+    }
+
+    #[test]
+    fn package_story_forbidden_comment_bodies_fail_closed() {
+        let xml = format!(r#"<w:hdr xmlns:w="{W_NS}"><!--producer--invalid--><w:p/></w:hdr>"#);
+        assert!(validate_story_document_declarations_and_doctype(xml.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn package_story_processing_instruction_targets_require_xml_names() {
+        for instruction in ["<?XML version=\"1.0\"?>", "<?1producer value?>"] {
+            let xml = format!(r#"{instruction}<w:hdr xmlns:w="{W_NS}"><w:p/></w:hdr>"#);
+            assert!(
+                validate_story_document_declarations_and_doctype(xml.as_bytes()).is_err(),
+                "{instruction}"
+            );
+        }
+    }
+
+    #[test]
+    fn package_story_xml_names_bindings_and_expanded_attributes_fail_closed() {
+        for malformed in [
+            r#"<1producer/>"#,
+            r#"<producer:item/>"#,
+            r#"<w:p 1producer="value"/>"#,
+            r#"<w:p producer:value="opaque"/>"#,
+            r#"<w:p xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" w:rsidR="one" q:rsidR="two"/>"#,
+        ] {
+            let xml = format!(r#"<w:hdr xmlns:w="{W_NS}">{malformed}</w:hdr>"#);
+            assert!(
+                validate_story_document_declarations_and_doctype(xml.as_bytes()).is_err(),
+                "{malformed}"
+            );
+        }
+    }
+
+    #[test]
+    fn package_story_nested_references_and_literal_xml_characters_fail_closed() {
+        for malformed in [
+            "<x:raw>&undefined;</x:raw>".to_owned(),
+            "<x:raw>&#xFFFE;</x:raw>".to_owned(),
+            "<x:raw>producer\u{1}</x:raw>".to_owned(),
+            "<x:raw><![CDATA[producer\u{FFFE}]]></x:raw>".to_owned(),
+        ] {
+            let xml = format!(
+                r#"<w:hdr xmlns:w="{W_NS}" xmlns:x="urn:producer">{malformed}<w:p/></w:hdr>"#
+            );
+            assert!(
+                validate_story_document_declarations_and_doctype(xml.as_bytes()).is_err(),
+                "{malformed:?}"
+            );
+        }
     }
 }

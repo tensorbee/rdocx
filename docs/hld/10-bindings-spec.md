@@ -246,6 +246,17 @@ query so layout and conversion can diagnose retained content without exposing
 the preservation sidecar. The model and accessors are additive on the pre-1.0
 Rust surface. Python, WASM, and CLI bindings remain unchanged.
 
+The native facade also exposes `Document::legacy_form_fields` and
+`Document::set_legacy_form_field_value` for text, checkbox, and drop-down
+legacy fields. Form identity is the normalized source-part path plus its
+source-order ordinal within that part. `Document::building_blocks` and
+`Document::replace_building_block` expose owned supported projections of
+existing relationship-resolved glossary entries, identified by glossary part
+and source-order ordinal. Both mutation paths validate a staged package,
+reopen it, and commit only after the selected identity and typed value survive.
+They do not create entries, execute fields, or expand AutoText. Python, WASM,
+and CLI bindings remain unchanged.
+
 The native document renderer copies those defaults into the concrete optional
 `rdocx_layout::LayoutInput::math_properties` field. This field addition is a
 pre-1.0 source break for native callers that construct `LayoutInput` with a

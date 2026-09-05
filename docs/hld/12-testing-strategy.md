@@ -65,6 +65,15 @@ a reintroduction is obvious from the test name alone rather than from a diff.
 The existing file is the model: `zero_column_tables_do_not_panic`,
 `saving_is_reproducible`.
 
+The legacy form and glossary round-trip gate constructs every package in
+source. It covers typed text, checkbox, and drop-down values, deterministic
+part-scoped ordinal identity across supported internal Word stories, AutoText
+classification, and selected building-block replacement. Prefix aliases,
+fixed-prefix changed output, schema-order insertion, structural reopen,
+byte-exact unsupported subtree retention, unsafe relationship graphs, stale
+identities, wrong value kinds, bounds, and atomic failure are focused checks.
+The Python, WASM, and CLI surfaces and the 49-entry hash set remain unchanged.
+
 The Presentation collaboration round-trip gate is
 `modern_comments_replies_sections_and_handout_settings_survive_ordered_mutation_save_and_reopen`.
 It builds a noncanonical package in the existing `rpptx` integration binary,

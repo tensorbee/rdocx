@@ -21,6 +21,7 @@
 
 #![allow(clippy::too_many_arguments)]
 
+mod building_block;
 mod comments;
 mod comparison;
 mod content_control;
@@ -42,6 +43,7 @@ mod svg;
 pub mod table;
 mod template;
 
+pub use building_block::{BuildingBlock, BuildingBlockInfo, BuildingBlockKind};
 pub use comments::{BookmarkRef, CommentRef, RunPosition, RunRange};
 pub use comparison::{
     ComparisonDiagnostic, ComparisonGranularity, ComparisonOptions, ComparisonStoryKind,
@@ -59,7 +61,8 @@ pub use epub::{EpubDiagnostic, EpubWriteResult};
 pub use error::{Error, Result};
 pub use field::{
     BarcodeCaseStyle, BarcodeField, BarcodeKind, BarcodePointOfSaleStyle, FieldDateTime,
-    FieldEvaluation, FieldEvaluationContext, FieldOutcome, MailMergeControl, MailMergeData,
+    FieldEvaluation, FieldEvaluationContext, FieldOutcome, LegacyFormFieldInfo,
+    LegacyFormFieldKind, LegacyFormFieldValue, MailMergeControl, MailMergeData,
     MailMergeFormatContext, MailMergeFormattedText, MailMergeImage, MailMergeRecord,
     MailMergeValue, TcField, TocEntrySelection, TocField, TocRebuildReport,
 };
