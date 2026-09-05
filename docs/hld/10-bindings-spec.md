@@ -911,6 +911,25 @@ preserve these payloads through the existing presentation owner. No feature,
 trait, generic parameter, dynamic dispatch, wrapper identifier, crate, or
 binary fixture is added.
 
+## Native Word executable-content inventory
+
+The published pre-1.0 `rdocx` facade exposes the concrete
+`EmbeddedContentKind`, `EmbeddedSignatureState`, `EmbeddedMutationPolicy`, and
+`EmbeddedContentInfo` values. `Document::embedded_content` returns stable
+source-part and relationship identities, normalized target parts, resolved
+content types, exact byte lengths, SHA-256 hashes, and signature state for
+relationship-owned OLE, ActiveX, and VBA payloads.
+`extract_embedded_content` returns exact stored bytes.
+`replace_embedded_content` and `remove_embedded_content` stage, validate,
+serialize, reopen, and re-inventory the complete package before commit. Their
+explicit policy either preserves signature bytes as invalidated evidence or
+removes only validated package and selected VBA signature infrastructure.
+
+This is additive native Rust API in the existing facade. Python, WASM, and CLI
+consumers gain no executable-content methods and retain their existing opaque
+round-trip behavior. No public OXML API, feature, trait, generic parameter,
+dynamic dispatch, wrapper, crate, or binary fixture is added.
+
 ## Native PowerPoint media model
 
 The published pre-1.0 `rpptx` facade exposes concrete native Rust media values:

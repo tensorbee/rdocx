@@ -154,6 +154,14 @@ equations through the normalized Word model. Legacy Equation Editor, OLE, and
 pre-OOXML equation payloads remain opaque under the permanent legacy-format
 boundary.
 
+The native Rust Word facade inventories relationship-owned OLE objects,
+ActiveX controls, and VBA projects without decoding or executing their
+payloads. Callers can extract and replace exact bytes or remove one validated
+owner while shared targets and unrelated producer content survive. Package and
+VBA signature evidence is either retained as explicitly invalidated evidence or
+removed through an explicit mutation policy. Python, WASM, CLI, binary `.doc`,
+payload decoding, and execution remain outside this surface.
+
 Native Rust callers can also import and export the supported normalized
 equation subset as Presentation MathML or LaTeX. Lossy format and OfficeMath
 properties remain visible through ordered diagnostics. Python, WASM, CLI,

@@ -25,6 +25,7 @@ mod comments;
 mod comparison;
 mod content_control;
 mod document;
+mod embedded;
 mod epub;
 mod error;
 mod field;
@@ -50,6 +51,9 @@ pub use document::{
     AccessibilityIssue, BodyContentRef, BodyItemRef, Document, ImageInfo, IssueSeverity, LinkInfo,
     ListLevel, ListLevelSuffix, ListNumberFormat, NumberingFormat, NumberingLevel, OutlineNode,
     RenderOptions, UnsupportedXmlRef,
+};
+pub use embedded::{
+    EmbeddedContentInfo, EmbeddedContentKind, EmbeddedMutationPolicy, EmbeddedSignatureState,
 };
 pub use epub::{EpubDiagnostic, EpubWriteResult};
 pub use error::{Error, Result};

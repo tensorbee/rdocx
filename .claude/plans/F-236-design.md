@@ -1,6 +1,6 @@
 # F-236, Embedded object and macro inventory
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S68
 **Size**: L
 **Depends on**: F-171, F-172
@@ -198,21 +198,21 @@ repository harness.
 
 ## Implementation checklist
 
-- [ ] Add the approved private embedded module, `sha2` dependency, facade
+- [x] Add the approved private embedded module, `sha2` dependency, facade
   exports, and specific mutation error.
-- [ ] Discover Word OLE, ActiveX, and VBA ownership only through normalized,
+- [x] Discover Word OLE, ActiveX, and VBA ownership only through normalized,
   exact-type internal relationships and schema-position owner XML.
-- [ ] Produce deterministic inventory facts and exact SHA-256 hashes without
+- [x] Produce deterministic inventory facts and exact SHA-256 hashes without
   decoding payloads.
-- [ ] Implement byte-exact extraction.
-- [ ] Implement staged identity-preserving replacement.
-- [ ] Implement complete owner-range removal and newly-unreachable candidate
+- [x] Implement byte-exact extraction.
+- [x] Implement staged identity-preserving replacement.
+- [x] Implement complete owner-range removal and newly-unreachable candidate
   cleanup.
-- [ ] Implement both signature policies for package, legacy VBA, and Agile VBA
+- [x] Implement both signature policies for package, legacy VBA, and Agile VBA
   signature evidence.
-- [ ] Validate malformed graphs and guarantee byte-for-byte failure atomicity.
-- [ ] Add all source-built cases to the existing regression binary.
-- [ ] Run focused `rdocx` checks, every risk rider, and `/verify`.
+- [x] Validate malformed graphs and guarantee byte-for-byte failure atomicity.
+- [x] Add all source-built cases to the existing regression binary.
+- [x] Run focused `rdocx` checks, every risk rider, and `/verify`.
 
 ## Open questions
 

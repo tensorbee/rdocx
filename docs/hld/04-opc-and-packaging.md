@@ -548,6 +548,26 @@ digital-signature relationships with distinct existing targets. Unrelated,
 misplaced, duplicate, external, missing, or traversal-shaped signature graph
 edges fail closed before signature evidence can be retained or removed.
 
+The Word facade applies the same package rules from schema-positioned owners in
+supported story parts. An OLE payload requires exactly one relationship-owned
+`o:OLEObject` inside a valid run-owned `w:object`. An ActiveX control requires
+one valid `w:control`, an exact properties content type, and exactly one
+internal ActiveX binary relationship. A VBA project is owned by at most one
+main-document relationship and may own at most one legacy or Agile signature.
+Targets must be normalized internal Pack URI references with the exact
+relationship and content types. Missing relationship scopes, ambiguous or
+overlapping owners, shared removal targets, malformed signature graphs, and
+malformed owner XML fail before a package mutation becomes observable.
+
+Replacement preserves the normalized source-part and relationship identity,
+target name, content type, and owner XML. Removal patches only the validated
+complete owner range or the main-document VBA relationship, then deletes only
+owned candidates made newly unreachable by that operation. Signature policy
+either retains exact package and VBA signature bytes behind deterministic
+invalidation markers or removes only the validated signature infrastructure.
+Every mutation serializes, reopens, and re-inventories a staged package before
+commit, so failure leaves the original package byte-identical.
+
 The bounded SmartArt copy graph accepts only the five diagram relationship
 types and internal images whose parts own no relationships. Traversal has cycle
 protection and a shared 128-part ceiling in preflight and copy. Unsupported

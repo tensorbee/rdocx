@@ -41,6 +41,12 @@ pub enum Error {
         message: String,
     },
 
+    #[error("{operation} failed: {message}")]
+    InvalidEmbeddedMutation {
+        operation: &'static str,
+        message: String,
+    },
+
     #[error("{0}")]
     Other(String),
 }

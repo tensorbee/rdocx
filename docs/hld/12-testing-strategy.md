@@ -94,6 +94,18 @@ evidence, producing-scope selection, namespace and compatibility handling,
 malformed graph rejection, and byte-for-byte failure atomicity. No payload is
 decoded or executed.
 
+The Word executable-content regression gate is
+`word_embedded_inventory_reports_exact_hashes_relationship_paths_and_signature_state`.
+It source-builds OLE, ActiveX, VBA, package-signature, legacy VBA-signature,
+and Agile VBA-signature graphs in the existing `rdocx` regression binary. The
+gate requires deterministic ordering and stable kind, source, relationship,
+target, content type, byte length, exact SHA-256, and signature state. Adjacent
+tests cover extraction, staged replacement, ownership-aware removal,
+newly-unreachable cleanup, both signature policies, schema-position and
+markup-compatibility grammar, strict XML lexical and namespace validation,
+prefix-alias and unsupported-subtree preservation, save and reopen, and
+byte-for-byte failure atomicity. Payload bytes are never decoded or executed.
+
 The Presentation timing round-trip gate is
 `the_corpus_timeline_preserves_every_unsupported_sibling`. It walks every
 slide, layout, and master in the 50-deck corpus. The gate requires nonzero

@@ -182,6 +182,16 @@ layout, or master model, while ActiveX and VBA ownership is resolved through
 their package relationships. No OLE, ActiveX, or VBA decoder enters an
 `oxml-*`, layout, renderer, binding, WASM, or CLI crate.
 
+Word executable-content editing follows that boundary independently.
+`rdocx` owns schema-positioned story-owner discovery, relationship-graph and
+content-type validation, exact payload hashing and extraction, and staged
+replacement or removal. The private `embedded` module scans supported Word
+story parts without promoting executable XML or bytes into the typed document
+model. It commits only a serialized, reopened, and re-inventoried candidate.
+The facade uses the existing `oxml-opc` relationship vocabulary and a direct
+`sha2` dependency. It adds no cross-family edge, decoder, binding, WASM, or CLI
+surface.
+
 Deterministic animation export also belongs to the `rpptx` facade. It validates
 and samples explicit segments, prepares the package, resolver, font, chart,
 picture, and media state once, then evaluates and lowers one timeline sample at

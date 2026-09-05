@@ -1486,6 +1486,7 @@ dependencies = [
  "rpptx",
  "scraper",
  "serde_json",
+ "sha2",
  "thiserror",
  "zip",
 ]

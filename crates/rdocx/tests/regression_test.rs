@@ -13,12 +13,13 @@ use quick_xml::Reader as XmlReader;
 use quick_xml::events::Event as XmlEvent;
 use rdocx::{
     BarcodeField, BarcodeKind, BodyContentRef, BodyItemRef, BreakKind, CellItemRef, CellRef,
-    ChartData, ChartKind, Document, FieldDateTime, FieldEvaluationContext, FieldOutcome,
-    HyperlinkItemRef, HyperlinkRef, Length, ListLevel, MailMergeControl, MailMergeData,
-    MailMergeFormattedText, MailMergeImage, MailMergeRecord, MailMergeValue, ParagraphItemRef,
-    ParagraphRef, RasterFormat, RasterOptions, RasterOutput, RenderOptions, RevisionView,
-    RunItemRef, RunPosition, RunRange, RunRef, StyleBuilder, TableRef, TcField, TocEntrySelection,
-    TocField, TocRebuildReport, UnsupportedXmlRef,
+    ChartData, ChartKind, Document, EmbeddedContentKind, EmbeddedMutationPolicy,
+    EmbeddedSignatureState, FieldDateTime, FieldEvaluationContext, FieldOutcome, HyperlinkItemRef,
+    HyperlinkRef, Length, ListLevel, MailMergeControl, MailMergeData, MailMergeFormattedText,
+    MailMergeImage, MailMergeRecord, MailMergeValue, ParagraphItemRef, ParagraphRef, RasterFormat,
+    RasterOptions, RasterOutput, RenderOptions, RevisionView, RunItemRef, RunPosition, RunRange,
+    RunRef, StyleBuilder, TableRef, TcField, TocEntrySelection, TocField, TocRebuildReport,
+    UnsupportedXmlRef,
 };
 use rdocx_oxml::CT_Document;
 use rdocx_oxml::document::{BodyContent, CT_Body};
@@ -14779,4 +14780,3827 @@ fn granular_comparison_preserves_unmodelled_xml_byte_for_byte() {
     let mut rejected = Document::from_bytes(&bytes).unwrap();
     rejected.reject_all().unwrap();
     assert_eq!(document_xml(&mut rejected).matches(raw).count(), 1);
+}
+
+#[test]
+fn word_embedded_inventory_reports_exact_hashes_relationship_paths_and_signature_state() {
+    let mut package = f236_embedded_package(true);
+    let xml = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    package.set_part(
+        "/word/document.xml",
+        xml.replacen(
+            r#"<w:control q:id="control-rel" w:name="opaque"/>"#,
+            r#"<w:control q:id="control-rel" w:name="opaque"/><x:opaque xmlns:x="urn:f236:lookalike"><o:OLEObject q:id="lookalike-rel"/></x:opaque>"#,
+            1,
+        )
+        .into_bytes(),
+    );
+    package.set_part(
+        "/word/embeddings/lookalike.bin",
+        b"schema-position-lookalike".to_vec(),
+    );
+    package.content_types.add_override(
+        "/word/embeddings/lookalike.bin",
+        "application/vnd.openxmlformats-officedocument.oleObject",
+    );
+    package
+        .get_or_create_part_rels("/word/document.xml")
+        .add_with_id(
+            "lookalike-rel",
+            oxml_opc::relationship::rel_types::OLE_OBJECT,
+            "embeddings/lookalike.bin",
+        );
+    let document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    let inventory = document.embedded_content().unwrap();
+    assert_eq!(inventory.len(), 3);
+    assert_eq!(
+        inventory
+            .iter()
+            .map(|info| (
+                info.kind,
+                info.source_part.as_str(),
+                info.relationship_id.as_str(),
+                info.target_part.as_str(),
+                info.content_type.as_str(),
+                info.byte_len,
+                f236_hex(info.sha256),
+                info.signature_state,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                EmbeddedContentKind::ActiveXControl,
+                "/word/activeX/activeX1.xml",
+                "binary-rel",
+                "/word/activeX/activeX1.bin",
+                "application/vnd.ms-office.activeX",
+                18,
+                "15061d052ad086ca4077fa026fd53c13e8481df7671727c37d4d30566219996a".to_owned(),
+                EmbeddedSignatureState::Present,
+            ),
+            (
+                EmbeddedContentKind::OleObject,
+                "/word/document.xml",
+                "ole-rel",
+                "/word/embeddings/object1.bin",
+                "application/vnd.openxmlformats-officedocument.oleObject",
+                14,
+                "bdd4fcc46a30a68034bba88743518dc0e815c348d33ea4024bfa1c5e8134581f".to_owned(),
+                EmbeddedSignatureState::Present,
+            ),
+            (
+                EmbeddedContentKind::VbaProject,
+                "/word/document.xml",
+                "vba-rel",
+                "/word/vbaProject.bin",
+                "application/vnd.ms-office.vbaProject",
+                14,
+                "7b20cff9b07d570e5f0513f47ddc73236cdfa8951c0229fe16f6eff1086ac0b1".to_owned(),
+                EmbeddedSignatureState::Present,
+            ),
+        ]
+    );
+}
+
+#[test]
+fn word_embedded_extract_replace_and_remove_are_atomic() {
+    let mut document = f236_embedded_document(false);
+    assert_eq!(
+        document
+            .extract_embedded_content("/word/document.xml", "ole-rel")
+            .unwrap(),
+        b"ole-executable"
+    );
+    let replaced = document
+        .replace_embedded_content(
+            "/word/activeX/activeX1.xml",
+            "binary-rel",
+            b"opaque replacement",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    assert_eq!(replaced.relationship_id, "binary-rel");
+    assert_eq!(replaced.target_part, "/word/activeX/activeX1.bin");
+    assert_eq!(
+        document
+            .extract_embedded_content("/word/activeX/activeX1.xml", "binary-rel")
+            .unwrap(),
+        b"opaque replacement"
+    );
+    document
+        .remove_embedded_content(
+            "/word/activeX/activeX1.xml",
+            "binary-rel",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    let bytes = document.to_bytes().unwrap();
+    let package = f236_open_package(&bytes);
+    assert!(!package.parts.contains_key("/word/activeX/activeX1.xml"));
+    assert!(!package.parts.contains_key("/word/activeX/activeX1.bin"));
+    assert!(
+        !String::from_utf8_lossy(package.get_part("/word/document.xml").unwrap())
+            .contains("control-rel")
+    );
+    Document::from_bytes(&bytes).unwrap();
+
+    let before_failure = document.to_bytes().unwrap();
+    assert!(
+        document
+            .replace_embedded_content(
+                "/word/document.xml",
+                "missing",
+                b"must-not-land",
+                EmbeddedMutationPolicy::RemoveInvalidatedSignatures,
+            )
+            .is_err()
+    );
+    assert_eq!(document.to_bytes().unwrap(), before_failure);
+}
+
+#[test]
+fn word_embedded_control_requires_an_object_or_picture_owner() {
+    let mut package = f236_embedded_package(false);
+    let xml = br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:p><w:r><w:object><w:control q:id="object-control" w:name="valid"/></w:object></w:r><w:r><w:control q:id="direct-control" w:name="opaque"/></w:r></w:p></w:hdr>"#.to_vec();
+    package.set_part("/word/direct-control-header.xml", xml.clone());
+    package.content_types.add_override(
+        "/word/direct-control-header.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+    );
+    for (relationship_id, target) in [
+        ("object-control", "activeX/object-control.xml"),
+        ("direct-control", "activeX/direct-control.xml"),
+    ] {
+        package
+            .get_or_create_part_rels("/word/direct-control-header.xml")
+            .add_with_id(
+                relationship_id,
+                oxml_opc::relationship::rel_types::CONTROL,
+                target,
+            );
+    }
+    for (stem, relationship_id) in [
+        ("object-control", "object-control-binary"),
+        ("direct-control", "direct-control-binary"),
+    ] {
+        let properties_part = format!("/word/activeX/{stem}.xml");
+        let binary_part = format!("/word/activeX/{stem}.bin");
+        package.set_part(
+            &properties_part,
+            format!(
+                r#"<ax:ocx xmlns:ax="http://schemas.microsoft.com/office/2006/activeX" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" q:id="{relationship_id}"/>"#
+            )
+            .into_bytes(),
+        );
+        package
+            .content_types
+            .add_override(&properties_part, "application/vnd.ms-office.activeX+xml");
+        package.set_part(&binary_part, format!("{stem} executable").into_bytes());
+        package
+            .content_types
+            .add_override(&binary_part, "application/vnd.ms-office.activeX");
+        let binary_target = format!("{stem}.bin");
+        package
+            .get_or_create_part_rels(&properties_part)
+            .add_with_id(
+                relationship_id,
+                oxml_opc::relationship::rel_types::ACTIVEX_CONTROL_BINARY,
+                &binary_target,
+            );
+    }
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    let inventory = document.embedded_content().unwrap();
+    assert!(
+        inventory
+            .iter()
+            .any(|info| info.target_part == "/word/activeX/object-control.bin")
+    );
+    assert!(
+        !inventory
+            .iter()
+            .any(|info| info.target_part == "/word/activeX/direct-control.bin")
+    );
+    let before = document.to_bytes().unwrap();
+    assert_eq!(
+        f236_open_package(&before)
+            .get_part("/word/direct-control-header.xml")
+            .unwrap(),
+        xml
+    );
+    assert!(
+        document
+            .remove_embedded_content(
+                "/word/activeX/direct-control.xml",
+                "direct-control-binary",
+                EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+            )
+            .is_err()
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+    document
+        .remove_embedded_content(
+            "/word/activeX/object-control.xml",
+            "object-control-binary",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    let removed = f236_open_package(&document.to_bytes().unwrap());
+    let header = String::from_utf8(
+        removed
+            .get_part("/word/direct-control-header.xml")
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!header.contains("object-control"), "{header}");
+    assert!(header.contains("direct-control"), "{header}");
+}
+
+#[test]
+fn ordinary_document_edits_preserve_every_embedded_payload_byte() {
+    let mut document = f236_embedded_document(true);
+    let before = f236_open_package(&document.to_bytes().unwrap());
+    let retained = [
+        "/word/embeddings/object1.bin",
+        "/word/activeX/activeX1.bin",
+        "/word/vbaProject.bin",
+        "/word/vbaSignature.bin",
+        "/_xmlsignatures/origin.sigs",
+        "/_xmlsignatures/sig1.xml",
+    ]
+    .map(|part| (part, before.get_part(part).unwrap().to_vec()));
+    document.add_paragraph("ordinary typed edit");
+    let after_bytes = document.to_bytes().unwrap();
+    let after = f236_open_package(&after_bytes);
+    for (part, bytes) in retained {
+        assert_eq!(after.get_part(part).unwrap(), bytes, "{part}");
+    }
+    assert!(
+        Document::from_bytes(&after_bytes)
+            .unwrap()
+            .embedded_content()
+            .unwrap()
+            .iter()
+            .all(|info| info.signature_state == EmbeddedSignatureState::Invalidated)
+    );
+
+    let mut synchronized = f236_embedded_document(true);
+    assert_eq!(synchronized.redact_text("secret").unwrap().total(), 1);
+    assert!(
+        synchronized
+            .embedded_content()
+            .unwrap()
+            .iter()
+            .all(|info| info.signature_state == EmbeddedSignatureState::Invalidated)
+    );
+    let synchronized = synchronized.to_bytes().unwrap();
+    assert!(
+        Document::from_bytes(&synchronized)
+            .unwrap()
+            .embedded_content()
+            .unwrap()
+            .iter()
+            .all(|info| info.signature_state == EmbeddedSignatureState::Invalidated)
+    );
+}
+
+#[test]
+fn word_embedded_removal_deletes_only_newly_unreachable_owned_candidates() {
+    let mut package = f236_embedded_package(false);
+    let xml = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    package.set_part(
+        "/word/document.xml",
+        xml.replacen(
+            "</w:body>",
+            r#"<w:p><w:r><w:object xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><o:OLEObject q:id="shared-ole"/></w:object></w:r></w:p></w:body>"#,
+            1,
+        )
+        .into_bytes(),
+    );
+    package
+        .get_or_create_part_rels("/word/document.xml")
+        .add_with_id(
+            "shared-ole",
+            oxml_opc::relationship::rel_types::OLE_OBJECT,
+            "embeddings/object1.bin",
+        );
+    let orphan = package
+        .get_part("/word/embeddings/orphan.bin")
+        .unwrap()
+        .to_vec();
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    document
+        .remove_embedded_content(
+            "/word/document.xml",
+            "ole-rel",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    let saved = f236_open_package(&document.to_bytes().unwrap());
+    assert_eq!(
+        saved.get_part("/word/embeddings/object1.bin").unwrap(),
+        b"ole-executable"
+    );
+    assert_eq!(
+        saved.get_part("/word/embeddings/orphan.bin").unwrap(),
+        orphan
+    );
+    let inventory = document.embedded_content().unwrap();
+    assert!(
+        inventory
+            .iter()
+            .any(|info| info.relationship_id == "shared-ole")
+    );
+    assert!(
+        !inventory
+            .iter()
+            .any(|info| info.relationship_id == "ole-rel")
+    );
+
+    let mut shared_properties = f236_embedded_package(false);
+    shared_properties
+        .get_or_create_part_rels("/word/document.xml")
+        .add_with_id(
+            "shared-properties",
+            "urn:f236:shared-active-x-properties",
+            "activeX/activeX1.xml",
+        );
+    let mut shared_properties =
+        Document::from_bytes(&f236_package_bytes(shared_properties)).unwrap();
+    shared_properties
+        .remove_embedded_content(
+            "/word/activeX/activeX1.xml",
+            "binary-rel",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    let saved = f236_open_package(&shared_properties.to_bytes().unwrap());
+    assert!(saved.parts.contains_key("/word/activeX/activeX1.xml"));
+    assert_eq!(
+        saved.get_part("/word/activeX/activeX1.bin").unwrap(),
+        b"activex-executable"
+    );
+    assert!(
+        saved
+            .get_part_rels("/word/activeX/activeX1.xml")
+            .unwrap()
+            .items
+            .iter()
+            .any(|relationship| relationship.id == "binary-rel")
+    );
+    assert!(
+        !String::from_utf8_lossy(saved.get_part("/word/document.xml").unwrap())
+            .contains("control-rel")
+    );
+    assert!(
+        !shared_properties
+            .embedded_content()
+            .unwrap()
+            .iter()
+            .any(|info| info.kind == EmbeddedContentKind::ActiveXControl)
+    );
+}
+
+#[test]
+fn word_embedded_mutation_policy_preserves_or_removes_invalidated_signature_evidence() {
+    let bytes = f236_package_bytes(f236_embedded_package(true));
+    let mut preserving = Document::from_bytes(&bytes).unwrap();
+    let preserved = preserving
+        .replace_embedded_content(
+            "/word/document.xml",
+            "vba-rel",
+            b"changed vba",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    assert_eq!(
+        preserved.signature_state,
+        EmbeddedSignatureState::Invalidated
+    );
+    let preserved = f236_open_package(&preserving.to_bytes().unwrap());
+    assert!(preserved.parts.contains_key("/word/vbaSignature.bin"));
+    assert!(preserved.parts.contains_key("/_xmlsignatures/sig1.xml"));
+
+    let mut removing = Document::from_bytes(&bytes).unwrap();
+    let unsigned = removing
+        .replace_embedded_content(
+            "/word/document.xml",
+            "vba-rel",
+            b"changed vba",
+            EmbeddedMutationPolicy::RemoveInvalidatedSignatures,
+        )
+        .unwrap();
+    assert_eq!(unsigned.signature_state, EmbeddedSignatureState::Absent);
+    let unsigned = f236_open_package(&removing.to_bytes().unwrap());
+    assert!(!unsigned.parts.contains_key("/word/vbaSignature.bin"));
+    assert!(!unsigned.parts.contains_key("/_xmlsignatures/origin.sigs"));
+    assert!(!unsigned.parts.contains_key("/_xmlsignatures/sig1.xml"));
+
+    let mut agile = f236_embedded_package(false);
+    agile
+        .get_or_create_part_rels("/word/vbaProject.bin")
+        .items
+        .iter_mut()
+        .find(|relationship| relationship.id == "vba-signature-rel")
+        .unwrap()
+        .rel_type = oxml_opc::relationship::rel_types::VBA_PROJECT_SIGNATURE_AGILE.to_owned();
+    agile.content_types.add_override(
+        "/word/vbaSignature.bin",
+        "application/vnd.ms-office.vbaProjectSignatureAgile",
+    );
+    let agile = f236_package_bytes(agile);
+    let mut preserving = Document::from_bytes(&agile).unwrap();
+    assert_eq!(
+        preserving
+            .replace_embedded_content(
+                "/word/document.xml",
+                "vba-rel",
+                b"changed agile vba",
+                EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+            )
+            .unwrap()
+            .signature_state,
+        EmbeddedSignatureState::Invalidated
+    );
+    assert!(
+        f236_open_package(&preserving.to_bytes().unwrap())
+            .parts
+            .contains_key("/word/vbaSignature.bin")
+    );
+    let mut removing = Document::from_bytes(&agile).unwrap();
+    assert_eq!(
+        removing
+            .replace_embedded_content(
+                "/word/document.xml",
+                "vba-rel",
+                b"changed agile vba",
+                EmbeddedMutationPolicy::RemoveInvalidatedSignatures,
+            )
+            .unwrap()
+            .signature_state,
+        EmbeddedSignatureState::Absent
+    );
+    assert!(
+        !f236_open_package(&removing.to_bytes().unwrap())
+            .parts
+            .contains_key("/word/vbaSignature.bin")
+    );
+}
+
+#[test]
+fn unsafe_or_malformed_word_embedded_graphs_fail_closed_without_mutation() {
+    for (label, target, external) in [
+        ("external", "https://example.com/object.bin", true),
+        ("traversal", "../../../outside.bin", false),
+    ] {
+        let mut package = f236_embedded_package(false);
+        let relationship = package
+            .get_or_create_part_rels("/word/document.xml")
+            .items
+            .iter_mut()
+            .find(|relationship| relationship.id == "ole-rel")
+            .unwrap();
+        relationship.target = target.to_owned();
+        relationship.target_mode = external.then(|| "External".to_owned());
+        let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        assert!(document.embedded_content().is_err(), "{label}");
+        assert!(
+            document
+                .remove_embedded_content(
+                    "/word/document.xml",
+                    "ole-rel",
+                    EmbeddedMutationPolicy::RemoveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{label}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{label}");
+    }
+
+    let mut explicit_internal = f236_embedded_package(false);
+    explicit_internal
+        .get_or_create_part_rels("/word/document.xml")
+        .items
+        .iter_mut()
+        .find(|relationship| relationship.id == "ole-rel")
+        .unwrap()
+        .target_mode = Some("Internal".to_owned());
+    assert_eq!(
+        Document::from_bytes(&f236_package_bytes(explicit_internal))
+            .unwrap()
+            .extract_embedded_content("/word/document.xml", "ole-rel")
+            .unwrap(),
+        b"ole-executable"
+    );
+
+    for invalid_mode in ["external", "External ", "ProducerDefined"] {
+        let mut package = f236_embedded_package(false);
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .items
+            .iter_mut()
+            .find(|relationship| relationship.id == "ole-rel")
+            .unwrap()
+            .target_mode = Some(invalid_mode.to_owned());
+        let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        assert!(document.embedded_content().is_err(), "{invalid_mode}");
+        assert!(
+            document
+                .replace_embedded_content(
+                    "/word/document.xml",
+                    "ole-rel",
+                    b"must-not-land",
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{invalid_mode}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{invalid_mode}");
+    }
+
+    let mut invalid_reachability = f236_embedded_package(false);
+    invalid_reachability
+        .get_or_create_part_rels("/word/document.xml")
+        .items
+        .push(oxml_opc::relationship::Relationship {
+            id: "invalid-reachability".to_owned(),
+            rel_type: "urn:f236:producer-defined".to_owned(),
+            target: "embeddings/object1.bin".to_owned(),
+            target_mode: Some("ProducerDefined".to_owned()),
+        });
+    let mut invalid_reachability =
+        Document::from_bytes(&f236_package_bytes(invalid_reachability)).unwrap();
+    let before = invalid_reachability.to_bytes().unwrap();
+    assert!(
+        invalid_reachability
+            .remove_embedded_content(
+                "/word/document.xml",
+                "ole-rel",
+                EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+            )
+            .is_err()
+    );
+    assert_eq!(invalid_reachability.to_bytes().unwrap(), before);
+
+    let mut invalid_run_owner = f236_embedded_package(false);
+    let invalid_run_owner_xml =
+        br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+            <w:p><w:pPr><w:r><w:object><o:OLEObject q:id="invalid-run-owner"/></w:object></w:r></w:pPr></w:p>
+            <w:pPr><w:p><w:r><w:object><o:OLEObject q:id="invalid-story-owner"/></w:object></w:r></w:p></w:pPr>
+            <w:sdt><w:sdtPr/><w:sdtContent><w:tbl><w:sdt><w:sdtContent><w:tr><w:sdt><w:sdtContent><w:tc><w:sdt><w:sdtContent><w:p><w:sdt><w:sdtContent><w:hyperlink><w:r><w:object><o:OLEObject q:id="valid-run-owner"/></w:object></w:r></w:hyperlink></w:sdtContent></w:sdt></w:p></w:sdtContent></w:sdt></w:tc></w:sdtContent></w:sdt></w:tr></w:sdtContent></w:sdt></w:tbl></w:sdtContent></w:sdt>
+        </w:hdr>"#
+            .to_vec();
+    invalid_run_owner.set_part("/word/header-f236.xml", invalid_run_owner_xml.clone());
+    invalid_run_owner.content_types.add_override(
+        "/word/header-f236.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+    );
+    invalid_run_owner
+        .get_or_create_part_rels("/word/header-f236.xml")
+        .add_with_id(
+            "invalid-run-owner",
+            oxml_opc::relationship::rel_types::OLE_OBJECT,
+            "embeddings/object1.bin",
+        );
+    invalid_run_owner
+        .get_or_create_part_rels("/word/header-f236.xml")
+        .add_with_id(
+            "invalid-story-owner",
+            oxml_opc::relationship::rel_types::OLE_OBJECT,
+            "embeddings/object1.bin",
+        );
+    invalid_run_owner
+        .get_or_create_part_rels("/word/header-f236.xml")
+        .add_with_id(
+            "valid-run-owner",
+            oxml_opc::relationship::rel_types::OLE_OBJECT,
+            "embeddings/object1.bin",
+        );
+    let mut invalid_run_owner =
+        Document::from_bytes(&f236_package_bytes(invalid_run_owner)).unwrap();
+    let inventory = invalid_run_owner.embedded_content().unwrap();
+    assert!(
+        !inventory
+            .iter()
+            .any(|info| info.relationship_id == "invalid-run-owner")
+    );
+    assert!(
+        !inventory
+            .iter()
+            .any(|info| info.relationship_id == "invalid-story-owner")
+    );
+    assert!(
+        inventory
+            .iter()
+            .any(|info| info.relationship_id == "valid-run-owner")
+    );
+    let before = invalid_run_owner.to_bytes().unwrap();
+    assert_eq!(
+        f236_open_package(&before)
+            .get_part("/word/header-f236.xml")
+            .unwrap(),
+        invalid_run_owner_xml
+    );
+    for relationship_id in ["invalid-run-owner", "invalid-story-owner"] {
+        assert!(
+            invalid_run_owner
+                .remove_embedded_content(
+                    "/word/header-f236.xml",
+                    relationship_id,
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{relationship_id}"
+        );
+        assert_eq!(invalid_run_owner.to_bytes().unwrap(), before);
+    }
+
+    let mut wrong_type = f236_embedded_package(false);
+    wrong_type
+        .get_or_create_part_rels("/word/document.xml")
+        .items
+        .iter_mut()
+        .find(|relationship| relationship.id == "ole-rel")
+        .unwrap()
+        .rel_type = oxml_opc::relationship::rel_types::IMAGE.to_owned();
+    let mut document = Document::from_bytes(&f236_package_bytes(wrong_type)).unwrap();
+    let before = document.to_bytes().unwrap();
+    assert!(document.embedded_content().is_err());
+    assert!(
+        document
+            .replace_embedded_content(
+                "/word/document.xml",
+                "ole-rel",
+                b"must-not-land",
+                EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+            )
+            .is_err()
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+
+    let mut missing_content_type = f236_embedded_package(false);
+    missing_content_type
+        .content_types
+        .overrides
+        .remove("/word/embeddings/object1.bin");
+    assert!(
+        Document::from_bytes(&f236_package_bytes(missing_content_type))
+            .unwrap()
+            .embedded_content()
+            .is_err()
+    );
+
+    let mut duplicate_identity = f236_embedded_package(false);
+    duplicate_identity
+        .get_or_create_part_rels("/word/document.xml")
+        .items
+        .push(oxml_opc::relationship::Relationship {
+            id: "ole-rel".to_owned(),
+            rel_type: oxml_opc::relationship::rel_types::OLE_OBJECT.to_owned(),
+            target: "embeddings/object1.bin".to_owned(),
+            target_mode: None,
+        });
+    assert!(
+        Document::from_bytes(&f236_package_bytes(duplicate_identity))
+            .unwrap()
+            .embedded_content()
+            .is_err()
+    );
+
+    let mut ambiguous_owner = f236_embedded_package(false);
+    let xml = String::from_utf8(
+        ambiguous_owner
+            .get_part("/word/document.xml")
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap()
+    .replacen(
+        r#"<o:OLEObject q:id="ole-rel" ProgID="opaque"/>"#,
+        r#"<o:OLEObject q:id="ole-rel" ProgID="opaque"/><o:OLEObject q:id="other-ole"/>"#,
+        1,
+    );
+    ambiguous_owner.set_part("/word/document.xml", xml.into_bytes());
+    ambiguous_owner
+        .get_or_create_part_rels("/word/document.xml")
+        .add_with_id(
+            "other-ole",
+            oxml_opc::relationship::rel_types::OLE_OBJECT,
+            "embeddings/object1.bin",
+        );
+    assert!(
+        Document::from_bytes(&f236_package_bytes(ambiguous_owner))
+            .unwrap()
+            .embedded_content()
+            .is_err()
+    );
+
+    let mut malformed_signature = f236_embedded_package(true);
+    malformed_signature.parts.remove("/_xmlsignatures/sig1.xml");
+    assert!(
+        Document::from_bytes(&f236_package_bytes(malformed_signature))
+            .unwrap()
+            .embedded_content()
+            .is_err()
+    );
+
+    let mut extra_binary = f236_embedded_package(false);
+    extra_binary.set_part(
+        "/word/activeX/activeX2.bin",
+        b"second ActiveX binary".to_vec(),
+    );
+    extra_binary.content_types.add_override(
+        "/word/activeX/activeX2.bin",
+        "application/vnd.ms-office.activeX",
+    );
+    extra_binary
+        .get_or_create_part_rels("/word/activeX/activeX1.xml")
+        .add_with_id(
+            "second-binary-rel",
+            oxml_opc::relationship::rel_types::ACTIVEX_CONTROL_BINARY,
+            "activeX2.bin",
+        );
+    assert!(
+        Document::from_bytes(&f236_package_bytes(extra_binary))
+            .unwrap()
+            .embedded_content()
+            .is_err()
+    );
+
+    for (relationship_id, target) in [
+        ("incoming-origin", "../_xmlsignatures/origin.sigs"),
+        ("incoming-signature", "../_xmlsignatures/sig1.xml"),
+    ] {
+        let mut incoming = f236_embedded_package(true);
+        incoming
+            .get_or_create_part_rels("/word/document.xml")
+            .add_with_id(relationship_id, "urn:f236:unrelated", target);
+        let mut incoming = Document::from_bytes(&f236_package_bytes(incoming)).unwrap();
+        assert!(incoming.embedded_content().is_err(), "{relationship_id}");
+        assert!(
+            incoming
+                .replace_embedded_content(
+                    "/word/document.xml",
+                    "ole-rel",
+                    b"must-not-land",
+                    EmbeddedMutationPolicy::RemoveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{relationship_id}"
+        );
+    }
+}
+
+#[test]
+fn word_embedded_owner_removal_preserves_every_unrelated_raw_xml_byte() {
+    let mut package = f236_embedded_package(false);
+    let xml = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    let raw = r#"<x:producer xmlns:x="urn:f236" a="A&#x20;B"><!--keep--><?pi value?></x:producer>"#;
+    let object = r#"<w:object><v:shape id="opaque"/><o:OLEObject q:id="ole-rel" ProgID="opaque"/></w:object>"#;
+    let fallback = r#"<mc:Fallback><x:fallback xmlns:x="urn:f236:fallback" a="A&#x20;B"><!--fallback--><?pi keep?></x:fallback></mc:Fallback>"#;
+    let wrapped = format!(
+        r#"{raw}<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:x="urn:f236:wrapper" mc:Ignorable="x" x:owner="A&#x20;B"><mc:Choice Requires="w14">{object}</mc:Choice>{fallback}</mc:AlternateContent>"#
+    );
+    let xml = xml.replacen(object, &wrapped, 1);
+    assert!(xml.contains(&wrapped));
+    package.set_part("/word/document.xml", xml.into_bytes());
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    document
+        .remove_embedded_content(
+            "/word/document.xml",
+            "ole-rel",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    let bytes = document.to_bytes().unwrap();
+    let xml = String::from_utf8(
+        f236_open_package(&bytes)
+            .get_part("/word/document.xml")
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(xml.contains(raw), "{xml}");
+    assert!(xml.contains(fallback), "{xml}");
+    assert!(
+        xml.contains(r#"<mc:Choice Requires="w14"></mc:Choice>"#),
+        "{xml}"
+    );
+    assert!(xml.contains(r#"x:owner="A&#x20;B""#), "{xml}");
+    assert!(!xml.contains("ole-rel"), "{xml}");
+    assert!(xml.contains("control-rel"), "{xml}");
+    assert_eq!(
+        Document::from_bytes(&bytes)
+            .unwrap()
+            .embedded_content()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn word_embedded_duplicate_same_id_ole_children_fail_closed_atomically() {
+    let mut package = f236_embedded_package(false);
+    let xml = br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:p><w:r><w:object><o:OLEObject q:id="duplicate-same-id"/><o:OLEObject q:id="duplicate-same-id"/></w:object></w:r></w:p></w:hdr>"#.to_vec();
+    package.set_part("/word/duplicate-ole-header.xml", xml);
+    package.content_types.add_override(
+        "/word/duplicate-ole-header.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+    );
+    package
+        .get_or_create_part_rels("/word/duplicate-ole-header.xml")
+        .add_with_id(
+            "duplicate-same-id",
+            oxml_opc::relationship::rel_types::OLE_OBJECT,
+            "embeddings/object1.bin",
+        );
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    let before = document.to_bytes().unwrap();
+    assert!(document.embedded_content().is_err());
+    assert!(
+        document
+            .remove_embedded_content(
+                "/word/duplicate-ole-header.xml",
+                "duplicate-same-id",
+                EmbeddedMutationPolicy::RemoveInvalidatedSignatures,
+            )
+            .is_err()
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+}
+
+#[test]
+fn word_embedded_supported_story_without_relationships_rejects_broken_owner() {
+    let owner = r#"<w:p><w:r><w:object><o:OLEObject q:id="missing-owner-relationship"/></w:object></w:r></w:p>"#;
+    let namespace_declarations = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
+    let cases = [
+        (
+            "/word/missing-header-rels.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+            format!(r#"<w:hdr {namespace_declarations}>{owner}</w:hdr>"#),
+        ),
+        (
+            "/word/missing-footer-rels.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml",
+            format!(r#"<w:ftr {namespace_declarations}>{owner}</w:ftr>"#),
+        ),
+        (
+            "/word/missing-footnote-rels.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml",
+            format!(
+                r#"<w:footnotes {namespace_declarations}><w:footnote>{owner}</w:footnote></w:footnotes>"#
+            ),
+        ),
+        (
+            "/word/missing-endnote-rels.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml",
+            format!(
+                r#"<w:endnotes {namespace_declarations}><w:endnote>{owner}</w:endnote></w:endnotes>"#
+            ),
+        ),
+        (
+            "/word/missing-comment-rels.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml",
+            format!(
+                r#"<w:comments {namespace_declarations}><w:comment>{owner}</w:comment></w:comments>"#
+            ),
+        ),
+        (
+            "/word/missing-glossary-rels.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document.glossary+xml",
+            format!(
+                r#"<w:glossaryDocument {namespace_declarations}><w:docParts><w:docPart><w:docPartBody>{owner}</w:docPartBody></w:docPart></w:docParts></w:glossaryDocument>"#
+            ),
+        ),
+    ];
+    for (part, content_type, xml) in cases {
+        let mut package = f236_embedded_package(false);
+        package.set_part(part, xml.into_bytes());
+        package.content_types.add_override(part, content_type);
+        assert!(package.get_part_rels(part).is_none(), "{part}");
+        let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        assert!(document.embedded_content().is_err(), "{part}");
+        assert!(
+            document
+                .replace_embedded_content(
+                    "/word/document.xml",
+                    "ole-rel",
+                    b"must-not-land",
+                    EmbeddedMutationPolicy::RemoveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{part}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{part}");
+    }
+}
+
+#[test]
+fn word_embedded_malformed_compatibility_ancestry_stays_opaque_and_unremovable() {
+    let mut package = f236_embedded_package(false);
+    let xml = br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">
+        <mc:Choice Requires="w14"><w:p><w:r><w:object><o:OLEObject q:id="standalone-choice"/></w:object></w:r></w:p></mc:Choice>
+        <mc:Fallback><w:p><w:r><w:object><o:OLEObject q:id="standalone-fallback"/></w:object></w:r></w:p></mc:Fallback>
+        <mc:AlternateContent><mc:Choice Requires="w14"><mc:Fallback><w:p><w:r><w:object><o:OLEObject q:id="misnested-fallback"/></w:object></w:r></w:p></mc:Fallback></mc:Choice></mc:AlternateContent>
+        <mc:AlternateContent><mc:Choice Requires="w14"><w:p><w:r><w:object><o:OLEObject q:id="valid-choice"/></w:object></w:r></w:p></mc:Choice><mc:Fallback><w:p/></mc:Fallback></mc:AlternateContent>
+    </w:hdr>"#
+        .to_vec();
+    package.set_part("/word/malformed-mc.xml", xml.clone());
+    package.content_types.add_override(
+        "/word/malformed-mc.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+    );
+    for relationship_id in [
+        "standalone-choice",
+        "standalone-fallback",
+        "misnested-fallback",
+        "valid-choice",
+    ] {
+        package
+            .get_or_create_part_rels("/word/malformed-mc.xml")
+            .add_with_id(
+                relationship_id,
+                oxml_opc::relationship::rel_types::OLE_OBJECT,
+                "embeddings/object1.bin",
+            );
+    }
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    let inventory = document.embedded_content().unwrap();
+    assert!(
+        inventory
+            .iter()
+            .any(|info| info.relationship_id == "valid-choice")
+    );
+    for relationship_id in [
+        "standalone-choice",
+        "standalone-fallback",
+        "misnested-fallback",
+    ] {
+        assert!(
+            !inventory
+                .iter()
+                .any(|info| info.relationship_id == relationship_id),
+            "{relationship_id}"
+        );
+    }
+    let before = document.to_bytes().unwrap();
+    assert_eq!(
+        f236_open_package(&before)
+            .get_part("/word/malformed-mc.xml")
+            .unwrap(),
+        xml
+    );
+    for relationship_id in [
+        "standalone-choice",
+        "standalone-fallback",
+        "misnested-fallback",
+    ] {
+        assert!(
+            document
+                .remove_embedded_content(
+                    "/word/malformed-mc.xml",
+                    relationship_id,
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{relationship_id}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{relationship_id}");
+    }
+}
+
+#[test]
+fn word_embedded_text_box_story_supports_inventory_mutation_and_removal() {
+    let mut package = f236_embedded_package(false);
+    package.set_part(
+        "/word/textbox-header.xml",
+        br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:p><w:r><w:pict><v:shape id="textbox-shape"><v:textbox><w:txbxContent><w:p><w:r><w:object><o:OLEObject q:id="textbox-ole"/></w:object></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p></w:hdr>"#.to_vec(),
+    );
+    package.content_types.add_override(
+        "/word/textbox-header.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+    );
+    package.set_part(
+        "/word/embeddings/textbox-object.bin",
+        b"textbox executable".to_vec(),
+    );
+    package.content_types.add_override(
+        "/word/embeddings/textbox-object.bin",
+        "application/vnd.openxmlformats-officedocument.oleObject",
+    );
+    package
+        .get_or_create_part_rels("/word/textbox-header.xml")
+        .add_with_id(
+            "textbox-ole",
+            oxml_opc::relationship::rel_types::OLE_OBJECT,
+            "embeddings/textbox-object.bin",
+        );
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    let info = document
+        .embedded_content()
+        .unwrap()
+        .into_iter()
+        .find(|info| info.relationship_id == "textbox-ole")
+        .unwrap();
+    assert_eq!(info.source_part, "/word/textbox-header.xml");
+    assert_eq!(info.target_part, "/word/embeddings/textbox-object.bin");
+    assert_eq!(
+        document
+            .extract_embedded_content("/word/textbox-header.xml", "textbox-ole")
+            .unwrap(),
+        b"textbox executable"
+    );
+    document
+        .replace_embedded_content(
+            "/word/textbox-header.xml",
+            "textbox-ole",
+            b"changed textbox executable",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    let replaced = document.to_bytes().unwrap();
+    let reopened = Document::from_bytes(&replaced).unwrap();
+    assert_eq!(
+        reopened
+            .extract_embedded_content("/word/textbox-header.xml", "textbox-ole")
+            .unwrap(),
+        b"changed textbox executable"
+    );
+    document
+        .remove_embedded_content(
+            "/word/textbox-header.xml",
+            "textbox-ole",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    let removed = document.to_bytes().unwrap();
+    let package = f236_open_package(&removed);
+    assert!(
+        !package
+            .parts
+            .contains_key("/word/embeddings/textbox-object.bin")
+    );
+    let header = String::from_utf8(
+        package
+            .get_part("/word/textbox-header.xml")
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(header.contains("<w:txbxContent>"), "{header}");
+    assert!(!header.contains("textbox-ole"), "{header}");
+    assert!(
+        !Document::from_bytes(&removed)
+            .unwrap()
+            .embedded_content()
+            .unwrap()
+            .iter()
+            .any(|info| info.relationship_id == "textbox-ole")
+    );
+}
+
+#[test]
+fn word_embedded_shared_vba_target_rejects_removal_before_signature_mutation() {
+    for policy in [
+        EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        EmbeddedMutationPolicy::RemoveInvalidatedSignatures,
+    ] {
+        let mut package = f236_embedded_package(false);
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .add_with_id(
+                "shared-vba-project",
+                "urn:f236:shared-vba-project",
+                "vbaProject.bin",
+            );
+        let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        assert!(
+            document
+                .remove_embedded_content("/word/document.xml", "vba-rel", policy)
+                .is_err(),
+            "{policy:?}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{policy:?}");
+        let package = f236_open_package(&before);
+        assert!(
+            package
+                .get_part_rels("/word/vbaProject.bin")
+                .unwrap()
+                .items
+                .iter()
+                .any(|relationship| relationship.id == "vba-signature-rel"),
+            "{policy:?}"
+        );
+        assert!(package.parts.contains_key("/word/vbaSignature.bin"));
+    }
+}
+
+#[test]
+fn word_embedded_nested_story_root_cannot_bypass_invalid_outer_ancestry() {
+    let mut package = f236_embedded_package(false);
+    let malformed = br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:pPr><w:hdr><w:p><w:r><w:object><o:OLEObject q:id="nested-root-ole"/></w:object></w:r></w:p></w:hdr></w:pPr></w:hdr>"#.to_vec();
+    package.set_part("/word/nested-root-header.xml", malformed.clone());
+    package.content_types.add_override(
+        "/word/nested-root-header.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+    );
+    package
+        .get_or_create_part_rels("/word/nested-root-header.xml")
+        .add_with_id(
+            "nested-root-ole",
+            oxml_opc::relationship::rel_types::OLE_OBJECT,
+            "embeddings/object1.bin",
+        );
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    assert!(
+        !document
+            .embedded_content()
+            .unwrap()
+            .iter()
+            .any(|info| info.relationship_id == "nested-root-ole")
+    );
+    let before = document.to_bytes().unwrap();
+    assert_eq!(
+        f236_open_package(&before)
+            .get_part("/word/nested-root-header.xml")
+            .unwrap(),
+        malformed
+    );
+    assert!(
+        document
+            .remove_embedded_content(
+                "/word/nested-root-header.xml",
+                "nested-root-ole",
+                EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+            )
+            .is_err()
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+}
+
+#[test]
+fn word_embedded_story_root_must_be_the_single_xml_document_element() {
+    let mut package = f236_embedded_package(false);
+    let foreign_root = br#"<x:wrapper xmlns:x="urn:f236:wrapper" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:hdr><w:p><w:r><w:object><o:OLEObject q:id="foreign-root-ole"/></w:object></w:r></w:p></w:hdr></x:wrapper>"#.to_vec();
+    let multiple_roots = br#"<x:closed xmlns:x="urn:f236:closed"/><w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:p><w:r><w:object><o:OLEObject q:id="second-root-ole"/></w:object></w:r></w:p></w:hdr>"#.to_vec();
+    for (part, xml) in [
+        ("/word/foreign-root-header.xml", foreign_root.clone()),
+        ("/word/multiple-root-header.xml", multiple_roots.clone()),
+    ] {
+        package.set_part(part, xml);
+        package.content_types.add_override(
+            part,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        );
+    }
+    for (part, relationship_id) in [
+        ("/word/foreign-root-header.xml", "foreign-root-ole"),
+        ("/word/multiple-root-header.xml", "second-root-ole"),
+    ] {
+        package.get_or_create_part_rels(part).add_with_id(
+            relationship_id,
+            oxml_opc::relationship::rel_types::OLE_OBJECT,
+            "embeddings/object1.bin",
+        );
+    }
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    let inventory = document.embedded_content().unwrap();
+    for relationship_id in ["foreign-root-ole", "second-root-ole"] {
+        assert!(
+            !inventory
+                .iter()
+                .any(|info| info.relationship_id == relationship_id),
+            "{relationship_id}"
+        );
+    }
+    let before = document.to_bytes().unwrap();
+    let before_package = f236_open_package(&before);
+    assert_eq!(
+        before_package
+            .get_part("/word/foreign-root-header.xml")
+            .unwrap(),
+        foreign_root
+    );
+    assert_eq!(
+        before_package
+            .get_part("/word/multiple-root-header.xml")
+            .unwrap(),
+        multiple_roots
+    );
+    for (part, relationship_id) in [
+        ("/word/foreign-root-header.xml", "foreign-root-ole"),
+        ("/word/multiple-root-header.xml", "second-root-ole"),
+    ] {
+        assert!(
+            document
+                .remove_embedded_content(
+                    part,
+                    relationship_id,
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{relationship_id}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{relationship_id}");
+    }
+}
+
+#[test]
+fn word_embedded_non_whitespace_outside_the_story_root_stays_opaque() {
+    for (label, xml) in [
+        (
+            "before-root",
+            br#"junk<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:p><w:r><w:object><o:OLEObject q:id="outside-root-ole"/></w:object></w:r></w:p></w:hdr>"#.to_vec(),
+        ),
+        (
+            "after-root",
+            br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:p><w:r><w:object><o:OLEObject q:id="outside-root-ole"/></w:object></w:r></w:p></w:hdr>junk"#.to_vec(),
+        ),
+    ] {
+        let mut package = f236_embedded_package(false);
+        package.set_part("/word/outside-root-header.xml", xml.clone());
+        package.content_types.add_override(
+            "/word/outside-root-header.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        );
+        package
+            .get_or_create_part_rels("/word/outside-root-header.xml")
+            .add_with_id(
+                "outside-root-ole",
+                oxml_opc::relationship::rel_types::OLE_OBJECT,
+                "embeddings/object1.bin",
+            );
+        let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+        assert!(
+            !document
+                .embedded_content()
+                .unwrap()
+                .iter()
+                .any(|info| info.relationship_id == "outside-root-ole"),
+            "{label}"
+        );
+        let before = document.to_bytes().unwrap();
+        assert_eq!(
+            f236_open_package(&before)
+                .get_part("/word/outside-root-header.xml")
+                .unwrap(),
+            xml,
+            "{label}"
+        );
+        assert!(
+            document
+                .remove_embedded_content(
+                    "/word/outside-root-header.xml",
+                    "outside-root-ole",
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{label}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{label}");
+    }
+}
+
+#[test]
+fn word_embedded_markup_compatibility_requires_complete_choice_fallback_grammar() {
+    let mut package = f236_embedded_package(false);
+    let xml = br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">
+        <mc:AlternateContent><mc:Fallback><w:p><w:r><w:object><o:OLEObject q:id="fallback-only"/></w:object></w:r></w:p></mc:Fallback></mc:AlternateContent>
+        <mc:AlternateContent><mc:Choice><w:p><w:r><w:object><o:OLEObject q:id="missing-requires"/></w:object></w:r></w:p></mc:Choice></mc:AlternateContent>
+        <mc:AlternateContent><mc:Choice Requires=""><w:p><w:r><w:object><o:OLEObject q:id="empty-requires"/></w:object></w:r></w:p></mc:Choice></mc:AlternateContent>
+        <mc:AlternateContent><mc:Choice Requires="unbound"><w:p><w:r><w:object><o:OLEObject q:id="unbound-requires"/></w:object></w:r></w:p></mc:Choice></mc:AlternateContent>
+        <mc:AlternateContent><mc:Choice Requires="w14"><w:p><w:r><w:object><o:OLEObject q:id="choice-before-fallback"/></w:object></w:r></w:p></mc:Choice><mc:Fallback><w:p/></mc:Fallback><mc:Choice Requires="w14"><w:p/></mc:Choice></mc:AlternateContent>
+        <mc:AlternateContent><mc:Choice Requires="w14"><w:p><w:r><w:object><o:OLEObject q:id="choice-before-duplicate-fallback"/></w:object></w:r></w:p></mc:Choice><mc:Fallback><w:p/></mc:Fallback><mc:Fallback><w:p/></mc:Fallback></mc:AlternateContent>
+        <mc:AlternateContent><mc:Choice Requires="w14"><w:p><w:r><w:object><o:OLEObject q:id="valid-mc-grammar"/></w:object></w:r></w:p></mc:Choice><mc:Fallback><w:p/></mc:Fallback></mc:AlternateContent>
+    </w:hdr>"#
+        .to_vec();
+    package.set_part("/word/mc-grammar.xml", xml.clone());
+    package.content_types.add_override(
+        "/word/mc-grammar.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+    );
+    let invalid_relationships = [
+        "fallback-only",
+        "missing-requires",
+        "empty-requires",
+        "unbound-requires",
+        "choice-before-fallback",
+        "choice-before-duplicate-fallback",
+    ];
+    for relationship_id in invalid_relationships
+        .iter()
+        .copied()
+        .chain(["valid-mc-grammar"])
+    {
+        package
+            .get_or_create_part_rels("/word/mc-grammar.xml")
+            .add_with_id(
+                relationship_id,
+                oxml_opc::relationship::rel_types::OLE_OBJECT,
+                "embeddings/object1.bin",
+            );
+    }
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    let inventory = document.embedded_content().unwrap();
+    assert!(
+        inventory
+            .iter()
+            .any(|info| info.relationship_id == "valid-mc-grammar")
+    );
+    for relationship_id in invalid_relationships {
+        assert!(
+            !inventory
+                .iter()
+                .any(|info| info.relationship_id == relationship_id),
+            "{relationship_id}"
+        );
+    }
+    let before = document.to_bytes().unwrap();
+    assert_eq!(
+        f236_open_package(&before)
+            .get_part("/word/mc-grammar.xml")
+            .unwrap(),
+        xml
+    );
+    for relationship_id in invalid_relationships {
+        assert!(
+            document
+                .remove_embedded_content(
+                    "/word/mc-grammar.xml",
+                    relationship_id,
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{relationship_id}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{relationship_id}");
+    }
+}
+
+#[test]
+fn word_embedded_markup_compatibility_prohibited_attributes_stay_opaque() {
+    let mut package = f236_embedded_package(false);
+    let xml = br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">
+        <mc:AlternateContent xml:lang="en"><mc:Choice Requires="w14"><w:p><w:r><w:object><o:OLEObject q:id="alternate-xml-lang"/></w:object></w:r></w:p></mc:Choice></mc:AlternateContent>
+        <mc:AlternateContent><mc:Choice Requires="w14" xml:space="preserve"><w:p><w:r><w:object><o:OLEObject q:id="choice-xml-space"/></w:object></w:r></w:p></mc:Choice></mc:AlternateContent>
+        <mc:AlternateContent><mc:Choice Requires="w14"><w:p/></mc:Choice><mc:Fallback xml:lang="en"><w:p><w:r><w:object><o:OLEObject q:id="fallback-xml-lang"/></w:object></w:r></w:p></mc:Fallback></mc:AlternateContent>
+        <mc:AlternateContent><mc:Choice Requires="w14" producer="opaque"><w:p><w:r><w:object><o:OLEObject q:id="choice-unqualified-attribute"/></w:object></w:r></w:p></mc:Choice></mc:AlternateContent>
+        <mc:AlternateContent><mc:Choice Requires="w14" mc:Requires="w14"><w:p><w:r><w:object><o:OLEObject q:id="choice-prefixed-requires"/></w:object></w:r></w:p></mc:Choice></mc:AlternateContent>
+        <mc:AlternateContent><mc:Choice Requires="w14"><w:p/></mc:Choice><mc:Fallback mc:producer="opaque"><w:p><w:r><w:object><o:OLEObject q:id="fallback-unknown-mc-attribute"/></w:object></w:r></w:p></mc:Fallback></mc:AlternateContent>
+        <mc:AlternateContent><mc:Choice Requires="w14"><w:p><w:r><w:object><o:OLEObject q:id="valid-attributes-control"/></w:object></w:r></w:p></mc:Choice><mc:Fallback><w:p/></mc:Fallback></mc:AlternateContent>
+    </w:hdr>"#
+        .to_vec();
+    package.set_part("/word/mc-attributes.xml", xml.clone());
+    package.content_types.add_override(
+        "/word/mc-attributes.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+    );
+    let invalid_relationships = [
+        "alternate-xml-lang",
+        "choice-xml-space",
+        "fallback-xml-lang",
+        "choice-unqualified-attribute",
+        "choice-prefixed-requires",
+        "fallback-unknown-mc-attribute",
+    ];
+    for relationship_id in invalid_relationships
+        .iter()
+        .copied()
+        .chain(["valid-attributes-control"])
+    {
+        package
+            .get_or_create_part_rels("/word/mc-attributes.xml")
+            .add_with_id(
+                relationship_id,
+                oxml_opc::relationship::rel_types::OLE_OBJECT,
+                "embeddings/object1.bin",
+            );
+    }
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    let inventory = document.embedded_content().unwrap();
+    assert!(
+        inventory
+            .iter()
+            .any(|info| info.relationship_id == "valid-attributes-control")
+    );
+    for relationship_id in invalid_relationships {
+        assert!(
+            !inventory
+                .iter()
+                .any(|info| info.relationship_id == relationship_id),
+            "{relationship_id}"
+        );
+    }
+    let before = document.to_bytes().unwrap();
+    assert_eq!(
+        f236_open_package(&before)
+            .get_part("/word/mc-attributes.xml")
+            .unwrap(),
+        xml
+    );
+    for relationship_id in invalid_relationships {
+        assert!(
+            document
+                .remove_embedded_content(
+                    "/word/mc-attributes.xml",
+                    relationship_id,
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{relationship_id}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{relationship_id}");
+    }
+}
+
+#[test]
+fn word_embedded_markup_compatibility_rule_values_require_bound_names() {
+    let mut package = f236_embedded_package(false);
+    let xml = br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">
+        <mc:AlternateContent mc:Ignorable="unbound"><mc:Choice Requires="w14"><w:p><w:r><w:object><o:OLEObject q:id="unbound-ignorable"/></w:object></w:r></w:p></mc:Choice></mc:AlternateContent>
+        <mc:AlternateContent mc:Ignorable="mc"><mc:Choice Requires="w14"><w:p><w:r><w:object><o:OLEObject q:id="mc-ignorable"/></w:object></w:r></w:p></mc:Choice></mc:AlternateContent>
+        <mc:AlternateContent mc:MustUnderstand="w14:invalid"><mc:Choice Requires="w14"><w:p><w:r><w:object><o:OLEObject q:id="invalid-must-understand"/></w:object></w:r></w:p></mc:Choice></mc:AlternateContent>
+        <mc:AlternateContent mc:ProcessContent="w14"><mc:Choice Requires="w14"><w:p><w:r><w:object><o:OLEObject q:id="invalid-process-qname"/></w:object></w:r></w:p></mc:Choice></mc:AlternateContent>
+        <mc:AlternateContent mc:ProcessContent="unbound:item"><mc:Choice Requires="w14"><w:p><w:r><w:object><o:OLEObject q:id="unbound-process-qname"/></w:object></w:r></w:p></mc:Choice></mc:AlternateContent>
+        <mc:AlternateContent mc:PreserveElements="w14:"><mc:Choice Requires="w14"><w:p><w:r><w:object><o:OLEObject q:id="invalid-preserve-element"/></w:object></w:r></w:p></mc:Choice></mc:AlternateContent>
+        <mc:AlternateContent mc:PreserveAttributes=":attribute"><mc:Choice Requires="w14"><w:p><w:r><w:object><o:OLEObject q:id="invalid-preserve-attribute"/></w:object></w:r></w:p></mc:Choice></mc:AlternateContent>
+        <mc:AlternateContent mc:Ignorable="w14" mc:MustUnderstand="w" mc:ProcessContent="w14:*" mc:PreserveElements="w14:item" mc:PreserveAttributes="w14:attribute"><mc:Choice Requires="w14"><w:p><w:r><w:object><o:OLEObject q:id="valid-rule-values"/></w:object></w:r></w:p></mc:Choice><mc:Fallback><w:p/></mc:Fallback></mc:AlternateContent>
+    </w:hdr>"#
+        .to_vec();
+    package.set_part("/word/mc-rule-values.xml", xml.clone());
+    package.content_types.add_override(
+        "/word/mc-rule-values.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+    );
+    let invalid_relationships = [
+        "unbound-ignorable",
+        "mc-ignorable",
+        "invalid-must-understand",
+        "invalid-process-qname",
+        "unbound-process-qname",
+        "invalid-preserve-element",
+        "invalid-preserve-attribute",
+    ];
+    for relationship_id in invalid_relationships
+        .iter()
+        .copied()
+        .chain(["valid-rule-values"])
+    {
+        package
+            .get_or_create_part_rels("/word/mc-rule-values.xml")
+            .add_with_id(
+                relationship_id,
+                oxml_opc::relationship::rel_types::OLE_OBJECT,
+                "embeddings/object1.bin",
+            );
+    }
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    let inventory = document.embedded_content().unwrap();
+    assert!(
+        inventory
+            .iter()
+            .any(|info| info.relationship_id == "valid-rule-values")
+    );
+    for relationship_id in invalid_relationships {
+        assert!(
+            !inventory
+                .iter()
+                .any(|info| info.relationship_id == relationship_id),
+            "{relationship_id}"
+        );
+    }
+    let before = document.to_bytes().unwrap();
+    assert_eq!(
+        f236_open_package(&before)
+            .get_part("/word/mc-rule-values.xml")
+            .unwrap(),
+        xml
+    );
+    for relationship_id in invalid_relationships {
+        assert!(
+            document
+                .remove_embedded_content(
+                    "/word/mc-rule-values.xml",
+                    relationship_id,
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{relationship_id}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{relationship_id}");
+    }
+}
+
+#[test]
+fn word_embedded_grouped_drawingml_text_box_supports_inventory_mutation_and_removal() {
+    let mut package = f236_embedded_package(false);
+    package.set_part(
+        "/word/grouped-textbox-header.xml",
+        br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:p><w:r><w:drawing><wp:inline><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"><wpg:wgp><wpg:cNvGrpSpPr/><wpg:grpSpPr/><wps:wsp><wps:txbx><w:txbxContent><w:p><w:r><w:object><o:OLEObject q:id="grouped-textbox-ole"/></w:object></w:r></w:p></w:txbxContent></wps:txbx></wps:wsp></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:hdr>"#.to_vec(),
+    );
+    package.content_types.add_override(
+        "/word/grouped-textbox-header.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+    );
+    package.set_part(
+        "/word/embeddings/grouped-textbox.bin",
+        b"grouped textbox executable".to_vec(),
+    );
+    package.content_types.add_override(
+        "/word/embeddings/grouped-textbox.bin",
+        "application/vnd.openxmlformats-officedocument.oleObject",
+    );
+    package
+        .get_or_create_part_rels("/word/grouped-textbox-header.xml")
+        .add_with_id(
+            "grouped-textbox-ole",
+            oxml_opc::relationship::rel_types::OLE_OBJECT,
+            "embeddings/grouped-textbox.bin",
+        );
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    assert_eq!(
+        document
+            .extract_embedded_content("/word/grouped-textbox-header.xml", "grouped-textbox-ole",)
+            .unwrap(),
+        b"grouped textbox executable"
+    );
+    document
+        .replace_embedded_content(
+            "/word/grouped-textbox-header.xml",
+            "grouped-textbox-ole",
+            b"changed grouped textbox executable",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    let replaced = document.to_bytes().unwrap();
+    assert_eq!(
+        Document::from_bytes(&replaced)
+            .unwrap()
+            .extract_embedded_content("/word/grouped-textbox-header.xml", "grouped-textbox-ole",)
+            .unwrap(),
+        b"changed grouped textbox executable"
+    );
+    document
+        .remove_embedded_content(
+            "/word/grouped-textbox-header.xml",
+            "grouped-textbox-ole",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    let removed = document.to_bytes().unwrap();
+    let package = f236_open_package(&removed);
+    assert!(
+        !package
+            .parts
+            .contains_key("/word/embeddings/grouped-textbox.bin")
+    );
+    let header = String::from_utf8(
+        package
+            .get_part("/word/grouped-textbox-header.xml")
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(header.contains("<wpg:wgp>"), "{header}");
+    assert!(header.contains("<w:txbxContent>"), "{header}");
+    assert!(!header.contains("grouped-textbox-ole"), "{header}");
+}
+
+#[test]
+fn word_embedded_nested_drawingml_groups_preserve_text_box_story_ownership() {
+    let mut package = f236_embedded_package(false);
+    package.set_part(
+        "/word/nested-group-textbox-header.xml",
+        br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:p><w:r><w:drawing><wp:inline><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"><wpg:wgp><wpg:grpSp><wpg:grpSp><wps:wsp><wps:txbx><w:txbxContent><w:p><w:r><w:object><o:OLEObject q:id="nested-group-textbox-ole"/></w:object></w:r></w:p></w:txbxContent></wps:txbx></wps:wsp></wpg:grpSp></wpg:grpSp></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:hdr>"#.to_vec(),
+    );
+    package.content_types.add_override(
+        "/word/nested-group-textbox-header.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+    );
+    package.set_part(
+        "/word/embeddings/nested-group-textbox.bin",
+        b"nested group textbox executable".to_vec(),
+    );
+    package.content_types.add_override(
+        "/word/embeddings/nested-group-textbox.bin",
+        "application/vnd.openxmlformats-officedocument.oleObject",
+    );
+    package
+        .get_or_create_part_rels("/word/nested-group-textbox-header.xml")
+        .add_with_id(
+            "nested-group-textbox-ole",
+            oxml_opc::relationship::rel_types::OLE_OBJECT,
+            "embeddings/nested-group-textbox.bin",
+        );
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    assert_eq!(
+        document
+            .extract_embedded_content(
+                "/word/nested-group-textbox-header.xml",
+                "nested-group-textbox-ole",
+            )
+            .unwrap(),
+        b"nested group textbox executable"
+    );
+    document
+        .replace_embedded_content(
+            "/word/nested-group-textbox-header.xml",
+            "nested-group-textbox-ole",
+            b"changed nested group textbox executable",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    assert_eq!(
+        document
+            .extract_embedded_content(
+                "/word/nested-group-textbox-header.xml",
+                "nested-group-textbox-ole",
+            )
+            .unwrap(),
+        b"changed nested group textbox executable"
+    );
+    document
+        .remove_embedded_content(
+            "/word/nested-group-textbox-header.xml",
+            "nested-group-textbox-ole",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    let removed = document.to_bytes().unwrap();
+    let package = f236_open_package(&removed);
+    assert!(
+        !package
+            .parts
+            .contains_key("/word/embeddings/nested-group-textbox.bin")
+    );
+    let header = String::from_utf8(
+        package
+            .get_part("/word/nested-group-textbox-header.xml")
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert_eq!(header.matches("<wpg:grpSp>").count(), 2, "{header}");
+    assert!(header.contains("<w:txbxContent>"), "{header}");
+    assert!(!header.contains("nested-group-textbox-ole"), "{header}");
+}
+
+#[test]
+fn word_embedded_relationshipless_owner_children_count_toward_cardinality() {
+    for (label, old, new, source_part, relationship_id) in [
+        (
+            "ole",
+            r#"<o:OLEObject q:id="ole-rel" ProgID="opaque"/>"#,
+            r#"<o:OLEObject ProgID="relationshipless"/><o:OLEObject q:id="ole-rel" ProgID="opaque"/>"#,
+            "/word/document.xml",
+            "ole-rel",
+        ),
+        (
+            "control",
+            r#"<w:control q:id="control-rel" w:name="opaque"/>"#,
+            r#"<w:control w:name="relationshipless"/><w:control q:id="control-rel" w:name="opaque"/>"#,
+            "/word/activeX/activeX1.xml",
+            "binary-rel",
+        ),
+    ] {
+        let mut package = f236_embedded_package(false);
+        let xml = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec())
+            .unwrap()
+            .replacen(old, new, 1);
+        package.set_part("/word/document.xml", xml.into_bytes());
+        let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        assert!(document.embedded_content().is_err(), "{label}");
+        assert!(
+            document
+                .remove_embedded_content(
+                    source_part,
+                    relationship_id,
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{label}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{label}");
+    }
+}
+
+#[test]
+fn word_embedded_activex_removal_keeps_unrelated_relationship_targets() {
+    let mut package = f236_embedded_package(false);
+    package.set_part(
+        "/word/activeX/producer-data.bin",
+        b"unrelated producer data".to_vec(),
+    );
+    package.content_types.add_override(
+        "/word/activeX/producer-data.bin",
+        "application/vnd.example.producer-data",
+    );
+    package
+        .get_or_create_part_rels("/word/activeX/activeX1.xml")
+        .add_with_id("producer-rel", "urn:example:producer", "producer-data.bin");
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    document
+        .remove_embedded_content(
+            "/word/activeX/activeX1.xml",
+            "binary-rel",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    let package = f236_open_package(&document.to_bytes().unwrap());
+    assert!(!package.parts.contains_key("/word/activeX/activeX1.xml"));
+    assert!(!package.parts.contains_key("/word/activeX/activeX1.bin"));
+    assert_eq!(
+        package.get_part("/word/activeX/producer-data.bin").unwrap(),
+        b"unrelated producer data"
+    );
+    assert_eq!(
+        package
+            .content_types
+            .content_type_for("/word/activeX/producer-data.bin"),
+        Some("application/vnd.example.producer-data")
+    );
+}
+
+#[test]
+fn word_embedded_mc_rules_on_ordinary_ancestors_fail_closed() {
+    let mut package = f236_embedded_package(false);
+    let xml = br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="unbound"><w:p><w:r><w:object><o:OLEObject q:id="ordinary-invalid-mc"/></w:object></w:r></w:p></w:hdr>"#.to_vec();
+    f236_add_ole_story(
+        &mut package,
+        "/word/ordinary-invalid-mc.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        xml.clone(),
+        &["ordinary-invalid-mc"],
+    );
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    assert!(
+        !document
+            .embedded_content()
+            .unwrap()
+            .iter()
+            .any(|info| info.relationship_id == "ordinary-invalid-mc")
+    );
+    let before = document.to_bytes().unwrap();
+    assert!(
+        document
+            .remove_embedded_content(
+                "/word/ordinary-invalid-mc.xml",
+                "ordinary-invalid-mc",
+                EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+            )
+            .is_err()
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+    assert_eq!(
+        f236_open_package(&before)
+            .get_part("/word/ordinary-invalid-mc.xml")
+            .unwrap(),
+        xml
+    );
+}
+
+#[test]
+fn word_embedded_process_content_requires_an_ignorable_namespace() {
+    let mut package = f236_embedded_package(false);
+    let xml = br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x="urn:producer"><w:p mc:ProcessContent="x:item"><w:r><w:object><o:OLEObject q:id="missing-ignorable"/></w:object></w:r></w:p><w:p mc:Ignorable="x" mc:ProcessContent="x:item"><w:r><w:object><o:OLEObject q:id="matching-ignorable"/></w:object></w:r></w:p></w:hdr>"#.to_vec();
+    f236_add_ole_story(
+        &mut package,
+        "/word/process-content.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        xml,
+        &["missing-ignorable", "matching-ignorable"],
+    );
+    let document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    let inventory = document.embedded_content().unwrap();
+    assert!(
+        !inventory
+            .iter()
+            .any(|info| info.relationship_id == "missing-ignorable")
+    );
+    assert!(
+        inventory
+            .iter()
+            .any(|info| info.relationship_id == "matching-ignorable")
+    );
+}
+
+#[test]
+fn word_embedded_preservation_wildcards_keep_valid_owners_actionable() {
+    let mut package = f236_embedded_package(false);
+    let xml = br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14" mc:PreserveElements="w14:*" mc:PreserveAttributes="w14:*"><w:p><w:r><w:object><o:OLEObject q:id="wildcard-owner"/></w:object></w:r></w:p></w:hdr>"#.to_vec();
+    f236_add_ole_story(
+        &mut package,
+        "/word/preservation-wildcards.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        xml,
+        &["wildcard-owner"],
+    );
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    assert_eq!(
+        document
+            .extract_embedded_content("/word/preservation-wildcards.xml", "wildcard-owner")
+            .unwrap(),
+        b"ole-executable"
+    );
+    document
+        .remove_embedded_content(
+            "/word/preservation-wildcards.xml",
+            "wildcard-owner",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    let package = f236_open_package(&document.to_bytes().unwrap());
+    let header = String::from_utf8(
+        package
+            .get_part("/word/preservation-wildcards.xml")
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(header.contains(r#"mc:PreserveElements="w14:*""#));
+    assert!(header.contains(r#"mc:PreserveAttributes="w14:*""#));
+    assert!(!header.contains("wildcard-owner"));
+}
+
+#[test]
+fn word_embedded_graphic_data_uri_must_match_shape_vocabulary() {
+    let mut package = f236_embedded_package(false);
+    let xml = br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:p><w:r><w:drawing><wp:inline><a:graphic><a:graphicData><wpg:wgp><wps:wsp><wps:txbx><w:txbxContent><w:p><w:r><w:object><o:OLEObject q:id="missing-graphic-uri"/></w:object></w:r></w:p></w:txbxContent></wps:txbx></wps:wsp></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing><w:drawing><wp:inline><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wpg:wgp><wps:wsp><wps:txbx><w:txbxContent><w:p><w:r><w:object><o:OLEObject q:id="mismatched-graphic-uri"/></w:object></w:r></w:p></w:txbxContent></wps:txbx></wps:wsp></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing><w:drawing><wp:inline><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup"><wpg:wgp><wps:wsp><wps:txbx><w:txbxContent><w:p><w:r><w:object><o:OLEObject q:id="matching-graphic-uri"/></w:object></w:r></w:p></w:txbxContent></wps:txbx></wps:wsp></wpg:wgp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:hdr>"#.to_vec();
+    let ids = [
+        "missing-graphic-uri",
+        "mismatched-graphic-uri",
+        "matching-graphic-uri",
+    ];
+    f236_add_ole_story(
+        &mut package,
+        "/word/graphic-data-uri.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        xml,
+        &ids,
+    );
+    let document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    let inventory = document.embedded_content().unwrap();
+    assert!(
+        inventory
+            .iter()
+            .any(|info| info.relationship_id == "matching-graphic-uri")
+    );
+    for relationship_id in ["missing-graphic-uri", "mismatched-graphic-uri"] {
+        assert!(
+            !inventory
+                .iter()
+                .any(|info| info.relationship_id == relationship_id),
+            "{relationship_id}"
+        );
+    }
+}
+
+#[test]
+fn word_embedded_story_root_must_match_its_content_type() {
+    for (label, content_type, root) in [
+        (
+            "header-as-footer",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+            "ftr",
+        ),
+        (
+            "comments-as-header",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml",
+            "hdr",
+        ),
+    ] {
+        let mut package = f236_embedded_package(false);
+        let part = format!("/word/{label}.xml");
+        let relationship_id = format!("{label}-ole");
+        let xml = format!(
+            r#"<w:{root} xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:p><w:r><w:object><o:OLEObject q:id="{relationship_id}"/></w:object></w:r></w:p></w:{root}>"#
+        )
+        .into_bytes();
+        f236_add_ole_story(&mut package, &part, content_type, xml, &[&relationship_id]);
+        let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+        assert!(
+            !document
+                .embedded_content()
+                .unwrap()
+                .iter()
+                .any(|info| info.relationship_id == relationship_id.as_str()),
+            "{label}"
+        );
+        let before = document.to_bytes().unwrap();
+        assert!(
+            document
+                .remove_embedded_content(
+                    &part,
+                    &relationship_id,
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{label}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{label}");
+    }
+}
+
+#[test]
+fn word_embedded_story_rejects_misplaced_declarations_and_doctypes() {
+    let root = |relationship_id: &str| {
+        format!(
+            r#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:p><w:r><w:object><o:OLEObject q:id="{relationship_id}"/></w:object></w:r></w:p></w:hdr>"#
+        )
+    };
+    for (label, xml) in [
+        (
+            "second-declaration",
+            format!(
+                r#"<?xml version="1.0"?>{}<?xml version="1.0"?>"#,
+                root("second-declaration-ole")
+            ),
+        ),
+        (
+            "trailing-doctype",
+            format!(r#"{}<!DOCTYPE w:hdr>"#, root("trailing-doctype-ole")),
+        ),
+    ] {
+        let mut package = f236_embedded_package(false);
+        let part = format!("/word/{label}.xml");
+        let relationship_id = format!("{label}-ole");
+        f236_add_ole_story(
+            &mut package,
+            &part,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+            xml.into_bytes(),
+            &[&relationship_id],
+        );
+        let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+        if let Ok(inventory) = document.embedded_content() {
+            assert!(
+                !inventory
+                    .iter()
+                    .any(|info| info.relationship_id == relationship_id.as_str()),
+                "{label}"
+            );
+        }
+        let before = document.to_bytes();
+        assert!(
+            document
+                .remove_embedded_content(
+                    &part,
+                    &relationship_id,
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{label}"
+        );
+        let after = document.to_bytes();
+        match (before, after) {
+            (Ok(before), Ok(after)) => assert_eq!(after, before, "{label}"),
+            (Err(before), Err(after)) => {
+                assert_eq!(after.to_string(), before.to_string(), "{label}")
+            }
+            (before, after) => {
+                panic!("serialization result changed for {label}: {before:?} {after:?}")
+            }
+        }
+    }
+}
+
+#[test]
+fn word_embedded_story_doctype_declarations_fail_closed_atomically() {
+    let root = |relationship_id: &str| {
+        format!(
+            r#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:p><w:r><w:object><o:OLEObject q:id="{relationship_id}"/></w:object></w:r></w:p></w:hdr>"#
+        )
+    };
+    for (label, declaration) in [
+        ("uppercase-simple", "<!DOCTYPE w:hdr>"),
+        ("lowercase-keyword", "<!doctype w:hdr>"),
+        ("invalid-root-name", "<!DOCTYPE 1producer>"),
+        (
+            "external-system-identifier",
+            r#"<!DOCTYPE w:hdr SYSTEM "urn:producer">"#,
+        ),
+        (
+            "well-formed-internal-subset",
+            "<!DOCTYPE w:hdr [<!ELEMENT w:hdr ANY>]>",
+        ),
+        (
+            "malformed-internal-subset",
+            "<!DOCTYPE w:hdr [<!ELEMENT w:hdr ANY>",
+        ),
+    ] {
+        let mut package = f236_embedded_package(false);
+        let part = format!("/word/doctype-{label}.xml");
+        let relationship_id = format!("doctype-{label}-ole");
+        let xml = format!("{declaration}{}", root(&relationship_id));
+        f236_add_ole_story(
+            &mut package,
+            &part,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+            xml.into_bytes(),
+            &[&relationship_id],
+        );
+        let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        assert!(document.embedded_content().is_err(), "{label}");
+        assert!(
+            document
+                .remove_embedded_content(
+                    &part,
+                    &relationship_id,
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{label}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{label}");
+    }
+}
+
+#[test]
+fn word_embedded_preservation_rules_require_ignorable_namespaces() {
+    for (label, rule) in [
+        ("preserve-elements", "mc:PreserveElements=\"x:*\""),
+        ("preserve-attributes", "mc:PreserveAttributes=\"x:*\""),
+    ] {
+        let mut package = f236_embedded_package(false);
+        let part = format!("/word/{label}.xml");
+        let relationship_id = format!("{label}-ole");
+        let xml = format!(
+            r#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x="urn:producer" {rule}><w:p><w:r><w:object><o:OLEObject q:id="{relationship_id}"/></w:object></w:r></w:p></w:hdr>"#
+        )
+        .into_bytes();
+        f236_add_ole_story(
+            &mut package,
+            &part,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+            xml.clone(),
+            &[&relationship_id],
+        );
+        let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+        assert!(
+            !document
+                .embedded_content()
+                .unwrap()
+                .iter()
+                .any(|info| info.relationship_id == relationship_id),
+            "{label}"
+        );
+        let before = document.to_bytes().unwrap();
+        assert!(
+            document
+                .remove_embedded_content(
+                    &part,
+                    &relationship_id,
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{label}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{label}");
+        assert_eq!(
+            f236_open_package(&before).get_part(&part).unwrap(),
+            xml,
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn word_embedded_must_understand_requires_a_supported_namespace() {
+    let mut package = f236_embedded_package(false);
+    let xml = br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:x="urn:producer"><w:p mc:MustUnderstand="x"><w:r><w:object><o:OLEObject q:id="unknown-must-understand"/></w:object></w:r></w:p><w:p mc:MustUnderstand="w"><w:r><w:object><o:OLEObject q:id="known-must-understand"/></w:object></w:r></w:p></w:hdr>"#.to_vec();
+    f236_add_ole_story(
+        &mut package,
+        "/word/must-understand.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        xml.clone(),
+        &["unknown-must-understand", "known-must-understand"],
+    );
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    let inventory = document.embedded_content().unwrap();
+    assert!(
+        !inventory
+            .iter()
+            .any(|info| info.relationship_id == "unknown-must-understand")
+    );
+    assert!(
+        inventory
+            .iter()
+            .any(|info| info.relationship_id == "known-must-understand")
+    );
+    let before = document.to_bytes().unwrap();
+    assert!(
+        document
+            .remove_embedded_content(
+                "/word/must-understand.xml",
+                "unknown-must-understand",
+                EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+            )
+            .is_err()
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+    assert_eq!(
+        f236_open_package(&before)
+            .get_part("/word/must-understand.xml")
+            .unwrap(),
+        xml
+    );
+}
+
+#[test]
+fn word_embedded_activex_properties_reject_misplaced_xml_declarations() {
+    let root = r#"<ax:ocx xmlns:ax="http://schemas.microsoft.com/office/2006/activeX" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" q:id="binary-rel"/>"#;
+    for (label, properties) in [
+        (
+            "duplicate-declaration",
+            format!(r#"<?xml version="1.0"?><?xml version="1.0"?>{root}"#),
+        ),
+        (
+            "trailing-declaration",
+            format!(r#"<?xml version="1.0"?>{root}<?xml version="1.0"?>"#),
+        ),
+    ] {
+        let mut package = f236_embedded_package(false);
+        package.set_part("/word/activeX/activeX1.xml", properties.as_bytes().to_vec());
+        let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        assert!(document.embedded_content().is_err(), "{label}");
+        assert!(
+            document
+                .remove_embedded_content(
+                    "/word/activeX/activeX1.xml",
+                    "binary-rel",
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{label}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{label}");
+        assert_eq!(
+            f236_open_package(&before)
+                .get_part("/word/activeX/activeX1.xml")
+                .unwrap(),
+            properties.as_bytes(),
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn word_embedded_activex_properties_require_the_exact_content_type() {
+    for (label, content_type) in [
+        ("missing-content-type", None),
+        ("wrong-content-type", Some("application/octet-stream")),
+    ] {
+        let mut package = f236_embedded_package(false);
+        package
+            .content_types
+            .overrides
+            .remove("/word/activeX/activeX1.xml");
+        if let Some(content_type) = content_type {
+            package
+                .content_types
+                .add_override("/word/activeX/activeX1.xml", content_type);
+        }
+        let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        assert!(document.embedded_content().is_err(), "{label}");
+        assert!(
+            document
+                .remove_embedded_content(
+                    "/word/activeX/activeX1.xml",
+                    "binary-rel",
+                    EmbeddedMutationPolicy::RemoveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{label}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{label}");
+    }
+}
+
+#[test]
+fn word_embedded_main_document_rejects_multiple_vba_projects() {
+    let mut package = f236_embedded_package(false);
+    package
+        .get_or_create_part_rels("/word/document.xml")
+        .add_with_id(
+            "second-vba-rel",
+            oxml_opc::relationship::rel_types::VBA_PROJECT,
+            "vbaProject.bin",
+        );
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    let before = document.to_bytes().unwrap();
+    assert!(document.embedded_content().is_err());
+    assert!(
+        document
+            .replace_embedded_content(
+                "/word/document.xml",
+                "vba-rel",
+                b"must-not-land",
+                EmbeddedMutationPolicy::RemoveInvalidatedSignatures,
+            )
+            .is_err()
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+    assert_eq!(
+        f236_open_package(&before)
+            .get_part("/word/vbaProject.bin")
+            .unwrap(),
+        b"vba-executable"
+    );
+}
+
+#[test]
+fn word_embedded_cross_kind_owner_range_collisions_fail_closed_atomically() {
+    let mut package = f236_embedded_package(false);
+    let xml = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec())
+        .unwrap()
+        .replace(
+            r#"<w:object><v:shape id="opaque"/><o:OLEObject q:id="ole-rel" ProgID="opaque"/></w:object><w:pict><w:control q:id="control-rel" w:name="opaque"/></w:pict>"#,
+            r#"<w:object><v:shape id="opaque"/><o:OLEObject q:id="ole-rel" ProgID="opaque"/><w:control q:id="control-rel" w:name="opaque"/></w:object>"#,
+        );
+    assert_eq!(xml.matches("control-rel").count(), 1);
+    package.set_part("/word/document.xml", xml.into_bytes());
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    let before = document.to_bytes().unwrap();
+    assert!(document.embedded_content().is_err());
+    for (source_part, relationship_id) in [
+        ("/word/document.xml", "ole-rel"),
+        ("/word/activeX/activeX1.xml", "binary-rel"),
+    ] {
+        assert!(
+            document
+                .remove_embedded_content(
+                    source_part,
+                    relationship_id,
+                    EmbeddedMutationPolicy::RemoveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{source_part} {relationship_id}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before);
+    }
+}
+
+#[test]
+fn word_embedded_vml_text_box_shape_primitives_support_inventory_mutation_and_removal() {
+    let mut package = f236_embedded_package(false);
+    let mut owners = String::new();
+    for (primitive, relationship_id) in [
+        ("shape", "shape-text-box"),
+        ("arc", "arc-text-box"),
+        ("curve", "curve-text-box"),
+        ("image", "image-text-box"),
+        ("line", "line-text-box"),
+        ("rect", "rect-text-box"),
+        ("oval", "oval-text-box"),
+        ("polyline", "polyline-text-box"),
+        ("roundrect", "roundrect-text-box"),
+    ] {
+        owners.push_str(&format!(
+            r#"<w:p><w:r><w:pict><v:{primitive}><v:textbox><w:txbxContent><w:p><w:r><w:object><o:OLEObject q:id="{relationship_id}"/></w:object></w:r></w:p></w:txbxContent></v:textbox></v:{primitive}></w:pict></w:r></w:p>"#
+        ));
+    }
+    let xml = format!(
+        r#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships">{owners}</w:hdr>"#
+    )
+    .into_bytes();
+    let ids = [
+        "shape-text-box",
+        "arc-text-box",
+        "curve-text-box",
+        "image-text-box",
+        "line-text-box",
+        "rect-text-box",
+        "oval-text-box",
+        "polyline-text-box",
+        "roundrect-text-box",
+    ];
+    f236_add_ole_story(
+        &mut package,
+        "/word/vml-primitives.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        xml,
+        &ids,
+    );
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    let inventory = document.embedded_content().unwrap();
+    for relationship_id in ids {
+        assert!(
+            inventory
+                .iter()
+                .any(|info| info.relationship_id == relationship_id),
+            "{relationship_id}"
+        );
+    }
+    document
+        .replace_embedded_content(
+            "/word/vml-primitives.xml",
+            "oval-text-box",
+            b"vml-oval-replacement",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    assert_eq!(
+        document
+            .extract_embedded_content("/word/vml-primitives.xml", "rect-text-box")
+            .unwrap(),
+        b"vml-oval-replacement"
+    );
+    document
+        .remove_embedded_content(
+            "/word/vml-primitives.xml",
+            "roundrect-text-box",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    let bytes = document.to_bytes().unwrap();
+    let reopened = Document::from_bytes(&bytes).unwrap();
+    let inventory = reopened.embedded_content().unwrap();
+    assert!(
+        !inventory
+            .iter()
+            .any(|info| info.relationship_id == "roundrect-text-box")
+    );
+    assert!(
+        inventory
+            .iter()
+            .any(|info| info.relationship_id == "rect-text-box")
+    );
+    assert!(
+        inventory
+            .iter()
+            .any(|info| info.relationship_id == "oval-text-box")
+    );
+}
+
+#[test]
+fn word_embedded_mc_wrappers_preserve_vml_and_drawingml_text_box_ownership_paths() {
+    let mut package = f236_embedded_package(false);
+    let xml = br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+        <w:p><w:r><w:pict><mc:AlternateContent><mc:Choice Requires="w14"><v:rect><mc:AlternateContent><mc:Choice Requires="w14"><v:textbox><mc:AlternateContent><mc:Choice Requires="w14"><w:txbxContent><w:p><w:r><w:object><o:OLEObject q:id="mc-vml-text-box"/></w:object></w:r></w:p></w:txbxContent></mc:Choice><mc:Fallback><!--keep-vml-fallback--></mc:Fallback></mc:AlternateContent></v:textbox></mc:Choice><mc:Fallback/></mc:AlternateContent></v:rect></mc:Choice><mc:Fallback/></mc:AlternateContent></w:pict></w:r></w:p>
+        <w:p><w:r><w:drawing><mc:AlternateContent><mc:Choice Requires="w14"><wp:inline><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><mc:AlternateContent><mc:Choice Requires="w14"><wps:wsp><mc:AlternateContent><mc:Choice Requires="w14"><wps:txbx><mc:AlternateContent><mc:Choice Requires="w14"><w:txbxContent><w:p><w:r><w:object><o:OLEObject q:id="mc-drawing-text-box"/></w:object></w:r></w:p></w:txbxContent></mc:Choice><mc:Fallback><!--keep-drawing-fallback--></mc:Fallback></mc:AlternateContent></wps:txbx></mc:Choice><mc:Fallback/></mc:AlternateContent></wps:wsp></mc:Choice><mc:Fallback/></mc:AlternateContent></a:graphicData></a:graphic></wp:inline></mc:Choice><mc:Fallback/></mc:AlternateContent></w:drawing></w:r></w:p>
+    </w:hdr>"#.to_vec();
+    let ids = ["mc-vml-text-box", "mc-drawing-text-box"];
+    f236_add_ole_story(
+        &mut package,
+        "/word/mc-text-boxes.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        xml,
+        &ids,
+    );
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    let inventory = document.embedded_content().unwrap();
+    for relationship_id in ids {
+        assert!(
+            inventory
+                .iter()
+                .any(|info| info.relationship_id == relationship_id),
+            "{relationship_id}"
+        );
+    }
+    document
+        .remove_embedded_content(
+            "/word/mc-text-boxes.xml",
+            "mc-vml-text-box",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    document
+        .remove_embedded_content(
+            "/word/mc-text-boxes.xml",
+            "mc-drawing-text-box",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    let bytes = document.to_bytes().unwrap();
+    let header = String::from_utf8(
+        f236_open_package(&bytes)
+            .get_part("/word/mc-text-boxes.xml")
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(header.contains("keep-vml-fallback"));
+    assert!(header.contains("keep-drawing-fallback"));
+    assert!(!header.contains("mc-vml-text-box"));
+    assert!(!header.contains("mc-drawing-text-box"));
+    assert!(
+        Document::from_bytes(&bytes)
+            .unwrap()
+            .embedded_content()
+            .is_ok()
+    );
+}
+
+#[test]
+fn word_embedded_activex_properties_reject_in_root_doctype_atomically() {
+    let mut package = f236_embedded_package(false);
+    let properties = br#"<ax:ocx xmlns:ax="http://schemas.microsoft.com/office/2006/activeX" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" q:id="binary-rel"><!DOCTYPE x></ax:ocx>"#;
+    package.set_part("/word/activeX/activeX1.xml", properties.to_vec());
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    let before = document.to_bytes().unwrap();
+    assert!(document.embedded_content().is_err());
+    assert!(
+        document
+            .remove_embedded_content(
+                "/word/activeX/activeX1.xml",
+                "binary-rel",
+                EmbeddedMutationPolicy::RemoveInvalidatedSignatures,
+            )
+            .is_err()
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+    assert_eq!(
+        f236_open_package(&before)
+            .get_part("/word/activeX/activeX1.xml")
+            .unwrap(),
+        properties
+    );
+}
+
+#[test]
+fn word_embedded_relationship_targets_require_normalized_pack_uris() {
+    for (label, target) in [
+        ("backslash", r"..\embeddings\object1.bin"),
+        ("fragment", "embeddings/object1.bin#fragment"),
+        ("query", "embeddings/object1.bin?query"),
+        ("encoded-slash", "embeddings%2Fobject1.bin"),
+        ("encoded-unreserved", "embeddings/%6Fobject1.bin"),
+        ("empty-segment", "embeddings//object1.bin"),
+        ("trailing-slash", "embeddings/object1.bin/"),
+        ("scheme", "https:object1.bin"),
+        ("space", "embeddings/object 1.bin"),
+    ] {
+        let mut package = f236_embedded_package(false);
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .items
+            .iter_mut()
+            .find(|relationship| relationship.id == "ole-rel")
+            .unwrap()
+            .target = target.to_owned();
+        let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        assert!(document.embedded_content().is_err(), "{label}: {target}");
+        assert!(
+            document
+                .replace_embedded_content(
+                    "/word/document.xml",
+                    "ole-rel",
+                    b"must-not-land",
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{label}: {target}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{label}: {target}");
+    }
+
+    let mut package = f236_embedded_package(false);
+    let bytes = package
+        .parts
+        .remove("/word/embeddings/object1.bin")
+        .unwrap();
+    package.set_part("/word/embeddings/object%20one.bin", bytes);
+    package
+        .content_types
+        .overrides
+        .remove("/word/embeddings/object1.bin");
+    package.content_types.add_override(
+        "/word/embeddings/object%20one.bin",
+        "application/vnd.openxmlformats-officedocument.oleObject",
+    );
+    package
+        .get_or_create_part_rels("/word/document.xml")
+        .items
+        .iter_mut()
+        .find(|relationship| relationship.id == "ole-rel")
+        .unwrap()
+        .target = "embeddings/object%20one.bin".to_owned();
+    assert_eq!(
+        Document::from_bytes(&f236_package_bytes(package))
+            .unwrap()
+            .extract_embedded_content("/word/document.xml", "ole-rel")
+            .unwrap(),
+        b"ole-executable"
+    );
+}
+
+#[test]
+fn word_embedded_same_kind_nested_control_owner_ranges_fail_closed_atomically() {
+    let mut package = f236_embedded_package(false);
+    let xml = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec())
+        .unwrap()
+        .replace(
+            r#"<w:pict><w:control q:id="control-rel" w:name="opaque"/></w:pict>"#,
+            r#"<w:pict><w:control q:id="control-rel" w:name="outer"/><v:shape><v:textbox><w:txbxContent><w:p><w:r><w:pict><w:control q:id="nested-control" w:name="inner"/></w:pict></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict>"#,
+        );
+    assert_eq!(xml.matches("nested-control").count(), 1);
+    package.set_part("/word/document.xml", xml.into_bytes());
+    package
+        .get_or_create_part_rels("/word/document.xml")
+        .add_with_id(
+            "nested-control",
+            oxml_opc::relationship::rel_types::CONTROL,
+            "activeX/activeX1.xml",
+        );
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    let before = document.to_bytes().unwrap();
+    assert!(document.embedded_content().is_err());
+    assert!(
+        document
+            .remove_embedded_content(
+                "/word/activeX/activeX1.xml",
+                "binary-rel",
+                EmbeddedMutationPolicy::RemoveInvalidatedSignatures,
+            )
+            .is_err()
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+}
+
+#[test]
+fn word_embedded_undeclared_general_entities_fail_closed_atomically() {
+    let malformed = [
+        ("story", {
+            let mut package = f236_embedded_package(false);
+            f236_add_ole_story(
+                &mut package,
+                "/word/entity-header.xml",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+                br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:p><w:r><w:object><o:OLEObject q:id="entity-ole"/></w:object><w:t>&producer;</w:t></w:r></w:p></w:hdr>"#.to_vec(),
+                &["entity-ole"],
+            );
+            package
+        }),
+        ("ActiveX properties", {
+            let mut package = f236_embedded_package(false);
+            package.set_part(
+                "/word/activeX/activeX1.xml",
+                br#"<ax:ocx xmlns:ax="http://schemas.microsoft.com/office/2006/activeX" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" q:id="binary-rel">&producer;</ax:ocx>"#.to_vec(),
+            );
+            package
+        }),
+    ];
+    for (label, package) in malformed {
+        let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        assert!(document.embedded_content().is_err(), "{label}");
+        assert!(
+            document
+                .replace_embedded_content(
+                    "/word/document.xml",
+                    "ole-rel",
+                    b"must-not-land",
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{label}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{label}");
+    }
+
+    let mut package = f236_embedded_package(false);
+    f236_add_ole_story(
+        &mut package,
+        "/word/reference-header.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:x="urn:producer"><w:p><w:r><x:raw>&amp;&#65;</x:raw><w:object><o:OLEObject q:id="reference-ole"/></w:object></w:r></w:p></w:hdr>"#.to_vec(),
+        &["reference-ole"],
+    );
+    let document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    assert!(
+        document
+            .embedded_content()
+            .unwrap()
+            .iter()
+            .any(|info| info.relationship_id == "reference-ole")
+    );
+}
+
+#[test]
+fn word_embedded_source_part_identities_require_normalized_pack_names() {
+    let mut package = f236_embedded_package(false);
+    f236_add_ole_story(
+        &mut package,
+        "/word/header 1.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:p><w:r><w:object><o:OLEObject q:id="invalid-source-ole"/></w:object></w:r></w:p></w:hdr>"#.to_vec(),
+        &["invalid-source-ole"],
+    );
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    let before = document.to_bytes().unwrap();
+    assert!(document.embedded_content().is_err());
+    assert!(
+        document
+            .extract_embedded_content("/word/header 1.xml", "invalid-source-ole")
+            .is_err()
+    );
+    assert!(
+        document
+            .remove_embedded_content(
+                "/word/header 1.xml",
+                "invalid-source-ole",
+                EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+            )
+            .is_err()
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+}
+
+#[test]
+fn word_embedded_wordprocessing_canvas_text_box_supports_mutation_and_removal() {
+    let mut package = f236_embedded_package(false);
+    f236_add_ole_story(
+        &mut package,
+        "/word/canvas-header.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:p><w:r><w:drawing><wp:inline><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas"><wpc:wpc><wps:wsp><wps:txbx><w:txbxContent><w:p><w:r><w:object><o:OLEObject q:id="canvas-ole"/></w:object></w:r></w:p></w:txbxContent></wps:txbx></wps:wsp></wpc:wpc></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:hdr>"#.to_vec(),
+        &["canvas-ole"],
+    );
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    assert!(
+        document
+            .embedded_content()
+            .unwrap()
+            .iter()
+            .any(|info| info.relationship_id == "canvas-ole")
+    );
+    document
+        .replace_embedded_content(
+            "/word/canvas-header.xml",
+            "canvas-ole",
+            b"canvas-replacement",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    assert_eq!(
+        document
+            .extract_embedded_content("/word/canvas-header.xml", "canvas-ole")
+            .unwrap(),
+        b"canvas-replacement"
+    );
+    document
+        .remove_embedded_content(
+            "/word/canvas-header.xml",
+            "canvas-ole",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    let bytes = document.to_bytes().unwrap();
+    assert!(
+        !Document::from_bytes(&bytes)
+            .unwrap()
+            .embedded_content()
+            .unwrap()
+            .iter()
+            .any(|info| info.relationship_id == "canvas-ole")
+    );
+}
+
+#[test]
+fn word_embedded_vml_text_box_under_object_supports_nested_owner_mutation() {
+    let mut package = f236_embedded_package(false);
+    f236_add_ole_story(
+        &mut package,
+        "/word/object-text-box.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:p><w:r><w:object><v:shape id="object-box"><v:textbox><w:txbxContent><w:p><w:r><w:object><o:OLEObject q:id="object-text-box-ole"/></w:object></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:object></w:r></w:p></w:hdr>"#.to_vec(),
+        &["object-text-box-ole"],
+    );
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    assert!(
+        document
+            .embedded_content()
+            .unwrap()
+            .iter()
+            .any(|info| info.relationship_id == "object-text-box-ole")
+    );
+    document
+        .replace_embedded_content(
+            "/word/object-text-box.xml",
+            "object-text-box-ole",
+            b"object-text-box-replacement",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    document
+        .remove_embedded_content(
+            "/word/object-text-box.xml",
+            "object-text-box-ole",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    let bytes = document.to_bytes().unwrap();
+    let package = f236_open_package(&bytes);
+    let xml = String::from_utf8(
+        package
+            .get_part("/word/object-text-box.xml")
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(xml.contains("object-box"));
+    assert!(!xml.contains("object-text-box-ole"));
+    assert!(
+        !Document::from_bytes(&bytes)
+            .unwrap()
+            .embedded_content()
+            .unwrap()
+            .iter()
+            .any(|info| info.relationship_id == "object-text-box-ole")
+    );
+}
+
+#[test]
+fn word_embedded_empty_process_content_keeps_valid_owner_actionable() {
+    let mut package = f236_embedded_package(false);
+    f236_add_ole_story(
+        &mut package,
+        "/word/empty-process-content.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><w:p mc:ProcessContent=""><w:r><w:object><o:OLEObject q:id="empty-process-content-ole"/></w:object></w:r></w:p></w:hdr>"#.to_vec(),
+        &["empty-process-content-ole"],
+    );
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    assert!(
+        document
+            .embedded_content()
+            .unwrap()
+            .iter()
+            .any(|info| info.relationship_id == "empty-process-content-ole")
+    );
+    document
+        .replace_embedded_content(
+            "/word/empty-process-content.xml",
+            "empty-process-content-ole",
+            b"empty-process-content-replacement",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    assert_eq!(
+        document
+            .extract_embedded_content(
+                "/word/empty-process-content.xml",
+                "empty-process-content-ole",
+            )
+            .unwrap(),
+        b"empty-process-content-replacement"
+    );
+}
+
+#[test]
+fn word_embedded_empty_mc_rule_lists_keep_valid_owner_actionable() {
+    let mut package = f236_embedded_package(false);
+    f236_add_ole_story(
+        &mut package,
+        "/word/empty-mc-lists.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><w:p mc:Ignorable="" mc:MustUnderstand="" mc:PreserveElements="" mc:PreserveAttributes=""><w:r><w:object><o:OLEObject q:id="empty-mc-lists-ole"/></w:object></w:r></w:p></w:hdr>"#.to_vec(),
+        &["empty-mc-lists-ole"],
+    );
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    assert!(
+        document
+            .embedded_content()
+            .unwrap()
+            .iter()
+            .any(|info| info.relationship_id == "empty-mc-lists-ole")
+    );
+    document
+        .replace_embedded_content(
+            "/word/empty-mc-lists.xml",
+            "empty-mc-lists-ole",
+            b"empty-mc-lists-replacement",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    assert_eq!(
+        document
+            .extract_embedded_content("/word/empty-mc-lists.xml", "empty-mc-lists-ole")
+            .unwrap(),
+        b"empty-mc-lists-replacement"
+    );
+}
+
+#[test]
+fn word_embedded_alternate_content_allows_ignorable_extension_children() {
+    let mut package = f236_embedded_package(false);
+    f236_add_ole_story(
+        &mut package,
+        "/word/ignorable-ac-children.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:x="urn:f236:extension"><mc:AlternateContent mc:Ignorable="x"><x:extension place="before"/><mc:Choice Requires="w14"><w:p><w:r><w:object><o:OLEObject q:id="ignorable-ac-ole"/></w:object></w:r></w:p></mc:Choice><x:extension place="between"/><mc:Fallback><w:p/></mc:Fallback><x:extension place="after"/></mc:AlternateContent></w:hdr>"#.to_vec(),
+        &["ignorable-ac-ole"],
+    );
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    assert!(
+        document
+            .embedded_content()
+            .unwrap()
+            .iter()
+            .any(|info| info.relationship_id == "ignorable-ac-ole")
+    );
+    document
+        .remove_embedded_content(
+            "/word/ignorable-ac-children.xml",
+            "ignorable-ac-ole",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    let bytes = document.to_bytes().unwrap();
+    let xml = String::from_utf8(
+        f236_open_package(&bytes)
+            .get_part("/word/ignorable-ac-children.xml")
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(xml.contains("place=\"before\""));
+    assert!(xml.contains("place=\"between\""));
+    assert!(xml.contains("place=\"after\""));
+    assert!(!xml.contains("ignorable-ac-ole"));
+}
+
+#[test]
+fn word_embedded_mc_elements_reject_non_ignorable_qualified_attributes_atomically() {
+    for (label, alternate_content) in [
+        (
+            "alternate-content",
+            r#"<mc:AlternateContent x:producer="opaque"><mc:Choice Requires="w14"><w:p><w:r><w:object><o:OLEObject q:id="nonignorable-attribute-ole"/></w:object></w:r></w:p></mc:Choice></mc:AlternateContent>"#,
+        ),
+        (
+            "choice",
+            r#"<mc:AlternateContent><mc:Choice Requires="w14" x:producer="opaque"><w:p><w:r><w:object><o:OLEObject q:id="nonignorable-attribute-ole"/></w:object></w:r></w:p></mc:Choice></mc:AlternateContent>"#,
+        ),
+        (
+            "fallback",
+            r#"<mc:AlternateContent><mc:Choice Requires="w14"><w:p/></mc:Choice><mc:Fallback x:producer="opaque"><w:p><w:r><w:object><o:OLEObject q:id="nonignorable-attribute-ole"/></w:object></w:r></w:p></mc:Fallback></mc:AlternateContent>"#,
+        ),
+    ] {
+        let mut package = f236_embedded_package(false);
+        let xml = format!(
+            r#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:x="urn:f236:producer">{alternate_content}</w:hdr>"#
+        );
+        f236_add_ole_story(
+            &mut package,
+            "/word/nonignorable-mc-attribute.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+            xml.into_bytes(),
+            &["nonignorable-attribute-ole"],
+        );
+        let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        assert!(
+            !document
+                .embedded_content()
+                .unwrap()
+                .iter()
+                .any(|info| info.relationship_id == "nonignorable-attribute-ole"),
+            "{label}"
+        );
+        assert!(
+            document
+                .remove_embedded_content(
+                    "/word/nonignorable-mc-attribute.xml",
+                    "nonignorable-attribute-ole",
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{label}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{label}");
+    }
+}
+
+#[test]
+fn word_embedded_alternate_content_general_references_obey_character_grammar() {
+    let mut malformed = f236_embedded_package(false);
+    f236_add_ole_story(
+        &mut malformed,
+        "/word/ac-general-reference.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><mc:AlternateContent>&amp;<mc:Choice Requires="w14"><w:p><w:r><w:object><o:OLEObject q:id="ac-general-reference-ole"/></w:object></w:r></w:p></mc:Choice></mc:AlternateContent></w:hdr>"#.to_vec(),
+        &["ac-general-reference-ole"],
+    );
+    let mut document = Document::from_bytes(&f236_package_bytes(malformed)).unwrap();
+    let before = document.to_bytes().unwrap();
+    assert!(
+        !document
+            .embedded_content()
+            .unwrap()
+            .iter()
+            .any(|info| info.relationship_id == "ac-general-reference-ole")
+    );
+    assert!(
+        document
+            .remove_embedded_content(
+                "/word/ac-general-reference.xml",
+                "ac-general-reference-ole",
+                EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+            )
+            .is_err()
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+
+    let mut valid = f236_embedded_package(false);
+    f236_add_ole_story(
+        &mut valid,
+        "/word/ac-whitespace-reference.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><mc:AlternateContent>&#x20;<mc:Choice Requires="w14"><w:p><w:r><w:object><o:OLEObject q:id="ac-whitespace-reference-ole"/></w:object></w:r></w:p></mc:Choice></mc:AlternateContent></w:hdr>"#.to_vec(),
+        &["ac-whitespace-reference-ole"],
+    );
+    assert!(
+        Document::from_bytes(&f236_package_bytes(valid))
+            .unwrap()
+            .embedded_content()
+            .unwrap()
+            .iter()
+            .any(|info| info.relationship_id == "ac-whitespace-reference-ole")
+    );
+}
+
+#[test]
+fn word_embedded_forbidden_xml_character_references_fail_closed_atomically() {
+    for reference in ["&#xFFFE;", "&#xFFFF;"] {
+        for (label, package) in [
+            ("story", {
+                let mut package = f236_embedded_package(false);
+                let xml = format!(
+                    r#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:p><w:r><w:object><o:OLEObject q:id="forbidden-character-ole"/></w:object><w:t>{reference}</w:t></w:r></w:p></w:hdr>"#
+                );
+                f236_add_ole_story(
+                    &mut package,
+                    "/word/forbidden-character.xml",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+                    xml.into_bytes(),
+                    &["forbidden-character-ole"],
+                );
+                package
+            }),
+            ("ActiveX properties", {
+                let mut package = f236_embedded_package(false);
+                package.set_part(
+                    "/word/activeX/activeX1.xml",
+                    format!(r#"<ax:ocx xmlns:ax="http://schemas.microsoft.com/office/2006/activeX" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" q:id="binary-rel">{reference}</ax:ocx>"#).into_bytes(),
+                );
+                package
+            }),
+        ] {
+            let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+            let before = document.to_bytes().unwrap();
+            assert!(document.embedded_content().is_err(), "{label}: {reference}");
+            assert!(
+                document
+                    .replace_embedded_content(
+                        "/word/document.xml",
+                        "ole-rel",
+                        b"must-not-land",
+                        EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                    )
+                    .is_err(),
+                "{label}: {reference}"
+            );
+            assert_eq!(document.to_bytes().unwrap(), before, "{label}: {reference}");
+        }
+    }
+}
+
+#[test]
+fn word_embedded_grouped_wordprocessing_canvas_uses_schema_child_grammar() {
+    let mut valid = f236_embedded_package(false);
+    f236_add_ole_story(
+        &mut valid,
+        "/word/grouped-canvas.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:p><w:r><w:drawing><wp:inline><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas"><wpc:wpc><wpg:wgp><wpg:grpSp><wpg:grpSp><wps:wsp><wps:txbx><w:txbxContent><w:p><w:r><w:object><o:OLEObject q:id="grouped-canvas-ole"/></w:object></w:r></w:p></w:txbxContent></wps:txbx></wps:wsp></wpg:grpSp></wpg:grpSp></wpg:wgp></wpc:wpc></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:hdr>"#.to_vec(),
+        &["grouped-canvas-ole"],
+    );
+    let mut document = Document::from_bytes(&f236_package_bytes(valid)).unwrap();
+    assert!(
+        document
+            .embedded_content()
+            .unwrap()
+            .iter()
+            .any(|info| info.relationship_id == "grouped-canvas-ole")
+    );
+    document
+        .replace_embedded_content(
+            "/word/grouped-canvas.xml",
+            "grouped-canvas-ole",
+            b"grouped-canvas-replacement",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    assert_eq!(
+        document
+            .extract_embedded_content("/word/grouped-canvas.xml", "grouped-canvas-ole")
+            .unwrap(),
+        b"grouped-canvas-replacement"
+    );
+
+    let mut invalid = f236_embedded_package(false);
+    f236_add_ole_story(
+        &mut invalid,
+        "/word/direct-group-canvas.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas" xmlns:wpg="http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:p><w:r><w:drawing><wp:inline><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas"><wpc:wpc><wpg:grpSp><wps:wsp><wps:txbx><w:txbxContent><w:p><w:r><w:object><o:OLEObject q:id="direct-group-canvas-ole"/></w:object></w:r></w:p></w:txbxContent></wps:txbx></wps:wsp></wpg:grpSp></wpc:wpc></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:hdr>"#.to_vec(),
+        &["direct-group-canvas-ole"],
+    );
+    let mut document = Document::from_bytes(&f236_package_bytes(invalid)).unwrap();
+    let before = document.to_bytes().unwrap();
+    assert!(
+        !document
+            .embedded_content()
+            .unwrap()
+            .iter()
+            .any(|info| info.relationship_id == "direct-group-canvas-ole")
+    );
+    assert!(
+        document
+            .remove_embedded_content(
+                "/word/direct-group-canvas.xml",
+                "direct-group-canvas-ole",
+                EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+            )
+            .is_err()
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+}
+
+#[test]
+fn word_embedded_drawingml_text_box_under_object_supports_nested_owner_mutation() {
+    let mut package = f236_embedded_package(false);
+    f236_add_ole_story(
+        &mut package,
+        "/word/object-drawing-text-box.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:p><w:r><w:object><w:drawing><wp:inline><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:txbx><w:txbxContent><w:p><w:r><w:object><o:OLEObject q:id="object-drawing-ole"/></w:object></w:r></w:p></w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:object></w:r></w:p></w:hdr>"#.to_vec(),
+        &["object-drawing-ole"],
+    );
+    let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+    assert!(
+        document
+            .embedded_content()
+            .unwrap()
+            .iter()
+            .any(|info| info.relationship_id == "object-drawing-ole")
+    );
+    document
+        .replace_embedded_content(
+            "/word/object-drawing-text-box.xml",
+            "object-drawing-ole",
+            b"object-drawing-replacement",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    document
+        .remove_embedded_content(
+            "/word/object-drawing-text-box.xml",
+            "object-drawing-ole",
+            EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+        )
+        .unwrap();
+    let bytes = document.to_bytes().unwrap();
+    let xml = String::from_utf8(
+        f236_open_package(&bytes)
+            .get_part("/word/object-drawing-text-box.xml")
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(xml.contains("<w:drawing>"));
+    assert!(!xml.contains("object-drawing-ole"));
+}
+
+#[test]
+fn word_embedded_story_xml_declaration_contents_fail_closed_atomically() {
+    for (label, declaration) in [
+        ("missing-version", r#"<?xml?>"#),
+        ("encoding-first", r#"<?xml encoding="UTF-8"?>"#),
+        (
+            "duplicate-version",
+            r#"<?xml version="1.0" version="1.0"?>"#,
+        ),
+        ("unsupported-version", r#"<?xml version="1.1"?>"#),
+        (
+            "invalid-encoding",
+            r#"<?xml version="1.0" encoding="UTF-16"?>"#,
+        ),
+        (
+            "duplicate-encoding",
+            r#"<?xml version="1.0" encoding="UTF-8" encoding="UTF-8"?>"#,
+        ),
+        (
+            "invalid-standalone",
+            r#"<?xml version="1.0" standalone="true"?>"#,
+        ),
+        (
+            "duplicate-standalone",
+            r#"<?xml version="1.0" standalone="yes" standalone="no"?>"#,
+        ),
+        (
+            "encoding-after-standalone",
+            r#"<?xml version="1.0" standalone="yes" encoding="UTF-8"?>"#,
+        ),
+    ] {
+        let mut package = f236_embedded_package(false);
+        let relationship_id = format!("declaration-{label}-ole");
+        let xml = format!(
+            r#"{declaration}<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:p><w:r><w:object><o:OLEObject q:id="{relationship_id}"/></w:object></w:r></w:p></w:hdr>"#
+        );
+        f236_add_ole_story(
+            &mut package,
+            "/word/declaration-header.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+            xml.into_bytes(),
+            &[&relationship_id],
+        );
+        let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        assert!(document.embedded_content().is_err(), "{label}");
+        assert!(
+            document
+                .remove_embedded_content(
+                    "/word/declaration-header.xml",
+                    &relationship_id,
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{label}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{label}");
+    }
+
+    let mut package = f236_embedded_package(false);
+    f236_add_ole_story(
+        &mut package,
+        "/word/valid-declaration-header.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        br#"<?xml version="1.0" encoding="utf-8" standalone="no"?><w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:p><w:r><w:object><o:OLEObject q:id="valid-declaration-ole"/></w:object></w:r></w:p></w:hdr>"#.to_vec(),
+        &["valid-declaration-ole"],
+    );
+    assert!(
+        Document::from_bytes(&f236_package_bytes(package))
+            .unwrap()
+            .embedded_content()
+            .unwrap()
+            .iter()
+            .any(|info| info.relationship_id == "valid-declaration-ole")
+    );
+}
+
+#[test]
+fn word_embedded_activex_xml_declaration_contents_fail_closed_atomically() {
+    let root = r#"<ax:ocx xmlns:ax="http://schemas.microsoft.com/office/2006/activeX" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" q:id="binary-rel"/>"#;
+    for (label, declaration) in [
+        ("missing-version", r#"<?xml?>"#),
+        ("encoding-first", r#"<?xml encoding="UTF-8"?>"#),
+        (
+            "duplicate-version",
+            r#"<?xml version="1.0" version="1.0"?>"#,
+        ),
+        ("invalid-version", r#"<?xml version="2.0"?>"#),
+        (
+            "invalid-encoding",
+            r#"<?xml version="1.0" encoding="producer"?>"#,
+        ),
+        (
+            "standalone-first",
+            r#"<?xml standalone="yes" version="1.0"?>"#,
+        ),
+        (
+            "invalid-standalone",
+            r#"<?xml version="1.0" standalone="YES"?>"#,
+        ),
+        (
+            "duplicate-standalone",
+            r#"<?xml version="1.0" standalone="yes" standalone="yes"?>"#,
+        ),
+    ] {
+        let mut package = f236_embedded_package(false);
+        let properties = format!("{declaration}{root}");
+        package.set_part("/word/activeX/activeX1.xml", properties.as_bytes().to_vec());
+        let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        assert!(document.embedded_content().is_err(), "{label}");
+        assert!(
+            document
+                .remove_embedded_content(
+                    "/word/activeX/activeX1.xml",
+                    "binary-rel",
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{label}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{label}");
+    }
+
+    let mut package = f236_embedded_package(false);
+    package.set_part(
+        "/word/activeX/activeX1.xml",
+        format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>{root}"#).into_bytes(),
+    );
+    assert!(
+        Document::from_bytes(&f236_package_bytes(package))
+            .unwrap()
+            .embedded_content()
+            .unwrap()
+            .iter()
+            .any(|info| info.relationship_id == "binary-rel")
+    );
+}
+
+#[test]
+fn word_embedded_relationshipless_cross_kind_owner_children_fail_closed_atomically() {
+    let original = r#"<w:object><v:shape id="opaque"/><o:OLEObject q:id="ole-rel" ProgID="opaque"/></w:object><w:pict><w:control q:id="control-rel" w:name="opaque"/></w:pict>"#;
+    for (label, replacement, source_part, relationship_id) in [
+        (
+            "relationship-owned-ole",
+            r#"<w:object><v:shape id="opaque"/><o:OLEObject q:id="ole-rel" ProgID="opaque"/><w:control w:name="relationshipless"/></w:object><w:pict><w:control q:id="control-rel" w:name="opaque"/></w:pict>"#,
+            "/word/document.xml",
+            "ole-rel",
+        ),
+        (
+            "relationship-owned-control",
+            r#"<w:object><o:OLEObject ProgID="relationshipless"/><w:control q:id="control-rel" w:name="opaque"/></w:object>"#,
+            "/word/activeX/activeX1.xml",
+            "binary-rel",
+        ),
+    ] {
+        let mut package = f236_embedded_package(false);
+        let xml = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec())
+            .unwrap()
+            .replace(original, replacement);
+        assert!(xml.contains("relationshipless"), "{label}");
+        package.set_part("/word/document.xml", xml.into_bytes());
+        let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        assert!(document.embedded_content().is_err(), "{label}");
+        assert!(
+            document
+                .remove_embedded_content(
+                    source_part,
+                    relationship_id,
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{label}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{label}");
+        assert!(
+            String::from_utf8(
+                f236_open_package(&before)
+                    .get_part("/word/document.xml")
+                    .unwrap()
+                    .to_vec(),
+            )
+            .unwrap()
+            .contains("relationshipless"),
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn word_embedded_reserved_case_variant_xml_processing_instructions_fail_closed_atomically() {
+    for (label, package) in [
+        ("story", {
+            let mut package = f236_embedded_package(false);
+            f236_add_ole_story(
+                &mut package,
+                "/word/reserved-xml-pi.xml",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+                br#"<?XML version="1.0"?><w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:p><w:r><w:object><o:OLEObject q:id="reserved-xml-pi-ole"/></w:object></w:r></w:p></w:hdr>"#.to_vec(),
+                &["reserved-xml-pi-ole"],
+            );
+            package
+        }),
+        ("ActiveX properties", {
+            let mut package = f236_embedded_package(false);
+            package.set_part(
+                "/word/activeX/activeX1.xml",
+                br#"<?Xml version="1.0"?><ax:ocx xmlns:ax="http://schemas.microsoft.com/office/2006/activeX" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" q:id="binary-rel"/>"#.to_vec(),
+            );
+            package
+        }),
+    ] {
+        let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        assert!(document.embedded_content().is_err(), "{label}");
+        assert!(
+            document
+                .replace_embedded_content(
+                    "/word/document.xml",
+                    "ole-rel",
+                    b"must-not-land",
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{label}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{label}");
+    }
+}
+
+#[test]
+fn word_embedded_forbidden_double_hyphen_comments_fail_closed_atomically() {
+    for (label, package) in [
+        ("story", {
+            let mut package = f236_embedded_package(false);
+            f236_add_ole_story(
+                &mut package,
+                "/word/invalid-comment.xml",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+                br#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><!--producer--invalid--><w:p><w:r><w:object><o:OLEObject q:id="invalid-comment-ole"/></w:object></w:r></w:p></w:hdr>"#.to_vec(),
+                &["invalid-comment-ole"],
+            );
+            package
+        }),
+        ("ActiveX properties", {
+            let mut package = f236_embedded_package(false);
+            package.set_part(
+                "/word/activeX/activeX1.xml",
+                br#"<ax:ocx xmlns:ax="http://schemas.microsoft.com/office/2006/activeX" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" q:id="binary-rel"><!--producer--invalid--></ax:ocx>"#.to_vec(),
+            );
+            package
+        }),
+    ] {
+        let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        assert!(document.embedded_content().is_err(), "{label}");
+        assert!(
+            document
+                .replace_embedded_content(
+                    "/word/document.xml",
+                    "ole-rel",
+                    b"must-not-land",
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{label}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{label}");
+    }
+}
+
+#[test]
+fn word_embedded_lone_relationshipless_owner_children_fail_closed_atomically() {
+    for (label, owner) in [
+        (
+            "OLE object",
+            r#"<w:object><o:OLEObject ProgID="relationshipless"/></w:object>"#,
+        ),
+        (
+            "object-owned control",
+            r#"<w:object><w:control w:name="relationshipless"/></w:object>"#,
+        ),
+        (
+            "picture-owned control",
+            r#"<w:pict><w:control w:name="relationshipless"/></w:pict>"#,
+        ),
+    ] {
+        let mut package = f236_embedded_package(false);
+        let xml = format!(
+            r#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office"><w:p><w:r>{owner}</w:r></w:p></w:hdr>"#
+        );
+        f236_add_ole_story(
+            &mut package,
+            "/word/relationshipless-owner.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+            xml.into_bytes(),
+            &[],
+        );
+        let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        assert!(document.embedded_content().is_err(), "{label}");
+        assert!(
+            document
+                .replace_embedded_content(
+                    "/word/document.xml",
+                    "ole-rel",
+                    b"must-not-land",
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{label}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{label}");
+    }
+}
+
+#[test]
+fn word_embedded_processing_instruction_targets_require_xml_names_atomically() {
+    for (label, package) in [
+        ("story", {
+            let mut package = f236_embedded_package(false);
+            f236_add_ole_story(
+                &mut package,
+                "/word/invalid-pi-name.xml",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+                br#"<?1producer value?><w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:p><w:r><w:object><o:OLEObject q:id="invalid-pi-name-ole"/></w:object></w:r></w:p></w:hdr>"#.to_vec(),
+                &["invalid-pi-name-ole"],
+            );
+            package
+        }),
+        ("ActiveX properties", {
+            let mut package = f236_embedded_package(false);
+            package.set_part(
+                "/word/activeX/activeX1.xml",
+                br#"<ax:ocx xmlns:ax="http://schemas.microsoft.com/office/2006/activeX" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" q:id="binary-rel"><?1producer value?></ax:ocx>"#.to_vec(),
+            );
+            package
+        }),
+    ] {
+        let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        assert!(document.embedded_content().is_err(), "{label}");
+        assert!(
+            document
+                .replace_embedded_content(
+                    "/word/document.xml",
+                    "ole-rel",
+                    b"must-not-land",
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{label}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{label}");
+    }
+}
+
+#[test]
+fn word_embedded_xml_names_and_namespace_bindings_fail_closed_atomically() {
+    for (label, malformed) in [
+        (
+            "invalid element name",
+            r#"<1producer/><w:p><w:r><w:object><o:OLEObject q:id="invalid-name-ole"/></w:object></w:r></w:p>"#,
+        ),
+        (
+            "unbound element prefix",
+            r#"<producer:item/><w:p><w:r><w:object><o:OLEObject q:id="invalid-name-ole"/></w:object></w:r></w:p>"#,
+        ),
+        (
+            "invalid attribute name",
+            r#"<w:p 1producer="value"><w:r><w:object><o:OLEObject q:id="invalid-name-ole"/></w:object></w:r></w:p>"#,
+        ),
+        (
+            "unbound attribute prefix",
+            r#"<w:p producer:value="opaque"><w:r><w:object><o:OLEObject q:id="invalid-name-ole"/></w:object></w:r></w:p>"#,
+        ),
+    ] {
+        let mut package = f236_embedded_package(false);
+        let xml = format!(
+            r#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships">{malformed}</w:hdr>"#
+        );
+        f236_add_ole_story(
+            &mut package,
+            "/word/invalid-xml-name.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+            xml.into_bytes(),
+            &["invalid-name-ole"],
+        );
+        let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        assert!(document.embedded_content().is_err(), "{label}");
+        assert!(
+            document
+                .replace_embedded_content(
+                    "/word/document.xml",
+                    "ole-rel",
+                    b"must-not-land",
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{label}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{label}");
+    }
+
+    for (label, properties) in [
+        (
+            "ActiveX invalid element name",
+            br#"<ax:ocx xmlns:ax="http://schemas.microsoft.com/office/2006/activeX" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" q:id="binary-rel"><1producer/></ax:ocx>"#.as_slice(),
+        ),
+        (
+            "ActiveX unbound attribute prefix",
+            br#"<ax:ocx xmlns:ax="http://schemas.microsoft.com/office/2006/activeX" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" q:id="binary-rel" producer:value="opaque"/>"#.as_slice(),
+        ),
+    ] {
+        let mut package = f236_embedded_package(false);
+        package.set_part("/word/activeX/activeX1.xml", properties.to_vec());
+        let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        assert!(document.embedded_content().is_err(), "{label}");
+        assert!(
+            document
+                .replace_embedded_content(
+                    "/word/document.xml",
+                    "ole-rel",
+                    b"must-not-land",
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{label}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{label}");
+    }
+}
+
+#[test]
+fn word_embedded_forbidden_literal_xml_characters_fail_closed_atomically() {
+    for (label, package) in [
+        ("story text U+0001", {
+            let mut package = f236_embedded_package(false);
+            let xml = "<w:hdr xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:o=\"urn:schemas-microsoft-com:office:office\" xmlns:q=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><w:p><w:r><w:t>producer\u{1}</w:t><w:object><o:OLEObject q:id=\"literal-character-ole\"/></w:object></w:r></w:p></w:hdr>";
+            f236_add_ole_story(
+                &mut package,
+                "/word/forbidden-literal.xml",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+                xml.as_bytes().to_vec(),
+                &["literal-character-ole"],
+            );
+            package
+        }),
+        ("story CDATA U+FFFE", {
+            let mut package = f236_embedded_package(false);
+            let xml = "<w:hdr xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:o=\"urn:schemas-microsoft-com:office:office\" xmlns:q=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><![CDATA[producer\u{FFFE}]]><w:p><w:r><w:object><o:OLEObject q:id=\"literal-character-ole\"/></w:object></w:r></w:p></w:hdr>";
+            f236_add_ole_story(
+                &mut package,
+                "/word/forbidden-literal.xml",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+                xml.as_bytes().to_vec(),
+                &["literal-character-ole"],
+            );
+            package
+        }),
+        ("ActiveX text U+0001", {
+            let mut package = f236_embedded_package(false);
+            package.set_part(
+                "/word/activeX/activeX1.xml",
+                "<ax:ocx xmlns:ax=\"http://schemas.microsoft.com/office/2006/activeX\" xmlns:q=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" q:id=\"binary-rel\">producer\u{1}</ax:ocx>"
+                    .as_bytes()
+                    .to_vec(),
+            );
+            package
+        }),
+        ("ActiveX CDATA U+FFFE", {
+            let mut package = f236_embedded_package(false);
+            package.set_part(
+                "/word/activeX/activeX1.xml",
+                "<ax:ocx xmlns:ax=\"http://schemas.microsoft.com/office/2006/activeX\" xmlns:q=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" q:id=\"binary-rel\"><![CDATA[producer\u{FFFE}]]></ax:ocx>"
+                    .as_bytes()
+                    .to_vec(),
+            );
+            package
+        }),
+    ] {
+        let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+        let before = document.to_bytes().unwrap();
+        assert!(document.embedded_content().is_err(), "{label}");
+        assert!(
+            document
+                .replace_embedded_content(
+                    "/word/document.xml",
+                    "ole-rel",
+                    b"must-not-land",
+                    EmbeddedMutationPolicy::PreserveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{label}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{label}");
+    }
+}
+
+#[test]
+fn word_embedded_signature_parts_require_exact_content_types_before_mutation() {
+    use oxml_opc::relationship::rel_types;
+
+    let malformed = [
+        ("missing-vba-signature-type", {
+            let mut package = f236_embedded_package(false);
+            package
+                .content_types
+                .overrides
+                .remove("/word/vbaSignature.bin");
+            package
+        }),
+        ("wrong-vba-signature-type", {
+            let mut package = f236_embedded_package(false);
+            package
+                .content_types
+                .add_override("/word/vbaSignature.bin", "application/octet-stream");
+            package
+        }),
+        ("wrong-agile-vba-signature-type", {
+            let mut package = f236_embedded_package(false);
+            package
+                .get_or_create_part_rels("/word/vbaProject.bin")
+                .items
+                .iter_mut()
+                .find(|relationship| relationship.id == "vba-signature-rel")
+                .unwrap()
+                .rel_type = rel_types::VBA_PROJECT_SIGNATURE_AGILE.to_owned();
+            package
+        }),
+        ("missing-package-origin-type", {
+            let mut package = f236_embedded_package(true);
+            package
+                .content_types
+                .overrides
+                .remove("/_xmlsignatures/origin.sigs");
+            package
+        }),
+        ("wrong-package-signature-type", {
+            let mut package = f236_embedded_package(true);
+            package
+                .content_types
+                .add_override("/_xmlsignatures/sig1.xml", "application/octet-stream");
+            package
+        }),
+    ];
+    for (label, package) in malformed {
+        let mut document = Document::from_bytes(&f236_package_bytes(package)).unwrap();
+        let before = document.to_bytes();
+        assert!(document.embedded_content().is_err(), "{label}");
+        assert!(
+            document
+                .replace_embedded_content(
+                    "/word/document.xml",
+                    "vba-rel",
+                    b"must-not-land",
+                    EmbeddedMutationPolicy::RemoveInvalidatedSignatures,
+                )
+                .is_err(),
+            "{label}"
+        );
+        let after = document.to_bytes();
+        match (before, after) {
+            (Ok(before), Ok(after)) => assert_eq!(after, before, "{label}"),
+            (Err(before), Err(after)) => {
+                assert_eq!(after.to_string(), before.to_string(), "{label}")
+            }
+            (before, after) => {
+                panic!("serialization result changed for {label}: {before:?} {after:?}")
+            }
+        }
+    }
+}
+
+fn f236_add_ole_story(
+    package: &mut oxml_opc::OpcPackage,
+    part_name: &str,
+    content_type: &str,
+    xml: Vec<u8>,
+    relationship_ids: &[&str],
+) {
+    package.set_part(part_name, xml);
+    package.content_types.add_override(part_name, content_type);
+    for relationship_id in relationship_ids {
+        package.get_or_create_part_rels(part_name).add_with_id(
+            relationship_id,
+            oxml_opc::relationship::rel_types::OLE_OBJECT,
+            "embeddings/object1.bin",
+        );
+    }
+}
+
+fn f236_embedded_document(with_package_signature: bool) -> Document {
+    Document::from_bytes(&f236_package_bytes(f236_embedded_package(
+        with_package_signature,
+    )))
+    .unwrap()
+}
+
+fn f236_embedded_package(with_package_signature: bool) -> oxml_opc::OpcPackage {
+    use oxml_opc::relationship::rel_types;
+
+    let mut seed = Document::new();
+    seed.add_paragraph("secret");
+    let mut package = f236_open_package(&seed.to_bytes().unwrap());
+    let document_xml =
+        String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    let owners = format!(
+        r#"<w:p xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:q="{relationship_namespace}"><w:r><w:object><v:shape id="opaque"/><o:OLEObject q:id="ole-rel" ProgID="opaque"/></w:object><w:pict><w:control q:id="control-rel" w:name="opaque"/></w:pict></w:r></w:p>"#,
+        relationship_namespace =
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    );
+    package.set_part(
+        "/word/document.xml",
+        document_xml
+            .replacen("</w:body>", &format!("{owners}</w:body>"), 1)
+            .into_bytes(),
+    );
+    for (part, bytes, content_type) in [
+        (
+            "/word/embeddings/object1.bin",
+            b"ole-executable".as_slice(),
+            "application/vnd.openxmlformats-officedocument.oleObject",
+        ),
+        (
+            "/word/embeddings/orphan.bin",
+            b"producer-orphan".as_slice(),
+            "application/vnd.openxmlformats-officedocument.oleObject",
+        ),
+        (
+            "/word/activeX/activeX1.xml",
+            br#"<?xml version="1.0"?><ax:ocx xmlns:ax="http://schemas.microsoft.com/office/2006/activeX" xmlns:q="http://schemas.openxmlformats.org/officeDocument/2006/relationships" q:id="binary-rel"><ax:ocxPr ax:name="producer" ax:value="kept"/></ax:ocx>"#,
+            "application/vnd.ms-office.activeX+xml",
+        ),
+        (
+            "/word/activeX/activeX1.bin",
+            b"activex-executable".as_slice(),
+            "application/vnd.ms-office.activeX",
+        ),
+        (
+            "/word/vbaProject.bin",
+            b"vba-executable".as_slice(),
+            "application/vnd.ms-office.vbaProject",
+        ),
+        (
+            "/word/vbaSignature.bin",
+            b"vba-signature-evidence".as_slice(),
+            "application/vnd.ms-office.vbaProjectSignature",
+        ),
+    ] {
+        package.set_part(part, bytes.to_vec());
+        package.content_types.add_override(part, content_type);
+    }
+    package
+        .get_or_create_part_rels("/word/document.xml")
+        .add_with_id("ole-rel", rel_types::OLE_OBJECT, "embeddings/object1.bin");
+    package
+        .get_or_create_part_rels("/word/document.xml")
+        .add_with_id("control-rel", rel_types::CONTROL, "activeX/activeX1.xml");
+    package
+        .get_or_create_part_rels("/word/activeX/activeX1.xml")
+        .add_with_id(
+            "binary-rel",
+            rel_types::ACTIVEX_CONTROL_BINARY,
+            "activeX1.bin",
+        );
+    package
+        .get_or_create_part_rels("/word/document.xml")
+        .add_with_id("vba-rel", rel_types::VBA_PROJECT, "vbaProject.bin");
+    package
+        .get_or_create_part_rels("/word/vbaProject.bin")
+        .add_with_id(
+            "vba-signature-rel",
+            rel_types::VBA_PROJECT_SIGNATURE,
+            "vbaSignature.bin",
+        );
+    if with_package_signature {
+        package.set_part("/_xmlsignatures/origin.sigs", Vec::new());
+        package.set_part(
+            "/_xmlsignatures/sig1.xml",
+            b"package-signature-evidence".to_vec(),
+        );
+        package.content_types.add_override(
+            "/_xmlsignatures/origin.sigs",
+            "application/vnd.openxmlformats-package.digital-signature-origin",
+        );
+        package.content_types.add_override(
+            "/_xmlsignatures/sig1.xml",
+            "application/vnd.openxmlformats-package.digital-signature-xmlsignature+xml",
+        );
+        package.package_rels.add_with_id(
+            "package-signature-origin",
+            rel_types::DIGITAL_SIGNATURE_ORIGIN,
+            "_xmlsignatures/origin.sigs",
+        );
+        package
+            .get_or_create_part_rels("/_xmlsignatures/origin.sigs")
+            .add_with_id(
+                "package-signature",
+                rel_types::DIGITAL_SIGNATURE,
+                "sig1.xml",
+            );
+    }
+    package
+}
+
+fn f236_package_bytes(package: oxml_opc::OpcPackage) -> Vec<u8> {
+    let mut output = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut output).unwrap();
+    output.into_inner()
+}
+
+fn f236_open_package(bytes: &[u8]) -> oxml_opc::OpcPackage {
+    oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap()
+}
+
+fn f236_hex(bytes: [u8; 32]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }

@@ -41,6 +41,7 @@ thiserror = { workspace = true }
 regex = { workspace = true }
 serde_json = { workspace = true }
 scraper = { workspace = true }
+sha2 = { workspace = true }
 zip = { workspace = true }
 
 [dev-dependencies]
