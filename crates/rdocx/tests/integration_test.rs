@@ -7,28 +7,113 @@ use oxml_opc::relationship::rel_types;
 use rdocx::paragraph::Alignment;
 use rdocx::table::VerticalAlignment;
 use rdocx::{
-    BodyItemRef, BorderStyle, Length, ListLevel, ParagraphRef, RunPosition, RunRange, SectionBreak,
-    StyleBuilder, TabAlignment, TabLeader, UnderlineStyle,
+    BodyItemRef, BorderStyle, Length, ListLevel, MhtmlDiagnostic, ParagraphRef, RunPosition,
+    RunRange, SectionBreak, StyleBuilder, TabAlignment, TabLeader, UnderlineStyle,
 };
 use rdocx::{Document, PackageReadLimits, RevisionKind};
 
 const ODT_ORACLE_VERSION: &str = "LibreOffice 26.2.5.2 cd7284b4cbbfeb507e630c1aac019f4157393acb";
 const MHTML_ORACLE_VERSION: &str = "Microsoft Word 16.104 build 16.104.25121423";
+const MHTML_ORACLE_HTML: &str = "<h1>Oracle title</h1><p><strong>bold</strong> <a href='https://example.test/'>link</a><img src='https://example.test/pixel.png' width='2' height='3'></p><ol><li>one</li><li>two</li></ol><table><tr><td>cell</td></tr></table>";
 
-fn source_built_mhtml(html: &str) -> Vec<u8> {
-    format!(
-        "MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=integration\r\n\r\n--integration\r\nContent-Type: text/html; charset=utf-8\r\nContent-Location: https://example.test/index.html\r\n\r\n{html}\r\n--integration--\r\n"
-    )
-    .into_bytes()
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MhtmlOracleRecord {
+    text: String,
+    bold_text: Vec<String>,
+    numbered_text: Vec<String>,
+    table_cells: Vec<Vec<Vec<String>>>,
+    image_sizes: Vec<(i64, i64)>,
+    links: Vec<(String, Option<String>, Option<String>)>,
+    diagnostics: Vec<MhtmlDiagnostic>,
+}
+
+fn normalized_mhtml_record(
+    document: &Document,
+    diagnostics: &[MhtmlDiagnostic],
+) -> MhtmlOracleRecord {
+    let paragraphs = document.paragraphs();
+    let bold_text = paragraphs
+        .iter()
+        .flat_map(|paragraph| paragraph.runs())
+        .filter(|run| run.bold_value() == Some(true) || run.style_id() == Some("Strong"))
+        .map(|run| run.text())
+        .collect();
+    let numbered_text = paragraphs
+        .iter()
+        .filter(|paragraph| paragraph.numbering().is_some())
+        .map(|paragraph| paragraph.text())
+        .collect();
+    let mut table_cells = Vec::new();
+    for table_index in 0..document.table_count() {
+        let table = document.table(table_index).unwrap();
+        let mut rows = Vec::new();
+        for row_index in 0..table.row_count() {
+            let row = table.row(row_index).unwrap();
+            rows.push(
+                (0..row.cell_count())
+                    .map(|cell_index| row.cell(cell_index).unwrap().text())
+                    .collect(),
+            );
+        }
+        table_cells.push(rows);
+    }
+    MhtmlOracleRecord {
+        text: document.text().trim_end().to_owned(),
+        bold_text,
+        numbered_text,
+        table_cells,
+        image_sizes: document
+            .images()
+            .iter()
+            .map(|image| (image.width_emu, image.height_emu))
+            .collect(),
+        links: document
+            .links()
+            .into_iter()
+            .map(|link| (link.text.trim().to_owned(), link.url, link.anchor))
+            .collect(),
+        diagnostics: diagnostics.to_vec(),
+    }
+}
+
+fn pinned_rdocx_mhtml_record() -> MhtmlOracleRecord {
+    MhtmlOracleRecord {
+        text: "Oracle title\nbold link\none\ntwo\ncell".to_owned(),
+        bold_text: vec!["bold".to_owned()],
+        numbered_text: vec!["one".to_owned(), "two".to_owned()],
+        table_cells: vec![vec![vec!["cell".to_owned()]]],
+        image_sizes: vec![(19_050, 28_575)],
+        links: vec![(
+            "link".to_owned(),
+            Some("https://example.test/".to_owned()),
+            None,
+        )],
+        diagnostics: Vec::new(),
+    }
+}
+
+fn pinned_word_mhtml_record() -> MhtmlOracleRecord {
+    MhtmlOracleRecord {
+        image_sizes: Vec::new(),
+        ..pinned_rdocx_mhtml_record()
+    }
+}
+
+fn mhtml_oracle_accepts(rdocx: &MhtmlOracleRecord, word: &MhtmlOracleRecord) -> bool {
+    // Word 16.104 drops this contained PNG while rdocx retains it by contract.
+    // Compare every shared field, then assert each side of that pinned difference.
+    let mut common_rdocx = rdocx.clone();
+    common_rdocx.image_sizes.clear();
+    common_rdocx == *word
+        && *rdocx == pinned_rdocx_mhtml_record()
+        && *word == pinned_word_mhtml_record()
 }
 
 fn mhtml_pixel_png() -> Vec<u8> {
     vec![
-        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
-        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
-        0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x08, 0xd7, 0x63, 0xf8,
-        0xcf, 0xc0, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01, 0xe2, 0x21, 0xbc, 0x33, 0x00, 0x00, 0x00,
-        0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
+        0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 8, 29, 99, 96, 96, 96, 248, 15, 0,
+        1, 4, 1, 0, 30, 115, 156, 64, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
     ]
 }
 
@@ -36,9 +121,13 @@ fn source_built_mhtml_with_pixel(html: &str) -> Vec<u8> {
     use base64::Engine as _;
     let encoded = base64::engine::general_purpose::STANDARD.encode(mhtml_pixel_png());
     format!(
-        "MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=integration; start=\"<root@rdocx>\"\r\n\r\n--integration\r\nContent-Type: text/html; charset=utf-8\r\nContent-ID: <root@rdocx>\r\nContent-Location: https://example.test/index.html\r\n\r\n{html}\r\n--integration\r\nContent-Type: image/png\r\nContent-ID: <pixel@rdocx>\r\nContent-Location: pixel.png\r\nContent-Transfer-Encoding: base64\r\n\r\n{encoded}\r\n--integration--\r\n"
+        "MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=integration; start=\"<root@rdocx>\"\r\n\r\n--integration\r\nContent-Type: text/html; charset=utf-8\r\nContent-ID: <root@rdocx>\r\nContent-Location: https://example.test/index.html\r\n\r\n{html}\r\n--integration\r\nContent-Type: image/png\r\nContent-ID: <pixel@rdocx>\r\nContent-Location: https://example.test/pixel.png\r\nContent-Transfer-Encoding: base64\r\n\r\n{encoded}\r\n--integration--\r\n"
     )
     .into_bytes()
+}
+
+fn mhtml_word_oracle_source() -> Vec<u8> {
+    source_built_mhtml_with_pixel(MHTML_ORACLE_HTML)
 }
 
 #[test]
@@ -128,51 +217,35 @@ fn mhtml_conversions_match_the_pinned_word_structure() {
         MHTML_ORACLE_VERSION,
         "Microsoft Word 16.104 build 16.104.25121423"
     );
-    let imported = Document::from_mhtml_bytes(&source_built_mhtml("<p>oracle structure</p>"))
-        .expect("Word-authenticated source-built MHTML");
-    assert_eq!(imported.document.text(), "oracle structure\n");
+    let imported = Document::from_mhtml_bytes(&mhtml_word_oracle_source())
+        .expect("source-built MHTML imported by rdocx");
+    let word_record = pinned_word_mhtml_record();
+    let rdocx_record = normalized_mhtml_record(&imported.document, &imported.diagnostics);
+    assert!(mhtml_oracle_accepts(&rdocx_record, &word_record));
 
-    let record = |document: &Document| {
-        (
-            document.text(),
-            document.table_count(),
-            document
-                .paragraphs()
-                .iter()
-                .filter(|paragraph| paragraph.numbering().is_some())
-                .count(),
-            document.images().len(),
-            document.links().len(),
-            document
-                .paragraphs()
-                .iter()
-                .flat_map(|paragraph| paragraph.runs())
-                .any(|run| run.bold_value() == Some(true)),
-        )
-    };
-    let expected = record(&imported.document);
     let perturbations = [
-        "<p>changed structure</p>",
-        "<p><strong>oracle structure</strong></p>",
-        "<table><tr><td>oracle structure</td></tr></table>",
-        "<ol><li>oracle structure</li></ol>",
-        "<p><a href='https://example.test/'>oracle structure</a></p>",
+        MHTML_ORACLE_HTML.replace("Oracle title", "Changed title"),
+        MHTML_ORACLE_HTML.replace("<strong>bold</strong>", "<span>bold</span>"),
+        MHTML_ORACLE_HTML.replace("<td>cell</td>", "<td>changed</td>"),
+        MHTML_ORACLE_HTML.replace("<li>two</li>", ""),
+        MHTML_ORACLE_HTML.replace(
+            "href='https://example.test/'",
+            "href='https://changed.test/'",
+        ),
+        MHTML_ORACLE_HTML.replace(
+            "<img src='https://example.test/pixel.png' width='2' height='3'>",
+            "",
+        ),
+        MHTML_ORACLE_HTML.replace("<strong>", "<object></object><strong>"),
     ];
     for html in perturbations {
-        let candidate = Document::from_mhtml_bytes(&source_built_mhtml(html)).unwrap();
-        assert_ne!(record(&candidate.document), expected);
+        let candidate = Document::from_mhtml_bytes(&source_built_mhtml_with_pixel(&html)).unwrap();
+        let candidate = normalized_mhtml_record(&candidate.document, &candidate.diagnostics);
+        assert!(
+            !mhtml_oracle_accepts(&candidate, &word_record),
+            "accepted perturbed MHTML source {html:?}"
+        );
     }
-    let image_candidate = Document::from_mhtml_bytes(&source_built_mhtml_with_pixel(
-        "<p>oracle structure<img src='cid:pixel@rdocx'></p>",
-    ))
-    .unwrap();
-    assert_ne!(record(&image_candidate.document), expected);
-    let diagnostic_candidate = Document::from_mhtml_bytes(&source_built_mhtml(
-        "<p>oracle structure<object>loss</object></p>",
-    ))
-    .unwrap();
-    assert_eq!(record(&diagnostic_candidate.document), expected);
-    assert_eq!(diagnostic_candidate.diagnostics.len(), 1);
 
     let mut seed = Document::new();
     let bytes = seed.to_bytes().unwrap();
@@ -213,15 +286,15 @@ fn regenerate_mhtml_word_oracle_authenticates_exact_build() {
         String::from_utf8_lossy(&build.stdout).trim(),
         "16.104.25121423"
     );
-    let source = "/private/tmp/F-239-word-16.104-source.mhtml";
-    let output = "/private/tmp/F-239-word-16.104-output.docx";
-    std::fs::write(
-        source,
-        source_built_mhtml(
-            "<h1>Oracle title</h1><p><strong>bold</strong> <a href='https://example.test/'>link</a></p><ol><li>one</li><li>two</li></ol><table><tr><td>cell</td></tr></table>",
-        ),
-    )
-    .unwrap();
+    let source = format!(
+        "/private/tmp/F-239-word-16.104-{}-source.mhtml",
+        std::process::id()
+    );
+    let output = format!(
+        "/private/tmp/F-239-word-16.104-{}-output.docx",
+        std::process::id()
+    );
+    std::fs::write(&source, mhtml_word_oracle_source()).unwrap();
     let script = format!(
         r#"with timeout of 120 seconds
 tell application "Microsoft Word"
@@ -244,21 +317,16 @@ end timeout
         "Word conversion failed: {}",
         String::from_utf8_lossy(&conversion.stderr)
     );
-    let oracle = Document::open(output).expect("Word-produced DOCX");
-    assert_eq!(oracle.paragraph(0).unwrap().text(), "Oracle title");
-    assert_eq!(oracle.paragraph(1).unwrap().text(), "bold link");
-    assert!(
-        oracle
-            .paragraph(1)
-            .unwrap()
-            .runs()
-            .any(|run| run.bold_value() == Some(true) || run.style_id() == Some("Strong"))
-    );
-    assert_eq!(oracle.table(0).unwrap().cell(0, 0).unwrap().text(), "cell");
-    assert_eq!(
-        oracle.links()[0].url.as_deref(),
-        Some("https://example.test/")
-    );
+    let oracle = Document::open(&output).expect("Word-produced DOCX");
+    let imported = Document::from_mhtml_bytes(&mhtml_word_oracle_source())
+        .expect("same source imported by rdocx");
+    let word_record = normalized_mhtml_record(&oracle, &[]);
+    let rdocx_record = normalized_mhtml_record(&imported.document, &imported.diagnostics);
+    assert_eq!(word_record, pinned_word_mhtml_record());
+    assert_eq!(rdocx_record, pinned_rdocx_mhtml_record());
+    assert!(mhtml_oracle_accepts(&rdocx_record, &word_record));
+    std::fs::remove_file(source).unwrap();
+    std::fs::remove_file(output).unwrap();
 }
 
 #[derive(Debug, PartialEq)]

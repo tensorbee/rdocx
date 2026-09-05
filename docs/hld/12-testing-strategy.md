@@ -461,7 +461,10 @@ It compares normalized public structure rather than package bytes. Independent
 mutations to body text, formatting, table content, list identity, hyperlink,
 image, and diagnostic records each fail the same acceptance predicate. Word's
 `Strong` run style is accepted as the normalized representation of source
-`strong` markup.
+`strong` markup. Word drops the source-built contained PNG while rdocx retains
+it under the declared MHTML image contract. The shared predicate compares all
+other normalized fields and pins both sides of that intentional image
+difference, so removing the rdocx image still fails acceptance.
 
 The PDF import regression gate builds PDF objects, content streams, embedded
 Carlito bytes, paths, text, and URI annotations in source. Unit coverage locks

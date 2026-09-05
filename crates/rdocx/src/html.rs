@@ -21,8 +21,8 @@ use crate::paragraph::{Alignment, Paragraph};
 use crate::run::Run;
 use crate::table::Cell;
 use crate::{
-    BodyItemRef, CellItemRef, Document, Error, Length, ListLevel, ParagraphItemRef, ParagraphRef,
-    Result, TableRef,
+    BodyItemRef, CellItemRef, Document, Error, HyperlinkItemRef, HyperlinkRef, Length, ListLevel,
+    ParagraphItemRef, ParagraphRef, Result, RunItemRef, RunRef, TableRef,
 };
 
 const MAX_INPUT_BYTES: usize = 64 * 1024 * 1024;
@@ -435,6 +435,16 @@ fn mhtml_export_html(document: &Document) -> Result<(String, Vec<MhtmlResource>)
             .map_err(|_| mhtml_error(None, 0, "HTML emitter produced invalid base64 image data"))?;
         let format = oxml_media::ImageFormat::sniff(&bytes)
             .ok_or_else(|| mhtml_error(None, 0, "document image has an unsupported format"))?;
+        if !matches!(
+            format,
+            oxml_media::ImageFormat::Png | oxml_media::ImageFormat::Jpeg
+        ) {
+            return Err(mhtml_error(
+                None,
+                0,
+                "MHTML export supports only PNG and JPEG images",
+            ));
+        }
         if format.content_type() != content_type {
             return Err(mhtml_error(
                 None,
@@ -536,7 +546,18 @@ fn paragraph_mhtml_losses(
 ) -> Result<()> {
     for (index, item) in paragraph.items().enumerate() {
         let message = match item {
-            ParagraphItemRef::Run(_) | ParagraphItemRef::Hyperlink(_) => continue,
+            ParagraphItemRef::Run(run) => {
+                run_mhtml_losses(run, &format!("{location}/item[{index}]/run"), diagnostics)?;
+                continue;
+            }
+            ParagraphItemRef::Hyperlink(hyperlink) => {
+                hyperlink_mhtml_losses(
+                    hyperlink,
+                    &format!("{location}/item[{index}]/hyperlink"),
+                    diagnostics,
+                )?;
+                continue;
+            }
             ParagraphItemRef::Equation(_) => "dropped Word equation",
             ParagraphItemRef::ContentControl(_) => "dropped Word paragraph content control",
             ParagraphItemRef::Revision(_) => "dropped Word revision",
@@ -547,6 +568,83 @@ fn paragraph_mhtml_losses(
             ParagraphItemRef::UnsupportedXml(_) => "dropped unsupported Word paragraph XML",
         };
         push_mhtml_loss(diagnostics, format!("{location}/item[{index}]"), message)?;
+    }
+    Ok(())
+}
+
+fn run_mhtml_losses(
+    run: RunRef<'_>,
+    location: &str,
+    diagnostics: &mut Vec<MhtmlDiagnostic>,
+) -> Result<()> {
+    for (index, item) in run.items().enumerate() {
+        let message = match item {
+            RunItemRef::Text(_)
+            | RunItemRef::Tab
+            | RunItemRef::Break(_)
+            | RunItemRef::Drawing(_) => continue,
+            RunItemRef::DeletedText(_) => "dropped Word deleted-text semantics",
+            RunItemRef::Field(_) => "dropped Word field semantics",
+            RunItemRef::FootnoteReference(_) => "dropped Word footnote reference",
+            RunItemRef::EndnoteReference(_) => "dropped Word endnote reference",
+            RunItemRef::CommentReference(_) => "dropped Word comment reference",
+            RunItemRef::LegacyHorizontalRule(_) => "dropped Word legacy horizontal rule",
+            RunItemRef::UnsupportedXml(_) => "dropped unsupported Word run XML",
+        };
+        push_mhtml_loss(diagnostics, format!("{location}/item[{index}]"), message)?;
+    }
+    Ok(())
+}
+
+fn hyperlink_mhtml_losses(
+    hyperlink: HyperlinkRef<'_>,
+    location: &str,
+    diagnostics: &mut Vec<MhtmlDiagnostic>,
+) -> Result<()> {
+    if hyperlink.anchor().is_some() {
+        push_mhtml_loss(
+            diagnostics,
+            format!("{location}/anchor"),
+            "dropped Word internal hyperlink anchor",
+        )?;
+    }
+    if hyperlink.tooltip().is_some() {
+        push_mhtml_loss(
+            diagnostics,
+            format!("{location}/tooltip"),
+            "dropped Word hyperlink tooltip",
+        )?;
+    }
+    if hyperlink.doc_location().is_some() {
+        push_mhtml_loss(
+            diagnostics,
+            format!("{location}/doc-location"),
+            "dropped Word hyperlink document location",
+        )?;
+    }
+    if hyperlink.has_unmodeled_semantic_attributes() {
+        push_mhtml_loss(
+            diagnostics,
+            format!("{location}/attributes"),
+            "dropped unsupported Word hyperlink attributes",
+        )?;
+    }
+    for (index, item) in hyperlink.items().enumerate() {
+        match item {
+            HyperlinkItemRef::Run(run) => {
+                run_mhtml_losses(run, &format!("{location}/item[{index}]/run"), diagnostics)?
+            }
+            HyperlinkItemRef::Revision(_) => push_mhtml_loss(
+                diagnostics,
+                format!("{location}/item[{index}]"),
+                "dropped Word hyperlink revision",
+            )?,
+            HyperlinkItemRef::UnsupportedXml(_) => push_mhtml_loss(
+                diagnostics,
+                format!("{location}/item[{index}]"),
+                "dropped unsupported Word hyperlink XML",
+            )?,
+        }
     }
     Ok(())
 }
@@ -1517,7 +1615,7 @@ fn parse_mhtml(bytes: &[u8], limits: MhtmlLimits) -> Result<(String, MhtmlProjec
     let dom = Html::parse_document(&html);
     let mut resources = HashMap::new();
     let resource_selector = Selector::parse(
-        "img[src], link[href], script[src], iframe[src], frame[src], embed[src], object[data]",
+        "img[src], link[href], script[src], iframe[src], frame[src], embed[src], object[data], video[src], audio[src], track[src]",
     )
     .expect("static selector");
     for element in dom.select(&resource_selector) {
@@ -1554,6 +1652,16 @@ fn parse_mhtml(bytes: &[u8], limits: MhtmlLimits) -> Result<(String, MhtmlProjec
                     "image bytes have an unsupported format",
                 )
             })?;
+            if !matches!(
+                format,
+                oxml_media::ImageFormat::Png | oxml_media::ImageFormat::Jpeg
+            ) {
+                return Err(mhtml_error(
+                    part.content_id.as_deref(),
+                    part.offset,
+                    "MHTML import supports only PNG and JPEG images",
+                ));
+            }
             if format.content_type() != part.content_type {
                 return Err(mhtml_error(
                     part.content_id.as_deref(),
@@ -3106,6 +3214,7 @@ mod tests {
     use std::io::Cursor;
 
     use base64::Engine as _;
+    use oxml_opc::OpcPackage;
 
     use super::{
         Document, Length, Limits, MhtmlLimits, from_html_with_limits, from_mhtml_with_limits,
@@ -3122,9 +3231,34 @@ mod tests {
         ]
     }
 
+    fn one_pixel_jpeg() -> Vec<u8> {
+        vec![
+            0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00,
+            0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xff, 0xdb, 0x00, 0x43, 0x00, 0x08, 0x06, 0x06,
+            0x07, 0x06, 0x05, 0x08, 0x07, 0x07, 0x07, 0x09, 0x09, 0x08, 0x0a, 0x0c, 0x14, 0x0d,
+            0x0c, 0x0b, 0x0b, 0x0c, 0x19, 0x12, 0x13, 0x0f, 0x14, 0x1d, 0x1a, 0x1f, 0x1e, 0x1d,
+            0x1a, 0x1c, 0x1c, 0x20, 0x24, 0x2e, 0x27, 0x20, 0x22, 0x2c, 0x23, 0x1c, 0x1c, 0x28,
+            0x37, 0x29, 0x2c, 0x30, 0x31, 0x34, 0x34, 0x34, 0x1f, 0x27, 0x39, 0x3d, 0x38, 0x32,
+            0x3c, 0x2e, 0x33, 0x34, 0x32, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x01, 0x00, 0x01,
+            0x01, 0x01, 0x11, 0x00, 0xff, 0xc4, 0x00, 0x14, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0xff, 0xc4,
+            0x00, 0x14, 0x10, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00,
+            0x3f, 0x00, 0x7f, 0x7f, 0xff, 0xd9,
+        ]
+    }
+
     fn mhtml_fixture(html: &str) -> Vec<u8> {
         format!(
             "MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=fixture\r\n\r\n--fixture\r\nContent-Type: text/html; charset=utf-8\r\nContent-Location: https://example.test/index.html\r\n\r\n{html}\r\n--fixture--\r\n"
+        )
+        .into_bytes()
+    }
+
+    fn mhtml_image_fixture(content_type: &str, bytes: &[u8]) -> Vec<u8> {
+        let encoded = super::BASE64.encode(bytes);
+        format!(
+            "MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=fixture; start=\"<root@rdocx>\"\r\n\r\n--fixture\r\nContent-Type: text/html; charset=utf-8\r\nContent-ID: <root@rdocx>\r\nContent-Location: https://example.test/index.html\r\n\r\n<p>before<img src='cid:image@rdocx' width='1' height='1'>after</p>\r\n--fixture\r\nContent-Type: {content_type}\r\nContent-ID: <image@rdocx>\r\nContent-Transfer-Encoding: base64\r\n\r\n{encoded}\r\n--fixture--\r\n"
         )
         .into_bytes()
     }
@@ -3147,6 +3281,30 @@ mod tests {
                 .map(char::from)
                 .collect(),
             mhtml_fixture("<img srcset='https://outside.test/a.png 1x'>")
+                .into_iter()
+                .map(char::from)
+                .collect(),
+            mhtml_fixture("<video src='https://outside.test/video.mp4'></video>")
+                .into_iter()
+                .map(char::from)
+                .collect(),
+            mhtml_fixture("<video src='cid:missing@rdocx'></video>")
+                .into_iter()
+                .map(char::from)
+                .collect(),
+            mhtml_fixture("<audio src='https://outside.test/audio.mp3'></audio>")
+                .into_iter()
+                .map(char::from)
+                .collect(),
+            mhtml_fixture("<audio src='cid:missing@rdocx'></audio>")
+                .into_iter()
+                .map(char::from)
+                .collect(),
+            mhtml_fixture("<track src='https://outside.test/captions.vtt'>")
+                .into_iter()
+                .map(char::from)
+                .collect(),
+            mhtml_fixture("<track src='cid:missing@rdocx'>")
                 .into_iter()
                 .map(char::from)
                 .collect(),
@@ -3211,6 +3369,58 @@ mod tests {
             },
         ] {
             assert!(from_mhtml_with_limits(two_parts.as_bytes(), limits).is_err());
+        }
+    }
+
+    #[test]
+    fn mhtml_images_are_limited_to_png_and_jpeg_in_both_directions() {
+        for (content_type, bytes) in [
+            ("image/png", one_pixel_png()),
+            ("image/jpeg", one_pixel_jpeg()),
+        ] {
+            let imported = Document::from_mhtml_bytes(&mhtml_image_fixture(content_type, &bytes))
+                .expect("supported MHTML image");
+            assert_eq!(imported.document.images().len(), 1);
+            let exported = imported
+                .document
+                .to_mhtml_bytes()
+                .expect("supported export");
+            assert!(
+                exported
+                    .bytes
+                    .windows(content_type.len())
+                    .any(|window| window == content_type.as_bytes())
+            );
+        }
+
+        let unsupported: [(&str, &[u8], &str); 7] = [
+            ("image/gif", b"GIF89a", "image.gif"),
+            ("image/bmp", b"BM", "image.bmp"),
+            ("image/tiff", b"II*\0", "image.tiff"),
+            ("image/webp", b"RIFF\0\0\0\0WEBP", "image.webp"),
+            (
+                "image/svg+xml",
+                b"<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>",
+                "image.svg",
+            ),
+            (
+                "image/emf",
+                b"\x01\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0 EMF",
+                "image.emf",
+            ),
+            ("image/wmf", b"\xd7\xcd\xc6\x9a", "image.wmf"),
+        ];
+        for (content_type, bytes, filename) in unsupported {
+            assert!(
+                Document::from_mhtml_bytes(&mhtml_image_fixture(content_type, bytes)).is_err(),
+                "accepted {content_type} import"
+            );
+            let mut document = Document::new();
+            document.add_picture(bytes, filename, Length::emu(9_525), Length::emu(9_525));
+            assert!(
+                document.to_mhtml_bytes().is_err(),
+                "accepted {content_type} export"
+            );
         }
     }
 
@@ -3299,6 +3509,91 @@ mod tests {
                 .expect("safe lossy MHTML import");
         assert_eq!(parsed.document.text(), "beforeafter\n");
         assert_eq!(parsed.diagnostics.len(), 1);
+
+        let mut seed = Document::new();
+        let bytes = seed.to_bytes().unwrap();
+        let mut package = OpcPackage::from_reader(Cursor::new(bytes)).unwrap();
+        package.set_part(
+            "/word/document.xml",
+            br#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:x="urn:producer" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><w:body><w:p><w:r><w:t>before</w:t></w:r><w:r><w:delText>deleted</w:delText></w:r><w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple><w:r><w:footnoteReference w:id="1"/></w:r><w:r><w:endnoteReference w:id="2"/></w:r><w:r><w:commentReference w:id="3"/></w:r><w:r><w:t>kept</w:t><x:run/></w:r><w:r><w:pict><v:rect o:hr="t"/></w:pict></w:r><w:hyperlink w:anchor="bookmark" w:tooltip="tip" w:docLocation="there" x:flag="yes"><x:link/><w:ins w:id="4" w:author="Ada"><w:r><w:t>revision</w:t></w:r></w:ins><w:r><w:t>linked</w:t><x:nested/></w:r></w:hyperlink><w:r><w:t>after</w:t></w:r></w:p><w:sectPr/></w:body></w:document>"#.to_vec(),
+        );
+        let mut saved = Cursor::new(Vec::new());
+        package.write_to(&mut saved).unwrap();
+        let document = Document::from_bytes(saved.get_ref()).unwrap();
+        let written = document.to_mhtml_bytes().unwrap();
+        assert_eq!(
+            written
+                .diagnostics
+                .iter()
+                .map(|diagnostic| (diagnostic.location.as_str(), diagnostic.message.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "body[0]/paragraph/item[1]/run/item[0]",
+                    "dropped Word deleted-text semantics",
+                ),
+                (
+                    "body[0]/paragraph/item[2]/run/item[0]",
+                    "dropped Word field semantics",
+                ),
+                (
+                    "body[0]/paragraph/item[3]/run/item[0]",
+                    "dropped Word footnote reference",
+                ),
+                (
+                    "body[0]/paragraph/item[4]/run/item[0]",
+                    "dropped Word endnote reference",
+                ),
+                (
+                    "body[0]/paragraph/item[5]/run/item[0]",
+                    "dropped Word comment reference",
+                ),
+                (
+                    "body[0]/paragraph/item[6]/run/item[1]",
+                    "dropped unsupported Word run XML",
+                ),
+                (
+                    "body[0]/paragraph/item[7]/run/item[0]",
+                    "dropped Word legacy horizontal rule",
+                ),
+                (
+                    "body[0]/paragraph/item[8]/hyperlink/anchor",
+                    "dropped Word internal hyperlink anchor",
+                ),
+                (
+                    "body[0]/paragraph/item[8]/hyperlink/tooltip",
+                    "dropped Word hyperlink tooltip",
+                ),
+                (
+                    "body[0]/paragraph/item[8]/hyperlink/doc-location",
+                    "dropped Word hyperlink document location",
+                ),
+                (
+                    "body[0]/paragraph/item[8]/hyperlink/attributes",
+                    "dropped unsupported Word hyperlink attributes",
+                ),
+                (
+                    "body[0]/paragraph/item[8]/hyperlink/item[0]",
+                    "dropped unsupported Word hyperlink XML",
+                ),
+                (
+                    "body[0]/paragraph/item[8]/hyperlink/item[1]",
+                    "dropped Word hyperlink revision",
+                ),
+                (
+                    "body[0]/paragraph/item[8]/hyperlink/item[2]/run/item[1]",
+                    "dropped unsupported Word run XML",
+                ),
+            ]
+        );
+        let reopened = Document::from_mhtml_bytes(&written.bytes).unwrap();
+        let text = reopened.document.text();
+        for supported in ["before", "1", "kept", "linked", "after"] {
+            assert!(
+                text.contains(supported),
+                "missing supported sibling {supported:?}"
+            );
+        }
     }
 
     #[test]
