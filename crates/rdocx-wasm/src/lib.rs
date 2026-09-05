@@ -314,7 +314,7 @@ mod tests {
         let wasm_manifest = include_str!("../Cargo.toml");
 
         for dependency in [
-            "oxml-layout = { path = \"crates/oxml-layout\", version = \"0.9.0\", default-features = false }",
+            "oxml-layout = { path = \"crates/oxml-layout\", version = \"0.10.0\", default-features = false }",
             "rdocx = { path = \"crates/rdocx\", version = \"0.12.0\", default-features = false }",
             "rdocx-layout = { path = \"crates/rdocx-layout\", version = \"0.12.0\", default-features = false }",
         ] {

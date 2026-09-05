@@ -21,11 +21,11 @@ jobs:
         run: python3 scripts/hash_harness.py --check
 
       - name: Verify release metadata
-        run: python3 -m unittest scripts.test_sprint_workflow.SprintWorkflowTests.test_stable_release_family_is_prepared_at_0_12_0 scripts.test_sprint_workflow.SprintWorkflowTests.test_immutable_rdocx_layout_0_10_1_registry_graph_remains_at_oxml_layout_0_6_0 scripts.test_sprint_workflow.SprintWorkflowTests.test_incubating_release_family_is_prepared_at_0_9_0
+        run: python3 -m unittest scripts.test_sprint_workflow.SprintWorkflowTests.test_stable_release_family_is_prepared_at_0_12_0 scripts.test_sprint_workflow.SprintWorkflowTests.test_immutable_rdocx_layout_0_10_1_registry_graph_remains_at_oxml_layout_0_6_0 scripts.test_sprint_workflow.SprintWorkflowTests.test_incubating_release_family_is_prepared_at_0_10_0
 
       - name: Verify published shared family for stable release
         if: startsWith(github.ref_name, 'v')
-        run: python3 -m unittest scripts.test_sprint_workflow.SprintWorkflowTests.test_prepared_rdocx_layout_0_12_0_requires_published_oxml_layout_0_9_0
+        run: python3 -m unittest scripts.test_sprint_workflow.SprintWorkflowTests.test_prepared_rdocx_layout_0_12_0_requires_published_oxml_layout_0_10_0
         env:
           RDOCX_VERIFY_PUBLISHED_SHARED: "1"
 

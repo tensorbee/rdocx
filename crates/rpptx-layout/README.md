@@ -19,4 +19,4 @@ let media = ScopedMediaIds::default();
 assert_eq!(media.get(FlattenedSource::Slide, "rId1"), None);
 ```
 
-Add `rpptx-layout = "0.9.0"` to your dependencies. See the [resolver API](https://docs.rs/rpptx-layout) for the resolved-slide contract.
+Add `rpptx-layout = "0.10.0"` to your dependencies. See the [resolver API](https://docs.rs/rpptx-layout) for the resolved-slide contract.

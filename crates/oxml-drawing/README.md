@@ -22,4 +22,4 @@ assert!(matches!(fill, Fill::NoFill(_)));
 # Ok::<(), oxml_drawing::fill::FillError>(())
 ```
 
-Add `oxml-drawing = "0.9.0"` to your dependencies. Browse the [typed DrawingML API](https://docs.rs/oxml-drawing) before constructing schema-level values directly.
+Add `oxml-drawing = "0.10.0"` to your dependencies. Browse the [typed DrawingML API](https://docs.rs/oxml-drawing) before constructing schema-level values directly.

@@ -1775,19 +1775,19 @@ The stable 0.12.0 carrier regression pins all eleven inherited version
 carriers, both Python project versions, both rdocx WASM dependency assertions,
 the stable CI package literal, the seven publishable crates, and every stable
 README requirement. It also proves the current incubating workspace carriers
-are 0.9.0 while `rpptx-wasm` remains ineligible for publication.
+are 0.10.0 while `rpptx-wasm` remains ineligible for publication.
 The paired incubating regression pins all sixteen explicit manifests, fifteen
 workspace dependency requirements, sixteen lockfile entries, publication
 flags, README examples, Rust assertions, the CI WASM literal, and the exact
-15-package publication preflight at 0.9.0. It separately proves the stable
+15-package publication preflight at 0.10.0. It separately proves the stable
 workspace remains at its prepared 0.12.0 boundary and `rpptx-wasm` remains
 ineligible for publication.
 The current stable shared-family gate packages and verifies
 `rdocx-layout@0.12.0`, requires its normalized archive dependency on
-`oxml-layout@0.9.0` to contain no local path, and compiles the packaged crate
+`oxml-layout@0.10.0` to contain no local path, and compiles the packaged crate
 against the exact shared registry version without an `oxml-layout` patch.
 That registry consumer is excluded from the incubating tag preflight because
-0.9.0 does not exist before its own publication. The stable tag preflight runs
+0.10.0 does not exist before its own publication. The stable tag preflight runs
 it only with explicit published-shared authority. The earlier F-X068
 post-publication proof against 0.8.0 remains immutable release evidence.
 A separate recovery gate constructs an isolated registry consumer of exact
@@ -1822,8 +1822,16 @@ owner `mantissaman (Atul Sharma)`, immutable annotated tag `rpptx-v0.9.0` at
 reviewed SHA `45b4f277ff5fd6d1b032e929c5dcee7fb9d2c550`, byte-identical GitHub
 release notes, selected-family exclusion, and absent `rpptx-wasm@0.9.0`. Its
 selected-family inventory is empty, so it requires no notification.
+The 0.10.0 preparation gate pins all 16 incubating manifest and lock carriers,
+the 15 workspace requirements and crates.io candidates, the stable 0.12.0
+source dependency boundary, README examples, source assertions, the CI WASM
+literal, and the selected-family changelog section. The selected diff contains
+no external issue or pull request, so its reviewed contribution inventory is
+empty and no notification is prepared. Real registry, owner, tag, release-body,
+exclusion, and absence proofs remain deferred to separately approved
+publication.
 The stable 0.12.0 preparation gate pins the exact seven-package family, the
-published shared 0.9.0 dependency boundary, all binding exclusions, and the
+prepared shared 0.10.0 source dependency boundary, all binding exclusions, and the
 seven-record PR 61 through 64 and Issue 65 through 67 contribution inventory.
 It requires full verification and clean review at one SHA before a separate
 release approval.

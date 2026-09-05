@@ -113,15 +113,15 @@ release metadata only. Any output delta blocks preparation.
 
 ## Implementation checklist
 
-- [ ] Complete and verify F-X077.
-- [ ] Complete and verify F-X080 so hosted CI release gates are current.
-- [ ] Move every incubating version carrier and stable shared dependency pin
+- [x] Complete and verify F-X077.
+- [x] Complete and verify F-X080 so hosted CI release gates are current.
+- [x] Move every incubating version carrier and stable shared dependency pin
       to 0.10.0.
-- [ ] Update exact carrier, isolation, workflow, package, and release-note
+- [x] Update exact carrier, isolation, workflow, package, and release-note
       regressions.
-- [ ] Build and verify the selected-family contribution inventory.
-- [ ] Prepare exact `rpptx-v0.10.0` release notes and compatibility guidance.
-- [ ] Run `/verify --full`, packaging, assets, bindings, WASM, dependency,
+- [x] Build and verify the selected-family contribution inventory.
+- [x] Prepare exact `rpptx-v0.10.0` release notes and compatibility guidance.
+- [x] Run `/verify --full`, packaging, assets, bindings, WASM, dependency,
       supply-chain, notes, and hash gates at one exact SHA.
 - [ ] Stop at `/release rpptx-v0.10.0` for separate final approval.
 - [ ] Verify every publication, owner, tag, body, exclusion, and applicable

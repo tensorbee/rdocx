@@ -2,7 +2,59 @@
 
 ## Unreleased
 
-No changes have been recorded since the v0.12.0 preparation.
+No changes have been recorded since the rpptx-v0.10.0 preparation.
+
+## rpptx-v0.10.0
+
+### Highlights
+
+The shared OOXML and PowerPoint family moves to 0.10.0 with one strict XML
+1.0 lexical validator owned by `oxml-core`. Format-specific readers can share
+declaration, character, name, namespace, reference, comment, and processing
+instruction checks while keeping their schema rules and public errors local.
+
+### Added
+
+- Add `XmlLexicalError` and `validate_strict_xml_1_0` to `oxml-core` for
+  bounded format-neutral lexical validation.
+- Add baseline-aware inline groups to `oxml-layout`, allowing shared layout
+  consumers to carry exact ascent and descent without teaching a backend
+  document grammar.
+- Add the Word glossary content type and relationship constants to `oxml-opc`
+  so package owners can resolve glossary parts through shared vocabulary.
+
+### Fixed
+
+- Replace three independently maintained lexical checks with the shared
+  validator while retaining each consumer's established failure surface.
+- Reject malformed declarations, forbidden XML 1.0 characters, invalid names
+  and namespace bindings, duplicate expanded attributes, invalid references,
+  malformed comments, and reserved processing instruction targets through one
+  reviewed policy.
+
+### Compatibility
+
+The exact 15-package shared OOXML and PowerPoint crates.io family moves
+together from 0.9.0 to 0.10.0. The selected set is `oxml-core`, `oxml-opc`,
+`oxml-media`, `oxml-layout`, `oxml-drawing`, `oxml-pdf`, `oxml-sml`,
+`oxml-cli-support`, `oxml-chart`, `rpptx-oxml`, `rpptx-chart`, `rpptx-layout`,
+`rpptx-render`, `rpptx`, and `rpptx-cli`.
+
+The lexical validator and glossary constants are additive pre-1.0 APIs.
+Callers constructing `InlineItem::Group` or `LineItem::Group` literals must
+initialize the new `baseline` field. `None` preserves the established
+top-aligned group behavior.
+
+The stable Word family remains prepared at 0.12.0 and now pins shared source
+dependencies to 0.10.0. It is outside this release's publication authority.
+Python, WASM, npm, and PyPI publication authority is unchanged, and
+`rpptx-wasm@0.10.0` is not a crates.io package.
+
+### Contributors
+
+Atul Sharma maintained the release. No external issue or pull request belongs
+to the selected family changes since `rpptx-v0.9.0`, so this release has no
+external contribution notification.
 
 ## v0.12.0
 

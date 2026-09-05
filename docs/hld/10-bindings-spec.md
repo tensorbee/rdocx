@@ -1144,10 +1144,11 @@ honest. Do not auto-generate them from PyO3.
 crates are `publish = false`, because a cdylib has no business on crates.io.
 
 The Rust package trains remain separate. The exact 15-package shared OOXML and
-PowerPoint workspace family is published at 0.9.0 from immutable annotated tag
-`rpptx-v0.9.0` at reviewed SHA
-`45b4f277ff5fd6d1b032e929c5dcee7fb9d2c550`. The stable workspace is prepared
-at 0.12.0 and pins shared dependencies to the published 0.9.0 boundary. Its
+PowerPoint workspace family is prepared at 0.10.0. Its last published boundary
+remains 0.9.0 from immutable annotated tag `rpptx-v0.9.0` at reviewed SHA
+`45b4f277ff5fd6d1b032e929c5dcee7fb9d2c550` until the separately approved
+0.10.0 release completes. The stable workspace is prepared at 0.12.0 and pins
+shared source dependencies to the prepared 0.10.0 boundary. Its
 last published family remains 0.11.1 from immutable annotated `v0.11.1` tag at
 reviewed SHA `5a850ce9ae6c31f8365594ed2970193266f8b2a6`, whose archives retain their
 0.8.0 requirements. The immutable v0.11.0 attempt at
@@ -1157,7 +1158,7 @@ contribution notifications. The complete seven-package recovery is published
 at 0.11.1, and all six reviewed leave-open notifications are posted. Both
 Python project versions and `rdocx-wasm` track stable workspace version 0.12.0, but
 every binding and WASM crate remains unpublished on crates.io. The incubating
-group places the unpublished `rpptx-wasm` crate at 0.9.0. Neither Rust release
+group places the unpublished `rpptx-wasm` crate at 0.10.0. Neither Rust release
 gives binding, WASM, npm, or Python package publication authority. Every later
 release still requires its selected-family gate and a separate final approval
 at the reviewed SHA. Complete coherent stable releases remain live and

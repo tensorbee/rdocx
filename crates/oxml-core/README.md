@@ -19,4 +19,4 @@ let page_width = Length::inches(8.5);
 assert_eq!(page_width.to_twips(), 12_240);
 ```
 
-Add `oxml-core = "0.9.0"` to your dependencies. See the [API documentation](https://docs.rs/oxml-core) for XML and property types.
+Add `oxml-core = "0.10.0"` to your dependencies. See the [API documentation](https://docs.rs/oxml-core) for XML and property types.

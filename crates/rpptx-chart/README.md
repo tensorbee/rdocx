@@ -27,7 +27,7 @@ assert_ne!(category_axis, value_axis);
 
 ```toml
 [dependencies]
-rpptx-chart = "0.9.0"
+rpptx-chart = "0.10.0"
 ```
 
 For new code, replace both the dependency and the import with `oxml-chart` and

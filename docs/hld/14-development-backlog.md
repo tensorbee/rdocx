@@ -3732,8 +3732,11 @@ dependency pins to the published shared 0.10.0 boundary without changing the
 stable family version or granting it publication authority.
 
 Prepare exact `rpptx-v0.10.0` release notes from the reviewed selected-family
-diff and contribution inventory. Stable Word, Python, WASM, npm, and PyPI
-packages remain outside publication authority. After one clean full
+diff and contribution inventory. That diff contains the shared lexical
+validator, baseline-aware inline groups, and Word glossary package constants.
+No external issue or pull request belongs to those selected changes, so the
+reviewed contribution inventory is empty. Stable Word, Python, WASM, npm, and
+PyPI packages remain outside publication authority. After one clean full
 verification and sprint review at the exact prepared SHA, `/release
 rpptx-v0.10.0` obtains separate final approval immediately before external
 mutation.
