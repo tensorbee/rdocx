@@ -362,8 +362,8 @@ leave-open notifications are verified. After separate approval, exactly
 `rdocx-opc@0.11.0` and `rdocx-oxml@0.11.0` are yanked. Complete coherent stable
 releases remain live and unyanked. The tag is never moved or deleted, no
 v0.11.0 GitHub release exists, and no other external state changes. Current
-stable source remains at 0.13.0 while preparing shared 0.11.0 without granting
-stable publication authority. The immutable v0.13.0 tag at reviewed SHA
+stable source remains at 0.13.0 pending the separately gated 0.13.1 recovery.
+The immutable v0.13.0 tag at reviewed SHA
 `05332b17f481741e7d5ab4e39699c6d1536475af` published five stable packages,
 then stopped before `rdocx`, `rdocx-cli`, and the GitHub release because
 registry `oxml-opc@0.10.0` lacks the F-238 Word main content-type constants.
