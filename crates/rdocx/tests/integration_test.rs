@@ -270,6 +270,27 @@ mod flat_opc_package_class_tests {
                 .unwrap()
                 .contains("xmlns=\"urn:rdocx:f238\"")
         );
+
+        let inherited_mc_value_prefix = canonical.replacen(
+            "<pkg:xmlData><preserved xmlns=\"urn:rdocx:f238\"><opaque a=\"1\"> bytes </opaque></preserved></pkg:xmlData>",
+            "<pkg:xmlData xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" xmlns:w14=\"urn:word:w14\" xmlns:w15=\"urn:word:w15\" xmlns:w16=\"urn:word:w16\" xmlns:w17=\"urn:word:w17\" xmlns:w18=\"urn:word:w18\" xmlns:w19=\"urn:word:w19\"><preserved xmlns=\"urn:rdocx:f238\" mc:Ignorable=\"w14\" mc:MustUnderstand=\"w15\" mc:ProcessContent=\"w16:item\" mc:PreserveElements=\"w17:*\" mc:PreserveAttributes=\"w18:attribute\"><mc:AlternateContent><mc:Choice Requires=\"w19\"><opaque a=\"1\"> bytes </opaque></mc:Choice><mc:Fallback/></mc:AlternateContent></preserved></pkg:xmlData>",
+            1,
+        );
+        assert_ne!(inherited_mc_value_prefix, canonical);
+        let imported = Document::from_flat_opc_bytes(inherited_mc_value_prefix.as_bytes()).unwrap();
+        let reopened = OpcPackage::from_reader(std::io::Cursor::new(
+            imported
+                .to_bytes_as(WordPackageClass::MacroEnabledDocument)
+                .unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(
+            reopened.get_part("/custom/preserved.xml"),
+            Some(
+                br#"<preserved xmlns="urn:rdocx:f238" mc:Ignorable="w14" mc:MustUnderstand="w15" mc:ProcessContent="w16:item" mc:PreserveElements="w17:*" mc:PreserveAttributes="w18:attribute" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="urn:word:w14" xmlns:w15="urn:word:w15" xmlns:w16="urn:word:w16" xmlns:w17="urn:word:w17" xmlns:w18="urn:word:w18" xmlns:w19="urn:word:w19"><mc:AlternateContent><mc:Choice Requires="w19"><opaque a="1"> bytes </opaque></mc:Choice><mc:Fallback/></mc:AlternateContent></preserved>"#
+                    .as_slice()
+            )
+        );
     }
 
     #[test]
@@ -392,6 +413,13 @@ mod flat_opc_package_class_tests {
         let post_toc_bytes = document
             .to_bytes_as(WordPackageClass::MacroEnabledTemplate)
             .unwrap();
+        let post_toc_package =
+            OpcPackage::from_reader(std::io::Cursor::new(&post_toc_bytes)).unwrap();
+        let post_toc_xml =
+            std::str::from_utf8(post_toc_package.get_part("/word/document.xml").unwrap()).unwrap();
+        assert!(!post_toc_xml.contains("stale entry"), "{post_toc_xml}");
+        assert!(post_toc_xml.contains("Milestone heading"), "{post_toc_xml}");
+        assert!(post_toc_xml.contains("PAGEREF _Toc"), "{post_toc_xml}");
         let mut field_updated = Document::from_bytes(&post_toc_bytes).unwrap();
         let mut field_context = rdocx::FieldEvaluationContext::default();
         field_context
@@ -428,6 +456,11 @@ mod flat_opc_package_class_tests {
             std::str::from_utf8(merged_package.get_part("/word/document.xml").unwrap()).unwrap();
         assert!(merged_xml.contains(">Ada<"), "{merged_xml}");
         assert!(merged_xml.contains(">Grace<"), "{merged_xml}");
+        assert_eq!(
+            merged_xml.matches(r#"<w:type w:val="nextPage"/>"#).count(),
+            1,
+            "{merged_xml}"
+        );
         let inventory = merged.embedded_content().unwrap();
         assert_eq!(inventory.len(), 1);
         assert_eq!(inventory[0].kind, rdocx::EmbeddedContentKind::VbaProject);
@@ -471,10 +504,19 @@ mod flat_opc_package_class_tests {
             final_package.get_part("/custom/preserved.xml"),
             package.get_part("/custom/preserved.xml")
         );
+        let compared_document_xml =
+            std::str::from_utf8(final_package.get_part("/word/document.xml").unwrap()).unwrap();
         assert!(
-            std::str::from_utf8(final_package.get_part("/word/document.xml").unwrap())
-                .unwrap()
-                .contains("preserve-me")
+            compared_document_xml.contains("preserve-me"),
+            "{compared_document_xml}"
+        );
+        assert!(
+            compared_document_xml.contains("comparison addition"),
+            "{compared_document_xml}"
+        );
+        assert!(
+            compared_document_xml.contains("<w:ins"),
+            "{compared_document_xml}"
         );
         assert!(
             std::str::from_utf8(final_package.get_part("/word/header1.xml").unwrap())

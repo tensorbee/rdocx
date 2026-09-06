@@ -591,10 +591,6 @@ fn materialize_required_inherited_namespaces(
     xml: &[u8],
     inherited: &NamespaceDeclarations,
 ) -> Result<Vec<u8>> {
-    let inherited_keys = inherited
-        .iter()
-        .map(|(key, _)| key.clone())
-        .collect::<HashSet<_>>();
     let mut required = HashSet::new();
     let mut local_scopes = Vec::new();
     let mut reader = quick_xml::Reader::from_reader(xml);
@@ -609,18 +605,13 @@ fn materialize_required_inherited_namespaces(
                 let local = required_namespaces_for_element(
                     element,
                     &local_scopes,
-                    &inherited_keys,
+                    inherited,
                     &mut required,
                 )?;
                 local_scopes.push(local);
             }
             Event::Empty(ref element) => {
-                required_namespaces_for_element(
-                    element,
-                    &local_scopes,
-                    &inherited_keys,
-                    &mut required,
-                )?;
+                required_namespaces_for_element(element, &local_scopes, inherited, &mut required)?;
             }
             Event::End(_) => {
                 local_scopes.pop();
@@ -676,20 +667,31 @@ fn materialize_required_inherited_namespaces(
 
 fn required_namespaces_for_element(
     element: &BytesStart<'_>,
-    local_scopes: &[HashSet<Vec<u8>>],
-    inherited: &HashSet<Vec<u8>>,
+    local_scopes: &[NamespaceDeclarations],
+    inherited: &NamespaceDeclarations,
     required: &mut HashSet<Vec<u8>>,
-) -> Result<HashSet<Vec<u8>>> {
-    let mut local = HashSet::new();
-    let mut attribute_names = Vec::new();
+) -> Result<NamespaceDeclarations> {
+    const MC_NAMESPACE: &[u8] = b"http://schemas.openxmlformats.org/markup-compatibility/2006";
+    const MC_PREFIX_LIST_ATTRIBUTES: [&[u8]; 2] = [b"Ignorable", b"MustUnderstand"];
+    const MC_QNAME_LIST_ATTRIBUTES: [&[u8]; 3] = [
+        b"ProcessContent",
+        b"PreserveElements",
+        b"PreserveAttributes",
+    ];
+
+    let mut local = NamespaceDeclarations::new();
+    let mut attributes = Vec::new();
     for attribute in element.attributes() {
         let attribute = attribute
             .map_err(|error| invalid(format!("invalid payload root attribute: {error}")))?;
         let key = attribute.key.as_ref();
         if key == b"xmlns" || key.starts_with(b"xmlns:") {
-            local.insert(key.to_vec());
+            local.push((key.to_vec(), attribute.value.as_ref().to_vec()));
         } else {
-            attribute_names.push(key.to_vec());
+            let value = attribute
+                .decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())
+                .map_err(|error| invalid(format!("invalid payload attribute value: {error}")))?;
+            attributes.push((key.to_vec(), value.into_owned()));
         }
     }
 
@@ -698,18 +700,94 @@ fn required_namespaces_for_element(
         used.push(key);
     }
     used.extend(
-        attribute_names
+        attributes
             .iter()
-            .filter_map(|name| namespace_declaration_key(name, false)),
+            .filter_map(|(name, _)| namespace_declaration_key(name, false)),
     );
     for key in used {
-        let locally_bound =
-            local.contains(&key) || local_scopes.iter().rev().any(|scope| scope.contains(&key));
-        if !locally_bound && inherited.contains(&key) {
-            required.insert(key);
+        require_inherited_namespace(&key, &local, local_scopes, inherited, required);
+    }
+
+    let element_namespace_key = namespace_declaration_key(element.name().as_ref(), true);
+    let element_is_mc = element_namespace_key.as_deref().is_some_and(|key| {
+        namespace_binding(key, &local, local_scopes, inherited) == Some(MC_NAMESPACE)
+    });
+    for (name, value) in &attributes {
+        let local_name = name
+            .iter()
+            .position(|byte| *byte == b':')
+            .map_or(name.as_slice(), |separator| &name[separator + 1..]);
+        let attribute_is_mc = namespace_declaration_key(name, false)
+            .as_deref()
+            .is_some_and(|key| {
+                namespace_binding(key, &local, local_scopes, inherited) == Some(MC_NAMESPACE)
+            });
+        let prefix_list = attribute_is_mc && MC_PREFIX_LIST_ATTRIBUTES.contains(&local_name);
+        let qname_list = attribute_is_mc && MC_QNAME_LIST_ATTRIBUTES.contains(&local_name);
+        let choice_requires = element_is_mc && name.as_slice() == b"Requires";
+        if !prefix_list && !qname_list && !choice_requires {
+            continue;
+        }
+        for token in value.split_ascii_whitespace() {
+            let prefix = if qname_list {
+                token.split_once(':').map(|(prefix, _)| prefix)
+            } else if token.contains(':') {
+                None
+            } else {
+                Some(token)
+            };
+            let Some(prefix) = prefix.filter(|prefix| !prefix.is_empty() && *prefix != "xml")
+            else {
+                continue;
+            };
+            let mut key = b"xmlns:".to_vec();
+            key.extend_from_slice(prefix.as_bytes());
+            require_inherited_namespace(&key, &local, local_scopes, inherited, required);
         }
     }
     Ok(local)
+}
+
+fn require_inherited_namespace(
+    key: &[u8],
+    local: &NamespaceDeclarations,
+    local_scopes: &[NamespaceDeclarations],
+    inherited: &NamespaceDeclarations,
+    required: &mut HashSet<Vec<u8>>,
+) {
+    let locally_bound = local.iter().any(|(candidate, _)| candidate == key)
+        || local_scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.iter().any(|(candidate, _)| candidate == key));
+    if !locally_bound && inherited.iter().any(|(candidate, _)| candidate == key) {
+        required.insert(key.to_vec());
+    }
+}
+
+fn namespace_binding<'a>(
+    key: &[u8],
+    local: &'a NamespaceDeclarations,
+    local_scopes: &'a [NamespaceDeclarations],
+    inherited: &'a NamespaceDeclarations,
+) -> Option<&'a [u8]> {
+    local
+        .iter()
+        .rev()
+        .find(|(candidate, _)| candidate == key)
+        .or_else(|| {
+            local_scopes
+                .iter()
+                .rev()
+                .find_map(|scope| scope.iter().rev().find(|(candidate, _)| candidate == key))
+        })
+        .or_else(|| {
+            inherited
+                .iter()
+                .rev()
+                .find(|(candidate, _)| candidate == key)
+        })
+        .map(|(_, value)| value.as_slice())
 }
 
 fn namespace_declaration_key(name: &[u8], element_name: bool) -> Option<Vec<u8>> {

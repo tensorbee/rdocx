@@ -1269,8 +1269,11 @@ rebuilds a dynamic table of contents and field caches, performs sectioned mail
 merge and full document comparison, inventories the retained VBA project, and
 round-trips through Flat OPC. The final package must retain its DOTM identity,
 exact executable bytes, equations, and unsupported XML. Separate focused tests
-cover inherited Flat OPC payload namespaces and the required binary treatment
-of Transitional and Strict alternative-format import targets.
+cover inherited Flat OPC payload namespaces in qualified names and
+markup-compatibility values, plus the required binary treatment of Transitional
+and Strict alternative-format import targets. The composed predicate inspects
+the rebuilt TOC cache, section boundary, and body and header comparison output
+so each milestone operation is mutation-sensitive.
 
 Five real `.docx` files are stored outside the published crates and fetched by
 `scripts/fetch_docx_corpus.py` into the ignored `corpus/docx` directory. The
