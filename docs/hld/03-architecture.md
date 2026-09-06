@@ -849,7 +849,7 @@ includes `oxml-chart` as the format-neutral owner while
 retaining `rpptx-chart` as a source-compatible deprecated shim. The released
 `rdocx-*` crates use the separate workspace version. The stable workspace and
 its nine internal pins, eleven inherited lockfile packages, two Python project
-versions, and unpublished `rdocx-wasm` package are prepared at 0.13.0. The latest
+versions, and unpublished `rdocx-wasm` package are prepared at 0.13.1. The latest
 published exact seven-package crates.io family is 0.12.0 from immutable
 annotated `v0.12.0` tag at reviewed SHA
 `19adaacfcf82e3918bba4f8c3648747f1969b746`. Those published archives retain

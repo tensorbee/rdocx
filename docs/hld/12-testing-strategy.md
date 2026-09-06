@@ -1794,7 +1794,7 @@ creation uses the same exact 22-package local source patch set as the release
 dry run, so a reviewed version can be checked before its internal dependencies
 exist on crates.io. The patches never enter an archive and upload nothing. The
 docs job and canonical non-fast verification call this same runner.
-The stable 0.13.0 carrier regression pins all eleven inherited version
+The stable 0.13.1 carrier regression pins all eleven inherited version
 carriers, both Python project versions, both rdocx WASM dependency assertions,
 the stable CI package literal, the seven publishable crates, and every stable
 README requirement. It also proves the current incubating workspace carriers
@@ -1803,7 +1803,7 @@ The paired incubating regression pins all sixteen explicit manifests, fifteen
 workspace dependency requirements, sixteen lockfile entries, publication
 flags, README examples, Rust assertions, the CI WASM literal, and the exact
 15-package publication preflight at 0.11.0. It separately proves the stable
-workspace remains at its prepared 0.13.0 boundary and `rpptx-wasm` remains
+workspace remains at its prepared 0.13.1 boundary and `rpptx-wasm` remains
 ineligible for publication.
 The immutable v0.13.0 shared-family gate packages and verifies
 `rdocx-layout@0.13.0`, requires its normalized archive dependency on
@@ -1864,8 +1864,8 @@ The immutable stable 0.13.0 attempt passed its preparation gate, full
 verification, and clean review at SHA
 `05332b17f481741e7d5ab4e39699c6d1536475af`. Publication then stopped after
 five packages because packaged `rdocx` could not find those constants in
-registry `oxml-opc@0.10.0`. Stable 0.13.1 must package and compile `rdocx`
-against registry-only shared 0.11.0 before publication.
+registry `oxml-opc@0.10.0`. The stable 0.13.1 recovery gate packages and
+compiles `rdocx` against registry-only shared 0.11.0 before publication.
 The failed stable 0.11.0 release gate is not a passing family gate. Its
 annotated tag targets reviewed SHA
 `25350d000ed7ed96bf4f6e371f01f8fbc8e2cec4`, and its preparation, full

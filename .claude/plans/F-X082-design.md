@@ -82,11 +82,11 @@ Expected unchanged across all 49 entries. Any delta blocks preparation.
 
 ## Implementation checklist
 
-- [ ] Verify F-X081 publication and the immutable v0.13.0 partial state.
-- [ ] Move every stable carrier to 0.13.1 and shared pin to 0.11.0.
-- [ ] Add the registry-only `rdocx` package verification gate.
-- [ ] Prepare exact recovery notes and contribution inventory.
-- [ ] Run `/verify --full` and every routed release check.
+- [x] Verify F-X081 publication and the immutable v0.13.0 partial state.
+- [x] Move every stable carrier to 0.13.1 and shared pin to 0.11.0.
+- [x] Add the registry-only `rdocx` package verification gate.
+- [x] Prepare exact recovery notes and contribution inventory.
+- [x] Run `/verify --full` and every routed release check.
 - [ ] Reach a clean microscope and sprint review at the exact prepared SHA.
 - [ ] Stop at `/release v0.13.1` for separate final approval.
 - [ ] Verify all seven registry entries and release evidence before completion.

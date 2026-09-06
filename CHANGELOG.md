@@ -2,7 +2,51 @@
 
 ## Unreleased
 
-No changes have been recorded since the rpptx-v0.11.0 preparation.
+No changes have been recorded since the v0.13.1 preparation.
+
+## v0.13.1
+
+### Highlights
+
+The complete stable Word family publishes the M22 Word-depth boundary at
+0.13.1. This patch release recovers from the immutable v0.13.0 attempt, which
+published only five low-level stable packages before registry verification
+stopped the workflow.
+
+### Added
+
+- Publish the complete DOCX, DOCM, DOTX, and DOTM package identity and bounded
+  Flat OPC interchange surface.
+- Publish bounded MHTML import and export with contained image and link
+  resolution, deterministic output, and stable loss diagnostics.
+- Publish the M22 OfficeMath, field, table-of-contents, merge, comparison,
+  executable-content, glossary, and package-story outcomes in one coherent
+  stable family.
+
+### Fixed
+
+- Pin the stable family to the separately published shared OOXML 0.11.0 family,
+  which contains the Word main content-type constants required by `rdocx`.
+- Replace the incomplete v0.13.0 publication boundary with a new coherent patch
+  family without moving its tag or altering its five immutable registry entries.
+
+### Compatibility
+
+The exact seven-package stable crates.io family moves together from the last
+complete 0.12.0 release to 0.13.1. The selected set is `rdocx-opc`,
+`rdocx-oxml`, `rdocx-layout`, `rdocx-html`, `rdocx-pdf`, `rdocx`, and
+`rdocx-cli`. It depends on the separately published shared OOXML 0.11.0 family.
+
+The native Rust APIs remain additive pre-1.0 surfaces. The immutable v0.13.0
+attempt and its five published packages remain available as historical release
+evidence. Python, WASM, npm, and PyPI publication authority is unchanged, and
+`rdocx-wasm@0.13.1` is not a crates.io package.
+
+### Contributors
+
+Atul Sharma maintained the release. No external issue or pull request belongs
+to the selected stable-family changes since `v0.12.0`, so this release has no
+external contribution notification.
 
 ## rpptx-v0.11.0
 

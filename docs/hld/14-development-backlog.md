@@ -3817,15 +3817,15 @@ eligible to start.
 
 ### F-X082, Tag v0.13.1 (S)
 
-Publish the complete seven-package stable Word family at 0.13.1 after F-X081
-verifies shared 0.11.0. Move every stable version carrier, internal pin, lock
+The 0.13.1 preparation moves every stable version carrier, internal pin, lock
 record, README requirement, source assertion, CI literal, Python and WASM
-metadata carrier, workflow preflight, and release regression in lockstep. Pin
-shared dependencies to 0.11.0.
+metadata carrier, workflow preflight, and release regression in lockstep after
+F-X081 verified shared 0.11.0. Every shared dependency is pinned to 0.11.0.
 
 The release notes describe the complete M22 outcome and the immutable partial
-v0.13.0 attempt accurately. Add a registry-only package proof for `rdocx` that
-uses published shared crates, including `oxml-opc`, so the local patched
+v0.13.0 attempt accurately. The registry-only proof packages normalized local
+stable crates, then compiles `rdocx` while all shared crates, including
+`oxml-opc`, resolve from the published 0.11.0 family. The local patched
 workspace graph cannot mask this dependency boundary again. Python, WASM, npm,
 and PyPI remain outside publication authority.
 

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "rdocx"
-version = "0.13.0"
+version = "0.13.1"
 requires-python = ">=3.9"
 description = "Python bindings for rdocx"
 license = "MIT OR Apache-2.0"

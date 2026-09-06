@@ -1158,7 +1158,7 @@ PowerPoint workspace family is published at 0.11.0 from immutable annotated tag
 `rpptx-v0.11.0` at reviewed SHA
 `0b6bd622f8a14189d7d1281d011f81319ef8ad2a`. Every registry entry and its sole
 owner are verified. The stable workspace and its
-unpublished binding carriers are prepared at 0.13.0. Its latest published exact
+unpublished binding carriers are prepared at 0.13.1. Its latest published exact
 seven-package family remains at 0.12.0. The immutable
 annotated `v0.12.0` tag
 dereferences to reviewed SHA `19adaacfcf82e3918bba4f8c3648747f1969b746`.
@@ -1172,7 +1172,7 @@ reviewed SHA `25350d000ed7ed96bf4f6e371f01f8fbc8e2cec4` published only
 `rdocx-opc` and `rdocx-oxml`. It created no GitHub release and posted no
 contribution notifications. The complete seven-package recovery is published
 at 0.11.1, and all six reviewed leave-open notifications are posted. Both
-Python project versions and `rdocx-wasm` track stable workspace version 0.13.0, but
+Python project versions and `rdocx-wasm` track stable workspace version 0.13.1, but
 every binding and WASM crate remains unpublished on crates.io. The incubating
 group places the unpublished `rpptx-wasm` crate at 0.11.0. Neither Rust release
 gives binding, WASM, npm, or Python package publication authority. Every later
