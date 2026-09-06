@@ -38,8 +38,8 @@ regenerated, never hand-edited.
 | M20, Fidelity at scale                         | 7  | 7 | 0 | 0  |
 | M21, Presentation depth                        | 15 | 15 | 0 | 0  |
 | M22, Word depth                                | 12 | 12 | 0 | 0  |
-| X, Cross-cutting (opportunistic)            | 83 | 79 | 0 | 1  |
-| **Total** | **330** | **305** | **0** | **22** |
+| X, Cross-cutting (opportunistic)            | 83 | 79 | 1 | 0  |
+| **Total** | **330** | **305** | **1** | **21** |
 <!-- AUTOGEN:backlog-summary END -->
 
 ## All F-IDs
@@ -530,7 +530,7 @@ regenerated, never hand-edited.
 | F-X075 | Preserve restart pagination across page-spanning paragraphs | S64 | M | done |
 | F-X076 | Tag v0.12.0                               | S64 | S | done |
 | F-X077 | Share strict XML lexical validation       | S69 | M | done |
-| F-X078 | Tag v0.13.0                               | S69 | S | pending |
+| F-X078 | Tag v0.13.0                               | S69 | S | in-progress |
 | F-X079 | Tag rpptx-v0.10.0                         | S69 | S | done |
 | F-X080 | Restore CI release readiness              | S69 | S | done |
 <!-- AUTOGEN:backlog-MX END -->

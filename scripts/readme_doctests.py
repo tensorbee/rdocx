@@ -175,26 +175,26 @@ README_CASES = (
 
 README_REQUIRED_TEXT = {
     REPO_ROOT / "README.md": (
-        'rdocx = "0.12.0"',
-        'rdocx = { version = "0.12.0", default-features = false }',
+        'rdocx = "0.13.0"',
+        'rdocx = { version = "0.13.0", default-features = false }',
         "rdocx convert report.docx --to pdf -o report.pdf",
         "rdocx convert report.docx --to html -o report.html",
         "rdocx convert report.docx --to md -o report.md",
         'rdocx replace report.docx --placeholder "Draft" --value "Final" -o final.docx',
     ),
     REPO_ROOT / "crates/rdocx-cli/README.md": (
-        "cargo install rdocx-cli --version '^0.12.0'",
+        "cargo install rdocx-cli --version '^0.13.0'",
         "rdocx convert report.docx --to pdf -o report.pdf",
     ),
-    REPO_ROOT / "crates/rdocx-html/README.md": ('rdocx-html = "0.12.0"',),
-    REPO_ROOT / "crates/rdocx-layout/README.md": ('rdocx-layout = "0.12.0"',),
+    REPO_ROOT / "crates/rdocx-html/README.md": ('rdocx-html = "0.13.0"',),
+    REPO_ROOT / "crates/rdocx-layout/README.md": ('rdocx-layout = "0.13.0"',),
     REPO_ROOT / "crates/rdocx-opc/README.md": (
-        'rdocx-opc = "0.12.0"',
+        'rdocx-opc = "0.13.0"',
         "use rdocx_opc::OpcPackage;",
     ),
-    REPO_ROOT / "crates/rdocx-oxml/README.md": ('rdocx-oxml = "0.12.0"',),
+    REPO_ROOT / "crates/rdocx-oxml/README.md": ('rdocx-oxml = "0.13.0"',),
     REPO_ROOT / "crates/rdocx-pdf/README.md": (
-        'rdocx-pdf = "0.12.0"',
+        'rdocx-pdf = "0.13.0"',
         "use rdocx_pdf::render_to_pdf;",
     ),
     REPO_ROOT / "crates/oxml-cli-support/README.md": (

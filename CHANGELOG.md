@@ -2,7 +2,62 @@
 
 ## Unreleased
 
-No changes have been recorded since the rpptx-v0.10.0 preparation.
+No changes have been recorded since the v0.13.0 preparation.
+
+## v0.13.0
+
+### Highlights
+
+The stable Word family completes the M22 Word-depth boundary at 0.13.0.
+Documents can author and render OfficeMath, rebuild fields and tables of
+contents, perform advanced mail merge and comparison, inspect executable and
+building-block content, preserve modern package identity, and exchange bounded
+Flat OPC and MHTML through the native Rust facade.
+
+### Added
+
+- Add OfficeMath modeling, authoring, deterministic rendering, and MathML and
+  LaTeX conversion for the supported equation subset.
+- Add field evaluation and updates, dynamic table-of-contents rebuilding,
+  sectioned mail merge, and body, header, footer, footnote, and endnote
+  comparison with explicit revision policy.
+- Add exact VBA, OLE, and ActiveX inventory and mutation, plus glossary,
+  building-block, and package-story access without executing embedded content.
+- Add DOCX, DOCM, DOTX, and DOTM package identity, output-only class
+  conversion, and bounded Flat OPC import and export with payload retention.
+- Add bounded MHTML import and export with contained image and link resolution,
+  deterministic MIME output, and location-aware loss diagnostics.
+
+### Fixed
+
+- Reject malformed XML lexical forms through the shared `oxml-core` validator
+  while preserving each Word owner's established error and rollback surface.
+- Preserve unsupported XML, namespace bindings, relationship ownership,
+  executable bytes, template semantics, and package-signature invalidation
+  evidence through the new editing and interchange paths.
+- Keep unsafe, external, ambiguous, malformed, or over-limit MHTML and Flat OPC
+  resources from publishing a partial document.
+
+### Compatibility
+
+The exact seven-package stable crates.io family moves together from 0.12.0 to
+0.13.0. The selected set is `rdocx-opc`, `rdocx-oxml`, `rdocx-layout`,
+`rdocx-html`, `rdocx-pdf`, `rdocx`, and `rdocx-cli`. It depends on the
+separately published shared OOXML 0.10.0 family.
+
+The native Rust APIs are additive pre-1.0 surfaces. Package-class conversion
+changes only output identity and does not remove macros. Flat OPC output uses a
+deterministic container representation while preserving unsupported inner XML
+and binary payload bytes. MHTML supports the documented contained PNG and JPEG
+resource subset and never fetches external content. Python, WASM, npm, and PyPI
+publication authority is unchanged, and `rdocx-wasm@0.13.0` is not a crates.io
+package.
+
+### Contributors
+
+Atul Sharma maintained the release. No external issue or pull request belongs
+to the selected stable-family changes since `v0.12.0`, so this release has no
+external contribution notification.
 
 ## rpptx-v0.10.0
 

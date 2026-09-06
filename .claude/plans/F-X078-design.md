@@ -39,7 +39,7 @@ dependency graph resolves against the published shared 0.10.0 family. Move
 every stable workspace version, stable workspace pin, lock record, README requirement,
 source assertion, CI literal, Python project carrier, WASM carrier, workflow
 preflight, and release regression from 0.12.0 to 0.13.0 in lockstep. Keep the
-shared and PowerPoint family at its separately published 0.9.0 boundary and
+shared and PowerPoint family at its separately published 0.10.0 boundary and
 keep every binding publication flag unchanged.
 
 Prepare the `CHANGELOG.md` section headed `v0.13.0` from the reviewed stable
@@ -126,16 +126,16 @@ release metadata only. Any output delta blocks preparation.
 
 ## Implementation checklist
 
-- [ ] Confirm F-238, F-239, F-X077, and F-X079 are completed at the reviewed
+- [x] Confirm F-238, F-239, F-X077, and F-X079 are completed at the reviewed
       M22 gate.
-- [ ] Confirm stable package resolution uses the published shared 0.10.0
+- [x] Confirm stable package resolution uses the published shared 0.10.0
       boundary from F-X079.
-- [ ] Move every stable version carrier and internal stable dependency pin to
+- [x] Move every stable version carrier and internal stable dependency pin to
       0.13.0.
-- [ ] Update stable carrier, workflow, registry, package, and notification
+- [x] Update stable carrier, workflow, registry, package, and notification
       regressions.
-- [ ] Build and verify the selected-family contribution inventory.
-- [ ] Prepare exact `v0.13.0` release notes and compatibility guidance.
+- [x] Build and verify the selected-family contribution inventory.
+- [x] Prepare exact `v0.13.0` release notes and compatibility guidance.
 - [ ] Run `/verify --full`, packaging, asset, binding, WASM, dependency,
       supply-chain, notes, and hash gates at one exact SHA.
 - [ ] Stop at `/release v0.13.0` for separate final approval.

@@ -3779,8 +3779,9 @@ Python, WASM, npm, and PyPI remain outside publication authority.
 Before version preparation, inspect the reviewed dependency diff. If a shared
 crate version or stable dependency pin moved, add and complete a separate
 incubating-family release F-ID first. Do not mix the stable and incubating
-families under one tag. After the M22 end gate, one clean full verification and
-sprint review must cover the exact prepared SHA. `/release v0.13.0` then
+families under one tag. The required shared 0.10.0 family is published before
+stable preparation begins. After the M22 end gate, one clean full verification
+and sprint review must cover the exact prepared SHA. `/release v0.13.0` then
 obtains its separate final approval immediately before external mutation.
 
 **Depends on**: F-238, F-239, F-X077, F-X079.

@@ -1794,7 +1794,7 @@ creation uses the same exact 22-package local source patch set as the release
 dry run, so a reviewed version can be checked before its internal dependencies
 exist on crates.io. The patches never enter an archive and upload nothing. The
 docs job and canonical non-fast verification call this same runner.
-The stable 0.12.0 carrier regression pins all eleven inherited version
+The stable 0.13.0 carrier regression pins all eleven inherited version
 carriers, both Python project versions, both rdocx WASM dependency assertions,
 the stable CI package literal, the seven publishable crates, and every stable
 README requirement. It also proves the current incubating workspace carriers
@@ -1803,10 +1803,10 @@ The paired incubating regression pins all sixteen explicit manifests, fifteen
 workspace dependency requirements, sixteen lockfile entries, publication
 flags, README examples, Rust assertions, the CI WASM literal, and the exact
 15-package publication preflight at 0.10.0. It separately proves the stable
-workspace remains at its prepared 0.12.0 boundary and `rpptx-wasm` remains
+workspace remains at its prepared 0.13.0 boundary and `rpptx-wasm` remains
 ineligible for publication.
 The current stable shared-family gate packages and verifies
-`rdocx-layout@0.12.0`, requires its normalized archive dependency on
+`rdocx-layout@0.13.0`, requires its normalized archive dependency on
 `oxml-layout@0.10.0` to contain no local path, and compiles the packaged crate
 against the exact shared registry version without an `oxml-layout` patch.
 That registry consumer is excluded from the incubating tag preflight because
@@ -1852,11 +1852,12 @@ owner `mantissaman (Atul Sharma)`, immutable annotated tag
 notes, stable-family exclusion, and absent `rpptx-wasm@0.10.0`. Its selected
 diff contains no external issue or pull request, so its reviewed contribution
 inventory is empty and no notification is required.
-The stable 0.12.0 preparation gate pins the exact seven-package family, the
-published shared 0.10.0 source dependency boundary, all binding exclusions, and the
-seven-record PR 61 through 64 and Issue 65 through 67 contribution inventory.
-It requires full verification and clean review at one SHA before a separate
-release approval.
+The stable 0.13.0 preparation gate pins the exact seven-package family, the
+published shared 0.10.0 source dependency boundary, all binding exclusions,
+and the reviewed empty selected-family contribution inventory. Repository
+history and GitHub records since `v0.12.0` contain no external issue or pull
+request that implements the selected M22 changes. It requires full
+verification and clean review at one SHA before a separate release approval.
 The failed stable 0.11.0 release gate is not a passing family gate. Its
 annotated tag targets reviewed SHA
 `25350d000ed7ed96bf4f6e371f01f8fbc8e2cec4`, and its preparation, full

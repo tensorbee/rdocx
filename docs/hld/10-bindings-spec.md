@@ -1157,7 +1157,8 @@ The Rust package trains remain separate. The exact 15-package shared OOXML and
 PowerPoint workspace family is published at 0.10.0 from immutable annotated
 tag `rpptx-v0.10.0` at reviewed SHA
 `1e409c553b950eb8029e3e78e39ff775f18ba3ab`. The stable workspace and its
-latest published exact seven-package family are at 0.12.0. The immutable
+unpublished binding carriers are prepared at 0.13.0. Its latest published exact
+seven-package family remains at 0.12.0. The immutable
 annotated `v0.12.0` tag
 dereferences to reviewed SHA `19adaacfcf82e3918bba4f8c3648747f1969b746`.
 Its published archives retain their shared 0.9.0 requirements, while current
@@ -1167,7 +1168,7 @@ reviewed SHA `25350d000ed7ed96bf4f6e371f01f8fbc8e2cec4` published only
 `rdocx-opc` and `rdocx-oxml`. It created no GitHub release and posted no
 contribution notifications. The complete seven-package recovery is published
 at 0.11.1, and all six reviewed leave-open notifications are posted. Both
-Python project versions and `rdocx-wasm` track stable workspace version 0.12.0, but
+Python project versions and `rdocx-wasm` track stable workspace version 0.13.0, but
 every binding and WASM crate remains unpublished on crates.io. The incubating
 group places the unpublished `rpptx-wasm` crate at 0.10.0. Neither Rust release
 gives binding, WASM, npm, or Python package publication authority. Every later
