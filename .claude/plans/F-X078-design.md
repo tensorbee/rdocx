@@ -136,7 +136,7 @@ release metadata only. Any output delta blocks preparation.
       regressions.
 - [x] Build and verify the selected-family contribution inventory.
 - [x] Prepare exact `v0.13.0` release notes and compatibility guidance.
-- [ ] Run `/verify --full`, packaging, asset, binding, WASM, dependency,
+- [x] Run `/verify --full`, packaging, asset, binding, WASM, dependency,
       supply-chain, notes, and hash gates at one exact SHA.
 - [ ] Stop at `/release v0.13.0` for separate final approval.
 - [ ] Verify every publication, owner, tag, body, exclusion, and applicable
