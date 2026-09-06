@@ -340,9 +340,9 @@ and PowerPoint packages. They are
 `oxml-core`, `oxml-opc`, `oxml-media`, `oxml-layout`, `oxml-drawing`,
 `oxml-pdf`, `oxml-sml`, `oxml-cli-support`, `oxml-chart`, `rpptx-oxml`,
 `rpptx-chart`, `rpptx-layout`, `rpptx-render`, `rpptx`, and `rpptx-cli`. All 15
-are published at 0.10.0 from immutable annotated `rpptx-v0.10.0` tag at
-reviewed SHA `1e409c553b950eb8029e3e78e39ff775f18ba3ab`. The earlier 0.9.0,
-0.8.0, 0.7.0, 0.6.0, 0.5.0,
+are published at 0.11.0 from immutable annotated `rpptx-v0.11.0` tag at
+reviewed SHA `0b6bd622f8a14189d7d1281d011f81319ef8ad2a`. The earlier 0.10.0,
+0.9.0, 0.8.0, 0.7.0, 0.6.0, 0.5.0,
 and 0.4.0 registry releases remain available, and no existing version or tag
 was moved. Manifest eligibility and allowlist membership do not authorize a
 later publication without a separately approved `/release` invocation at the
@@ -475,8 +475,8 @@ The 16 implemented `oxml-*` and `rpptx*` package manifests use explicit version
 0.11.0, the named `incubating` group, and the `rpptx-v{{version}}` template. The
 preparation group contains unpublished `rpptx-wasm`, while the crates.io
 allowlist remains exactly 15 packages. The latest published complete family is
-the immutable `rpptx-v0.10.0` release at reviewed SHA
-`1e409c553b950eb8029e3e78e39ff775f18ba3ab`, and earlier registry releases
+the immutable `rpptx-v0.11.0` release at reviewed SHA
+`0b6bd622f8a14189d7d1281d011f81319ef8ad2a`, and earlier registry releases
 remain available. The stable 0.10.1 registry consumer proof remains pinned to
 the immutable `oxml-layout@0.6.0` dependency rather than the current workspace
 family. Shared 0.11.0 contains the additive `oxml-opc` constants required by

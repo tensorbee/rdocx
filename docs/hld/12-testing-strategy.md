@@ -1852,10 +1852,14 @@ owner `mantissaman (Atul Sharma)`, immutable annotated tag
 notes, stable-family exclusion, and absent `rpptx-wasm@0.10.0`. Its selected
 diff contains no external issue or pull request, so its reviewed contribution
 inventory is empty and no notification is required.
-The shared 0.11.0 preparation gate pins all 16 incubating carriers, the exact
-15-package publication set, source and CI literals, and the selected release
-notes. Its selected diff contains only the additive `oxml-opc` Word main
-content-type constants required by F-238. The contribution inventory is empty.
+The shared 0.11.0 release gate verified all 15 registry entries under sole owner
+`mantissaman (Atul Sharma)`, immutable annotated tag `rpptx-v0.11.0` at reviewed
+SHA `0b6bd622f8a14189d7d1281d011f81319ef8ad2a`, byte-identical GitHub release
+notes, stable-family exclusion, and absent `rpptx-wasm@0.11.0`. Its preparation
+gate pins all 16 incubating carriers, the exact publication set, source and CI
+literals, and the selected notes. Its selected diff contains only the additive
+`oxml-opc` Word main content-type constants required by F-238. The contribution
+inventory is empty, so no notification was required.
 The immutable stable 0.13.0 attempt passed its preparation gate, full
 verification, and clean review at SHA
 `05332b17f481741e7d5ab4e39699c6d1536475af`. Publication then stopped after

@@ -11938,3 +11938,52 @@ riders.
 class authority. Keep class conversion staged and preservation-first, and do
 not infer identity from filenames or remove executable content when selecting
 an ordinary document or template class.
+
+### F-X081, Tag rpptx-v0.11.0
+
+**Sprint.** S69
+**Completed.** 2026-09-06
+**Size.** S, estimated 1 day, actual 1 day
+
+**What was built.** The exact 15-package shared OOXML and PowerPoint family is
+published at 0.11.0. The immutable annotated `rpptx-v0.11.0` tag dereferences
+to reviewed SHA `0b6bd622f8a14189d7d1281d011f81319ef8ad2a`. The successful
+publication workflow is
+https://github.com/tensorbee/rdocx/actions/runs/34033742964 and the release is
+https://github.com/tensorbee/rdocx/releases/tag/rpptx-v0.11.0.
+
+**Non-obvious choices.** The complete lockstep family was required because the
+additive pre-1.0 `oxml-opc` API crossed a minor version boundary. Stable Word,
+bindings, WASM, Python, npm, and PyPI remained outside publication authority.
+The immutable partial v0.13.0 tag and its five registry packages were not
+moved, deleted, republished, or treated as a complete stable family.
+
+**Deviations from the design plan.** None. Microscope pass 1 and integrated
+sprint review pass 19 reported zero findings.
+
+**Spec sections touched.** `docs/hld/03-architecture.md`,
+`docs/hld/10-bindings-spec.md`, `docs/hld/12-testing-strategy.md`,
+`docs/hld/14-development-backlog.md`, and
+`docs/hld/15-build-and-toolchain.md`.
+
+**Tests.** Full verification passed at the exact reviewed SHA with all 49 hash
+entries unchanged. The hosted workflow published all 15 packages and created
+the GitHub release. Every package downloaded independently at 0.11.0 and
+reported sole owner `mantissaman (Atul Sharma)`. The remote annotated tag
+dereferences to the reviewed SHA. The GitHub release body matches the reviewed
+render with SHA-256
+`e4556abf8b218b2cfcf64bc92b0661dc87260a8f130916f2f0a6dc60cf8ff837`.
+`rpptx-wasm@0.11.0`, `rdocx@0.13.0`, and `rdocx-cli@0.13.0` remain absent from
+crates.io.
+
+**Contribution inventory.** Empty. The selected source delta contains the four
+additive Word main content-type constants and their shared vocabulary
+regression. No external issue or pull request implements those selected
+changes, so no release notification was required. Issue 69 remains a separate
+paragraph-cache performance follow-up and is not part of this release.
+
+**Hash harness.** Unchanged, 49 of 49.
+
+**Notes for future sessions.** Stable v0.13.1 may now package against the
+published shared 0.11.0 boundary. Its registry-only facade proof, full gate,
+clean review, and separate release approval remain mandatory.

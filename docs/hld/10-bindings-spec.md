@@ -1154,9 +1154,10 @@ honest. Do not auto-generate them from PyO3.
 crates are `publish = false`, because a cdylib has no business on crates.io.
 
 The Rust package trains remain separate. The exact 15-package shared OOXML and
-PowerPoint workspace family is prepared at 0.11.0. Its latest published family
-remains 0.10.0 from immutable annotated tag `rpptx-v0.10.0` at reviewed SHA
-`1e409c553b950eb8029e3e78e39ff775f18ba3ab`. The stable workspace and its
+PowerPoint workspace family is published at 0.11.0 from immutable annotated tag
+`rpptx-v0.11.0` at reviewed SHA
+`0b6bd622f8a14189d7d1281d011f81319ef8ad2a`. Every registry entry and its sole
+owner are verified. The stable workspace and its
 unpublished binding carriers are prepared at 0.13.0. Its latest published exact
 seven-package family remains at 0.12.0. The immutable
 annotated `v0.12.0` tag

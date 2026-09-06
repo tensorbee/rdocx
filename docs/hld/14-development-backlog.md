@@ -3794,13 +3794,14 @@ release.
 
 ### F-X081, Tag rpptx-v0.11.0 (S)
 
-Publish the exact 15-package shared OOXML and PowerPoint family at 0.11.0. The
-only selected source change since `rpptx-v0.10.0` is the additive `oxml-opc`
-Word main content-type vocabulary required by F-238. Move all publishable
-incubating manifests, workspace pins, lock records, README requirements,
-source assertions, CI literals, release regressions, and the unpublished
-`rpptx-wasm` preparation carrier in lockstep. Keep stable carriers at 0.13.0
-until this registry family verifies.
+The exact 15-package shared OOXML and PowerPoint family is published at 0.11.0
+from immutable annotated tag `rpptx-v0.11.0` at reviewed SHA
+`0b6bd622f8a14189d7d1281d011f81319ef8ad2a`. The only selected source change
+since `rpptx-v0.10.0` is the additive `oxml-opc` Word main content-type
+vocabulary required by F-238. All publishable incubating manifests, workspace
+pins, lock records, README requirements, source assertions, CI literals,
+release regressions, and the unpublished `rpptx-wasm` preparation carrier move
+in lockstep. Stable carriers remain at 0.13.0 for the separate recovery.
 
 Preserve the immutable partial v0.13.0 tag and registry entries. Do not rerun
 its workflow or publish a partial shared patch. Prepare exact selected-family
@@ -3808,10 +3809,11 @@ notes and an evidence-derived contribution inventory. Stable Word, Python,
 WASM, npm, and PyPI packages remain outside publication authority.
 
 **Depends on**: F-238, F-X079, F-X080.
-**Test gate**: release. All 15 shared and PowerPoint registry entries resolve
-at 0.11.0 under the authenticated owner. The annotated tag, release body,
-stable-family exclusion, absent `rpptx-wasm@0.11.0`, and applicable
-contribution notifications verify before F-X082 starts.
+**Test gate**: release, passed. All 15 shared and PowerPoint registry entries
+resolve at 0.11.0 under the authenticated sole owner. The annotated tag,
+byte-identical release body, stable-family exclusion, absent
+`rpptx-wasm@0.11.0`, and empty contribution inventory verify. F-X082 is
+eligible to start.
 
 ### F-X082, Tag v0.13.1 (S)
 

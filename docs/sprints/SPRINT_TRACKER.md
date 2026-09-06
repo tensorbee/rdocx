@@ -393,6 +393,7 @@ defended.
 | F-X080 | S69 | S | 1 | 1 | 2026-09-05 | Restored release-ready CI package inventory, bounded authenticated Pandoc extraction, and exhaustive Python error mapping |
 | F-X079 | S69 | S | 1 | 1 | 2026-09-05 | Published and independently verified the exact 15-package rpptx 0.10.0 family with no external contribution notifications |
 | F-238 | S69 | M | 2 | 1 | 2026-09-05 | Added strict Flat OPC import and export plus source-preserving DOCX, DOCM, DOTX, and DOTM package identity and conversion |
+| F-X081 | S69 | S | 1 | 1 | 2026-09-06 | Published and independently verified the exact 15-package rpptx 0.11.0 recovery family required by stable package-class handling |
 
 ## Velocity
 

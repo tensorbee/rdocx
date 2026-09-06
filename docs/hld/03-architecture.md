@@ -840,11 +840,11 @@ an endnote sharing a number.
 
 The 15 shared and PowerPoint publication candidates use the explicit common
 incubating version 0.11.0 in their manifests and workspace pins. The latest
-published coherent family is 0.10.0 from immutable annotated tag
-`rpptx-v0.10.0` at reviewed SHA
-`1e409c553b950eb8029e3e78e39ff775f18ba3ab`. The unpublished `rpptx-wasm`
-preparation member is also at 0.11.0 without gaining a crates.io publication
-path. The family
+published coherent family is 0.11.0 from immutable annotated tag
+`rpptx-v0.11.0` at reviewed SHA
+`0b6bd622f8a14189d7d1281d011f81319ef8ad2a`. All 15 registry entries and their
+sole owner are verified, while the `rpptx-wasm` preparation member remains
+unpublished at 0.11.0. The earlier 0.10.0 family remains available. The family
 includes `oxml-chart` as the format-neutral owner while
 retaining `rpptx-chart` as a source-compatible deprecated shim. The released
 `rdocx-*` crates use the separate workspace version. The stable workspace and

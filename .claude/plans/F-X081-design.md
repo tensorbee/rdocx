@@ -1,6 +1,6 @@
 # F-X081, Tag rpptx-v0.11.0
 
-**Status**: approved
+**Status**: completed
 **Sprint**: S69
 **Size**: S
 **Depends on**: F-238, F-X079, F-X080
@@ -90,9 +90,9 @@ Expected unchanged across all 49 entries. Any delta blocks preparation.
 - [x] Update carrier, workflow, notes, and publication regressions.
 - [x] Build and verify the selected-family contribution inventory.
 - [x] Run `/verify --full` and every routed release check.
-- [ ] Reach a clean microscope and sprint review at the exact prepared SHA.
-- [ ] Stop at `/release rpptx-v0.11.0` for separate final approval.
-- [ ] Verify all 15 registry entries and release evidence before completion.
+- [x] Reach a clean microscope and sprint review at the exact prepared SHA.
+- [x] Stop at `/release rpptx-v0.11.0` for separate final approval.
+- [x] Verify all 15 registry entries and release evidence before completion.
 
 ## Open questions
 
