@@ -1807,7 +1807,7 @@ fn verify_fetched_corpus() {
 fn rpptx_oxml_is_an_explicit_publication_candidate() {
     let manifest = include_str!("../Cargo.toml");
     assert!(manifest.contains("name = \"rpptx-oxml\""));
-    assert!(manifest.contains("version = \"0.10.0\""));
+    assert!(manifest.contains("version = \"0.11.0\""));
     assert!(manifest.contains("publish = true"));
     assert_eq!(
         P_NS,

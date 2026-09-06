@@ -2,7 +2,45 @@
 
 ## Unreleased
 
-No changes have been recorded since the v0.13.0 preparation.
+No changes have been recorded since the rpptx-v0.11.0 preparation.
+
+## rpptx-v0.11.0
+
+### Highlights
+
+The shared OOXML and PowerPoint family moves to 0.11.0 with the Word main
+content-type constants required by modern stable package-class handling.
+`oxml-opc` now names DOCX, DOCM, DOTX, and DOTM main parts through one shared
+vocabulary.
+
+### Added
+
+- Add `WORD_DOCUMENT`, `WORD_DOCUMENT_MACRO_ENABLED`, `WORD_TEMPLATE`, and
+  `WORD_TEMPLATE_MACRO_ENABLED` to `oxml-opc`.
+- Cover the four Word main content-type constants in the shared relationship
+  vocabulary regression.
+
+### Fixed
+
+- Publish the shared contract required by packaged stable `rdocx`, which the
+  immutable shared 0.10.0 archive does not contain.
+
+### Compatibility
+
+The exact 15-package shared OOXML and PowerPoint crates.io family moves
+together from 0.10.0 to 0.11.0. The constants are additive pre-1.0 Rust API.
+The stable Word family remains at 0.13.0 during this selected-family release.
+Its immutable v0.13.0 attempt published five low-level packages before
+registry verification exposed the missing shared constants.
+
+Stable Word, Python, WASM, npm, and PyPI packages are outside this release's
+publication authority. `rpptx-wasm@0.11.0` is not a crates.io package.
+
+### Contributors
+
+Atul Sharma maintained the release. No external issue or pull request belongs
+to the selected family changes since `rpptx-v0.10.0`, so this release has no
+external contribution notification.
 
 ## v0.13.0
 

@@ -84,12 +84,12 @@ Expected unchanged across all 49 entries. Any delta blocks preparation.
 
 ## Implementation checklist
 
-- [ ] Preserve and record the exact partial v0.13.0 external state.
-- [ ] Move every incubating version carrier and stable shared dependency pin
+- [x] Preserve and record the exact partial v0.13.0 external state.
+- [x] Move every incubating version carrier and stable shared dependency pin
       to 0.11.0.
-- [ ] Update carrier, workflow, notes, and publication regressions.
-- [ ] Build and verify the selected-family contribution inventory.
-- [ ] Run `/verify --full` and every routed release check.
+- [x] Update carrier, workflow, notes, and publication regressions.
+- [x] Build and verify the selected-family contribution inventory.
+- [x] Run `/verify --full` and every routed release check.
 - [ ] Reach a clean microscope and sprint review at the exact prepared SHA.
 - [ ] Stop at `/release rpptx-v0.11.0` for separate final approval.
 - [ ] Verify all 15 registry entries and release evidence before completion.

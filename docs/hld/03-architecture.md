@@ -839,11 +839,11 @@ an endnote sharing a number.
 ## Versioning
 
 The 15 shared and PowerPoint publication candidates use the explicit common
-incubating version 0.10.0 in their manifests and workspace pins. The latest
+incubating version 0.11.0 in their manifests and workspace pins. The latest
 published coherent family is 0.10.0 from immutable annotated tag
 `rpptx-v0.10.0` at reviewed SHA
 `1e409c553b950eb8029e3e78e39ff775f18ba3ab`. The unpublished `rpptx-wasm`
-preparation member is also at 0.10.0 without gaining a crates.io publication
+preparation member is also at 0.11.0 without gaining a crates.io publication
 path. The family
 includes `oxml-chart` as the format-neutral owner while
 retaining `rpptx-chart` as a source-compatible deprecated shim. The released
@@ -853,9 +853,12 @@ versions, and unpublished `rdocx-wasm` package are prepared at 0.13.0. The lates
 published exact seven-package crates.io family is 0.12.0 from immutable
 annotated `v0.12.0` tag at reviewed SHA
 `19adaacfcf82e3918bba4f8c3648747f1969b746`. Those published archives retain
-their shared 0.9.0 registry requirements, while current source pins the
-published shared 0.10.0 boundary. The immutable
-v0.11.0 attempt at reviewed SHA
+their shared 0.9.0 registry requirements, while current source prepares shared
+0.11.0. The immutable v0.13.0 tag at reviewed SHA
+`05332b17f481741e7d5ab4e39699c6d1536475af` published five low-level stable
+packages, then stopped because packaged `rdocx` required the four Word main
+content-type constants added after shared 0.10.0. `rdocx`, `rdocx-cli`, and the
+GitHub release are absent. The immutable v0.11.0 attempt at reviewed SHA
 `25350d000ed7ed96bf4f6e371f01f8fbc8e2cec4` published `rdocx-opc` and
 `rdocx-oxml`, then stopped before the other five packages and GitHub release
 when `rdocx-layout` proved it needed `TextSegment.direction` from a newer
@@ -864,8 +867,8 @@ The separately approved cleanup yanked exactly the incomplete
 `rdocx-opc@0.11.0` and `rdocx-oxml@0.11.0` entries. Complete coherent stable
 releases remain live and unyanked. The v0.11.0 tag remains immutable, and no
 v0.11.0 GitHub release exists. The last published complete stable family remains
-0.12.0 until the separately approved 0.13.0 release. Earlier immutable registry
-releases remain available. Version
+0.12.0 until the separately approved 0.13.1 recovery. Earlier immutable
+registry releases remain available. Version
 preparation and manifest eligibility do not authorize any later publication.
 `oxml-cli-support` is the
 format-neutral owner of range parsing,

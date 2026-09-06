@@ -52,22 +52,22 @@ push = false
 
 [workspace.dependencies]
 # Internal crates
-oxml-core = { path = "crates/oxml-core", version = "0.10.0" }
+oxml-core = { path = "crates/oxml-core", version = "0.11.0" }
 oxml-py-support = { path = "crates/oxml-py-support", version = "0.13.0" }
-oxml-drawing = { path = "crates/oxml-drawing", version = "0.10.0" }
-oxml-layout = { path = "crates/oxml-layout", version = "0.10.0", default-features = false }
-oxml-media = { path = "crates/oxml-media", version = "0.10.0" }
-oxml-opc = { path = "crates/oxml-opc", version = "0.10.0" }
-oxml-pdf = { path = "crates/oxml-pdf", version = "0.10.0", default-features = false }
-oxml-sml = { path = "crates/oxml-sml", version = "0.10.0" }
-oxml-cli-support = { path = "crates/oxml-cli-support", version = "0.10.0" }
-oxml-chart = { path = "crates/oxml-chart", version = "0.10.0" }
-rpptx = { path = "crates/rpptx", version = "0.10.0", default-features = false }
-rpptx-cli = { path = "crates/rpptx-cli", version = "0.10.0" }
-rpptx-chart = { path = "crates/rpptx-chart", version = "0.10.0" }
-rpptx-layout = { path = "crates/rpptx-layout", version = "0.10.0" }
-rpptx-oxml = { path = "crates/rpptx-oxml", version = "0.10.0" }
-rpptx-render = { path = "crates/rpptx-render", version = "0.10.0", default-features = false }
+oxml-drawing = { path = "crates/oxml-drawing", version = "0.11.0" }
+oxml-layout = { path = "crates/oxml-layout", version = "0.11.0", default-features = false }
+oxml-media = { path = "crates/oxml-media", version = "0.11.0" }
+oxml-opc = { path = "crates/oxml-opc", version = "0.11.0" }
+oxml-pdf = { path = "crates/oxml-pdf", version = "0.11.0", default-features = false }
+oxml-sml = { path = "crates/oxml-sml", version = "0.11.0" }
+oxml-cli-support = { path = "crates/oxml-cli-support", version = "0.11.0" }
+oxml-chart = { path = "crates/oxml-chart", version = "0.11.0" }
+rpptx = { path = "crates/rpptx", version = "0.11.0", default-features = false }
+rpptx-cli = { path = "crates/rpptx-cli", version = "0.11.0" }
+rpptx-chart = { path = "crates/rpptx-chart", version = "0.11.0" }
+rpptx-layout = { path = "crates/rpptx-layout", version = "0.11.0" }
+rpptx-oxml = { path = "crates/rpptx-oxml", version = "0.11.0" }
+rpptx-render = { path = "crates/rpptx-render", version = "0.11.0", default-features = false }
 rpptx-py = { path = "crates/rpptx-py", version = "0.13.0" }
 rdocx-opc = { path = "crates/rdocx-opc", version = "0.13.0" }
 rdocx-oxml = { path = "crates/rdocx-oxml", version = "0.13.0" }

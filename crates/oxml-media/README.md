@@ -22,4 +22,4 @@ let format = resolve(b"\x89PNG\r\n\x1a\n", "image.bin");
 assert_eq!(format, ImageFormat::Png);
 ```
 
-Add `oxml-media = "0.10.0"` to your dependencies. See the [API documentation](https://docs.rs/oxml-media) for supported formats and sizing functions.
+Add `oxml-media = "0.11.0"` to your dependencies. See the [API documentation](https://docs.rs/oxml-media) for supported formats and sizing functions.

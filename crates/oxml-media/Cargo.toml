@@ -2,7 +2,7 @@
 name = "oxml-media"
 description = "Media type detection, naming, and intrinsic sizing for OOXML"
 readme = "README.md"
-version = "0.10.0"
+version = "0.11.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true

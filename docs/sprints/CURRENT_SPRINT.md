@@ -38,7 +38,7 @@ shared 0.11.0 family and the exact stable Rust family at v0.13.1.
 | F-X079 | Tag rpptx-v0.10.0 | S | done | - |
 | F-238 | Flat OPC and modern Word package variants | M | done | - |
 | F-X078 | Tag v0.13.0 | S | archived | - |
-| F-X081 | Tag rpptx-v0.11.0 | S | pending | - |
+| F-X081 | Tag rpptx-v0.11.0 | S | in-progress | codex |
 | F-X082 | Tag v0.13.1 | S | pending | - |
 
 ## Sequencing note

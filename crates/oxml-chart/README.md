@@ -23,4 +23,4 @@ assert_ne!(category_axis, value_axis);
 # Ok::<(), oxml_chart::ChartError>(())
 ```
 
-Add `oxml-chart = "0.10.0"` to your dependencies. See the [chart API](https://docs.rs/oxml-chart) for supported plot families.
+Add `oxml-chart = "0.11.0"` to your dependencies. See the [chart API](https://docs.rs/oxml-chart) for supported plot families.

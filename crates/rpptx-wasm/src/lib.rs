@@ -465,7 +465,7 @@ mod tests {
         let wasm_manifest = include_str!("../Cargo.toml");
 
         assert!(workspace_manifest.contains(
-            "rpptx = { path = \"crates/rpptx\", version = \"0.10.0\", default-features = false }"
+            "rpptx = { path = \"crates/rpptx\", version = \"0.11.0\", default-features = false }"
         ));
         assert!(
             facade_manifest

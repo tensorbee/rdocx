@@ -1798,21 +1798,21 @@ The stable 0.13.0 carrier regression pins all eleven inherited version
 carriers, both Python project versions, both rdocx WASM dependency assertions,
 the stable CI package literal, the seven publishable crates, and every stable
 README requirement. It also proves the current incubating workspace carriers
-are 0.10.0 while `rpptx-wasm` remains ineligible for publication.
+are 0.11.0 while `rpptx-wasm` remains ineligible for publication.
 The paired incubating regression pins all sixteen explicit manifests, fifteen
 workspace dependency requirements, sixteen lockfile entries, publication
 flags, README examples, Rust assertions, the CI WASM literal, and the exact
-15-package publication preflight at 0.10.0. It separately proves the stable
+15-package publication preflight at 0.11.0. It separately proves the stable
 workspace remains at its prepared 0.13.0 boundary and `rpptx-wasm` remains
 ineligible for publication.
-The current stable shared-family gate packages and verifies
+The immutable v0.13.0 shared-family gate packages and verifies
 `rdocx-layout@0.13.0`, requires its normalized archive dependency on
 `oxml-layout@0.10.0` to contain no local path, and compiles the packaged crate
-against the exact shared registry version without an `oxml-layout` patch.
-That registry consumer is excluded from the incubating tag preflight because
-0.10.0 does not exist before its own publication. The stable tag preflight runs
-it only with explicit published-shared authority. The earlier F-X068
-post-publication proof against 0.8.0 remains immutable release evidence.
+against the exact shared registry version without an `oxml-layout` patch. That
+narrow proof did not cover the facade's newer `oxml-opc` API. Stable 0.13.1
+therefore replaces it with a package-level `rdocx` proof against registry-only
+shared 0.11.0. The earlier F-X068 post-publication proof against 0.8.0 remains
+immutable release evidence.
 A separate recovery gate constructs an isolated registry consumer of exact
 `rdocx-layout@0.10.1` and inspects its unpatched normal dependency tree. It
 requires registry `oxml-layout@0.6.0` and rejects 0.7.0, so the immutable
@@ -1852,12 +1852,16 @@ owner `mantissaman (Atul Sharma)`, immutable annotated tag
 notes, stable-family exclusion, and absent `rpptx-wasm@0.10.0`. Its selected
 diff contains no external issue or pull request, so its reviewed contribution
 inventory is empty and no notification is required.
-The stable 0.13.0 preparation gate pins the exact seven-package family, the
-published shared 0.10.0 source dependency boundary, all binding exclusions,
-and the reviewed empty selected-family contribution inventory. Repository
-history and GitHub records since `v0.12.0` contain no external issue or pull
-request that implements the selected M22 changes. It requires full
-verification and clean review at one SHA before a separate release approval.
+The shared 0.11.0 preparation gate pins all 16 incubating carriers, the exact
+15-package publication set, source and CI literals, and the selected release
+notes. Its selected diff contains only the additive `oxml-opc` Word main
+content-type constants required by F-238. The contribution inventory is empty.
+The immutable stable 0.13.0 attempt passed its preparation gate, full
+verification, and clean review at SHA
+`05332b17f481741e7d5ab4e39699c6d1536475af`. Publication then stopped after
+five packages because packaged `rdocx` could not find those constants in
+registry `oxml-opc@0.10.0`. Stable 0.13.1 must package and compile `rdocx`
+against registry-only shared 0.11.0 before publication.
 The failed stable 0.11.0 release gate is not a passing family gate. Its
 annotated tag targets reviewed SHA
 `25350d000ed7ed96bf4f6e371f01f8fbc8e2cec4`, and its preparation, full

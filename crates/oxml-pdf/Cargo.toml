@@ -2,7 +2,7 @@
 name = "oxml-pdf"
 description = "Format-neutral PDF renderer for staged OOXML layout output"
 readme = "README.md"
-version = "0.10.0"
+version = "0.11.0"
 publish = true
 edition.workspace = true
 license.workspace = true
