@@ -29,6 +29,8 @@ struct MhtmlOracleRecord {
 
 mod flat_opc_package_class_tests {
     use super::*;
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as BASE64;
     use oxml_opc::content_types;
 
     const WORD_NS: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
@@ -215,6 +217,270 @@ mod flat_opc_package_class_tests {
                 .get_part("/custom/preserved.xml")
         );
         assert_eq!(reopened.get_part("/custom/empty.bin"), Some(&[][..]));
+    }
+
+    #[test]
+    fn flat_opc_import_materializes_inherited_payload_namespaces() {
+        let document = Document::from_bytes(&package_bytes(&source_package(
+            WordPackageClass::MacroEnabledDocument,
+        )))
+        .unwrap();
+        let canonical = String::from_utf8(document.to_flat_opc_bytes().unwrap()).unwrap();
+
+        let inherited_prefix = canonical
+            .replacen(
+                &format!("<w:document xmlns:w=\"{WORD_NS}\" "),
+                "<w:document ",
+                1,
+            )
+            .replacen(
+                "<pkg:part pkg:name=\"/word/document.xml\"",
+                &format!("<pkg:part xmlns:w=\"{WORD_NS}\" pkg:name=\"/word/document.xml\""),
+                1,
+            );
+        assert_ne!(inherited_prefix, canonical);
+        let imported = Document::from_flat_opc_bytes(inherited_prefix.as_bytes()).unwrap();
+        let reopened = OpcPackage::from_reader(std::io::Cursor::new(
+            imported
+                .to_bytes_as(WordPackageClass::MacroEnabledDocument)
+                .unwrap(),
+        ))
+        .unwrap();
+        assert!(
+            std::str::from_utf8(reopened.get_part("/word/document.xml").unwrap())
+                .unwrap()
+                .contains(&format!("xmlns:w=\"{WORD_NS}\""))
+        );
+
+        let inherited_default = canonical.replacen(
+            "<pkg:xmlData><preserved xmlns=\"urn:rdocx:f238\">",
+            "<pkg:xmlData xmlns=\"urn:rdocx:f238\"><preserved>",
+            1,
+        );
+        assert_ne!(inherited_default, canonical);
+        let imported = Document::from_flat_opc_bytes(inherited_default.as_bytes()).unwrap();
+        let reopened = OpcPackage::from_reader(std::io::Cursor::new(
+            imported
+                .to_bytes_as(WordPackageClass::MacroEnabledDocument)
+                .unwrap(),
+        ))
+        .unwrap();
+        assert!(
+            std::str::from_utf8(reopened.get_part("/custom/preserved.xml").unwrap())
+                .unwrap()
+                .contains("xmlns=\"urn:rdocx:f238\"")
+        );
+    }
+
+    #[test]
+    fn flat_opc_treats_transitional_and_strict_alt_chunks_as_opaque() {
+        const ALT_CHUNK_RELATIONSHIPS: [&str; 2] = [
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships/aFChunk",
+            "http://purl.oclc.org/ooxml/officeDocument/relationships/aFChunk",
+        ];
+        const XHTML: &[u8] =
+            br#"<html xmlns="http://www.w3.org/1999/xhtml"><body> <p>chunk</p><!--opaque--></body></html>"#;
+        const ORDINARY_XHTML: &[u8] =
+            br#"<html xmlns="http://www.w3.org/1999/xhtml"><body><p>ordinary XML</p></body></html>"#;
+
+        for relationship_type in ALT_CHUNK_RELATIONSHIPS {
+            let mut package = source_package(WordPackageClass::Document);
+            package.set_part(
+                "/word/document.xml",
+                format!(
+                    r#"<w:document xmlns:w="{WORD_NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:altChunk r:id="altChunk1"/><w:sectPr/></w:body></w:document>"#,
+                )
+                .into_bytes(),
+            );
+            package
+                .get_or_create_part_rels("/word/document.xml")
+                .add_with_id("altChunk1", relationship_type, "afchunk1.xhtml");
+            package.set_part("/word/afchunk1.xhtml", XHTML.to_vec());
+            package
+                .content_types
+                .add_override("/word/afchunk1.xhtml", "application/xhtml+xml");
+            package.set_part("/word/ordinary.xhtml", ORDINARY_XHTML.to_vec());
+            package
+                .content_types
+                .add_override("/word/ordinary.xhtml", "application/xhtml+xml");
+
+            let document = Document::from_bytes(&package_bytes(&package)).unwrap();
+            let flat = String::from_utf8(document.to_flat_opc_bytes().unwrap()).unwrap();
+            let part_start = flat
+                .find("<pkg:part pkg:name=\"/word/afchunk1.xhtml\"")
+                .unwrap();
+            let part_end = part_start + flat[part_start..].find("</pkg:part>").unwrap();
+            let part = &flat[part_start..part_end];
+            assert!(part.contains("<pkg:binaryData>"), "{part}");
+            assert!(part.contains(&BASE64.encode(XHTML)), "{part}");
+            let ordinary_start = flat
+                .find("<pkg:part pkg:name=\"/word/ordinary.xhtml\"")
+                .unwrap();
+            let ordinary_end = ordinary_start + flat[ordinary_start..].find("</pkg:part>").unwrap();
+            assert!(
+                flat[ordinary_start..ordinary_end].contains("<pkg:xmlData>"),
+                "{}",
+                &flat[ordinary_start..ordinary_end]
+            );
+
+            let imported = Document::from_flat_opc_bytes(flat.as_bytes()).unwrap();
+            let reopened = OpcPackage::from_reader(std::io::Cursor::new(
+                imported.to_bytes_as(WordPackageClass::Document).unwrap(),
+            ))
+            .unwrap();
+            assert_eq!(reopened.get_part("/word/afchunk1.xhtml"), Some(XHTML));
+            assert_eq!(
+                reopened.get_part("/word/ordinary.xhtml"),
+                Some(ORDINARY_XHTML)
+            );
+        }
+    }
+
+    #[test]
+    fn representative_m22_document_composes_the_complete_milestone_gate() {
+        let mut package = source_package(WordPackageClass::MacroEnabledTemplate);
+        let header_id = package
+            .get_or_create_part_rels("/word/document.xml")
+            .add(rel_types::HEADER, "header1.xml");
+        package.set_part(
+            "/word/header1.xml",
+            format!(
+                r#"<w:hdr xmlns:w="{WORD_NS}"><w:p><w:r><w:t>original header</w:t></w:r></w:p></w:hdr>"#,
+            )
+            .into_bytes(),
+        );
+        package.content_types.add_override(
+            "/word/header1.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        );
+        package.set_part(
+            "/word/document.xml",
+            format!(
+                r#"<w:document xmlns:w="{WORD_NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:x="urn:rdocx:m22"><w:body>
+<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> TOC \o "1-1" \h </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+<w:p><w:r><w:t>stale entry</w:t></w:r></w:p>
+<w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Milestone heading</w:t></w:r></w:p>
+<w:p><w:fldSimple w:instr="MERGEFIELD Name"><w:r><w:t>stored name</w:t></w:r></w:fldSimple></w:p>
+<x:unsupported x:token="preserve-me"/>
+<w:sectPr><w:headerReference w:type="default" r:id="{header_id}"/></w:sectPr></w:body></w:document>"#,
+            )
+            .into_bytes(),
+        );
+        let mut document = Document::from_bytes(&package_bytes(&package)).unwrap();
+
+        document
+            .add_paragraph("Authored equation")
+            .add_equation(rdocx::OfficeMath::inline(vec![
+                rdocx::MathRun::new("x").into(),
+                rdocx::MathExpression::Fraction(rdocx::MathFraction::new(
+                    rdocx::MathArgument::text("1"),
+                    rdocx::MathArgument::text("2"),
+                )),
+            ]))
+            .unwrap();
+        let rendered = document
+            .render_page_to_svg_deterministic(0)
+            .unwrap()
+            .expect("the representative document renders page zero");
+        assert!(rendered.svg.contains(">x</text>"), "{}", rendered.svg);
+        assert!(rendered.svg.contains(">1</text>"), "{}", rendered.svg);
+        assert!(rendered.svg.contains(">2</text>"), "{}", rendered.svg);
+
+        let toc = document.rebuild_toc().unwrap();
+        assert_eq!(toc.entry_count, 1);
+        let post_toc_bytes = document
+            .to_bytes_as(WordPackageClass::MacroEnabledTemplate)
+            .unwrap();
+        let mut field_updated = Document::from_bytes(&post_toc_bytes).unwrap();
+        let mut field_context = rdocx::FieldEvaluationContext::default();
+        field_context
+            .merge_fields
+            .insert("Name".to_owned(), "Ada".to_owned());
+        assert!(field_updated.update_fields(&field_context).unwrap() >= 1);
+        let field_updated_package = OpcPackage::from_reader(std::io::Cursor::new(
+            field_updated
+                .to_bytes_as(WordPackageClass::MacroEnabledTemplate)
+                .unwrap(),
+        ))
+        .unwrap();
+        assert!(
+            std::str::from_utf8(
+                field_updated_package
+                    .get_part("/word/document.xml")
+                    .unwrap()
+            )
+            .unwrap()
+            .contains(">Ada<")
+        );
+
+        let records = [
+            std::collections::BTreeMap::from([("Name".to_owned(), "Ada".to_owned())]),
+            std::collections::BTreeMap::from([("Name".to_owned(), "Grace".to_owned())]),
+        ];
+        let merge_source = Document::from_bytes(&post_toc_bytes).unwrap();
+        let merged = merge_source.mail_merge_sections(&records).unwrap();
+        let merged_bytes = merged
+            .to_bytes_as(WordPackageClass::MacroEnabledTemplate)
+            .unwrap();
+        let merged_package = OpcPackage::from_reader(std::io::Cursor::new(&merged_bytes)).unwrap();
+        let merged_xml =
+            std::str::from_utf8(merged_package.get_part("/word/document.xml").unwrap()).unwrap();
+        assert!(merged_xml.contains(">Ada<"), "{merged_xml}");
+        assert!(merged_xml.contains(">Grace<"), "{merged_xml}");
+        let inventory = merged.embedded_content().unwrap();
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(inventory[0].kind, rdocx::EmbeddedContentKind::VbaProject);
+
+        let mut compared = Document::from_bytes(&merged_bytes).unwrap();
+        let mut edited_package =
+            OpcPackage::from_reader(std::io::Cursor::new(&merged_bytes)).unwrap();
+        let edited_header =
+            std::str::from_utf8(edited_package.get_part("/word/header1.xml").unwrap())
+                .unwrap()
+                .replace("original header", "edited header");
+        edited_package.set_part("/word/header1.xml", edited_header.into_bytes());
+        let mut edited = Document::from_bytes(&package_bytes(&edited_package)).unwrap();
+        edited.add_paragraph("comparison addition");
+        compared
+            .compare(&edited, "M22 gate", "2026-09-06T09:00:00Z")
+            .unwrap();
+        assert!(!compared.revisions().is_empty());
+
+        let flat = compared.to_flat_opc_bytes().unwrap();
+        let reopened = Document::from_flat_opc_bytes(&flat).unwrap();
+        assert_eq!(
+            reopened.package_class().unwrap(),
+            WordPackageClass::MacroEnabledTemplate
+        );
+        assert!(
+            reopened
+                .paragraphs()
+                .iter()
+                .any(|paragraph| paragraph.equations().next().is_some())
+        );
+        let final_zip = reopened
+            .to_bytes_as(WordPackageClass::MacroEnabledTemplate)
+            .unwrap();
+        let final_package = OpcPackage::from_reader(std::io::Cursor::new(final_zip)).unwrap();
+        assert_eq!(
+            final_package.get_part("/word/vbaProject.bin"),
+            Some(VBA_BYTES)
+        );
+        assert_eq!(
+            final_package.get_part("/custom/preserved.xml"),
+            package.get_part("/custom/preserved.xml")
+        );
+        assert!(
+            std::str::from_utf8(final_package.get_part("/word/document.xml").unwrap())
+                .unwrap()
+                .contains("preserve-me")
+        );
+        assert!(
+            std::str::from_utf8(final_package.get_part("/word/header1.xml").unwrap())
+                .unwrap()
+                .contains("<w:ins")
+        );
     }
 
     #[test]

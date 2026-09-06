@@ -11903,7 +11903,9 @@ base64 binary data for opaque parts, atomic path replacement, and a reopen gate.
 relationship target-mode handling, relationship-owner validation, local
 namespace declaration handling, allocation bounds, MIME classification, empty
 binary representation, and signature invalidation evidence. Pass 5 reported
-zero defects, zero smells, and zero nitpicks.
+zero defects, zero smells, and zero nitpicks. Integrated sprint review pass 14
+then added relationship-aware alternative-format classification, materialized
+used inherited payload namespaces, and established the composed M22 gate.
 
 **Spec sections touched.** `docs/hld/02-scope-and-non-goals.md`,
 `docs/hld/03-architecture.md`, `docs/hld/04-opc-and-packaging.md`,
@@ -11915,8 +11917,13 @@ zero defects, zero smells, and zero nitpicks.
 covers all four package classes through ZIP, Flat OPC, document, and ZIP
 conversion. Focused malformed-package, namespace, relationship, limit,
 conversion-isolation, signature-invalidation, path-save, XML, and binary tests
-cover the strict boundary. Microsoft Word 16.104 build 16.104.25121423 opened
-the generated DOCX, DOCM, DOTX, DOTM, and Flat OPC outputs without repair.
+cover the strict boundary. The source-built
+`representative_m22_document_composes_the_complete_milestone_gate` test authors
+and renders OfficeMath, rebuilds fields and a table of contents, performs
+sectioned mail merge and comparison, inventories VBA, and preserves DOTM
+identity, unsupported XML, and executable bytes through Flat OPC. Microsoft
+Word 16.104 build 16.104.25121423 opened the generated DOCX, DOCM, DOTX, DOTM,
+and Flat OPC outputs without repair.
 Integrated `/verify --full` passed at
 `f4c5bb07e0680c85f446e3df06fed44802005e83`, including all tests, WASM,
 rustdoc, dependency direction, packaging, archive-size, and supply-chain

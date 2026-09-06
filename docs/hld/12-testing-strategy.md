@@ -1263,6 +1263,15 @@ lookalikes, and each resource limit fail before publication. Microsoft Word
 16.104 build 16.104.25121423 supplies only the ignored no-repair acceptance
 fact. Source-built assertions remain the structural authority.
 
+The M22 completion gate composes its feature families in one source-built
+macro-enabled template. It authors and deterministically renders OfficeMath,
+rebuilds a dynamic table of contents and field caches, performs sectioned mail
+merge and full document comparison, inventories the retained VBA project, and
+round-trips through Flat OPC. The final package must retain its DOTM identity,
+exact executable bytes, equations, and unsupported XML. Separate focused tests
+cover inherited Flat OPC payload namespaces and the required binary treatment
+of Transitional and Strict alternative-format import targets.
+
 Five real `.docx` files are stored outside the published crates and fetched by
 `scripts/fetch_docx_corpus.py` into the ignored `corpus/docx` directory. The
 tracked manifest pins one document for each of `business-letter`, `report`,

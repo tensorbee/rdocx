@@ -42,9 +42,12 @@ unique canonical absolute part names, exact data-kind selection, strict base64,
 relationship ownership, and entry, part, and cumulative decoded-size limits.
 Relationship parts populate `package_rels` and `part_rels`, never ordinary
 parts. Export flushes a staged document and emits sorted fixed-prefix parts.
-XML uses `pkg:xmlData` and opaque bytes use `pkg:binaryData`. A reopened Flat
-package cannot claim retained cryptographic signature validity because the
-original content-types byte ordering is unavailable.
+XML uses `pkg:xmlData` and opaque bytes use `pkg:binaryData`. Relationship-owned
+alternative-format import targets remain opaque and use `pkg:binaryData` even
+when their media type ends in `+xml`. Namespace bindings inherited from Flat
+OPC wrapper elements are materialized only when the extracted XML payload uses
+them. A reopened Flat package cannot claim retained cryptographic signature
+validity because the original content-types byte ordering is unavailable.
 
 ODT is a ZIP package but not an OPC package. The private `rdocx` ODT reader
 therefore indexes it directly with the workspace `zip` dependency and does not

@@ -21,6 +21,10 @@ use crate::error::{Error, Result};
 const PACKAGE_NAMESPACE: &[u8] = b"http://schemas.microsoft.com/office/2006/xmlPackage";
 const RELATIONSHIPS_NAMESPACE: &[u8] =
     b"http://schemas.openxmlformats.org/package/2006/relationships";
+const ALT_CHUNK_RELATIONSHIPS: [&str; 2] = [
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/aFChunk",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships/aFChunk",
+];
 const DEFAULT_LIMITS: PackageReadLimits = PackageReadLimits {
     max_entries: 4_096,
     max_part_uncompressed_bytes: 64 * 1024 * 1024,
@@ -33,6 +37,8 @@ struct FlatPart {
     data: Vec<u8>,
     is_xml: bool,
 }
+
+type NamespaceDeclarations = Vec<(Vec<u8>, Vec<u8>)>;
 
 impl Document {
     /// Import a bounded Flat OPC XML package.
@@ -111,6 +117,7 @@ fn parse_flat_package(bytes: &[u8], limits: PackageReadLimits) -> Result<OpcPack
     let mut saw_root = false;
     let mut closed_root = false;
     let mut total_size = 0_u64;
+    let mut package_namespaces = Vec::new();
 
     loop {
         let (namespace, event) = reader
@@ -120,7 +127,8 @@ fn parse_flat_package(bytes: &[u8], limits: PackageReadLimits) -> Result<OpcPack
             Event::Decl(_) if !saw_root => {}
             Event::Start(ref element) if !saw_root => {
                 require_element(namespace, element.local_name().as_ref(), b"package")?;
-                require_no_semantic_attributes(&reader, element)?;
+                require_no_semantic_attributes(element)?;
+                extend_namespace_declarations(&mut package_namespaces, element)?;
                 saw_root = true;
             }
             Event::Start(ref element) if saw_root && !closed_root => {
@@ -133,8 +141,10 @@ fn parse_flat_package(bytes: &[u8], limits: PackageReadLimits) -> Result<OpcPack
                 if !seen_names.insert(name.clone()) {
                     return Err(invalid(format!("duplicate Flat OPC part name {name}")));
                 }
-                let is_xml = xml_content_type(&content_type);
-                let data = read_part_payload(&mut reader, is_xml, limits, total_size)?;
+                let mut inherited_namespaces = package_namespaces.clone();
+                extend_namespace_declarations(&mut inherited_namespaces, element)?;
+                let (data, is_xml) =
+                    read_part_payload(&mut reader, limits, total_size, inherited_namespaces)?;
                 total_size = total_size
                     .checked_add(data.len() as u64)
                     .filter(|size| *size <= limits.max_total_uncompressed_bytes)
@@ -170,10 +180,10 @@ fn parse_flat_package(bytes: &[u8], limits: PackageReadLimits) -> Result<OpcPack
 
 fn read_part_payload(
     reader: &mut NsReader<&[u8]>,
-    expected_xml: bool,
     limits: PackageReadLimits,
     total_size: u64,
-) -> Result<Vec<u8>> {
+    inherited_namespaces: NamespaceDeclarations,
+) -> Result<(Vec<u8>, bool)> {
     let mut buffer = Vec::new();
     let mut payload = None;
     loop {
@@ -182,13 +192,7 @@ fn read_part_payload(
             .map_err(|error| invalid(format!("invalid Flat OPC part: {error}")))?;
         match event {
             Event::Start(ref element) if payload.is_none() => {
-                let wanted = if expected_xml {
-                    b"xmlData".as_slice()
-                } else {
-                    b"binaryData".as_slice()
-                };
-                require_element(namespace, element.local_name().as_ref(), wanted)?;
-                require_no_semantic_attributes(reader, element)?;
+                require_no_semantic_attributes(element)?;
                 let remaining = limits
                     .max_total_uncompressed_bytes
                     .checked_sub(total_size)
@@ -199,16 +203,33 @@ fn read_part_payload(
                         )
                     })?;
                 let payload_limit = limits.max_part_uncompressed_bytes.min(remaining);
-                payload = Some(if expected_xml {
-                    read_xml_data(reader, payload_limit)?
+                let is_xml =
+                    if is_package_element(&namespace, element.local_name().as_ref(), b"xmlData") {
+                        true
+                    } else if is_package_element(
+                        &namespace,
+                        element.local_name().as_ref(),
+                        b"binaryData",
+                    ) {
+                        false
+                    } else {
+                        return Err(invalid(
+                            "Flat OPC part must contain pkg:xmlData or pkg:binaryData",
+                        ));
+                    };
+                let data = if is_xml {
+                    let mut namespaces = inherited_namespaces.clone();
+                    extend_namespace_declarations(&mut namespaces, element)?;
+                    read_xml_data(reader, payload_limit, &namespaces)?
                 } else {
                     read_binary_data(reader, payload_limit)?
-                });
+                };
+                payload = Some((data, is_xml));
             }
-            Event::Empty(ref element) if payload.is_none() && !expected_xml => {
+            Event::Empty(ref element) if payload.is_none() => {
                 require_element(namespace, element.local_name().as_ref(), b"binaryData")?;
-                require_no_semantic_attributes(reader, element)?;
-                payload = Some(Vec::new());
+                require_no_semantic_attributes(element)?;
+                payload = Some((Vec::new(), false));
             }
             Event::End(ref element) => {
                 require_element(namespace, element.local_name().as_ref(), b"part")?;
@@ -223,7 +244,7 @@ fn read_part_payload(
                 ));
             }
         }
-        if payload.as_ref().is_some_and(|data| {
+        if payload.as_ref().is_some_and(|(data, _)| {
             total_size.saturating_add(data.len() as u64) > limits.max_total_uncompressed_bytes
         }) {
             return Err(limit_error(
@@ -235,7 +256,11 @@ fn read_part_payload(
     }
 }
 
-fn read_xml_data(reader: &mut NsReader<&[u8]>, limit: u64) -> Result<Vec<u8>> {
+fn read_xml_data(
+    reader: &mut NsReader<&[u8]>,
+    limit: u64,
+    inherited_namespaces: &NamespaceDeclarations,
+) -> Result<Vec<u8>> {
     let mut output = Writer::new(Vec::new());
     let mut buffer = Vec::new();
     let mut depth = 0_usize;
@@ -250,7 +275,7 @@ fn read_xml_data(reader: &mut NsReader<&[u8]>, limit: u64) -> Result<Vec<u8>> {
         let encoded_event_size = position.saturating_sub(previous_position);
         previous_position = position;
         match event {
-            Event::Start(ref element) if depth == 0 => {
+            Event::Start(_) if depth == 0 => {
                 roots += 1;
                 depth = 1;
                 write_bounded_xml_event(&mut output, event, encoded_event_size, limit)?;
@@ -281,7 +306,10 @@ fn read_xml_data(reader: &mut NsReader<&[u8]>, limit: u64) -> Result<Vec<u8>> {
                         "Flat OPC xmlData must contain exactly one XML root",
                     ));
                 }
-                let data = output.into_inner();
+                let data = materialize_required_inherited_namespaces(
+                    &output.into_inner(),
+                    inherited_namespaces,
+                )?;
                 enforce_part_size(data.len() as u64, limit)?;
                 validate_strict_xml_1_0(&data).map_err(|error| {
                     invalid(format!("invalid part XML lexical form: {error:?}"))
@@ -356,6 +384,7 @@ fn parts_to_package(parts: Vec<FlatPart>) -> Result<OpcPackage> {
     let mut package_rels = None;
     let mut part_rels = HashMap::new();
     let mut package_parts = HashMap::new();
+    let mut data_parts = Vec::new();
 
     for part in parts {
         if part.name == "/_rels/.rels" {
@@ -381,9 +410,26 @@ fn parts_to_package(parts: Vec<FlatPart>) -> Result<OpcPackage> {
                 part.name
             )));
         } else {
-            content_types.add_override(&part.name, &part.content_type);
-            package_parts.insert(part.name, part.data);
+            data_parts.push(part);
         }
+    }
+    let opaque_parts = alternative_format_targets(&part_rels);
+    for part in data_parts {
+        let expected_xml =
+            !opaque_parts.contains(&part.name) && xml_content_type(&part.content_type);
+        if part.is_xml != expected_xml {
+            let expected = if expected_xml {
+                "xmlData"
+            } else {
+                "binaryData"
+            };
+            return Err(invalid(format!(
+                "Flat OPC part {} must use pkg:{expected}",
+                part.name
+            )));
+        }
+        content_types.add_override(&part.name, &part.content_type);
+        package_parts.insert(part.name, part.data);
     }
     if part_rels
         .keys()
@@ -404,6 +450,7 @@ fn parts_to_package(parts: Vec<FlatPart>) -> Result<OpcPackage> {
 
 fn write_flat_package(package: &OpcPackage) -> Result<Vec<u8>> {
     let mut parts = Vec::new();
+    let opaque_parts = alternative_format_targets(&package.part_rels);
     parts.push(FlatPart {
         name: "/_rels/.rels".to_owned(),
         content_type: content_types::RELATIONSHIPS.to_owned(),
@@ -428,7 +475,7 @@ fn write_flat_package(package: &OpcPackage) -> Result<Vec<u8>> {
             name: name.clone(),
             content_type: content_type.to_owned(),
             data: data.clone(),
-            is_xml: xml_content_type(content_type),
+            is_xml: !opaque_parts.contains(name) && xml_content_type(content_type),
         });
     }
     parts.sort_by(|left, right| left.name.cmp(&right.name));
@@ -501,6 +548,187 @@ fn copy_xml_without_declaration(xml: &[u8], output: &mut Writer<Vec<u8>>) -> Res
     }
 }
 
+fn extend_namespace_declarations(
+    declarations: &mut NamespaceDeclarations,
+    element: &BytesStart<'_>,
+) -> Result<()> {
+    for attribute in element.attributes() {
+        let attribute = attribute
+            .map_err(|error| invalid(format!("invalid namespace declaration: {error}")))?;
+        let key = attribute.key.as_ref();
+        if key != b"xmlns" && !key.starts_with(b"xmlns:") {
+            continue;
+        }
+        declarations.retain(|(existing, _)| existing.as_slice() != key);
+        declarations.push((key.to_vec(), attribute.value.as_ref().to_vec()));
+    }
+    Ok(())
+}
+
+fn materialize_inherited_namespaces(
+    element: BytesStart<'_>,
+    inherited: &NamespaceDeclarations,
+) -> Result<BytesStart<'static>> {
+    let mut present = HashSet::new();
+    for attribute in element.attributes() {
+        let attribute = attribute
+            .map_err(|error| invalid(format!("invalid payload root attribute: {error}")))?;
+        let key = attribute.key.as_ref();
+        if key == b"xmlns" || key.starts_with(b"xmlns:") {
+            present.insert(key.to_vec());
+        }
+    }
+    let mut element = element.into_owned();
+    for (key, value) in inherited {
+        if !present.contains(key) {
+            element.push_attribute((key.as_slice(), value.as_slice()));
+        }
+    }
+    Ok(element)
+}
+
+fn materialize_required_inherited_namespaces(
+    xml: &[u8],
+    inherited: &NamespaceDeclarations,
+) -> Result<Vec<u8>> {
+    let inherited_keys = inherited
+        .iter()
+        .map(|(key, _)| key.clone())
+        .collect::<HashSet<_>>();
+    let mut required = HashSet::new();
+    let mut local_scopes = Vec::new();
+    let mut reader = quick_xml::Reader::from_reader(xml);
+    reader.config_mut().trim_text(false);
+    let mut buffer = Vec::new();
+    loop {
+        match reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| invalid(format!("invalid extracted XML part: {error}")))?
+        {
+            Event::Start(ref element) => {
+                let local = required_namespaces_for_element(
+                    element,
+                    &local_scopes,
+                    &inherited_keys,
+                    &mut required,
+                )?;
+                local_scopes.push(local);
+            }
+            Event::Empty(ref element) => {
+                required_namespaces_for_element(
+                    element,
+                    &local_scopes,
+                    &inherited_keys,
+                    &mut required,
+                )?;
+            }
+            Event::End(_) => {
+                local_scopes.pop();
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    if required.is_empty() {
+        return Ok(xml.to_vec());
+    }
+
+    let declarations = inherited
+        .iter()
+        .filter(|(key, _)| required.contains(key))
+        .cloned()
+        .collect::<NamespaceDeclarations>();
+    let mut reader = quick_xml::Reader::from_reader(xml);
+    reader.config_mut().trim_text(false);
+    let mut writer = Writer::new(Vec::new());
+    let mut buffer = Vec::new();
+    let mut wrote_root = false;
+    loop {
+        match reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| invalid(format!("invalid extracted XML part: {error}")))?
+        {
+            Event::Start(element) if !wrote_root => {
+                wrote_root = true;
+                writer
+                    .write_event(Event::Start(materialize_inherited_namespaces(
+                        element,
+                        &declarations,
+                    )?))
+                    .map_err(xml_error)?;
+            }
+            Event::Empty(element) if !wrote_root => {
+                wrote_root = true;
+                writer
+                    .write_event(Event::Empty(materialize_inherited_namespaces(
+                        element,
+                        &declarations,
+                    )?))
+                    .map_err(xml_error)?;
+            }
+            Event::Eof => return Ok(writer.into_inner()),
+            event => writer.write_event(event.into_owned()).map_err(xml_error)?,
+        }
+        buffer.clear();
+    }
+}
+
+fn required_namespaces_for_element(
+    element: &BytesStart<'_>,
+    local_scopes: &[HashSet<Vec<u8>>],
+    inherited: &HashSet<Vec<u8>>,
+    required: &mut HashSet<Vec<u8>>,
+) -> Result<HashSet<Vec<u8>>> {
+    let mut local = HashSet::new();
+    let mut attribute_names = Vec::new();
+    for attribute in element.attributes() {
+        let attribute = attribute
+            .map_err(|error| invalid(format!("invalid payload root attribute: {error}")))?;
+        let key = attribute.key.as_ref();
+        if key == b"xmlns" || key.starts_with(b"xmlns:") {
+            local.insert(key.to_vec());
+        } else {
+            attribute_names.push(key.to_vec());
+        }
+    }
+
+    let mut used = Vec::new();
+    if let Some(key) = namespace_declaration_key(element.name().as_ref(), true) {
+        used.push(key);
+    }
+    used.extend(
+        attribute_names
+            .iter()
+            .filter_map(|name| namespace_declaration_key(name, false)),
+    );
+    for key in used {
+        let locally_bound =
+            local.contains(&key) || local_scopes.iter().rev().any(|scope| scope.contains(&key));
+        if !locally_bound && inherited.contains(&key) {
+            required.insert(key);
+        }
+    }
+    Ok(local)
+}
+
+fn namespace_declaration_key(name: &[u8], element_name: bool) -> Option<Vec<u8>> {
+    if let Some(separator) = name.iter().position(|byte| *byte == b':') {
+        let prefix = &name[..separator];
+        if prefix == b"xml" {
+            None
+        } else {
+            let mut key = b"xmlns:".to_vec();
+            key.extend_from_slice(prefix);
+            Some(key)
+        }
+    } else if element_name {
+        Some(b"xmlns".to_vec())
+    } else {
+        None
+    }
+}
+
 fn part_attributes(reader: &NsReader<&[u8]>, element: &BytesStart<'_>) -> Result<(String, String)> {
     let mut name = None;
     let mut content_type = None;
@@ -542,10 +770,7 @@ fn part_attributes(reader: &NsReader<&[u8]>, element: &BytesStart<'_>) -> Result
     Ok((name, content_type))
 }
 
-fn require_no_semantic_attributes(
-    _reader: &NsReader<&[u8]>,
-    element: &BytesStart<'_>,
-) -> Result<()> {
+fn require_no_semantic_attributes(element: &BytesStart<'_>) -> Result<()> {
     for attribute in element.attributes() {
         let attribute =
             attribute.map_err(|error| invalid(format!("invalid structural attribute: {error}")))?;
@@ -560,7 +785,7 @@ fn require_no_semantic_attributes(
 }
 
 fn require_element(namespace: ResolveResult<'_>, local: &[u8], wanted: &[u8]) -> Result<()> {
-    if is_package_element(namespace, local, wanted) {
+    if is_package_element(&namespace, local, wanted) {
         Ok(())
     } else {
         Err(invalid(format!(
@@ -570,8 +795,9 @@ fn require_element(namespace: ResolveResult<'_>, local: &[u8], wanted: &[u8]) ->
     }
 }
 
-fn is_package_element(namespace: ResolveResult<'_>, local: &[u8], wanted: &[u8]) -> bool {
-    namespace_is_package(namespace) && local == wanted
+fn is_package_element(namespace: &ResolveResult<'_>, local: &[u8], wanted: &[u8]) -> bool {
+    matches!(namespace, ResolveResult::Bound(Namespace(value)) if *value == PACKAGE_NAMESPACE)
+        && local == wanted
 }
 
 fn namespace_is_package(namespace: ResolveResult<'_>) -> bool {
@@ -761,6 +987,22 @@ fn require_only_namespace_attributes(element: &BytesStart<'_>) -> Result<()> {
 
 fn namespace_is(namespace: ResolveResult<'_>, expected: &[u8]) -> bool {
     matches!(namespace, ResolveResult::Bound(Namespace(value)) if value == expected)
+}
+
+fn alternative_format_targets(
+    part_relationships: &HashMap<String, Relationships>,
+) -> HashSet<String> {
+    part_relationships
+        .iter()
+        .flat_map(|(owner, relationships)| {
+            relationships.items.iter().filter_map(move |relationship| {
+                let is_internal =
+                    matches!(relationship.target_mode.as_deref(), None | Some("Internal"));
+                (is_internal && ALT_CHUNK_RELATIONSHIPS.contains(&relationship.rel_type.as_str()))
+                    .then(|| OpcPackage::resolve_rel_target(owner, &relationship.target))
+            })
+        })
+        .collect()
 }
 
 fn xml_content_type(content_type: &str) -> bool {
