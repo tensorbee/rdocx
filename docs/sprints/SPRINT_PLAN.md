@@ -1279,6 +1279,8 @@ form fields are modeled only where they occur inside modern OOXML packages.
 | F-X080 | Restore CI release readiness | S |
 | F-X079 | Tag rpptx-v0.10.0 | S |
 | F-X078 | Tag v0.13.0 | S |
+| F-X081 | Tag rpptx-v0.11.0 | S |
+| F-X082 | Tag v0.13.1 | S |
 
 Flat OPC, DOCM, DOTX, DOTM, and bounded MHTML share the current document model.
 Binary `.doc` and Word 2003 XML remain permanent non-goals. The shared strict
@@ -1288,8 +1290,12 @@ and Python binding gates before either release begins. F-X079 publishes the new
 shared API as the incubating family at rpptx-v0.10.0 before F-238 consumes it
 through the stable graph. The M22 end gate then runs only modern package
 fixtures. F-X078 runs last and prepares and publishes the exact seven-package
-stable family at v0.13.0 only after that gate is clean. Each publication uses
-`/release` and its own separate final approval at the reviewed SHA.
+stable family at v0.13.0 only after that gate is clean. The immutable v0.13.0
+attempt published five low-level packages before its registry graph exposed
+F-238's newer `oxml-opc` contract. F-X081 publishes the coherent shared 0.11.0
+family, then F-X082 publishes the complete stable recovery at v0.13.1. Each
+publication uses `/release` and its own separate final approval at the reviewed
+SHA.
 
 ### M19, Advanced spreadsheets
 

@@ -530,7 +530,9 @@ regenerated, never hand-edited.
 | F-X075 | Preserve restart pagination across page-spanning paragraphs | S64 | M | done |
 | F-X076 | Tag v0.12.0                               | S64 | S | done |
 | F-X077 | Share strict XML lexical validation       | S69 | M | done |
-| F-X078 | Tag v0.13.0                               | S69 | S | in-progress |
+| F-X078 | Tag v0.13.0                               | S69 | S | archived |
 | F-X079 | Tag rpptx-v0.10.0                         | S69 | S | done |
 | F-X080 | Restore CI release readiness              | S69 | S | done |
+| F-X081 | Tag rpptx-v0.11.0                         | S69 | S | pending |
+| F-X082 | Tag v0.13.1                               | S69 | S | pending |
 <!-- AUTOGEN:backlog-MX END -->

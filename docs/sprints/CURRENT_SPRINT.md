@@ -6,7 +6,8 @@
 DOCM, DOTX, DOTM, and bounded MHTML share the current document model, while the
 strict XML lexical checks exposed by S68 move to one existing shared layer
 without weakening any owner-specific fail-closed contract. After the M22 end
-gate is clean, publish the exact stable Rust family at v0.13.0.
+gate is clean, recover the immutable partial v0.13.0 attempt through a coherent
+shared 0.11.0 family and the exact stable Rust family at v0.13.1.
 
 ## Spec references
 
@@ -36,7 +37,9 @@ gate is clean, publish the exact stable Rust family at v0.13.0.
 | F-X080 | Restore CI release readiness | S | done | - |
 | F-X079 | Tag rpptx-v0.10.0 | S | done | - |
 | F-238 | Flat OPC and modern Word package variants | M | done | - |
-| F-X078 | Tag v0.13.0 | S | in-progress | - |
+| F-X078 | Tag v0.13.0 | S | archived | - |
+| F-X081 | Tag rpptx-v0.11.0 | S | pending | - |
+| F-X082 | Tag v0.13.1 | S | pending | - |
 
 ## Sequencing note
 
@@ -48,10 +51,13 @@ incubating family at 0.10.0 only after CI is locally reconstructed and clean.
 F-238 builds on F-236, F-X077, and the published F-X079 graph, while F-239
 builds on F-178's HTML import foundation.
 
-F-X078 runs last and depends on F-238, F-239, F-X077, and F-X079. It starts
-only after the representative M22 end gate passes. The incubating release uses
-`/release rpptx-v0.10.0`, and the stable release uses `/release v0.13.0`.
-Each pauses for separate final approval at its exact reviewed SHA.
+F-X078 ran after the representative M22 end gate passed. Its immutable
+v0.13.0 tag published five low-level stable crates, then registry verification
+proved that F-238's new `oxml-opc` constants were newer than the published
+shared 0.10.0 archive. F-X081 therefore publishes the complete shared and
+PowerPoint family at 0.11.0. F-X082 then publishes the complete stable family
+at 0.13.1 against that registry boundary. Each recovery release pauses for
+separate final approval at its exact reviewed SHA.
 
 ## Definition of done for this sprint
 
@@ -77,9 +83,12 @@ Each pauses for separate final approval at its exact reviewed SHA.
   rebuilds fields and a table of contents, performs advanced merge and
   comparison, inventories embedded content, and round-trips its modern package
   variant without losing unsupported XML or executable payloads.
-- The exact seven-package stable Rust family is prepared at 0.13.0, receives
-  separate final release approval, publishes under v0.13.0, and has its
-  registry entries, owner, annotated tag, GitHub release body, selected-family
-  exclusions, and applicable contribution notifications verified.
+- The immutable v0.13.0 attempt and its five published low-level packages are
+  recorded accurately without moving or deleting its tag.
+- The complete shared and PowerPoint family publishes at 0.11.0 before the
+  exact seven-package stable Rust family publishes at 0.13.1. Both receive
+  separate final release approval and have their registry entries, owners,
+  annotated tags, GitHub release bodies, selected-family exclusions, and
+  applicable contribution notifications verified.
 - Full verification passes with every deterministic hash explained, every
   package archive below 10 MiB, and the bounded sprint review clean.

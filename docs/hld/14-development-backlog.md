@@ -3769,27 +3769,70 @@ Pandoc, and Python binding CI commands all pass before release preparation.
 
 ### F-X078, Tag v0.13.0 (S)
 
-Publish the reviewed M22 Word-depth outcomes as the exact seven-package stable
-family at 0.13.0. Move every stable manifest, workspace pin, lock record,
-README requirement, source assertion, CI literal, Python and WASM metadata
-carrier, workflow preflight, and release regression in lockstep. Prepare exact
-`v0.13.0` release notes from the reviewed public API and contribution diff.
-Python, WASM, npm, and PyPI remain outside publication authority.
+The immutable v0.13.0 attempt prepared the reviewed M22 Word-depth outcomes as
+the exact seven-package stable family. The annotated tag targets reviewed SHA
+`05332b17f481741e7d5ab4e39699c6d1536475af`. The workflow published
+`rdocx-opc`, `rdocx-oxml`, `rdocx-layout`, `rdocx-html`, and `rdocx-pdf`, then
+stopped while verifying `rdocx`. F-238 added four public Word main content-type
+constants after the immutable shared 0.10.0 release, so the packaged facade
+could not compile against the registry `oxml-opc` API. `rdocx`, `rdocx-cli`,
+and the GitHub release were not published.
 
-Before version preparation, inspect the reviewed dependency diff. If a shared
-crate version or stable dependency pin moved, add and complete a separate
-incubating-family release F-ID first. Do not mix the stable and incubating
-families under one tag. The required shared 0.10.0 family is published before
-stable preparation begins. After the M22 end gate, one clean full verification
-and sprint review must cover the exact prepared SHA. `/release v0.13.0` then
-obtains its separate final approval immediately before external mutation.
+The tag and five registry entries remain immutable. F-X081 publishes the
+complete shared 0.11.0 family containing the F-238 constants. F-X082 publishes
+the coherent seven-package stable recovery at 0.13.1. Python, WASM, npm, and
+PyPI remain outside publication authority. Issue 69 is a valid post-release
+paragraph-cache performance follow-up, but no Issue 69 change is part of this
+partial attempt or its recovery releases.
 
 **Depends on**: F-238, F-239, F-X077, F-X079.
-**Test gate**: release. Publish exactly `rdocx-opc`, `rdocx-oxml`,
-`rdocx-layout`, `rdocx-html`, `rdocx-pdf`, `rdocx`, and `rdocx-cli`. Every
-registry entry, owner, annotated tag target, GitHub release-body byte,
-selected-family exclusion, and applicable contribution notification URL must
-verify before completion.
+**Test gate**: release. Preparation and every local gate passed at the reviewed
+SHA. Publication did not complete because the registry `oxml-opc@0.10.0`
+contract lacks the F-238 constants used by packaged `rdocx`. The immutable
+partial result is the input to F-X081 and F-X082, not a completed stable-family
+release.
+
+### F-X081, Tag rpptx-v0.11.0 (S)
+
+Publish the exact 15-package shared OOXML and PowerPoint family at 0.11.0. The
+only selected source change since `rpptx-v0.10.0` is the additive `oxml-opc`
+Word main content-type vocabulary required by F-238. Move all publishable
+incubating manifests, workspace pins, lock records, README requirements,
+source assertions, CI literals, release regressions, and the unpublished
+`rpptx-wasm` preparation carrier in lockstep. Keep stable carriers at 0.13.0
+until this registry family verifies.
+
+Preserve the immutable partial v0.13.0 tag and registry entries. Do not rerun
+its workflow or publish a partial shared patch. Prepare exact selected-family
+notes and an evidence-derived contribution inventory. Stable Word, Python,
+WASM, npm, and PyPI packages remain outside publication authority.
+
+**Depends on**: F-238, F-X079, F-X080.
+**Test gate**: release. All 15 shared and PowerPoint registry entries resolve
+at 0.11.0 under the authenticated owner. The annotated tag, release body,
+stable-family exclusion, absent `rpptx-wasm@0.11.0`, and applicable
+contribution notifications verify before F-X082 starts.
+
+### F-X082, Tag v0.13.1 (S)
+
+Publish the complete seven-package stable Word family at 0.13.1 after F-X081
+verifies shared 0.11.0. Move every stable version carrier, internal pin, lock
+record, README requirement, source assertion, CI literal, Python and WASM
+metadata carrier, workflow preflight, and release regression in lockstep. Pin
+shared dependencies to 0.11.0.
+
+The release notes describe the complete M22 outcome and the immutable partial
+v0.13.0 attempt accurately. Add a registry-only package proof for `rdocx` that
+uses published shared crates, including `oxml-opc`, so the local patched
+workspace graph cannot mask this dependency boundary again. Python, WASM, npm,
+and PyPI remain outside publication authority.
+
+**Depends on**: F-238, F-239, F-X077, F-X081.
+**Test gate**: release. All seven stable registry entries resolve at 0.13.1
+against shared 0.11.0 under the authenticated owner. The annotated tag targets
+the reviewed SHA, the GitHub release body is byte-identical to reviewed notes,
+selected-family exclusions hold, and every applicable contribution
+notification verifies.
 
 ### F-X021, The hash harness should cover PDF output (M)
 The output-stability harness records `page1.png` and three `word/*.xml` parts
