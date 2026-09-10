@@ -3943,6 +3943,21 @@ impl CT_P {
         writer: &mut Writer<W>,
         para_id: Option<&str>,
     ) -> Result<()> {
+        if para_id.is_none()
+            && self.properties.is_none()
+            && self.runs.is_empty()
+            && self.hyperlinks.is_empty()
+            && self.comment_ranges.is_empty()
+            && self.bookmark_markers.is_empty()
+            && self.extra_xml.is_empty()
+            && self.content_controls.is_empty()
+            && self.revisions.is_empty()
+            && self.equations.is_empty()
+        {
+            writer.write_event(Event::Empty(BytesStart::new("w:p")))?;
+            return Ok(());
+        }
+
         let mut start = BytesStart::new("w:p");
         if let Some(para_id) = para_id {
             start.push_attribute(("w14:paraId", para_id));

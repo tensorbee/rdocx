@@ -3817,7 +3817,7 @@ mod tests {
 
         assert_eq!(cell.paragraphs().len(), 1);
         assert!(cell.paragraphs()[0].text().is_empty());
-        assert!(table_to_xml(&table).contains("<w:p></w:p>"));
+        assert!(table_to_xml(&table).contains("<w:p/>"));
     }
 
     /// Serialize a table and return the XML, for the fidelity tests below.
@@ -3893,7 +3893,7 @@ mod tests {
             r#"<w:tblLook w:val="04A0" w:firstRow="1" w:lastRow="0" w:firstColumn="1" w:lastColumn="0" w:noHBand="0" w:noVBand="1"/>"#,
             r#"</w:tblPr><w:tblGrid><w:gridCol w:w="4675"/></w:tblGrid>"#,
             r#"<w:tr><w:trPr><w:cnfStyle w:val="100000000000"/></w:trPr>"#,
-            r#"<w:tc><w:tcPr><w:cnfStyle w:val="001000000000"/></w:tcPr><w:p></w:p></w:tc>"#,
+            r#"<w:tc><w:tcPr><w:cnfStyle w:val="001000000000"/></w:tcPr><w:p/></w:tc>"#,
             r#"</w:tr>"#,
         );
         let tbl = parse_table(inner);
