@@ -3232,8 +3232,17 @@ fn scan_dynamic_toc_spans(xml: &[u8]) -> Result<Vec<DynamicTocSpan>> {
                     spans.retain(|span| span.field_start < start);
                     instruction_depth = None;
                 }
-                let paragraph = elements.last().and_then(|element| element.paragraph);
                 let typed_block_owner = classify_typed_block_owner(word, &local, &elements);
+                let paragraph = if typed_block_owner == Some(TypedBlockOwner::Paragraph) {
+                    let index = paragraph_count;
+                    paragraph_count += 1;
+                    paragraph_run_boundaries.push(0);
+                    paragraph_nested_run_orders.push(HashMap::new());
+                    paragraph_raw_before.push(0);
+                    Some(index)
+                } else {
+                    elements.last().and_then(|element| element.paragraph)
+                };
                 let is_typed_inline_owner = typed_inline_owner(
                     &element,
                     reader.resolver(),
@@ -5593,6 +5602,12 @@ fn toc_paragraph_insertions(xml: &[u8]) -> Result<Vec<TocParagraphInsertion>> {
                 let name = element.name();
                 let local = local_name(name.as_ref());
                 let typed_block_owner = classify_typed_block_owner(word, local, &elements);
+                if typed_block_owner == Some(TypedBlockOwner::Paragraph) {
+                    paragraphs.push(TocParagraphInsertion {
+                        content_start: before,
+                        content_end: before,
+                    });
+                }
                 mark_typed_sdt_content(&mut elements, local, typed_block_owner, false);
                 if word
                     && local == b"pPr"
