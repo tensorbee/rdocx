@@ -1659,10 +1659,11 @@ fn parse_doc_part_body(raw: &[u8], inherited_prefixes: &[String]) -> Result<CT_B
             Event::Start(element) => {
                 prefixes = word_prefixes_at(&element, &prefixes)?;
                 if is_word_element(element.name().as_ref(), b"docPartBody", &prefixes) {
-                    return CT_Body::from_xml_with_prefixes_and_owner_bindings(
+                    return CT_Body::from_xml_with_prefixes_and_owner_bindings_until(
                         &mut reader,
                         &prefixes,
                         &[],
+                        b"docPartBody",
                     );
                 }
             }

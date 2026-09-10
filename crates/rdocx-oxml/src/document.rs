@@ -863,6 +863,20 @@ impl CT_Body {
         word_prefixes: &[String],
         owner_bindings: &[(String, String)],
     ) -> Result<Self> {
+        Self::from_xml_with_prefixes_and_owner_bindings_until(
+            reader,
+            word_prefixes,
+            owner_bindings,
+            b"body",
+        )
+    }
+
+    pub(crate) fn from_xml_with_prefixes_and_owner_bindings_until(
+        reader: &mut Reader<&[u8]>,
+        word_prefixes: &[String],
+        owner_bindings: &[(String, String)],
+        end_local_name: &[u8],
+    ) -> Result<Self> {
         let mut content = Vec::new();
         let mut sect_pr = None;
         let mut buf = Vec::new();
@@ -938,11 +952,12 @@ impl CT_Body {
                         ));
                     }
                 }
-                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"body") => {
+                Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), end_local_name) => {
                     break;
                 }
                 Ok(Event::Eof) => {
-                    return Err(OxmlError::MissingElement("w:body end".to_owned()));
+                    let end_local_name = String::from_utf8_lossy(end_local_name);
+                    return Err(OxmlError::MissingElement(format!("w:{end_local_name} end")));
                 }
                 Err(e) => return Err(e.into()),
                 _ => {}
