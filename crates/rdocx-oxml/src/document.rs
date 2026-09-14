@@ -1087,7 +1087,15 @@ impl CT_Document {
                 }
                 Ok(Event::Empty(ref e)) => {
                     let prefixes = word_prefixes_at(e, &word_prefixes)?;
-                    if is_word_element(e.name().as_ref(), b"background", &prefixes) {
+                    if matches_local_name(e.name().as_ref(), b"body") {
+                        if !document_open || document_closed || body.is_some() {
+                            return Err(OxmlError::UnexpectedElement("w:body".to_owned()));
+                        }
+                        body = Some(CT_Body {
+                            content: Vec::new(),
+                            sect_pr: None,
+                        });
+                    } else if is_word_element(e.name().as_ref(), b"background", &prefixes) {
                         background_xml = Some(capture_empty_element(e)?);
                     } else if matches_local_name(e.name().as_ref(), b"background") {
                         background_extra_xml.push(capture_empty_element(e)?);
@@ -1281,6 +1289,18 @@ mod tests {
             [BodyContent::Paragraph(_)]
         ));
         assert!(document.body.sect_pr.is_some());
+    }
+
+    #[test]
+    fn parses_self_closing_body_as_an_empty_document_body() {
+        let xml = concat!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#,
+            "<w:body/></w:document>"
+        );
+
+        let document = CT_Document::from_xml(xml.as_bytes()).expect("document parses");
+        assert!(document.body.content.is_empty());
+        assert!(document.body.sect_pr.is_none());
     }
 
     #[test]
