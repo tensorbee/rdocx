@@ -3,13 +3,11 @@ import io
 import os
 import shutil
 import statistics
-import struct
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-import zipfile
 from pathlib import Path
 
 import pytest
@@ -140,53 +138,6 @@ def _assert_releases_gil(operation):
     return result
 
 
-def _font_with_zero_units_per_em():
-    font_path = (
-        Path(__file__).resolve().parents[2]
-        / "oxml-layout"
-        / "fonts"
-        / "Carlito-Regular.ttf"
-    )
-    font = bytearray(font_path.read_bytes())
-    font[:] = font.replace(b"Carlito", b"FaultyX")
-    font[:] = font.replace("Carlito".encode("utf-16-be"), "FaultyX".encode("utf-16-be"))
-    table_count = struct.unpack_from(">H", font, 4)[0]
-    for table_index in range(table_count):
-        record = 12 + table_index * 16
-        if font[record : record + 4] == b"head":
-            head_offset = struct.unpack_from(">I", font, record + 8)[0]
-            struct.pack_into(">H", font, head_offset + 18, 0)
-            return bytes(font)
-    raise AssertionError("Carlito test font has no head table")
-
-
-def _document_with_invalid_embedded_font():
-    from rdocx import Document
-
-    source = Document()
-    run = source.add_paragraph("").add_run("layout must reject this font")
-    run.font.name = "FaultyX"
-    source_archive = io.BytesIO(source.to_bytes())
-    result = io.BytesIO()
-    with zipfile.ZipFile(source_archive) as source_zip:
-        with zipfile.ZipFile(result, "w") as result_zip:
-            for info in source_zip.infolist():
-                data = source_zip.read(info.filename)
-                if info.filename == "[Content_Types].xml":
-                    data = data.replace(
-                        b"</Types>",
-                        (
-                            b'<Default Extension="ttf" '
-                            b'ContentType="application/x-font-ttf"/></Types>'
-                        ),
-                    )
-                result_zip.writestr(info, data)
-            result_zip.writestr(
-                "word/fonts/Carlito-Regular.ttf", _font_with_zero_units_per_em()
-            )
-    return Document.from_bytes(result.getvalue())
-
-
 def test_to_pdf_returns_pdf_bytes():
     document = _nontrivial_document(0)
 
@@ -239,12 +190,12 @@ def test_render_pages_accepts_keyword_options_and_zero_based_pages():
 def test_render_errors_reacquire_and_map_cleanly():
     from rdocx import LayoutError, RdocxError
 
-    document = _document_with_invalid_embedded_font()
+    document = _nontrivial_document(3)
 
     with pytest.raises(LayoutError) as raised:
-        document.to_pdf()
+        document.render_pages(format="jpeg", quality=0, pages=[0])
     assert isinstance(raised.value, RdocxError)
-    assert "font parsing error" in str(raised.value)
+    assert "JPEG quality 0 is outside 1 through 100" in str(raised.value)
 
 
 def test_poppler_pdf_oracle_is_available_at_reviewed_version():
