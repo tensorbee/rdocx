@@ -6901,6 +6901,7 @@ mod tests {
                 id: 4,
                 run_index: 0,
                 raw_before: 0,
+                has_child_content: false,
             });
         assert!(paragraph.insert_bookmark_start(0, 5, "bookmark"));
         assert!(paragraph.insert_bookmark_end(paragraph.runs.len(), 5));

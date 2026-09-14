@@ -409,6 +409,7 @@ impl Document {
             id,
             run_index: range.start.run_index,
             raw_before: raw_count_at(start, range.start.run_index),
+            has_child_content: false,
         });
         let end = body_paragraph_mut(&mut self.document.body.content, range.end.body_index)
             .expect("range was validated");
@@ -416,6 +417,7 @@ impl Document {
             id,
             run_index: range.end.run_index,
             raw_before: raw_count_at(end, range.end.run_index),
+            has_child_content: false,
         });
         self.identifiers = identifiers;
         self.invalidate_layout();

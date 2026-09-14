@@ -7421,8 +7421,8 @@ fn encoded_comment_ids_reopen_as_one_complete_comment_anchor() {
     let range_ids = paragraph
         .items()
         .filter_map(|item| match item {
-            rdocx::paragraph::ParagraphItemRef::CommentRangeStart(id) => Some((true, id)),
-            rdocx::paragraph::ParagraphItemRef::CommentRangeEnd(id) => Some((false, id)),
+            rdocx::paragraph::ParagraphItemRef::CommentRangeStart { id, .. } => Some((true, id)),
+            rdocx::paragraph::ParagraphItemRef::CommentRangeEnd { id, .. } => Some((false, id)),
             _ => None,
         })
         .collect::<Vec<_>>();

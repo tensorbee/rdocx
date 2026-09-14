@@ -6123,6 +6123,41 @@ fn unrendered_number_formats_survive_without_decimal_coercion() {
 }
 
 #[test]
+fn paragraph_markers_report_whether_their_source_elements_contain_children() {
+    let document = document_with_content_controls(
+        r#"<q:document xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+          <q:body><q:p>
+            <q:commentRangeStart q:id="1"><q:r><q:t>unexpected</q:t></q:r></q:commentRangeStart>
+            <q:commentRangeEnd q:id="1"/>
+            <q:bookmarkStart q:id="2" q:name="target"><q:r><q:t>unexpected</q:t></q:r></q:bookmarkStart>
+            <q:bookmarkEnd q:id="2"/>
+          </q:p></q:body>
+        </q:document>"#,
+    );
+    let paragraph = document.paragraph(0).expect("paragraph");
+    let markers = paragraph
+        .items()
+        .filter_map(|item| match item {
+            ParagraphItemRef::CommentRangeStart {
+                has_child_content, ..
+            }
+            | ParagraphItemRef::CommentRangeEnd {
+                has_child_content, ..
+            }
+            | ParagraphItemRef::BookmarkStart {
+                has_child_content, ..
+            }
+            | ParagraphItemRef::BookmarkEnd {
+                has_child_content, ..
+            } => Some(has_child_content),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(markers, [true, false, true, false]);
+}
+
+#[test]
 fn legacy_flattened_accessors_keep_their_recursive_results() {
     let xml = wrap_word_body(
         "<w:tbl><w:tr><w:tc><w:p><w:r><w:t>direct</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:r><w:t>nested</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:sdt><w:sdtContent><w:p><w:r><w:t>control</w:t></w:r></w:p></w:sdtContent></w:sdt></w:tc></w:tr></w:tbl>",

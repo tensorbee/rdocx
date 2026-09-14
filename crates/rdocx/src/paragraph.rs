@@ -13,7 +13,7 @@ use rdocx_oxml::text::{
 use rdocx_oxml::units::Twips;
 
 use crate::run::{Run, RunRef};
-use crate::{ContentControlRef, Length, RevisionRef, UnsupportedXmlRef};
+use crate::{ContentControlRef, Length, RevisionRef};
 
 /// Paragraph alignment options.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1043,22 +1043,22 @@ impl<'a> ParagraphRef<'a> {
                     );
                     if let Some(marker) = markers.get(marker_index) {
                         items.push(match marker {
-                            CommentRangeMarker::Start { id, .. } => {
-                                ParagraphItemRef::CommentRangeStart {
-                                    id: *id,
-                                    has_child_content: extras.get(raw_index).is_some_and(|raw| {
-                                        UnsupportedXmlRef::from_bytes(raw).has_child_content()
-                                    }),
-                                }
-                            }
-                            CommentRangeMarker::End { id, .. } => {
-                                ParagraphItemRef::CommentRangeEnd {
-                                    id: *id,
-                                    has_child_content: extras.get(raw_index).is_some_and(|raw| {
-                                        UnsupportedXmlRef::from_bytes(raw).has_child_content()
-                                    }),
-                                }
-                            }
+                            CommentRangeMarker::Start {
+                                id,
+                                has_child_content,
+                                ..
+                            } => ParagraphItemRef::CommentRangeStart {
+                                id: *id,
+                                has_child_content: *has_child_content,
+                            },
+                            CommentRangeMarker::End {
+                                id,
+                                has_child_content,
+                                ..
+                            } => ParagraphItemRef::CommentRangeEnd {
+                                id: *id,
+                                has_child_content: *has_child_content,
+                            },
                         });
                     }
                 }
@@ -1098,14 +1098,12 @@ impl<'a> ParagraphRef<'a> {
                             ParagraphItemRef::BookmarkStart {
                                 id: bookmark.id(),
                                 name: bookmark.name(),
-                                has_child_content: UnsupportedXmlRef::from_bytes(raw)
-                                    .has_child_content(),
+                                has_child_content: bookmark.has_child_content(),
                             }
                         } else {
                             ParagraphItemRef::BookmarkEnd {
                                 id: bookmark.id(),
-                                has_child_content: UnsupportedXmlRef::from_bytes(raw)
-                                    .has_child_content(),
+                                has_child_content: bookmark.has_child_content(),
                             }
                         }
                     } else if let Some((index, _)) = empty_hyperlink {
