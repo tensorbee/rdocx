@@ -407,9 +407,8 @@ jobs:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
-      - name: Install pinned LibreOffice
-        run: |
-          brew install --cask libreoffice
+      - name: Install pinned LibreOffice 26.2.5.2
+        run: python3 scripts/install_pinned_libreoffice.py
       - name: Install pinned Poppler 26.01.0
         shell: bash
         run: |

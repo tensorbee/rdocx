@@ -613,6 +613,25 @@ class SprintWorkflowTests(unittest.TestCase):
             installer,
         )
         self.assertIn('os.environ.get("GITHUB_PATH")', installer)
+        self.assertIn(
+            'MACOS_ARCHIVE = "LibreOffice_26.2.5.2_MacOS_aarch64.dmg"',
+            installer,
+        )
+        self.assertIn(
+            '"https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.5.2/"',
+            installer,
+        )
+        self.assertIn(
+            'MACOS_SHA256 = "c99fb4fe574437fc4cb820a4ca15271bca325920861f7139858b36d7f9df78ad"',
+            installer,
+        )
+        self.assertIn("MACOS_MAX_DOWNLOAD_BYTES = 320 * 1024 * 1024", installer)
+        self.assertIn(
+            'MACOS_INSTALL_ROOT = Path("/Applications/LibreOffice.app")',
+            installer,
+        )
+        self.assertIn('"hdiutil"', installer)
+        self.assertIn('"ditto"', installer)
 
     def assert_libreoffice_consumers_contract(self, ci: str) -> None:
         consumers = {
@@ -632,7 +651,23 @@ class SprintWorkflowTests(unittest.TestCase):
             self.assertLess(job.index(install), job.index(test_step))
             self.assertNotIn("continue-on-error", install)
             self.assert_no_success_short_circuit(self.operative_lines(install))
-        self.assertEqual(ci.count("python3 scripts/install_pinned_libreoffice.py"), 3)
+
+        presentation = self.yaml_block(ci, "  presentation-fidelity:")
+        self.assertIn("runs-on: macos-26", presentation)
+        install = self.yaml_step(
+            presentation, "Install pinned LibreOffice 26.2.5.2"
+        )
+        self.assertEqual(
+            self.yaml_direct_lines(install, 8),
+            ("run: python3 scripts/install_pinned_libreoffice.py",),
+        )
+        self.assertLess(
+            presentation.index(install),
+            presentation.index("Run all-slide SSIM trend and completeness gate"),
+        )
+        self.assertNotIn("continue-on-error", install)
+        self.assert_no_success_short_circuit(self.operative_lines(install))
+        self.assertEqual(ci.count("python3 scripts/install_pinned_libreoffice.py"), 4)
 
     def assert_poppler_consumers_contract(self, ci: str) -> None:
         consumers = {
@@ -1329,7 +1364,7 @@ class SprintWorkflowTests(unittest.TestCase):
         installer_path = workflow.REPO / "scripts/install_pinned_libreoffice.py"
         self.assertTrue(
             installer_path.is_file(),
-            "F-X012 requires one pinned Linux LibreOffice installer",
+            "F-X012 requires one pinned LibreOffice installer",
         )
         installer = installer_path.read_text(encoding="utf-8")
         self.assert_pinned_libreoffice_installer_contract(installer)
@@ -1338,6 +1373,10 @@ class SprintWorkflowTests(unittest.TestCase):
             "wrong-version": installer.replace("26.2.5.2", "26.2.6.0"),
             "wrong-checksum": installer.replace(
                 "2f03bfb2ac9f33ea7c77331b4b7a23300fb0ed7443566046bf8b5bc51c1bed1e",
+                "0" * 64,
+            ),
+            "wrong-macos-checksum": installer.replace(
+                "c99fb4fe574437fc4cb820a4ca15271bca325920861f7139858b36d7f9df78ad",
                 "0" * 64,
             ),
             "missing-member-bound": installer.replace(
@@ -1358,7 +1397,7 @@ class SprintWorkflowTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assert_libreoffice_consumers_contract(ci)
-        for job_name in ("test", "msrv", "word-fidelity"):
+        for job_name in ("test", "msrv", "word-fidelity", "presentation-fidelity"):
             job = self.yaml_block(ci, f"  {job_name}:")
             install = self.yaml_step(job, "Install pinned LibreOffice 26.2.5.2")
             for label, mutated_install in {
@@ -1389,10 +1428,14 @@ class SprintWorkflowTests(unittest.TestCase):
             with patch.object(
                 install_pinned_libreoffice.urllib.request,
                 "urlopen",
-                return_value=io.BytesIO(b"not the reviewed LibreOffice source"),
+                side_effect=lambda *_args, **_kwargs: io.BytesIO(
+                    b"not the reviewed LibreOffice source"
+                ),
             ):
                 with self.assertRaisesRegex(RuntimeError, "SHA-256"):
                     install_pinned_libreoffice.download_archive(root / "wrong.tar.gz")
+                with self.assertRaisesRegex(RuntimeError, "SHA-256"):
+                    install_pinned_libreoffice.download_macos_image(root / "wrong.dmg")
 
             with (
                 patch.object(install_pinned_libreoffice, "MAX_DOWNLOAD_BYTES", 8),
@@ -1575,6 +1618,108 @@ class SprintWorkflowTests(unittest.TestCase):
             self.assertEqual(
                 events,
                 ["download", "extract", "install", "verify", "expose"],
+            )
+
+            macos_install_root = root / "LibreOffice.app"
+            macos_soffice = macos_install_root / "Contents/MacOS/soffice"
+            macos_events: list[str] = []
+
+            occupied_macos_root = root / "occupied-LibreOffice.app"
+            occupied_macos_root.mkdir()
+            with (
+                patch.object(
+                    install_pinned_libreoffice,
+                    "MACOS_INSTALL_ROOT",
+                    occupied_macos_root,
+                ),
+                patch.object(
+                    install_pinned_libreoffice.platform,
+                    "system",
+                    return_value="Darwin",
+                ),
+                patch.object(
+                    install_pinned_libreoffice.platform,
+                    "machine",
+                    return_value="arm64",
+                ),
+                patch.object(
+                    install_pinned_libreoffice,
+                    "download_macos_image",
+                    side_effect=AssertionError("occupied prefix must fail first"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "prefix must be absent"),
+            ):
+                install_pinned_libreoffice.install()
+
+            def record_macos_command(command: list[str], *, check: bool) -> None:
+                self.assertTrue(check)
+                if command[:2] == ["hdiutil", "attach"]:
+                    mount_root = Path(command[-1])
+                    (mount_root / "LibreOffice.app").mkdir()
+                    macos_events.append("attach")
+                elif command[0] == "ditto":
+                    self.assertEqual(command[-1], str(macos_install_root))
+                    macos_events.append("copy")
+                elif command[:2] == ["hdiutil", "detach"]:
+                    macos_events.append("detach")
+                else:
+                    self.fail(f"unexpected macOS installer command: {command}")
+
+            def record_macos_verify(executable: Path) -> None:
+                self.assertEqual(executable, macos_soffice)
+                macos_events.append("verify")
+
+            def record_macos_expose(executable: Path) -> None:
+                self.assertEqual(executable, macos_soffice)
+                macos_events.append("expose")
+
+            with (
+                patch.object(
+                    install_pinned_libreoffice,
+                    "MACOS_INSTALL_ROOT",
+                    macos_install_root,
+                ),
+                patch.object(
+                    install_pinned_libreoffice,
+                    "MACOS_SOFFICE",
+                    macos_soffice,
+                ),
+                patch.object(
+                    install_pinned_libreoffice.platform,
+                    "system",
+                    return_value="Darwin",
+                ),
+                patch.object(
+                    install_pinned_libreoffice.platform,
+                    "machine",
+                    return_value="arm64",
+                ),
+                patch.dict(os.environ, {"RUNNER_TEMP": str(root)}),
+                patch.object(
+                    install_pinned_libreoffice,
+                    "download_macos_image",
+                    side_effect=lambda _destination: macos_events.append("download"),
+                ),
+                patch.object(
+                    install_pinned_libreoffice.subprocess,
+                    "run",
+                    side_effect=record_macos_command,
+                ),
+                patch.object(
+                    install_pinned_libreoffice,
+                    "verify_soffice",
+                    side_effect=record_macos_verify,
+                ),
+                patch.object(
+                    install_pinned_libreoffice,
+                    "expose_soffice",
+                    side_effect=record_macos_expose,
+                ),
+            ):
+                install_pinned_libreoffice.install()
+            self.assertEqual(
+                macos_events,
+                ["download", "attach", "copy", "detach", "verify", "expose"],
             )
 
     def test_pinned_poppler_installer_enforces_its_runtime_guards(self) -> None:

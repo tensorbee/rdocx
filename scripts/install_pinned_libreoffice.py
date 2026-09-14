@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install the exact LibreOffice Linux viewer oracle used by CI."""
+"""Install the exact LibreOffice viewer oracle used by CI."""
 
 from __future__ import annotations
 
@@ -46,13 +46,27 @@ SYSTEM_RUNTIME_PACKAGES = (
     "libxext6",
     "libxinerama1",
 )
+MACOS_ARCHIVE = "LibreOffice_26.2.5.2_MacOS_aarch64.dmg"
+MACOS_URL = (
+    "https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.5.2/"
+    f"mac/aarch64/{MACOS_ARCHIVE}"
+)
+MACOS_SHA256 = "c99fb4fe574437fc4cb820a4ca15271bca325920861f7139858b36d7f9df78ad"
+MACOS_MAX_DOWNLOAD_BYTES = 320 * 1024 * 1024
+MACOS_INSTALL_ROOT = Path("/Applications/LibreOffice.app")
+MACOS_SOFFICE = MACOS_INSTALL_ROOT / "Contents/MacOS/soffice"
 
 
-def download_archive(destination: Path) -> None:
+def download_file(
+    destination: Path,
+    url: str,
+    expected_sha256: str,
+    max_download_bytes: int,
+) -> None:
     digest = hashlib.sha256()
     written = 0
     request = urllib.request.Request(
-        LIBREOFFICE_URL,
+        url,
         headers={"User-Agent": "rdocx-ci-libreoffice-installer/1"},
     )
     with urllib.request.urlopen(request, timeout=60) as response, destination.open(
@@ -60,14 +74,32 @@ def download_archive(destination: Path) -> None:
     ) as output:
         while chunk := response.read(1024 * 1024):
             written += len(chunk)
-            if written > MAX_DOWNLOAD_BYTES:
+            if written > max_download_bytes:
                 raise RuntimeError("LibreOffice archive exceeds the download bound")
             digest.update(chunk)
             output.write(chunk)
-    if digest.hexdigest() != LIBREOFFICE_SHA256:
+    if digest.hexdigest() != expected_sha256:
         raise RuntimeError(
             "LibreOffice archive SHA-256 does not match the reviewed source"
         )
+
+
+def download_archive(destination: Path) -> None:
+    download_file(
+        destination,
+        LIBREOFFICE_URL,
+        LIBREOFFICE_SHA256,
+        MAX_DOWNLOAD_BYTES,
+    )
+
+
+def download_macos_image(destination: Path) -> None:
+    download_file(
+        destination,
+        MACOS_URL,
+        MACOS_SHA256,
+        MACOS_MAX_DOWNLOAD_BYTES,
+    )
 
 
 def safe_extract(archive_path: Path, destination: Path) -> Path:
@@ -144,9 +176,9 @@ def expose_soffice(executable: Path = SOFFICE) -> None:
             path_file.write(f"{executable.parent}\n")
 
 
-def install() -> None:
-    if platform.system() != "Linux" or platform.machine() != "x86_64":
-        raise RuntimeError("the pinned LibreOffice installer requires Linux x86_64")
+def install_linux() -> None:
+    if platform.machine() != "x86_64":
+        raise RuntimeError("the pinned LibreOffice Linux installer requires x86_64")
     if INSTALL_ROOT.exists():
         raise RuntimeError(
             f"LibreOffice prefix must be absent before installation: {INSTALL_ROOT}"
@@ -177,6 +209,61 @@ def install() -> None:
     verify_soffice()
     expose_soffice()
     print(f"Installed LibreOffice {LIBREOFFICE_VERSION} from reviewed packages")
+
+
+def install_macos() -> None:
+    if platform.machine() != "arm64":
+        raise RuntimeError("the pinned LibreOffice macOS installer requires arm64")
+    if MACOS_INSTALL_ROOT.exists():
+        raise RuntimeError(
+            f"LibreOffice prefix must be absent before installation: {MACOS_INSTALL_ROOT}"
+        )
+
+    runner_temp = Path(os.environ.get("RUNNER_TEMP", tempfile.gettempdir()))
+    with tempfile.TemporaryDirectory(
+        prefix="rdocx-libreoffice-", dir=runner_temp
+    ) as work:
+        work_root = Path(work)
+        image_path = work_root / MACOS_ARCHIVE
+        mount_root = work_root / "mounted"
+        mount_root.mkdir()
+        download_macos_image(image_path)
+        subprocess.run(
+            [
+                "hdiutil",
+                "attach",
+                str(image_path),
+                "-nobrowse",
+                "-readonly",
+                "-mountpoint",
+                str(mount_root),
+            ],
+            check=True,
+        )
+        try:
+            source = mount_root / "LibreOffice.app"
+            if not source.is_dir():
+                raise RuntimeError("LibreOffice image contains no application bundle")
+            subprocess.run(
+                ["ditto", str(source), str(MACOS_INSTALL_ROOT)],
+                check=True,
+            )
+        finally:
+            subprocess.run(["hdiutil", "detach", str(mount_root)], check=True)
+
+    verify_soffice(MACOS_SOFFICE)
+    expose_soffice(MACOS_SOFFICE)
+    print(f"Installed LibreOffice {LIBREOFFICE_VERSION} from reviewed image")
+
+
+def install() -> None:
+    system = platform.system()
+    if system == "Linux":
+        install_linux()
+    elif system == "Darwin":
+        install_macos()
+    else:
+        raise RuntimeError(f"the pinned LibreOffice installer does not support {system}")
 
 
 if __name__ == "__main__":
