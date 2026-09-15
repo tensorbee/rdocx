@@ -722,6 +722,18 @@ impl PyDocument {
             .map_err(|error| rdocx_to_pyerr(py, error))
     }
 
+    #[getter]
+    fn update_fields_on_open(&self) -> Option<bool> {
+        self.inner.update_fields_on_open()
+    }
+
+    #[setter]
+    fn set_update_fields_on_open(&mut self, py: Python<'_>, value: Option<bool>) -> PyResult<()> {
+        self.inner
+            .set_update_fields_on_open(value)
+            .map_err(|error| rdocx_to_pyerr(py, error))
+    }
+
     fn to_pdf<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         py.detach(|| self.inner.to_pdf())
             .map(|bytes| PyBytes::new(py, &bytes))

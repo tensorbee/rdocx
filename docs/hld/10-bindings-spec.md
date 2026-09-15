@@ -338,7 +338,10 @@ Native Rust re-exports `CoreProperties`, `AppProperties`, `CustomProperty`,
 provides borrowed readers, staged setters, selective removals, and whole-part
 removals for these property families. Document variables and compatibility
 settings use stable string keys. Default tab stop retains exact integer twips.
-Python, WASM, and CLI receive preserved package behavior but do not gain new
+`Document::update_fields_on_open` and `set_update_fields_on_open` read, set, or
+remove the `w:updateFields` toggle that asks Word to update fields on open.
+Python exposes that toggle as the `Document.update_fields_on_open` property and
+otherwise receives preserved package behavior. WASM and CLI do not gain new
 entry points.
 
 Native Word mutations share one private document identifier owner. Existing

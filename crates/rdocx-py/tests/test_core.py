@@ -24,6 +24,18 @@ def _document_xml(document):
         return archive.read("word/document.xml")
 
 
+def test_update_fields_on_open_sets_clears_and_removes_the_setting():
+    import rdocx
+
+    document = rdocx.Document()
+    assert document.update_fields_on_open is None
+    for value in (True, False, None):
+        document.update_fields_on_open = value
+        assert document.update_fields_on_open is value
+        document = rdocx.Document.from_bytes(document.to_bytes())
+        assert document.update_fields_on_open is value
+
+
 def _document_with_structure_snapshots(document):
     word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
     rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"

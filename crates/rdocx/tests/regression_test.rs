@@ -175,6 +175,18 @@ fn f252_page_text(page: &oxml_layout::PageFrame) -> String {
 }
 
 #[test]
+fn update_fields_on_open_is_set_cleared_and_removed_through_the_settings_part() {
+    let mut document = Document::new();
+    assert_eq!(document.update_fields_on_open(), None);
+    for value in [Some(true), Some(false), None] {
+        document.set_update_fields_on_open(value).unwrap();
+        assert_eq!(document.update_fields_on_open(), value);
+        document = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(document.update_fields_on_open(), value);
+    }
+}
+
+#[test]
 fn section_header_footer_variants_match_word_width_and_inheritance() {
     assert_eq!(
         WORD_F252_ORACLE,

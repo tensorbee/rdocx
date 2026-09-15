@@ -192,6 +192,7 @@ pub struct CT_Settings {
     theme_font_language: Option<ThemeFontLanguage>,
     automatic_hyphenation: Option<bool>,
     even_and_odd_headers: Option<bool>,
+    update_fields: Option<bool>,
     math_properties: Option<MathProperties>,
     /// Parsed parts keep their complete producer bytes as the serialization
     /// source. This retains root attributes, child order, whitespace, and all
@@ -223,6 +224,8 @@ impl CT_Settings {
         let mut automatic_hyphenation_count = 0usize;
         let mut even_and_odd_headers = None;
         let mut even_and_odd_headers_count = 0usize;
+        let mut update_fields = None;
+        let mut update_fields_count = 0usize;
         let mut math_properties = None;
         let mut math_properties_count = 0usize;
         let mut doc_vars_depth = None;
@@ -291,6 +294,11 @@ impl CT_Settings {
                         {
                             even_and_odd_headers_count += 1;
                             even_and_odd_headers = parse_toggle(&element, &prefixes)?;
+                        } else if depth == 1
+                            && is_word_element(element.name().as_ref(), b"updateFields", &prefixes)
+                        {
+                            update_fields_count += 1;
+                            update_fields = parse_toggle(&element, &prefixes)?;
                         } else if depth == 1
                             && is_word_element(
                                 element.name().as_ref(),
@@ -383,6 +391,11 @@ impl CT_Settings {
                         even_and_odd_headers_count += 1;
                         even_and_odd_headers = parse_toggle(&element, &prefixes)?;
                     } else if depth == 1
+                        && is_word_element(element.name().as_ref(), b"updateFields", &prefixes)
+                    {
+                        update_fields_count += 1;
+                        update_fields = parse_toggle(&element, &prefixes)?;
+                    } else if depth == 1
                         && is_word_element(element.name().as_ref(), b"defaultTabStop", &prefixes)
                     {
                         default_tab_stop_count += 1;
@@ -442,6 +455,9 @@ impl CT_Settings {
         if even_and_odd_headers_count != 1 {
             even_and_odd_headers = None;
         }
+        if update_fields_count != 1 {
+            update_fields = None;
+        }
         if math_properties_count != 1 {
             math_properties = None;
         }
@@ -463,6 +479,7 @@ impl CT_Settings {
             theme_font_language,
             automatic_hyphenation,
             even_and_odd_headers,
+            update_fields,
             math_properties,
             source_xml: Some(xml.to_vec()),
         })
@@ -649,6 +666,7 @@ impl CT_Settings {
             && self.theme_font_language.is_none()
             && self.automatic_hyphenation.is_none()
             && self.even_and_odd_headers.is_none()
+            && self.update_fields.is_none()
             && self.math_properties.is_none()
             && self.source_xml.is_none()
     }
@@ -721,6 +739,25 @@ impl CT_Settings {
         Ok(())
     }
 
+    /// Return the `w:updateFields` toggle, which asks Word to update fields
+    /// when it opens the document.
+    ///
+    /// `None` means the part omits the toggle, or repeats it ambiguously.
+    pub fn update_fields(&self) -> Option<bool> {
+        self.update_fields
+    }
+
+    /// Set the `w:updateFields` toggle, or remove it with `None`.
+    pub fn set_update_fields(&mut self, value: Option<bool>) -> Result<()> {
+        let replacement = match value {
+            Some(enabled) => write_toggle_setting("w:updateFields", enabled)?,
+            None => Vec::new(),
+        };
+        self.rewrite_scalar(b"updateFields", replacement)?;
+        self.update_fields = value;
+        Ok(())
+    }
+
     /// Serialize settings with fixed Word prefixes and schema child order.
     pub fn to_xml(&self) -> Result<Vec<u8>> {
         if let Some(source) = &self.source_xml {
@@ -756,6 +793,9 @@ impl CT_Settings {
                 "w:characterSpacingControl",
                 value.as_str(),
             )?);
+        }
+        if let Some(enabled) = self.update_fields {
+            write_toggle(&mut writer, "w:updateFields", enabled)?;
         }
         if !self.compatibility_settings.is_empty() {
             writer.write_event(Event::Start(BytesStart::new("w:compat")))?;
@@ -1733,6 +1773,7 @@ mod tests {
             theme_font_language: None,
             automatic_hyphenation: None,
             even_and_odd_headers: None,
+            update_fields: None,
             math_properties: None,
             source_xml: None,
         };
@@ -1816,6 +1857,53 @@ mod tests {
         );
         let reopened = CT_Settings::from_xml(output.as_bytes()).unwrap();
         assert!(reopened.even_and_odd_headers());
+    }
+
+    #[test]
+    fn update_fields_toggle_reads_sets_and_removes_in_schema_order() {
+        let xml = format!(
+            r#"<q:settings xmlns:q="{W_NS}" xmlns:x="urn:foreign"><q:characterSpacingControl q:val="doNotCompress"/><q:updateFields q:val="true"/><x:updateFields/><x:kept/><q:compat/></q:settings>"#,
+        );
+        let mut settings = CT_Settings::from_xml(xml.as_bytes()).unwrap();
+        assert_eq!(settings.update_fields(), Some(true));
+
+        settings.set_update_fields(Some(false)).unwrap();
+        let output = String::from_utf8(settings.to_xml().unwrap()).unwrap();
+        assert!(
+            output.contains(r#"<w:updateFields w:val="false"/>"#),
+            "{output}"
+        );
+        assert!(!output.contains("<q:updateFields"), "{output}");
+        assert!(output.contains("<x:updateFields/>"), "{output}");
+        assert!(output.contains("<x:kept/>"), "{output}");
+        let reopened = CT_Settings::from_xml(output.as_bytes()).unwrap();
+        assert_eq!(reopened.update_fields(), Some(false));
+
+        settings.set_update_fields(None).unwrap();
+        let output = String::from_utf8(settings.to_xml().unwrap()).unwrap();
+        assert!(!output.contains("<w:updateFields"), "{output}");
+        assert!(output.contains("<x:updateFields/>"), "{output}");
+        let reopened = CT_Settings::from_xml(output.as_bytes()).unwrap();
+        assert_eq!(reopened.update_fields(), None);
+
+        // A part without the toggle receives it at its schema position.
+        let xml = format!(
+            r#"<w:settings xmlns:w="{W_NS}"><w:characterSpacingControl w:val="doNotCompress"/><w:compat/></w:settings>"#,
+        );
+        let mut settings = CT_Settings::from_xml(xml.as_bytes()).unwrap();
+        settings.set_update_fields(Some(true)).unwrap();
+        let output = String::from_utf8(settings.to_xml().unwrap()).unwrap();
+        let position = output.find("<w:updateFields/>").unwrap();
+        assert!(
+            output.find("characterSpacingControl").unwrap() < position,
+            "{output}"
+        );
+        assert!(position < output.find("<w:compat").unwrap(), "{output}");
+
+        let mut authored = CT_Settings::new();
+        authored.set_update_fields(Some(true)).unwrap();
+        let output = String::from_utf8(authored.to_xml().unwrap()).unwrap();
+        assert!(output.contains("<w:updateFields/>"), "{output}");
     }
 
     #[test]

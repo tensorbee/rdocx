@@ -16239,6 +16239,24 @@ impl Document {
         Ok(())
     }
 
+    /// Return whether the settings part asks Word to update fields when it
+    /// opens the document, or `None` when the part does not say.
+    pub fn update_fields_on_open(&self) -> Option<bool> {
+        self.settings.as_ref()?.update_fields()
+    }
+
+    /// Ask Word to update fields when it opens the document, stop asking with
+    /// `Some(false)`, or remove the setting with `None`.
+    pub fn set_update_fields_on_open(&mut self, value: Option<bool>) -> Result<()> {
+        let mut candidate = self.settings_mutation_candidate()?;
+        candidate
+            .settings
+            .get_or_insert_with(CT_Settings::new)
+            .set_update_fields(value)?;
+        self.commit_staged_mutation(candidate);
+        Ok(())
+    }
+
     /// Return document-wide OfficeMath defaults from the settings part.
     pub fn math_properties(&self) -> Option<&MathProperties> {
         self.settings.as_ref()?.math_properties()
