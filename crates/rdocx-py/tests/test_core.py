@@ -481,3 +481,44 @@ def test_word_structure_snapshots_preserve_order_ownership_and_types():
     assert captured_items[-1].text != "later body content"
     assert len(reopened.story_items) == len(captured_items) + 1
     assert reopened.hyperlinks == captured_links
+
+
+def test_run_split_lets_a_comment_cover_part_of_a_run():
+    import re
+
+    import rdocx
+
+    document = rdocx.Document()
+    run = document.add_paragraph("").add_run("Hello brave world")
+    run.font.bold = True
+    middle = run.split(6)
+    with pytest.raises(rdocx.StaleElementError):
+        run.text
+    assert middle.text == "brave world"
+    assert middle.split(5).text == " world"
+    runs = document.paragraphs[0].runs
+    assert [item.text for item in runs] == ["Hello ", "brave", " world"]
+    assert [item.font.bold for item in runs] == [True, True, True]
+
+    brave = rdocx.RunRange(
+        start=rdocx.RunPosition(body_index=0, run_index=1),
+        end=rdocx.RunPosition(body_index=0, run_index=2),
+    )
+    comment_id = document.add_comment(brave, author="Ada", text="Which one?")
+    xml = _document_xml(rdocx.Document.from_bytes(document.to_bytes())).decode()
+    start = xml.index(f'commentRangeStart w:id="{comment_id}"')
+    end = xml.index(f'commentRangeEnd w:id="{comment_id}"')
+    assert re.findall(r"<w:t[^>]*>([^<]*)</w:t>", xml[start:end]) == ["brave"]
+
+
+def test_run_split_rejects_offsets_outside_the_text_without_changing_the_document():
+    import rdocx
+
+    document = rdocx.Document()
+    run = document.add_paragraph("").add_run("abc")
+    before = document.to_bytes()
+    for offset in (0, 3, 4):
+        with pytest.raises(rdocx.RdocxError, match="strictly inside"):
+            run.split(offset)
+    assert document.to_bytes() == before
+    assert run.text == "abc"

@@ -49,6 +49,7 @@ def exercise_rdocx_types(path: Path) -> None:
     channels: tuple[int, int, int] = color
     paragraph_format: ParagraphFormat = paragraph.paragraph_format
     paragraph_format.keep_together = None
+    second_part: Run = run.split(1)
     paragraphs: ParagraphCollection = document.paragraphs
     first: Paragraph = paragraphs[0]
     sliced: list[Paragraph] = paragraphs[:]

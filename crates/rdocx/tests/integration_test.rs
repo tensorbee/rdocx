@@ -8700,6 +8700,43 @@ fn core_properties_at_relationship_target_round_trip_in_place() {
 }
 
 #[test]
+fn split_run_lets_a_bookmark_and_a_comment_cover_part_of_a_run() {
+    let mut doc = Document::new();
+    doc.add_paragraph("Hello brave world");
+    let mut paragraph = doc.paragraph_mut(0).unwrap();
+    paragraph.split_run(0, 6).unwrap();
+    paragraph.split_run(1, 5).unwrap();
+    let error = paragraph.split_run(1, 5).unwrap_err();
+    assert!(error.to_string().contains("strictly inside"), "{error}");
+    let texts: Vec<String> = doc
+        .paragraph(0)
+        .unwrap()
+        .runs()
+        .map(|run| run.text())
+        .collect();
+    assert_eq!(texts, ["Hello ", "brave", " world"]);
+
+    let brave = RunRange {
+        start: RunPosition {
+            body_index: 0,
+            run_index: 1,
+        },
+        end: RunPosition {
+            body_index: 0,
+            run_index: 2,
+        },
+    };
+    doc.add_bookmark("brave", brave).unwrap();
+    doc.add_comment(brave, "Ada", None, "Which one?").unwrap();
+
+    let reopened = Document::from_bytes(&doc.to_bytes().unwrap()).unwrap();
+    let bookmarks = reopened.bookmarks();
+    assert_eq!(bookmarks.len(), 1);
+    assert_eq!(bookmarks[0].text(), "brave");
+    assert_eq!(reopened.comments().len(), 1);
+}
+
+#[test]
 fn three_comments_and_cross_paragraph_anchors_round_trip_byte_identically() {
     let mut source = Document::new();
     source.add_paragraph("first");
