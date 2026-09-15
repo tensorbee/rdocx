@@ -2174,15 +2174,14 @@ fn compare_paragraph(
             location,
         )?;
     }
-    let original_run_spans = original_source
-        .map(paragraph_run_spans)
-        .transpose()?
-        .unwrap_or_default();
-    if original_source.is_some() && original_run_spans.len() != original.runs.len() {
-        return Err(Error::Other(format!(
-            "comparison could not correlate paragraph run owners at {location}"
-        )));
-    }
+    let original_run_spans = match original_source {
+        Some(source) => run_owner_spans(&original.runs, source)?.ok_or_else(|| {
+            Error::Other(format!(
+                "comparison could not correlate paragraph run owners at {location}"
+            ))
+        })?,
+        None => Vec::new(),
+    };
     for (left, right) in aligned {
         match (left, right) {
             (Some(i), Some(j)) => {
@@ -2308,15 +2307,14 @@ fn compare_granular_paragraph(
     {
         let properties =
             paragraph_properties_xml(original, edited, location, metadata, diagnostics)?;
-        let spans = original_source
-            .map(paragraph_run_spans)
-            .transpose()?
-            .unwrap_or_default();
-        if original_source.is_some() && spans.len() != original.runs.len() {
-            return Err(Error::Other(format!(
-                "comparison could not correlate granular run owners at {location}"
-            )));
-        }
+        let spans = match original_source {
+            Some(source) => run_owner_spans(&original.runs, source)?.ok_or_else(|| {
+                Error::Other(format!(
+                    "comparison could not correlate granular run owners at {location}"
+                ))
+            })?,
+            None => Vec::new(),
+        };
         let replacements = original
             .runs
             .iter()
@@ -2641,7 +2639,7 @@ fn replace_paragraph_properties_and_runs(
         }
         (None, true) => {}
     }
-    replace_paragraph_run_elements(&source, runs)
+    replace_paragraph_run_elements(&source, &paragraph.runs, runs)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2674,12 +2672,13 @@ fn interleave_granular_paragraph(
         }
         (None, true) => {}
     }
-    let spans = paragraph_run_spans(&source)?;
-    if spans.len() != original.runs.len() || aligned.len() != replacements.len() {
-        return Err(Error::Other(format!(
-            "comparison could not correlate granular run owners at {location}"
-        )));
-    }
+    let spans = run_owner_spans(&original.runs, &source)?
+        .filter(|_| aligned.len() == replacements.len())
+        .ok_or_else(|| {
+            Error::Other(format!(
+                "comparison could not correlate granular run owners at {location}"
+            ))
+        })?;
     let insertion_boundary = spans
         .first()
         .map_or_else(|| paragraph_close_start(&source), |span| Ok(span.start))?;
@@ -3020,12 +3019,11 @@ fn compare_complex_paragraph(
     let source = original_source
         .map(str::to_owned)
         .map_or_else(|| paragraph_xml(original), Ok)?;
-    let run_spans = paragraph_run_spans(&source)?;
-    if run_spans.len() != original.runs.len() {
-        return Err(Error::Other(format!(
+    let run_spans = run_owner_spans(&original.runs, &source)?.ok_or_else(|| {
+        Error::Other(format!(
             "comparison could not correlate complex paragraph runs at {location}"
-        )));
-    }
+        ))
+    })?;
     let original_signatures = original
         .runs
         .iter()
@@ -5325,15 +5323,53 @@ fn paragraph_run_spans(xml: &str) -> Result<Vec<Range<usize>>> {
     Ok(spans)
 }
 
-fn replace_paragraph_run_elements(xml: &str, replacements: &[String]) -> Result<String> {
-    let spans = paragraph_run_spans(xml)?;
-    if spans.len() != replacements.len() {
-        return Err(Error::Other(format!(
-            "comparison expected {} paragraph run owners, found {}",
-            replacements.len(),
-            spans.len()
-        )));
+/// Correlate each model run with its raw source, one span per run.
+///
+/// The parser projects a complete complex field, from its begin run to its
+/// end run, into one model run, so that run owns every raw run it came from.
+/// `None` means the raw runs do not add up to the model runs.
+fn run_owner_spans(runs: &[CT_R], xml: &str) -> Result<Option<Vec<Range<usize>>>> {
+    let raw = paragraph_run_spans(xml)?;
+    let mut spans = Vec::with_capacity(runs.len());
+    let mut next = 0usize;
+    for run in runs {
+        let width = raw_run_width(run)?;
+        let Some(owned) = raw.get(next..next + width) else {
+            return Ok(None);
+        };
+        spans.push(owned[0].start..owned[width - 1].end);
+        next += width;
     }
+    Ok((next == raw.len()).then_some(spans))
+}
+
+/// The number of raw `w:r` or `w:fldSimple` children one model run came from.
+fn raw_run_width(run: &CT_R) -> Result<usize> {
+    let [RunContent::Field(field)] = run.content.as_slice() else {
+        return Ok(1);
+    };
+    let Some((raw, _)) = field.source_replacement()? else {
+        return Ok(1);
+    };
+    let raw = std::str::from_utf8(raw).map_err(utf8_error)?;
+    Ok(paragraph_run_spans(&format!("<w:p>{raw}</w:p>"))?
+        .len()
+        .max(1))
+}
+
+fn replace_paragraph_run_elements(
+    xml: &str,
+    runs: &[CT_R],
+    replacements: &[String],
+) -> Result<String> {
+    let spans = run_owner_spans(runs, xml)?
+        .filter(|spans| spans.len() == replacements.len())
+        .ok_or_else(|| {
+            Error::Other(format!(
+                "comparison expected {} paragraph run owners",
+                replacements.len()
+            ))
+        })?;
     let mut output = xml.to_owned();
     for (span, replacement) in spans.into_iter().zip(replacements).rev() {
         output.replace_range(span, replacement);

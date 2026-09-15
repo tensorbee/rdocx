@@ -15773,6 +15773,96 @@ fn comparison_preserves_unrelated_modeled_fields() {
     );
 }
 
+fn complex_page_field_paragraph(lead: &str, result: &str) -> String {
+    format!(
+        r#"<w:p><w:r><w:t>{lead}</w:t></w:r><w:r><w:t xml:space="preserve"> Page </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>{result}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#
+    )
+}
+
+#[test]
+fn comparison_revises_paragraphs_that_hold_a_complex_field() {
+    for (lead, result) in [("Bravo", "1"), ("Alpha", "2"), ("Bravo", "2")] {
+        for granularity in [
+            rdocx::ComparisonGranularity::Run,
+            rdocx::ComparisonGranularity::Word,
+            rdocx::ComparisonGranularity::Character,
+        ] {
+            for ignore_fields in [false, true] {
+                let case = format!("{lead}/{result} {granularity:?} ignore_fields={ignore_fields}");
+                let options = rdocx::ComparisonOptions {
+                    granularity,
+                    ignore_fields,
+                    ..Default::default()
+                };
+                let original_xml = wrap_word_body(&complex_page_field_paragraph("Alpha", "1"));
+                let edited_xml = wrap_word_body(&complex_page_field_paragraph(lead, result));
+                let mut compared = document_with_content_controls(&original_xml);
+                compared
+                    .compare_with_options(
+                        &document_with_content_controls(&edited_xml),
+                        "Ada",
+                        "2026-09-15T09:30:00Z",
+                        &options,
+                    )
+                    .unwrap_or_else(|error| panic!("{case}: {error}"));
+                let tracked = compared.to_bytes().unwrap();
+
+                // An ignored field keeps its original result.
+                let accepted_result = if ignore_fields { "1" } else { result };
+                for (accept, expected) in [
+                    (true, format!("{lead} Page {accepted_result}")),
+                    (false, "Alpha Page 1".to_owned()),
+                ] {
+                    let mut document = Document::from_bytes(&tracked).unwrap();
+                    if accept {
+                        document.accept_all().unwrap();
+                    } else {
+                        document.reject_all().unwrap();
+                    }
+                    let xml = document_xml(&mut document);
+                    assert_eq!(
+                        f_x093_visible_text(&xml),
+                        expected,
+                        "{case} accept={accept}: {xml}"
+                    );
+                    assert_eq!(
+                        xml.matches(r#"w:fldCharType="begin""#).count(),
+                        1,
+                        "{case} accept={accept}: {xml}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn comparison_revises_a_header_paragraph_that_holds_a_complex_field() {
+    let edited = document_with_comparison_header(&complex_page_field_paragraph("Bravo", "1"));
+    let mut compared = document_with_comparison_header(&complex_page_field_paragraph("Alpha", "1"));
+    compared
+        .compare(&edited, "Ada", "2026-09-15T09:30:00Z")
+        .unwrap();
+    let tracked = compared.to_bytes().unwrap();
+
+    for (accept, expected) in [(true, "Bravo Page 1"), (false, "Alpha Page 1")] {
+        let mut document = Document::from_bytes(&tracked).unwrap();
+        if accept {
+            document.accept_all().unwrap();
+        } else {
+            document.reject_all().unwrap();
+        }
+        let bytes = document.to_bytes().unwrap();
+        let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+        let header = std::str::from_utf8(package.get_part("/word/header1.xml").unwrap()).unwrap();
+        assert_eq!(
+            f_x093_visible_text(header),
+            expected,
+            "accept={accept}: {header}"
+        );
+    }
+}
+
 #[test]
 fn final_paragraph_markers_stay_outside_formatted_run_properties() {
     let anchor = r#"<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>anchor</w:t></w:r></w:p>"#;
