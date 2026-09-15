@@ -481,3 +481,201 @@ def test_word_structure_snapshots_preserve_order_ownership_and_types():
     assert captured_items[-1].text != "later body content"
     assert len(reopened.story_items) == len(captured_items) + 1
     assert reopened.hyperlinks == captured_links
+
+
+def _story_paragraph_texts(document, kind):
+    return [
+        item.text
+        for item in document.story_items
+        if item.story.kind == kind and item.kind == "paragraph"
+    ]
+
+
+def test_header_footer_and_story_text_edit_the_section_stories():
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("body")
+    held = document.paragraphs[0]
+    document.set_header("Draft")
+    document.set_footer("Page footer")
+    with pytest.raises(rdocx.StaleElementError):
+        held.text
+    assert _story_paragraph_texts(document, "header") == ["Draft"]
+    assert _story_paragraph_texts(document, "footer") == ["Page footer"]
+
+    header_item = next(
+        item
+        for item in document.story_items
+        if item.story.kind == "header" and item.kind == "paragraph"
+    )
+    document.set_story_text(header_item, "Final")
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert _story_paragraph_texts(reopened, "header") == ["Final"]
+    assert _story_paragraph_texts(reopened, "body") == ["body"]
+
+
+def test_set_story_text_rejects_a_story_that_is_not_in_the_document():
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("body")
+    missing = rdocx.StoryItem(
+        story=rdocx.Story(kind="header", part_name="/word/missing.xml", owner_index=0),
+        kind="paragraph",
+        index_path=(0,),
+        text="stale",
+        xml=b"",
+    )
+    held = document.paragraphs[0]
+    before = document.to_bytes()
+    with pytest.raises(rdocx.RdocxError, match="no header story"):
+        document.set_story_text(missing, "edited")
+    assert document.to_bytes() == before
+    assert held.text == "body"
+
+
+def test_hyperlinks_are_added_to_paragraphs_and_stories():
+    import rdocx
+
+    document = rdocx.Document()
+    run = document.add_paragraph("See ").add_hyperlink("docs", "https://example.com/docs")
+    run.font.bold = True
+    document.set_header("Header")
+    header = next(story for story in document.stories if story.kind == "header")
+    document.add_hyperlink_to_story(header, "home", "https://example.com/")
+
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert [(link.story.kind, link.text, link.url) for link in reopened.hyperlinks] == [
+        ("body", "docs", "https://example.com/docs"),
+        ("header", "home", "https://example.com/"),
+    ]
+    assert reopened.paragraphs[0].runs[1].font.bold is True
+
+
+def test_story_item_xml_is_a_detached_snapshot():
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("hello")
+    item = next(
+        item
+        for item in document.story_items
+        if item.story.kind == "body" and item.kind == "paragraph"
+    )
+    assert isinstance(item.xml, bytes)
+    assert b"hello" in item.xml
+    document.add_paragraph("later")
+    assert b"later" not in item.xml
+
+
+def _paragraph_texts(document):
+    return [paragraph.text for paragraph in document.paragraphs]
+
+
+def _body_item(document, text):
+    return next(
+        item
+        for item in document.story_items
+        if item.story.kind == "body" and item.text == text
+    )
+
+
+def test_insert_paragraph_returns_the_inserted_paragraph_after_a_content_control():
+    import rdocx
+
+    document = _replace_document_body(
+        rdocx.Document(),
+        "<w:sdt><w:sdtContent><w:p><w:r><w:t>control</w:t></w:r></w:p></w:sdtContent></w:sdt>"
+        "<w:p><w:r><w:t>first</w:t></w:r></w:p>"
+        "<w:p><w:r><w:t>last</w:t></w:r></w:p>",
+    )
+    held = document.paragraphs[0]
+    before = document.to_bytes()
+    with pytest.raises(IndexError, match="content index out of range"):
+        document.insert_paragraph(4, "beyond")
+    assert document.to_bytes() == before
+    assert held.text == "control"
+
+    index = document.find_content_index("last")
+    assert index == 2
+    assert document.find_content_index("absent") is None
+    inserted = document.insert_paragraph(index, "middle")
+    with pytest.raises(rdocx.StaleElementError):
+        held.text
+    assert inserted.text == "middle"
+    inserted.add_run("!")
+    assert document.insert_paragraph(4, "end").text == "end"
+
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert _paragraph_texts(reopened) == ["control", "first", "middle!", "last", "end"]
+
+
+def test_insert_content_places_a_fragment_before_an_item_or_at_the_story_end():
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("body")
+    document.set_header("middle")
+    header = next(story for story in document.stories if story.kind == "header")
+    middle = next(
+        item
+        for item in document.story_items
+        if item.story == header and item.kind == "paragraph"
+    )
+    fragment = rdocx.ContentFragment.paragraph("edge")
+    assert fragment.kind == "paragraph"
+    document.insert_content(middle, fragment)
+    document.insert_content(header, fragment)
+
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert _story_paragraph_texts(reopened, "header") == ["edge", "middle", "edge"]
+    assert _paragraph_texts(reopened) == ["body"]
+
+
+def test_clone_and_move_content_reorder_body_items():
+    import rdocx
+
+    document = rdocx.Document()
+    for text in ["a", "b", "c"]:
+        document.add_paragraph(text)
+    body = next(story for story in document.stories if story.kind == "body")
+    held = document.paragraphs[0]
+
+    document.clone_content(_body_item(document, "a"), body)
+    with pytest.raises(rdocx.StaleElementError):
+        held.text
+    assert _paragraph_texts(document) == ["a", "b", "c", "a"]
+    document.move_content(_body_item(document, "c"), _body_item(document, "b"))
+    assert _paragraph_texts(document) == ["a", "c", "b", "a"]
+
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert _paragraph_texts(reopened) == ["a", "c", "b", "a"]
+
+
+def test_content_operations_reject_invalid_locations_without_changing_the_document():
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("body")
+    document.set_header("header")
+    header = next(story for story in document.stories if story.kind == "header")
+    source = _body_item(document, "body")
+    wrong_kind = rdocx.StoryItem(
+        story=source.story,
+        kind="table",
+        index_path=source.index_path,
+        text=None,
+        xml=b"",
+    )
+    held = document.paragraphs[0]
+    before = document.to_bytes()
+
+    with pytest.raises(rdocx.RdocxError, match="within one"):
+        document.move_content(source, header)
+    with pytest.raises(rdocx.RdocxError):
+        document.insert_content(wrong_kind, rdocx.ContentFragment.paragraph("x"))
+    with pytest.raises(TypeError, match="StoryItem or a Story"):
+        document.clone_content(source, 0)
+    assert document.to_bytes() == before
+    assert held.text == "body"

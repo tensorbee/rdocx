@@ -8,9 +8,9 @@ use oxml_opc::relationship::rel_types;
 use rdocx::paragraph::Alignment;
 use rdocx::table::VerticalAlignment;
 use rdocx::{
-    BodyItemRef, BorderStyle, Length, ListLevel, MhtmlDiagnostic, ParagraphRef, RunPosition,
-    RunRange, SectionBreak, StoryItemKind, StoryKind, StyleBuilder, TabAlignment, TabLeader,
-    UnderlineStyle,
+    BodyItemRef, BorderStyle, ContentFragment, ContentLocation, Length, ListLevel, MhtmlDiagnostic,
+    ParagraphRef, RunPosition, RunRange, SectionBreak, StoryItemKind, StoryKind, StyleBuilder,
+    TabAlignment, TabLeader, UnderlineStyle,
 };
 use rdocx::{Document, PackageReadLimits, RevisionKind, WordCreationProfile, WordPackageClass};
 use rdocx_oxml::CT_BorderEdge;
@@ -9572,6 +9572,71 @@ fn empty_document_insert_and_remove() {
 
     assert!(doc.remove_content(0));
     assert_eq!(doc.content_count(), 0);
+}
+
+#[test]
+fn paragraph_index_of_content_counts_paragraphs_inside_block_content_controls() {
+    let mut seed = Document::new();
+    seed.add_paragraph("first");
+    seed.add_paragraph("last");
+    let mut package = OpcPackage::from_reader(std::io::Cursor::new(seed.to_bytes().unwrap()))
+        .expect("open seed package");
+    let body = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+    let body = body.replacen(
+        "<w:body>",
+        "<w:body><w:sdt><w:sdtContent><w:p><w:r><w:t>control one</w:t></w:r></w:p><w:p><w:r><w:t>control two</w:t></w:r></w:p></w:sdtContent></w:sdt><w:tbl><w:tr><w:tc><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>",
+        1,
+    );
+    package.set_part("/word/document.xml", body.into_bytes());
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    let mut doc = Document::from_bytes(&bytes.into_inner()).unwrap();
+
+    assert_eq!(doc.content_count(), 4);
+    assert_eq!(doc.paragraph_index_of_content(0), None);
+    assert_eq!(doc.paragraph_index_of_content(1), None);
+    assert_eq!(doc.paragraph_index_of_content(2), Some(2));
+    assert_eq!(doc.paragraph_index_of_content(4), None);
+
+    doc.insert_paragraph(3, "middle");
+    let index = doc.paragraph_index_of_content(3).unwrap();
+    assert_eq!(index, 3);
+    assert_eq!(doc.paragraph(index).unwrap().text(), "middle");
+    doc.paragraph_mut(index).unwrap().add_run("!");
+    assert_eq!(doc.paragraph(index).unwrap().text(), "middle!");
+}
+
+#[test]
+fn text_paragraph_fragment_holds_one_run_or_none() {
+    let mut doc = Document::new();
+    doc.add_paragraph("body");
+    // A story identity carries a fingerprint, so each insertion resolves it again.
+    let body_end = |doc: &Document| {
+        let body = doc
+            .stories()
+            .unwrap()
+            .into_iter()
+            .find(|story| story.kind() == StoryKind::Body)
+            .unwrap();
+        ContentLocation::end(body)
+    };
+    let fragment = ContentFragment::text_paragraph("plain").unwrap();
+    assert_eq!(fragment.kind(), StoryItemKind::Paragraph);
+    let destination = body_end(&doc);
+    doc.insert_content(&destination, fragment).unwrap();
+    let destination = body_end(&doc);
+    doc.insert_content(&destination, ContentFragment::text_paragraph("").unwrap())
+        .unwrap();
+
+    let reopened = Document::from_bytes(&doc.to_bytes().unwrap()).unwrap();
+    let paragraphs = reopened.paragraphs();
+    let texts: Vec<String> = paragraphs
+        .iter()
+        .map(|paragraph| paragraph.text())
+        .collect();
+    assert_eq!(texts, ["body", "plain", ""]);
+    assert_eq!(paragraphs[1].run_count(), 1);
+    assert_eq!(paragraphs[2].run_count(), 0);
 }
 
 // ---- PDF rendering tests ----

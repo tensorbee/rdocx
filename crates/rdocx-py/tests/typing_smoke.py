@@ -8,6 +8,7 @@ from rdocx import (
     CellParagraphCollection,
     Comment,
     ComparisonDiagnostic,
+    ContentFragment,
     Document,
     Font,
     HeaderFooterVariant,
@@ -85,6 +86,20 @@ def exercise_rdocx_types(path: Path) -> None:
     fragments: tuple[LayoutFragment, ...] = document.layout()
     maybe_layout_page: LayoutPage | None = document.layout_page(0)
     report: TocRebuildReport = document.rebuild_toc()
+    document.set_header("Header")
+    document.set_footer("Footer")
+    document.set_story_text(story_items[0], "edited")
+    document.add_hyperlink_to_story(stories[0], "home", "https://example.com/")
+    link_run: Run = first.add_hyperlink("docs", "https://example.com/docs")
+    assert_type(story_items[0].xml, bytes)
+    fragment: ContentFragment = ContentFragment.paragraph("inserted")
+    assert_type(fragment.kind, str)
+    document.insert_content(story_items[0], fragment)
+    document.insert_content(stories[0], fragment)
+    document.clone_content(story_items[0], stories[0])
+    document.move_content(story_items[0], story_items[1])
+    inserted: Paragraph = document.insert_paragraph(0, "inserted")
+    content_index: int | None = document.find_content_index("inserted")
     if fragments:
         bounds: BoundingBox = fragments[0].bounds
         assert_type(bounds.width, float)
@@ -103,6 +118,7 @@ if TYPE_CHECKING:
     Cell()  # type: ignore[call-arg]
     CellCollection()  # type: ignore[call-arg]
     CellParagraphCollection()  # type: ignore[call-arg]
+    ContentFragment()  # type: ignore[call-arg]
     Font()  # type: ignore[call-arg]
     Paragraph()  # type: ignore[call-arg]
     ParagraphCollection()  # type: ignore[call-arg]
