@@ -512,6 +512,7 @@ mod tests {
                     indent_left: 0.0,
                     available_width: 468.0,
                     is_last: false,
+                    page_break_after: false,
                 },
                 LayoutLine {
                     items: vec![],
@@ -523,6 +524,7 @@ mod tests {
                     indent_left: 0.0,
                     available_width: 468.0,
                     is_last: true,
+                    page_break_after: false,
                 },
             ],
             space_before: 6.0,
