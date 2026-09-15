@@ -1,5 +1,8 @@
 import io
+import re
+import struct
 import zipfile
+import zlib
 
 import pytest
 
@@ -22,6 +25,45 @@ def _replace_document_body(document, body):
 def _document_xml(document):
     with zipfile.ZipFile(io.BytesIO(document.to_bytes())) as archive:
         return archive.read("word/document.xml")
+
+
+def _one_pixel_png():
+    def chunk(kind, data):
+        crc = struct.pack(">I", zlib.crc32(kind + data))
+        return struct.pack(">I", len(data)) + kind + data + crc
+
+    header = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(b"\x00\xff\xff\xff"))
+        + chunk(b"IEND", b"")
+    )
+
+
+def test_replace_image_data_keeps_the_picture_and_follows_the_new_format():
+    docx = pytest.importorskip("docx")
+    import rdocx
+
+    source = docx.Document()
+    source.add_picture(io.BytesIO(_one_pixel_png()))
+    buffer = io.BytesIO()
+    source.save(buffer)
+    document = rdocx.Document.from_bytes(buffer.getvalue())
+    held = document.paragraphs[0]
+    relationship_id = re.search(rb'r:embed="([^"]+)"', _document_xml(document)).group(1).decode()
+
+    jpeg = b"\xff\xd8\xff\xe0replacement"
+    document.replace_image_data(relationship_id, jpeg)
+    assert document.image_data(relationship_id) == jpeg
+    assert held.text == ""
+    assert rdocx.Document.from_bytes(document.to_bytes()).image_data(relationship_id) == jpeg
+    with zipfile.ZipFile(io.BytesIO(document.to_bytes())) as archive:
+        assert b'ContentType="image/jpeg"' in archive.read("[Content_Types].xml")
+
+    with pytest.raises(rdocx.RdocxError):
+        document.replace_image_data("rIdMissing", jpeg)
+    assert document.image_data("rIdMissing") is None
 
 
 def _document_with_structure_snapshots(document):

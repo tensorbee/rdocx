@@ -11760,6 +11760,37 @@ impl Document {
             .ok_or_else(|| Error::Other(format!("image relationship target {target} is missing")))
     }
 
+    /// Replace picture bytes through a checked story-local relationship.
+    ///
+    /// See [`Document::replace_image_data`] for what is kept.
+    pub fn replace_image_data_for_story(
+        &mut self,
+        story: &StoryId,
+        relationship_id: &str,
+        image_data: &[u8],
+    ) -> Result<()> {
+        let target = self.validate_internal_relationship_for_story(
+            story,
+            relationship_id,
+            rel_types::IMAGE,
+        )?;
+        self.replace_image_part(&target, image_data)
+    }
+
+    fn replace_image_part(&mut self, part_name: &str, image_data: &[u8]) -> Result<()> {
+        if self.package.get_part(part_name).is_none() {
+            return Err(Error::Other(format!(
+                "image relationship target {part_name} is missing"
+            )));
+        }
+        let mut candidate = self.clone_for_staging();
+        let format = oxml_media::resolve(image_data, part_name);
+        candidate.install_reserved_image_part(part_name, image_data, format);
+        candidate.invalidate_layout();
+        self.commit_staged_mutation(candidate);
+        Ok(())
+    }
+
     /// Resolve an external hyperlink through a checked story-local relationship.
     pub fn hyperlink_url_for_story(
         &self,
@@ -12842,6 +12873,32 @@ impl Document {
         })?;
         let target = OpcPackage::resolve_rel_target(&self.doc_part_name, &rel.target);
         self.package.get_part(&target).map(|b| b.to_vec())
+    }
+
+    /// Replace the bytes of an embedded picture by its relationship ID.
+    ///
+    /// The relationship and every drawing that shows the picture, with its
+    /// extent, alt text and position, stay as they are. The part content type
+    /// follows the new bytes when their format differs. Every relationship
+    /// that targets the same media part sees the new bytes.
+    pub fn replace_image_data(&mut self, rel_id: &str, image_data: &[u8]) -> Result<()> {
+        let target = self
+            .package
+            .get_part_rels(&self.doc_part_name)
+            .and_then(|rels| {
+                rels.items.iter().find(|relationship| {
+                    relationship.id == rel_id
+                        && relationship.rel_type == rel_types::IMAGE
+                        && relationship_is_internal(relationship)
+                })
+            })
+            .map(|rel| OpcPackage::resolve_rel_target(&self.doc_part_name, &rel.target))
+            .ok_or_else(|| {
+                Error::Other(format!(
+                    "document has no internal image relationship {rel_id}"
+                ))
+            })?;
+        self.replace_image_part(&target, image_data)
     }
 
     /// Resolve a hyperlink relationship ID to its external URL.

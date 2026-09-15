@@ -393,10 +393,16 @@ same pre-1.0 `Document` facade. `add_picture_to_story` and
 `add_hyperlink_to_story` append namespace-complete paragraphs to a checked
 `StoryId`. `add_hyperlink_relationship_to_story` allocates one external link
 without inserting content. `validate_internal_relationship_for_story`,
-`image_data_for_story`, and `hyperlink_url_for_story` resolve only through the
-story owner's relationship set and reject stale owners, missing identifiers,
-wrong types, wrong target modes, and missing internal targets. These additions
-do not add a trait, generic parameter, or WASM or CLI surface.
+`image_data_for_story`, `replace_image_data_for_story`, and
+`hyperlink_url_for_story` resolve only through the story owner's relationship
+set and reject stale owners, missing identifiers, wrong types, wrong target
+modes, and missing internal targets. These additions do not add a trait,
+generic parameter, or WASM or CLI surface. `Document::replace_image_data` and
+`replace_image_data_for_story` replace the bytes of the target media part in a
+staged mutation. The relationship and every drawing that shows the picture stay
+unchanged, and the part gains a content type override when the new format
+differs. Python exposes `Document.image_data` and `Document.replace_image_data`
+for main document relationships.
 `StoryItemRef::links` inventories modeled links in source order and returns the
 existing `LinkInfo` values after checked owner-scoped resolution.
 `Document::story_links` pairs those records with their existing
