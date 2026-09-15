@@ -1,6 +1,7 @@
 //! Input types for the layout engine.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use oxml_chart::CT_ChartSpace;
 use oxml_drawing::color::ColorMap;
@@ -39,7 +40,7 @@ pub struct ImageData {
 #[derive(Debug, Clone)]
 pub struct MediaRegistry {
     relationship_ids: HashMap<String, MediaId>,
-    media: HashMap<MediaId, ImageData>,
+    media: Arc<HashMap<MediaId, ImageData>>,
     missing_id: MediaId,
 }
 
@@ -55,6 +56,27 @@ impl MediaRegistry {
             .get(relationship_id)
             .copied()
             .unwrap_or(self.missing_id)
+    }
+
+    /// The registry a header or footer part resolves its own drawings against.
+    ///
+    /// A header or footer part has its own relationships, so its images are
+    /// keyed as `"{part relationship}\0{image relationship}"` while a drawing
+    /// inside the part names only the image relationship. The media itself is
+    /// shared with this registry.
+    pub fn scoped_to_part(&self, part_relationship_id: &str) -> Self {
+        let prefix = format!("{part_relationship_id}\0");
+        Self {
+            relationship_ids: self
+                .relationship_ids
+                .iter()
+                .filter_map(|(id, media_id)| {
+                    Some((id.strip_prefix(&prefix)?.to_owned(), *media_id))
+                })
+                .collect(),
+            media: Arc::clone(&self.media),
+            missing_id: self.missing_id,
+        }
     }
 
     /// Return the image bytes and content types keyed by resolved media ID.
@@ -100,7 +122,7 @@ impl MediaRegistry {
 
         Self {
             relationship_ids,
-            media,
+            media: Arc::new(media),
             missing_id,
         }
     }

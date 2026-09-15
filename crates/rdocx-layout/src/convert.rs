@@ -261,6 +261,7 @@ mod tests {
             indent_left: 0.0,
             available_width: 468.0,
             is_last: true,
+            page_break_after: false,
         }];
         let properties = CT_PPr {
             line_spacing: Some(Twips(480)),

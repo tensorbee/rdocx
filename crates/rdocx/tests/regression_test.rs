@@ -175,6 +175,62 @@ fn f252_page_text(page: &oxml_layout::PageFrame) -> String {
 }
 
 #[test]
+fn run_page_breaks_start_new_pages_in_layout() {
+    let mut seed = Document::new();
+    let mut package =
+        oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(seed.to_bytes().unwrap())).unwrap();
+    // A break inside a paragraph, then python-docx's add_page_break shape: a
+    // paragraph holding only the break.
+    package.set_part(
+        "/word/document.xml",
+        format!(
+            r#"<w:document xmlns:w="{W_NS}"><w:body><w:p><w:r><w:t>Alpha</w:t></w:r><w:r><w:br w:type="page"/></w:r><w:r><w:t>Bravo</w:t></w:r></w:p><w:p><w:r><w:br w:type="page"/></w:r></w:p><w:p><w:r><w:t>Charlie</w:t></w:r></w:p><w:sectPr/></w:body></w:document>"#
+        )
+        .into_bytes(),
+    );
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    let document = Document::from_bytes(bytes.get_ref()).unwrap();
+
+    let layout = document.layout().unwrap();
+    let pages = layout
+        .layout
+        .pages
+        .iter()
+        .map(|page| f252_page_text(page))
+        .collect::<Vec<_>>();
+    assert_eq!(pages, ["Alpha", "Bravo", "Charlie"]);
+}
+
+#[test]
+fn header_and_footer_pictures_render_their_own_image_bytes() {
+    let mut document = f255_story_document();
+    for (kind, bytes, name) in [
+        (StoryKind::Header, b"header image", "header.png"),
+        (StoryKind::Footer, b"footer image", "footer.png"),
+    ] {
+        let story = f254_story(&document, kind);
+        document
+            .add_picture_to_story(&story, bytes, name, Length::pt(20.0), Length::pt(20.0))
+            .unwrap();
+    }
+    let document = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+
+    let page = document
+        .layout_page(0)
+        .unwrap()
+        .expect("story document produces a page");
+    let mut images = Vec::new();
+    oxml_layout::walk(&page.elements, &mut |element, _| {
+        if let oxml_layout::PositionedElement::Image { data, .. } = element {
+            images.push(data.clone());
+        }
+    });
+    images.sort();
+    assert_eq!(images, [b"footer image".to_vec(), b"header image".to_vec()]);
+}
+
+#[test]
 fn section_header_footer_variants_match_word_width_and_inheritance() {
     assert_eq!(
         WORD_F252_ORACLE,

@@ -241,6 +241,8 @@ pub struct LayoutLine {
     pub available_width: f64,
     /// Whether this is the last line of the paragraph.
     pub is_last: bool,
+    /// Whether a page break ends this line, so the lines after it start a new page.
+    pub page_break_after: bool,
 }
 
 impl LayoutLine {
@@ -318,6 +320,7 @@ pub fn break_into_lines(
             indent_left: line_indent_at(params, 0, true),
             available_width: line_width_at(params, 0, true),
             is_last: true,
+            page_break_after: false,
         }]);
     }
 
@@ -386,6 +389,7 @@ pub fn break_into_lines(
                         indent_left: indent,
                         available_width: line_avail,
                         is_last: false,
+                        page_break_after: false,
                     });
                     current_width = 0.0;
                     current_ascent = 0.0;
@@ -493,6 +497,7 @@ pub fn break_into_lines(
                         indent_left: indent,
                         available_width: line_avail,
                         is_last: false,
+                        page_break_after: false,
                     });
                     current_width = 0.0;
                     current_ascent = 0.0;
@@ -528,6 +533,7 @@ pub fn break_into_lines(
                         indent_left: indent,
                         available_width: line_avail,
                         is_last: false,
+                        page_break_after: false,
                     });
                     current_width = 0.0;
                     current_ascent = 0.0;
@@ -581,6 +587,7 @@ pub fn break_into_lines(
                     indent_left: indent,
                     available_width: line_avail,
                     is_last: matches!(break_type, ForcedBreakType::Page | ForcedBreakType::Column),
+                    page_break_after: matches!(break_type, ForcedBreakType::Page),
                 });
                 current_width = 0.0;
                 current_ascent = 0.0;
@@ -613,6 +620,7 @@ pub fn break_into_lines(
         indent_left: indent,
         available_width: line_avail,
         is_last: true,
+        page_break_after: false,
     });
 
     Ok(lines)
@@ -2411,6 +2419,7 @@ mod tests {
             indent_left: 0.0,
             available_width: 100.0,
             is_last: true,
+            page_break_after: false,
         };
         let below_natural = LayoutLine {
             height: 8.0,

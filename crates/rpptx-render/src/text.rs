@@ -1917,6 +1917,7 @@ mod tests {
             indent_left: 0.0,
             available_width: 100.0,
             is_last: true,
+            page_break_after: false,
         };
         let mut elements = Vec::new();
 
@@ -2130,6 +2131,7 @@ mod tests {
             indent_left: 10.0,
             available_width: 80.0,
             is_last: true,
+            page_break_after: false,
         };
 
         for (alignment, expected_x) in [
@@ -2175,6 +2177,7 @@ mod tests {
             indent_left: 0.0,
             available_width: 45.0,
             is_last: false,
+            page_break_after: false,
         };
         let mut elements = Vec::new();
         let width = emit_line_items(
@@ -2229,6 +2232,7 @@ mod tests {
             indent_left: 0.0,
             available_width,
             is_last: false,
+            page_break_after: false,
         };
         let mut elements = Vec::new();
 
