@@ -316,6 +316,20 @@ impl<'a> Row<'a> {
         self.ensure_tr_pr().cant_split = Some(true);
     }
 
+    /// Stop repeating this row as a header row.
+    pub fn clear_header(&mut self) {
+        if let Some(properties) = self.inner.properties.as_mut() {
+            properties.header = None;
+        }
+    }
+
+    /// Allow this row to split across pages again.
+    pub fn clear_cant_split(&mut self) {
+        if let Some(properties) = self.inner.properties.as_mut() {
+            properties.cant_split = None;
+        }
+    }
+
     /// Get a mutable reference to a cell by index.
     pub fn cell(&mut self, index: usize) -> Option<Cell<'_>> {
         self.inner.cells.get_mut(index).map(|c| Cell { inner: c })

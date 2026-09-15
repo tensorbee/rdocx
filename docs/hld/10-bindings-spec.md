@@ -706,6 +706,19 @@ raw preservation fields. Full literals written against the earlier pre-1.0
 shape must initialize those fields or use `Default`. This intentional low-level
 Rust source impact does not add Python, WASM, or CLI methods.
 
+`Document::clone_table_row` inserts a copy of one row at a checked row boundary
+of the same table, and `Document::remove_table_row` removes one row. Both count
+tables as `Document::table_mut` does and publish only a reopened candidate. The
+copy keeps the row and cell properties and the cell content. Its bookmark,
+content-control, and drawing identities are freshened as `clone_content`
+freshens them, and its comment anchors are left out. Raw XML between rows stays
+before the row it preceded. Removal keeps at least one direct row and moves a
+vertical merge start to the next row when the merge continues below.
+`Row::clear_header` and `Row::clear_cant_split` remove the two row flags. These
+are additive pre-1.0 native Rust APIs. Python exposes `Table.clone_row(index,
+at=None)`, which returns the new `Row`, and `Table.remove_row(index)`. Both
+advance the binding revision. WASM and CLI gain no row mutation surface.
+
 Native Word callers can inspect comments through `Document::comments` and
 author threads through `add_comment`, `reply_to`, `resolve_comment`, and
 `remove_comment`. `RunPosition` and `RunRange` define top-level paragraph run

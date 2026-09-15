@@ -279,3 +279,51 @@ def test_automatic_font_color_reads_as_none_after_reopen():
     reopened = Document.from_bytes(automatic)
 
     assert reopened.paragraphs[0].runs[0].font.color is None
+
+
+def test_table_rows_are_cloned_with_their_formatting_and_removed():
+    from rdocx import (
+        Document,
+        Inches,
+        RdocxError,
+        StaleElementError,
+        WD_CELL_VERTICAL_ALIGNMENT,
+    )
+
+    document = Document()
+    document.add_table(rows=2, cols=2)
+    document.tables[0].rows[0].cells[0].text = "header"
+    document.tables[0].rows[1].cells[0].text = "entry"
+    document.tables[0].rows[1].cells[0].paragraphs[0].runs[0].font.bold = True
+    template = document.tables[0].rows[1].cells[1]
+    template.width = Inches(2)
+    template.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.BOTTOM
+
+    table = document.tables[0]
+    held = table.rows[0]
+    copied = table.clone_row(-1)
+    with pytest.raises(StaleElementError):
+        held.cells
+    copied.cells[1].text = "new entry"
+
+    reopened = Document.from_bytes(document.to_bytes())
+    rows = reopened.tables[0].rows
+    assert [row.cells[0].text for row in rows] == ["header", "entry", "entry"]
+    assert rows[2].cells[0].paragraphs[0].runs[0].font.bold is True
+    assert rows[2].cells[1].text == "new entry"
+    assert rows[2].cells[1].width == Inches(2)
+    assert rows[2].cells[1].vertical_alignment == WD_CELL_VERTICAL_ALIGNMENT.BOTTOM
+
+    reopened.tables[0].clone_row(0, at=0)
+    reopened.tables[0].remove_row(1)
+    reopened.tables[0].remove_row(-1)
+    texts = [row.cells[0].text for row in reopened.tables[0].rows]
+    assert texts == ["header", "entry"]
+    with pytest.raises(IndexError):
+        reopened.tables[0].remove_row(2)
+    with pytest.raises(IndexError):
+        reopened.tables[0].clone_row(0, at=3)
+    reopened.tables[0].remove_row(0)
+    with pytest.raises(RdocxError, match="at least one row"):
+        reopened.tables[0].remove_row(0)
+    assert [row.cells[0].text for row in reopened.tables[0].rows] == ["entry"]
