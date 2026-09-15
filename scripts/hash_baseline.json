@@ -8,9 +8,9 @@
     "contract:word/numbering.xml": "01d6cb0aa0ecc30b3d2a77c4df062b1c727d70ff9cbc0824910f049daf878a26",
     "contract:word/styles.xml": "0dc0b047b6019b798b83bfe4d66eb91d14b03caea3f6bdb0934d48fbb863fba4",
     "feature_showcase:page1.png": "6e88403fe63a789fd2ce6803029f67fcd45e00f2d13b9c13d5201a99eda0ada9",
-    "feature_showcase:pdf/bytes": "a9035ceb5183ba12deedde68aae833a3af0e54e0fc9791ef851629b83fe91f87",
-    "feature_showcase:pdf/pages": "9c46894bd67eeab233be138863ab5fb0a61e5d96f27f781bdd53dfb02778d91d",
-    "feature_showcase:pdf/resources": "23f3e0a8a1b942352c4c38082d871445a0a1f4779d42491026f6cf3bf220fbd2",
+    "feature_showcase:pdf/bytes": "0a0289b68d46f88ea59dac34bd3c4c85fa04758b14e3f9bc33c309151607a1e8",
+    "feature_showcase:pdf/pages": "5da23c06088c19df5a8e4254e15d21f13b159b34c73100ed4b278a85a8bdb506",
+    "feature_showcase:pdf/resources": "e624cef80cac1f99ba398b0b0f8fc7986c0389cf12b6599f2a9bb187749bb797",
     "feature_showcase:word/document.xml": "7bfdbc2740871b1b38314dc95b353237d18e49b56ea64fa7a4c6499e4d21c8d3",
     "feature_showcase:word/numbering.xml": "2aa0599486d98573be0b7febb04ec63c08d3dfc5341b0f722b93cae113803bbc",
     "feature_showcase:word/styles.xml": "b815acd04cc89189d5b2b0caf822435d941c8cc70077f34932e4a2b3ce1b6595",
@@ -50,5 +50,5 @@
     "report:word/numbering.xml": "2aa0599486d98573be0b7febb04ec63c08d3dfc5341b0f722b93cae113803bbc",
     "report:word/styles.xml": "0dc0b047b6019b798b83bfe4d66eb91d14b03caea3f6bdb0934d48fbb863fba4"
   },
-  "reason": "F-X095 models and serializes empty paragraphs as self-closing WordprocessingML; exactly seven word/document.xml hashes changed while PNG and PDF fingerprints remained unchanged"
+  "reason": "GitHub issue #89: the header logo that feature_showcase adds with set_header_image is now drawn on page 11, the only page using that header. Page count and all other output unchanged."
 }

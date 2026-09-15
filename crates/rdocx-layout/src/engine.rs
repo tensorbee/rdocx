@@ -7500,6 +7500,8 @@ fn layout_header_footer_variant_uncached(
             relationship_id: relationship_id.to_owned(),
         },
     };
+    // Drawings in the part name the part's own image relationships.
+    let part_media = media.scoped_to_part(relationship_id);
     let mut blocks = Vec::with_capacity(part.paragraphs.len());
     let mut directions = Vec::with_capacity(part.paragraphs.len());
     for (paragraph_index, paragraph) in part.paragraphs.iter().enumerate() {
@@ -7513,7 +7515,7 @@ fn layout_header_footer_variant_uncached(
             width,
             styles,
             input,
-            media,
+            &part_media,
             fm,
             num_state,
             diagnostics,

@@ -203,6 +203,34 @@ fn run_page_breaks_start_new_pages_in_layout() {
 }
 
 #[test]
+fn header_and_footer_pictures_render_their_own_image_bytes() {
+    let mut document = f255_story_document();
+    for (kind, bytes, name) in [
+        (StoryKind::Header, b"header image", "header.png"),
+        (StoryKind::Footer, b"footer image", "footer.png"),
+    ] {
+        let story = f254_story(&document, kind);
+        document
+            .add_picture_to_story(&story, bytes, name, Length::pt(20.0), Length::pt(20.0))
+            .unwrap();
+    }
+    let document = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+
+    let page = document
+        .layout_page(0)
+        .unwrap()
+        .expect("story document produces a page");
+    let mut images = Vec::new();
+    oxml_layout::walk(&page.elements, &mut |element, _| {
+        if let oxml_layout::PositionedElement::Image { data, .. } = element {
+            images.push(data.clone());
+        }
+    });
+    images.sort();
+    assert_eq!(images, [b"footer image".to_vec(), b"header image".to_vec()]);
+}
+
+#[test]
 fn section_header_footer_variants_match_word_width_and_inheritance() {
     assert_eq!(
         WORD_F252_ORACLE,

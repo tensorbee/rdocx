@@ -18853,6 +18853,32 @@ impl Document {
         // Extract embedded fonts from the DOCX package
         let fonts = self.extract_embedded_fonts();
 
+        // A header or footer part resolves image relationships against its own
+        // relationships, so its images are keyed by both relationship IDs.
+        let insert_part_images =
+            |images: &mut HashMap<String, ImageData>, part_rel_id: &str, part_name: &str| {
+                let Some(part_relationships) = self.package.get_part_rels(part_name) else {
+                    return;
+                };
+                for image_relationship in part_relationships.items.iter().filter(|item| {
+                    item.rel_type == rel_types::IMAGE && relationship_is_internal(item)
+                }) {
+                    let image_part =
+                        OpcPackage::resolve_rel_target(part_name, &image_relationship.target);
+                    if let Some(data) = self.package.get_part(&image_part) {
+                        images.insert(
+                            format!("{part_rel_id}\0{}", image_relationship.id),
+                            ImageData {
+                                data: data.to_vec(),
+                                content_type: oxml_media::resolve(data, &image_part)
+                                    .content_type()
+                                    .to_owned(),
+                            },
+                        );
+                    }
+                }
+            };
+
         if let Some(rels) = self.package.get_part_rels(&self.doc_part_name) {
             for rel in &rels.items {
                 match rel.rel_type.as_str() {
@@ -18869,30 +18895,7 @@ impl Document {
                         {
                             headers.insert(rel.id.clone(), hf);
                         }
-                        if let Some(header_relationships) = self.package.get_part_rels(&part_name) {
-                            for image_relationship in
-                                header_relationships.items.iter().filter(|item| {
-                                    item.rel_type == rel_types::IMAGE
-                                        && relationship_is_internal(item)
-                                })
-                            {
-                                let image_part = OpcPackage::resolve_rel_target(
-                                    &part_name,
-                                    &image_relationship.target,
-                                );
-                                if let Some(data) = self.package.get_part(&image_part) {
-                                    images.insert(
-                                        format!("{}\0{}", rel.id, image_relationship.id),
-                                        ImageData {
-                                            data: data.to_vec(),
-                                            content_type: oxml_media::resolve(data, &image_part)
-                                                .content_type()
-                                                .to_owned(),
-                                        },
-                                    );
-                                }
-                            }
-                        }
+                        insert_part_images(&mut images, &rel.id, &part_name);
                     }
                     t if t == rel_types::FOOTER => {
                         if !active_header_footer_ids.contains(&rel.id)
@@ -18907,6 +18910,7 @@ impl Document {
                         {
                             footers.insert(rel.id.clone(), hf);
                         }
+                        insert_part_images(&mut images, &rel.id, &part_name);
                     }
                     t if t == rel_types::IMAGE => {
                         if !relationship_is_internal(rel) {
