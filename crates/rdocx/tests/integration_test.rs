@@ -8200,6 +8200,123 @@ fn table_header_row_round_trip() {
 }
 
 #[test]
+fn cloned_table_row_gets_fresh_identities_without_comment_anchors() {
+    let mut seed = Document::new();
+    seed.add_paragraph("entry");
+    let entry = RunRange {
+        start: RunPosition {
+            body_index: 0,
+            run_index: 0,
+        },
+        end: RunPosition {
+            body_index: 0,
+            run_index: 1,
+        },
+    };
+    seed.add_bookmark("entry", entry).unwrap();
+    seed.add_comment(entry, "Ada", None, "Check this entry")
+        .unwrap();
+    let mut package = OpcPackage::from_reader(std::io::Cursor::new(seed.to_bytes().unwrap()))
+        .expect("open seed package");
+    let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap())
+        .unwrap()
+        .to_owned();
+    // Move the commented and bookmarked paragraph into a one-row table, next to
+    // a content control and a raw child whose prefix is declared on the root.
+    let body_start = xml.find("<w:body>").unwrap() + "<w:body>".len();
+    let paragraph_end = body_start + xml[body_start..].find("</w:p>").unwrap() + "</w:p>".len();
+    let table = format!(
+        r#"<w:tbl><w:tblGrid><w:gridCol w:w="4000"/></w:tblGrid><w:tr><w:tc><w:sdt><w:sdtPr><w:id w:val="42"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>control</w:t></w:r></w:p></w:sdtContent></w:sdt><x:keep/>{}</w:tc></w:tr></w:tbl><w:p/>"#,
+        &xml[body_start..paragraph_end]
+    );
+    let xml = format!("{}{table}{}", &xml[..body_start], &xml[paragraph_end..]).replacen(
+        "<w:document ",
+        r#"<w:document xmlns:x="urn:producer" "#,
+        1,
+    );
+    package.set_part("/word/document.xml", xml.into_bytes());
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    let mut doc = Document::from_bytes(&bytes.into_inner()).unwrap();
+
+    doc.clone_table_row(0, 0, 1).unwrap();
+
+    let saved = doc.to_bytes().unwrap();
+    let reopened = Document::from_bytes(&saved).unwrap();
+    let table = &reopened.tables()[0];
+    assert_eq!(table.row_count(), 2);
+    assert_eq!(
+        table.cell(1, 0).unwrap().text(),
+        table.cell(0, 0).unwrap().text()
+    );
+    assert_eq!(reopened.comments().len(), 1);
+    let package = OpcPackage::from_reader(std::io::Cursor::new(saved)).unwrap();
+    let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+    let bookmark_starts = xml
+        .match_indices("<w:bookmarkStart ")
+        .map(|(start, _)| &xml[start..start + xml[start..].find('>').unwrap()])
+        .collect::<Vec<_>>();
+    assert_eq!(bookmark_starts.len(), 2, "{xml}");
+    assert_ne!(bookmark_starts[0], bookmark_starts[1], "{xml}");
+    let control_ids = xml
+        .match_indices("<w:id w:val=\"")
+        .map(|(start, _)| &xml[start..start + xml[start..].find('>').unwrap()])
+        .collect::<Vec<_>>();
+    assert_eq!(control_ids.len(), 2, "{xml}");
+    assert_ne!(control_ids[0], control_ids[1], "{xml}");
+    assert_eq!(xml.matches("commentRangeStart").count(), 1, "{xml}");
+    assert_eq!(xml.matches("commentReference").count(), 1, "{xml}");
+    assert_eq!(xml.matches("<x:keep").count(), 2, "{xml}");
+}
+
+#[test]
+fn removing_a_table_row_restarts_merges_below_and_keeps_one_row() {
+    let mut doc = Document::new();
+    let mut table = doc.add_table(3, 1);
+    for (row, text) in ["first", "second", "third"].into_iter().enumerate() {
+        table.cell(row, 0).unwrap().set_text(text);
+    }
+    table.cell(0, 0).unwrap().set_v_merge_restart();
+    table.cell(1, 0).unwrap().set_v_merge_continue();
+    table.cell(2, 0).unwrap().set_v_merge_continue();
+    let mut row = table.row(1).unwrap();
+    row.set_header();
+    row.set_cant_split();
+    row.clear_header();
+    row.clear_cant_split();
+
+    doc.remove_table_row(0, 0).unwrap();
+    let error = doc.remove_table_row(0, 2).unwrap_err();
+    assert!(error.to_string().contains("out of range"), "{error}");
+
+    let saved = doc.to_bytes().unwrap();
+    let document_xml = OpcPackage::from_reader(std::io::Cursor::new(saved.clone()))
+        .unwrap()
+        .get_part("/word/document.xml")
+        .map(|part| String::from_utf8(part.to_vec()).unwrap())
+        .unwrap();
+    assert!(!document_xml.contains("tblHeader"), "{document_xml}");
+    assert!(!document_xml.contains("cantSplit"), "{document_xml}");
+    let mut reopened = Document::from_bytes(&saved).unwrap();
+    let table = &reopened.tables()[0];
+    assert_eq!(table.row_count(), 2);
+    assert_eq!(table.cell(0, 0).unwrap().text(), "second");
+    assert_eq!(
+        table.cell(0, 0).unwrap().v_merge(),
+        Some(&rdocx_oxml::table::VMerge::Restart)
+    );
+    assert_eq!(
+        table.cell(1, 0).unwrap().v_merge(),
+        Some(&rdocx_oxml::table::VMerge::Continue)
+    );
+
+    reopened.remove_table_row(0, 1).unwrap();
+    let error = reopened.remove_table_row(0, 0).unwrap_err();
+    assert!(error.to_string().contains("at least one row"), "{error}");
+    assert_eq!(reopened.tables()[0].row_count(), 1);
+}
+
+#[test]
 fn table_cell_grid_span_round_trip() {
     let mut doc = Document::new();
     let mut table = doc.add_table(2, 3);

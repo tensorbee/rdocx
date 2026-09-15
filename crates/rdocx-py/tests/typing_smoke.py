@@ -58,6 +58,8 @@ def exercise_rdocx_types(path: Path) -> None:
     row: Row = table.rows[0]
     cell: Cell = row.cells[0]
     cell.text = first.text
+    copied_row: Row = table.clone_row(0, at=1)
+    table.remove_row(-1)
     package_bytes: bytes = loaded.to_bytes()
     pdf_bytes: bytes = opened.to_pdf()
     pages: list[bytes] = opened.render_all_pages()

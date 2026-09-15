@@ -5430,6 +5430,90 @@ fn freshen_content_fragment_identities(
     Ok(updated[item.full.clone()].to_vec())
 }
 
+/// Copy `xml` without Word comment range markers and comment references.
+fn strip_comment_anchors(xml: &[u8]) -> Result<Vec<u8>> {
+    let malformed = |error| Error::Other(format!("copied table row is not well formed: {error}"));
+    let mut reader = NsReader::from_reader(xml);
+    reader.config_mut().trim_text(false);
+    let mut writer = Writer::new(Vec::new());
+    let mut buffer = Vec::new();
+    loop {
+        let event = reader.read_event_into(&mut buffer).map_err(malformed)?;
+        let is_anchor = match &event {
+            Event::Start(element) | Event::Empty(element) => {
+                let (namespace, local_name) = reader.resolver().resolve_element(element.name());
+                matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == WORD_NAMESPACE.as_bytes())
+                    && matches!(
+                        local_name.as_ref(),
+                        b"commentRangeStart" | b"commentRangeEnd" | b"commentReference"
+                    )
+            }
+            _ => false,
+        };
+        match event {
+            Event::Eof => break,
+            Event::Start(element) if is_anchor => {
+                let end = element.to_end().into_owned();
+                reader
+                    .read_to_end_into(end.name(), &mut Vec::new())
+                    .map_err(malformed)?;
+            }
+            Event::Empty(_) if is_anchor => {}
+            event => writer.write_event(event)?,
+        }
+        buffer.clear();
+    }
+    Ok(writer.into_inner())
+}
+
+/// Hand each vertical merge that `row_index` starts, and that continues in the
+/// row below, to that row before `row_index` is removed.
+fn restart_merges_continued_below(table: &mut CT_Tbl, row_index: usize) {
+    let Some([row, below]) = table.rows.get_mut(row_index..row_index + 2) else {
+        return;
+    };
+    let restarted = cell_grid_starts(row)
+        .into_iter()
+        .zip(&row.cells)
+        .filter(|(_, cell)| {
+            cell.properties
+                .as_ref()
+                .and_then(|properties| properties.v_merge)
+                == Some(rdocx_oxml::table::VMerge::Restart)
+        })
+        .map(|(start, _)| start)
+        .collect::<Vec<_>>();
+    for (start, cell) in cell_grid_starts(below).into_iter().zip(&mut below.cells) {
+        if restarted.contains(&start)
+            && let Some(properties) = cell.properties.as_mut()
+            && properties.v_merge == Some(rdocx_oxml::table::VMerge::Continue)
+        {
+            properties.v_merge = Some(rdocx_oxml::table::VMerge::Restart);
+        }
+    }
+}
+
+/// The first grid column of each cell in `row`.
+fn cell_grid_starts(row: &CT_Row) -> Vec<usize> {
+    let mut column = row
+        .properties
+        .as_ref()
+        .and_then(|properties| properties.grid_before)
+        .unwrap_or(0) as usize;
+    row.cells
+        .iter()
+        .map(|cell| {
+            let start = column;
+            column += cell
+                .properties
+                .as_ref()
+                .and_then(|properties| properties.grid_span)
+                .unwrap_or(1) as usize;
+            start
+        })
+        .collect()
+}
+
 fn set_story_source_xml(document: &mut Document, part_name: &str, xml: Vec<u8>) -> Result<()> {
     if part_name == document.doc_part_name {
         document.document = CT_Document::from_xml(&xml)?;
@@ -12404,6 +12488,156 @@ impl Document {
     pub fn remove_content(&mut self, index: usize) -> bool {
         self.invalidate_layout();
         self.document.body.remove(index).is_some()
+    }
+
+    /// Insert a copy of one table row before row `at` of the same table.
+    ///
+    /// `table_index` counts tables as [`Self::table_mut`] does, and `at` may
+    /// equal the row count to append. The copy keeps the row and cell
+    /// properties and the cell content. Its bookmark, content-control, and
+    /// drawing identities are freshened and its comment anchors are left out,
+    /// so it shares no identity with its source. Raw XML between rows stays
+    /// before the row it preceded. The document is unchanged on error.
+    pub fn clone_table_row(
+        &mut self,
+        table_index: usize,
+        row_index: usize,
+        at: usize,
+    ) -> Result<()> {
+        let mut candidate = self.clone_for_staging();
+        let source = {
+            let table = candidate
+                .table_mut(table_index)
+                .ok_or_else(|| Error::Other(format!("table index {table_index} is out of range")))?
+                .inner;
+            let row_count = table.rows.len();
+            if row_index >= row_count {
+                return Err(Error::Other(format!(
+                    "row index {row_index} is out of range for a table with {row_count} rows"
+                )));
+            }
+            if at > row_count {
+                return Err(Error::Other(format!(
+                    "row insertion index {at} is out of range for a table with {row_count} rows"
+                )));
+            }
+            table.rows[row_index].clone()
+        };
+        let row = candidate.fresh_table_row_copy(source)?;
+        let table = candidate
+            .table_mut(table_index)
+            .expect("the table was found before the copy")
+            .inner;
+        for (position, _) in &mut table.extra_xml {
+            if *position >= at {
+                *position += 1;
+            }
+        }
+        for (position, _, _) in &mut table.content_controls {
+            if *position >= at {
+                *position += 1;
+            }
+        }
+        table.rows.insert(at, row);
+        let reopened = candidate.prepare_and_reopen_staged()?;
+        self.commit_staged_mutation(reopened);
+        Ok(())
+    }
+
+    /// Remove one row of a table.
+    ///
+    /// `table_index` counts tables as [`Self::table_mut`] does. A table keeps
+    /// at least one direct row. When the removed row starts a vertical merge
+    /// that continues below, the next row starts it instead. Raw XML before the
+    /// removed row stays in place, before the row that follows. The document is
+    /// unchanged on error.
+    pub fn remove_table_row(&mut self, table_index: usize, row_index: usize) -> Result<()> {
+        let mut candidate = self.clone_for_staging();
+        let table = candidate
+            .table_mut(table_index)
+            .ok_or_else(|| Error::Other(format!("table index {table_index} is out of range")))?
+            .inner;
+        let row_count = table.rows.len();
+        if row_index >= row_count {
+            return Err(Error::Other(format!(
+                "row index {row_index} is out of range for a table with {row_count} rows"
+            )));
+        }
+        if row_count == 1 {
+            return Err(Error::Other(
+                "a table keeps at least one row, so its only row cannot be removed".to_owned(),
+            ));
+        }
+        restart_merges_continued_below(table, row_index);
+        let raw_before_removed = table
+            .extra_xml
+            .iter()
+            .filter(|(position, _)| *position == row_index)
+            .count();
+        for (position, _) in &mut table.extra_xml {
+            if *position > row_index {
+                *position -= 1;
+            }
+        }
+        for (position, raw_before, _) in &mut table.content_controls {
+            if *position > row_index {
+                // Controls before the next row now follow the raw XML that
+                // preceded the removed row at the same boundary.
+                if *position == row_index + 1 {
+                    *raw_before += raw_before_removed;
+                }
+                *position -= 1;
+            }
+        }
+        table.rows.remove(row_index);
+        let reopened = candidate.prepare_and_reopen_staged()?;
+        self.commit_staged_mutation(reopened);
+        Ok(())
+    }
+
+    /// Return a copy of `row` with fresh identities and no comment anchors.
+    ///
+    /// The row is serialized inside a one-row table under the body namespace
+    /// scope, freshened like a cloned content fragment, and parsed back.
+    fn fresh_table_row_copy(&mut self, row: CT_Row) -> Result<CT_Row> {
+        let mut xml = Vec::new();
+        CT_Tbl {
+            properties: None,
+            grid: None,
+            rows: vec![row],
+            extra_xml: Vec::new(),
+            content_controls: Vec::new(),
+        }
+        .to_xml(&mut Writer::new(&mut xml))?;
+        let mut namespace_scope = self
+            .body_namespace_bindings
+            .iter()
+            .cloned()
+            .collect::<BTreeMap<_, _>>();
+        namespace_scope.insert("w".to_owned(), WORD_NAMESPACE.to_owned());
+        let fragment = ContentFragment {
+            kind: StoryItemKind::Table,
+            xml,
+            source_part_name: None,
+            source_story_kind: None,
+            source_owner_index: None,
+            namespace_scope,
+        };
+        let freshened = freshen_content_fragment_identities(self, &fragment)?;
+        let closed = close_content_fragment_namespaces(&freshened, &fragment.namespace_scope)?;
+        let mut wrapped =
+            format!(r#"<w:document xmlns:w="{WORD_NAMESPACE}"><w:body>"#).into_bytes();
+        wrapped.extend(strip_comment_anchors(&closed)?);
+        wrapped.extend_from_slice(b"</w:body></w:document>");
+        let mut content = CT_Document::from_xml(&wrapped)?.body.content.into_iter();
+        match (content.next(), content.next()) {
+            (Some(BodyContent::Table(mut table)), None) if table.rows.len() == 1 => {
+                Ok(table.rows.remove(0))
+            }
+            _ => Err(Error::Other(
+                "the copied table row did not parse back as one row".to_owned(),
+            )),
+        }
     }
 
     // ---- Image support ----
