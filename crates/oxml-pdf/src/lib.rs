@@ -257,6 +257,7 @@ mod tests {
             bold: false,
             italic: false,
             field_kind: None,
+            field_source: None,
             note: None,
         })]);
         assert_eq!(

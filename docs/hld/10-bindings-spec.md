@@ -754,7 +754,12 @@ types are additive. The new public `FieldEvaluationContext` fields are a
 pre-1.0 source break for native callers that construct the context with a
 struct literal. The new `FieldOutcome` variants are also a pre-1.0 source break
 for exhaustive native matches. Python, WASM, and CLI surfaces gain no evaluator
-methods and continue to preserve the same package content.
+methods and continue to preserve the same package content. Python does expose
+`Document.update_page_fields() -> int`, which calls the native
+`Document::update_page_fields` and advances the document revision when it
+writes a field, so handles taken earlier raise `StaleElementError`. The new
+`field_source` member of `oxml-layout`'s `TextSegment`, `GlyphRun`, and
+`MultilingualGlyphRun` is a pre-1.0 source break for native struct literals.
 
 Native paragraph item inspection reports whether comment-range and bookmark
 marker source elements contained child elements or visible text. Complex-field

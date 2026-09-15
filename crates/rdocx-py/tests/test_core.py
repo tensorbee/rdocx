@@ -359,6 +359,36 @@ def test_priority_word_operations_return_typed_snapshots_and_remain_atomic():
     assert live_after_noop.text == "no table of contents"
 
 
+def test_update_page_fields_writes_layout_page_numbers():
+    import rdocx
+
+    source = rdocx.Document()
+    source.add_paragraph("placeholder")
+    document = _replace_document_body(
+        source,
+        """
+        <w:p><w:r><w:t>Page one.</w:t></w:r></w:p>
+        <w:p><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t xml:space="preserve">Page </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>7</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t xml:space="preserve"> of </w:t></w:r><w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p>
+        """,
+    )
+    held_before_update = document.paragraphs[1]
+    assert document.update_page_fields() == 2
+    with pytest.raises(
+        rdocx.StaleElementError, match=r"revision 0, but the document is now at revision 1"
+    ):
+        _ = held_before_update.text
+    xml = _document_xml(document)
+    assert b"<w:t>7</w:t>" not in xml
+    assert b"<w:t>9</w:t>" not in xml
+    assert xml.count(b"<w:t>2</w:t>") == 2
+
+    no_page_fields = rdocx.Document()
+    no_page_fields.add_paragraph("no page fields")
+    live_after_noop = no_page_fields.paragraphs[0]
+    assert no_page_fields.update_page_fields() == 0
+    assert live_after_noop.text == "no page fields"
+
+
 def test_word_structure_snapshots_preserve_order_ownership_and_types():
     import rdocx
 

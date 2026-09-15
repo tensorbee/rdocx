@@ -2045,6 +2045,7 @@ mod tests {
             bold: false,
             italic: false,
             field_kind: None,
+            field_source: None,
             note: None,
         }
     }
@@ -2801,6 +2802,7 @@ mod tests {
             bold: false,
             italic: false,
             field_kind: None,
+            field_source: None,
             note: None,
         });
         let pdf = tagged_pdf(
@@ -2897,6 +2899,7 @@ mod tests {
                         bold: false,
                         italic: false,
                         field_kind: None,
+                        field_source: None,
                         note: None,
                     })],
                 }])
@@ -3226,6 +3229,7 @@ mod tests {
             bold: false,
             italic: false,
             field_kind: None,
+            field_source: None,
             note: None,
         });
         let layout = LayoutResult::new(
@@ -3392,6 +3396,7 @@ mod tests {
                 bold: false,
                 italic: false,
                 field_kind: None,
+                field_source: None,
                 note: None,
             }),
             PositionedElement::Image {

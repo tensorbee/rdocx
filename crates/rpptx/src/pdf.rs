@@ -1482,6 +1482,7 @@ impl Importer<'_> {
             bold: false,
             italic: false,
             field_kind: None,
+            field_source: None,
             note: None,
         };
         if state.graphics_supported && state.fill_supported && state.text_visible {

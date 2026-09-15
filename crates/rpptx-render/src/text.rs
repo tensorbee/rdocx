@@ -211,6 +211,7 @@ fn shape_run(
         baseline_offset: style.baseline.unwrap_or(0.0) * font_size,
         hyperlink_url: style.hyperlink_url.clone(),
         field_kind: None,
+        field_source: None,
         note: None,
     })
 }
@@ -977,6 +978,7 @@ fn emit_segment(
         bold: segment.bold,
         italic: segment.italic,
         field_kind: segment.field_kind,
+        field_source: segment.field_source,
         note: segment.note,
     }));
 
@@ -1066,6 +1068,7 @@ fn emit_multilingual_segment(
         bold: base.bold,
         italic: base.italic,
         field_kind: base.field_kind,
+        field_source: base.field_source,
         note: base.note,
     }));
 
@@ -2115,6 +2118,7 @@ mod tests {
             baseline_offset: 0.0,
             hyperlink_url: None,
             field_kind: None,
+            field_source: None,
             note: None,
         };
         let line = oxml_layout::LayoutLine {

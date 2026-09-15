@@ -20,10 +20,10 @@ pub use line::{
     break_multilingual_into_lines,
 };
 pub use output::{
-    Color, Diagnostic, DocumentMetadata, DocumentStructure, Effect, FieldKind, FontData, FontId,
-    GlyphRun, GroupElement, LayoutResult, MediaId, MultilingualGlyphRun, OutlineEntry, PageFrame,
-    PathElement, Point, PositionedElement, Rect, SourceNodeId, SourceSpan, StructureId,
-    StructureNode, StructureRole, walk,
+    Color, Diagnostic, DocumentMetadata, DocumentStructure, Effect, FieldKind, FieldSource,
+    FontData, FontId, GlyphRun, GroupElement, LayoutResult, MediaId, MultilingualGlyphRun,
+    OutlineEntry, PageFrame, PathElement, Point, PositionedElement, Rect, SourceNodeId, SourceSpan,
+    StructureId, StructureNode, StructureRole, walk,
 };
 pub use paint::{GradientStop, LineCap, LineJoin, Paint, Stroke};
 pub use path::{FillRule, Path, PathCommand};

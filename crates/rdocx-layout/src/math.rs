@@ -499,6 +499,7 @@ fn layout_text(
                 bold,
                 italic,
                 field_kind: None,
+                field_source: None,
                 note: None,
             })]),
         },
@@ -1522,6 +1523,7 @@ mod tests {
                     baseline_offset: 0.0,
                     hyperlink_url: None,
                     field_kind: None,
+                    field_source: None,
                     note: None,
                 }),
                 InlineItem::Group {
