@@ -85,6 +85,12 @@ def exercise_rdocx_types(path: Path) -> None:
     fragments: tuple[LayoutFragment, ...] = document.layout()
     maybe_layout_page: LayoutPage | None = document.layout_page(0)
     report: TocRebuildReport = document.rebuild_toc()
+    document.set_header("Header")
+    document.set_footer("Footer")
+    document.set_story_text(story_items[0], "edited")
+    document.add_hyperlink_to_story(stories[0], "home", "https://example.com/")
+    link_run: Run = first.add_hyperlink("docs", "https://example.com/docs")
+    assert_type(story_items[0].xml, bytes)
     if fragments:
         bounds: BoundingBox = fragments[0].bounds
         assert_type(bounds.width, float)
