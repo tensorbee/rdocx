@@ -27043,7 +27043,7 @@ mod tests {
             assert_eq!(row.extra_xml, vec![(0, row_raw.clone())]);
             assert_eq!(
                 row.properties.as_ref().unwrap().header,
-                (index % 3 == 0).then_some(true)
+                Some(index % 3 == 0)
             );
             let cell = &row.cells[0];
             assert_eq!(cell.extra_xml, vec![(0, cell_raw.clone())]);
