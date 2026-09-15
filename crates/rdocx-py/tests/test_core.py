@@ -24,6 +24,115 @@ def _document_xml(document):
         return archive.read("word/document.xml")
 
 
+def _tracked_document():
+    import rdocx
+
+    original = rdocx.Document()
+    original.add_paragraph("alpha")
+    edited = rdocx.Document()
+    edited.add_paragraph("alpha beta")
+    document = rdocx.Document.from_bytes(original.to_bytes())
+    document.compare(edited, "Ada", "2026-01-02T03:04:05Z")
+    return document
+
+
+def test_revisions_are_snapshots_and_resolution_reports_counts():
+    import rdocx
+
+    document = _tracked_document()
+    revisions = document.revisions
+    assert revisions
+    assert {revision.author for revision in revisions} == {"Ada"}
+    kinds = {revision.kind for revision in revisions}
+    assert "insertion" in kinds
+    assert kinds <= {
+        "insertion",
+        "deletion",
+        "move_from",
+        "move_to",
+        "run_property_change",
+        "paragraph_property_change",
+        "table_property_change",
+        "section_property_change",
+    }
+    assert {revision.timestamp for revision in revisions} == {"2026-01-02T03:04:05Z"}
+
+    held = document.paragraphs[0]
+    assert document.reject_revisions_by_author("Grace") == 0
+    held.text
+    with pytest.raises(rdocx.RdocxError):
+        document.accept_revisions_in_date_range(start="yesterday", end="2026-01-03T00:00:00Z")
+    held.text
+
+    assert (
+        document.accept_revisions_in_date_range(
+            start="2026-01-01T00:00:00Z", end="2026-01-03T00:00:00Z"
+        )
+        > 0
+    )
+    with pytest.raises(rdocx.StaleElementError):
+        held.text
+    assert document.revisions == ()
+    assert [paragraph.text for paragraph in document.paragraphs] == ["alpha beta"]
+
+
+def test_reject_revision_id_then_reject_all_restores_the_original():
+    document = _tracked_document()
+    first = document.revisions[0]
+    assert document.reject_revision_id(first.id) > 0
+    assert all(revision.id != first.id for revision in document.revisions)
+    document.reject_all()
+    assert document.revisions == ()
+    assert [paragraph.text for paragraph in document.paragraphs] == ["alpha"]
+
+
+def test_counted_replacement_spans_runs_and_a_bad_regex_changes_nothing():
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("Dear {{na").add_run("me}}, hello")
+    held = document.paragraphs[0]
+    assert document.try_replace_text("{{missing}}", "x") == 0
+    held.text
+    assert document.try_replace_text("{{name}}", "Ada") == 1
+    with pytest.raises(rdocx.StaleElementError):
+        held.text
+    assert document.paragraphs[0].text == "Dear Ada, hello"
+
+    before = document.to_bytes()
+    with pytest.raises(rdocx.RdocxError, match="invalid regex"):
+        document.replace_all_regex([("hello", "bye"), ("(", "x")])
+    assert document.to_bytes() == before
+    assert document.replace_all_regex([("h(el)lo", "bye")]) == 1
+    assert document.paragraphs[0].text == "Dear Ada, bye"
+
+
+def test_update_fields_takes_a_keyword_context_and_counts_updates():
+    import datetime
+
+    import rdocx
+
+    document = _replace_document_body(
+        rdocx.Document(),
+        '<w:p><w:fldSimple w:instr=" FILENAME "><w:r><w:t>old.docx</w:t></w:r></w:fldSimple></w:p>'
+        '<w:p><w:fldSimple w:instr=" MERGEFIELD Name "><w:r><w:t>Name</w:t></w:r></w:fldSimple></w:p>'
+        '<w:p><w:fldSimple w:instr=" DATE \\@ &quot;yyyy-MM-dd&quot; "><w:r><w:t>2000-01-01</w:t></w:r></w:fldSimple></w:p>',
+    )
+    held = document.paragraphs[0]
+    count = document.update_fields(
+        now=datetime.datetime(2026, 9, 15, 10, 30),
+        file_name="report.docx",
+        merge_fields={"Name": "Ada"},
+    )
+    assert count == 3
+    with pytest.raises(rdocx.StaleElementError):
+        held.text
+    xml = _document_xml(document)
+    for cached in (b"report.docx", b"Ada", b"2026-09-15"):
+        assert cached in xml
+    assert b"old.docx" not in xml and b"2000-01-01" not in xml
+
+
 def _document_with_structure_snapshots(document):
     word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
     rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"

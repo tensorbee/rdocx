@@ -19,6 +19,7 @@ from rdocx import (
     Paragraph,
     ParagraphCollection,
     ParagraphFormat,
+    Revision,
     Row,
     RowCollection,
     Run,
@@ -85,6 +86,17 @@ def exercise_rdocx_types(path: Path) -> None:
     fragments: tuple[LayoutFragment, ...] = document.layout()
     maybe_layout_page: LayoutPage | None = document.layout_page(0)
     report: TocRebuildReport = document.rebuild_toc()
+    revisions: tuple[Revision, ...] = document.revisions
+    accepted: int = document.accept_all()
+    dated: int = document.reject_revisions_in_date_range(
+        start="2026-01-01T00:00:00Z", end="2026-12-31T00:00:00Z"
+    )
+    replaced: int = document.try_replace_text("{{name}}", "Ada")
+    matched: int = document.replace_all_regex([(r"\d", "#")])
+    updated: int = document.update_fields(
+        file_name="report.docx", merge_fields={"Name": "Ada"}
+    )
+    assert_type(revisions[0].timestamp, str | None)
     if fragments:
         bounds: BoundingBox = fragments[0].bounds
         assert_type(bounds.width, float)
@@ -97,6 +109,7 @@ def exercise_rdocx_types(path: Path) -> None:
     assert_type(hyperlinks[0].url, str | None)
     assert_type(report.entry_count, int)
     package_bytes, pdf_bytes, pages, maybe_page, sliced, channels
+    accepted, dated, replaced, matched, updated
 
 
 if TYPE_CHECKING:

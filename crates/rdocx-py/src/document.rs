@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use oxml_py_support::{PathSeg, RevisionCounter};
@@ -234,6 +235,42 @@ pub struct PyTocRebuildReport {
     pub entry_count: usize,
     pub bookmark_count: usize,
     pub diagnostic_count: usize,
+}
+
+#[pyclass(name = "Revision", frozen, get_all, eq, skip_from_py_object)]
+#[derive(Clone, PartialEq, Eq)]
+pub struct PyRevision {
+    pub id: i32,
+    pub author: String,
+    pub timestamp: Option<String>,
+    pub kind: String,
+}
+
+#[pymethods]
+impl PyRevision {
+    #[new]
+    #[pyo3(signature = (*, id, author, timestamp, kind))]
+    fn new(id: i32, author: String, timestamp: Option<String>, kind: String) -> Self {
+        Self {
+            id,
+            author,
+            timestamp,
+            kind,
+        }
+    }
+}
+
+fn revision_kind_name(kind: rdocx::RevisionKind) -> &'static str {
+    match kind {
+        rdocx::RevisionKind::Insertion => "insertion",
+        rdocx::RevisionKind::Deletion => "deletion",
+        rdocx::RevisionKind::MoveFrom => "move_from",
+        rdocx::RevisionKind::MoveTo => "move_to",
+        rdocx::RevisionKind::RunPropertyChange => "run_property_change",
+        rdocx::RevisionKind::ParagraphPropertyChange => "paragraph_property_change",
+        rdocx::RevisionKind::TablePropertyChange => "table_property_change",
+        rdocx::RevisionKind::SectionPropertyChange => "section_property_change",
+    }
 }
 
 #[pyclass(name = "Story", frozen, get_all, eq, skip_from_py_object)]
@@ -585,6 +622,23 @@ impl PyDocument {
             inner,
             revisions: RevisionCounter::new(),
         }
+    }
+
+    /// Run a native mutation that reports how many things it changed.
+    ///
+    /// The GIL is released while it runs, and live handles are staled only
+    /// when the count is nonzero.
+    fn counted_mutation<F>(&mut self, py: Python<'_>, mutation: F) -> PyResult<usize>
+    where
+        F: FnOnce(&mut rdocx::Document) -> rdocx::Result<usize> + Send,
+    {
+        let count = py
+            .detach(|| mutation(&mut self.inner))
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        if count > 0 {
+            self.revisions.bump();
+        }
+        Ok(count)
     }
 }
 
@@ -1047,6 +1101,137 @@ impl PyDocument {
             bookmark_count: report.bookmark_count,
             diagnostic_count: report.diagnostic_count,
         })
+    }
+
+    #[getter(revisions)]
+    fn revision_snapshots<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(
+            py,
+            self.inner
+                .revisions()
+                .into_iter()
+                .map(|revision| PyRevision {
+                    id: revision.id(),
+                    author: revision.author().to_owned(),
+                    timestamp: revision.timestamp().map(str::to_owned),
+                    kind: revision_kind_name(revision.kind()).to_owned(),
+                }),
+        )
+    }
+
+    fn accept_all(&mut self, py: Python<'_>) -> PyResult<usize> {
+        self.counted_mutation(py, rdocx::Document::accept_all)
+    }
+
+    fn reject_all(&mut self, py: Python<'_>) -> PyResult<usize> {
+        self.counted_mutation(py, rdocx::Document::reject_all)
+    }
+
+    fn accept_revisions_by_author(&mut self, py: Python<'_>, author: &str) -> PyResult<usize> {
+        self.counted_mutation(py, |document| document.accept_revisions_by_author(author))
+    }
+
+    fn reject_revisions_by_author(&mut self, py: Python<'_>, author: &str) -> PyResult<usize> {
+        self.counted_mutation(py, |document| document.reject_revisions_by_author(author))
+    }
+
+    #[pyo3(signature = (*, start, end))]
+    fn accept_revisions_in_date_range(
+        &mut self,
+        py: Python<'_>,
+        start: &str,
+        end: &str,
+    ) -> PyResult<usize> {
+        self.counted_mutation(py, |document| {
+            document.accept_revisions_in_date_range(start, end)
+        })
+    }
+
+    #[pyo3(signature = (*, start, end))]
+    fn reject_revisions_in_date_range(
+        &mut self,
+        py: Python<'_>,
+        start: &str,
+        end: &str,
+    ) -> PyResult<usize> {
+        self.counted_mutation(py, |document| {
+            document.reject_revisions_in_date_range(start, end)
+        })
+    }
+
+    fn accept_revision_id(&mut self, py: Python<'_>, id: i32) -> PyResult<usize> {
+        self.counted_mutation(py, |document| document.accept_revision_id(id))
+    }
+
+    fn reject_revision_id(&mut self, py: Python<'_>, id: i32) -> PyResult<usize> {
+        self.counted_mutation(py, |document| document.reject_revision_id(id))
+    }
+
+    fn try_replace_text(
+        &mut self,
+        py: Python<'_>,
+        placeholder: &str,
+        replacement: &str,
+    ) -> PyResult<usize> {
+        self.counted_mutation(py, |document| {
+            document.try_replace_text(placeholder, replacement)
+        })
+    }
+
+    fn replace_all_regex(
+        &mut self,
+        py: Python<'_>,
+        patterns: Vec<(String, String)>,
+    ) -> PyResult<usize> {
+        self.counted_mutation(py, |document| document.replace_all_regex(&patterns))
+    }
+
+    #[pyo3(signature = (
+        *,
+        now = None,
+        file_name = None,
+        file_path = None,
+        merge_fields = None,
+        included_text = None,
+        merge_record_number = None,
+        merge_sequence_number = None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn update_fields(
+        &mut self,
+        py: Python<'_>,
+        now: Option<&Bound<'_, PyAny>>,
+        file_name: Option<String>,
+        file_path: Option<String>,
+        merge_fields: Option<BTreeMap<String, String>>,
+        included_text: Option<BTreeMap<String, String>>,
+        merge_record_number: Option<u32>,
+        merge_sequence_number: Option<u32>,
+    ) -> PyResult<usize> {
+        // Read field by field: the abi3 build has no datetime accessors, and
+        // the wall-clock values are used as given.
+        let now = now
+            .map(|now| {
+                Ok::<_, PyErr>(rdocx::FieldDateTime {
+                    year: now.getattr("year")?.extract()?,
+                    month: now.getattr("month")?.extract()?,
+                    day: now.getattr("day")?.extract()?,
+                    hour: now.getattr("hour")?.extract()?,
+                    minute: now.getattr("minute")?.extract()?,
+                    second: now.getattr("second")?.extract()?,
+                })
+            })
+            .transpose()?;
+        let context = rdocx::FieldEvaluationContext {
+            now,
+            file_name,
+            file_path,
+            merge_fields: merge_fields.unwrap_or_default(),
+            included_text: included_text.unwrap_or_default(),
+            merge_record_number,
+            merge_sequence_number,
+        };
+        self.counted_mutation(py, |document| document.update_fields(&context))
     }
 
     #[getter]
