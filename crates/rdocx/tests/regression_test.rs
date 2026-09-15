@@ -7621,7 +7621,7 @@ fn toc_rebuild_rejects_ambiguous_or_malformed_sources_atomically() {
     }
 
     let unsupported = r#"
-        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \z</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \x</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
         <w:p><w:r><w:t>stored unsupported cache</w:t></w:r></w:p>
         <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
     "#;
@@ -7646,6 +7646,24 @@ fn toc_rebuild_rejects_ambiguous_or_malformed_sources_atomically() {
     let mut no_toc = Document::new();
     no_toc.add_paragraph("Heading").style("Heading1");
     assert_eq!(no_toc.rebuild_toc().unwrap(), TocRebuildReport::default());
+}
+
+#[test]
+fn toc_rebuild_does_not_skip_word_default_instruction_with_web_layout_switch() {
+    let body = r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> TOC \o "1-3" \h \z \u </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>stale cache</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Alpha</w:t></w:r></w:p>
+    "#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+
+    let report = document.rebuild_toc().unwrap();
+    assert_eq!(report.entry_count, 1);
+    assert_eq!(report.diagnostic_count, 0);
+    let xml = document_xml(&mut document);
+    assert!(!xml.contains("stale cache"), "{xml}");
+    assert!(xml.contains(r#" TOC \o "1-3" \h \z \u "#), "{xml}");
 }
 
 #[test]
