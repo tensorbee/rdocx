@@ -8511,6 +8511,9 @@ impl<'a> Evaluator<'a> {
             };
             match field_switch.name.as_str() {
                 "h" if argument.is_none() => toc.hyperlink = true,
+                // `\z` only hides tab leaders and page numbers in Web layout
+                // view, so it does not change the rebuilt entries.
+                "z" if argument.is_none() => {}
                 "u" if argument.is_none() => {
                     toc.use_outline_levels = true;
                     has_explicit_source = true;

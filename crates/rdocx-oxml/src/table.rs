@@ -11,7 +11,8 @@ use crate::numbering::{
     local_namespace_overrides, merged_owner_bindings, namespace_bindings, word_prefixes_at,
 };
 use crate::properties::{
-    CT_Shd, get_val_attr, get_word_val_attr, is_word_attribute, is_word_element,
+    CT_Shd, get_val_attr, get_word_val_attr, is_word_attribute, is_word_element, parse_word_toggle,
+    write_toggle,
 };
 use crate::raw_xml::{capture_element, capture_empty_element};
 use crate::revision::{CT_Revision, RevisionKind};
@@ -984,7 +985,7 @@ impl CT_TrPr {
                             }
                         }
                     } else if matches_local_name(name.as_ref(), b"tblHeader") {
-                        pr.header = Some(true);
+                        pr.header = Some(parse_word_toggle(e, &prefixes)?);
                     } else if matches_local_name(name.as_ref(), b"jc") {
                         if let Some(val) = get_val_attr(e)? {
                             pr.jc = ST_Jc::from_str(&val).ok();
@@ -1000,7 +1001,7 @@ impl CT_TrPr {
                     } else if matches_local_name(name.as_ref(), b"cnfStyle") {
                         pr.cnf_style = get_val_attr(e)?;
                     } else if matches_local_name(name.as_ref(), b"cantSplit") {
-                        pr.cant_split = Some(true);
+                        pr.cant_split = Some(parse_word_toggle(e, &prefixes)?);
                     } else if is_word_element(name.as_ref(), b"ins", &prefixes)
                         || is_word_element(name.as_ref(), b"del", &prefixes)
                     {
@@ -1100,10 +1101,8 @@ impl CT_TrPr {
         write_extras_at(writer, &self.extra_xml, 4)?;
         write_extras_at(writer, &self.extra_xml, 5)?;
         write_extras_at(writer, &self.extra_xml, 6)?;
-        if let Some(ref cant_split) = self.cant_split
-            && *cant_split
-        {
-            writer.write_event(Event::Empty(BytesStart::new("w:cantSplit")))?;
+        if let Some(cant_split) = self.cant_split {
+            write_toggle(writer, "w:cantSplit", cant_split)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 7)?;
@@ -1118,8 +1117,8 @@ impl CT_TrPr {
         }
 
         write_extras_at(writer, &self.extra_xml, 8)?;
-        if let Some(true) = self.header {
-            writer.write_event(Event::Empty(BytesStart::new("w:tblHeader")))?;
+        if let Some(header) = self.header {
+            write_toggle(writer, "w:tblHeader", header)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 9)?;
@@ -1410,7 +1409,7 @@ impl CT_TcPr {
         } else if is_word_element(name.as_ref(), b"cnfStyle", word_prefixes) {
             pr.cnf_style = get_word_val_attr(e, word_prefixes)?;
         } else if is_word_element(name.as_ref(), b"noWrap", word_prefixes) {
-            pr.no_wrap = Some(true);
+            pr.no_wrap = Some(parse_word_toggle(e, word_prefixes)?);
         } else if is_word_element(name.as_ref(), b"textDirection", word_prefixes)
             && let Some(val) = get_word_val_attr(e, word_prefixes)?
         {
@@ -1482,8 +1481,8 @@ impl CT_TcPr {
         }
 
         write_extras_at(writer, &self.extra_xml, 7)?;
-        if let Some(true) = self.no_wrap {
-            writer.write_event(Event::Empty(BytesStart::new("w:noWrap")))?;
+        if let Some(no_wrap) = self.no_wrap {
+            write_toggle(writer, "w:noWrap", no_wrap)?;
         }
 
         write_extras_at(writer, &self.extra_xml, 8)?;
@@ -3125,6 +3124,43 @@ mod tests {
         assert_eq!(tr_pr.header, Some(true));
         assert_eq!(tr_pr.grid_before, Some(1));
         assert_eq!(tr_pr.grid_after, Some(2));
+    }
+
+    #[test]
+    fn explicit_off_row_and_cell_toggles_are_not_read_or_written_as_on() {
+        let table = parse_table(
+            r#"<w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid>
+               <w:tr>
+                 <w:trPr>
+                   <w:cantSplit w:val="0"/>
+                   <w:tblHeader w:val="false"/>
+                 </w:trPr>
+                 <w:tc><w:tcPr><w:noWrap w:val="off"/></w:tcPr><w:p/></w:tc>
+               </w:tr>"#,
+        );
+        let assert_off = |table: &CT_Tbl| {
+            let row = &table.rows[0];
+            let tr_pr = row.properties.as_ref().unwrap();
+            assert_eq!(tr_pr.cant_split, Some(false));
+            assert_eq!(tr_pr.header, Some(false));
+            let tc_pr = row.cells[0].properties.as_ref().unwrap();
+            assert_eq!(tc_pr.no_wrap, Some(false));
+        };
+        assert_off(&table);
+
+        let xml = table_to_xml(&table);
+        for written in [
+            r#"<w:cantSplit w:val="false"/>"#,
+            r#"<w:tblHeader w:val="false"/>"#,
+            r#"<w:noWrap w:val="false"/>"#,
+        ] {
+            assert!(xml.contains(written), "missing {written}: {xml}");
+        }
+        let children = xml
+            .strip_prefix("<w:tbl>")
+            .and_then(|xml| xml.strip_suffix("</w:tbl>"))
+            .expect("table element wraps its children");
+        assert_off(&parse_table(children));
     }
 
     #[test]

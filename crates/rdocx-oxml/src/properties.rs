@@ -2807,7 +2807,7 @@ pub(crate) fn get_word_val_attr(
     Ok(None)
 }
 
-fn parse_word_toggle(e: &BytesStart, word_prefixes: &[String]) -> Result<bool> {
+pub(crate) fn parse_word_toggle(e: &BytesStart, word_prefixes: &[String]) -> Result<bool> {
     let val = get_word_val_attr(e, word_prefixes)?;
     Ok(ST_OnOff::from_str_or_default(val.as_deref()).is_on())
 }
