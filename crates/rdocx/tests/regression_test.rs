@@ -816,6 +816,86 @@ fn f255_story_document() -> Document {
     Document::from_bytes(&bytes.into_inner()).unwrap()
 }
 
+#[test]
+fn replace_image_data_keeps_drawings_and_follows_the_new_format() {
+    let jpeg: &[u8] = b"\xff\xd8\xff\xe0replacement";
+    let mut authored = f255_story_document();
+    authored.add_picture(
+        b"body image",
+        "body.png",
+        Length::pt(20.0),
+        Length::pt(10.0),
+    );
+    let header = f254_story(&authored, StoryKind::Header);
+    authored
+        .add_picture_to_story(
+            &header,
+            b"header image",
+            "header.png",
+            Length::pt(1.0),
+            Length::pt(1.0),
+        )
+        .unwrap();
+    let bytes = authored.to_bytes().unwrap();
+    let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(&bytes)).unwrap();
+    let mut document = Document::from_bytes(&bytes).unwrap();
+    let header = f254_story(&document, StoryKind::Header);
+    let header_image = package
+        .get_part_rels(header.part_name())
+        .unwrap()
+        .items
+        .iter()
+        .find(|relationship| relationship.rel_type == oxml_opc::relationship::rel_types::IMAGE)
+        .unwrap()
+        .id
+        .clone();
+    let body_image = document.images()[0].clone();
+
+    let before = document.to_bytes().unwrap();
+    assert!(document.replace_image_data("rIdMissing", jpeg).is_err());
+    assert_eq!(document.to_bytes().unwrap(), before);
+
+    document
+        .replace_image_data(&body_image.embed_id, jpeg)
+        .unwrap();
+    assert_eq!(
+        document.image_data(&body_image.embed_id).as_deref(),
+        Some(jpeg)
+    );
+    assert_eq!(document.images()[0], body_image);
+    document
+        .replace_image_data_for_story(&header, &header_image, b"header replacement")
+        .unwrap();
+    assert_eq!(
+        document
+            .image_data_for_story(&header, &header_image)
+            .unwrap(),
+        b"header replacement"
+    );
+    assert_eq!(
+        document.image_data(&body_image.embed_id).as_deref(),
+        Some(jpeg)
+    );
+
+    let saved = document.to_bytes().unwrap();
+    let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(&saved)).unwrap();
+    let (part, _) = package
+        .parts
+        .iter()
+        .find(|(_, data)| data.as_slice() == jpeg)
+        .expect("replaced body image part");
+    assert_eq!(
+        package.content_types.content_type_for(part),
+        Some("image/jpeg")
+    );
+    assert!(
+        package
+            .parts
+            .values()
+            .any(|data| data.as_slice() == b"header replacement")
+    );
+}
+
 fn f_x090_cross_part_drawing_package() -> Vec<u8> {
     let mut document = f255_story_document();
     document.add_picture(b"body image", "body.png", Length::pt(1.0), Length::pt(1.0));
