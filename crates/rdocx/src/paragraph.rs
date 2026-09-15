@@ -478,6 +478,14 @@ impl<'a> Paragraph<'a> {
         self.ensure_ppr().style_id = Some(style_id.to_string());
     }
 
+    /// Set or clear the paragraph style ID in place.
+    pub fn set_style_value(&mut self, style_id: Option<&str>) {
+        if style_id.is_none() && self.inner.properties.is_none() {
+            return;
+        }
+        self.ensure_ppr().style_id = style_id.map(str::to_owned);
+    }
+
     /// Attach this paragraph to a list definition as a list item.
     ///
     /// `num_id` comes from [`crate::Document::add_list_definition`] (or the

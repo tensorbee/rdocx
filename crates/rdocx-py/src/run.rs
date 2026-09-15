@@ -113,6 +113,24 @@ impl PyRun {
             crate::formatting::PyFont::new(self.document.clone_ref(py), self.path.clone()),
         )
     }
+
+    #[getter]
+    fn style(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        let (location, run_index) = self.validate(py)?;
+        Ok(crate::formatting::run_snapshot(py, &self.document, location, run_index)?.style_id)
+    }
+
+    #[setter]
+    fn set_style(&self, py: Python<'_>, value: Option<&str>) -> PyResult<()> {
+        let (location, run_index) = self.validate(py)?;
+        crate::formatting::apply_run_update(
+            py,
+            &self.document,
+            location,
+            run_index,
+            crate::formatting::FontUpdate::Style(value),
+        )
+    }
 }
 
 #[pyclass(name = "RunCollection")]

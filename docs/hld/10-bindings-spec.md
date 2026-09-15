@@ -205,7 +205,11 @@ doc.save_pdf("out.pdf")                        # documented as an rdocx extensio
 The S33 formatting inventory is intentionally bounded to font name, size,
 colour, bold, italic, underline and strike, plus paragraph alignment, spacing,
 indentation, keep-with-next, keep-together, page-break-before and widow
-control. Assigning `None` clears direct tri-state formatting. The S33 table
+control. Assigning `None` clears direct tri-state formatting. `Paragraph` also
+exposes its style ID and its list numbering as a `(num_id, level)` pair, `Run`
+its character style ID, and `Font` its highlight. Highlight reads a
+`w:highlight` keyword or a shading fill, and accepts six hexadecimal digits or
+`auto`, written as a shading fill. These setters also clear with `None`. The S33 table
 inventory is lazy table, row, cell and nested paragraph lookup, table style,
 alignment and width, plus cell text, width and vertical alignment. These
 handles use `Body`, `Row`, `Cell`, `Para` and `Run` path segments and reach the

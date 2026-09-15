@@ -577,6 +577,23 @@ impl<'a> Run<'a> {
         });
     }
 
+    /// Set or clear the highlight in place.
+    ///
+    /// A value is written as a shading fill, like [`Run::set_highlight`].
+    /// Clearing removes that shading and any `w:highlight` keyword, the two
+    /// forms [`RunRef::highlight`] reads.
+    pub fn set_highlight_value(&mut self, color: Option<&str>) {
+        match color {
+            Some(color) => self.set_highlight(color),
+            None => {
+                if let Some(properties) = self.inner.properties.as_mut() {
+                    properties.shading = None;
+                    properties.highlight = None;
+                }
+            }
+        }
+    }
+
     /// Set strikethrough formatting.
     pub fn strike(mut self, val: bool) -> Self {
         self.set_strike(val);
@@ -704,6 +721,14 @@ impl<'a> Run<'a> {
     /// Set the character style by ID in place.
     pub fn set_style(&mut self, style_id: &str) {
         self.ensure_rpr().style_id = Some(style_id.to_string());
+    }
+
+    /// Set or clear the character style ID in place.
+    pub fn set_style_value(&mut self, style_id: Option<&str>) {
+        if style_id.is_none() && self.inner.properties.is_none() {
+            return;
+        }
+        self.ensure_rpr().style_id = style_id.map(str::to_owned);
     }
 
     fn ensure_rpr(&mut self) -> &mut CT_RPr {
