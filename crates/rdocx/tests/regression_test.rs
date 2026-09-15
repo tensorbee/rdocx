@@ -7084,6 +7084,193 @@ fn every_supported_field_matches_the_pinned_word_result() {
     assert_eq!(actual, expected, "{WORD_FIELD_ORACLE_INPUT}");
 }
 
+fn top_level_field_caches<'a>(
+    paragraphs: impl IntoIterator<Item = &'a CT_P>,
+) -> Vec<(String, String, Option<bool>)> {
+    paragraphs
+        .into_iter()
+        .flat_map(CT_P::runs)
+        .flat_map(|run| &run.content)
+        .filter_map(|content| match content {
+            rdocx_oxml::text::RunContent::Field(field) => Some((
+                field.instruction.name.clone(),
+                field.cached_result.clone(),
+                field.dirty,
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn update_page_fields_writes_first_placed_page_values_through_staged_parts() {
+    fn complex_field(instruction: &str, cached: &str) -> String {
+        format!(
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> {instruction} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>{cached}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+        )
+    }
+
+    let mut seed = Document::new();
+    let mut package =
+        oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(seed.to_bytes().unwrap())).unwrap();
+    let (first_footer_id, footer_id, even_footer_id) = {
+        let relationships = package.get_or_create_part_rels("/word/document.xml");
+        (
+            relationships.add(oxml_opc::relationship::rel_types::FOOTER, "footer1.xml"),
+            relationships.add(oxml_opc::relationship::rel_types::FOOTER, "footer1.xml"),
+            relationships.add(oxml_opc::relationship::rel_types::FOOTER, "footer2.xml"),
+        )
+    };
+    assert_ne!(first_footer_id, footer_id);
+    for (part_name, paragraph) in [
+        (
+            "/word/footer1.xml",
+            format!(
+                r#"<w:r><w:t xml:space="preserve">Page </w:t></w:r>{}<w:r><w:t xml:space="preserve"> of </w:t></w:r>{}"#,
+                complex_field("PAGE", "7"),
+                complex_field("NUMPAGES", "9")
+            ),
+        ),
+        ("/word/footer2.xml", complex_field("PAGE", "7")),
+    ] {
+        package.set_part(
+            part_name,
+            format!(r#"<w:ftr xmlns:w="{W_NS}"><w:p>{paragraph}</w:p></w:ftr>"#).into_bytes(),
+        );
+        package.content_types.add_override(
+            part_name,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml",
+        );
+    }
+    let nested_if = format!(
+        r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> IF </w:instrText></w:r>{}<w:r><w:instrText xml:space="preserve"> = 2 "two" "other" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>other</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+        complex_field("PAGE", "5")
+    );
+    let body = format!(
+        r#"<w:p><w:pPr><w:sectPr><w:footerReference w:type="default" r:id="{first_footer_id}"/></w:sectPr></w:pPr><w:r><w:t>Page one.</w:t></w:r><w:fldSimple w:instr="AUTHOR"><w:r><w:t>stale author</w:t></w:r></w:fldSimple></w:p><w:p><w:r><w:t xml:space="preserve">Body </w:t></w:r>{}{}{}{nested_if}<w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p><w:sectPr><w:footerReference w:type="default" r:id="{footer_id}"/><w:footerReference w:type="even" r:id="{even_footer_id}"/></w:sectPr>"#,
+        complex_field("PAGE", "7"),
+        complex_field(r"PAGE \* roman", "x"),
+        complex_field(r"PAGE \* CardText", "stale words"),
+    );
+    package.set_part(
+        "/word/document.xml",
+        format!(
+            r#"<?xml version="1.0"?><w:document xmlns:w="{W_NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>{body}</w:body></w:document>"#
+        )
+        .into_bytes(),
+    );
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    let mut document = Document::from_bytes(bytes.get_ref()).unwrap();
+
+    // The shared footer part is laid out once per relationship, and each
+    // placement keeps the identity of its own relationship.
+    let layout = document.layout_deterministic().unwrap();
+    let placed = layout
+        .layout
+        .pages
+        .iter()
+        .map(|page| {
+            let mut fields = Vec::new();
+            oxml_layout::walk(&page.elements, &mut |element, _| {
+                if let rdocx_layout::PositionedElement::Text(run) = element
+                    && run.field_kind == Some(oxml_layout::FieldKind::Page)
+                    && let Some(field) = run.field_source
+                {
+                    let path = layout.source_node(field.node).unwrap();
+                    fields.push((path.story.clone(), path.children.clone(), field.index));
+                }
+            });
+            fields
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(placed.len(), 2);
+    let footer_story = |relationship_id: &str| rdocx_layout::WordStory::Footer {
+        relationship_id: relationship_id.to_owned(),
+    };
+    assert_eq!(
+        placed[0],
+        vec![(footer_story(&first_footer_id), vec![0], 0)]
+    );
+    for index in 0..3 {
+        assert!(placed[1].contains(&(rdocx_layout::WordStory::Document, vec![1], index)));
+    }
+    assert!(placed[1].contains(&(footer_story(&footer_id), vec![0], 0)));
+    drop(layout);
+
+    assert_eq!(document.update_page_fields().unwrap(), 5);
+    let updated = document.to_bytes().unwrap();
+    assert_eq!(document.update_page_fields().unwrap(), 5);
+    assert_eq!(document.to_bytes().unwrap(), updated);
+
+    let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(updated)).unwrap();
+    let document_xml = package.get_part("/word/document.xml").unwrap();
+    let body = CT_Document::from_xml(document_xml).unwrap().body;
+    let paragraphs = body.content.iter().filter_map(|content| match content {
+        BodyContent::Paragraph(paragraph) => Some(paragraph),
+        _ => None,
+    });
+    let caches = |values: &[(&str, &str, Option<bool>)]| {
+        values
+            .iter()
+            .map(|(name, cached, dirty)| ((*name).to_owned(), (*cached).to_owned(), *dirty))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        top_level_field_caches(paragraphs),
+        caches(&[
+            ("AUTHOR", "stale author", None),
+            ("PAGE", "2", Some(false)),
+            ("PAGE", "ii", Some(false)),
+            ("PAGE", "stale words", None),
+            ("IF", "other", None),
+            ("NUMPAGES", "2", Some(false)),
+        ])
+    );
+    assert!(
+        String::from_utf8_lossy(document_xml).contains("<w:t>5</w:t>"),
+        "the nested PAGE is not laid out and keeps its cache"
+    );
+    let footer = |part_name: &str| {
+        rdocx_oxml::header_footer::CT_HdrFtr::from_xml(package.get_part(part_name).unwrap())
+            .unwrap()
+    };
+    assert_eq!(
+        top_level_field_caches(&footer("/word/footer1.xml").paragraphs),
+        caches(&[("PAGE", "1", Some(false)), ("NUMPAGES", "2", Some(false))])
+    );
+    assert_eq!(
+        top_level_field_caches(&footer("/word/footer2.xml").paragraphs),
+        caches(&[("PAGE", "7", None)]),
+        "the even footer is not laid out while even and odd headers are off"
+    );
+}
+
+#[test]
+fn update_page_fields_keeps_page_caches_layout_does_not_format() {
+    let body = r#"<w:p><w:fldSimple w:instr="PAGE"><w:r><w:t>7</w:t></w:r></w:fldSimple><w:fldSimple w:instr="NUMPAGES"><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p><w:sectPr><w:pgNumType w:fmt="lowerRoman"/></w:sectPr>"#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+    assert_eq!(document.update_page_fields().unwrap(), 1);
+    let body = body_from_document(&mut document);
+    let paragraphs = body.content.iter().filter_map(|content| match content {
+        BodyContent::Paragraph(paragraph) => Some(paragraph),
+        _ => None,
+    });
+    assert_eq!(
+        top_level_field_caches(paragraphs),
+        vec![
+            ("PAGE".to_owned(), "7".to_owned(), None),
+            ("NUMPAGES".to_owned(), "1".to_owned(), Some(false)),
+        ]
+    );
+
+    let mut unchanged = Document::new();
+    unchanged.add_paragraph("no page fields");
+    let before = unchanged.to_bytes().unwrap();
+    assert_eq!(unchanged.update_page_fields().unwrap(), 0);
+    assert_eq!(unchanged.to_bytes().unwrap(), before);
+}
+
 #[test]
 fn extended_field_families_match_the_pinned_word_result() {
     assert_eq!(

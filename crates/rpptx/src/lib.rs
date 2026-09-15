@@ -7378,6 +7378,7 @@ fn handout_slide_number(
         bold: false,
         italic: false,
         field_kind: None,
+        field_source: None,
         note: None,
     }))
 }
@@ -7987,6 +7988,7 @@ fn render_media_placeholder(
             bold: false,
             italic: false,
             field_kind: None,
+            field_source: None,
             note: None,
         })],
     })

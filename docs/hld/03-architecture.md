@@ -579,6 +579,13 @@ byte methods remain leave alone operations that preserve cache content and
 dirty spelling. Update-aware save methods opt into the same atomic operation
 before writing. The settings-level `w:updateFields` value remains untouched.
 
+`Document::update_page_fields` is the separate pagination-aware entry point for
+PAGE and NUMPAGES. It lays out the staged candidate deterministically, reads
+each placed field through its layout field identity, and writes only those
+caches through the same traversal and validated story patching. Every other
+field keeps its cache and dirty spelling, and `update_fields` still defers both
+page field kinds.
+
 The native facade also rebuilds supported existing main-story table of
 contents fields. It reparses each owned instruction through the same recursive
 field grammar, discovers selected headings, custom paragraph styles, direct

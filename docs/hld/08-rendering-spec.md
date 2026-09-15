@@ -1216,6 +1216,22 @@ single post-pagination substitution pass and does not trigger layout. `REF`
 resolves the same unique typed bookmark text used by layout, so pure
 evaluation and rendering share the same target-validity boundary.
 
+Layout gives each PAGE and NUMPAGES placeholder run an optional `FieldSource`
+beside its `FieldKind`. It names the source paragraph node and the field's
+position among that paragraph's top-level fields in `CT_P::runs` order, the
+order the field evaluator and cache updates use. Main-story and header or
+footer cache reuse rebinds it together with the paragraph's source spans. It is
+not a `SourceSpan`, so PDF ActualText grouping and extracted text do not
+change. Fields that only a revision projection reaches, and text box
+paragraphs, carry no identity. `Document::update_page_fields` lays out a staged
+candidate deterministically and writes the values the substitution pass
+renders. PAGE takes the displayed page number of the first page that places
+the field, so a header or footer shared by many pages takes its first page.
+NUMPAGES takes the page count. Written fields are marked clean. A field whose
+switches the evaluator cannot format keeps its cache. PAGE also keeps its cache
+when any section declares a non-decimal `w:pgNumType` format or a chapter
+style, because layout substitutes decimal page numbers only.
+
 REF switch evaluation uses the bookmarked paragraph's resolved numbering in
 the flattened main-story paragraph order, including paragraphs inside tables
 and those after a table. `\n` returns the target level and `\w` returns its full

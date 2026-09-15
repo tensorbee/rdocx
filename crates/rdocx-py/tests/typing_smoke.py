@@ -85,6 +85,7 @@ def exercise_rdocx_types(path: Path) -> None:
     fragments: tuple[LayoutFragment, ...] = document.layout()
     maybe_layout_page: LayoutPage | None = document.layout_page(0)
     report: TocRebuildReport = document.rebuild_toc()
+    page_fields_updated: int = document.update_page_fields()
     if fragments:
         bounds: BoundingBox = fragments[0].bounds
         assert_type(bounds.width, float)

@@ -113,6 +113,17 @@ pub struct SourceSpan {
     pub char_end: u32,
 }
 
+/// Format-neutral identity of one field within a source node.
+///
+/// It is separate from [`SourceSpan`] so that attributing a field does not
+/// change which runs a backend groups as contiguous source text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FieldSource {
+    pub node: SourceNodeId,
+    /// Zero-based position among the node's top-level fields.
+    pub index: u32,
+}
+
 /// Stable result-local identity of one logical structure element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StructureId(NonZeroU32);
@@ -220,6 +231,8 @@ pub struct GlyphRun {
     pub italic: bool,
     /// If this glyph run is a field placeholder, the kind of field.
     pub field_kind: Option<FieldKind>,
+    /// Source field of a page-number placeholder, when attributable.
+    pub field_source: Option<FieldSource>,
     /// If this glyph run is a footnote/endnote reference marker, its ID.
     pub note: Option<crate::line::NoteRef>,
 }
@@ -247,6 +260,7 @@ pub struct MultilingualGlyphRun {
     pub bold: bool,
     pub italic: bool,
     pub field_kind: Option<FieldKind>,
+    pub field_source: Option<FieldSource>,
     pub note: Option<crate::line::NoteRef>,
 }
 
@@ -289,6 +303,7 @@ impl MultilingualGlyphRun {
             bold: self.bold,
             italic: self.italic,
             field_kind: self.field_kind,
+            field_source: self.field_source,
             note: self.note,
         }
     }

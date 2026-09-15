@@ -37,11 +37,11 @@ use crate::style_resolver::{self, NumberingState, ResolvedNumbering};
 use crate::table;
 use crate::{WordBodyLayoutFragment, WordSourcePath, WordStory};
 use oxml_layout::{
-    Color, Diagnostic, DocumentMetadata, DocumentStructure, FieldKind, FontId, FontManager,
-    GlyphRun, GroupElement, InlineItem, LayoutResult, LineItem, NoteRef, NoteStream, PageFrame,
-    Point, PositionedElement, Rect, Result, SourceNodeId, SourceSpan, StructureId, StructureNode,
-    StructureRole, TextDirection, TextSegment, Transform, Underline, break_into_lines,
-    break_multilingual_into_lines,
+    Color, Diagnostic, DocumentMetadata, DocumentStructure, FieldKind, FieldSource, FontId,
+    FontManager, GlyphRun, GroupElement, InlineItem, LayoutResult, LineItem, NoteRef, NoteStream,
+    PageFrame, Point, PositionedElement, Rect, Result, SourceNodeId, SourceSpan, StructureId,
+    StructureNode, StructureRole, TextDirection, TextSegment, Transform, Underline,
+    break_into_lines, break_multilingual_into_lines,
 };
 
 #[derive(Clone)]
@@ -4391,6 +4391,11 @@ fn rebind_text_source(text: &mut TextSegment, source_node: Option<SourceNodeId>)
         (Some(_), None) => text.source = None,
         (None, _) => {}
     }
+    match (text.field_source.as_mut(), source_node) {
+        (Some(field_source), Some(node)) => field_source.node = node,
+        (Some(_), None) => text.field_source = None,
+        (None, _) => {}
+    }
 }
 
 fn rebind_multilingual_source(
@@ -5704,6 +5709,7 @@ fn layout_paragraph_with_source_and_table(
                     baseline_offset: 0.0,
                     hyperlink_url: None,
                     field_kind: None,
+                    field_source: None,
                     note: None,
                 }));
 
@@ -5733,6 +5739,7 @@ fn layout_paragraph_with_source_and_table(
                             baseline_offset: 0.0,
                             hyperlink_url: None,
                             field_kind: None,
+                            field_source: None,
                             note: None,
                         }));
                     }
@@ -5754,6 +5761,23 @@ fn layout_paragraph_with_source_and_table(
             }
         }
     }
+
+    // A page-number field is identified by its position among the top-level
+    // fields of `CT_P::runs`, the order field evaluation and updates use.
+    // Fields that only a revision projection reaches get no identity.
+    let field_indices = source_node
+        .map(|_| {
+            para.runs()
+                .into_iter()
+                .flat_map(|run| &run.content)
+                .filter_map(|content| match content {
+                    RunContent::Field(field) => Some(std::ptr::from_ref(field)),
+                    _ => None,
+                })
+                .zip(0u32..)
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
 
     // Process ordinary and revision-wrapped runs in their preserved order.
     let mut projection_char_offset = 0usize;
@@ -5920,6 +5944,7 @@ fn layout_paragraph_with_source_and_table(
                         baseline_offset,
                         hyperlink_url: current_hyperlink_url.clone(),
                         field_kind: None,
+                        field_source: None,
                         note: None,
                     };
                     let item_index = inline_items.len();
@@ -6040,6 +6065,12 @@ fn layout_paragraph_with_source_and_table(
                         }
                         _ => (None, None),
                     };
+                    let field_source = source_node
+                        .filter(|_| {
+                            matches!(field_kind, Some(FieldKind::Page | FieldKind::NumPages))
+                        })
+                        .zip(field_indices.get(&std::ptr::from_ref(field)).copied())
+                        .map(|(node, index)| FieldSource { node, index });
                     let stored_segments = field.cached_display_segments();
                     let segments = if let Some(value) = computed_value.as_deref() {
                         let stored_properties = stored_segments
@@ -6172,6 +6203,7 @@ fn layout_paragraph_with_source_and_table(
                                     baseline_offset: segment_baseline_offset,
                                     hyperlink_url: current_hyperlink_url.clone(),
                                     field_kind,
+                                    field_source,
                                     note: None,
                                 }));
                             }
@@ -6219,6 +6251,7 @@ fn layout_paragraph_with_source_and_table(
                         baseline_offset: sup_offset,
                         hyperlink_url: None,
                         field_kind: None,
+                        field_source: None,
                         note: Some(NoteRef { stream, id: *id }),
                     }));
                 }
@@ -6285,6 +6318,7 @@ fn layout_paragraph_with_source_and_table(
             baseline_offset: 0.0,
             hyperlink_url: None,
             field_kind: None,
+            field_source: None,
             note: None,
         }));
     }
@@ -6454,6 +6488,7 @@ fn push_bookmark_marker(items: &mut Vec<InlineItem>, target: usize, font_id: oxm
         baseline_offset: 0.0,
         hyperlink_url: None,
         field_kind: Some(FieldKind::Target(target)),
+        field_source: None,
         note: None,
     }));
 }
@@ -7598,6 +7633,7 @@ fn layout_watermark(
                 bold: false,
                 italic: false,
                 field_kind: None,
+                field_source: None,
                 note: None,
             })]
         }
@@ -15145,6 +15181,19 @@ mod tests {
             runs.iter()
                 .any(|run| run.field_kind == Some(FieldKind::Page) && run.source.is_none())
         );
+        assert!(runs.iter().any(|run| {
+            run.field_kind == Some(FieldKind::Page)
+                && run.field_source.is_some_and(|field| {
+                    field.index == 0
+                        && matches!(
+                            result.source_node(field.node),
+                            Some(WordSourcePath {
+                                story: WordStory::Document,
+                                children,
+                            }) if children == &[2]
+                        )
+                })
+        }));
         assert!(
             runs.iter()
                 .any(|run| run.note.is_some() && run.source.is_none())

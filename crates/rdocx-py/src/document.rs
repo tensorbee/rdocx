@@ -1049,6 +1049,16 @@ impl PyDocument {
         })
     }
 
+    fn update_page_fields(&mut self, py: Python<'_>) -> PyResult<usize> {
+        let updated = py
+            .detach(|| self.inner.update_page_fields())
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        if updated != 0 {
+            self.revisions.bump();
+        }
+        Ok(updated)
+    }
+
     #[getter]
     fn paragraphs(slf: Py<Self>, py: Python<'_>) -> PyResult<Py<PyParagraphCollection>> {
         Py::new(py, PyParagraphCollection::new(slf))
