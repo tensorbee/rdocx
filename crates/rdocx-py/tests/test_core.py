@@ -481,3 +481,89 @@ def test_word_structure_snapshots_preserve_order_ownership_and_types():
     assert captured_items[-1].text != "later body content"
     assert len(reopened.story_items) == len(captured_items) + 1
     assert reopened.hyperlinks == captured_links
+
+
+def _story_paragraph_texts(document, kind):
+    return [
+        item.text
+        for item in document.story_items
+        if item.story.kind == kind and item.kind == "paragraph"
+    ]
+
+
+def test_header_footer_and_story_text_edit_the_section_stories():
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("body")
+    held = document.paragraphs[0]
+    document.set_header("Draft")
+    document.set_footer("Page footer")
+    with pytest.raises(rdocx.StaleElementError):
+        held.text
+    assert _story_paragraph_texts(document, "header") == ["Draft"]
+    assert _story_paragraph_texts(document, "footer") == ["Page footer"]
+
+    header_item = next(
+        item
+        for item in document.story_items
+        if item.story.kind == "header" and item.kind == "paragraph"
+    )
+    document.set_story_text(header_item, "Final")
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert _story_paragraph_texts(reopened, "header") == ["Final"]
+    assert _story_paragraph_texts(reopened, "body") == ["body"]
+
+
+def test_set_story_text_rejects_a_story_that_is_not_in_the_document():
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("body")
+    missing = rdocx.StoryItem(
+        story=rdocx.Story(kind="header", part_name="/word/missing.xml", owner_index=0),
+        kind="paragraph",
+        index_path=(0,),
+        text="stale",
+        xml=b"",
+    )
+    held = document.paragraphs[0]
+    before = document.to_bytes()
+    with pytest.raises(rdocx.RdocxError, match="no header story"):
+        document.set_story_text(missing, "edited")
+    assert document.to_bytes() == before
+    assert held.text == "body"
+
+
+def test_hyperlinks_are_added_to_paragraphs_and_stories():
+    import rdocx
+
+    document = rdocx.Document()
+    run = document.add_paragraph("See ").add_hyperlink("docs", "https://example.com/docs")
+    run.font.bold = True
+    document.set_header("Header")
+    header = next(story for story in document.stories if story.kind == "header")
+    document.add_hyperlink_to_story(header, "home", "https://example.com/")
+
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert [(link.story.kind, link.text, link.url) for link in reopened.hyperlinks] == [
+        ("body", "docs", "https://example.com/docs"),
+        ("header", "home", "https://example.com/"),
+    ]
+    assert reopened.paragraphs[0].runs[1].font.bold is True
+
+
+def test_story_item_xml_is_a_detached_snapshot():
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("hello")
+    item = next(
+        item
+        for item in document.story_items
+        if item.story.kind == "body" and item.kind == "paragraph"
+    )
+    assert isinstance(item.xml, bytes)
+    assert b"hello" in item.xml
+    document.add_paragraph("later")
+    assert b"later" not in item.xml

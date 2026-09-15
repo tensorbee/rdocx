@@ -365,7 +365,11 @@ owned for typed body or comment sources and namespace-complete complex-field
 projections. `Document::set_story_text` resolves a checked operation-scoped
 location against a staged package and publishes only a serialized and reopened
 candidate. These additions are native Rust APIs on the pre-1.0 `rdocx` crate.
-Python, WASM, and CLI gain no story traversal or mutation entry point.
+Python exposes story and story item snapshots, including each item's `xml` as
+bytes. `Document.set_story_text` takes a `StoryItem` snapshot, which carries no
+owner fingerprint, and resolves it by story kind, part name, owner index, item
+kind, and index path against the current document. WASM and CLI gain no story
+traversal or mutation entry point.
 
 Native Rust also exposes the owned `ContentFragment` value and
 `ContentLocation::end`. Paragraph, table, and block content-control
@@ -401,7 +405,9 @@ do not add a trait, generic parameter, or WASM or CLI surface.
 existing `LinkInfo` values after checked owner-scoped resolution.
 `Document::story_links` pairs those records with their existing
 `ContentLocation` owners and merges nested and ancestor-owned links by physical
-source position.
+source position. Python exposes `Document.add_hyperlink_to_story` for a `Story`
+snapshot, resolved the same way as a story item, and `Paragraph.add_hyperlink`,
+which adds a main-document link relationship and returns the new hyperlink run.
 
 Native Rust also exposes concrete borrowed `SectionRef` and `Section` handles.
 Each handle reports its zero-based document ordinal, schema-final ownership,
@@ -424,8 +430,9 @@ section and inherited state. `create_section_story`, `link_section_story`,
 addressed by the returned `StoryId` through the common story API. The facade
 also exposes `even_and_odd_headers` and `set_even_and_odd_headers`, while first
 story creation enables section `titlePg`. These are additive pre-1.0 native
-Rust APIs. Python exposes immutable inspection snapshots but no corresponding
-mutation entry point. WASM and CLI gain no corresponding binding surface.
+Rust APIs. Python exposes immutable inspection snapshots, and only the default
+header and footer text setters `Document.set_header` and `Document.set_footer`
+as mutation entry points. WASM and CLI gain no corresponding binding surface.
 
 `CT_SectPr` adds typed page-number start and raw child-position state, while
 `PageFrame` adds `displayed_page_number` beside its physical `page_number`.

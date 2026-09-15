@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use oxml_py_support::{PathSeg, RevisionCounter};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyList, PyTuple};
 use smallvec::smallvec;
@@ -264,23 +265,26 @@ pub struct PyStoryItem {
     kind: String,
     index_path: Vec<usize>,
     text: Option<String>,
+    xml: Vec<u8>,
 }
 
 #[pymethods]
 impl PyStoryItem {
     #[new]
-    #[pyo3(signature = (*, story, kind, index_path, text))]
+    #[pyo3(signature = (*, story, kind, index_path, text, xml))]
     fn new(
         story: PyRef<'_, PyStory>,
         kind: String,
         index_path: Vec<usize>,
         text: Option<String>,
+        xml: &[u8],
     ) -> Self {
         Self {
             story: story.clone(),
             kind,
             index_path,
             text,
+            xml: xml.to_vec(),
         }
     }
 
@@ -302,6 +306,11 @@ impl PyStoryItem {
     #[getter]
     fn text(&self) -> Option<&str> {
         self.text.as_deref()
+    }
+
+    #[getter]
+    fn xml<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, &self.xml)
     }
 }
 
@@ -586,6 +595,39 @@ impl PyDocument {
             revisions: RevisionCounter::new(),
         }
     }
+
+    /// The live native owner that a `Story` snapshot names.
+    ///
+    /// A snapshot carries no fingerprint, so it resolves by kind, part name
+    /// and owner index against the document as it is now.
+    fn native_story(&self, py: Python<'_>, story: &PyStory) -> PyResult<rdocx::StoryId> {
+        self.inner
+            .stories()
+            .map_err(|error| rdocx_to_pyerr(py, error))?
+            .into_iter()
+            .find(|candidate| story_snapshot(candidate) == *story)
+            .ok_or_else(|| {
+                rdocx_to_pyerr(
+                    py,
+                    rdocx::Error::Other(format!(
+                        "document has no {} story {} at owner index {}",
+                        story.kind, story.part_name, story.owner_index
+                    )),
+                )
+            })
+    }
+
+    fn native_location(
+        &self,
+        py: Python<'_>,
+        item: &PyStoryItem,
+    ) -> PyResult<rdocx::ContentLocation> {
+        Ok(rdocx::ContentLocation::new(
+            self.native_story(py, &item.story)?,
+            story_item_kind_from_name(&item.kind)?,
+            item.index_path.clone(),
+        ))
+    }
 }
 
 fn story_snapshot(story: &rdocx::StoryId) -> PyStory {
@@ -616,6 +658,20 @@ fn story_item_kind_name(kind: rdocx::StoryItemKind) -> &'static str {
         rdocx::StoryItemKind::Drawing => "drawing",
         rdocx::StoryItemKind::PreservedNode => "preserved_node",
         _ => "unknown",
+    }
+}
+
+fn story_item_kind_from_name(name: &str) -> PyResult<rdocx::StoryItemKind> {
+    match name {
+        "paragraph" => Ok(rdocx::StoryItemKind::Paragraph),
+        "table" => Ok(rdocx::StoryItemKind::Table),
+        "content_control" => Ok(rdocx::StoryItemKind::ContentControl),
+        "field" => Ok(rdocx::StoryItemKind::Field),
+        "drawing" => Ok(rdocx::StoryItemKind::Drawing),
+        "preserved_node" => Ok(rdocx::StoryItemKind::PreservedNode),
+        _ => Err(PyValueError::new_err(format!(
+            "unsupported story item kind {name:?}"
+        ))),
     }
 }
 
@@ -866,6 +922,10 @@ impl PyDocument {
                     kind: story_item_kind_name(item.kind()).to_owned(),
                     index_path: item.location().index_path().to_vec(),
                     text: item.text().map_err(|error| rdocx_to_pyerr(py, error))?,
+                    xml: item
+                        .xml()
+                        .map_err(|error| rdocx_to_pyerr(py, error))?
+                        .into_owned(),
                 });
             }
         }
@@ -928,6 +988,43 @@ impl PyDocument {
             }
         }
         PyTuple::new(py, snapshots)
+    }
+
+    fn set_header(&mut self, text: &str) {
+        self.inner.set_header(text);
+        self.revisions.bump();
+    }
+
+    fn set_footer(&mut self, text: &str) {
+        self.inner.set_footer(text);
+        self.revisions.bump();
+    }
+
+    fn set_story_text(
+        &mut self,
+        py: Python<'_>,
+        item: PyRef<'_, PyStoryItem>,
+        text: &str,
+    ) -> PyResult<()> {
+        let location = self.native_location(py, &item)?;
+        py.detach(|| self.inner.set_story_text(&location, text))
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        self.revisions.bump();
+        Ok(())
+    }
+
+    fn add_hyperlink_to_story(
+        &mut self,
+        py: Python<'_>,
+        story: PyRef<'_, PyStory>,
+        text: &str,
+        url: &str,
+    ) -> PyResult<()> {
+        let story = self.native_story(py, &story)?;
+        py.detach(|| self.inner.add_hyperlink_to_story(&story, text, url))
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        self.revisions.bump();
+        Ok(())
     }
 
     #[pyo3(signature = (range, *, author, text, initials = None))]

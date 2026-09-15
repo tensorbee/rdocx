@@ -83,6 +83,83 @@ impl PyParagraph {
             .map_err(|error| stale_to_pyerr(py, error))?;
         Ok(location)
     }
+
+    /// Append one run, or one external hyperlink run when `url` is given, and
+    /// return its handle.
+    fn append_run(&self, py: Python<'_>, text: &str, url: Option<&str>) -> PyResult<Py<PyRun>> {
+        let location = self.validate(py)?;
+        let path = {
+            let mut document = self.document.borrow_mut(py);
+            let relationship_id = match url {
+                Some(url) => {
+                    // Check the paragraph first, so a failure leaves no
+                    // orphaned relationship behind.
+                    let exists = match location {
+                        ParagraphLocation::Body(index) => document.inner.paragraph(index).is_some(),
+                        ParagraphLocation::Cell {
+                            table,
+                            row,
+                            cell,
+                            paragraph,
+                        } => document.inner.table(table).is_some_and(|table| {
+                            table
+                                .cell(row, cell)
+                                .is_some_and(|cell| cell.paragraph(paragraph).is_some())
+                        }),
+                    };
+                    if !exists {
+                        return Err(PyIndexError::new_err("paragraph index out of range"));
+                    }
+                    Some(document.inner.add_hyperlink_relationship(url))
+                }
+                None => None,
+            };
+            let append = |paragraph: &mut rdocx::Paragraph<'_>| {
+                let run_index = paragraph.run_count();
+                match &relationship_id {
+                    Some(relationship_id) => {
+                        paragraph.add_hyperlink(text, relationship_id);
+                    }
+                    None => {
+                        paragraph.add_run(text);
+                    }
+                }
+                run_index
+            };
+            let run_index = match location {
+                ParagraphLocation::Body(index) => append(
+                    &mut document
+                        .inner
+                        .paragraph_mut(index)
+                        .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?,
+                ),
+                ParagraphLocation::Cell {
+                    table,
+                    row,
+                    cell,
+                    paragraph,
+                } => {
+                    let mut table = document
+                        .inner
+                        .table_mut(table)
+                        .ok_or_else(|| PyIndexError::new_err("table index out of range"))?;
+                    let mut cell = table
+                        .cell(row, cell)
+                        .ok_or_else(|| PyIndexError::new_err("cell index out of range"))?;
+                    append(
+                        &mut cell
+                            .paragraph_mut(paragraph)
+                            .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?,
+                    )
+                }
+            };
+            document.revisions.bump();
+            let mut segments = self.path.segs.clone();
+            segments.push(PathSeg::Run(run_index));
+            document.revisions.capture(segments)
+        };
+        Py::new(py, PyRun::new(self.document.clone_ref(py), path))
+    }
 }
 
 #[pymethods]
@@ -184,46 +261,11 @@ impl PyParagraph {
     }
 
     fn add_run(&self, py: Python<'_>, text: &str) -> PyResult<Py<PyRun>> {
-        let location = self.validate(py)?;
-        let path = {
-            let mut document = self.document.borrow_mut(py);
-            let run_index = match location {
-                ParagraphLocation::Body(index) => {
-                    let mut paragraph = document
-                        .inner
-                        .paragraph_mut(index)
-                        .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?;
-                    let run_index = paragraph.run_count();
-                    paragraph.add_run(text);
-                    run_index
-                }
-                ParagraphLocation::Cell {
-                    table,
-                    row,
-                    cell,
-                    paragraph,
-                } => {
-                    let mut table = document
-                        .inner
-                        .table_mut(table)
-                        .ok_or_else(|| PyIndexError::new_err("table index out of range"))?;
-                    let mut cell = table
-                        .cell(row, cell)
-                        .ok_or_else(|| PyIndexError::new_err("cell index out of range"))?;
-                    let mut paragraph = cell
-                        .paragraph_mut(paragraph)
-                        .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?;
-                    let run_index = paragraph.run_count();
-                    paragraph.add_run(text);
-                    run_index
-                }
-            };
-            document.revisions.bump();
-            let mut segments = self.path.segs.clone();
-            segments.push(PathSeg::Run(run_index));
-            document.revisions.capture(segments)
-        };
-        Py::new(py, PyRun::new(self.document.clone_ref(py), path))
+        self.append_run(py, text, None)
+    }
+
+    fn add_hyperlink(&self, py: Python<'_>, text: &str, url: &str) -> PyResult<Py<PyRun>> {
+        self.append_run(py, text, Some(url))
     }
 
     #[getter]
