@@ -542,6 +542,18 @@ impl ContentFragment {
         Self::from_body_content(BodyContent::Paragraph(paragraph))
     }
 
+    /// Create a fixed-prefix paragraph fragment holding `text` in one run.
+    ///
+    /// Empty text creates an empty paragraph, as
+    /// [`Document::insert_paragraph`] does.
+    pub fn text_paragraph(text: &str) -> Result<Self> {
+        let mut paragraph = CT_P::new();
+        if !text.is_empty() {
+            paragraph.add_run(text);
+        }
+        Self::paragraph(paragraph)
+    }
+
     /// Create a fixed-prefix table fragment.
     pub fn table(table: CT_Tbl) -> Result<Self> {
         Self::from_body_content(BodyContent::Table(table))
@@ -12396,6 +12408,22 @@ impl Document {
     /// Find the body content index of the first paragraph containing the given text.
     pub fn find_content_index(&self, text: &str) -> Option<usize> {
         self.document.body.find_paragraph_index(text)
+    }
+
+    /// Return the paragraph index of the body child at `content_index`.
+    ///
+    /// The result addresses that paragraph through [`Self::paragraph`] and
+    /// [`Self::paragraph_mut`], whose index also counts paragraphs inside block
+    /// content controls. Returns `None` when the index is out of bounds or the
+    /// child is not a paragraph.
+    pub fn paragraph_index_of_content(&self, content_index: usize) -> Option<usize> {
+        let BodyContent::Paragraph(target) = self.document.body.content.get(content_index)? else {
+            return None;
+        };
+        self.document
+            .body
+            .paragraphs()
+            .position(|paragraph| std::ptr::eq(paragraph, target))
     }
 
     /// Remove the content at the given body index.

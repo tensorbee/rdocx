@@ -567,3 +567,115 @@ def test_story_item_xml_is_a_detached_snapshot():
     assert b"hello" in item.xml
     document.add_paragraph("later")
     assert b"later" not in item.xml
+
+
+def _paragraph_texts(document):
+    return [paragraph.text for paragraph in document.paragraphs]
+
+
+def _body_item(document, text):
+    return next(
+        item
+        for item in document.story_items
+        if item.story.kind == "body" and item.text == text
+    )
+
+
+def test_insert_paragraph_returns_the_inserted_paragraph_after_a_content_control():
+    import rdocx
+
+    document = _replace_document_body(
+        rdocx.Document(),
+        "<w:sdt><w:sdtContent><w:p><w:r><w:t>control</w:t></w:r></w:p></w:sdtContent></w:sdt>"
+        "<w:p><w:r><w:t>first</w:t></w:r></w:p>"
+        "<w:p><w:r><w:t>last</w:t></w:r></w:p>",
+    )
+    held = document.paragraphs[0]
+    before = document.to_bytes()
+    with pytest.raises(IndexError, match="content index out of range"):
+        document.insert_paragraph(4, "beyond")
+    assert document.to_bytes() == before
+    assert held.text == "control"
+
+    index = document.find_content_index("last")
+    assert index == 2
+    assert document.find_content_index("absent") is None
+    inserted = document.insert_paragraph(index, "middle")
+    with pytest.raises(rdocx.StaleElementError):
+        held.text
+    assert inserted.text == "middle"
+    inserted.add_run("!")
+    assert document.insert_paragraph(4, "end").text == "end"
+
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert _paragraph_texts(reopened) == ["control", "first", "middle!", "last", "end"]
+
+
+def test_insert_content_places_a_fragment_before_an_item_or_at_the_story_end():
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("body")
+    document.set_header("middle")
+    header = next(story for story in document.stories if story.kind == "header")
+    middle = next(
+        item
+        for item in document.story_items
+        if item.story == header and item.kind == "paragraph"
+    )
+    fragment = rdocx.ContentFragment.paragraph("edge")
+    assert fragment.kind == "paragraph"
+    document.insert_content(middle, fragment)
+    document.insert_content(header, fragment)
+
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert _story_paragraph_texts(reopened, "header") == ["edge", "middle", "edge"]
+    assert _paragraph_texts(reopened) == ["body"]
+
+
+def test_clone_and_move_content_reorder_body_items():
+    import rdocx
+
+    document = rdocx.Document()
+    for text in ["a", "b", "c"]:
+        document.add_paragraph(text)
+    body = next(story for story in document.stories if story.kind == "body")
+    held = document.paragraphs[0]
+
+    document.clone_content(_body_item(document, "a"), body)
+    with pytest.raises(rdocx.StaleElementError):
+        held.text
+    assert _paragraph_texts(document) == ["a", "b", "c", "a"]
+    document.move_content(_body_item(document, "c"), _body_item(document, "b"))
+    assert _paragraph_texts(document) == ["a", "c", "b", "a"]
+
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert _paragraph_texts(reopened) == ["a", "c", "b", "a"]
+
+
+def test_content_operations_reject_invalid_locations_without_changing_the_document():
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("body")
+    document.set_header("header")
+    header = next(story for story in document.stories if story.kind == "header")
+    source = _body_item(document, "body")
+    wrong_kind = rdocx.StoryItem(
+        story=source.story,
+        kind="table",
+        index_path=source.index_path,
+        text=None,
+        xml=b"",
+    )
+    held = document.paragraphs[0]
+    before = document.to_bytes()
+
+    with pytest.raises(rdocx.RdocxError, match="within one"):
+        document.move_content(source, header)
+    with pytest.raises(rdocx.RdocxError):
+        document.insert_content(wrong_kind, rdocx.ContentFragment.paragraph("x"))
+    with pytest.raises(TypeError, match="StoryItem or a Story"):
+        document.clone_content(source, 0)
+    assert document.to_bytes() == before
+    assert held.text == "body"

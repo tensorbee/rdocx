@@ -379,8 +379,25 @@ preserved direct child. `Document::insert_content`, `remove_content_at`,
 or the explicit end boundary. The end boundary is after final direct content
 and before body section properties. Moves stay within one story owner. Clones
 freshen document identities, and relationship-bearing fragments require their
-unchanged owner scope. These are additive pre-1.0 native Rust APIs. Python,
-WASM, and CLI gain no corresponding binding surface.
+unchanged owner scope. `ContentFragment::text_paragraph` creates a paragraph
+fragment holding one text run, or an empty paragraph for empty text. These are
+additive pre-1.0 native Rust APIs. Python exposes `ContentFragment.paragraph`
+and `Document.insert_content`, `clone_content`, and `move_content`. A source is
+a `StoryItem` snapshot. A destination is either a `StoryItem`, naming the
+boundary before that item, or a `Story`, naming its end boundary. Both resolve
+the same way as `set_story_text`. Each operation advances the binding revision
+once on success, and a native error changes nothing. Python does not expose
+`remove_content_at`. WASM and CLI gain no corresponding binding surface.
+
+`Document::paragraph_index_of_content` maps a body content index to the
+paragraph index that `paragraph` and `paragraph_mut` use, which also counts
+paragraphs inside block content controls. Python `Document.insert_paragraph`
+inserts at a body content index and returns a `Paragraph` handle at that mapped
+index. An index beyond the content count raises `IndexError` instead of reaching
+the native panic. `Document.find_content_index` returns the body content index
+of the first paragraph containing the text, or `None`. Body content indices, as
+used by these methods and `remove_content`, are distinct from story item index
+paths.
 
 Native Rust also exposes owned `DocumentFragment` and non-exhaustive
 `FragmentConflictPolicy` values. `DocumentFragment::from_range` captures a

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use oxml_py_support::{PathSeg, RevisionCounter};
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyList, PyTuple};
 use smallvec::smallvec;
@@ -311,6 +311,26 @@ impl PyStoryItem {
     #[getter]
     fn xml<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
         PyBytes::new(py, &self.xml)
+    }
+}
+
+#[pyclass(name = "ContentFragment", frozen, skip_from_py_object)]
+pub struct PyContentFragment {
+    inner: rdocx::ContentFragment,
+}
+
+#[pymethods]
+impl PyContentFragment {
+    #[staticmethod]
+    fn paragraph(text: &str, py: Python<'_>) -> PyResult<Self> {
+        rdocx::ContentFragment::text_paragraph(text)
+            .map(|inner| Self { inner })
+            .map_err(|error| rdocx_to_pyerr(py, error))
+    }
+
+    #[getter]
+    fn kind(&self) -> &'static str {
+        story_item_kind_name(self.inner.kind())
     }
 }
 
@@ -626,6 +646,28 @@ impl PyDocument {
             self.native_story(py, &item.story)?,
             story_item_kind_from_name(&item.kind)?,
             item.index_path.clone(),
+        ))
+    }
+
+    /// The insertion boundary that a destination names.
+    ///
+    /// A `StoryItem` names the boundary before that item, and a `Story` names
+    /// the boundary after its final content.
+    fn native_destination(
+        &self,
+        py: Python<'_>,
+        destination: &Bound<'_, PyAny>,
+    ) -> PyResult<rdocx::ContentLocation> {
+        if let Ok(item) = destination.cast::<PyStoryItem>() {
+            return self.native_location(py, item.get());
+        }
+        if let Ok(story) = destination.cast::<PyStory>() {
+            return Ok(rdocx::ContentLocation::end(
+                self.native_story(py, story.get())?,
+            ));
+        }
+        Err(PyTypeError::new_err(
+            "content destination must be a StoryItem or a Story",
         ))
     }
 }
@@ -1027,6 +1069,48 @@ impl PyDocument {
         Ok(())
     }
 
+    fn insert_content(
+        &mut self,
+        py: Python<'_>,
+        destination: &Bound<'_, PyAny>,
+        fragment: PyRef<'_, PyContentFragment>,
+    ) -> PyResult<()> {
+        let destination = self.native_destination(py, destination)?;
+        let fragment = fragment.inner.clone();
+        py.detach(|| self.inner.insert_content(&destination, fragment))
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        self.revisions.bump();
+        Ok(())
+    }
+
+    fn clone_content(
+        &mut self,
+        py: Python<'_>,
+        source: PyRef<'_, PyStoryItem>,
+        destination: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let source = self.native_location(py, &source)?;
+        let destination = self.native_destination(py, destination)?;
+        py.detach(|| self.inner.clone_content(&source, &destination))
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        self.revisions.bump();
+        Ok(())
+    }
+
+    fn move_content(
+        &mut self,
+        py: Python<'_>,
+        source: PyRef<'_, PyStoryItem>,
+        destination: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let source = self.native_location(py, &source)?;
+        let destination = self.native_destination(py, destination)?;
+        py.detach(|| self.inner.move_content(&source, &destination))
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        self.revisions.bump();
+        Ok(())
+    }
+
     #[pyo3(signature = (range, *, author, text, initials = None))]
     fn add_comment(
         &mut self,
@@ -1191,6 +1275,34 @@ impl PyDocument {
             self.revisions.bump();
         }
         removed
+    }
+
+    fn insert_paragraph(
+        slf: Py<Self>,
+        py: Python<'_>,
+        index: usize,
+        text: &str,
+    ) -> PyResult<Py<PyParagraph>> {
+        let path = {
+            let mut document = slf.borrow_mut(py);
+            if index > document.inner.content_count() {
+                return Err(PyIndexError::new_err("content index out of range"));
+            }
+            document.inner.insert_paragraph(index, text);
+            let paragraph = document
+                .inner
+                .paragraph_index_of_content(index)
+                .expect("an inserted body paragraph has a paragraph index");
+            document.revisions.bump();
+            document
+                .revisions
+                .capture(smallvec![PathSeg::Body(0), PathSeg::Para(paragraph)])
+        };
+        Py::new(py, PyParagraph::new(slf, path))
+    }
+
+    fn find_content_index(&self, text: &str) -> Option<usize> {
+        self.inner.find_content_index(text)
     }
 }
 
