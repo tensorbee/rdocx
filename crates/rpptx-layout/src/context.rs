@@ -1382,6 +1382,9 @@ fn resolve_image_fill(
         },
         dpi: fill.dpi.filter(|dpi| *dpi > 0).map(f64::from),
         rotate_with_shape: fill.rotate_with_shape.unwrap_or(true),
+        opacity: blip.alpha_modulation_fix().map_or(1.0, |amount| {
+            (f64::from(amount.0) / 100_000.0).clamp(0.0, 1.0)
+        }),
     })
 }
 
@@ -5141,6 +5144,31 @@ mod tests {
             ResolvedTextRun::Text { text, .. } if text == "caption"
         ));
         assert!(resolved.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn picture_fill_opacity_comes_from_alpha_modulation_fix() {
+        let opaque = shape_picture_fill("rId7", 0, None);
+        let faded = opaque.replace(
+            r#"r:embed="rId7"/>"#,
+            r#"r:embed="rId7"><a:alphaModFix amt="30000"/></a:blip>"#,
+        );
+        assert_ne!(faded, opaque);
+        let media = ScopedMediaIds {
+            slide: HashMap::from([("rId7".to_owned(), MediaId(7))]),
+            ..ScopedMediaIds::default()
+        };
+
+        for (shape, opacity) in [(opaque, 1.0), (faded, 0.3)] {
+            let fixture = Fixture::new(&shape, "", "");
+            let resolved = fixture
+                .context()
+                .resolve_slide_with_media((720.0, 540.0), &media)
+                .unwrap();
+            let image = resolved.shapes[0].image_fill.as_ref().unwrap();
+            assert_eq!(image.opacity, opacity);
+            assert!(resolved.diagnostics.is_empty());
+        }
     }
 
     #[test]

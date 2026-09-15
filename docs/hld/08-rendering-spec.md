@@ -1327,8 +1327,10 @@ same `FontManager` that produced the group and then shapes ordinary slide text.
 `ResolvedSlide::background` is an optional `ResolvedBackground`, either a
 backend-neutral `Paint` or a shared `ResolvedImage`. `ResolvedContent::Image`
 and `ResolvedShape::image_fill` use the same `ResolvedImage` structure, which
-carries media ID, source crop, stretch or tile placement, declared DPI, and
-rotation policy. A background image lowers through the existing picture path
+carries media ID, source crop, stretch or tile placement, declared DPI,
+rotation policy, and the opacity that `a:alphaModFix` sets. A picture below full
+opacity lowers into one group at that opacity, tiles included. A background
+image lowers through the existing picture path
 before every slide shape. A shape image fill lowers through that path and its
 concrete geometry clip before the shape stroke and text. It stays separate from
 `ResolvedContent`, so picture-filled text retains both layers. Paint backgrounds

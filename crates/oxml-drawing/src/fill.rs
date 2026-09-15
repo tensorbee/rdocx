@@ -645,6 +645,31 @@ impl Blip {
         emit_raw(writer, self.raw_children.at(0))?;
         write_end(writer, "a:blip")
     }
+
+    /// The opacity `a:alphaModFix` gives the picture, where 100000 is opaque.
+    ///
+    /// The element stays a preserved raw child, so this only reads it. An
+    /// omitted `amt` is the schema default of 100%.
+    pub fn alpha_modulation_fix(&self) -> Option<Percent1000> {
+        self.raw_children.at(0).find_map(|raw| {
+            let mut reader = Reader::from_reader(raw);
+            loop {
+                match reader.read_event() {
+                    Ok(Event::Start(element) | Event::Empty(element)) => {
+                        if !matches_local_name(element.name().as_ref(), b"alphaModFix") {
+                            return None;
+                        }
+                        return match get_attr(&element, b"amt") {
+                            Some(amount) => amount.parse().ok().map(Percent1000),
+                            None => Some(Percent1000(100_000)),
+                        };
+                    }
+                    Ok(Event::Eof) | Err(_) => return None,
+                    Ok(_) => {}
+                }
+            }
+        })
+    }
 }
 
 /// Picture-fill placement mode.
@@ -1377,6 +1402,31 @@ mod tests {
         assert!(written.contains(
             "<a:blip xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" r:embed=\"rId1\"/>"
         ));
+    }
+
+    #[test]
+    fn blip_reports_alpha_modulation_fix_from_its_preserved_children() {
+        let blip = |children: &str| {
+            let xml =
+                format!(r#"<z:blipFill><z:blip r:embed="rId1">{children}</z:blip></z:blipFill>"#);
+            super::BlipFill::from_xml(xml.as_bytes())
+                .unwrap()
+                .blip
+                .expect("blip")
+        };
+        assert_eq!(
+            blip(r#"<a:alphaModFix amt="30000"/>"#).alpha_modulation_fix(),
+            Some(super::Percent1000(30_000))
+        );
+        assert_eq!(
+            blip(r#"<x:ext/><q:alphaModFix/>"#).alpha_modulation_fix(),
+            Some(super::Percent1000(100_000))
+        );
+        assert_eq!(
+            blip(r#"<a:lum bright="10000"/>"#).alpha_modulation_fix(),
+            None
+        );
+        assert_eq!(blip("").alpha_modulation_fix(), None);
     }
 
     #[test]

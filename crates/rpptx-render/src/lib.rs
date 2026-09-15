@@ -884,6 +884,16 @@ fn lower_picture(
             resolved_image.rotate_with_shape,
         )?,
     };
+    // `a:alphaModFix` fades the picture as one layer, tiles included.
+    if resolved_image.opacity < 1.0 {
+        return Ok(vec![PositionedElement::Group(GroupElement {
+            transform: Transform::IDENTITY,
+            clip: None,
+            opacity: resolved_image.opacity,
+            effects: Vec::new(),
+            children: elements,
+        })]);
+    }
     Ok(elements)
 }
 
@@ -2767,6 +2777,46 @@ mod tests {
     }
 
     #[test]
+    fn picture_opacity_fades_the_image_over_the_slide() {
+        let png = horizontal_png(&[[255, 0, 0, 255]; 4]);
+        let media_id = MediaId::from_bytes(&png);
+        let mut picture = picture_shape(
+            Rect {
+                x: 2.0,
+                y: 2.0,
+                width: 8.0,
+                height: 4.0,
+            },
+            media_id,
+            None,
+            ResolvedImagePlacement::default(),
+            None,
+        );
+        let ResolvedContent::Image(image) = &mut picture.content else {
+            panic!("picture content");
+        };
+        image.opacity = 0.3;
+        let input = render_input_with_media(
+            vec![slide((12.0, 8.0), vec![picture])],
+            HashMap::from([(media_id, media(&png))]),
+        );
+
+        let layout = layout_presentation(&input).expect("lower faded picture");
+        let rendered =
+            oxml_pdf::render_page_to_png(&layout, 0, 72.0).expect("rasterise faded picture");
+        let pixmap = tiny_skia::Pixmap::decode_png(&rendered).expect("decode faded picture");
+
+        // 30% red over white, as LibreOffice renders it.
+        let (red, green, blue) = rgb_at(&pixmap, 6, 4);
+        assert_eq!(red, 255);
+        assert!(
+            (i32::from(green) - 178).abs() <= 1 && green == blue,
+            "({red}, {green}, {blue})"
+        );
+        assert_eq!(rgb_at(&pixmap, 1, 4), (255, 255, 255));
+    }
+
+    #[test]
     fn crop_lowers_to_clipped_source_image_geometry() {
         let media_id = MediaId(21);
         let mut picture = picture_shape(
@@ -2858,6 +2908,7 @@ mod tests {
             placement: ResolvedImagePlacement::default(),
             dpi: None,
             rotate_with_shape: true,
+            opacity: 1.0,
         });
         filled.content = ResolvedContent::Text(table_text("caption"));
 
@@ -3262,6 +3313,7 @@ mod tests {
             placement,
             dpi,
             rotate_with_shape: true,
+            opacity: 1.0,
         });
         picture
     }
@@ -3557,6 +3609,7 @@ mod tests {
             placement: ResolvedImagePlacement::default(),
             dpi: None,
             rotate_with_shape: true,
+            opacity: 1.0,
         }));
         let input =
             render_input_with_media(vec![resolved], HashMap::from([(media_id, media(&png))]));

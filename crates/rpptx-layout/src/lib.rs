@@ -200,6 +200,8 @@ pub struct ResolvedImage {
     pub placement: ResolvedImagePlacement,
     pub dpi: Option<f64>,
     pub rotate_with_shape: bool,
+    /// Picture opacity from `a:alphaModFix`, from 0.0 to 1.0 for opaque.
+    pub opacity: f64,
 }
 
 /// Destination placement for one resolved picture.
