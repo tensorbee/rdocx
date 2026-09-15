@@ -311,7 +311,7 @@ pub fn parse_alternate_content(raw: &[u8], inherited_prefixes: &[String]) -> Opt
                 } else if in_choice && matches_local_name(local, b"drawing") {
                     let prefixes =
                         crate::numbering::word_prefixes_at(e, inherited_prefixes).ok()?;
-                    return CT_Drawing::from_xml_with_prefixes(&mut reader, &prefixes).ok();
+                    return CT_Drawing::from_xml_with_prefixes(&mut reader, &prefixes, &[]).ok();
                 }
             }
             Ok(Event::End(ref e)) if matches_local_name(e.name().as_ref(), b"Choice") => {
@@ -1478,12 +1478,18 @@ impl CT_Drawing {
     }
 
     pub fn from_xml(reader: &mut Reader<&[u8]>) -> Result<Self> {
-        Self::from_xml_with_prefixes(reader, &[])
+        Self::from_xml_with_prefixes(reader, &[], &[])
     }
 
+    /// Parse a `w:drawing` whose start tag the caller has consumed.
+    ///
+    /// `owner_bindings` are the namespace declarations made on that start tag.
+    /// The preserved inline or anchor subtree is written back without its
+    /// `w:drawing` owner, so it keeps the declarations it uses.
     pub(crate) fn from_xml_with_prefixes(
         reader: &mut Reader<&[u8]>,
         prefixes: &[String],
+        owner_bindings: &[(String, String)],
     ) -> Result<Self> {
         let mut inline = None;
         let mut anchor = None;
@@ -1514,7 +1520,10 @@ impl CT_Drawing {
                                     (inl.embed_id, inl.link_id) =
                                         image_relationship_ids(&scoped_raw)?;
                                     inl.chart_rel_id = chart_relationship_id(&scoped_raw)?;
-                                    inl.raw_xml = Some(raw);
+                                    inl.raw_xml = Some(crate::text::raw_with_external_bindings(
+                                        &raw,
+                                        owner_bindings,
+                                    )?);
                                     inline = Some(inl);
                                     break;
                                 }
@@ -1544,7 +1553,10 @@ impl CT_Drawing {
                                     (anc.embed_id, anc.link_id) =
                                         image_relationship_ids(&scoped_raw)?;
                                     anc.chart_rel_id = chart_relationship_id(&scoped_raw)?;
-                                    anc.raw_xml = Some(raw);
+                                    anc.raw_xml = Some(crate::text::raw_with_external_bindings(
+                                        &raw,
+                                        owner_bindings,
+                                    )?);
                                     anchor = Some(anc);
                                     break;
                                 }
@@ -1652,7 +1664,7 @@ mod tests {
             }
             buf.clear();
         };
-        CT_Drawing::from_xml_with_prefixes(&mut reader, &prefixes).unwrap()
+        CT_Drawing::from_xml_with_prefixes(&mut reader, &prefixes, &[]).unwrap()
     }
 
     fn parse_inline_direct(xml: &str) -> CT_Inline {
@@ -1686,6 +1698,59 @@ mod tests {
                 _ => {}
             }
             buffer.clear();
+        }
+    }
+
+    #[test]
+    fn namespaces_declared_on_the_drawing_element_travel_with_its_raw_xml() {
+        use crate::document::CT_Document;
+        use crate::namespace::W_NS;
+        use crate::text::RunContent;
+
+        const DECLARATIONS: &str = r#"xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships""#;
+        let graphic = r#"<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="rId10"/></pic:blipFill></pic:pic></a:graphicData></a:graphic>"#;
+        let inline = format!(
+            r#"<wp:inline><wp:extent cx="1" cy="1"/><wp:docPr id="1" name="Inline"/>{graphic}</wp:inline>"#
+        );
+        let anchor = format!(
+            r#"<wp:anchor behindDoc="0"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="1" cy="1"/><wp:wrapNone/><wp:docPr id="2" name="Anchor"/>{graphic}</wp:anchor>"#
+        );
+        let drawing_of = |document: &CT_Document| {
+            let paragraph = document.body.paragraphs().next().expect("paragraph");
+            let Some(RunContent::Drawing(drawing)) = paragraph.runs[0].content.first() else {
+                panic!("drawing run");
+            };
+            drawing.clone()
+        };
+        let parts = |drawing: &CT_Drawing| match (&drawing.inline, &drawing.anchor) {
+            (Some(inline), _) => (inline.embed_id.clone(), inline.raw_xml.clone().unwrap()),
+            (_, Some(anchor)) => (anchor.embed_id.clone(), anchor.raw_xml.clone().unwrap()),
+            _ => panic!("inline or anchor"),
+        };
+
+        for subtree in [&inline, &anchor] {
+            let xml = format!(
+                r#"<w:document xmlns:w="{W_NS}"><w:body><w:p><w:r><w:drawing {DECLARATIONS}>{subtree}</w:drawing></w:r></w:p></w:body></w:document>"#
+            );
+            let document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+            let saved = document.to_xml().unwrap();
+            let reopened = CT_Document::from_xml(&saved).unwrap();
+            for parsed in [&document, &reopened] {
+                let (embed_id, raw) = parts(&drawing_of(parsed));
+                assert_eq!(embed_id, "rId10", "{}", String::from_utf8_lossy(&saved));
+                let raw = String::from_utf8(raw).unwrap();
+                assert!(raw.contains("xmlns:a="), "{raw}");
+                assert!(raw.contains("xmlns:pic="), "{raw}");
+            }
+
+            // Declarations on the part root leave the preserved subtree untouched.
+            let xml = format!(
+                r#"<w:document xmlns:w="{W_NS}" {DECLARATIONS}><w:body><w:p><w:r><w:drawing>{subtree}</w:drawing></w:r></w:p></w:body></w:document>"#
+            );
+            let document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+            let (embed_id, raw) = parts(&drawing_of(&document));
+            assert_eq!(embed_id, "rId10");
+            assert!(!String::from_utf8(raw).unwrap().contains("xmlns"));
         }
     }
 

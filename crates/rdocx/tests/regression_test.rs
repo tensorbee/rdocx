@@ -15863,6 +15863,55 @@ fn comparison_revises_a_header_paragraph_that_holds_a_complex_field() {
     }
 }
 
+/// A picture whose DrawingML namespaces are declared on `w:drawing` instead of
+/// the part root, as some producers write it.
+fn document_with_locally_declared_drawing(text: &str) -> Document {
+    const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    let mut seed = Document::new();
+    let mut package =
+        oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(seed.to_bytes().unwrap())).unwrap();
+    package.set_part("/word/media/logo.png", b"logo image".to_vec());
+    package.content_types.add_default("png", "image/png");
+    let image_id = package
+        .get_or_create_part_rels("/word/document.xml")
+        .add(oxml_opc::relationship::rel_types::IMAGE, "media/logo.png");
+    package.set_part(
+        "/word/document.xml",
+        format!(
+            r#"<w:document xmlns:w="{W_NS}" xmlns:r="{R}"><w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p><w:p><w:r><w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="{R}"><wp:inline><wp:extent cx="304800" cy="304800"/><wp:docPr id="1" name="Picture 1"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="logo.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="{image_id}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p><w:sectPr/></w:body></w:document>"#
+        )
+        .into_bytes(),
+    );
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    Document::from_bytes(bytes.get_ref()).unwrap()
+}
+
+#[test]
+fn drawing_namespaces_declared_on_the_drawing_survive_save_and_comparison() {
+    let mut original = document_with_locally_declared_drawing("before");
+    let image_id = original.images()[0].embed_id.clone();
+    assert!(!image_id.is_empty());
+
+    let saved = Document::from_bytes(&original.to_bytes().unwrap()).unwrap();
+    assert_eq!(saved.images()[0].embed_id, image_id);
+
+    let mut compared = document_with_locally_declared_drawing("before");
+    compared
+        .compare(
+            &document_with_locally_declared_drawing("after"),
+            "Ada",
+            "2026-09-15T09:30:00Z",
+        )
+        .unwrap();
+    let tracked = Document::from_bytes(&compared.to_bytes().unwrap()).unwrap();
+    assert_eq!(tracked.images()[0].embed_id, image_id);
+    assert_eq!(
+        tracked.image_data(&image_id).as_deref(),
+        Some(&b"logo image"[..])
+    );
+}
+
 #[test]
 fn final_paragraph_markers_stay_outside_formatted_run_properties() {
     let anchor = r#"<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>anchor</w:t></w:r></w:p>"#;
