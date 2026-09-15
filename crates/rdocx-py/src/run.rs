@@ -5,7 +5,21 @@ use pyo3::types::{PyAny, PyList, PySlice};
 
 use crate::document::PyDocument;
 use crate::paragraph::{ParagraphLocation, paragraph_location};
-use crate::{normalize_index, stale_to_pyerr};
+use crate::{normalize_index, rdocx_to_pyerr, stale_to_pyerr};
+
+fn split_paragraph_run(
+    py: Python<'_>,
+    mut paragraph: rdocx::Paragraph<'_>,
+    run_index: usize,
+    offset: usize,
+) -> PyResult<()> {
+    if run_index >= paragraph.run_count() {
+        return Err(PyIndexError::new_err("run index out of range"));
+    }
+    paragraph
+        .split_run(run_index, offset)
+        .map_err(|error| rdocx_to_pyerr(py, error))
+}
 
 fn path_indices(path: &ContentPath) -> PyResult<(ParagraphLocation, usize)> {
     let run = path.segs.iter().find_map(|segment| match segment {
@@ -112,6 +126,51 @@ impl PyRun {
             py,
             crate::formatting::PyFont::new(self.document.clone_ref(py), self.path.clone()),
         )
+    }
+
+    fn split(&self, py: Python<'_>, offset: usize) -> PyResult<Py<PyRun>> {
+        let (location, run_index) = self.validate(py)?;
+        let path = {
+            let mut document = self.document.borrow_mut(py);
+            match location {
+                ParagraphLocation::Body(index) => split_paragraph_run(
+                    py,
+                    document
+                        .inner
+                        .paragraph_mut(index)
+                        .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?,
+                    run_index,
+                    offset,
+                )?,
+                ParagraphLocation::Cell {
+                    table,
+                    row,
+                    cell,
+                    paragraph,
+                } => {
+                    let mut table = document
+                        .inner
+                        .table_mut(table)
+                        .ok_or_else(|| PyIndexError::new_err("table index out of range"))?;
+                    let mut cell = table
+                        .cell(row, cell)
+                        .ok_or_else(|| PyIndexError::new_err("cell index out of range"))?;
+                    split_paragraph_run(
+                        py,
+                        cell.paragraph_mut(paragraph)
+                            .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?,
+                        run_index,
+                        offset,
+                    )?;
+                }
+            }
+            document.revisions.bump();
+            let mut segments = self.path.segs.clone();
+            segments.pop();
+            segments.push(PathSeg::Run(run_index + 1));
+            document.revisions.capture(segments)
+        };
+        Py::new(py, PyRun::new(self.document.clone_ref(py), path))
     }
 }
 
