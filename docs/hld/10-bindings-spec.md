@@ -212,10 +212,17 @@ handles use `Body`, `Row`, `Cell`, `Para` and `Run` path segments and reach the
 document only through the public `rdocx` facade.
 
 The Python `Document` also exposes the current native comparison, main-body
-comment, deterministic layout, and TOC rebuild operations. `RunPosition` and
+comment, deterministic layout, TOC rebuild, revision, counted replacement, and
+field cache update operations. `RunPosition` and
 `RunRange` are constructible frozen values for zero-based half-open run ranges.
 `Comment`, `ComparisonDiagnostic`, `BoundingBox`, `LayoutFragment`,
-`LayoutPage`, and `TocRebuildReport` are frozen typed snapshots. Comments are
+`LayoutPage`, `TocRebuildReport`, and `Revision` are frozen typed snapshots.
+`Document.revisions` lists main-document revisions with a snake_case `kind`,
+while the accept and reject methods resolve revisions in every story and return
+how many they resolved. `try_replace_text` and `replace_all_regex` return their
+replacement counts. `update_fields` takes the native evaluation context as
+keyword arguments, reads the wall-clock fields of `now` as given, and returns
+the number of updated fields. Comments are
 returned as a tuple in package order, comparison diagnostics are returned as a
 tuple, and layout fragments are returned in body and page order. No operation
 returns a borrowed native handle or an untyped dictionary.
@@ -225,7 +232,9 @@ serialization release the GIL. A successful comment addition or reply advances
 the document revision once. Comment resolution and removal advance it once
 only when they update the document. Comparison and TOC rebuild compare their
 serialized package state around the successful staged operation and advance
-the revision once only when that state changes. A native error publishes no
+the revision once only when that state changes. Revision resolution,
+replacement, and field updates release the GIL and advance the revision once
+only when they report a nonzero count. A native error publishes no
 candidate and does not advance the binding revision.
 
 `rpptx` mirrors python-pptx through an unpublished mixed-layout `rpptx-py`
