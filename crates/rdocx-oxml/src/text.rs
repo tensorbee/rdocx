@@ -1030,8 +1030,12 @@ impl CT_R {
                         }));
                         modeled_children += 1;
                     } else if is_word_element(name.as_ref(), b"drawing", &prefixes) {
+                        let owner_bindings =
+                            crate::numbering::local_namespace_overrides(e, word_prefixes)?;
                         content.push(RunContent::Drawing(CT_Drawing::from_xml_with_prefixes(
-                            reader, &prefixes,
+                            reader,
+                            &prefixes,
+                            &owner_bindings,
                         )?));
                         modeled_children += 1;
                     } else if is_word_element(name.as_ref(), b"commentReference", &prefixes) {

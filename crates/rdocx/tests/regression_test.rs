@@ -15773,6 +15773,145 @@ fn comparison_preserves_unrelated_modeled_fields() {
     );
 }
 
+fn complex_page_field_paragraph(lead: &str, result: &str) -> String {
+    format!(
+        r#"<w:p><w:r><w:t>{lead}</w:t></w:r><w:r><w:t xml:space="preserve"> Page </w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>{result}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#
+    )
+}
+
+#[test]
+fn comparison_revises_paragraphs_that_hold_a_complex_field() {
+    for (lead, result) in [("Bravo", "1"), ("Alpha", "2"), ("Bravo", "2")] {
+        for granularity in [
+            rdocx::ComparisonGranularity::Run,
+            rdocx::ComparisonGranularity::Word,
+            rdocx::ComparisonGranularity::Character,
+        ] {
+            for ignore_fields in [false, true] {
+                let case = format!("{lead}/{result} {granularity:?} ignore_fields={ignore_fields}");
+                let options = rdocx::ComparisonOptions {
+                    granularity,
+                    ignore_fields,
+                    ..Default::default()
+                };
+                let original_xml = wrap_word_body(&complex_page_field_paragraph("Alpha", "1"));
+                let edited_xml = wrap_word_body(&complex_page_field_paragraph(lead, result));
+                let mut compared = document_with_content_controls(&original_xml);
+                compared
+                    .compare_with_options(
+                        &document_with_content_controls(&edited_xml),
+                        "Ada",
+                        "2026-09-15T09:30:00Z",
+                        &options,
+                    )
+                    .unwrap_or_else(|error| panic!("{case}: {error}"));
+                let tracked = compared.to_bytes().unwrap();
+
+                // An ignored field keeps its original result.
+                let accepted_result = if ignore_fields { "1" } else { result };
+                for (accept, expected) in [
+                    (true, format!("{lead} Page {accepted_result}")),
+                    (false, "Alpha Page 1".to_owned()),
+                ] {
+                    let mut document = Document::from_bytes(&tracked).unwrap();
+                    if accept {
+                        document.accept_all().unwrap();
+                    } else {
+                        document.reject_all().unwrap();
+                    }
+                    let xml = document_xml(&mut document);
+                    assert_eq!(
+                        f_x093_visible_text(&xml),
+                        expected,
+                        "{case} accept={accept}: {xml}"
+                    );
+                    assert_eq!(
+                        xml.matches(r#"w:fldCharType="begin""#).count(),
+                        1,
+                        "{case} accept={accept}: {xml}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn comparison_revises_a_header_paragraph_that_holds_a_complex_field() {
+    let edited = document_with_comparison_header(&complex_page_field_paragraph("Bravo", "1"));
+    let mut compared = document_with_comparison_header(&complex_page_field_paragraph("Alpha", "1"));
+    compared
+        .compare(&edited, "Ada", "2026-09-15T09:30:00Z")
+        .unwrap();
+    let tracked = compared.to_bytes().unwrap();
+
+    for (accept, expected) in [(true, "Bravo Page 1"), (false, "Alpha Page 1")] {
+        let mut document = Document::from_bytes(&tracked).unwrap();
+        if accept {
+            document.accept_all().unwrap();
+        } else {
+            document.reject_all().unwrap();
+        }
+        let bytes = document.to_bytes().unwrap();
+        let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+        let header = std::str::from_utf8(package.get_part("/word/header1.xml").unwrap()).unwrap();
+        assert_eq!(
+            f_x093_visible_text(header),
+            expected,
+            "accept={accept}: {header}"
+        );
+    }
+}
+
+/// A picture whose DrawingML namespaces are declared on `w:drawing` instead of
+/// the part root, as some producers write it.
+fn document_with_locally_declared_drawing(text: &str) -> Document {
+    const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    let mut seed = Document::new();
+    let mut package =
+        oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(seed.to_bytes().unwrap())).unwrap();
+    package.set_part("/word/media/logo.png", b"logo image".to_vec());
+    package.content_types.add_default("png", "image/png");
+    let image_id = package
+        .get_or_create_part_rels("/word/document.xml")
+        .add(oxml_opc::relationship::rel_types::IMAGE, "media/logo.png");
+    package.set_part(
+        "/word/document.xml",
+        format!(
+            r#"<w:document xmlns:w="{W_NS}" xmlns:r="{R}"><w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p><w:p><w:r><w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="{R}"><wp:inline><wp:extent cx="304800" cy="304800"/><wp:docPr id="1" name="Picture 1"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="logo.png"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="{image_id}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p><w:sectPr/></w:body></w:document>"#
+        )
+        .into_bytes(),
+    );
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    Document::from_bytes(bytes.get_ref()).unwrap()
+}
+
+#[test]
+fn drawing_namespaces_declared_on_the_drawing_survive_save_and_comparison() {
+    let mut original = document_with_locally_declared_drawing("before");
+    let image_id = original.images()[0].embed_id.clone();
+    assert!(!image_id.is_empty());
+
+    let saved = Document::from_bytes(&original.to_bytes().unwrap()).unwrap();
+    assert_eq!(saved.images()[0].embed_id, image_id);
+
+    let mut compared = document_with_locally_declared_drawing("before");
+    compared
+        .compare(
+            &document_with_locally_declared_drawing("after"),
+            "Ada",
+            "2026-09-15T09:30:00Z",
+        )
+        .unwrap();
+    let tracked = Document::from_bytes(&compared.to_bytes().unwrap()).unwrap();
+    assert_eq!(tracked.images()[0].embed_id, image_id);
+    assert_eq!(
+        tracked.image_data(&image_id).as_deref(),
+        Some(&b"logo image"[..])
+    );
+}
+
 #[test]
 fn final_paragraph_markers_stay_outside_formatted_run_properties() {
     let anchor = r#"<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>anchor</w:t></w:r></w:p>"#;
