@@ -1,5 +1,5 @@
 use oxml_py_support::{ContentPath, PathSeg};
-use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyTypeError};
+use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyList, PySlice};
 use smallvec::smallvec;
@@ -238,6 +238,45 @@ impl PyParagraph {
                 self.document.clone_ref(py),
                 self.path.clone(),
             ),
+        )
+    }
+
+    #[getter]
+    fn style(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        let location = self.validate(py)?;
+        Ok(crate::formatting::paragraph_snapshot(py, &self.document, location)?.style_id)
+    }
+
+    #[setter]
+    fn set_style(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        let location = self.validate(py)?;
+        crate::formatting::apply_paragraph_update(
+            py,
+            &self.document,
+            location,
+            crate::formatting::ParagraphUpdate::Style(value),
+        )
+    }
+
+    #[getter]
+    fn numbering(&self, py: Python<'_>) -> PyResult<Option<(u32, u32)>> {
+        let location = self.validate(py)?;
+        Ok(crate::formatting::paragraph_snapshot(py, &self.document, location)?.numbering)
+    }
+
+    #[setter]
+    fn set_numbering(&self, py: Python<'_>, value: Option<(u32, u32)>) -> PyResult<()> {
+        let location = self.validate(py)?;
+        if value.is_some_and(|(_, level)| level > 8) {
+            return Err(PyValueError::new_err(
+                "numbering level must be between 0 and 8",
+            ));
+        }
+        crate::formatting::apply_paragraph_update(
+            py,
+            &self.document,
+            location,
+            crate::formatting::ParagraphUpdate::Numbering(value),
         )
     }
 }

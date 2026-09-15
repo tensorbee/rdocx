@@ -279,3 +279,68 @@ def test_automatic_font_color_reads_as_none_after_reopen():
     reopened = Document.from_bytes(automatic)
 
     assert reopened.paragraphs[0].runs[0].font.color is None
+
+
+def test_paragraph_style_and_numbering_round_trip_and_clear():
+    from rdocx import Document
+
+    document = Document()
+    paragraph = document.add_paragraph("Title")
+    assert paragraph.style is None
+    assert paragraph.numbering is None
+    paragraph.style = "Heading1"
+    paragraph.numbering = (1, 2)
+    assert paragraph.text == "Title"
+
+    reopened = Document.from_bytes(document.to_bytes())
+    assert reopened.paragraphs[0].style == "Heading1"
+    assert reopened.paragraphs[0].numbering == (1, 2)
+
+    with pytest.raises(ValueError, match="numbering level"):
+        paragraph.numbering = (1, 9)
+    paragraph.style = None
+    paragraph.numbering = None
+    reopened = Document.from_bytes(document.to_bytes())
+    assert reopened.paragraphs[0].style is None
+    assert reopened.paragraphs[0].numbering is None
+
+
+def test_run_style_and_highlight_round_trip_and_clear():
+    from rdocx import Document
+
+    document = Document()
+    run = document.add_paragraph("").add_run("marked")
+    assert run.style is None
+    assert run.font.highlight is None
+    run.style = "Strong"
+    run.font.highlight = "FFFF00"
+
+    reopened = Document.from_bytes(document.to_bytes()).paragraphs[0].runs[0]
+    assert reopened.style == "Strong"
+    assert reopened.font.highlight == "FFFF00"
+
+    with pytest.raises(ValueError, match="hexadecimal"):
+        run.font.highlight = "yellow"
+    run.style = None
+    run.font.highlight = None
+    reopened = Document.from_bytes(document.to_bytes()).paragraphs[0].runs[0]
+    assert reopened.style is None
+    assert reopened.font.highlight is None
+
+
+def test_word_highlight_keyword_reads_and_clears_through_font_highlight():
+    from rdocx import Document, RGBColor
+
+    document = Document()
+    document.add_paragraph("").add_run("marked").font.color = RGBColor(0x12, 0x34, 0x56)
+    keyword = _replace_document_xml(
+        document.to_bytes(),
+        b'<w:color w:val="123456"/>',
+        b'<w:color w:val="123456"/><w:highlight w:val="yellow"/>',
+    )
+    reopened = Document.from_bytes(keyword)
+    font = reopened.paragraphs[0].runs[0].font
+    assert font.highlight == "yellow"
+
+    font.highlight = None
+    assert Document.from_bytes(reopened.to_bytes()).paragraphs[0].runs[0].font.highlight is None

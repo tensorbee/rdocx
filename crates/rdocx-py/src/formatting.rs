@@ -33,7 +33,7 @@ fn checked_underline_code(value: i32) -> PyResult<i32> {
     }
 }
 
-struct FontSnapshot {
+pub(crate) struct FontSnapshot {
     name: Option<String>,
     size: Option<f64>,
     color: Option<String>,
@@ -41,6 +41,8 @@ struct FontSnapshot {
     italic: Option<bool>,
     underline: Option<i32>,
     strike: Option<bool>,
+    highlight: Option<String>,
+    pub(crate) style_id: Option<String>,
 }
 
 impl FontSnapshot {
@@ -53,11 +55,13 @@ impl FontSnapshot {
             italic: run.italic_value(),
             underline: run.underline_code_value(),
             strike: run.strike_value(),
+            highlight: run.highlight(),
+            style_id: run.style_id().map(str::to_owned),
         }
     }
 }
 
-enum FontUpdate<'a> {
+pub(crate) enum FontUpdate<'a> {
     Name(Option<&'a str>),
     Size(Option<f64>),
     Color(Option<String>),
@@ -65,6 +69,8 @@ enum FontUpdate<'a> {
     Italic(Option<bool>),
     Underline(Option<i32>),
     Strike(Option<bool>),
+    Highlight(Option<&'a str>),
+    Style(Option<&'a str>),
 }
 
 impl FontUpdate<'_> {
@@ -80,6 +86,8 @@ impl FontUpdate<'_> {
                 debug_assert!(applied);
             }
             Self::Strike(value) => run.set_strike_value(value),
+            Self::Highlight(value) => run.set_highlight_value(value),
+            Self::Style(value) => run.set_style_value(value),
         }
     }
 }
@@ -118,64 +126,85 @@ impl PyFont {
 
     fn snapshot(&self, py: Python<'_>) -> PyResult<FontSnapshot> {
         let (location, run_index) = self.validate(py)?;
-        let document = self.document.borrow(py);
-        let snapshot = match location {
-            ParagraphLocation::Body(index) => document
-                .inner
-                .paragraph(index)
-                .and_then(|paragraph| paragraph.run(run_index).map(FontSnapshot::from_run)),
-            ParagraphLocation::Cell {
-                table,
-                row,
-                cell,
-                paragraph,
-            } => document.inner.table(table).and_then(|table| {
-                let cell = table.cell(row, cell)?;
-                let paragraph = cell.paragraph(paragraph)?;
-                paragraph.run(run_index).map(FontSnapshot::from_run)
-            }),
-        };
-        snapshot.ok_or_else(|| PyIndexError::new_err("run index out of range"))
+        run_snapshot(py, &self.document, location, run_index)
     }
 
     fn apply(&self, py: Python<'_>, update: FontUpdate<'_>) -> PyResult<()> {
         let (location, run_index) = self.validate(py)?;
-        let mut document = self.document.borrow_mut(py);
-        match location {
-            ParagraphLocation::Body(index) => {
-                let mut paragraph = document
-                    .inner
-                    .paragraph_mut(index)
-                    .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?;
-                let mut run = paragraph
-                    .run_mut(run_index)
-                    .ok_or_else(|| PyIndexError::new_err("run index out of range"))?;
-                update.apply(&mut run);
-            }
-            ParagraphLocation::Cell {
-                table,
-                row,
-                cell,
-                paragraph,
-            } => {
-                let mut table = document
-                    .inner
-                    .table_mut(table)
-                    .ok_or_else(|| PyIndexError::new_err("table index out of range"))?;
-                let mut cell = table
-                    .cell(row, cell)
-                    .ok_or_else(|| PyIndexError::new_err("cell index out of range"))?;
-                let mut paragraph = cell
-                    .paragraph_mut(paragraph)
-                    .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?;
-                let mut run = paragraph
-                    .run_mut(run_index)
-                    .ok_or_else(|| PyIndexError::new_err("run index out of range"))?;
-                update.apply(&mut run);
-            }
-        }
-        Ok(())
+        apply_run_update(py, &self.document, location, run_index, update)
     }
+}
+
+/// Read the run properties at a run location the caller has validated.
+pub(crate) fn run_snapshot(
+    py: Python<'_>,
+    document: &Py<PyDocument>,
+    location: ParagraphLocation,
+    run_index: usize,
+) -> PyResult<FontSnapshot> {
+    let document = document.borrow(py);
+    let snapshot = match location {
+        ParagraphLocation::Body(index) => document
+            .inner
+            .paragraph(index)
+            .and_then(|paragraph| paragraph.run(run_index).map(FontSnapshot::from_run)),
+        ParagraphLocation::Cell {
+            table,
+            row,
+            cell,
+            paragraph,
+        } => document.inner.table(table).and_then(|table| {
+            let cell = table.cell(row, cell)?;
+            let paragraph = cell.paragraph(paragraph)?;
+            paragraph.run(run_index).map(FontSnapshot::from_run)
+        }),
+    };
+    snapshot.ok_or_else(|| PyIndexError::new_err("run index out of range"))
+}
+
+/// Apply one run property update at a run location the caller has validated.
+pub(crate) fn apply_run_update(
+    py: Python<'_>,
+    document: &Py<PyDocument>,
+    location: ParagraphLocation,
+    run_index: usize,
+    update: FontUpdate<'_>,
+) -> PyResult<()> {
+    let mut document = document.borrow_mut(py);
+    match location {
+        ParagraphLocation::Body(index) => {
+            let mut paragraph = document
+                .inner
+                .paragraph_mut(index)
+                .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?;
+            let mut run = paragraph
+                .run_mut(run_index)
+                .ok_or_else(|| PyIndexError::new_err("run index out of range"))?;
+            update.apply(&mut run);
+        }
+        ParagraphLocation::Cell {
+            table,
+            row,
+            cell,
+            paragraph,
+        } => {
+            let mut table = document
+                .inner
+                .table_mut(table)
+                .ok_or_else(|| PyIndexError::new_err("table index out of range"))?;
+            let mut cell = table
+                .cell(row, cell)
+                .ok_or_else(|| PyIndexError::new_err("cell index out of range"))?;
+            let mut paragraph = cell
+                .paragraph_mut(paragraph)
+                .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?;
+            let mut run = paragraph
+                .run_mut(run_index)
+                .ok_or_else(|| PyIndexError::new_err("run index out of range"))?;
+            update.apply(&mut run);
+        }
+    }
+    Ok(())
 }
 
 #[pymethods]
@@ -283,9 +312,29 @@ impl PyFont {
     fn set_strike(&self, py: Python<'_>, value: Option<bool>) -> PyResult<()> {
         self.apply(py, FontUpdate::Strike(value))
     }
+
+    #[getter]
+    fn highlight(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        Ok(self.snapshot(py)?.highlight)
+    }
+
+    #[setter]
+    fn set_highlight(&self, py: Python<'_>, value: Option<&str>) -> PyResult<()> {
+        if let Some(value) = value
+            && !(value.eq_ignore_ascii_case("auto")
+                || (value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_hexdigit())))
+        {
+            return Err(PyValueError::new_err(
+                "highlight must be six hexadecimal digits or auto",
+            ));
+        }
+        self.apply(py, FontUpdate::Highlight(value))
+    }
 }
 
-struct ParagraphSnapshot {
+pub(crate) struct ParagraphSnapshot {
+    pub(crate) style_id: Option<String>,
+    pub(crate) numbering: Option<(u32, u32)>,
     alignment: Option<rdocx::Alignment>,
     space_before: Option<rdocx::Length>,
     space_after: Option<rdocx::Length>,
@@ -303,6 +352,8 @@ struct ParagraphSnapshot {
 impl ParagraphSnapshot {
     fn from_paragraph(paragraph: rdocx::ParagraphRef<'_>) -> Self {
         Self {
+            style_id: paragraph.style_id().map(str::to_owned),
+            numbering: paragraph.numbering(),
             alignment: paragraph.alignment(),
             space_before: paragraph.space_before(),
             space_after: paragraph.space_after(),
@@ -319,7 +370,9 @@ impl ParagraphSnapshot {
     }
 }
 
-enum ParagraphUpdate {
+pub(crate) enum ParagraphUpdate {
+    Style(Option<String>),
+    Numbering(Option<(u32, u32)>),
     Alignment(Option<rdocx::Alignment>),
     SpaceBefore(Option<rdocx::Length>),
     SpaceAfter(Option<rdocx::Length>),
@@ -337,6 +390,11 @@ enum ParagraphUpdate {
 impl ParagraphUpdate {
     fn apply(self, paragraph: &mut rdocx::Paragraph<'_>) {
         match self {
+            Self::Style(value) => paragraph.set_style_value(value.as_deref()),
+            Self::Numbering(value) => {
+                let applied = paragraph.set_numbering_value(value);
+                debug_assert!(applied);
+            }
             Self::Alignment(value) => paragraph.set_alignment_value(value),
             Self::SpaceBefore(value) => paragraph.set_space_before_value(value),
             Self::SpaceAfter(value) => paragraph.set_space_after_value(value),
@@ -379,58 +437,77 @@ impl PyParagraphFormat {
 
     fn snapshot(&self, py: Python<'_>) -> PyResult<ParagraphSnapshot> {
         let location = self.validate(py)?;
-        let document = self.document.borrow(py);
-        let snapshot = match location {
-            ParagraphLocation::Body(index) => document
-                .inner
-                .paragraph(index)
-                .map(ParagraphSnapshot::from_paragraph),
-            ParagraphLocation::Cell {
-                table,
-                row,
-                cell,
-                paragraph,
-            } => document.inner.table(table).and_then(|table| {
-                let cell = table.cell(row, cell)?;
-                cell.paragraph(paragraph)
-                    .map(ParagraphSnapshot::from_paragraph)
-            }),
-        };
-        snapshot.ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))
+        paragraph_snapshot(py, &self.document, location)
     }
 
     fn apply(&self, py: Python<'_>, update: ParagraphUpdate) -> PyResult<()> {
         let location = self.validate(py)?;
-        let mut document = self.document.borrow_mut(py);
-        match location {
-            ParagraphLocation::Body(index) => {
-                let mut paragraph = document
-                    .inner
-                    .paragraph_mut(index)
-                    .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?;
-                update.apply(&mut paragraph);
-            }
-            ParagraphLocation::Cell {
-                table,
-                row,
-                cell,
-                paragraph,
-            } => {
-                let mut table = document
-                    .inner
-                    .table_mut(table)
-                    .ok_or_else(|| PyIndexError::new_err("table index out of range"))?;
-                let mut cell = table
-                    .cell(row, cell)
-                    .ok_or_else(|| PyIndexError::new_err("cell index out of range"))?;
-                let mut paragraph = cell
-                    .paragraph_mut(paragraph)
-                    .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?;
-                update.apply(&mut paragraph);
-            }
-        }
-        Ok(())
+        apply_paragraph_update(py, &self.document, location, update)
     }
+}
+
+/// Read the paragraph properties at a location the caller has validated.
+pub(crate) fn paragraph_snapshot(
+    py: Python<'_>,
+    document: &Py<PyDocument>,
+    location: ParagraphLocation,
+) -> PyResult<ParagraphSnapshot> {
+    let document = document.borrow(py);
+    let snapshot = match location {
+        ParagraphLocation::Body(index) => document
+            .inner
+            .paragraph(index)
+            .map(ParagraphSnapshot::from_paragraph),
+        ParagraphLocation::Cell {
+            table,
+            row,
+            cell,
+            paragraph,
+        } => document.inner.table(table).and_then(|table| {
+            let cell = table.cell(row, cell)?;
+            cell.paragraph(paragraph)
+                .map(ParagraphSnapshot::from_paragraph)
+        }),
+    };
+    snapshot.ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))
+}
+
+/// Apply one paragraph property update at a location the caller has validated.
+pub(crate) fn apply_paragraph_update(
+    py: Python<'_>,
+    document: &Py<PyDocument>,
+    location: ParagraphLocation,
+    update: ParagraphUpdate,
+) -> PyResult<()> {
+    let mut document = document.borrow_mut(py);
+    match location {
+        ParagraphLocation::Body(index) => {
+            let mut paragraph = document
+                .inner
+                .paragraph_mut(index)
+                .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?;
+            update.apply(&mut paragraph);
+        }
+        ParagraphLocation::Cell {
+            table,
+            row,
+            cell,
+            paragraph,
+        } => {
+            let mut table = document
+                .inner
+                .table_mut(table)
+                .ok_or_else(|| PyIndexError::new_err("table index out of range"))?;
+            let mut cell = table
+                .cell(row, cell)
+                .ok_or_else(|| PyIndexError::new_err("cell index out of range"))?;
+            let mut paragraph = cell
+                .paragraph_mut(paragraph)
+                .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?;
+            update.apply(&mut paragraph);
+        }
+    }
+    Ok(())
 }
 
 #[pymethods]
