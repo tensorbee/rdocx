@@ -10,7 +10,7 @@ use quick_xml::{Reader, Writer, XmlVersion};
 
 use crate::borders::{CT_PBdr, CT_Tabs};
 use crate::document::CT_SectPr;
-use crate::error::Result;
+use crate::error::{OxmlError, Result};
 use crate::namespace::{W_NS, matches_local_name};
 use crate::numbering::{
     local_namespace_overrides, merged_owner_bindings, namespace_binding, namespace_bindings,
@@ -205,6 +205,42 @@ const PPR_END_SLOT: u8 = 36;
 const RAW_MODELED_ATTRIBUTES_FLAG: usize = 1 << (usize::BITS - 1);
 const RAW_MODELED_DUPLICATE_FLAG: usize = 1 << (usize::BITS - 2);
 const RAW_MODELED_FLAGS: usize = RAW_MODELED_ATTRIBUTES_FLAG | RAW_MODELED_DUPLICATE_FLAG;
+
+fn parse_line_spacing(value: &str) -> Result<Twips> {
+    let integer_error = match value.parse::<i32>() {
+        Ok(value) => return Ok(Twips(value)),
+        Err(error) => error,
+    };
+
+    // Some producers write fractional values even though w:line is integral.
+    // Accept only plain decimals and normalize them to the nearest twip.
+    let unsigned = value
+        .strip_prefix('-')
+        .or_else(|| value.strip_prefix('+'))
+        .unwrap_or(value);
+    let Some((whole, fraction)) = unsigned.split_once('.') else {
+        return Err(integer_error.into());
+    };
+
+    if whole.is_empty()
+        || fraction.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(integer_error.into());
+    }
+
+    let decimal = value
+        .parse::<f64>()
+        .map_err(|_| OxmlError::InvalidValue(format!("invalid line spacing: {value}")))?;
+    if !decimal.is_finite() || decimal < i32::MIN as f64 || decimal > i32::MAX as f64 {
+        return Err(OxmlError::InvalidValue(format!(
+            "line spacing is out of range: {value}"
+        )));
+    }
+
+    Ok(Twips(decimal.round() as i32))
+}
 
 fn raw_occurrence(position: (u8, usize)) -> usize {
     position.1 & !RAW_MODELED_FLAGS
@@ -680,7 +716,7 @@ impl CT_PPr {
                             } else if is_word_attribute(key, b"after", &prefixes) {
                                 ppr.space_after = Some(Twips(val_str.parse()?));
                             } else if is_word_attribute(key, b"line", &prefixes) {
-                                ppr.line_spacing = Some(Twips(val_str.parse()?));
+                                ppr.line_spacing = Some(parse_line_spacing(val_str)?);
                             } else if is_word_attribute(key, b"lineRule", &prefixes) {
                                 ppr.line_rule = Some(val_str.to_string());
                             } else if is_word_attribute(key, b"beforeAutospacing", &prefixes) {
@@ -2844,7 +2880,7 @@ mod tests {
     use super::*;
     use crate::shared::ST_Border;
 
-    fn parse_ppr(xml: &str) -> CT_PPr {
+    fn try_parse_ppr(xml: &str) -> Result<CT_PPr> {
         let full = format!("<w:pPr>{xml}</w:pPr>");
         let mut reader = Reader::from_str(&full);
         reader.config_mut().trim_text(true);
@@ -2856,7 +2892,11 @@ mod tests {
             }
             buf.clear();
         }
-        CT_PPr::from_xml(&mut reader).unwrap()
+        CT_PPr::from_xml(&mut reader)
+    }
+
+    fn parse_ppr(xml: &str) -> CT_PPr {
+        try_parse_ppr(xml).unwrap()
     }
 
     fn parse_rpr(xml: &str) -> CT_RPr {
@@ -2887,6 +2927,40 @@ mod tests {
         assert_eq!(ppr.space_before, Some(Twips(240)));
         assert_eq!(ppr.space_after, Some(Twips(120)));
         assert_eq!(ppr.line_spacing, Some(Twips(360)));
+    }
+
+    #[test]
+    fn fractional_line_spacing_rounds_to_nearest_twip() {
+        for (value, expected) in [
+            ("257.1432", 257),
+            ("320.00879999999995", 320),
+            ("342.8616", 343),
+            ("1.5", 2),
+            ("-1.5", -2),
+            ("2147483647.0", i32::MAX),
+            ("-2147483648.0", i32::MIN),
+        ] {
+            let ppr = parse_ppr(&format!(r#"<w:spacing w:line="{value}"/>"#));
+            assert_eq!(ppr.line_spacing, Some(Twips(expected)));
+        }
+    }
+
+    #[test]
+    fn invalid_fractional_line_spacing_remains_rejected() {
+        for value in [
+            "NaN",
+            "inf",
+            "-inf",
+            "1e3",
+            "1.2.3",
+            "2147483648.0",
+            "-2147483649.0",
+        ] {
+            assert!(
+                try_parse_ppr(&format!(r#"<w:spacing w:line="{value}"/>"#)).is_err(),
+                "accepted invalid line spacing {value}"
+            );
+        }
     }
 
     #[test]
