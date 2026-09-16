@@ -8121,8 +8121,11 @@ impl CT_Title {
     fn plain_text(text: &str) -> Self {
         let mut body = CT_TextBody::new();
         body.set_text(text);
+        let mut raw_children = OrderedRawChildren::default();
+        raw_children.push(1, br#"<c:layout/><c:overlay val="0"/>"#.to_vec());
         Self {
             text: Some(body),
+            raw_children,
             ..Self::default()
         }
     }
@@ -8286,6 +8289,10 @@ impl CT_PlotArea {
                 let mut markup = PlotMarkup::default();
                 if matches!(plot, Plot::Doughnut { .. }) {
                     markup.hole_size = Some(ScalarMarkup::default());
+                }
+                if matches!(plot, Plot::Line { .. }) {
+                    markup.marker = Some(ScalarMarkup::default());
+                    markup.smooth = Some(ScalarMarkup::default());
                 }
                 markup
             })
@@ -11092,6 +11099,10 @@ mod tests {
         assert!(line.contains(r#"<c:numFmt formatCode="0.##\%" sourceLinked="0"/>"#));
         assert!(line.contains("<a:t>Month</a:t>"));
         assert!(line.contains("<a:t>Change</a:t>"));
+        assert_eq!(line.matches("<c:layout/>").count(), 2);
+        assert_eq!(line.matches(r#"<c:overlay val="0"/>"#).count(), 2);
+        assert!(line.contains(r#"<c:marker val="0"/>"#));
+        assert!(line.contains(r#"<c:smooth val="0"/>"#));
         assert!(line.contains(r#"<a:srgbClr val="2B6FE3"/>"#));
         for axis in line.split("<c:crossAx").take(2) {
             let scaling = axis.rfind("<c:scaling").unwrap();
