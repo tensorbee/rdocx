@@ -327,6 +327,33 @@ impl CT_Timing {
         &self.builds
     }
 
+    /// Returns whether any `spid` attribute in the retained subtree names `shape_id`.
+    ///
+    /// This covers animation targets and build lists, typed or not. A subtree
+    /// that no longer reads cleanly counts as referencing every shape.
+    pub fn references_shape(&self, shape_id: u32) -> bool {
+        let mut reader = Reader::from_reader(self.raw_xml.as_slice());
+        let mut buffer = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buffer) {
+                Ok(Event::Start(start) | Event::Empty(start)) => {
+                    if all_attributes(&start).is_ok_and(|attributes| {
+                        attributes.iter().any(|(name, value)| {
+                            name.rsplit(':').next() == Some("spid")
+                                && value.trim().parse::<u32>() == Ok(shape_id)
+                        })
+                    }) {
+                        return true;
+                    }
+                }
+                Ok(Event::Eof) => return false,
+                Err(_) => return true,
+                _ => {}
+            }
+            buffer.clear();
+        }
+    }
+
     /// Returns the first typed audio or video node targeting `shape_id`.
     pub fn media_for_shape(&self, shape_id: u32) -> Option<&TimingMedia> {
         find_media_in_nodes(&self.nodes, shape_id)

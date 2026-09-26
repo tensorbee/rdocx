@@ -1,10 +1,11 @@
 use oxml_py_support::{ContentPath, PathSeg};
 use pyo3::PyClass;
-use pyo3::exceptions::{PyIndexError, PyTypeError};
+use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyList, PySlice, PyTuple};
 use smallvec::smallvec;
 
+use crate::dml::{FillTarget, PyFillFormat};
 use crate::normalize_index;
 use crate::presentation::{PyComment, PyPresentation};
 use crate::shape::{PyPlaceholderCollection, PyShapeCollection};
@@ -15,6 +16,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PySlideLayoutCollection>()?;
     module.add_class::<PySlide>()?;
     module.add_class::<PySlideCollection>()?;
+    module.add_class::<PyBackground>()?;
     Ok(())
 }
 
@@ -48,6 +50,15 @@ impl PySlideLayout {
             .inner
             .layout_name(self.index)
             .map(str::to_owned))
+    }
+
+    /// Two handles are equal when they name the same layout of one presentation.
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .extract::<PyRef<'_, PySlideLayout>>()
+            .is_ok_and(|other| {
+                other.presentation.is(&self.presentation) && other.index == self.index
+            })
     }
 }
 
@@ -95,6 +106,19 @@ impl PySlideLayoutCollection {
         sequence_item(py, key, self.len(py)?, "slide layout", |index| {
             self.item(py, index)
         })
+    }
+
+    /// Returns the zero-based index of a layout of this presentation.
+    fn index(&self, py: Python<'_>, slide_layout: &Bound<'_, PyAny>) -> PyResult<usize> {
+        self.len(py)?;
+        let layout = slide_layout.extract::<PyRef<'_, PySlideLayout>>()?;
+        if !layout.presentation.is(&self.presentation) {
+            return Err(PyValueError::new_err(
+                "layout not in this SlideLayouts collection",
+            ));
+        }
+        layout.validate(py)?;
+        Ok(layout.index)
     }
 
     fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PySlideLayoutIterator>> {
@@ -191,17 +215,110 @@ impl PySlide {
             .and_then(|slide| slide.notes_text()))
     }
 
+    /// Replaces the speaker notes, creating the notes slide when absent.
     #[setter]
     fn set_notes_text(&self, py: Python<'_>, text: &str) -> PyResult<()> {
         let index = self.validate(py)?;
         let mut presentation = self.presentation.borrow_mut(py);
         presentation
             .inner
-            .slide_mut(index)
-            .ok_or_else(|| PyIndexError::new_err(format!("slide index {index} is out of range")))?
-            .set_notes_text(text)
+            .set_notes_text(index, text)
             .map_err(|error| crate::rpptx_to_pyerr(py, error))?;
         presentation.revisions.bump();
+        Ok(())
+    }
+
+    #[getter]
+    fn slide_layout(&self, py: Python<'_>) -> PyResult<Py<PySlideLayout>> {
+        let index = self.validate(py)?;
+        let presentation = self.presentation.borrow(py);
+        let layout = presentation
+            .inner
+            .slide_layout_index(index)
+            .ok_or_else(|| {
+                crate::rpptx_value_to_pyerr(
+                    py,
+                    format!("slide {index} has no layout reachable through the slide masters"),
+                )
+            })?;
+        let path = presentation.revisions.capture(smallvec![]);
+        drop(presentation);
+        Py::new(
+            py,
+            PySlideLayout {
+                presentation: self.presentation.clone_ref(py),
+                index: layout,
+                path,
+            },
+        )
+    }
+
+    #[getter]
+    fn hidden(&self, py: Python<'_>) -> PyResult<bool> {
+        let index = self.validate(py)?;
+        Ok(self
+            .presentation
+            .borrow(py)
+            .inner
+            .slide(index)
+            .is_some_and(|slide| slide.hidden()))
+    }
+
+    #[setter]
+    fn set_hidden(&self, py: Python<'_>, value: bool) -> PyResult<()> {
+        let index = self.validate(py)?;
+        self.presentation
+            .borrow_mut(py)
+            .inner
+            .slide_mut(index)
+            .ok_or_else(|| PyIndexError::new_err(format!("slide index {index} is out of range")))?
+            .set_hidden(value);
+        Ok(())
+    }
+
+    #[getter]
+    fn background(&self, py: Python<'_>) -> PyResult<Py<PyBackground>> {
+        self.validate(py)?;
+        Py::new(
+            py,
+            PyBackground {
+                presentation: self.presentation.clone_ref(py),
+                path: self.path.clone(),
+            },
+        )
+    }
+
+    /// Whether the slide inherits its background from its layout and master.
+    #[getter]
+    fn follow_master_background(&self, py: Python<'_>) -> PyResult<bool> {
+        let index = self.validate(py)?;
+        Ok(!self
+            .presentation
+            .borrow(py)
+            .inner
+            .slide(index)
+            .is_some_and(|slide| slide.has_explicit_background()))
+    }
+
+    #[setter]
+    fn set_follow_master_background(&self, py: Python<'_>, value: bool) -> PyResult<()> {
+        let index = self.validate(py)?;
+        let mut presentation = self.presentation.borrow_mut(py);
+        let explicit = presentation
+            .inner
+            .slide(index)
+            .is_some_and(|slide| slide.has_explicit_background());
+        let mut slide = presentation
+            .inner
+            .slide_mut(index)
+            .ok_or_else(|| PyIndexError::new_err(format!("slide index {index} is out of range")))?;
+        if value {
+            slide.remove_background();
+        } else if !explicit {
+            slide
+                .set_background(rpptx::Fill::NoFill(rpptx::NoFill::default()))
+                .map_err(|error| crate::rpptx_to_pyerr(py, error))?;
+        }
         Ok(())
     }
 
@@ -367,6 +484,68 @@ impl PySlideCollection {
         };
         debug_assert!(matches!(path.segs.last(), Some(PathSeg::Slide(value)) if *value == index));
         Py::new(py, PySlide::new(self.presentation.clone_ref(py), path))
+    }
+
+    /// Removes one slide of this presentation with its notes and owned media.
+    fn remove(&self, py: Python<'_>, slide: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.len(py)?;
+        let slide = slide.extract::<PyRef<'_, PySlide>>()?;
+        if !slide.presentation.is(&self.presentation) {
+            return Err(PyValueError::new_err("slide is not in this collection"));
+        }
+        let index = slide.validate(py)?;
+        let mut presentation = self.presentation.borrow_mut(py);
+        presentation
+            .inner
+            .remove_slide(index)
+            .map_err(|error| crate::rpptx_to_pyerr(py, error))?;
+        presentation.revisions.bump();
+        Ok(())
+    }
+
+    /// Moves the slide at `from_` so that it ends up at index `to`.
+    #[pyo3(name = "move")]
+    fn move_slide(&self, py: Python<'_>, from_: isize, to: isize) -> PyResult<()> {
+        let len = self.len(py)?;
+        let from_ = normalize_index(from_, len, "slide")?;
+        let to = normalize_index(to, len, "slide")?;
+        let mut presentation = self.presentation.borrow_mut(py);
+        presentation
+            .inner
+            .move_slide(from_, to)
+            .map_err(|error| crate::rpptx_to_pyerr(py, error))?;
+        presentation.revisions.bump();
+        Ok(())
+    }
+}
+
+/// The background of one slide, like python-pptx `_Background`.
+#[pyclass(name = "Background")]
+pub struct PyBackground {
+    presentation: Py<PyPresentation>,
+    path: ContentPath,
+}
+
+#[pymethods]
+impl PyBackground {
+    /// The slide's own background fill. Reading it never changes the slide.
+    #[getter]
+    fn fill(&self, py: Python<'_>) -> PyResult<Py<PyFillFormat>> {
+        validate_path(
+            py,
+            &self.presentation.borrow(py),
+            &self.path,
+            "background",
+            ".background",
+        )?;
+        Py::new(
+            py,
+            PyFillFormat::new(
+                self.presentation.clone_ref(py),
+                self.path.clone(),
+                FillTarget::Background,
+            ),
+        )
     }
 }
 

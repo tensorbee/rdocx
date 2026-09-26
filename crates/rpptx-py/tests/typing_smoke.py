@@ -1,3 +1,4 @@
+import io
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -10,12 +11,19 @@ from rpptx import (
     MSO_SHAPE,
     Presentation,
     Pt,
+    RGBColor,
 )
 from rpptx._rpptx import (
+    AdjustmentCollection,
+    Background,
     Cell,
+    ColorFormat,
     Column,
     ColumnCollection,
+    FillFormat,
     Font,
+    Image,
+    LineFormat,
     Paragraph,
     ParagraphCollection,
     PlaceholderCollection,
@@ -30,6 +38,8 @@ from rpptx._rpptx import (
     Table,
     TextFrame,
 )
+from rpptx.enum.dml import MSO_FILL_TYPE
+from rpptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE_TYPE
 
 
 def exercise_rpptx_types(path: Path) -> None:
@@ -104,6 +114,60 @@ def exercise_rpptx_types(path: Path) -> None:
     )
     comments: tuple[Comment, ...] = presentation.slides[0].comments
     reply: CommentReply = comments[0].replies[0]
+    slide_width: Length | None = presentation.slide_width
+    presentation.slide_height = Inches(6)
+    current_slide = presentation.slides[0]
+    slide_layout: SlideLayout = current_slide.slide_layout
+    layout_index: int = presentation.slide_layouts.index(slide_layout)
+    same_layout: bool = slide_layout == presentation.slide_layouts[0]
+    hidden: bool = current_slide.hidden
+    current_slide.hidden = True
+    background: Background = current_slide.background
+    background_fill: FillFormat = background.fill
+    follows_master: bool = current_slide.follow_master_background
+    current_slide.follow_master_background = False
+    shape = current_slide.shapes.add_shape(
+        "roundRect", Inches(1), Inches(1), Inches(2), Inches(1)
+    )
+    shape.left = Inches(2)
+    shape.top = Inches(2)
+    shape.width = Inches(3)
+    shape.height = Inches(1)
+    shape.name = "Typed"
+    shape.rotation = 15.0
+    rotation: float = shape.rotation
+    shape_type: MSO_SHAPE_TYPE | None = shape.shape_type
+    adjustments: AdjustmentCollection = shape.adjustments
+    adjustments[0] = 0.25
+    first_adjustment: float = adjustments[0]
+    all_adjustments: list[float] = list(adjustments)
+    fill: FillFormat = shape.fill
+    fill.solid()
+    fill_type: MSO_FILL_TYPE | None = fill.type
+    fore_color: ColorFormat = fill.fore_color
+    fore_color.rgb = RGBColor(0x12, 0x34, 0x56)
+    rgb: RGBColor | None = fore_color.rgb
+    line: LineFormat = shape.line
+    line.width = Pt(1)
+    line.width = None
+    line_width: Length = line.width
+    line.color.rgb = RGBColor.from_string("FF0000")
+    line_fill: FillFormat = line.fill
+    shape_xml: bytes = shape.xml
+    connector: Shape = presentation.slides[0].shapes.add_connector(
+        MSO_CONNECTOR.STRAIGHT, 0, 0, Inches(1), Inches(1)
+    )
+    group: Shape = presentation.slides[0].shapes.add_group_shape()
+    picture = presentation.slides[0].shapes.add_picture(
+        io.BytesIO(b""), 0, 0
+    )
+    image: Image = picture.image
+    blob: bytes = image.blob
+    picture.replace_image(b"")
+    picture.replace_image(path)
+    presentation.slides[0].shapes.remove(group)
+    presentation.slides.move(0, -1)
+    presentation.slides.remove(presentation.slides[0])
     presentation.save(path)
     (
         package_bytes,
@@ -131,11 +195,36 @@ def exercise_rpptx_types(path: Path) -> None:
         run_font_name,
         run_font_size,
         run_font_color,
+        slide_width,
+        layout_index,
+        same_layout,
+        hidden,
+        background_fill,
+        follows_master,
+        rotation,
+        shape_type,
+        first_adjustment,
+        all_adjustments,
+        fill_type,
+        rgb,
+        line_width,
+        line_fill,
+        shape_xml,
+        connector,
+        blob,
+        image.content_type,
+        image.ext,
     )
 
 
 if TYPE_CHECKING:
+    AdjustmentCollection()  # type: ignore[call-arg]
+    Background()  # type: ignore[call-arg]
     Cell()  # type: ignore[call-arg]
+    ColorFormat()  # type: ignore[call-arg]
+    FillFormat()  # type: ignore[call-arg]
+    Image()  # type: ignore[call-arg]
+    LineFormat()  # type: ignore[call-arg]
     Comment()  # type: ignore[call-arg]
     CommentAuthor()  # type: ignore[call-arg]
     CommentReply()  # type: ignore[call-arg]

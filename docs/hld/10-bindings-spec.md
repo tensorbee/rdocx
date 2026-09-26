@@ -278,11 +278,59 @@ source-compatibility surface is the seven python-pptx 1.0.2 Getting Started
 workflows. They change the import namespace and re-fetch through the public
 path after each structural write, because strict global revision invalidation
 intentionally stales every pre-write handle and collection. Pure-Python
-`Length`, `Inches`, `Pt` and the required `MSO_SHAPE` members keep native
-inheritance outside the limited ABI.
+`Length`, `Inches`, `Pt`, `RGBColor`, and the `MSO_SHAPE`, `MSO_SHAPE_TYPE`,
+`MSO_CONNECTOR_TYPE`, and `MSO_FILL_TYPE` enumerations keep native inheritance
+outside the limited ABI. `MSO_SHAPE` carries the 181 python-pptx
+`MSO_AUTO_SHAPE_TYPE` members whose preset rpptx can author, each with its
+preset name as `xml_value`. `UP_ARROW` is absent because the generated preset
+table has no `upArrow`.
 
 Presentation `Shape` handles expose optional `Length` values for left, top,
-width, and height plus optional non-visual id and name. `TextFrame.autofit`
+width, and height plus optional non-visual id and name.
+
+`Presentation.slide_width` and `slide_height` read the optional `p:sldSz` as
+`Length` values. Assigning one keeps the other, and a deck without `p:sldSz`
+pairs the assigned value with the 4:3 size the renderer assumes for such a
+deck. `Slide.slide_layout`
+returns the layout the slide relates to, equal to the same entry of
+`slide_layouts`, and `SlideLayoutCollection.index` returns its position.
+`Slide.hidden` reads and writes `p:sld/@show`. `Slide.background.fill` is a
+live `FillFormat` over the direct background fill that never changes the slide
+when read, and `follow_master_background` reports and sets whether the slide
+has no `p:bg`. `SlideCollection.remove` and `SlideCollection.move(from_, to)`
+use the native staged slide operations and advance the revision once.
+
+`Shape` geometry, `name`, and `rotation` are writable without a revision bump.
+A missing partner coordinate becomes zero, as in python-pptx, and a negative
+extent is a `ValueError`. `rotation` reads clockwise degrees normalized below
+360 and writes them with round-half-even into the 60000-per-degree angle.
+`shape_type` reports an `MSO_SHAPE_TYPE` member or `None`, and a placeholder
+picture is a `PICTURE` even when it holds a video, as in python-pptx. `fill` and
+`line` return live `FillFormat` and `LineFormat` views for ordinary shapes,
+pictures, and connectors, and raise `ValueError` for other kinds. `FillFormat`
+offers `type`, `solid()`, `background()`, and `fore_color`. A shape fill of
+`a:grpFill` reads as `GROUP`, and setting a fill replaces it. `ColorFormat.rgb`
+reads an sRGB colour as `RGBColor`, or `None` for any other colour, and writing
+it keeps the transforms of an existing sRGB colour. Reading `LineFormat.color`
+changes nothing, and assigning its `rgb` makes any other line fill solid,
+pattern included. `LineFormat.width` reads zero without a width, removes the
+width when `None` or zero is written, as python-pptx does, and rejects values
+above the `ST_LineWidth` maximum. `adjustments` is a live
+`AdjustmentCollection` of the effective preset adjustments, normalized so that
+1.0 is 100000, and assignment truncates as python-pptx does. `xml` returns the
+element serialized on its own as bytes. A picture's `image` is a frozen `Image`
+snapshot with `blob`, `content_type`, and the python-pptx `ext`, and
+`replace_image` changes only that picture through the native staged
+replacement.
+
+`ShapeCollection.add_shape` accepts a DrawingML preset name or an `MSO_SHAPE`
+member. `add_connector` follows the python-pptx signature, `add_group_shape`
+appends an empty group, and `add_picture` accepts a path, bytes, or a binary
+file-like object, which is rewound first when it can seek. `remove` deletes one
+shape of a slide with the relationships and parts only it used and advances the
+revision once. Nested collections stay read-only.
+
+`TextFrame.autofit`
 reports `none`, `normal`, or `shape` when the body carries an explicit choice.
 `Run.font` reads the run's direct Latin name, size, and sRGB colour, while the
 `Run.text` setter replaces only that run's text and preserves its typed and
@@ -291,7 +339,9 @@ unmodelled properties.
 The presentation binding exposes `to_pdf`, `render_slide_to_png`,
 `render_all_slides`, `to_notes_pdf`, and `render_all_notes` through the native
 deterministic facade. Every render call releases the GIL. A `Slide` exposes
-optional speaker-note text as a readable and writable property. A successful
+optional speaker-note text as a readable and writable property. Assigning it
+on a slide without notes creates the notes slide, and the notes master when
+the deck has none, through `Presentation::set_notes_text`. A successful
 notes assignment publishes the native staged mutation, advances the global
 revision once, and makes pre-write handles stale. A rejected assignment leaves
 package bytes and revisions unchanged. A `Slide` also exposes an ordered tuple

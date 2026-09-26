@@ -1092,6 +1092,26 @@ impl CT_Shape {
         self.raw.style.as_deref()
     }
 
+    /// Returns whether `p:cNvSpPr/@txBox` marks this shape as a text box.
+    pub fn is_textbox(&self) -> bool {
+        let mut reader = Reader::from_reader(self.raw.non_visual_shape_properties.as_slice());
+        let mut buffer = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buffer) {
+                Ok(Event::Start(start) | Event::Empty(start)) => {
+                    return all_attributes(&start).is_ok_and(|attributes| {
+                        attributes.iter().any(|(name, value)| {
+                            name == "txBox" && matches!(value.as_str(), "1" | "true")
+                        })
+                    });
+                }
+                Ok(Event::Eof) | Err(_) => return false,
+                _ => {}
+            }
+            buffer.clear();
+        }
+    }
+
     /// Serialises a self-contained shape with fixed modelled prefixes.
     pub fn to_xml(&self) -> Result<Vec<u8>> {
         let mut writer = Writer::new(Vec::new());

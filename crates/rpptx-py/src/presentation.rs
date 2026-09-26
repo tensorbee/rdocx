@@ -5,8 +5,13 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList, PyTuple};
 use smallvec::smallvec;
 
+use crate::shape::length;
 use crate::slide::{PySlideCollection, PySlideLayoutCollection};
 use crate::{rpptx_to_pyerr, rpptx_value_to_pyerr};
+
+/// The 4:3 size the renderer assumes for a deck without `p:sldSz`, paired with
+/// the first dimension set on such a deck so the other one keeps its effect.
+const DEFAULT_SLIDE_SIZE: (i64, i64) = (9_144_000, 6_858_000);
 
 #[pyclass(name = "CommentAuthor", frozen, get_all, eq, skip_from_py_object)]
 #[derive(Clone, PartialEq, Eq)]
@@ -122,6 +127,24 @@ impl PyPresentation {
             revisions: RevisionCounter::new(),
         }
     }
+
+    fn set_slide_size(
+        &mut self,
+        py: Python<'_>,
+        width: Option<i64>,
+        height: Option<i64>,
+    ) -> PyResult<()> {
+        let (current_width, current_height) = self
+            .inner
+            .slide_size()
+            .map_or(DEFAULT_SLIDE_SIZE, |(width, height)| (width.0, height.0));
+        self.inner
+            .set_slide_size(
+                rpptx::Emu(width.unwrap_or(current_width)),
+                rpptx::Emu(height.unwrap_or(current_height)),
+            )
+            .map_err(|error| rpptx_to_pyerr(py, error))
+    }
 }
 
 #[pymethods]
@@ -191,6 +214,26 @@ impl PyPresentation {
             .detach(|| self.inner.notes_page_pngs_deterministic(dpi))
             .map_err(|error| rpptx_to_pyerr(py, error))?;
         PyList::new(py, notes.iter().map(|page| PyBytes::new(py, page)))
+    }
+
+    #[getter]
+    fn slide_width(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        length(py, self.inner.slide_size().map(|(width, _)| width))
+    }
+
+    #[setter(slide_width)]
+    fn set_slide_width(&mut self, py: Python<'_>, value: i64) -> PyResult<()> {
+        self.set_slide_size(py, Some(value), None)
+    }
+
+    #[getter]
+    fn slide_height(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        length(py, self.inner.slide_size().map(|(_, height)| height))
+    }
+
+    #[setter(slide_height)]
+    fn set_slide_height(&mut self, py: Python<'_>, value: i64) -> PyResult<()> {
+        self.set_slide_size(py, None, Some(value))
     }
 
     #[getter]

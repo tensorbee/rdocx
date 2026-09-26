@@ -76,6 +76,54 @@ impl CT_GraphicData {
             _ => None,
         }
     }
+
+    /// Returns whether an OLE payload embeds its object rather than linking it.
+    ///
+    /// Like python-pptx, the last `p:oleObj` decides, because alternate
+    /// content lists its lowest common denominator last. `None` means the
+    /// payload is not OLE.
+    pub fn is_embedded_ole_object(&self) -> Option<bool> {
+        let GraphicDataPayload::Ole { raw, .. } = &self.payload else {
+            return None;
+        };
+        let mut reader = Reader::from_reader(raw.as_slice());
+        let mut buffer = Vec::new();
+        let mut depth = 0usize;
+        let mut object_depth = None;
+        let mut embedded = false;
+        loop {
+            match reader.read_event_into(&mut buffer) {
+                Ok(Event::Start(start)) => {
+                    depth += 1;
+                    match local_name(start.name().as_ref()) {
+                        b"oleObj" => {
+                            object_depth = Some(depth);
+                            embedded = false;
+                        }
+                        b"embed" if object_depth == Some(depth - 1) => embedded = true,
+                        _ => {}
+                    }
+                }
+                Ok(Event::Empty(start)) => match local_name(start.name().as_ref()) {
+                    b"oleObj" => {
+                        object_depth = None;
+                        embedded = false;
+                    }
+                    b"embed" if object_depth == Some(depth) => embedded = true,
+                    _ => {}
+                },
+                Ok(Event::End(_)) => {
+                    if object_depth == Some(depth) {
+                        object_depth = None;
+                    }
+                    depth = depth.saturating_sub(1);
+                }
+                Ok(Event::Eof) | Err(_) => return Some(embedded),
+                _ => {}
+            }
+            buffer.clear();
+        }
+    }
 }
 
 /// One typed PresentationML `p:graphicFrame`.

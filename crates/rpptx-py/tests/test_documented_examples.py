@@ -1,4 +1,5 @@
 import importlib.metadata
+import io
 import re
 import struct
 import sys
@@ -13,16 +14,20 @@ def _png_chunk(kind, data):
     return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
 
 
-def _write_tiny_png(path):
+def _tiny_png(red=0x20, green=0x80, blue=0xE0):
     signature = b"\x89PNG\r\n\x1a\n"
     header = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
-    pixels = zlib.compress(b"\x00\x20\x80\xe0")
-    path.write_bytes(
+    pixels = zlib.compress(bytes((0, red, green, blue)))
+    return (
         signature
         + _png_chunk(b"IHDR", header)
         + _png_chunk(b"IDAT", pixels)
         + _png_chunk(b"IEND", b"")
     )
+
+
+def _write_tiny_png(path):
+    path.write_bytes(_tiny_png())
 
 
 def test_python_pptx_getting_started_examples_run_with_global_revision_refetches(tmp_path, monkeypatch):
@@ -896,11 +901,11 @@ def test_notes_mutation_preserves_text_through_save_and_reopen(tmp_path):
 
     without_notes = rpptx.Presentation()
     held = without_notes.slides.add_slide(without_notes.slide_layouts[6])
-    before = without_notes.to_bytes()
-    with pytest.raises(rpptx.RpptxError, match="no notes part"):
-        held.notes_text = "must fail"
-    assert without_notes.to_bytes() == before
     assert held.notes_text is None
+    held.notes_text = "Created speaker note"
+    assert without_notes.slides[0].notes_text == "Created speaker note"
+    with pytest.raises(rpptx.StaleElementError):
+        _ = held.notes_text
 
 
 def test_python_round_three_authoring_and_inspection_is_typed_and_lossless(tmp_path):
@@ -1018,3 +1023,559 @@ def test_slide_and_notes_rendering_release_the_gil():
 
     assert len(slides) == 3
     assert len(notes) == 3
+
+
+def _python_pptx_deck(path, build):
+    pptx = pytest.importorskip("pptx", reason="python-pptx is the differential oracle")
+    deck = pptx.Presentation()
+    build(deck)
+    deck.save(path)
+    return path
+
+
+def _package_parts(data):
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        return {name: archive.read(name) for name in archive.namelist()}
+
+
+def _package_bytes(parts):
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in parts.items():
+            archive.writestr(name, data)
+    return output.getvalue()
+
+
+def _template_jpeg():
+    import rpptx
+
+    return _package_parts(rpptx.Presentation().to_bytes())["docProps/thumbnail.jpeg"]
+
+
+def test_slide_size_reads_and_writes_keep_the_other_dimension(tmp_path):
+    import rpptx
+
+    prs = rpptx.Presentation()
+    assert (prs.slide_width, prs.slide_height) == (12_192_000, 6_858_000)
+    assert isinstance(prs.slide_width, rpptx.Length)
+    held = prs.slides
+    prs.slide_width = rpptx.Inches(10)
+    assert (prs.slide_width, prs.slide_height) == (rpptx.Inches(10), 6_858_000)
+    assert len(held) == 0
+    before = prs.to_bytes()
+    with pytest.raises(rpptx.RpptxError):
+        prs.slide_height = 0
+    assert prs.to_bytes() == before
+    path = tmp_path / "sized.pptx"
+    prs.save(path)
+    pptx = pytest.importorskip("pptx", reason="python-pptx is the differential oracle")
+    oracle = pptx.Presentation(path)
+    assert (oracle.slide_width, oracle.slide_height) == (rpptx.Inches(10), 6_858_000)
+
+    parts = _package_parts(prs.to_bytes())
+    parts["ppt/presentation.xml"] = re.sub(
+        rb"<p:sldSz [^>]*/>", b"", parts["ppt/presentation.xml"]
+    )
+    unsized = tmp_path / "unsized.pptx"
+    unsized.write_bytes(_package_bytes(parts))
+    prs = rpptx.Presentation(unsized)
+    assert (prs.slide_width, prs.slide_height) == (None, None)
+    prs.slide_height = rpptx.Inches(5)
+    # The width the renderer assumed for the unsized deck stays in effect.
+    assert (prs.slide_width, prs.slide_height) == (9_144_000, rpptx.Inches(5))
+
+
+def test_slide_layout_hidden_and_background_round_trip_through_python_pptx(tmp_path):
+    import rpptx
+    from rpptx.dml.color import RGBColor
+    from rpptx.enum.dml import MSO_FILL_TYPE
+
+    source = _python_pptx_deck(
+        tmp_path / "slides.pptx",
+        lambda deck: [deck.slides.add_slide(deck.slide_layouts[index]) for index in (5, 1)],
+    )
+    prs = rpptx.Presentation(source)
+    first, second = prs.slides[0], prs.slides[1]
+    assert first.slide_layout == prs.slide_layouts[5]
+    assert first.slide_layout != prs.slide_layouts[1]
+    assert first.slide_layout.name == "Title Only"
+    assert prs.slide_layouts.index(second.slide_layout) == 1
+    with pytest.raises(ValueError, match="layout not in this SlideLayouts collection"):
+        prs.slide_layouts.index(rpptx.Presentation().slide_layouts[1])
+
+    assert first.hidden is False
+    first.hidden = True
+    assert prs.slides[0].hidden is True
+
+    background = first.background
+    assert first.follow_master_background is True
+    assert background.fill.type is None
+    assert first.follow_master_background is True
+    background.fill.solid()
+    background.fill.fore_color.rgb = RGBColor(0x12, 0x34, 0x56)
+    assert background.fill.type == MSO_FILL_TYPE.SOLID
+    assert first.follow_master_background is False
+    second.follow_master_background = False
+    assert second.background.fill.type == MSO_FILL_TYPE.BACKGROUND
+    output = tmp_path / "slides-out.pptx"
+    prs.save(output)
+
+    pptx = pytest.importorskip("pptx", reason="python-pptx is the differential oracle")
+    oracle = pptx.Presentation(output)
+    assert oracle.slides[0]._element.get("show") == "0"
+    assert oracle.slides[0].follow_master_background is False
+    assert oracle.slides[0].background.fill.fore_color.rgb == pptx.dml.color.RGBColor(0x12, 0x34, 0x56)
+    assert oracle.slides[1].follow_master_background is False
+
+    prs.slides[0].follow_master_background = True
+    prs.slides[0].hidden = False
+    prs.save(output)
+    oracle = pptx.Presentation(output)
+    assert oracle.slides[0].follow_master_background is True
+    assert oracle.slides[0]._element.get("show") in (None, "1")
+
+
+def test_shape_geometry_name_and_rotation_setters_match_python_pptx(tmp_path):
+    import rpptx
+
+    prs = rpptx.Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    shape = slide.shapes.add_textbox(1, 2, 3, 4)
+    held = shape
+    shape.left, shape.top = rpptx.Inches(1), rpptx.Inches(2)
+    shape.width, shape.height = rpptx.Inches(3), rpptx.Inches(4)
+    shape.name = "Renamed box"
+    shape.rotation = 45.5
+    assert (held.left, held.top, held.width, held.height) == (
+        rpptx.Inches(1),
+        rpptx.Inches(2),
+        rpptx.Inches(3),
+        rpptx.Inches(4),
+    )
+    assert (held.name, held.rotation) == ("Renamed box", 45.5)
+    for value, expected in ((-90, 270.0), (360, 0.0), (720.25, 0.25)):
+        shape.rotation = value
+        assert shape.rotation == expected
+    shape.rotation = 30
+    with pytest.raises(ValueError):
+        shape.width = -1
+    with pytest.raises(ValueError):
+        shape.rotation = float("nan")
+
+    group = prs.slides[0].shapes.add_group_shape()
+    assert (group.left, group.width, group.rotation) == (None, None, 0.0)
+    group.width = 100
+    assert (group.left, group.width, group.height) == (None, 100, 0)
+    output = tmp_path / "geometry.pptx"
+    prs.save(output)
+
+    pptx = pytest.importorskip("pptx", reason="python-pptx is the differential oracle")
+    oracle = pptx.Presentation(output).slides[0].shapes[0]
+    assert (oracle.left, oracle.top, oracle.width, oracle.height) == (
+        rpptx.Inches(1),
+        rpptx.Inches(2),
+        rpptx.Inches(3),
+        rpptx.Inches(4),
+    )
+    assert (oracle.name, oracle.rotation) == ("Renamed box", 30.0)
+
+
+def test_shape_type_reports_the_python_pptx_member_for_every_shape_kind(tmp_path):
+    import rpptx
+    from rpptx.enum.shapes import MSO_SHAPE_TYPE
+
+    def build(deck):
+        pptx = pytest.importorskip("pptx")
+        slide = deck.slides.add_slide(deck.slide_layouts[1])
+        slide.shapes.add_textbox(0, 0, 10, 10)
+        slide.shapes.add_shape(pptx.enum.shapes.MSO_SHAPE.ROUNDED_RECTANGLE, 0, 0, 10, 10)
+        slide.shapes.add_picture(io.BytesIO(_tiny_png()), 0, 0)
+        slide.shapes.add_table(1, 1, 0, 0, 10, 10)
+        slide.shapes.add_connector(pptx.enum.shapes.MSO_CONNECTOR.ELBOW, 0, 0, 10, 10)
+        slide.shapes.add_group_shape()
+        builder = slide.shapes.build_freeform(0, 0)
+        builder.add_line_segments([(10, 10), (0, 10)])
+        builder.convert_to_shape()
+
+    source = _python_pptx_deck(tmp_path / "kinds.pptx", build)
+    pptx = pytest.importorskip("pptx", reason="python-pptx is the differential oracle")
+    expected = [int(shape.shape_type) for shape in pptx.Presentation(source).slides[0].shapes]
+    shapes = rpptx.Presentation(source).slides[0].shapes
+    actual = [shape.shape_type for shape in shapes]
+    assert actual == expected
+    assert all(isinstance(value, MSO_SHAPE_TYPE) for value in actual)
+    assert actual[0] == MSO_SHAPE_TYPE.PLACEHOLDER
+    assert actual[-1] == MSO_SHAPE_TYPE.FREEFORM
+
+
+def test_fill_and_line_formats_write_what_python_pptx_reads(tmp_path):
+    import rpptx
+    from rpptx.dml.color import RGBColor
+    from rpptx.enum.dml import MSO_FILL, MSO_FILL_TYPE
+
+    assert MSO_FILL is MSO_FILL_TYPE
+    prs = rpptx.Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    shape = slide.shapes.add_shape("rect", 0, 0, 100, 100)
+    fill = shape.fill
+    assert fill.type is None
+    with pytest.raises(TypeError, match="fill type _NoneFill has no foreground color"):
+        _ = fill.fore_color
+    fill.solid()
+    assert fill.type == MSO_FILL_TYPE.SOLID
+    assert fill.fore_color.rgb is None
+    fill.fore_color.rgb = RGBColor(0xFF, 0x00, 0x00)
+    fill.solid()
+    assert shape.fill.fore_color.rgb == RGBColor(0xFF, 0x00, 0x00)
+    assert str(shape.fill.fore_color.rgb) == "FF0000"
+    with pytest.raises(ValueError, match="assigned value must be type RGBColor"):
+        fill.fore_color.rgb = (1, 2, 3)
+
+    line = shape.line
+    assert (line.width, line.color.rgb, line.fill.type) == (0, None, None)
+    line.color.rgb = RGBColor(0x00, 0x80, 0x00)
+    assert line.fill.type == MSO_FILL_TYPE.SOLID
+    line.width = rpptx.Pt(2)
+    assert line.width == rpptx.Pt(2)
+    with pytest.raises(ValueError):
+        line.width = 20_116_801
+    line.width = None
+    assert line.width == 0
+    line.width = rpptx.Pt(2)
+
+    plain = prs.slides[0].shapes.add_shape("ellipse", 0, 0, 10, 10)
+    _ = plain.line.color.rgb, plain.line.width, plain.fill.type
+    plain.fill.background()
+    assert plain.fill.type == MSO_FILL_TYPE.BACKGROUND
+    with pytest.raises(ValueError, match="shape has no fill"):
+        _ = prs.slides[0].shapes.add_group_shape().fill
+    with pytest.raises(ValueError, match="shape has no line"):
+        _ = prs.slides[0].shapes.add_table(1, 1, 0, 0, 10, 10).line
+
+    held = prs.slides[0].shapes[0].fill
+    prs.slides.add_slide(prs.slide_layouts[6])
+    with pytest.raises(rpptx.StaleElementError):
+        _ = held.type
+    output = tmp_path / "fills.pptx"
+    prs.save(output)
+    parts = _package_parts(output.read_bytes())
+    slide_xml = parts["ppt/slides/slide1.xml"].decode()
+    assert slide_xml.count("<a:ln") == 1
+
+    pptx = pytest.importorskip("pptx", reason="python-pptx is the differential oracle")
+    oracle = pptx.Presentation(output).slides[0].shapes
+    assert oracle[0].fill.type == pptx.enum.dml.MSO_FILL.SOLID
+    assert oracle[0].fill.fore_color.rgb == pptx.dml.color.RGBColor(0xFF, 0x00, 0x00)
+    assert oracle[0].line.color.rgb == pptx.dml.color.RGBColor(0x00, 0x80, 0x00)
+    assert oracle[0].line.width == rpptx.Pt(2)
+    assert oracle[1].fill.type == pptx.enum.dml.MSO_FILL.BACKGROUND
+
+
+def test_colour_edits_keep_python_pptx_brightness_transforms(tmp_path):
+    import rpptx
+    from rpptx.dml.color import RGBColor
+
+    def build(deck):
+        pptx = pytest.importorskip("pptx")
+        slide = deck.slides.add_slide(deck.slide_layouts[6])
+        shape = slide.shapes.add_shape(pptx.enum.shapes.MSO_SHAPE.RECTANGLE, 0, 0, 10, 10)
+        shape.fill.solid()
+        shape.fill.fore_color.rgb = pptx.dml.color.RGBColor(0xFF, 0x00, 0x00)
+        shape.fill.fore_color.brightness = -0.25
+
+    source = _python_pptx_deck(tmp_path / "brightness.pptx", build)
+    prs = rpptx.Presentation(source)
+    prs.slides[0].shapes[0].fill.fore_color.rgb = RGBColor(0x00, 0x00, 0xFF)
+    output = tmp_path / "brightness-out.pptx"
+    prs.save(output)
+    pptx = pytest.importorskip("pptx", reason="python-pptx is the differential oracle")
+    color = pptx.Presentation(output).slides[0].shapes[0].fill.fore_color
+    assert color.rgb == pptx.dml.color.RGBColor(0x00, 0x00, 0xFF)
+    assert color.brightness == pytest.approx(-0.25)
+
+
+def test_pictures_accept_bytes_and_file_objects_and_replace_their_image(tmp_path):
+    import rpptx
+
+    red, blue, jpeg = _tiny_png(0xFF, 0, 0), _tiny_png(0, 0, 0xFF), _template_jpeg()
+    image_path = tmp_path / "red.png"
+    image_path.write_bytes(red)
+    stream = io.BytesIO(red)
+    stream.read()
+    prs = rpptx.Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    slide.shapes.add_picture(image_path, 0, 0)
+    prs.slides[0].shapes.add_picture(stream, 0, 0, width=rpptx.Inches(1))
+    prs.slides[0].shapes.add_picture(jpeg, 0, 0)
+    prs.slides[0].shapes.add_textbox(0, 0, 10, 10)
+    shapes = prs.slides[0].shapes
+    assert [shape.image.blob for shape in shapes[:3]] == [red, red, jpeg]
+    image = shapes[2].image
+    assert (image.content_type, image.ext) == ("image/jpeg", "jpg")
+    assert (shapes[0].image.content_type, shapes[0].image.ext) == ("image/png", "png")
+    assert shapes[1].width == rpptx.Inches(1)
+    with pytest.raises(ValueError, match="shape is not a picture"):
+        _ = shapes[3].image
+
+    held = shapes[0]
+    held.replace_image(blue)
+    assert held.image.blob == blue
+    assert shapes[1].image.blob == red
+    shapes[1].replace_image(io.BytesIO(jpeg))
+    assert shapes[1].image.blob == jpeg
+    before = prs.to_bytes()
+    with pytest.raises(rpptx.RpptxError, match="not a supported image"):
+        held.replace_image(b"not an image")
+    assert prs.to_bytes() == before
+    with pytest.raises(rpptx.RpptxError, match="unsupported image bytes"):
+        prs.slides[0].shapes.add_picture(b"\x89PNG", 0, 0)
+    output = tmp_path / "pictures.pptx"
+    prs.save(output)
+    media = [name for name in _package_parts(output.read_bytes()) if name.startswith("ppt/media/")]
+    assert len(media) == 2
+
+    pptx = pytest.importorskip("pptx", reason="python-pptx is the differential oracle")
+    oracle = pptx.Presentation(output).slides[0].shapes
+    assert [oracle[index].image.blob for index in range(3)] == [blue, jpeg, jpeg]
+
+
+def test_shapes_and_slides_are_removed_and_reordered_with_stale_handles(tmp_path):
+    import rpptx
+
+    prs = rpptx.Presentation()
+    for index in range(3):
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        slide.shapes.add_textbox(0, 0, 10, 10).text = f"slide {index}"
+    held = prs.slides[0]
+    prs.slides.move(0, -1)
+    assert [slide.shapes[0].text for slide in prs.slides] == ["slide 1", "slide 2", "slide 0"]
+    with pytest.raises(rpptx.StaleElementError):
+        _ = held.shapes
+    with pytest.raises(IndexError):
+        prs.slides.move(0, 3)
+    prs.slides.remove(prs.slides[1])
+    assert [slide.shapes[0].text for slide in prs.slides] == ["slide 1", "slide 0"]
+    other = rpptx.Presentation()
+    other_slide = other.slides.add_slide(other.slide_layouts[6])
+    with pytest.raises(ValueError, match="slide is not in this collection"):
+        prs.slides.remove(other_slide)
+
+    shapes = prs.slides[0].shapes
+    picture = shapes.add_picture(io.BytesIO(_tiny_png()), 0, 0)
+    group = prs.slides[0].shapes.add_group_shape()
+    assert len(prs.slides[0].shapes) == 3
+    shapes = prs.slides[0].shapes
+    with pytest.raises(ValueError, match="shape is not in this collection"):
+        prs.slides[1].shapes.remove(shapes[0])
+    with pytest.raises(rpptx.StaleElementError):
+        shapes.remove(picture)
+    shapes.remove(shapes[1])
+    with pytest.raises(rpptx.StaleElementError):
+        _ = group.name
+    assert [shape.shape_type for shape in prs.slides[0].shapes] == [17, 6]
+    output = tmp_path / "removed.pptx"
+    prs.save(output)
+    parts = _package_parts(output.read_bytes())
+    assert not [name for name in parts if name.startswith("ppt/media/")]
+    pptx = pytest.importorskip("pptx", reason="python-pptx is the differential oracle")
+    oracle = pptx.Presentation(output)
+    assert [len(slide.shapes) for slide in oracle.slides] == [2, 1]
+
+
+def test_add_shape_accepts_preset_names_and_every_mso_shape_member(tmp_path):
+    import rpptx
+    from rpptx.enum.shapes import MSO_AUTO_SHAPE_TYPE, MSO_CONNECTOR, MSO_CONNECTOR_TYPE, MSO_SHAPE, MSO_SHAPE_TYPE
+
+    assert MSO_AUTO_SHAPE_TYPE is MSO_SHAPE and MSO_CONNECTOR is MSO_CONNECTOR_TYPE
+    assert len(MSO_SHAPE) == 181
+    assert (MSO_SHAPE.PENTAGON, MSO_SHAPE.CHEVRON) == (51, 52)
+    assert MSO_SHAPE(5) is MSO_SHAPE.ROUNDED_RECTANGLE
+    assert MSO_SHAPE.ROUNDED_RECTANGLE.xml_value == "roundRect"
+    prs = rpptx.Presentation()
+    prs.slides.add_slide(prs.slide_layouts[6])
+    for member in MSO_SHAPE:
+        prs.slides[0].shapes.add_shape(member, 0, 0, 10, 10)
+    prs.slides[0].shapes.add_shape("roundRect", 0, 0, 10, 10)
+    prs.slides[0].shapes.add_shape(1, 0, 0, 10, 10)
+    with pytest.raises(ValueError, match="unsupported MSO_SHAPE value"):
+        prs.slides[0].shapes.add_shape(9999, 0, 0, 10, 10)
+    with pytest.raises(rpptx.RpptxError):
+        prs.slides[0].shapes.add_shape("notAPreset", 0, 0, 10, 10)
+    shapes = prs.slides[0].shapes
+    shapes.add_connector(MSO_CONNECTOR.ELBOW, 100, 200, 10, 20)
+    prs.slides[0].shapes.add_connector(1, 0, 0, 50, 50)
+    with pytest.raises(ValueError, match="unsupported MSO_CONNECTOR value"):
+        prs.slides[0].shapes.add_connector(MSO_CONNECTOR.MIXED, 0, 0, 1, 1)
+    group = prs.slides[0].shapes.add_group_shape()
+    assert (group.shape_type, len(group.shapes)) == (MSO_SHAPE_TYPE.GROUP, 0)
+    output = tmp_path / "presets.pptx"
+    prs.save(output)
+
+    pptx = pytest.importorskip("pptx", reason="python-pptx is the differential oracle")
+    oracle_members = {member.name: member for member in pptx.enum.shapes.MSO_AUTO_SHAPE_TYPE}
+    assert set(oracle_members) - {member.name for member in MSO_SHAPE} == {"UP_ARROW"}
+    for member in MSO_SHAPE:
+        assert (oracle_members[member.name].value, oracle_members[member.name].xml_value) == (
+            member.value,
+            member.xml_value,
+        )
+    oracle = pptx.Presentation(output).slides[0].shapes
+    def preset(shape):
+        return shape._element.xpath("./p:spPr/a:prstGeom/@prst")[0]
+
+    presets = [preset(shape) for shape in list(oracle)[: len(MSO_SHAPE) + 2]]
+    assert presets == [member.xml_value for member in MSO_SHAPE] + ["roundRect", "rect"]
+    elbow, straight = oracle[len(MSO_SHAPE) + 2], oracle[len(MSO_SHAPE) + 3]
+    assert elbow.shape_type == pptx.enum.shapes.MSO_SHAPE_TYPE.LINE
+    assert (elbow.begin_x, elbow.begin_y, elbow.end_x, elbow.end_y) == (100, 200, 10, 20)
+    assert preset(straight) == "line"
+
+
+def test_notes_text_creates_the_notes_slide_on_a_python_pptx_deck(tmp_path):
+    import rpptx
+
+    source = _python_pptx_deck(
+        tmp_path / "no-notes.pptx",
+        lambda deck: [deck.slides.add_slide(deck.slide_layouts[6]) for _ in range(2)],
+    )
+    assert not [name for name in _package_parts(source.read_bytes()) if "notes" in name]
+    prs = rpptx.Presentation(source)
+    prs.slides[1].notes_text = "Second slide note"
+    assert [slide.notes_text for slide in prs.slides] == [None, "Second slide note"]
+    output = tmp_path / "notes.pptx"
+    prs.save(output)
+    assert len(prs.render_all_notes(dpi=36.0)) == 2
+
+    pptx = pytest.importorskip("pptx", reason="python-pptx is the differential oracle")
+    oracle = pptx.Presentation(output)
+    assert oracle.slides[0].has_notes_slide is False
+    notes_slide = oracle.slides[1].notes_slide
+    assert notes_slide.notes_text_frame.text == "Second slide note"
+    assert [shape.name for shape in notes_slide.placeholders] == [
+        "Slide Image Placeholder 1",
+        "Notes Placeholder 2",
+        "Slide Number Placeholder 3",
+    ]
+
+
+def test_shape_xml_is_a_self_contained_element():
+    import xml.etree.ElementTree as ElementTree
+
+    import rpptx
+
+    prs = rpptx.Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    slide.shapes.add_textbox(0, 0, 10, 10).text = "xml"
+    data = prs.slides[0].shapes[0].xml
+    assert isinstance(data, bytes)
+    element = ElementTree.fromstring(data)
+    assert element.tag == "{http://schemas.openxmlformats.org/presentationml/2006/main}sp"
+    assert b"<a:t>xml</a:t>" in data
+
+
+def test_adjustments_match_python_pptx_defaults_reads_and_writes(tmp_path):
+    import rpptx
+    from rpptx.enum.shapes import MSO_SHAPE
+
+    def build(deck):
+        pptx = pytest.importorskip("pptx")
+        slide = deck.slides.add_slide(deck.slide_layouts[6])
+        for member in MSO_SHAPE:
+            slide.shapes.add_shape(pptx.enum.shapes.MSO_AUTO_SHAPE_TYPE[member.name], 0, 0, 10, 10)
+        arrow = slide.shapes.add_shape(pptx.enum.shapes.MSO_SHAPE.RIGHT_ARROW, 0, 0, 10, 10)
+        arrow.adjustments[1] = 0.25
+
+    source = _python_pptx_deck(tmp_path / "adjustments.pptx", build)
+    pptx = pytest.importorskip("pptx", reason="python-pptx is the differential oracle")
+    expected = [list(shape.adjustments) for shape in pptx.Presentation(source).slides[0].shapes]
+    prs = rpptx.Presentation(source)
+    actual = [list(shape.adjustments) for shape in prs.slides[0].shapes]
+    differences = {
+        member.name: (ours, theirs)
+        for member, ours, theirs in zip(MSO_SHAPE, actual, expected)
+        if ours != theirs
+    }
+    assert differences == {
+        "FOLDED_CORNER": ([0.16667], []),
+        "UP_DOWN_ARROW": ([0.5, 0.5], [0.5, 0.5, 0.5, 0.5]),
+    }
+    assert actual[-1] == expected[-1] == [0.5, 0.25]
+
+    shapes = prs.slides[0].shapes
+    rounded = shapes[list(MSO_SHAPE).index(MSO_SHAPE.ROUNDED_RECTANGLE)]
+    adjustments = rounded.adjustments
+    assert (len(adjustments), adjustments[0], adjustments[-1]) == (1, 0.16667, 0.16667)
+    adjustments[0] = 0.3
+    assert rounded.adjustments[0] == 0.3
+    with pytest.raises(ValueError, match="adjustment value must be numeric"):
+        adjustments[0] = "wide"
+    with pytest.raises(IndexError):
+        _ = adjustments[1]
+    textbox = prs.slides[0].shapes.add_textbox(0, 0, 10, 10)
+    assert len(textbox.adjustments) == 0
+    with pytest.raises(ValueError, match="shape has no adjustments"):
+        _ = prs.slides[0].shapes.add_group_shape().adjustments
+    output = tmp_path / "adjustments-out.pptx"
+    prs.save(output)
+    oracle = pptx.Presentation(output).slides[0].shapes
+    assert oracle[list(MSO_SHAPE).index(MSO_SHAPE.ROUNDED_RECTANGLE)].adjustments[0] == 0.3
+
+
+def test_line_width_none_removes_the_width_attribute_like_python_pptx():
+    import rpptx
+
+    prs = rpptx.Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    shape = slide.shapes.add_shape("rect", 0, 0, 100, 100)
+    shape.line.width = rpptx.Pt(2)
+    shape.line.width = None
+    start_tag = prs.slides[0].shapes[0].xml.split(b"<a:ln", 1)[1].split(b">", 1)[0]
+    assert b" w=" not in start_tag
+    assert prs.slides[0].shapes[0].line.width == 0
+
+
+def test_a_group_fill_reads_as_group_and_a_new_fill_replaces_it(tmp_path):
+    import rpptx
+    from rpptx.enum.dml import MSO_FILL_TYPE
+
+    def build(deck):
+        pptx = pytest.importorskip("pptx")
+        from lxml import etree
+        from pptx.oxml.ns import qn
+
+        shape = deck.slides.add_slide(deck.slide_layouts[6]).shapes.add_shape(
+            pptx.enum.shapes.MSO_SHAPE.RECTANGLE, 0, 0, 10, 10
+        )
+        etree.SubElement(shape._element.spPr, qn("a:grpFill"))
+
+    prs = rpptx.Presentation(_python_pptx_deck(tmp_path / "group-fill.pptx", build))
+    fill = prs.slides[0].shapes[0].fill
+    assert fill.type == MSO_FILL_TYPE.GROUP
+    fill.solid()
+    xml = prs.slides[0].shapes[0].xml
+    assert b"grpFill" not in xml and xml.count(b"<a:solidFill") == 1
+    assert fill.type == MSO_FILL_TYPE.SOLID
+
+
+def test_assigning_a_line_colour_makes_a_patterned_line_solid(tmp_path):
+    import rpptx
+    from rpptx.dml.color import RGBColor
+    from rpptx.enum.dml import MSO_FILL_TYPE
+
+    def build(deck):
+        pptx = pytest.importorskip("pptx")
+        shape = deck.slides.add_slide(deck.slide_layouts[6]).shapes.add_shape(
+            pptx.enum.shapes.MSO_SHAPE.RECTANGLE, 0, 0, 10, 10
+        )
+        shape.line.fill.patterned()
+        shape.line.fill.pattern = pptx.enum.dml.MSO_PATTERN.PERCENT_5
+        shape.line.fill.fore_color.rgb = pptx.dml.color.RGBColor(0, 0, 0xFF)
+
+    prs = rpptx.Presentation(
+        _python_pptx_deck(tmp_path / "patterned-line.pptx", build)
+    )
+    line = prs.slides[0].shapes[0].line
+    assert line.fill.type == MSO_FILL_TYPE.PATTERNED
+    line.color.rgb = RGBColor(0xFF, 0x00, 0x00)
+    assert line.fill.type == MSO_FILL_TYPE.SOLID
+    assert str(line.color.rgb) == "FF0000"

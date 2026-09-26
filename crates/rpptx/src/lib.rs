@@ -23,11 +23,13 @@ pub use oxml_chart::{ChartData, ChartKind, RgbColor};
 use oxml_core::OxmlError;
 pub use oxml_core::core_properties::CoreProperties;
 pub use oxml_core::units::{Angle, Emu};
-use oxml_drawing::color::ColorChoice;
+pub use oxml_drawing::color::ColorChoice;
 #[cfg(feature = "render")]
 use oxml_drawing::color::ColorMap;
-pub use oxml_drawing::fill::Fill;
+pub use oxml_drawing::fill::{Fill, NoFill, PatternFill, SolidFill};
+use oxml_drawing::geometry::{Guide, GuideOp, GuideOperand};
 pub use oxml_drawing::line::CT_LineProperties;
+use oxml_drawing::namespace::A_NS;
 use oxml_drawing::shape_props::CT_ShapeProperties;
 #[cfg(feature = "render")]
 use oxml_drawing::table::CT_TableStyleList;
@@ -79,7 +81,7 @@ pub use rpptx_oxml::diagram::{
     DiagramPoint, DiagramPointKind, DiagramRelationshipIds, DiagramShapeStyle,
 };
 use rpptx_oxml::graphic_frame::{CT_GraphicFrame, GraphicDataPayload};
-use rpptx_oxml::namespace::P_NS;
+use rpptx_oxml::namespace::{P_NS, R_NS};
 use rpptx_oxml::notes_parts::{CT_HandoutMaster, CT_NotesMaster, CT_NotesSlide};
 pub use rpptx_oxml::picture::MediaKind;
 use rpptx_oxml::picture::{CT_Picture, MediaSource as PictureMediaSource, PictureMedia};
@@ -96,7 +98,9 @@ use rpptx_oxml::shape_tree::{
 use rpptx_oxml::slide_parts::CT_CommonSlideData;
 #[cfg(feature = "render")]
 use rpptx_oxml::slide_parts::ColorMapOverrideKind;
-use rpptx_oxml::slide_parts::{CT_HeaderFooter, CT_Slide, CT_SlideLayout, CT_SlideMaster};
+use rpptx_oxml::slide_parts::{
+    BackgroundRendering, CT_HeaderFooter, CT_Slide, CT_SlideLayout, CT_SlideMaster,
+};
 pub use rpptx_oxml::timing::MediaPlaybackTrigger;
 use rpptx_oxml::timing::{CT_Timing, MediaCommandKind, MediaDisplayPolicy};
 #[cfg(feature = "render")]
@@ -297,6 +301,14 @@ pub struct MediaInfo {
     pub poster_relationship_id: Option<String>,
     pub settings: MediaPlaybackSettings,
     pub diagnostics: Vec<MediaDiagnostic>,
+}
+
+/// The embedded image part shown by one picture shape.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PictureImage<'a> {
+    pub part_name: String,
+    pub content_type: String,
+    pub bytes: &'a [u8],
 }
 
 /// An error opening, resolving, or serialising a presentation package.
@@ -1759,6 +1771,19 @@ impl Presentation {
             .and_then(|record| record.layout.common_slide_data.name.as_deref())
     }
 
+    /// Returns the zero-based index of the layout one slide uses.
+    ///
+    /// The slide's internal layout relationship must target a layout that the
+    /// presentation masters reach.
+    pub fn slide_layout_index(&self, slide_index: usize) -> Option<usize> {
+        let slide_part = &self.slides.get(slide_index)?.part_name;
+        let layout_part =
+            related_internal_part(&self.package, slide_part, rel_types::SLIDE_LAYOUT).ok()??;
+        self.layouts
+            .iter()
+            .position(|layout| layout.part_name.eq_ignore_ascii_case(&layout_part))
+    }
+
     /// Returns modern PowerPoint comment authors in producer order.
     pub fn comment_authors(&self) -> &[CommentAuthor] {
         &self.comment_authors.authors
@@ -2088,6 +2113,187 @@ impl Presentation {
         Ok(())
     }
 
+    /// Replaces one slide's speaker-note text, creating its notes slide when absent.
+    ///
+    /// A new notes slide follows python-pptx: it relates to the notes master
+    /// and the slide, and clones the master's slide image, body and slide
+    /// number placeholders. A presentation without a notes master first
+    /// receives a copy of the bundled template's notes master and its theme,
+    /// which needs the `default-template` or `render` feature.
+    pub fn set_notes_text(&mut self, slide_index: usize, text: &str) -> Result<()> {
+        self.require_slide_index(slide_index)?;
+        if self.slides[slide_index].notes.is_some() {
+            return slide_mut(&mut self.slides[slide_index]).set_notes_text(text);
+        }
+        let mut staged = self.clone();
+        staged.add_notes_slide_in_place(slide_index)?;
+        slide_mut(&mut staged.slides[slide_index]).set_notes_text(text)?;
+        self.commit_candidate(staged)
+    }
+
+    fn add_notes_slide_in_place(&mut self, slide_index: usize) -> Result<()> {
+        const OPERATION: &str = "add notes slide";
+        if self.notes_master.is_none() {
+            self.add_default_notes_master_in_place()?;
+        }
+        let (Some(master_part), Some(master)) = (&self.notes_master_part, &self.notes_master)
+        else {
+            return Err(Error::InvalidSlideMutation {
+                operation: OPERATION,
+                message: "presentation has no notes master".to_owned(),
+            });
+        };
+        let mut notes = CT_NotesSlide::from_xml(
+            format!(
+                r#"<p:notes xmlns:a="{A_NS}" xmlns:p="{P_NS}" xmlns:r="{R_NS}"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:notes>"#
+            )
+            .as_bytes(),
+        )
+        .expect("canonical notes slide shell");
+        let tree = &mut notes.common_slide_data.shape_tree;
+        let mut shape_ids = ShapeIdAllocator::scan(tree);
+        for child in &master.common_slide_data.shape_tree.children {
+            let ShapeTreeChild::Shape(shape) = child else {
+                continue;
+            };
+            let Some(placeholder) = &shape.placeholder else {
+                continue;
+            };
+            let label = match placeholder.ph_type {
+                Some(PhType::SlideImage) => "Slide Image Placeholder",
+                Some(PhType::Body) => "Notes Placeholder",
+                Some(PhType::SlideNumber) => "Slide Number Placeholder",
+                _ => continue,
+            };
+            let id = shape_ids.allocate();
+            let mut clone = CT_Shape::new_placeholder(id, placeholder.clone())
+                .map_err(|error| invalid_slide_mutation(OPERATION, error.to_string()))?;
+            clone
+                .set_name(&format!("{label} {}", id - 1))
+                .map_err(|error| invalid_slide_mutation(OPERATION, error.to_string()))?;
+            if placeholder.ph_type != Some(PhType::Body) {
+                clone.text_body = None;
+            }
+            tree.append_child(ShapeTreeChild::Shape(clone));
+        }
+
+        let slide_part = self.slides[slide_index].part_name.clone();
+        let notes_part = MediaNamer::scan(
+            "/ppt/notesSlides",
+            "notesSlide",
+            self.package.parts.keys().map(String::as_str),
+        )
+        .next_part_name("xml");
+        let mut notes_relationships = Relationships::new();
+        notes_relationships.add(
+            rel_types::NOTES_MASTER,
+            &relative_part_target(&notes_part, master_part),
+        );
+        notes_relationships.add(
+            rel_types::SLIDE,
+            &relative_part_target(&notes_part, &slide_part),
+        );
+        let mut slide_relationships = self
+            .package
+            .get_part_rels(&slide_part)
+            .cloned()
+            .unwrap_or_default();
+        slide_relationships.add(
+            rel_types::NOTES_SLIDE,
+            &relative_part_target(&slide_part, &notes_part),
+        );
+        let notes_xml = notes
+            .to_xml()
+            .map_err(|error| invalid_slide_mutation(OPERATION, error.to_string()))?;
+        self.package.set_part(&notes_part, notes_xml);
+        self.package.set_part_rels(&notes_part, notes_relationships);
+        self.package.set_part_rels(&slide_part, slide_relationships);
+        self.package
+            .content_types
+            .add_override(&notes_part, content_types::NOTES_SLIDE);
+        self.slides[slide_index].notes = Some(NotesRecord {
+            part_name: notes_part,
+            notes,
+        });
+        Ok(())
+    }
+
+    #[cfg(any(feature = "default-template", feature = "render"))]
+    fn add_default_notes_master_in_place(&mut self) -> Result<()> {
+        let template = Self::from_bytes(DEFAULT_TEMPLATE)?;
+        let (Some(template_master_part), Some(master)) =
+            (template.notes_master_part, template.notes_master)
+        else {
+            return Err(invalid_slide_mutation(
+                "add notes master",
+                "the bundled template has no notes master",
+            ));
+        };
+        let template_theme_part =
+            related_internal_part(&template.package, &template_master_part, rel_types::THEME)?
+                .ok_or_else(|| {
+                    invalid_slide_mutation(
+                        "add notes master",
+                        "the bundled notes master has no theme",
+                    )
+                })?;
+        let master_part = MediaNamer::scan(
+            "/ppt/notesMasters",
+            "notesMaster",
+            self.package.parts.keys().map(String::as_str),
+        )
+        .next_part_name("xml");
+        let theme_part = MediaNamer::scan(
+            "/ppt/theme",
+            "theme",
+            self.package.parts.keys().map(String::as_str),
+        )
+        .next_part_name("xml");
+        self.package.set_part(
+            &master_part,
+            required_part(&template.package, &template_master_part)?.to_vec(),
+        );
+        self.package.set_part(
+            &theme_part,
+            required_part(&template.package, &template_theme_part)?.to_vec(),
+        );
+        let mut master_relationships = Relationships::new();
+        master_relationships.add(
+            rel_types::THEME,
+            &relative_part_target(&master_part, &theme_part),
+        );
+        self.package
+            .set_part_rels(&master_part, master_relationships);
+        self.package
+            .content_types
+            .add_override(&master_part, content_types::NOTES_MASTER);
+        self.package
+            .content_types
+            .add_override(&theme_part, content_types::THEME);
+        let mut presentation_relationships = self
+            .package
+            .get_part_rels(&self.presentation_part)
+            .cloned()
+            .unwrap_or_default();
+        presentation_relationships.add(
+            rel_types::NOTES_MASTER,
+            &relative_part_target(&self.presentation_part, &master_part),
+        );
+        self.package
+            .set_part_rels(&self.presentation_part, presentation_relationships);
+        self.notes_master_part = Some(master_part);
+        self.notes_master = Some(master);
+        Ok(())
+    }
+
+    #[cfg(not(any(feature = "default-template", feature = "render")))]
+    fn add_default_notes_master_in_place(&mut self) -> Result<()> {
+        Err(invalid_slide_mutation(
+            "add notes master",
+            "presentation has no notes master and the bundled template is not compiled in",
+        ))
+    }
+
     /// Duplicates one slide immediately after its source.
     pub fn duplicate_slide(&mut self, index: usize) -> Result<SlideRef<'_>> {
         if index >= self.slides.len() {
@@ -2197,7 +2403,7 @@ impl Presentation {
         }
         self.presentation.slide_ids.remove(index);
         self.slides.remove(index);
-        prune_unreachable_media(&mut self.package, &media_candidates);
+        prune_unreachable_parts(&mut self.package, &media_candidates);
         self.media_store = MediaStore::scan(&self.package);
         Ok(())
     }
@@ -2566,6 +2772,264 @@ impl Presentation {
         ))
     }
 
+    /// Returns the embedded image one picture shows, found by shape id.
+    ///
+    /// Pictures inside groups and alternate-content fallbacks are found too.
+    /// The content type comes from the package, falling back to the sniffed
+    /// image format.
+    pub fn picture_image(&self, slide_index: usize, shape_id: u32) -> Result<PictureImage<'_>> {
+        self.require_slide_index(slide_index)?;
+        let record = &self.slides[slide_index];
+        let picture = find_picture(
+            &record.slide.common_slide_data.shape_tree.children,
+            shape_id,
+        )
+        .ok_or_else(|| not_a_picture("read picture image", shape_id))?;
+        let relationship_id = picture_image_relationship(picture, "read picture image", shape_id)?;
+        let part_name = require_internal_related_part(
+            &self.package,
+            &record.part_name,
+            relationship_id,
+            rel_types::IMAGE,
+        )?;
+        let bytes = required_part(&self.package, &part_name)?;
+        let content_type = self
+            .package
+            .content_types
+            .content_type_for(&part_name)
+            .map_or_else(
+                || resolve(bytes, &part_name).content_type().to_owned(),
+                str::to_owned,
+            );
+        Ok(PictureImage {
+            part_name,
+            content_type,
+            bytes,
+        })
+    }
+
+    /// Replaces the image one picture shows while keeping its geometry.
+    ///
+    /// Only this picture changes. A relationship other pictures share is
+    /// split first, a part no other relationship targets is rewritten in
+    /// place when its extension fits the new format, and any other part is
+    /// left to its remaining users while the picture moves to a new or equal
+    /// media part. A picture that carries a second image, such as an SVG
+    /// alternate, is rejected because PowerPoint would keep showing it.
+    pub fn replace_picture_image(
+        &mut self,
+        slide_index: usize,
+        shape_id: u32,
+        image_data: &[u8],
+    ) -> Result<()> {
+        const OPERATION: &str = "replace picture image";
+        self.require_slide_index(slide_index)?;
+        let format = ImageFormat::sniff(image_data).ok_or_else(|| Error::InvalidShapeMutation {
+            operation: OPERATION,
+            message: "replacement bytes are not a supported image".to_owned(),
+        })?;
+        let mut staged = self.clone();
+        let slide_part = staged.slides[slide_index].part_name.clone();
+        let slide = &mut staged.slides[slide_index].slide;
+        let picture = find_picture_mut(&mut slide.common_slide_data.shape_tree.children, shape_id)
+            .ok_or_else(|| not_a_picture(OPERATION, shape_id))?;
+        let relationship_id = picture_image_relationship(picture, OPERATION, shape_id)?.to_owned();
+        let old_part = require_internal_related_part(
+            &staged.package,
+            &slide_part,
+            &relationship_id,
+            rel_types::IMAGE,
+        )?;
+        let mut relationships = staged
+            .package
+            .get_part_rels(&slide_part)
+            .cloned()
+            .unwrap_or_default();
+        let picture_xml = picture
+            .to_xml()
+            .map_err(|error| invalid_shape_mutation(OPERATION, error.to_string()))?;
+        let second_image = relationship_ids(&picture_xml)
+            .map_err(|error| invalid_shape_mutation(OPERATION, error.to_string()))?
+            .into_iter()
+            .filter(|id| *id != relationship_id)
+            .any(|id| {
+                relationships
+                    .get_by_id(&id)
+                    .is_some_and(|relationship| relationship.rel_type == rel_types::IMAGE)
+            });
+        if second_image {
+            return Err(invalid_shape_mutation(
+                OPERATION,
+                format!("picture {shape_id} carries a second image, such as an SVG alternate"),
+            ));
+        }
+        let slide_xml = slide
+            .to_xml()
+            .map_err(|error| invalid_shape_mutation(OPERATION, error.to_string()))?;
+        let uses = relationship_ids(&slide_xml)
+            .map_err(|error| invalid_shape_mutation(OPERATION, error.to_string()))?
+            .into_iter()
+            .filter(|id| *id == relationship_id)
+            .count();
+        let picture = find_picture_mut(&mut slide.common_slide_data.shape_tree.children, shape_id)
+            .expect("picture found above");
+        let relationship_id = if uses > 1 {
+            let isolated = relationships.add(
+                rel_types::IMAGE,
+                &relative_part_target(&slide_part, &old_part),
+            );
+            picture
+                .blip_fill
+                .as_mut()
+                .and_then(|fill| fill.blip.as_mut())
+                .expect("picture has an embedded image")
+                .embed = Some(isolated.clone());
+            isolated
+        } else {
+            relationship_id
+        };
+        let part_users = std::iter::once(("/", &staged.package.package_rels))
+            .chain(
+                staged
+                    .package
+                    .part_rels
+                    .iter()
+                    .filter(|(source, _)| **source != slide_part)
+                    .map(|(source, items)| (source.as_str(), items)),
+            )
+            .chain(std::iter::once((slide_part.as_str(), &relationships)))
+            .flat_map(|(source, items)| items.items.iter().map(move |item| (source, item)))
+            .filter(|(source, relationship)| {
+                !relationship_is_external(relationship)
+                    && OpcPackage::resolve_rel_target(source, &relationship.target)
+                        .eq_ignore_ascii_case(&old_part)
+            })
+            .count();
+        let extension = old_part
+            .rsplit_once('.')
+            .map_or("", |(_, extension)| extension)
+            .to_owned();
+        if part_users == 1 && ImageFormat::from_extension(&extension) == Some(format) {
+            staged.package.set_part(&old_part, image_data.to_vec());
+            register_content_type(
+                &mut staged.package,
+                &old_part,
+                &extension,
+                format.content_type(),
+            );
+        } else {
+            let new_part = staged.media_store.insert(
+                &mut staged.package,
+                image_data,
+                &format!("image.{}", format.extension()),
+            );
+            let relationship = relationships
+                .items
+                .iter_mut()
+                .find(|relationship| relationship.id == relationship_id)
+                .expect("picture relationship exists");
+            relationship.target = relative_part_target(&slide_part, &new_part);
+        }
+        staged.package.set_part_rels(&slide_part, relationships);
+        prune_unreachable_parts(&mut staged.package, &HashSet::from([old_part]));
+        staged.media_store = MediaStore::scan(&staged.package);
+        self.commit_candidate(staged)
+    }
+
+    /// Removes one immediate slide child and the package parts only it used.
+    ///
+    /// Connectors attached to a removed shape are detached, as PowerPoint does
+    /// on delete. The media timing a removed media picture owns goes with it.
+    /// A shape that other slide animations still target is rejected without
+    /// any change.
+    pub fn remove_shape(&mut self, slide_index: usize, shape_index: usize) -> Result<()> {
+        const OPERATION: &str = "remove shape";
+        self.require_slide_index(slide_index)?;
+        let mut staged = self.clone();
+        let slide_part = staged.slides[slide_index].part_name.clone();
+        let slide = &mut staged.slides[slide_index].slide;
+        let children = &slide.common_slide_data.shape_tree.children;
+        let child = children
+            .get(shape_index)
+            .ok_or_else(|| Error::InvalidSlideMutation {
+                operation: OPERATION,
+                message: format!(
+                    "shape index {shape_index} is out of range for {} shapes",
+                    children.len()
+                ),
+            })?;
+        let shape_id = child
+            .non_visual_id()
+            .ok_or_else(|| Error::UnsupportedShapeMutation {
+                operation: OPERATION,
+                shape_kind: shape_kind(child),
+            })?;
+        if children
+            .iter()
+            .position(|child| child.non_visual_id() == Some(shape_id))
+            != Some(shape_index)
+        {
+            return Err(Error::InvalidSlideMutation {
+                operation: OPERATION,
+                message: format!("shape id {shape_id} is not unique on the slide"),
+            });
+        }
+        let mut removed_ids = HashSet::new();
+        let mut media_ids = Vec::new();
+        collect_subtree_ids(
+            std::slice::from_ref(child),
+            &mut removed_ids,
+            &mut media_ids,
+        );
+        let before = slide_relationship_ids(slide)?;
+        if let Some(timing) = &mut slide.timing {
+            for media_id in media_ids {
+                timing
+                    .remove_media(media_id)
+                    .map_err(|error| invalid_shape_mutation(OPERATION, error.to_string()))?;
+            }
+            if let Some(animated) = removed_ids
+                .iter()
+                .copied()
+                .filter(|id| timing.references_shape(*id))
+                .min()
+            {
+                return Err(invalid_shape_mutation(
+                    OPERATION,
+                    format!("slide animations still target shape id {animated}"),
+                ));
+            }
+        }
+        detach_connectors(
+            &mut slide.common_slide_data.shape_tree.children,
+            &removed_ids,
+        );
+        slide
+            .common_slide_data
+            .shape_tree
+            .remove_child_by_id(shape_id)
+            .map_err(|error| invalid_shape_mutation(OPERATION, error.to_string()))?;
+        let after = slide_relationship_ids(slide)?;
+        let mut candidates = HashSet::new();
+        if let Some(relationships) = staged.package.get_part_rels_mut(&slide_part) {
+            relationships.items.retain(|relationship| {
+                if !before.contains(&relationship.id) || after.contains(&relationship.id) {
+                    return true;
+                }
+                if !relationship_is_external(relationship) {
+                    candidates.insert(OpcPackage::resolve_rel_target(
+                        &slide_part,
+                        &relationship.target,
+                    ));
+                }
+                false
+            });
+        }
+        prune_unreachable_parts(&mut staged.package, &candidates);
+        staged.media_store = MediaStore::scan(&staged.package);
+        self.commit_candidate(staged)
+    }
+
     /// Inspects slide, layout, and master SmartArt in producing-scope order.
     pub fn smart_art(&self, slide_index: usize) -> Result<Vec<SmartArtInfo>> {
         let record = self
@@ -2902,7 +3366,7 @@ impl Presentation {
             false
         });
         staged.package.set_part_rels(&slide_part, relationships);
-        prune_unreachable_media(&mut staged.package, &candidates);
+        prune_unreachable_parts(&mut staged.package, &candidates);
         staged.media_store = MediaStore::scan(&staged.package);
         self.commit_candidate(staged)
     }
@@ -2990,7 +3454,7 @@ impl Presentation {
             false
         });
         staged.package.set_part_rels(&slide_part, relationships);
-        prune_unreachable_media(&mut staged.package, &candidates);
+        prune_unreachable_parts(&mut staged.package, &candidates);
         staged.media_store = MediaStore::scan(&staged.package);
         self.commit_candidate(staged)
     }
@@ -3338,6 +3802,124 @@ fn media_picture_shape(slide: &CT_Slide, shape_id: u32) -> Result<&CT_Picture> {
                 format!("shape id {shape_id} is not a media picture"),
             )
         })
+}
+
+fn invalid_shape_mutation(operation: &'static str, message: impl Into<String>) -> Error {
+    Error::InvalidShapeMutation {
+        operation,
+        message: message.into(),
+    }
+}
+
+fn invalid_slide_mutation(operation: &'static str, message: impl Into<String>) -> Error {
+    Error::InvalidSlideMutation {
+        operation,
+        message: message.into(),
+    }
+}
+
+fn not_a_picture(operation: &'static str, shape_id: u32) -> Error {
+    invalid_shape_mutation(operation, format!("shape id {shape_id} is not a picture"))
+}
+
+fn find_picture(children: &[ShapeTreeChild], shape_id: u32) -> Option<&CT_Picture> {
+    children.iter().find_map(|child| match child {
+        ShapeTreeChild::Picture(picture) if child.non_visual_id() == Some(shape_id) => {
+            Some(picture)
+        }
+        ShapeTreeChild::GroupShape(group) => find_picture(&group.children, shape_id),
+        ShapeTreeChild::AlternateContent(alternate) => {
+            find_picture(alternate.selected_fallback().unwrap_or_default(), shape_id)
+        }
+        _ => None,
+    })
+}
+
+fn find_picture_mut(children: &mut [ShapeTreeChild], shape_id: u32) -> Option<&mut CT_Picture> {
+    for child in children {
+        let id = child.non_visual_id();
+        match child {
+            ShapeTreeChild::Picture(picture) if id == Some(shape_id) => return Some(picture),
+            ShapeTreeChild::GroupShape(group) => {
+                if let Some(picture) = find_picture_mut(&mut group.children, shape_id) {
+                    return Some(picture);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn picture_image_relationship<'a>(
+    picture: &'a CT_Picture,
+    operation: &'static str,
+    shape_id: u32,
+) -> Result<&'a str> {
+    picture
+        .blip_fill
+        .as_ref()
+        .and_then(|fill| fill.blip.as_ref())
+        .and_then(|blip| blip.embed.as_deref())
+        .ok_or_else(|| {
+            invalid_shape_mutation(
+                operation,
+                format!("picture {shape_id} has no embedded image"),
+            )
+        })
+}
+
+fn collect_subtree_ids(
+    children: &[ShapeTreeChild],
+    ids: &mut HashSet<u32>,
+    media_ids: &mut Vec<u32>,
+) {
+    for child in children {
+        ids.extend(child.non_visual_id());
+        match child {
+            ShapeTreeChild::Picture(picture) if picture.media.is_some() => {
+                media_ids.extend(child.non_visual_id());
+            }
+            ShapeTreeChild::GroupShape(group) => {
+                collect_subtree_ids(&group.children, ids, media_ids);
+            }
+            ShapeTreeChild::AlternateContent(alternate) => {
+                collect_subtree_ids(
+                    alternate.selected_fallback().unwrap_or_default(),
+                    ids,
+                    media_ids,
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn detach_connectors(children: &mut [ShapeTreeChild], removed_ids: &HashSet<u32>) {
+    for child in children {
+        match child {
+            ShapeTreeChild::Connector(connector) => {
+                if connector
+                    .start_connection
+                    .as_ref()
+                    .is_some_and(|connection| removed_ids.contains(&connection.id))
+                {
+                    connector.start_connection = None;
+                }
+                if connector
+                    .end_connection
+                    .as_ref()
+                    .is_some_and(|connection| removed_ids.contains(&connection.id))
+                {
+                    connector.end_connection = None;
+                }
+            }
+            ShapeTreeChild::GroupShape(group) => {
+                detach_connectors(&mut group.children, removed_ids)
+            }
+            _ => {}
+        }
+    }
 }
 
 fn slide_relationship_ids(slide: &CT_Slide) -> Result<HashSet<String>> {
@@ -4218,12 +4800,18 @@ fn collect_media_targets(package: &OpcPackage, source_part: &str, targets: &mut 
     }
 }
 
-fn prune_unreachable_media(package: &mut OpcPackage, candidates: &HashSet<String>) {
-    for candidate in candidates {
+/// Removes candidate parts that no relationship reaches any longer.
+///
+/// A removed part's own internal targets become candidates in turn, so a
+/// removed chart also drops its embedded workbook.
+fn prune_unreachable_parts(package: &mut OpcPackage, candidates: &HashSet<String>) {
+    let mut pending = candidates.iter().cloned().collect::<Vec<_>>();
+    pending.sort_unstable();
+    while let Some(candidate) = pending.pop() {
         let reachable_from_root = package.package_rels.items.iter().any(|relationship| {
             !relationship_is_external(relationship)
                 && OpcPackage::resolve_rel_target("/", &relationship.target)
-                    .eq_ignore_ascii_case(candidate)
+                    .eq_ignore_ascii_case(&candidate)
         });
         let reachable_from_part = package
             .part_rels
@@ -4232,14 +4820,26 @@ fn prune_unreachable_media(package: &mut OpcPackage, candidates: &HashSet<String
                 relationships.items.iter().any(|relationship| {
                     !relationship_is_external(relationship)
                         && OpcPackage::resolve_rel_target(source_part, &relationship.target)
-                            .eq_ignore_ascii_case(candidate)
+                            .eq_ignore_ascii_case(&candidate)
                 })
             });
-        if !reachable_from_root && !reachable_from_part {
-            package.remove_part(candidate);
-            package.remove_part_rels(candidate);
-            package.content_types.remove_override(candidate);
+        if reachable_from_root || reachable_from_part {
+            continue;
         }
+        if let Some(relationships) = package.get_part_rels(&candidate) {
+            pending.extend(
+                relationships
+                    .items
+                    .iter()
+                    .filter(|relationship| !relationship_is_external(relationship))
+                    .map(|relationship| {
+                        OpcPackage::resolve_rel_target(&candidate, &relationship.target)
+                    }),
+            );
+        }
+        package.remove_part(&candidate);
+        package.remove_part_rels(&candidate);
+        package.content_types.remove_override(&candidate);
     }
 }
 
@@ -4830,6 +5430,12 @@ impl<'a> SlideMut<'a> {
         self.record.slide.clear_background();
     }
 
+    /// Removes any slide background, direct fill or theme reference, so the
+    /// slide follows its layout and master background.
+    pub fn remove_background(&mut self) {
+        self.record.slide.common_slide_data.background = None;
+    }
+
     /// Replaces speaker-note text while preserving its body placeholder.
     pub fn set_notes_text(&mut self, text: &str) -> Result<()> {
         let notes = self
@@ -5081,6 +5687,21 @@ impl<'a> SlideRef<'a> {
         self.record.slide.has_explicit_background()
     }
 
+    /// Returns the direct `p:bgPr` fill when the slide background has one.
+    pub fn background_fill(&self) -> Option<&'a Fill> {
+        match self
+            .record
+            .slide
+            .common_slide_data
+            .background
+            .as_ref()?
+            .rendering()
+        {
+            BackgroundRendering::Properties(fill) => fill.as_deref(),
+            BackgroundRendering::Reference { .. } | BackgroundRendering::Unsupported(_) => None,
+        }
+    }
+
     /// Returns one immediate z-order child by zero-based index.
     pub fn shape(&self, index: usize) -> Option<ShapeRef<'a>> {
         self.record
@@ -5157,6 +5778,23 @@ pub enum AutofitMode {
     None,
     Normal,
     Shape,
+}
+
+/// The python-pptx `MSO_SHAPE_TYPE` classification of one shape-tree child.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShapeType {
+    AutoShape,
+    Chart,
+    EmbeddedOleObject,
+    Freeform,
+    Group,
+    Line,
+    LinkedOleObject,
+    Media,
+    Picture,
+    Placeholder,
+    Table,
+    TextBox,
 }
 
 /// A borrowed shape-tree child.
@@ -5251,7 +5889,7 @@ impl<'a> ShapeMut<'a> {
 
     /// Replaces the direct fill on a shape with typed shape properties.
     pub fn set_fill(&mut self, fill: Fill) -> Result<()> {
-        self.shape_properties_mut("set fill")?.fill = Some(fill);
+        self.shape_properties_mut("set fill")?.set_fill(Some(fill));
         Ok(())
     }
 
@@ -6296,10 +6934,156 @@ fn shape_transform(child: &ShapeTreeChild) -> Option<&CT_Transform2D> {
     }
 }
 
+fn literal_guide_value(guide: &Guide) -> Option<f64> {
+    match (&guide.op, guide.args.as_slice()) {
+        (GuideOp::Val, [GuideOperand::Literal(value)]) => Some(*value),
+        _ => None,
+    }
+}
+
+fn shape_properties(child: &ShapeTreeChild) -> Option<&CT_ShapeProperties> {
+    match child {
+        ShapeTreeChild::Shape(shape) => Some(&shape.shape_properties),
+        ShapeTreeChild::Picture(picture) => Some(&picture.shape_properties),
+        ShapeTreeChild::Connector(connector) => Some(&connector.shape_properties),
+        ShapeTreeChild::GraphicFrame(_)
+        | ShapeTreeChild::GroupShape(_)
+        | ShapeTreeChild::AlternateContent(_) => None,
+    }
+}
+
 impl<'a> ShapeRef<'a> {
     /// Returns the child's normalized structural kind.
     pub fn kind(&self) -> ShapeKind {
         shape_kind(self.child)
+    }
+
+    /// Classifies the child the way python-pptx `shape_type` does.
+    ///
+    /// Only an ordinary shape reports `Placeholder`: python-pptx classifies a
+    /// picture placeholder as a picture and a graphic-frame placeholder by its
+    /// payload. Only video counts as `Media`, so an audio picture is a
+    /// `Picture`. `None` covers a shape without geometry, SmartArt and other
+    /// graphic payloads, and alternate content without a chart choice.
+    pub fn shape_type(&self) -> Option<ShapeType> {
+        match self.child {
+            ShapeTreeChild::Shape(shape) => {
+                if shape.placeholder.is_some() {
+                    Some(ShapeType::Placeholder)
+                } else if shape.shape_properties.custom_geometry.is_some() {
+                    Some(ShapeType::Freeform)
+                } else if shape.is_textbox() {
+                    Some(ShapeType::TextBox)
+                } else if shape.shape_properties.preset_geometry.is_some() {
+                    Some(ShapeType::AutoShape)
+                } else {
+                    None
+                }
+            }
+            // python-pptx reads every placeholder picture as a picture, video
+            // included.
+            ShapeTreeChild::Picture(picture) => Some(
+                if picture.placeholder.is_none()
+                    && picture
+                        .media
+                        .as_ref()
+                        .is_some_and(|media| media.kind == MediaKind::Video)
+                {
+                    ShapeType::Media
+                } else {
+                    ShapeType::Picture
+                },
+            ),
+            ShapeTreeChild::GraphicFrame(frame) => match frame.graphic_data.payload() {
+                GraphicDataPayload::Table(_) => Some(ShapeType::Table),
+                GraphicDataPayload::Chart(_) => Some(ShapeType::Chart),
+                GraphicDataPayload::Ole { .. } => {
+                    if frame.graphic_data.is_embedded_ole_object() == Some(true) {
+                        Some(ShapeType::EmbeddedOleObject)
+                    } else {
+                        Some(ShapeType::LinkedOleObject)
+                    }
+                }
+                GraphicDataPayload::SmartArt(_) | GraphicDataPayload::Other(_) => None,
+            },
+            ShapeTreeChild::GroupShape(_) => Some(ShapeType::Group),
+            ShapeTreeChild::Connector(_) => Some(ShapeType::Line),
+            ShapeTreeChild::AlternateContent(alternate) => {
+                alternate.chart_choice().map(|_| ShapeType::Chart)
+            }
+        }
+    }
+
+    /// Returns the effective preset adjustments of an ordinary shape.
+    ///
+    /// Like python-pptx, the preset definition's defaults come in definition
+    /// order and a literal `val` guide in the shape's own `a:avLst` replaces
+    /// the default of the same name. Values are raw guide values, where
+    /// 100000 means 1.0. Other shape kinds and custom geometry have none.
+    pub fn adjustments(&self) -> Result<Vec<(String, f64)>> {
+        let ShapeTreeChild::Shape(shape) = self.child else {
+            return Ok(Vec::new());
+        };
+        let Some(geometry) = &shape.shape_properties.preset_geometry else {
+            return Ok(Vec::new());
+        };
+        let defaults = geometry
+            .default_adjust_values()
+            .map_err(|error| invalid_shape_mutation("read adjustments", error.to_string()))?;
+        Ok(defaults
+            .into_iter()
+            .filter_map(|default| {
+                let value = literal_guide_value(
+                    geometry
+                        .adjust_values()
+                        .iter()
+                        .find(|guide| guide.name == default.name)
+                        .unwrap_or(&default),
+                )
+                .or_else(|| literal_guide_value(&default))?;
+                Some((default.name, value))
+            })
+            .collect())
+    }
+
+    /// Returns the direct clockwise rotation, or `None` without a transform.
+    pub fn rotation(&self) -> Option<Angle> {
+        shape_transform(self.child).map(|transform| transform.rotation)
+    }
+
+    /// Returns the direct fill of a shape, picture, or connector.
+    pub fn fill(&self) -> Option<&'a Fill> {
+        shape_properties(self.child)?.fill.as_ref()
+    }
+
+    /// Returns whether the shape takes its parent group's fill (`a:grpFill`).
+    pub fn has_group_fill(&self) -> bool {
+        shape_properties(self.child).is_some_and(CT_ShapeProperties::has_group_fill)
+    }
+
+    /// Returns the direct line of a shape, picture, or connector.
+    pub fn line(&self) -> Option<&'a CT_LineProperties> {
+        shape_properties(self.child)?.line.as_ref()
+    }
+
+    /// Serialises the child as a self-contained element.
+    ///
+    /// Typed children declare the `p`, `a`, `r` and `mc` prefixes they use.
+    /// Alternate content is returned verbatim and may rely on prefixes that
+    /// only the slide root declares.
+    pub fn xml(&self) -> Result<Vec<u8>> {
+        match self.child {
+            ShapeTreeChild::Shape(shape) => shape.to_xml(),
+            ShapeTreeChild::Picture(picture) => picture.to_xml(),
+            ShapeTreeChild::GraphicFrame(frame) => frame.to_xml(),
+            ShapeTreeChild::GroupShape(group) => group.to_xml(),
+            ShapeTreeChild::Connector(connector) => connector.to_xml(),
+            ShapeTreeChild::AlternateContent(alternate) => Ok(alternate.raw_xml().to_vec()),
+        }
+        .map_err(|error| Error::InvalidShapeMutation {
+            operation: "serialize shape",
+            message: error.to_string(),
+        })
     }
 
     /// Returns the direct shape offset in EMU.

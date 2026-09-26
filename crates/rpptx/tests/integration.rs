@@ -21296,3 +21296,921 @@ for filename in sys.argv[1:]:
                 f"{bounds[2] / 12700:.3f}\t{bounds[3] / 12700:.3f}\t{escape(shape_text(shape))}"
             )
 "#;
+
+fn with_first_slide_children(
+    presentation: &Presentation,
+    children: &str,
+    relationships: &[(&str, &str, &str)],
+) -> Presentation {
+    let mut package = open_opc(&presentation.to_bytes().unwrap(), "slide children fixture");
+    let slide_part = "/ppt/slides/slide1.xml";
+    let xml = String::from_utf8(package.get_part(slide_part).unwrap().to_vec()).unwrap();
+    let xml = xml.replacen("</p:spTree>", &format!("{children}</p:spTree>"), 1);
+    package.set_part(slide_part, xml.into_bytes());
+    let slide_relationships = package.get_or_create_part_rels(slide_part);
+    for (id, relationship_type, target) in relationships {
+        slide_relationships.add_with_id(id, relationship_type, target);
+    }
+    open_package(package).unwrap()
+}
+
+fn with_renumbered_shape_id(xml: &[u8], from: u32, to: u32) -> String {
+    String::from_utf8(xml.to_vec()).unwrap().replacen(
+        &format!(r#"<p:cNvPr id="{from}""#),
+        &format!(r#"<p:cNvPr id="{to}""#),
+        1,
+    )
+}
+
+fn first_slide_shape_id(presentation: &Presentation, index: usize) -> u32 {
+    presentation
+        .slide(0)
+        .unwrap()
+        .shape(index)
+        .unwrap()
+        .non_visual_id()
+        .unwrap()
+}
+
+fn add_python_pptx_media(presentation: &mut Presentation, kind: MediaKind) {
+    let poster = valid_one_pixel_png();
+    let (bytes, filename, content_type) = match kind {
+        MediaKind::Audio => (b"ID3shapes-audio".as_slice(), "sound.mp3", "audio/mpeg"),
+        MediaKind::Video => (
+            b"\0\0\0\x18ftypisom-shapes-video".as_slice(),
+            "movie.mp4",
+            "video/mp4",
+        ),
+    };
+    presentation
+        .add_media(
+            0,
+            kind,
+            MediaSourceInput::Embedded(EmbeddedMediaInput {
+                bytes,
+                filename,
+                content_type,
+            }),
+            MediaPoster {
+                bytes: &poster,
+                filename: "poster.png",
+            },
+            Emu(10),
+            Emu(10),
+            Emu(300),
+            Emu(200),
+            MediaPlaybackSettings::default(),
+        )
+        .unwrap();
+}
+
+#[test]
+fn shape_type_classifies_every_shape_tree_child_like_python_pptx() {
+    use rpptx::ShapeType;
+
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(0).unwrap();
+    {
+        let mut slide = presentation.slide_mut(0).unwrap();
+        slide.add_textbox(Emu(1), Emu(1), Emu(10), Emu(10)).unwrap();
+        slide
+            .add_shape("roundRect", Emu(1), Emu(1), Emu(10), Emu(10))
+            .unwrap();
+        slide
+            .add_table(1, 1, Emu(1), Emu(1), Emu(100), Emu(100))
+            .unwrap();
+        slide
+            .add_connector(ConnectorType::Elbow, Emu(1), Emu(1), Emu(10), Emu(10))
+            .unwrap();
+        slide.add_group_shape().unwrap();
+    }
+    presentation
+        .add_picture(
+            0,
+            &valid_one_pixel_png(),
+            "pixel.png",
+            Emu(1),
+            Emu(1),
+            None,
+            None,
+        )
+        .unwrap();
+    presentation
+        .add_chart(
+            0,
+            ChartKind::Bar,
+            Emu(1),
+            Emu(2),
+            Emu(300),
+            Emu(400),
+            &f124_chart_data(),
+        )
+        .unwrap();
+    add_python_pptx_media(&mut presentation, MediaKind::Video);
+    add_python_pptx_media(&mut presentation, MediaKind::Audio);
+    let slide = presentation.slide(0).unwrap();
+    let picture_xml = String::from_utf8(slide.shape(7).unwrap().xml().unwrap()).unwrap();
+    let embed = picture_xml
+        .split(r#"r:embed=""#)
+        .nth(1)
+        .and_then(|tail| tail.split('"').next())
+        .unwrap()
+        .to_owned();
+    let chart_id = slide.shape(8).unwrap().non_visual_id().unwrap();
+    let chart_choice =
+        with_renumbered_shape_id(&slide.shape(8).unwrap().xml().unwrap(), chart_id, 99);
+    let ole = |id: u32, body: &str| {
+        format!(
+            r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="{id}" name="OLE {id}"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/presentationml/2006/ole">{body}</a:graphicData></a:graphic></p:graphicFrame>"#
+        )
+    };
+    let children = [
+        r#"<p:sp><p:nvSpPr><p:cNvPr id="90" name="Freeform"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l="0" t="0" r="r" b="b"/><a:pathLst><a:path w="10" h="10"><a:moveTo><a:pt x="0" y="0"/></a:moveTo><a:lnTo><a:pt x="10" y="10"/></a:lnTo></a:path></a:pathLst></a:custGeom></p:spPr></p:sp>"#.to_owned(),
+        r#"<p:sp><p:nvSpPr><p:cNvPr id="91" name="Spelled"/><p:cNvSpPr txBox="true"/><p:nvPr/></p:nvSpPr><p:spPr/></p:sp>"#.to_owned(),
+        r#"<p:sp><p:nvSpPr><p:cNvPr id="92" name="Bare"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/></p:sp>"#.to_owned(),
+        ole(93, r#"<p:oleObj r:id="ole-embedded" name="embedded"><p:embed/></p:oleObj>"#),
+        ole(94, r#"<p:oleObj r:id="ole-linked" name="linked"><p:link updateAutomatic="1"/></p:oleObj>"#),
+        ole(95, &format!(r#"<mc:AlternateContent xmlns:mc="{MC_NS}"><mc:Choice Requires="v"><p:oleObj r:id="ole-embedded" name="choice"><p:embed/></p:oleObj></mc:Choice><mc:Fallback><p:oleObj r:id="ole-linked" name="fallback"><p:link/></p:oleObj></mc:Fallback></mc:AlternateContent>"#)),
+        r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="96" name="Other"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></p:xfrm><a:graphic><a:graphicData uri="urn:rpptx:other"><x:payload xmlns:x="urn:rpptx:other"/></a:graphicData></a:graphic></p:graphicFrame>"#.to_owned(),
+        format!(r#"<p:pic><p:nvPicPr><p:cNvPr id="97" name="Picture Placeholder"/><p:cNvPicPr/><p:nvPr><p:ph type="pic" idx="13"/></p:nvPr></p:nvPicPr><p:blipFill><a:blip r:embed="{embed}"/></p:blipFill><p:spPr/></p:pic>"#),
+        format!(r#"<mc:AlternateContent xmlns:mc="{MC_NS}"><mc:Choice xmlns:c14="http://schemas.microsoft.com/office/drawing/2007/8/2/chart" Requires="c14">{chart_choice}</mc:Choice><mc:Fallback/></mc:AlternateContent>"#),
+    ]
+    .concat();
+    let presentation = with_first_slide_children(
+        &presentation,
+        &children,
+        &[
+            (
+                "ole-embedded",
+                rel_types::OLE_OBJECT,
+                "../embeddings/opaque.bin",
+            ),
+            (
+                "ole-linked",
+                rel_types::OLE_OBJECT,
+                "../embeddings/opaque.bin",
+            ),
+        ],
+    );
+    let types = presentation
+        .slide(0)
+        .unwrap()
+        .shapes()
+        .map(|shape| shape.shape_type())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        types,
+        [
+            Some(ShapeType::Placeholder),
+            Some(ShapeType::Placeholder),
+            Some(ShapeType::TextBox),
+            Some(ShapeType::AutoShape),
+            Some(ShapeType::Table),
+            Some(ShapeType::Line),
+            Some(ShapeType::Group),
+            Some(ShapeType::Picture),
+            Some(ShapeType::Chart),
+            Some(ShapeType::Media),
+            Some(ShapeType::Picture),
+            Some(ShapeType::Freeform),
+            Some(ShapeType::TextBox),
+            None,
+            Some(ShapeType::EmbeddedOleObject),
+            Some(ShapeType::LinkedOleObject),
+            Some(ShapeType::LinkedOleObject),
+            None,
+            Some(ShapeType::Picture),
+            Some(ShapeType::Chart),
+        ]
+    );
+}
+
+#[test]
+fn a_video_in_a_slide_placeholder_is_classified_as_a_picture_like_python_pptx() {
+    // python-pptx builds a placeholder picture for every slide `p:pic` that
+    // carries `p:ph`, and a placeholder picture is a PICTURE.
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    add_python_pptx_media(&mut presentation, MediaKind::Video);
+    let mut package = open_opc(&presentation.to_bytes().unwrap(), "video placeholder");
+    let part = "/ppt/slides/slide1.xml";
+    let xml = String::from_utf8(package.get_part(part).unwrap().to_vec()).unwrap();
+    assert!(xml.contains("<a:videoFile"), "{xml}");
+    package.set_part(
+        part,
+        xml.replacen("<a:videoFile", r#"<p:ph idx="1"/><a:videoFile"#, 1)
+            .into_bytes(),
+    );
+
+    let presentation = open_package(package).unwrap();
+
+    assert_eq!(
+        presentation
+            .slide(0)
+            .unwrap()
+            .shape(0)
+            .unwrap()
+            .shape_type(),
+        Some(rpptx::ShapeType::Picture)
+    );
+}
+
+#[test]
+fn setting_a_fill_replaces_a_group_fill_instead_of_adding_a_second_fill() {
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    let mut presentation = with_first_slide_children(
+        &presentation,
+        r#"<p:sp><p:nvSpPr><p:cNvPr id="60" name="Group filled"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:grpFill/></p:spPr></p:sp>"#,
+        &[],
+    );
+    let shape = presentation.slide(0).unwrap().shape(0).unwrap();
+    assert!(shape.has_group_fill() && shape.fill().is_none());
+
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .shape_mut(0)
+        .unwrap()
+        .set_fill(Fill::NoFill(rpptx::NoFill::default()))
+        .unwrap();
+
+    let shape = presentation.slide(0).unwrap().shape(0).unwrap();
+    assert!(!shape.has_group_fill());
+    let xml = String::from_utf8(shape.xml().unwrap()).unwrap();
+    assert!(
+        !xml.contains("grpFill") && xml.contains("<a:noFill/>"),
+        "{xml}"
+    );
+}
+
+#[test]
+fn shape_reads_report_rotation_fill_line_and_self_contained_xml() {
+    use rpptx::{ColorChoice, RgbColor, SolidFill};
+
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    {
+        let mut slide = presentation.slide_mut(0).unwrap();
+        let mut shape = slide
+            .add_shape("rect", Emu(10), Emu(20), Emu(30), Emu(40))
+            .unwrap();
+        shape.set_rotation(Angle(5_400_000)).unwrap();
+        let mut solid = SolidFill::default();
+        solid.color = Some(ColorChoice::srgb(RgbColor::new(1, 2, 3)));
+        shape.set_fill(Fill::Solid(solid)).unwrap();
+        let mut line = CT_LineProperties::default();
+        line.width = Some(12_700);
+        shape.set_line(line).unwrap();
+        slide.add_group_shape().unwrap();
+        slide
+            .add_table(1, 1, Emu(1), Emu(1), Emu(100), Emu(100))
+            .unwrap();
+        slide.add_textbox(Emu(1), Emu(1), Emu(10), Emu(10)).unwrap();
+    }
+    let slide = presentation.slide(0).unwrap();
+    let shape = slide.shape(0).unwrap();
+    assert_eq!(shape.rotation(), Some(Angle(5_400_000)));
+    assert!(matches!(
+        shape.fill(),
+        Some(Fill::Solid(fill)) if fill.color == Some(ColorChoice::srgb(RgbColor::new(1, 2, 3)))
+    ));
+    assert_eq!(shape.line().and_then(|line| line.width), Some(12_700));
+    let xml = String::from_utf8(shape.xml().unwrap()).unwrap();
+    assert!(xml.starts_with("<p:sp "), "{xml}");
+    assert!(xml.contains(&format!(r#"xmlns:p="{P_NS}""#)));
+    assert!(xml.contains(&format!(r#"xmlns:a="{A_NS}""#)));
+    assert!(xml.contains(r#"rot="5400000""#));
+    assert!(xml.contains(r#"<a:srgbClr val="010203"/>"#));
+    rpptx_oxml::shape_tree::CT_Shape::from_xml(xml.as_bytes()).unwrap();
+
+    let group = slide.shape(1).unwrap();
+    assert_eq!(
+        (group.rotation(), group.fill(), group.line()),
+        (None, None, None)
+    );
+    assert!(
+        String::from_utf8(group.xml().unwrap())
+            .unwrap()
+            .starts_with("<p:grpSp ")
+    );
+    let table = slide.shape(2).unwrap();
+    assert_eq!(table.rotation(), Some(Angle(0)));
+    assert_eq!((table.fill(), table.line()), (None, None));
+    let table_xml = table.xml().unwrap();
+    rpptx_oxml::graphic_frame::CT_GraphicFrame::from_xml(&table_xml).unwrap();
+    let textbox = slide.shape(3).unwrap();
+    assert!(matches!(textbox.fill(), Some(Fill::NoFill(_))));
+    assert_eq!(textbox.line(), None);
+}
+
+#[test]
+fn adjustments_start_from_preset_defaults_and_follow_explicit_values() {
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    {
+        let mut slide = presentation.slide_mut(0).unwrap();
+        slide
+            .add_shape("roundRect", Emu(1), Emu(1), Emu(10), Emu(10))
+            .unwrap();
+        slide
+            .add_shape("rightArrow", Emu(1), Emu(1), Emu(10), Emu(10))
+            .unwrap()
+            .set_adjust_value("adj2", 25_000.0)
+            .unwrap();
+        slide
+            .add_shape("rect", Emu(1), Emu(1), Emu(10), Emu(10))
+            .unwrap();
+        slide
+            .add_connector(ConnectorType::Straight, Emu(1), Emu(1), Emu(10), Emu(10))
+            .unwrap();
+    }
+    let reopened = Presentation::from_bytes(&presentation.to_bytes().unwrap()).unwrap();
+    let slide = reopened.slide(0).unwrap();
+    let adjustments = |index| slide.shape(index).unwrap().adjustments().unwrap();
+    assert_eq!(adjustments(0), [("adj".to_owned(), 16_667.0)]);
+    assert_eq!(
+        adjustments(1),
+        [("adj1".to_owned(), 50_000.0), ("adj2".to_owned(), 25_000.0)]
+    );
+    assert!(adjustments(2).is_empty());
+    assert!(adjustments(3).is_empty());
+}
+
+#[test]
+fn slide_layout_index_follows_the_slide_layout_relationship() {
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(3).unwrap();
+    presentation.add_slide(0).unwrap();
+    presentation.add_slide(10).unwrap();
+    assert_eq!(presentation.slide_layout_index(0), Some(3));
+    assert_eq!(presentation.slide_layout_index(1), Some(0));
+    assert_eq!(presentation.slide_layout_index(2), Some(10));
+    assert_eq!(presentation.slide_layout_index(3), None);
+    let reopened = Presentation::from_bytes(&presentation.to_bytes().unwrap()).unwrap();
+    assert_eq!(reopened.slide_layout_index(0), Some(3));
+    assert_eq!(
+        reopened.layout_name(reopened.slide_layout_index(1).unwrap()),
+        presentation.layout_name(0)
+    );
+}
+
+#[test]
+fn picture_image_returns_the_embedded_bytes_and_content_type_of_grouped_pictures() {
+    let png = valid_one_pixel_png();
+    let jpeg = valid_template_jpeg();
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    presentation
+        .add_picture(0, &png, "pixel.png", Emu(1), Emu(1), None, None)
+        .unwrap();
+    presentation
+        .add_picture(0, &jpeg, "photo.jpg", Emu(1), Emu(1), None, None)
+        .unwrap();
+    let png_id = first_slide_shape_id(&presentation, 0);
+    let jpeg_id = first_slide_shape_id(&presentation, 1);
+    let image = presentation.picture_image(0, png_id).unwrap();
+    assert_eq!(image.bytes, png.as_slice());
+    assert_eq!(image.content_type, "image/png");
+    assert!(image.part_name.starts_with("/ppt/media/image"));
+    let image = presentation.picture_image(0, jpeg_id).unwrap();
+    assert_eq!(image.bytes, jpeg.as_slice());
+    assert_eq!(image.content_type, "image/jpeg");
+
+    let picture_xml = with_renumbered_shape_id(
+        &presentation
+            .slide(0)
+            .unwrap()
+            .shape(0)
+            .unwrap()
+            .xml()
+            .unwrap(),
+        png_id,
+        77,
+    );
+    let grouped = with_first_slide_children(
+        &presentation,
+        &format!(
+            r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="76" name="Group"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{picture_xml}</p:grpSp>"#
+        ),
+        &[],
+    );
+    assert_eq!(grouped.picture_image(0, 77).unwrap().bytes, png.as_slice());
+    assert!(
+        grouped
+            .picture_image(0, 76)
+            .unwrap_err()
+            .to_string()
+            .contains("shape id 76 is not a picture")
+    );
+    assert!(matches!(
+        grouped.picture_image(4, 77),
+        Err(Error::UnknownSlideIndex { index: 4, .. })
+    ));
+}
+
+#[test]
+fn replacing_a_picture_image_changes_only_that_picture() {
+    let png = valid_one_pixel_png();
+    let blue = f226_blue_pixel_png();
+    let sparse = sparse_preview_png();
+    let jpeg = valid_template_jpeg();
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    presentation.add_slide(6).unwrap();
+    for (slide, name) in [(0, "a.png"), (0, "b.png"), (1, "c.png")] {
+        presentation
+            .add_picture(slide, &png, name, Emu(1), Emu(1), None, None)
+            .unwrap();
+    }
+    let first = first_slide_shape_id(&presentation, 0);
+    let second = first_slide_shape_id(&presentation, 1);
+    let third = presentation
+        .slide(1)
+        .unwrap()
+        .shape(0)
+        .unwrap()
+        .non_visual_id()
+        .unwrap();
+    let shared_part = presentation.picture_image(0, first).unwrap().part_name;
+    let slide_xml = |presentation: &Presentation| {
+        (0..2)
+            .map(|index| {
+                String::from_utf8(
+                    presentation
+                        .slide(0)
+                        .unwrap()
+                        .shape(index)
+                        .unwrap()
+                        .xml()
+                        .unwrap(),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    let embeds = |xml: &str| {
+        xml.split(r#"r:embed=""#)
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap()
+            .to_owned()
+    };
+    let before = slide_xml(&presentation);
+    assert_eq!(
+        embeds(&before[0]),
+        embeds(&before[1]),
+        "add_picture shares one relationship"
+    );
+
+    presentation.replace_picture_image(0, first, &blue).unwrap();
+    assert!(
+        presentation.validate().is_empty(),
+        "{:?}",
+        presentation.validate()
+    );
+    let after = slide_xml(&presentation);
+    assert_ne!(embeds(&after[0]), embeds(&after[1]));
+    assert_eq!(
+        presentation.picture_image(0, first).unwrap().bytes,
+        blue.as_slice()
+    );
+    let untouched = presentation.picture_image(0, second).unwrap();
+    assert_eq!(
+        (untouched.part_name.as_str(), untouched.bytes),
+        (shared_part.as_str(), png.as_slice())
+    );
+    assert_eq!(
+        presentation.picture_image(1, third).unwrap().bytes,
+        png.as_slice()
+    );
+
+    let own_part = presentation.picture_image(0, first).unwrap().part_name;
+    assert_ne!(own_part, shared_part);
+    presentation
+        .replace_picture_image(0, first, &sparse)
+        .unwrap();
+    let rewritten = presentation.picture_image(0, first).unwrap();
+    assert_eq!(
+        (rewritten.part_name.as_str(), rewritten.bytes),
+        (own_part.as_str(), sparse.as_slice())
+    );
+
+    presentation.replace_picture_image(0, first, &jpeg).unwrap();
+    assert!(
+        presentation.validate().is_empty(),
+        "{:?}",
+        presentation.validate()
+    );
+    let converted = presentation.picture_image(0, first).unwrap();
+    assert!(
+        converted.part_name.ends_with(".jpeg"),
+        "{}",
+        converted.part_name
+    );
+    assert_eq!(converted.content_type, "image/jpeg");
+    let package = open_opc(&presentation.to_bytes().unwrap(), "converted picture");
+    assert!(package.get_part(&own_part).is_none());
+    assert!(package.get_part(&shared_part).is_some());
+
+    presentation.replace_picture_image(1, third, &png).unwrap();
+    assert_eq!(
+        presentation.picture_image(1, third).unwrap().part_name,
+        shared_part
+    );
+
+    let before = presentation.to_bytes().unwrap();
+    assert!(
+        presentation
+            .replace_picture_image(0, first, b"not an image")
+            .unwrap_err()
+            .to_string()
+            .contains("not a supported image")
+    );
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .add_textbox(Emu(1), Emu(1), Emu(2), Emu(2))
+        .unwrap();
+    let textbox = first_slide_shape_id(&presentation, 2);
+    assert!(
+        presentation
+            .replace_picture_image(0, textbox, &png)
+            .is_err()
+    );
+    presentation.remove_shape(0, 2).unwrap();
+    assert_eq!(presentation.to_bytes().unwrap(), before);
+
+    let reopened = Presentation::from_bytes(&before).unwrap();
+    assert_eq!(
+        reopened.picture_image(0, first).unwrap().bytes,
+        jpeg.as_slice()
+    );
+    assert_eq!(
+        reopened.picture_image(0, second).unwrap().bytes,
+        png.as_slice()
+    );
+}
+
+#[test]
+fn replacing_a_picture_with_an_svg_alternate_is_rejected_without_change() {
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    let mut package = open_opc(&presentation.to_bytes().unwrap(), "svg picture");
+    package.set_part("/ppt/media/raster.png", valid_one_pixel_png());
+    package.set_part(
+        "/ppt/media/vector.svg",
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>"#.to_vec(),
+    );
+    package.content_types.add_default("svg", "image/svg+xml");
+    package.content_types.add_default("png", "image/png");
+    let slide_part = "/ppt/slides/slide1.xml";
+    let xml = String::from_utf8(package.get_part(slide_part).unwrap().to_vec()).unwrap();
+    let picture = r#"<p:pic><p:nvPicPr><p:cNvPr id="40" name="Vector"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="raster"><a:extLst><a:ext uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}"><asvg:svgBlip xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main" r:embed="vector"/></a:ext></a:extLst></a:blip><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="10" cy="10"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>"#;
+    let xml = xml.replacen("</p:spTree>", &format!("{picture}</p:spTree>"), 1);
+    package.set_part(slide_part, xml.into_bytes());
+    let relationships = package.get_or_create_part_rels(slide_part);
+    relationships.add_with_id("raster", rel_types::IMAGE, "../media/raster.png");
+    relationships.add_with_id("vector", rel_types::IMAGE, "../media/vector.svg");
+    let mut presentation = open_package(package).unwrap();
+    assert!(
+        presentation.validate().is_empty(),
+        "{:?}",
+        presentation.validate()
+    );
+    assert_eq!(
+        presentation.picture_image(0, 40).unwrap().content_type,
+        "image/png"
+    );
+    let before = presentation.to_bytes().unwrap();
+    assert!(
+        presentation
+            .replace_picture_image(0, 40, &f226_blue_pixel_png())
+            .unwrap_err()
+            .to_string()
+            .contains("second image")
+    );
+    assert_eq!(presentation.to_bytes().unwrap(), before);
+}
+
+#[test]
+fn removing_a_shape_deletes_only_relationships_and_parts_nothing_else_uses() {
+    let png = f226_blue_pixel_png();
+    let jpeg = valid_template_jpeg();
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    for (bytes, name) in [(&png, "a.png"), (&png, "b.png"), (&jpeg, "c.jpg")] {
+        presentation
+            .add_picture(0, bytes, name, Emu(1), Emu(1), None, None)
+            .unwrap();
+    }
+    presentation
+        .add_chart(
+            0,
+            ChartKind::Bar,
+            Emu(1),
+            Emu(2),
+            Emu(300),
+            Emu(400),
+            &f124_chart_data(),
+        )
+        .unwrap();
+    add_python_pptx_media(&mut presentation, MediaKind::Video);
+    let shared = presentation
+        .picture_image(0, first_slide_shape_id(&presentation, 0))
+        .unwrap()
+        .part_name;
+    let photo = presentation
+        .picture_image(0, first_slide_shape_id(&presentation, 2))
+        .unwrap()
+        .part_name;
+    let package_parts = |presentation: &Presentation| {
+        open_opc(&presentation.to_bytes().unwrap(), "shape removal")
+            .parts
+            .into_keys()
+            .collect::<HashSet<_>>()
+    };
+    let slide_relationship_count = |presentation: &Presentation| {
+        open_opc(&presentation.to_bytes().unwrap(), "shape removal")
+            .get_part_rels("/ppt/slides/slide1.xml")
+            .unwrap()
+            .items
+            .len()
+    };
+    let initial = package_parts(&presentation);
+    let chart_parts = initial
+        .iter()
+        .filter(|part| part.starts_with("/ppt/charts/") || part.starts_with("/ppt/embeddings/"))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(chart_parts.len(), 2, "{initial:?}");
+    let relationships = slide_relationship_count(&presentation);
+
+    presentation.remove_shape(0, 2).unwrap();
+    assert!(
+        presentation.validate().is_empty(),
+        "{:?}",
+        presentation.validate()
+    );
+    assert!(!package_parts(&presentation).contains(&photo));
+    assert_eq!(slide_relationship_count(&presentation), relationships - 1);
+
+    presentation.remove_shape(0, 0).unwrap();
+    assert!(package_parts(&presentation).contains(&shared));
+    assert_eq!(slide_relationship_count(&presentation), relationships - 1);
+    presentation.remove_shape(0, 0).unwrap();
+    assert!(!package_parts(&presentation).contains(&shared));
+    assert_eq!(slide_relationship_count(&presentation), relationships - 2);
+
+    presentation.remove_shape(0, 0).unwrap();
+    assert!(
+        presentation.validate().is_empty(),
+        "{:?}",
+        presentation.validate()
+    );
+    let parts = package_parts(&presentation);
+    assert!(
+        chart_parts.iter().all(|part| !parts.contains(part)),
+        "{parts:?}"
+    );
+
+    assert_eq!(presentation.media(0).unwrap().len(), 1);
+    presentation.remove_shape(0, 0).unwrap();
+    assert!(
+        presentation.validate().is_empty(),
+        "{:?}",
+        presentation.validate()
+    );
+    assert!(presentation.media(0).unwrap().is_empty());
+    let parts = package_parts(&presentation);
+    assert!(
+        parts.iter().all(|part| !part.starts_with("/ppt/media/")),
+        "{parts:?}"
+    );
+    let slide_xml = String::from_utf8(
+        open_opc(&presentation.to_bytes().unwrap(), "media removal")
+            .get_part("/ppt/slides/slide1.xml")
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(!slide_xml.contains("spTgt"), "{slide_xml}");
+    assert_eq!(slide_relationship_count(&presentation), 1);
+}
+
+#[test]
+fn removing_a_shape_detaches_connectors_and_rejects_animated_targets_without_change() {
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    {
+        let mut slide = presentation.slide_mut(0).unwrap();
+        slide
+            .add_shape("rect", Emu(1), Emu(1), Emu(10), Emu(10))
+            .unwrap();
+        slide
+            .add_shape("rect", Emu(30), Emu(1), Emu(10), Emu(10))
+            .unwrap();
+        slide.add_group_shape().unwrap();
+    }
+    let start = first_slide_shape_id(&presentation, 0);
+    let end = first_slide_shape_id(&presentation, 1);
+    let group = first_slide_shape_id(&presentation, 2);
+    let connected = format!(
+        r#"<p:cxnSp><p:nvCxnSpPr><p:cNvPr id="50" name="Connector"/><p:cNvCxnSpPr><a:stCxn id="{start}" idx="3"/><a:endCxn id="{end}" idx="1"/></p:cNvCxnSpPr><p:nvPr/></p:nvCxnSpPr><p:spPr><a:xfrm><a:off x="11" y="5"/><a:ext cx="19" cy="0"/></a:xfrm><a:prstGeom prst="line"><a:avLst/></a:prstGeom></p:spPr></p:cxnSp>"#
+    );
+    let mut presentation = with_first_slide_children(&presentation, &connected, &[]);
+    let mut package = open_opc(&presentation.to_bytes().unwrap(), "animated shape");
+    let xml =
+        String::from_utf8(package.get_part("/ppt/slides/slide1.xml").unwrap().to_vec()).unwrap();
+    let timing = format!(
+        r#"<p:timing><p:tnLst><p:par><p:cTn id="1" dur="indefinite" nodeType="tmRoot"/></p:par></p:tnLst><p:bldLst><p:bldP spid="{end}" grpId="0"/></p:bldLst></p:timing>"#
+    );
+    let xml = xml.replacen("</p:sld>", &format!("{timing}</p:sld>"), 1);
+    package.set_part("/ppt/slides/slide1.xml", xml.into_bytes());
+    let mut animated = open_package(package).unwrap();
+
+    let before = animated.to_bytes().unwrap();
+    assert!(
+        animated
+            .remove_shape(0, 1)
+            .unwrap_err()
+            .to_string()
+            .contains(&format!("slide animations still target shape id {end}"))
+    );
+    assert!(animated.remove_shape(0, 9).is_err());
+    assert_eq!(animated.to_bytes().unwrap(), before);
+
+    presentation.remove_shape(0, 0).unwrap();
+    assert!(
+        presentation.validate().is_empty(),
+        "{:?}",
+        presentation.validate()
+    );
+    let connector = String::from_utf8(
+        presentation
+            .slide(0)
+            .unwrap()
+            .shape(2)
+            .unwrap()
+            .xml()
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(!connector.contains("stCxn"), "{connector}");
+    assert!(
+        connector.contains(&format!(r#"<a:endCxn id="{end}" idx="1"/>"#)),
+        "{connector}"
+    );
+    let reopened = Presentation::from_bytes(&presentation.to_bytes().unwrap()).unwrap();
+    assert_eq!(reopened.slide(0).unwrap().shapes().len(), 3);
+    assert_eq!(first_slide_shape_id(&reopened, 1), group);
+}
+
+#[test]
+fn setting_notes_text_creates_the_notes_slide_and_a_missing_notes_master() {
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    presentation.add_slide(6).unwrap();
+    presentation.set_notes_text(1, "Created note").unwrap();
+    assert!(
+        presentation.validate().is_empty(),
+        "{:?}",
+        presentation.validate()
+    );
+    assert_eq!(presentation.slide(0).unwrap().notes_text(), None);
+    assert_eq!(
+        presentation.slide(1).unwrap().notes_text().as_deref(),
+        Some("Created note")
+    );
+    let bytes = presentation.to_bytes().unwrap();
+    let package = open_opc(&bytes, "created notes");
+    let notes = String::from_utf8(
+        package
+            .get_part("/ppt/notesSlides/notesSlide1.xml")
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    for expected in [
+        r#"<p:cNvPr id="2" name="Slide Image Placeholder 1"/>"#,
+        r#"<p:ph type="sldImg" idx="2"/>"#,
+        r#"<p:cNvPr id="3" name="Notes Placeholder 2"/>"#,
+        r#"<p:ph type="body" idx="3" sz="quarter"/>"#,
+        r#"<p:cNvPr id="4" name="Slide Number Placeholder 3"/>"#,
+        r#"<p:ph type="sldNum" idx="5" sz="quarter"/>"#,
+        "<a:masterClrMapping/>",
+        "Created note",
+    ] {
+        assert!(notes.contains(expected), "missing {expected} in {notes}");
+    }
+    assert_eq!(notes.matches("<p:txBody>").count(), 1, "{notes}");
+    assert_eq!(
+        package
+            .content_types
+            .content_type_for("/ppt/notesSlides/notesSlide1.xml"),
+        Some(content_types::NOTES_SLIDE)
+    );
+    let notes_relationships = package
+        .get_part_rels("/ppt/notesSlides/notesSlide1.xml")
+        .unwrap();
+    assert_eq!(
+        notes_relationships
+            .get_by_type(rel_types::NOTES_MASTER)
+            .unwrap()
+            .target,
+        "../notesMasters/notesMaster1.xml"
+    );
+    assert_eq!(
+        notes_relationships
+            .get_by_type(rel_types::SLIDE)
+            .unwrap()
+            .target,
+        "../slides/slide2.xml"
+    );
+    let reopened = Presentation::from_bytes(&bytes).unwrap();
+    assert_eq!(
+        reopened.slide(1).unwrap().notes_text().as_deref(),
+        Some("Created note")
+    );
+    let pdf = reopened.to_notes_pdf_deterministic().unwrap();
+    assert!(pdf.starts_with(b"%PDF"));
+
+    presentation.set_notes_text(1, "Edited note").unwrap();
+    let edited = open_opc(&presentation.to_bytes().unwrap(), "edited notes");
+    assert!(
+        edited
+            .get_part("/ppt/notesSlides/notesSlide2.xml")
+            .is_none()
+    );
+    assert_eq!(
+        presentation.slide(1).unwrap().notes_text().as_deref(),
+        Some("Edited note")
+    );
+
+    let mut package = open_opc(
+        &Presentation::new().unwrap().to_bytes().unwrap(),
+        "no notes master",
+    );
+    package.remove_part("/ppt/notesMasters/notesMaster1.xml");
+    package.remove_part_rels("/ppt/notesMasters/notesMaster1.xml");
+    package
+        .content_types
+        .remove_override("/ppt/notesMasters/notesMaster1.xml");
+    package.remove_part("/ppt/theme/theme2.xml");
+    package
+        .content_types
+        .remove_override("/ppt/theme/theme2.xml");
+    package
+        .get_part_rels_mut("/ppt/presentation.xml")
+        .unwrap()
+        .items
+        .retain(|relationship| relationship.rel_type != rel_types::NOTES_MASTER);
+    let mut without_master = open_package(package).unwrap();
+    without_master.add_slide(6).unwrap();
+    assert!(without_master.validate().is_empty());
+    assert!(without_master.to_notes_pdf_deterministic().is_err());
+    without_master.set_notes_text(0, "First note").unwrap();
+    assert!(
+        without_master.validate().is_empty(),
+        "{:?}",
+        without_master.validate()
+    );
+    let bytes = without_master.to_bytes().unwrap();
+    let package = open_opc(&bytes, "created notes master");
+    let master = package
+        .get_part_rels("/ppt/presentation.xml")
+        .unwrap()
+        .get_by_type(rel_types::NOTES_MASTER)
+        .unwrap()
+        .target
+        .clone();
+    assert_eq!(master, "notesMasters/notesMaster1.xml");
+    assert_eq!(
+        package
+            .get_part_rels("/ppt/notesMasters/notesMaster1.xml")
+            .unwrap()
+            .get_by_type(rel_types::THEME)
+            .unwrap()
+            .target,
+        "../theme/theme2.xml"
+    );
+    assert_eq!(
+        package
+            .content_types
+            .content_type_for("/ppt/theme/theme2.xml"),
+        Some(content_types::THEME)
+    );
+    let reopened = Presentation::from_bytes(&bytes).unwrap();
+    assert_eq!(
+        reopened.slide(0).unwrap().notes_text().as_deref(),
+        Some("First note")
+    );
+    assert!(
+        reopened
+            .to_notes_pdf_deterministic()
+            .unwrap()
+            .starts_with(b"%PDF")
+    );
+}

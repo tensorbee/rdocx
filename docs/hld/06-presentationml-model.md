@@ -84,12 +84,36 @@ Presentation::package_class(&self) -> Result<PresentationPackageClass>;
 Presentation::to_bytes_as(&self, class: PresentationPackageClass) -> Result<Vec<u8>>;
 Presentation::save_as_package_class(&self, path: impl AsRef<Path>, class: PresentationPackageClass) -> Result<()>;
 Presentation::save_as_show(&self, path: impl AsRef<Path>) -> Result<()>;
+Presentation::slide_layout_index(&self, slide_index: usize) -> Option<usize>;
+Presentation::set_notes_text(&mut self, slide_index: usize, text: &str) -> Result<()>;
 SlideRef::hidden(&self) -> bool;
 SlideRef::has_explicit_background(&self) -> bool;
+SlideRef::background_fill(&self) -> Option<&Fill>;
 SlideMut::set_hidden(&mut self, hidden: bool);
 SlideMut::set_background(&mut self, fill: Fill) -> Result<()>;
 SlideMut::clear_background(&mut self);
+SlideMut::remove_background(&mut self);
 ```
+
+`slide_layout_index` follows the slide's internal layout relationship to the
+layout list the masters reach. `background_fill` reports only a direct
+`p:bgPr` fill, so a theme reference reads as `None`. `clear_background` keeps
+a theme reference, while `remove_background` drops any `p:bg` so the slide
+follows its layout and master.
+
+`SlideMut::set_notes_text` edits an existing notes slide and fails without one.
+`Presentation::set_notes_text` also creates the notes slide when it is absent,
+as python-pptx does. The new part relates to the notes master and back to the
+slide, carries `p:clrMapOvr` with `a:masterClrMapping`, and clones the master
+placeholders whose explicit type is `sldImg`, `body`, or `sldNum`. Each clone
+keeps the master placeholder's type, index, and other attributes, so notes
+rendering overlays it on the master placeholder. Only the body clone carries a
+text body, because a text body on the slide-number clone would replace the
+master's number field. A presentation without a notes master first receives a
+copy of the bundled template's notes master and its theme under fresh part
+names. That path needs `default-template` or `render`, and like python-pptx it
+adds no `p:notesMasterIdLst`. The whole change is staged and publishes only
+after the staged package reopens.
 
 The native facade also owns the ODP conversion boundary. Import creates a fresh
 presentation containing ordered slides, ordinary rectangle shapes and text
@@ -236,6 +260,42 @@ shape kinds have no direct text. `ShapeRef` equality is node identity. Two
 handles compare equal only when they borrow the same underlying shape-tree
 child, rather than when separate shapes happen to contain equal XML.
 
+`ShapeRef` also reads the classification and direct formatting the Python
+binding exposes:
+
+```rust
+pub enum ShapeType {
+    AutoShape, Chart, EmbeddedOleObject, Freeform, Group, Line,
+    LinkedOleObject, Media, Picture, Placeholder, Table, TextBox,
+}
+ShapeRef::shape_type(&self) -> Option<ShapeType>;
+ShapeRef::rotation(&self) -> Option<Angle>;
+ShapeRef::fill(&self) -> Option<&Fill>;
+ShapeRef::line(&self) -> Option<&CT_LineProperties>;
+ShapeRef::adjustments(&self) -> Result<Vec<(String, f64)>>;
+ShapeRef::xml(&self) -> Result<Vec<u8>>;
+```
+
+`shape_type` follows python-pptx 1.0.2. An ordinary shape is a placeholder,
+then a freeform with custom geometry, then a text box when
+`p:cNvSpPr/@txBox` is true, then an auto shape with preset geometry, else
+unclassified. A picture is media only for video, so audio and picture
+placeholders stay pictures. A graphic frame is a table, a chart, or an OLE
+object, embedded when the last `p:oleObj` has a `p:embed` child and linked
+otherwise, while SmartArt and other payloads stay unclassified. Groups are
+groups, connectors are lines, and alternate content is a chart only through
+its chart choice. Graphic-frame placeholders are classified by payload, as in
+python-pptx.
+
+`rotation` is `None` without a transform. `fill` and `line` read the direct
+shape properties of ordinary shapes, pictures, and connectors. `adjustments`
+returns the preset definition's defaults in definition order, each replaced by
+a literal `val` guide of the same name in the shape's own `a:avLst`. Only
+ordinary shapes with preset geometry have adjustments. `xml` serializes a
+typed child on its own with the prefixes it uses declared. Alternate content
+returns its preserved bytes, which may rely on prefixes only the slide root
+declares.
+
 `slide_mut(index)` exposes a borrowed `SlideMut` handle. Its `shape(index)`
 method retains read access, while `shape_mut(index)` returns a `ShapeMut` for an
 immediate z-order child. `ShapeMut::child_mut(index)` recurses through group
@@ -351,6 +411,42 @@ media-store, and relationship changes remain staged until picture construction
 succeeds. The picture receives a tree-wide allocated id and deterministic name,
 then its canonical `p:nvPicPr`, relationship-backed `p:blipFill`, and typed
 `p:spPr` shell append at top z-order.
+
+The owning facade also reads and replaces a picture's image and removes
+shapes:
+
+```rust
+pub struct PictureImage<'a> {
+    pub part_name: String,
+    pub content_type: String,
+    pub bytes: &'a [u8],
+}
+pub fn picture_image(&self, slide_index: usize, shape_id: u32) -> Result<PictureImage<'_>>;
+pub fn replace_picture_image(&mut self, slide_index: usize, shape_id: u32, image_data: &[u8]) -> Result<()>;
+pub fn remove_shape(&mut self, slide_index: usize, shape_index: usize) -> Result<()>;
+```
+
+`picture_image` finds the picture by `p:cNvPr/@id`, including inside groups
+and alternate-content fallbacks, and resolves its `a:blip/@r:embed` as an
+internal image relationship. The content type comes from the package, falling
+back to the sniffed format. `replace_picture_image` changes only the named
+picture. When other shape-tree attributes use the same relationship id, the
+picture first receives its own relationship to the same part. A part that only
+this relationship targets is rewritten in place when its extension fits the
+new format. Otherwise the picture moves to a new or equal media part, and the
+old part is pruned once nothing reaches it. Unsupported bytes, a picture
+without an embedded image, and a picture that carries a second image
+relationship, such as an SVG alternate that PowerPoint would keep showing, are
+rejected without change.
+
+`remove_shape` removes one immediate slide child by z-order index. It rejects
+a child without an id or whose id is not unique on the slide. The media timing
+of a removed media picture is removed with it, and a shape that other slide
+animations still target through `spid` is rejected without change. Connectors
+whose start or end names a removed shape are detached, as PowerPoint does on
+delete. Slide relationships that only the removed subtree referenced are
+deleted, and their internal targets are pruned recursively once unreachable,
+so a removed chart also drops its embedded workbook.
 
 An ordinary shape has canonical non-visual properties, a typed transform,
 preset geometry, and a minimal text body. `add_shape` keeps the string API but

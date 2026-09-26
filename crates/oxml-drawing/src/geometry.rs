@@ -802,6 +802,31 @@ impl CT_PresetGeometry2D {
         Ok(())
     }
 
+    /// Returns the preset definition's own `avLst` guides in definition order.
+    ///
+    /// Only the `avLst` is read, so a preset whose other guides do not parse
+    /// still reports its defaults. An unknown preset has none.
+    pub fn default_adjust_values(&self) -> Result<Vec<Guide>, GeometryError> {
+        let Some(xml) = preset_shape_definition(&self.preset) else {
+            return Ok(Vec::new());
+        };
+        let mut reader = Reader::from_reader(xml);
+        let mut buffer = Vec::new();
+        loop {
+            match reader
+                .read_event_into(&mut buffer)
+                .map_err(|error| GeometryError::Xml(error.to_string()))?
+            {
+                Event::Start(element) if matches_local_name(element.name().as_ref(), b"avLst") => {
+                    return Ok(parse_guide_list(&mut reader, &element, b"avLst")?.guides);
+                }
+                Event::Eof => return Ok(Vec::new()),
+                _ => {}
+            }
+            buffer.clear();
+        }
+    }
+
     /// Writes with the canonical `a:` prefix and DrawingML schema order.
     pub fn to_xml(&self) -> Result<Vec<u8>, GeometryError> {
         let mut writer = Writer::new(Vec::new());

@@ -292,6 +292,22 @@ impl CT_ShapeProperties {
         &self.raw_children
     }
 
+    /// Returns whether the fill is a preserved `a:grpFill`, which takes the
+    /// fill of the parent group.
+    pub fn has_group_fill(&self) -> bool {
+        self.fill.is_none()
+            && (0..=8).any(|boundary| self.raw_children.at(boundary).any(raw_is_group_fill))
+    }
+
+    /// Replaces the typed fill. A preserved `a:grpFill` is dropped when a fill
+    /// replaces it, because `EG_FillProperties` allows one fill choice.
+    pub fn set_fill(&mut self, fill: Option<Fill>) {
+        if fill.is_some() {
+            self.raw_children.retain(|xml| !raw_is_group_fill(xml));
+        }
+        self.fill = fill;
+    }
+
     /// Returns whether an opaque effect DAG is present instead of a typed list.
     pub fn has_unmodelled_effect(&self) -> bool {
         (0..=8).any(|boundary| self.raw_children.at(boundary).any(raw_is_effect_dag))
@@ -304,6 +320,23 @@ impl CT_ShapeProperties {
                 .at(boundary)
                 .any(|xml| raw_is_effect_dag(xml) && raw_contains_placeholder_color(xml))
         })
+    }
+}
+
+/// Whether a preserved child is an `a:grpFill`, the one fill choice the
+/// model keeps raw.
+fn raw_is_group_fill(xml: &[u8]) -> bool {
+    let mut reader = Reader::from_reader(xml);
+    let mut buffer = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(element) | Event::Empty(element)) => {
+                return matches_local_name(element.name().as_ref(), b"grpFill");
+            }
+            Ok(Event::Eof) | Err(_) => return false,
+            _ => {}
+        }
+        buffer.clear();
     }
 }
 

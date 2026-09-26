@@ -1,5 +1,6 @@
 """Python bindings for rpptx."""
 
+from .dml.color import RGBColor
 from .enum.shapes import MSO_SHAPE
 from .util import Inches, Length, Pt
 
@@ -32,6 +33,7 @@ __all__ = [
     "CommentReply",
     "Presentation",
     "Pt",
+    "RGBColor",
     "RpptxError",
     "StaleElementError",
     "XmlError",

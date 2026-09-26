@@ -32,6 +32,11 @@ impl OrderedRawChildren {
         self.children.is_empty()
     }
 
+    /// Keeps only the raw children whose XML satisfies `keep`.
+    pub fn retain(&mut self, mut keep: impl FnMut(&[u8]) -> bool) {
+        self.children.retain(|child| keep(&child.xml));
+    }
+
     /// Moves raw children at and after one boundary to make room for a new
     /// modelled child without changing their relative order.
     pub fn shift_boundaries_from(&mut self, boundary: usize) {
