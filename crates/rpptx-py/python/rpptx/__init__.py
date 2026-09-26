@@ -1,6 +1,8 @@
 """Python bindings for rpptx."""
 
+from .dml.color import RGBColor
 from .enum.shapes import MSO_SHAPE
+from .enum.text import MSO_ANCHOR, MSO_AUTO_SIZE, MSO_UNDERLINE, PP_ALIGN
 from .util import Inches, Length, Pt
 
 
@@ -25,13 +27,18 @@ from ._rpptx import Comment, CommentAuthor, CommentReply, Presentation
 __all__ = [
     "Inches",
     "Length",
+    "MSO_ANCHOR",
+    "MSO_AUTO_SIZE",
     "MSO_SHAPE",
+    "MSO_UNDERLINE",
+    "PP_ALIGN",
     "PackageError",
     "Comment",
     "CommentAuthor",
     "CommentReply",
     "Presentation",
     "Pt",
+    "RGBColor",
     "RpptxError",
     "StaleElementError",
     "XmlError",

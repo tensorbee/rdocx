@@ -288,6 +288,56 @@ reports `none`, `normal`, or `shape` when the body carries an explicit choice.
 `Run.text` setter replaces only that run's text and preserves its typed and
 unmodelled properties.
 
+Text formatting follows python-pptx names and value types. Every property
+reads the direct value only, `None` when the element or attribute is absent,
+and assigning `None` removes the direct value. Setters validate before they
+write, raise `ValueError` for an out-of-range value, and leave the package
+unchanged when the value is rejected or equals the stored one, so clearing an
+absent value inserts no empty `a:pPr` or `a:rPr`. They change properties in
+place and do not advance the revision. `rpptx` and `rpptx.enum.text` export
+`MSO_AUTO_SIZE`, `MSO_ANCHOR`, `PP_ALIGN`, and `MSO_UNDERLINE` with python-pptx
+1.0.2 member values, and `rpptx` and `rpptx.dml.color` export `RGBColor`.
+
+- `TextFrame.margin_left`, `margin_right`, `margin_top`, and `margin_bottom`
+  read the body insets as `Length`, converting a universal measure such as
+  `0.1in` to EMU. python-pptx reports the implied 91440 and 45720 EMU defaults
+  instead of `None`, which a placeholder does not have because it inherits
+  its insets. `vertical_anchor` takes `MSO_ANCHOR`, whose `JUSTIFY` and
+  `DISTRIBUTE` extension members name the `just` and `dist` anchors.
+  `word_wrap` maps `square` to `True` and `none` to `False`. `auto_size` takes
+  `MSO_AUTO_SIZE`, and choosing `TEXT_TO_FIT_SHAPE` again keeps a stored font
+  scale. `autofit` keeps its string values.
+- `Paragraph.alignment` takes `PP_ALIGN`. `line_spacing` reads a float number
+  of lines from `a:spcPct` and a `Length` from `a:spcPts`. Assigning a
+  `Length` writes exact points and any other number writes lines, as in
+  python-pptx. `space_before` and `space_after` write points for an integer or
+  `Length` and lines for a float, and read lines back as a float where
+  python-pptx reports `None`. `left_indent`, `right_indent`, and
+  `first_line_indent` use the python-docx names for `marL`, `marR`, and
+  `indent`, where a negative first-line indent hangs.
+- `Paragraph.bullet` reads the direct bullet choice as its character, `False`
+  for `a:buNone`, `True` for an automatic number or picture bullet, or `None`.
+  Assigning a character keeps the bullet colour, size, and font and replaces
+  a preserved picture bullet. `False` writes `a:buNone`, `None` removes the
+  direct bullet, and `True` raises because automatic numbering is not
+  writable yet.
+- `Paragraph.add_run(text="")` appends a run, advances the revision once, and
+  returns the new run captured at that revision. The paragraph handle it was
+  called on becomes stale, like the text frame after `add_paragraph`.
+- `Font` reads and writes the same properties for a run and for a
+  paragraph's default run properties: `name` (`a:latin` typeface, keeping its
+  other attributes), `size` (1 to 4000 points, as python-pptx validates),
+  `bold`, `italic`, `underline`, `strike`, `all_caps`, and `color`.
+  `underline` reads `True` for `sng`, `False` for `none`, and an
+  `MSO_UNDERLINE` member otherwise. `strike` reads `True` for a single or
+  double strike, and assigning `True` keeps a double strike. `all_caps` does
+  not name `cap="small"`, which is preserved until `all_caps` is assigned.
+  `color` still reads the direct sRGB solid fill as an `RRGGBB` string for
+  compatibility, and the setter takes an `RGBColor`, any triple of 0 to 255
+  integers, or a six-digit hexadecimal string. It changes an existing sRGB
+  value in place, keeping transforms such as `a:alpha`, replaces any other
+  colour, and `None` removes the direct fill.
+
 The presentation binding exposes `to_pdf`, `render_slide_to_png`,
 `render_all_slides`, `to_notes_pdf`, and `render_all_notes` through the native
 deterministic facade. Every render call releases the GIL. A `Slide` exposes

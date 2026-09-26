@@ -13849,6 +13849,182 @@ fn paragraph_run_font_and_bullet_properties_round_trip() {
     assert_eq!(properties.latin.as_ref().unwrap().typeface, "Carlito");
 }
 
+fn plain_shape_fixture_bytes(from: &str, to: &str) -> Vec<u8> {
+    let mut package = fixture_package();
+    let original = String::from_utf8(package.get_part(SLIDE_TWO_PART).unwrap().to_vec()).unwrap();
+    let edited = original.replacen(from, to, 1);
+    assert_ne!(edited, original);
+    package.set_part(SLIDE_TWO_PART, edited.into_bytes());
+    package_bytes(package)
+}
+
+fn slide_two_xml(bytes: &[u8]) -> String {
+    let package = open_opc(bytes, "text property output");
+    String::from_utf8(package.get_part(SLIDE_TWO_PART).unwrap().to_vec()).unwrap()
+}
+
+#[test]
+fn text_frame_insets_anchor_wrap_and_autofit_are_set_read_and_cleared_in_schema_order() {
+    use rpptx::{AutofitMode, TextAnchor};
+
+    let bytes = plain_shape_fixture_bytes(
+        "<a:bodyPr/>",
+        r#"<a:bodyPr lIns="0.1in" tIns="1pc"><a:scene3d><a:camera prst="orthographicFront"/><a:lightRig rig="threePt" dir="t"/></a:scene3d></a:bodyPr>"#,
+    );
+    let mut presentation = Presentation::from_bytes(&bytes).unwrap();
+    let frame = presentation
+        .slide(0)
+        .unwrap()
+        .shape(0)
+        .unwrap()
+        .text_frame()
+        .unwrap();
+    assert_eq!(
+        frame.insets(),
+        (Some(Emu(91_440)), None, Some(Emu(152_400)), None)
+    );
+    assert_eq!(frame.vertical_anchor(), None);
+    assert_eq!(frame.word_wrap(), None);
+
+    {
+        let mut slide = presentation.slide_mut(0).unwrap();
+        let mut shape = slide.shape_mut(0).unwrap();
+        let mut frame = shape.text_frame().unwrap();
+        let outside = Emu(i64::from(i32::MAX) + 1);
+        assert!(matches!(
+            frame.set_insets(Some(Emu(0)), None, None, Some(outside)),
+            Err(Error::InvalidShapeMutation { .. })
+        ));
+    }
+    let frame = presentation
+        .slide(0)
+        .unwrap()
+        .shape(0)
+        .unwrap()
+        .text_frame()
+        .unwrap();
+    assert_eq!(
+        frame.insets(),
+        (Some(Emu(91_440)), None, Some(Emu(152_400)), None)
+    );
+
+    {
+        let mut slide = presentation.slide_mut(0).unwrap();
+        let mut shape = slide.shape_mut(0).unwrap();
+        let mut frame = shape.text_frame().unwrap();
+        frame
+            .set_insets(Some(Emu(0)), Some(Emu(45_720)), None, Some(Emu(12_700)))
+            .unwrap();
+        frame.set_vertical_anchor(Some(TextAnchor::Center));
+        frame.set_word_wrap(Some(false));
+        frame.set_autofit_mode(Some(AutofitMode::Shape));
+    }
+    let bytes = presentation.to_bytes().unwrap();
+    assert!(slide_two_xml(&bytes).contains(
+        r#"<a:bodyPr lIns="0" rIns="45720" bIns="12700" anchor="ctr" wrap="none"><a:spAutoFit/><a:scene3d>"#
+    ));
+    let mut reopened = Presentation::from_bytes(&bytes).unwrap();
+    assert!(reopened.validate().is_empty());
+    let frame = reopened
+        .slide(0)
+        .unwrap()
+        .shape(0)
+        .unwrap()
+        .text_frame()
+        .unwrap();
+    assert_eq!(
+        frame.insets(),
+        (Some(Emu(0)), Some(Emu(45_720)), None, Some(Emu(12_700)))
+    );
+    assert_eq!(frame.vertical_anchor(), Some(TextAnchor::Center));
+    assert_eq!(frame.word_wrap(), Some(false));
+    assert_eq!(frame.autofit_mode(), Some(AutofitMode::Shape));
+
+    {
+        let mut slide = reopened.slide_mut(0).unwrap();
+        let mut shape = slide.shape_mut(0).unwrap();
+        let mut frame = shape.text_frame().unwrap();
+        frame.set_insets(None, None, None, None).unwrap();
+        frame.set_vertical_anchor(None);
+        frame.set_word_wrap(None);
+        frame.set_autofit_mode(None);
+    }
+    assert!(slide_two_xml(&reopened.to_bytes().unwrap()).contains("<a:bodyPr><a:scene3d>"));
+}
+
+#[test]
+fn choosing_normal_autofit_again_keeps_its_stored_font_scale() {
+    use rpptx::AutofitMode;
+
+    let bytes = plain_shape_fixture_bytes(
+        "<a:bodyPr/>",
+        r#"<a:bodyPr><a:normAutofit fontScale="62500" lnSpcReduction="20000"/></a:bodyPr>"#,
+    );
+    let mut presentation = Presentation::from_bytes(&bytes).unwrap();
+    let mut slide = presentation.slide_mut(0).unwrap();
+    let mut shape = slide.shape_mut(0).unwrap();
+    shape
+        .text_frame()
+        .unwrap()
+        .set_autofit_mode(Some(AutofitMode::Normal));
+    assert!(slide_two_xml(&presentation.to_bytes().unwrap()).contains(
+        r#"<a:bodyPr><a:normAutofit fontScale="62500" lnSpcReduction="20000"/></a:bodyPr>"#
+    ));
+}
+
+#[test]
+fn paragraph_properties_read_back_and_a_character_bullet_replaces_a_picture_bullet() {
+    use rpptx::{TextAlignment, TextSpacing};
+
+    let bytes = plain_shape_fixture_bytes(
+        "<a:p><a:r><a:t>plain</a:t>",
+        r#"<a:p><a:pPr marL="342900" indent="-342900" algn="ctr"><a:lnSpc><a:spcPct val="250000"/></a:lnSpc><a:buFontTx/><a:buBlip><a:blip/></a:buBlip></a:pPr><a:r><a:t>plain</a:t>"#,
+    );
+    let mut presentation = Presentation::from_bytes(&bytes).unwrap();
+    let properties = presentation
+        .slide(0)
+        .unwrap()
+        .shape(0)
+        .unwrap()
+        .text_frame()
+        .unwrap()
+        .paragraph(0)
+        .unwrap()
+        .properties()
+        .unwrap();
+    assert_eq!(properties.left_margin, Some(342_900));
+    assert_eq!(properties.indent, Some(-342_900));
+    assert_eq!(properties.alignment, Some(TextAlignment::Center));
+    assert_eq!(
+        properties.line_spacing,
+        Some(TextSpacing::Percent("250000".to_owned()))
+    );
+    assert!(properties.has_picture_bullet());
+
+    let mut slide = presentation.slide_mut(0).unwrap();
+    let mut shape = slide.shape_mut(0).unwrap();
+    let mut frame = shape.text_frame().unwrap();
+    let mut paragraph = frame.paragraph_mut(0).unwrap();
+    paragraph.set_bullet(Some(TextBullet {
+        choice: Some(TextBulletChoice::Character(
+            TextBulletCharacter::new("•").unwrap(),
+        )),
+        ..TextBullet::default()
+    }));
+    assert!(!paragraph.properties().unwrap().has_picture_bullet());
+
+    let bytes = presentation.to_bytes().unwrap();
+    assert!(slide_two_xml(&bytes).contains(
+        r#"<a:pPr marL="342900" indent="-342900" algn="ctr"><a:lnSpc><a:spcPct val="250000"/></a:lnSpc><a:buFontTx/><a:buChar char="•"/></a:pPr>"#
+    ));
+    assert!(
+        Presentation::from_bytes(&bytes)
+            .unwrap()
+            .validate()
+            .is_empty()
+    );
+}
+
 #[test]
 fn text_mutation_preserves_placeholder_identity() {
     let mut package = open_opc(&mutation_fixture_bytes(), "F-112 placeholder fixture");

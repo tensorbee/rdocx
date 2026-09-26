@@ -242,6 +242,21 @@ are absent, inserting them moves preserved boundary-0 content to the slot after
 keeps a preserved `mc:AlternateContent` run substitution after the newly
 inserted properties without changing its bytes.
 
+`CT_TextParagraphProperties::set_bullet` keeps one member per bullet group. A
+typed colour, size, font, or choice removes a preserved `a:buClrTx`,
+`a:buSzTx`, `a:buFontTx`, or `a:buBlip` of the same group, and clearing the
+bullet removes all four. The writer applies the same rule to a bullet assigned
+through the public field. `has_picture_bullet` reports a preserved `a:buBlip`
+that no typed choice replaces. A typeface or bullet character that XML 1.0
+cannot carry is refused, since the writer escapes markup only.
+Line and paragraph spacing percentages accept the transitional
+`ST_TextSpacingPercent` range, 0 to 13200000, so a python-pptx deck with more
+than two lines of spacing opens. A typed `all_caps` replaces a preserved
+`cap="small"` on write, so a character-property element never carries two
+`cap` attributes, and `set_all_caps` drops the preserved value for good. `CT_TextBodyProperties` writes a preserved `a:prstTxWarp`,
+`a:scene3d`, 3D, or extension child at its schema slot, so an autofit choice
+added after parsing still precedes a preserved scene or extension.
+
 The presentation facade projects direct shape offset and extent, non-visual id
 and name, and the text body's explicit autofit choice through borrowed handles.
 Regular-run handles project the direct Latin typeface, centipoint size, and

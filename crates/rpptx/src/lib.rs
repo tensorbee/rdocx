@@ -23,10 +23,10 @@ pub use oxml_chart::{ChartData, ChartKind, RgbColor};
 use oxml_core::OxmlError;
 pub use oxml_core::core_properties::CoreProperties;
 pub use oxml_core::units::{Angle, Emu};
-use oxml_drawing::color::ColorChoice;
+pub use oxml_drawing::color::ColorChoice;
 #[cfg(feature = "render")]
 use oxml_drawing::color::ColorMap;
-pub use oxml_drawing::fill::Fill;
+pub use oxml_drawing::fill::{Fill, SolidFill};
 pub use oxml_drawing::line::CT_LineProperties;
 use oxml_drawing::shape_props::CT_ShapeProperties;
 #[cfg(feature = "render")]
@@ -34,10 +34,14 @@ use oxml_drawing::table::CT_TableStyleList;
 use oxml_drawing::table::{CT_Table, CT_TableCell, CT_TableCellProperties, CT_TableProperties};
 #[cfg(feature = "render")]
 use oxml_drawing::text::CT_TextListStyle;
-use oxml_drawing::text::{CT_RegularTextRun, CT_TextBody, CT_TextParagraph, TextAutofit, TextRun};
+use oxml_drawing::text::{
+    CT_RegularTextRun, CT_TextBody, CT_TextParagraph, Coordinate32Value, NormalAutofit,
+    TextAutofit, TextRun, TextWrap,
+};
 pub use oxml_drawing::text::{
-    CT_TextCharacterProperties, CT_TextParagraphProperties, TextBullet, TextBulletCharacter,
-    TextBulletChoice, TextFont,
+    CT_TextCharacterProperties, CT_TextParagraphProperties, TextAlignment, TextAnchor, TextBullet,
+    TextBulletCharacter, TextBulletChoice, TextFont, TextNoBullet, TextSpacing, TextStrike,
+    TextUnderline,
 };
 #[cfg(feature = "render")]
 use oxml_drawing::theme::CT_OfficeStyleSheet;
@@ -6055,6 +6059,93 @@ impl<'a> TextFrame<'a> {
             paragraph: self.body.add_paragraph(),
         }
     }
+
+    /// Replaces all four optional text insets.
+    ///
+    /// An inset outside the 32-bit `ST_Coordinate32` range is rejected before
+    /// any inset changes. An inset equal to the stored one keeps its stored
+    /// spelling, such as `0.1in`.
+    pub fn set_insets(
+        &mut self,
+        left: Option<Emu>,
+        right: Option<Emu>,
+        top: Option<Emu>,
+        bottom: Option<Emu>,
+    ) -> Result<()> {
+        let coordinate = |value: Option<Emu>| {
+            value
+                .map(|value| {
+                    i32::try_from(value.0)
+                        .map(Coordinate32Value::Emu)
+                        .map_err(|_| Error::InvalidShapeMutation {
+                            operation: "set text insets",
+                            message: format!("{} EMU is outside the coordinate range", value.0),
+                        })
+                })
+                .transpose()
+        };
+        // A side whose value is unchanged keeps its stored spelling, such as a
+        // universal measure, so setting one inset leaves the others as read.
+        let properties = &self.body.body_properties;
+        let resolve = |stored: &Option<Coordinate32Value>, value: Option<Emu>| {
+            if stored.as_ref().and_then(coordinate_emu) == value {
+                Ok(None)
+            } else {
+                coordinate(value).map(Some)
+            }
+        };
+        let (left, right, top, bottom) = (
+            resolve(&properties.left_inset, left)?,
+            resolve(&properties.right_inset, right)?,
+            resolve(&properties.top_inset, top)?,
+            resolve(&properties.bottom_inset, bottom)?,
+        );
+        let properties = &mut self.body.body_properties;
+        for (slot, value) in [
+            (&mut properties.left_inset, left),
+            (&mut properties.right_inset, right),
+            (&mut properties.top_inset, top),
+            (&mut properties.bottom_inset, bottom),
+        ] {
+            if let Some(value) = value {
+                *slot = value;
+            }
+        }
+        Ok(())
+    }
+
+    /// Sets or clears the direct vertical anchor.
+    pub fn set_vertical_anchor(&mut self, anchor: Option<TextAnchor>) {
+        self.body.body_properties.anchor = anchor;
+    }
+
+    /// Sets or clears the direct wrap choice, `true` wrapping at the frame width.
+    pub fn set_word_wrap(&mut self, wrap: Option<bool>) {
+        self.body.body_properties.wrap = wrap.map(|wrap| {
+            if wrap {
+                TextWrap::Square
+            } else {
+                TextWrap::None
+            }
+        });
+    }
+
+    /// Sets or clears the direct autofit choice.
+    ///
+    /// Choosing normal autofit again keeps a stored font scale and line
+    /// spacing reduction.
+    pub fn set_autofit_mode(&mut self, mode: Option<AutofitMode>) {
+        let properties = &mut self.body.body_properties;
+        properties.autofit = match mode {
+            None => None,
+            Some(AutofitMode::None) => Some(TextAutofit::NoAutofit),
+            Some(AutofitMode::Shape) => Some(TextAutofit::ShapeAutofit),
+            Some(AutofitMode::Normal) => match properties.autofit.take() {
+                Some(TextAutofit::Normal(normal)) => Some(TextAutofit::Normal(normal)),
+                _ => Some(TextAutofit::Normal(NormalAutofit::default())),
+            },
+        };
+    }
 }
 
 impl<'a> TextFrameRef<'a> {
@@ -6088,6 +6179,56 @@ impl<'a> TextFrameRef<'a> {
                 TextAutofit::ShapeAutofit => AutofitMode::Shape,
             })
     }
+
+    /// Returns the optional left, right, top, and bottom text insets in EMU.
+    ///
+    /// A universal measure such as `0.1in` is converted to the nearest EMU.
+    pub fn insets(&self) -> (Option<Emu>, Option<Emu>, Option<Emu>, Option<Emu>) {
+        let properties = &self.body.body_properties;
+        (
+            properties.left_inset.as_ref().and_then(coordinate_emu),
+            properties.right_inset.as_ref().and_then(coordinate_emu),
+            properties.top_inset.as_ref().and_then(coordinate_emu),
+            properties.bottom_inset.as_ref().and_then(coordinate_emu),
+        )
+    }
+
+    /// Returns the direct vertical anchor.
+    pub fn vertical_anchor(&self) -> Option<TextAnchor> {
+        self.body.body_properties.anchor
+    }
+
+    /// Returns the direct wrap choice, `true` when lines wrap at the frame width.
+    pub fn word_wrap(&self) -> Option<bool> {
+        self.body
+            .body_properties
+            .wrap
+            .map(|wrap| wrap == TextWrap::Square)
+    }
+}
+
+fn coordinate_emu(value: &Coordinate32Value) -> Option<Emu> {
+    match value {
+        Coordinate32Value::Emu(value) => Some(Emu(i64::from(*value))),
+        Coordinate32Value::UniversalMeasure(value) => {
+            let (number, emu_per_unit) = [
+                ("mm", 36_000.0),
+                ("cm", 360_000.0),
+                ("in", 914_400.0),
+                ("pt", 12_700.0),
+                ("pc", 152_400.0),
+                ("pi", 152_400.0),
+            ]
+            .into_iter()
+            .find_map(|(unit, emu_per_unit)| {
+                value
+                    .strip_suffix(unit)
+                    .map(|number| (number, emu_per_unit))
+            })?;
+            let number = number.parse::<f64>().ok()?;
+            Some(Emu((number * emu_per_unit).round() as i64))
+        }
+    }
 }
 
 impl<'a> TextParagraphRef<'a> {
@@ -6119,6 +6260,11 @@ impl<'a> TextParagraphRef<'a> {
             .properties
             .as_ref()
             .and_then(|properties| properties.default_run_properties.as_ref())
+    }
+
+    /// Returns direct paragraph properties when present.
+    pub fn properties(&self) -> Option<&'a CT_TextParagraphProperties> {
+        self.paragraph.properties.as_ref()
     }
 
     /// Returns the number of regular runs, excluding breaks and fields.
@@ -6226,17 +6372,25 @@ impl TextParagraphMut<'_> {
             .get_or_insert_with(CT_TextCharacterProperties::default)
     }
 
+    /// Returns direct paragraph properties when present.
+    pub fn properties(&self) -> Option<&CT_TextParagraphProperties> {
+        self.paragraph.properties.as_ref()
+    }
+
     /// Replaces the paragraph's direct typed properties.
     pub fn set_properties(&mut self, properties: CT_TextParagraphProperties) {
         *self.paragraph.properties_mut() = properties;
     }
 
     /// Sets or clears the direct paragraph bullet.
+    ///
+    /// A preserved picture or follow-text bullet part that the new value
+    /// replaces is removed, so the paragraph keeps one bullet choice.
     pub fn set_bullet(&mut self, bullet: Option<TextBullet>) {
         if let Some(properties) = self.paragraph.properties.as_mut() {
-            properties.bullet = bullet;
+            properties.set_bullet(bullet);
         } else if bullet.is_some() {
-            self.paragraph.properties_mut().bullet = bullet;
+            self.paragraph.properties_mut().set_bullet(bullet);
         }
     }
 }

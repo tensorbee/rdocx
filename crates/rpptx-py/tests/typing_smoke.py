@@ -7,9 +7,14 @@ from rpptx import (
     CommentReply,
     Inches,
     Length,
+    MSO_ANCHOR,
+    MSO_AUTO_SIZE,
     MSO_SHAPE,
+    MSO_UNDERLINE,
+    PP_ALIGN,
     Presentation,
     Pt,
+    RGBColor,
 )
 from rpptx._rpptx import (
     Cell,
@@ -59,6 +64,60 @@ def exercise_rpptx_types(path: Path) -> None:
     run_font_name: str | None = run.font.name
     run_font_size: Length | None = run.font.size
     run_font_color: str | None = run.font.color
+    frame: TextFrame = presentation.slides[0].shapes[-1].text_frame
+    frame.margin_left = Inches(0.1)
+    frame.margin_right = None
+    frame.margin_top = Pt(2)
+    frame.margin_bottom = 0
+    margins: tuple[Length | None, ...] = (
+        frame.margin_left,
+        frame.margin_right,
+        frame.margin_top,
+        frame.margin_bottom,
+    )
+    frame.vertical_anchor = MSO_ANCHOR.MIDDLE
+    anchor: MSO_ANCHOR | None = frame.vertical_anchor
+    frame.word_wrap = True
+    word_wrap: bool | None = frame.word_wrap
+    frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+    auto_size: MSO_AUTO_SIZE | None = frame.auto_size
+    paragraph = frame.paragraphs[0]
+    paragraph.alignment = PP_ALIGN.CENTER
+    alignment: PP_ALIGN | None = paragraph.alignment
+    paragraph.line_spacing = 1.5
+    paragraph.line_spacing = Pt(18)
+    line_spacing: float | Length | None = paragraph.line_spacing
+    paragraph.space_before = Pt(6)
+    paragraph.space_after = 0.5
+    spacing: tuple[Length | float | None, ...] = (
+        paragraph.space_before,
+        paragraph.space_after,
+    )
+    paragraph.left_indent = Inches(0.5)
+    paragraph.right_indent = None
+    paragraph.first_line_indent = -Inches(0.25)
+    indents: tuple[Length | None, ...] = (
+        paragraph.left_indent,
+        paragraph.right_indent,
+        paragraph.first_line_indent,
+    )
+    paragraph.bullet = "-"
+    paragraph.bullet = False
+    bullet: str | bool | None = paragraph.bullet
+    added: Run = paragraph.add_run("added")
+    added = frame.paragraphs[0].add_run()
+    font: Font = added.font
+    font.name = "Arial"
+    font.color = RGBColor(0x12, 0x34, 0x56)
+    font.color = "123456"
+    font.color = None
+    font.italic = True
+    font.underline = True
+    font.underline = MSO_UNDERLINE.DOUBLE_LINE
+    underline: bool | MSO_UNDERLINE | None = font.underline
+    font.strike = False
+    font.all_caps = None
+    font_flags: tuple[bool | None, ...] = (font.italic, font.strike, font.all_caps)
     broad_shape_factory: Callable[[int, int, int, int, int], Shape] = (
         presentation.slides[0].shapes.add_shape  # type: ignore[assignment]
     )
@@ -131,6 +190,17 @@ def exercise_rpptx_types(path: Path) -> None:
         run_font_name,
         run_font_size,
         run_font_color,
+        margins,
+        anchor,
+        word_wrap,
+        auto_size,
+        alignment,
+        line_spacing,
+        spacing,
+        indents,
+        bullet,
+        underline,
+        font_flags,
     )
 
 

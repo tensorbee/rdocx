@@ -266,6 +266,29 @@ re-exported by `rpptx`. Structural append returns the newly inserted borrowed
 item, and Rust's borrow rules prevent a live nested handle from being
 invalidated by another structural mutation.
 
+`TextFrameRef` reads the direct body insets, vertical anchor, and wrap choice,
+and `TextFrame` replaces them with the autofit choice:
+
+```rust
+TextFrameRef::insets(&self) -> (Option<Emu>, Option<Emu>, Option<Emu>, Option<Emu>);
+TextFrameRef::vertical_anchor(&self) -> Option<TextAnchor>;
+TextFrameRef::word_wrap(&self) -> Option<bool>;
+TextFrame::set_insets(&mut self, left: Option<Emu>, right: Option<Emu>, top: Option<Emu>, bottom: Option<Emu>) -> Result<()>;
+TextFrame::set_vertical_anchor(&mut self, anchor: Option<TextAnchor>);
+TextFrame::set_word_wrap(&mut self, wrap: Option<bool>);
+TextFrame::set_autofit_mode(&mut self, mode: Option<AutofitMode>);
+TextParagraphRef::properties(&self) -> Option<&CT_TextParagraphProperties>;
+TextParagraphMut::properties(&self) -> Option<&CT_TextParagraphProperties>;
+```
+
+Insets are read and written in left, right, top, bottom order, like
+`TableCellMut::margins`. A universal measure reads as the nearest EMU. An inset
+outside the 32-bit coordinate range is rejected before any inset changes.
+Choosing normal autofit again keeps its stored font scale and line spacing
+reduction. `TextParagraphMut::set_bullet` removes the preserved picture or
+follow-text bullet part that the new value replaces, so the paragraph keeps one
+choice per bullet group.
+
 Whole-frame replacement creates a minimal body when needed and always retains
 one paragraph. It preserves existing body properties, list style,
 first-paragraph formatting, end properties, and placeholder metadata. Existing

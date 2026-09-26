@@ -10,7 +10,7 @@ use crate::color::ColorChoice;
 use crate::namespace::reject_conflicting_a_prefix;
 use crate::order::OrderedRawChildren;
 
-use super::body::{Result, TextError, missing_end};
+use super::body::{Result, TextError, has_forbidden_xml_char, missing_end};
 use super::paragraph::TextFont;
 
 const MIN_BULLET_PERCENT: i32 = 25_000;
@@ -324,8 +324,8 @@ pub struct TextBulletCharacter {
 impl TextBulletCharacter {
     pub fn new(character: impl Into<String>) -> Result<Self> {
         let character = character.into();
-        if character.is_empty() {
-            return Err(invalid("buChar", "char", ""));
+        if character.is_empty() || has_forbidden_xml_char(&character) {
+            return Err(invalid("buChar", "char", &character));
         }
         Ok(Self {
             character,
@@ -354,8 +354,8 @@ impl TextBulletCharacter {
     }
 
     fn write_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
-        if self.character.is_empty() {
-            return Err(invalid("buChar", "char", ""));
+        if self.character.is_empty() || has_forbidden_xml_char(&self.character) {
+            return Err(invalid("buChar", "char", &self.character));
         }
         let mut start = BytesStart::new("a:buChar");
         start.push_attribute(("char", self.character.as_str()));
