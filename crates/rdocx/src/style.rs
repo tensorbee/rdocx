@@ -529,16 +529,47 @@ impl StyleBuilder {
 }
 
 pub(crate) fn validate_style_graph(styles: &CT_Styles) -> Result<()> {
+    match style_graph_defects(styles).into_iter().next() {
+        Some(defect) => Err(style_graph_error(defect)),
+        None => Ok(()),
+    }
+}
+
+/// Validate a staged change to a style graph a producer may already have
+/// left invalid.
+///
+/// Each defect `staged` shares with `source` is returned once, in check order,
+/// for the caller to report. A defect only `staged` has was introduced by the
+/// change and rejects it.
+pub(crate) fn validate_style_graph_change(
+    source: &CT_Styles,
+    staged: &CT_Styles,
+) -> Result<Vec<String>> {
+    let source_defects = style_graph_defects(source);
+    let mut retained = Vec::new();
+    for defect in style_graph_defects(staged) {
+        if !source_defects.contains(&defect) {
+            return Err(style_graph_error(defect));
+        }
+        if !retained.contains(&defect) {
+            retained.push(defect);
+        }
+    }
+    Ok(retained)
+}
+
+/// Every defect in check order. The first is the one `validate_style_graph`
+/// reports.
+fn style_graph_defects(styles: &CT_Styles) -> Vec<String> {
+    let mut defects = Vec::new();
     let mut by_id = HashMap::new();
     for style in &styles.styles {
         if style.style_id.is_empty() {
-            return Err(style_graph_error("style IDs cannot be empty"));
-        }
-        if by_id.insert(style.style_id.as_str(), style).is_some() {
-            return Err(style_graph_error(format!(
-                "duplicate style ID '{}'",
-                style.style_id
-            )));
+            defects.push("style IDs cannot be empty".to_owned());
+        } else if by_id.contains_key(style.style_id.as_str()) {
+            defects.push(format!("duplicate style ID '{}'", style.style_id));
+        } else {
+            by_id.insert(style.style_id.as_str(), style);
         }
     }
 
@@ -554,19 +585,19 @@ pub(crate) fn validate_style_graph(styles: &CT_Styles) -> Result<()> {
             .filter(|style| style.style_type == style_type && style.is_default)
             .count();
         if defaults > 1 {
-            return Err(style_graph_error(format!(
+            defects.push(format!(
                 "style type '{}' has more than one default",
                 style_type.to_str()
-            )));
+            ));
         }
     }
 
     for style in &styles.styles {
         if style.style_type == StyleType::Character && style.ppr.is_some() {
-            return Err(style_graph_error(format!(
+            defects.push(format!(
                 "character style '{}' cannot contain paragraph properties",
                 style.style_id
-            )));
+            ));
         }
         if style.style_type != StyleType::Table
             && (style.table_properties.is_some()
@@ -574,11 +605,11 @@ pub(crate) fn validate_style_graph(styles: &CT_Styles) -> Result<()> {
                 || style.table_cell_properties.is_some()
                 || !style.conditional_table_styles.is_empty())
         {
-            return Err(style_graph_error(format!(
+            defects.push(format!(
                 "{} style '{}' cannot contain table properties",
                 style.style_type.to_str(),
                 style.style_id
-            )));
+            ));
         }
         // Region validity is unrepresentable rather than checked. An
         // unrecognised `w:type` parses as `None`, round-trips from its
@@ -591,77 +622,81 @@ pub(crate) fn validate_style_graph(styles: &CT_Styles) -> Result<()> {
             .filter_map(|conditional| conditional.region)
         {
             if !conditional_regions.insert(region) {
-                return Err(style_graph_error(format!(
+                defects.push(format!(
                     "table style '{}' repeats conditional region '{}'",
                     style.style_id,
                     region.to_str()
-                )));
+                ));
             }
         }
 
         if let Some(parent_id) = style.based_on.as_deref() {
-            let parent = by_id.get(parent_id).ok_or_else(|| {
-                style_graph_error(format!(
+            match by_id.get(parent_id) {
+                None => defects.push(format!(
                     "style '{}' is based on missing style '{parent_id}'",
                     style.style_id
-                ))
-            })?;
-            if parent.style_type != style.style_type {
-                return Err(style_graph_error(format!(
-                    "style '{}' cannot be based on {} style '{parent_id}'",
-                    style.style_id,
-                    parent.style_type.to_str()
-                )));
+                )),
+                Some(parent) if parent.style_type != style.style_type => {
+                    defects.push(format!(
+                        "style '{}' cannot be based on {} style '{parent_id}'",
+                        style.style_id,
+                        parent.style_type.to_str()
+                    ));
+                }
+                Some(_) => {}
             }
         }
 
         if let Some(next_id) = style.next_style.as_deref() {
             if style.style_type != StyleType::Paragraph {
-                return Err(style_graph_error(format!(
+                defects.push(format!(
                     "{} style '{}' cannot declare a next style",
                     style.style_type.to_str(),
                     style.style_id
-                )));
-            }
-            let next = by_id.get(next_id).ok_or_else(|| {
-                style_graph_error(format!(
-                    "style '{}' names missing next style '{next_id}'",
-                    style.style_id
-                ))
-            })?;
-            if next.style_type != StyleType::Paragraph {
-                return Err(style_graph_error(format!(
-                    "paragraph style '{}' has non-paragraph next style '{next_id}'",
-                    style.style_id
-                )));
+                ));
+            } else {
+                match by_id.get(next_id) {
+                    None => defects.push(format!(
+                        "style '{}' names missing next style '{next_id}'",
+                        style.style_id
+                    )),
+                    Some(next) if next.style_type != StyleType::Paragraph => {
+                        defects.push(format!(
+                            "paragraph style '{}' has non-paragraph next style '{next_id}'",
+                            style.style_id
+                        ));
+                    }
+                    Some(_) => {}
+                }
             }
         }
 
         if let Some(linked_id) = style.linked_style.as_deref() {
-            let linked = by_id.get(linked_id).ok_or_else(|| {
-                style_graph_error(format!(
+            match by_id.get(linked_id) {
+                None => defects.push(format!(
                     "style '{}' links to missing style '{linked_id}'",
                     style.style_id
-                ))
-            })?;
-            let legal_types = matches!(
-                (style.style_type, linked.style_type),
-                (StyleType::Paragraph, StyleType::Character)
-                    | (StyleType::Character, StyleType::Paragraph)
-            );
-            if !legal_types {
-                return Err(style_graph_error(format!(
-                    "{} style '{}' cannot link to {} style '{linked_id}'",
-                    style.style_type.to_str(),
-                    style.style_id,
-                    linked.style_type.to_str()
-                )));
-            }
-            if linked.linked_style.as_deref() != Some(style.style_id.as_str()) {
-                return Err(style_graph_error(format!(
-                    "linked styles '{}' and '{linked_id}' are not reciprocal",
-                    style.style_id
-                )));
+                )),
+                Some(linked) => {
+                    let legal_types = matches!(
+                        (style.style_type, linked.style_type),
+                        (StyleType::Paragraph, StyleType::Character)
+                            | (StyleType::Character, StyleType::Paragraph)
+                    );
+                    if !legal_types {
+                        defects.push(format!(
+                            "{} style '{}' cannot link to {} style '{linked_id}'",
+                            style.style_type.to_str(),
+                            style.style_id,
+                            linked.style_type.to_str()
+                        ));
+                    } else if linked.linked_style.as_deref() != Some(style.style_id.as_str()) {
+                        defects.push(format!(
+                            "linked styles '{}' and '{linked_id}' are not reciprocal",
+                            style.style_id
+                        ));
+                    }
+                }
             }
         }
     }
@@ -671,9 +706,8 @@ pub(crate) fn validate_style_graph(styles: &CT_Styles) -> Result<()> {
         let mut current = Some(style.style_id.as_str());
         while let Some(style_id) = current {
             if !seen.insert(style_id) {
-                return Err(style_graph_error(format!(
-                    "based-on cycle contains style '{style_id}'"
-                )));
+                defects.push(format!("based-on cycle contains style '{style_id}'"));
+                break;
             }
             current = by_id
                 .get(style_id)
@@ -681,7 +715,7 @@ pub(crate) fn validate_style_graph(styles: &CT_Styles) -> Result<()> {
         }
     }
 
-    Ok(())
+    defects
 }
 
 fn style_graph_error(message: impl Into<String>) -> Error {
@@ -937,5 +971,51 @@ mod tests {
         assert_eq!(ppr.keep_next, Some(true));
         assert_eq!(ppr.space_before, Some(Twips(40)));
         assert_eq!(ppr.space_after, Some(Twips(0)));
+    }
+
+    #[test]
+    fn style_graph_change_retains_producer_defects_and_rejects_introduced_ones() {
+        let mut source = test_styles();
+        for (builder, is_default) in [
+            (
+                StyleBuilder::paragraph("Orphan", "Orphan").based_on("Missing"),
+                false,
+            ),
+            (StyleBuilder::paragraph("SecondDefault", "Second"), true),
+            (
+                StyleBuilder::character("OneWay", "One Way").linked_style("Normal"),
+                false,
+            ),
+        ] {
+            let (mut style, _, _) = builder.build();
+            style.is_default = is_default;
+            source.styles.push(style);
+        }
+        // Strict validation still fails on the first defect in check order.
+        assert_eq!(
+            validate_style_graph(&source).unwrap_err().to_string(),
+            "invalid style graph: style type 'paragraph' has more than one default"
+        );
+        assert_eq!(
+            validate_style_graph_change(&source, &source).unwrap(),
+            [
+                "style type 'paragraph' has more than one default",
+                "style 'Orphan' is based on missing style 'Missing'",
+                "linked styles 'OneWay' and 'Normal' are not reciprocal",
+            ]
+        );
+
+        // Resolving the dangling parent closes a cycle the source did not have.
+        let mut staged = source.clone();
+        let (parent, _, _) = StyleBuilder::paragraph("Missing", "Missing")
+            .based_on("Orphan")
+            .build();
+        staged.styles.push(parent);
+        assert_eq!(
+            validate_style_graph_change(&source, &staged)
+                .unwrap_err()
+                .to_string(),
+            "invalid style graph: based-on cycle contains style 'Orphan'"
+        );
     }
 }

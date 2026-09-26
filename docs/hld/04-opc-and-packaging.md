@@ -1375,18 +1375,30 @@ records exact byte offsets for the owned cached-result range. Bookmark markers
 are inserted at schema-valid unowned boundaries by byte-position edits. Source
 selection retains paragraph, run, and raw-child positions for bookmark scope.
 Each required built-in entry level resolves a paragraph style by the
-case-insensitive built-in name `toc N` and retains the producer's style id. An
-existing canonical `TOCN` id is the collision-safe fallback, and a canonical
-style is created only when neither form exists. Effective paragraph properties
-decide whether the style already owns a right tab. Style-graph validation and
-styles-part serialization complete inside the staged candidate, so unrelated
-styles and unmodelled style children retain their source bytes.
+case-insensitive built-in name `toc N` among the first definition of each id
+and retains the producer's style id. A
+style with an empty id is never chosen, because entries reference their style
+by id. An existing canonical `TOCN` id is the collision-safe fallback, and a
+canonical style is created only when neither form exists. Effective paragraph
+properties decide whether the style already owns a right tab. Style-graph
+validation and styles-part serialization complete inside the staged candidate,
+so unrelated styles and unmodelled style children retain their source bytes.
 One final empty component in a custom-style list is a tolerated producer
 separator. Interior empty names, missing levels, and invalid levels remain
 malformed. TOC discovery resolves duplicate style identifiers from the first
-source definition and reports each duplicated identifier once. Validation of
-that staged TOC view ignores later definitions without deleting or rewriting
-them. Public style mutation retains strict duplicate rejection.
+source definition and reports each duplicated identifier once. Several
+defaults of one style type resolve to the one layout applies, the first in
+source order, and each such type is reported once. ECMA-376 and python-docx
+take the last default instead. That divergence belongs to layout, and the
+rebuild follows layout so its page numbers match the render. That staged TOC
+view ignores later definitions and later defaults without deleting or rewriting
+them. Validation compares the view before and after entry styles are staged.
+Every defect the source view already has is one that open, save, layout, and
+text replacement accept, so the rebuild retains it and reports it once in check
+order. A defect only the staged view has was introduced by the rebuild, such
+as a new canonical style completing a dangling producer link into a one-way
+link, and it rejects the rebuild. Public style mutation retains strict
+whole-graph validation.
 Old-result exclusion adds a total nested-run order within each accepted
 revision or content-control owner, so fields on opposite sides of a marker in
 one wrapper remain distinguishable. The outer coordinate is the typed

@@ -81,7 +81,9 @@ templates, which users notice and cannot describe.
 table of sampled theme-colour resolutions asserted to exact RGB. Word style
 graphs are validated for type-compatible inheritance, cycle freedom,
 reciprocal links, legal next styles, and one default per style type before a
-mutation publishes. Paragraph, character, and table default resolution has
+mutation publishes. A TOC rebuild instead rejects only the defects its staged
+entry styles introduce and reports the producer defects it retains.
+Paragraph, character, and table default resolution has
 focused deterministic render coverage. Effective numbering resolution applies
 style inheritance, concrete replacement formatting, base-level start and
 restart controls, and counter projection once, then shares that result with

@@ -8211,6 +8211,190 @@ fn toc_rebuild_accepts_trailing_style_separator_and_duplicate_style_ids() {
     );
 }
 
+fn document_with_producer_styles(body: &str, producer_styles: &str) -> Document {
+    let mut source = document_with_field_parts(&wrap_word_body(body), None, None);
+    let mut package =
+        oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(source.to_bytes().unwrap()))
+            .unwrap();
+    let styles = String::from_utf8(package.get_part("/word/styles.xml").unwrap().to_vec()).unwrap();
+    let styles = styles.replacen("</w:styles>", &format!("{producer_styles}</w:styles>"), 1);
+    package.set_part("/word/styles.xml", styles.into_bytes());
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    Document::from_bytes(bytes.get_ref()).unwrap()
+}
+
+#[test]
+fn toc_rebuild_accepts_several_defaults_of_one_style_type_and_follows_the_layout_default() {
+    let body = r#"
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o "1-1" \h</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>stale</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>First heading</w:t></w:r></w:p>
+        <w:p><w:r><w:t>Body.</w:t></w:r></w:p>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Second heading</w:t></w:r></w:p>
+    "#;
+    // Google Docs exports declare several defaults of one type. The later
+    // default paragraph style would start every unstyled paragraph on a new
+    // page, so the rebuilt page numbers show which default was resolved.
+    let mut document = document_with_producer_styles(
+        body,
+        concat!(
+            r#"<w:style w:type="paragraph" w:default="1" w:styleId="LaterNormal"><w:name w:val="Later Normal"/><w:pPr><w:pageBreakBefore/></w:pPr></w:style>"#,
+            r#"<w:style w:type="table" w:default="1" w:styleId="TableNormal"><w:name w:val="Normal Table"/></w:style>"#,
+            r#"<w:style w:type="table" w:default="1" w:styleId="TableNormal2"><w:name w:val="Normal Table 2"/></w:style>"#,
+        ),
+    );
+
+    assert!(document.validate_style_graph().is_err());
+    let report = document.rebuild_toc().unwrap();
+    assert_eq!(report.entry_count, 2);
+    assert_eq!(
+        report.diagnostics,
+        [
+            "multiple default paragraph styles used first default 'Normal' while rebuilding TOC",
+            "multiple default table styles used first default 'TableNormal' while rebuilding TOC",
+        ]
+    );
+    let entries = toc_entry_signatures(&document_xml(&mut document))
+        .into_iter()
+        .map(|(display, style, _, _)| (display, style))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        entries,
+        [
+            ("First heading\t1".to_owned(), "TOC1".to_owned()),
+            ("Second heading\t1".to_owned(), "TOC1".to_owned()),
+        ]
+    );
+
+    let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+    assert_eq!(
+        reopened.layout_deterministic().unwrap().layout.pages.len(),
+        1
+    );
+    let defaults = reopened
+        .styles()
+        .iter()
+        .filter(|style| style.is_default())
+        .map(|style| style.style_id().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        defaults,
+        ["Normal", "LaterNormal", "TableNormal", "TableNormal2"]
+    );
+}
+
+const ONE_HEADING_TOC_BODY: &str = r#"
+    <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o "1-1" \h</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+    <w:p><w:r><w:t>stale</w:t></w:r></w:p>
+    <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+    <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Heading</w:t></w:r></w:p>
+"#;
+
+#[test]
+fn toc_rebuild_retains_every_producer_style_graph_defect_the_read_surface_accepts() {
+    // One producer defect per strict check. Open, save, layout, and text
+    // replacement accept each of them. The `toc 1` style has no identifier an
+    // entry could reference, so the rebuild creates the canonical one.
+    let producer_styles = concat!(
+        r#"<w:style w:type="paragraph" w:styleId=""><w:name w:val="toc 1"/></w:style>"#,
+        r#"<w:style w:type="character" w:styleId="CharacterWithParagraph"><w:name w:val="Character With Paragraph"/><w:pPr><w:jc w:val="center"/></w:pPr></w:style>"#,
+        r#"<w:style w:type="paragraph" w:styleId="ParagraphWithTable"><w:name w:val="Paragraph With Table"/><w:tblPr><w:tblInd w:w="0" w:type="dxa"/></w:tblPr></w:style>"#,
+        r#"<w:style w:type="table" w:styleId="RepeatedRegion"><w:name w:val="Repeated Region"/><w:tblStylePr w:type="firstRow"><w:rPr><w:b/></w:rPr></w:tblStylePr><w:tblStylePr w:type="firstRow"><w:rPr><w:i/></w:rPr></w:tblStylePr></w:style>"#,
+        r#"<w:style w:type="paragraph" w:styleId="Orphan"><w:name w:val="Orphan"/><w:basedOn w:val="Missing"/></w:style>"#,
+        r#"<w:style w:type="paragraph" w:styleId="OnCharacter"><w:name w:val="On Character"/><w:basedOn w:val="CharacterWithParagraph"/></w:style>"#,
+        r#"<w:style w:type="character" w:styleId="CharacterNext"><w:name w:val="Character Next"/><w:next w:val="Normal"/></w:style>"#,
+        r#"<w:style w:type="paragraph" w:styleId="NextMissing"><w:name w:val="Next Missing"/><w:next w:val="Missing"/></w:style>"#,
+        r#"<w:style w:type="paragraph" w:styleId="NextCharacter"><w:name w:val="Next Character"/><w:next w:val="CharacterNext"/></w:style>"#,
+        r#"<w:style w:type="paragraph" w:styleId="LinkMissing"><w:name w:val="Link Missing"/><w:link w:val="Missing"/></w:style>"#,
+        r#"<w:style w:type="paragraph" w:styleId="LinkParagraph"><w:name w:val="Link Paragraph"/><w:link w:val="Orphan"/></w:style>"#,
+        r#"<w:style w:type="character" w:styleId="OneWay"><w:name w:val="One Way"/><w:link w:val="Normal"/></w:style>"#,
+        r#"<w:style w:type="paragraph" w:styleId="CycleA"><w:name w:val="Cycle A"/><w:basedOn w:val="CycleB"/></w:style>"#,
+        r#"<w:style w:type="paragraph" w:styleId="CycleB"><w:name w:val="Cycle B"/><w:basedOn w:val="CycleA"/></w:style>"#,
+    );
+    let mut document = document_with_producer_styles(ONE_HEADING_TOC_BODY, producer_styles);
+    let source_style_count = document.styles().len();
+
+    assert!(document.validate_style_graph().is_err());
+    let report = document.rebuild_toc().unwrap();
+    assert_eq!(report.entry_count, 1);
+    assert_eq!(
+        report.diagnostics,
+        [
+            "style IDs cannot be empty",
+            "character style 'CharacterWithParagraph' cannot contain paragraph properties",
+            "paragraph style 'ParagraphWithTable' cannot contain table properties",
+            "table style 'RepeatedRegion' repeats conditional region 'firstRow'",
+            "style 'Orphan' is based on missing style 'Missing'",
+            "style 'OnCharacter' cannot be based on character style 'CharacterWithParagraph'",
+            "character style 'CharacterNext' cannot declare a next style",
+            "style 'NextMissing' names missing next style 'Missing'",
+            "paragraph style 'NextCharacter' has non-paragraph next style 'CharacterNext'",
+            "style 'LinkMissing' links to missing style 'Missing'",
+            "paragraph style 'LinkParagraph' cannot link to paragraph style 'Orphan'",
+            "linked styles 'OneWay' and 'Normal' are not reciprocal",
+            "based-on cycle contains style 'CycleA'",
+            "based-on cycle contains style 'CycleB'",
+        ]
+        .map(|defect| format!("{defect}, retained while rebuilding TOC"))
+    );
+    let xml = document_xml(&mut document);
+    assert!(!xml.contains(r#"<w:pStyle w:val=""/>"#), "{xml}");
+    let entries = toc_entry_signatures(&xml);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].1, "TOC1");
+
+    let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+    assert_eq!(reopened.styles().len(), source_style_count + 1);
+    assert!(reopened.validate_style_graph().is_err());
+}
+
+#[test]
+fn toc_rebuild_rejects_a_defect_its_entry_style_introduces_behind_retained_ones() {
+    // The retained dangling parent must not hide the new `TOC1` style
+    // completing a producer's dangling link into a one-way link.
+    let mut document = document_with_producer_styles(
+        ONE_HEADING_TOC_BODY,
+        concat!(
+            r#"<w:style w:type="paragraph" w:styleId="Orphan"><w:name w:val="Orphan"/><w:basedOn w:val="Missing"/></w:style>"#,
+            r#"<w:style w:type="character" w:styleId="TOC1Char"><w:name w:val="TOC 1 Char"/><w:link w:val="TOC1"/></w:style>"#,
+        ),
+    );
+    let before = document.to_bytes().unwrap();
+
+    let error = document.rebuild_toc().unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "invalid style graph: linked styles 'TOC1Char' and 'TOC1' are not reciprocal"
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+}
+
+#[test]
+fn toc_rebuild_ignores_a_toc_style_name_on_a_later_duplicate_definition() {
+    // `Contents1` resolves to its first definition, a centred custom style.
+    // The later definition's `toc 1` name must not make it the entry style.
+    let mut document = document_with_producer_styles(
+        ONE_HEADING_TOC_BODY,
+        concat!(
+            r#"<w:style w:type="paragraph" w:styleId="Contents1"><w:name w:val="Custom"/><w:pPr><w:jc w:val="center"/></w:pPr></w:style>"#,
+            r#"<w:style w:type="paragraph" w:styleId="Contents1"><w:name w:val="toc 1"/></w:style>"#,
+        ),
+    );
+
+    let report = document.rebuild_toc().unwrap();
+
+    assert_eq!(report.entry_count, 1);
+    assert_eq!(
+        report.diagnostics,
+        ["duplicate style ID 'Contents1' used first definition while rebuilding TOC"]
+    );
+    let entries = toc_entry_signatures(&document_xml(&mut document));
+    assert_eq!(entries.len(), 1, "the entry must not reference `Contents1`");
+    assert_eq!(entries[0].1, "TOC1");
+}
+
 #[test]
 fn numbered_toc_entries_reuse_the_visible_layout_marker() {
     let body = r#"
@@ -32394,4 +32578,90 @@ mod f266c_character_grid_and_vertical_text_regressions {
              {rotated} against {horizontal}"
         );
     }
+}
+
+#[test]
+fn story_link_snapshots_read_link_text_from_prefixes_declared_outside_the_link() {
+    // Each hyperlink's runs use a prefix declared on an ancestor outside the
+    // hyperlink span, or on the hyperlink itself. A header part reaches the
+    // scanner as it was read, so the prefixes are not rewritten first. The
+    // package-wide inventory reads each link from its own span with an
+    // inventoried namespace scope, so it must still agree with the per-story
+    // scan that reads from the head of the part.
+    let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let document = document_with_header_story(&format!(
+        concat!(
+            r#"<w:hdr xmlns:w="{0}"><w:p xmlns:ww="{0}">"#,
+            r#"<ww:r><ww:t>before </ww:t></ww:r>"#,
+            r#"<w:hyperlink w:anchor="first"><ww:r><ww:t>first link</ww:t></ww:r></w:hyperlink>"#,
+            r#"</w:p>"#,
+            r#"<w:p><w:hyperlink w:anchor="second" xmlns:x="{0}">"#,
+            r#"<x:r><x:t>second link</x:t></x:r></w:hyperlink></w:p></w:hdr>"#,
+        ),
+        word
+    ));
+    let header = document
+        .stories()
+        .unwrap()
+        .into_iter()
+        .find(|story| story.kind() == StoryKind::Header)
+        .unwrap();
+    let project = |links: Vec<(ContentLocation, rdocx::LinkInfo)>| {
+        links
+            .into_iter()
+            .filter(|(location, _)| location.story() == &header)
+            .map(|(location, link)| (link.text, link.anchor, location.index_path().to_vec()))
+            .collect::<Vec<_>>()
+    };
+
+    let snapshots = project(document.story_link_snapshots().unwrap());
+
+    assert_eq!(snapshots, project(document.story_links(&header).unwrap()));
+    assert_eq!(
+        snapshots
+            .iter()
+            .map(|(text, anchor, _)| (text.as_str(), anchor.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("first link", Some("first")),
+            ("second link", Some("second")),
+        ]
+    );
+}
+
+#[test]
+fn story_link_snapshots_match_story_links_when_a_part_binds_word_twice() {
+    // The header binds Word both as the default namespace and as `q`, and the
+    // tracked insertion inside the link names its attributes with `q`. Reading
+    // the link from its own span must not see more Word prefixes on the link
+    // than the read from the head of the part does.
+    let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let document = document_with_header_story(&format!(
+        concat!(
+            r#"<hdr xmlns="{0}" xmlns:q="{0}"><p><hyperlink q:anchor="a">"#,
+            r#"<ins q:id="1" q:author="A"><r><t>inserted</t></r></ins>"#,
+            r#"</hyperlink></p></hdr>"#,
+        ),
+        word
+    ));
+    let header = document
+        .stories()
+        .unwrap()
+        .into_iter()
+        .find(|story| story.kind() == StoryKind::Header)
+        .unwrap();
+    let project = |links: Vec<(ContentLocation, rdocx::LinkInfo)>| {
+        links
+            .into_iter()
+            .filter(|(location, _)| location.story() == &header)
+            .map(|(location, link)| (link.text, location.index_path().to_vec()))
+            .collect::<Vec<_>>()
+    };
+
+    let snapshots = project(document.story_link_snapshots().unwrap());
+
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots, project(document.story_links(&header).unwrap()));
+    let items = document.story_items(&header).unwrap();
+    assert_eq!(snapshots[0].0, items[0].links().unwrap()[0].text);
 }

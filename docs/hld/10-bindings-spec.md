@@ -565,12 +565,15 @@ tuple instead of rebuilding it per returned record.
 updates only supported existing main-story TOC fields with deterministic
 bundled-font page targets and returns `TocRebuildReport` with entry and newly
 allocated bookmark counts plus exact retained-field diagnostics in physical
-source order. `diagnostic_count()` is derived from the owned diagnostic
-collection. A document without a TOC is unchanged and returns empty counts and
-diagnostics. `rdocx-cli toc rebuild` publishes the validated result to an
-explicit output and reports the counts through a schema-1 main-story record.
-Python exposes the same operation and returns diagnostics as an immutable tuple
-with a derived `diagnostic_count` property. WASM does not expose this operation.
+source order. Style-graph diagnostics follow them, one per duplicated style id,
+one per style type with several defaults, and one per producer style-graph
+defect the rebuild retains. `diagnostic_count()` is derived from the owned
+diagnostic collection. A document without a TOC is unchanged and returns empty
+counts and diagnostics. `rdocx-cli toc rebuild` publishes the validated result
+to an explicit output and reports the counts through a schema-1 main-story
+record. Python exposes the same operation and returns diagnostics as an
+immutable tuple with a derived `diagnostic_count` property. WASM does not expose
+this operation.
 
 The native facade re-exports the concrete OfficeMath tree from `rdocx-oxml`.
 `Paragraph::equations`, `Paragraph::equation`, and their read-only equivalents

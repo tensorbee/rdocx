@@ -418,6 +418,19 @@ combines a final empty custom-style component with a duplicate `Normal` style.
 It requires two rebuilt entries, one ordered diagnostic, both style definitions
 after save and reopen, and unchanged strict failure from the public style-graph
 validator. Unit controls retain stored display for interior empty components.
+`toc_rebuild_accepts_several_defaults_of_one_style_type_and_follows_the_layout_default`
+adds a later default paragraph style that breaks pages and a second default
+table style. It requires one ordered diagnostic per type naming the first
+default, page numbers and a page count that match that default, and every
+default retained after save and reopen.
+`toc_rebuild_retains_every_producer_style_graph_defect_the_read_surface_accepts`
+carries one defect per remaining strict check, including a `toc 1` style with
+an empty id. It requires the exact ordered diagnostics, an entry that
+references the canonical `TOC1` style, and every producer style after save and
+reopen.
+`toc_rebuild_rejects_a_defect_its_entry_style_introduces_behind_retained_ones`
+requires the one-way link a new `TOC1` style would complete to reject the
+rebuild despite a retained dangling parent, leaving the package unchanged.
 The Word-default instruction case retains argument-free `TOC \\z`, rebuilds
 through an existing content-control payload, and saves and reopens the result.
 A mixed simple and unsupported complex TOC case asserts exact diagnostic text
@@ -1928,7 +1941,13 @@ The Python story-scale gate is `python_story_inventory_scales_linearly`. It
 doubles a corpus containing paragraphs, table cells, and hyperlinks, requires
 exact doubled inventory counts, and bounds the elapsed ratio without relying
 on an absolute machine speed. A native counted companion requires one complete
-story-source build for each item or hyperlink snapshot. The binding companion
+story-source build for each item or hyperlink snapshot. A second counted
+companion, `story_link_snapshots_read_each_link_from_its_own_span`, doubles a
+linked corpus and bounds the XML events the story text walker reads, so reading
+each link from the head of its part fails it.
+`story_link_snapshots_match_story_links_when_a_part_binds_word_twice` requires
+the snapshot, story and item hyperlink projections to agree on the text of a
+header link when the part binds Word to two prefixes. The binding companion
 interleaves direct, inserted, inline-control, and deleted runs, then proves
 StoryItem text, Paragraph text, and live run handles use the same accepted
 order. Nested formatting and splitting survive save and reopen, while an old
