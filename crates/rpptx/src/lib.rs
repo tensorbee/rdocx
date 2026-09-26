@@ -67,8 +67,9 @@ pub use rpptx_layout::timeline::{
 use rpptx_layout::timeline::{ResolvedTimelineSlide, evaluate_media_playback};
 #[cfg(feature = "render")]
 use rpptx_layout::{
-    ChartResource, FlattenedItem, FlattenedSource, ResolveCtx, ResolvedContent, ResolvedSlide,
-    ScopedChartResources, ScopedHyperlinkTargets, ScopedMediaFailures, ScopedMediaIds,
+    ChartResource, FlattenedItem, FlattenedSource, ResolveCtx, ResolvedAutofit, ResolvedContent,
+    ResolvedSlide, ResolvedSlideTextDirections, ScopedChartResources, ScopedHyperlinkTargets,
+    ScopedMediaFailures, ScopedMediaIds,
 };
 pub use rpptx_oxml::comments::{Comment, CommentAuthor, CommentReply};
 use rpptx_oxml::comments::{CommentAuthorList, CommentList};
@@ -187,6 +188,18 @@ impl HandoutLayout {
 pub struct DeterministicMediaTimelineFrame {
     pub frame: DeterministicTimelineFrame,
     pub media: Vec<EvaluatedMediaState>,
+}
+
+/// One text-bearing slide shape as the deterministic renderer lays it out.
+#[cfg(feature = "render")]
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextFrameLayout {
+    pub slide_index: usize,
+    pub shape_id: Option<u32>,
+    pub name: Option<String>,
+    /// The autofit mode in effect after placeholder inheritance.
+    pub autofit: AutofitMode,
+    pub layout: rpptx_render::ShapeTextLayout,
 }
 const DEFAULT_POWERPOINT_AUTHORS_PART: &str = "/ppt/authors.xml";
 const DEFAULT_POWERPOINT_COMMENTS_PART: &str = "/ppt/comments/comment1.xml";
@@ -1186,6 +1199,99 @@ impl Presentation {
     pub fn slide_pngs_deterministic(&self, dpi: f64) -> Result<Vec<Vec<u8>>> {
         let (_, layout) = self.render_deterministic()?;
         render_export_pngs(&layout, dpi)
+    }
+
+    /// Lays out the text of every text-bearing slide shape with deterministic fonts.
+    ///
+    /// Frames come in slide order, then draw order, from the same resolved
+    /// slides and line breaker as [`Self::to_pdf_deterministic`] and
+    /// [`Self::slide_png_deterministic`]. Only shapes in each slide's own shape
+    /// tree whose text draws a visible character are reported, so layout and
+    /// master shapes, SmartArt and table cells are left out. `width_factor`
+    /// scales every usable width before line breaking, so `1.0` reports the
+    /// rendered layout and `0.95` asks whether the text fits a narrower frame.
+    #[cfg(feature = "render")]
+    pub fn text_layout_deterministic(&self, width_factor: f64) -> Result<Vec<TextFrameLayout>> {
+        if !width_factor.is_finite() || width_factor <= 0.0 {
+            return Err(render_failure(format!(
+                "text layout width factor must be finite and positive, found {width_factor}"
+            )));
+        }
+        let package = self.staged_package(false)?;
+        let mut assembly = prepare_render_context(&package, false)?;
+        let mut frames = Vec::new();
+        for (slide_index, ((prepared, slide), directions)) in assembly
+            .slides
+            .iter()
+            .zip(&assembly.input.slides)
+            .zip(&assembly.text_directions)
+            .enumerate()
+        {
+            let context = ResolveCtx::new(
+                &prepared.theme,
+                render_effective_color_map(&prepared.master, &prepared.layout, &prepared.slide),
+                &prepared.master,
+                &prepared.layout,
+                &prepared.slide,
+                &assembly.default_text_style,
+            );
+            let sources = context
+                .flatten()
+                .into_iter()
+                .filter(|item| render_source_shape_has_bounds(&context, item))
+                .collect::<Vec<_>>();
+            if sources.len() != slide.shapes.len() {
+                return Err(render_failure(format!(
+                    "{}: text layout source {}, resolved {}",
+                    prepared.slide_part,
+                    sources.len(),
+                    slide.shapes.len()
+                )));
+            }
+            for (shape_index, ((item, shape), smartart_clip)) in sources
+                .into_iter()
+                .zip(&slide.shapes)
+                .zip(&prepared.smartart_clips)
+                .enumerate()
+            {
+                let (
+                    FlattenedItem::Shape {
+                        source: FlattenedSource::Slide,
+                        child,
+                        ..
+                    },
+                    ResolvedContent::Text(text),
+                    None,
+                ) = (item, &shape.content, smartart_clip)
+                else {
+                    continue;
+                };
+                let layout = rpptx_render::layout_shape_text(
+                    shape,
+                    text,
+                    &mut assembly.font_manager,
+                    slide_index + 1,
+                    directions.get(shape_index).map_or(&[], Vec::as_slice),
+                    width_factor,
+                )
+                .map_err(|error| render_failure(error.to_string()))?;
+                if layout.lines.iter().all(|line| line.text.trim().is_empty()) {
+                    continue;
+                }
+                frames.push(TextFrameLayout {
+                    slide_index,
+                    shape_id: child.non_visual_id(),
+                    name: child.non_visual_name(),
+                    autofit: match text.autofit {
+                        ResolvedAutofit::None => AutofitMode::None,
+                        ResolvedAutofit::Normal { .. } => AutofitMode::Normal,
+                        ResolvedAutofit::Shape => AutofitMode::Shape,
+                    },
+                    layout,
+                });
+            }
+        }
+        Ok(frames)
     }
 
     /// Render the presentation to the selected archival PDF profile.
@@ -5151,7 +5257,7 @@ pub enum ShapeKind {
     AlternateContent,
 }
 
-/// The direct autofit choice stored on a DrawingML text body.
+/// One DrawingML text body autofit choice.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AutofitMode {
     None,
@@ -7633,6 +7739,8 @@ struct PreparedRenderAssembly {
     layout: LayoutResult,
     font_manager: FontManager,
     slides: Vec<PreparedSlideAssembly>,
+    /// Paragraph directions parallel to `input.slides`, as lowering used them.
+    text_directions: Vec<ResolvedSlideTextDirections>,
     size: (f64, f64),
     default_text_style: CT_TextListStyle,
     table_styles: Option<CT_TableStyleList>,
@@ -7925,6 +8033,7 @@ fn prepare_render_context(
         layout,
         font_manager,
         slides: prepared_slides,
+        text_directions,
         size,
         default_text_style,
         table_styles,

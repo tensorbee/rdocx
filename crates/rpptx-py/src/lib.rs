@@ -1,5 +1,6 @@
 //! Python bindings for the rpptx facade.
 
+mod layout;
 mod presentation;
 mod shape;
 mod slide;
@@ -111,5 +112,6 @@ fn _rpptx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     shape::register(module)?;
     text::register(module)?;
     table::register(module)?;
+    layout::register(module)?;
     Ok(())
 }

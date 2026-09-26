@@ -21,8 +21,10 @@ class StaleElementError(RpptxError):
 
 
 from ._rpptx import Comment, CommentAuthor, CommentReply, Presentation
+from ._rpptx import BoundingBox, TextFrameLayout, TextLineLayout
 
 __all__ = [
+    "BoundingBox",
     "Inches",
     "Length",
     "MSO_SHAPE",
@@ -34,5 +36,7 @@ __all__ = [
     "Pt",
     "RpptxError",
     "StaleElementError",
+    "TextFrameLayout",
+    "TextLineLayout",
     "XmlError",
 ]

@@ -1,4 +1,5 @@
 import importlib.metadata
+import math
 import re
 import struct
 import sys
@@ -866,6 +867,101 @@ def test_presentation_render_comments_and_notes_match_native_snapshots(tmp_path)
     reopened = rpptx.Presentation(output)
     assert reopened.comment_authors == presentation.comment_authors
     assert reopened.slides[0].comments == presentation.slides[0].comments
+
+
+def _text_layout_deck(tmp_path, width, text, body_properties=None):
+    import rpptx
+
+    presentation = rpptx.Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    shape = slide.shapes.add_textbox(rpptx.Inches(1), rpptx.Inches(1), width, rpptx.Pt(36))
+    shape.text = text
+    if body_properties is None:
+        return presentation
+    source = tmp_path / "text-layout-source.pptx"
+    target = tmp_path / "text-layout.pptx"
+    presentation.save(source)
+    with zipfile.ZipFile(source) as archive:
+        parts = {name: archive.read(name) for name in archive.namelist()}
+    slide_xml = parts["ppt/slides/slide1.xml"]
+    assert slide_xml.count(b"<a:bodyPr/>") == 1
+    parts["ppt/slides/slide1.xml"] = slide_xml.replace(b"<a:bodyPr/>", body_properties)
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in parts.items():
+            archive.writestr(name, data)
+    return rpptx.Presentation(target)
+
+
+def test_text_layout_reports_the_renderer_fit_at_full_and_reduced_width(tmp_path):
+    import rpptx
+
+    assert rpptx.Presentation().text_layout() == ()
+    presentation = _text_layout_deck(tmp_path, rpptx.Inches(4), "Fits in one line")
+    shape = presentation.slides[0].shapes[0]
+    (frame,) = presentation.text_layout()
+    assert isinstance(frame, rpptx.TextFrameLayout)
+    assert (frame.slide_index, frame.shape_id, frame.name) == (0, shape.shape_id, shape.name)
+    assert (frame.autofit, frame.font_scale, frame.overflow) == ("none", 1.0, False)
+    assert isinstance(frame.frame, rpptx.BoundingBox)
+    assert (frame.frame.x, frame.frame.y, frame.frame.width, frame.frame.height) == (
+        72.0,
+        72.0,
+        288.0,
+        36.0,
+    )
+    assert (frame.usable.x, frame.usable.y) == pytest.approx((79.2, 75.6))
+    assert (frame.usable.width, frame.usable.height) == pytest.approx((273.6, 28.8))
+    (line,) = frame.lines
+    assert isinstance(line, rpptx.TextLineLayout)
+    assert (line.paragraph_index, line.text, line.font_size) == (0, "Fits in one line", 18.0)
+    assert line.bounds.x == pytest.approx(79.2)
+    assert frame.usable.y <= line.bounds.y < line.baseline < line.bounds.y + line.bounds.height
+    assert frame.height == pytest.approx(line.bounds.height)
+    assert presentation.text_layout() == (frame,)
+    with pytest.raises(AttributeError):
+        frame.overflow = True  # type: ignore[misc]
+
+    presentation.slides[0].shapes[0].text_frame.add_paragraph().text = "One line too many"
+    (two_lines,) = presentation.text_layout()
+    assert [(line.paragraph_index, line.text) for line in two_lines.lines] == [
+        (0, "Fits in one line"),
+        (1, "One line too many"),
+    ]
+    assert two_lines.overflow
+    assert two_lines.height > two_lines.usable.height
+
+    measured = _text_layout_deck(tmp_path, rpptx.Inches(8), "Fits only at full width")
+    natural = measured.text_layout()[0].lines[0].bounds.width
+    tight = _text_layout_deck(
+        tmp_path, math.ceil((natural / 0.975 + 14.4) * 12_700), "Fits only at full width"
+    )
+    (full,) = tight.text_layout()
+    (narrower,) = tight.text_layout(width_factor=0.95)
+    assert (len(full.lines), full.overflow) == (1, False)
+    assert (len(narrower.lines), narrower.overflow) == (2, True)
+    assert narrower.usable.width == pytest.approx(full.usable.width * 0.95)
+    assert "".join(line.text for line in narrower.lines) == "Fits only at full width"
+    with pytest.raises(rpptx.RpptxError, match="width factor"):
+        tight.text_layout(width_factor=0.0)
+    with pytest.raises(TypeError):
+        tight.text_layout(0.95)  # type: ignore[misc]
+
+    scaled = _text_layout_deck(
+        tmp_path,
+        rpptx.Inches(4),
+        "Stored scale",
+        b'<a:bodyPr lIns="0" tIns="0" rIns="0" bIns="0"><a:normAutofit fontScale="50000"/></a:bodyPr>',
+    )
+    (scaled_frame,) = scaled.text_layout()
+    assert (scaled_frame.autofit, scaled_frame.font_scale) == ("normal", 0.5)
+    assert (scaled_frame.usable.x, scaled_frame.usable.height) == (72.0, 36.0)
+    assert scaled_frame.lines[0].font_size == 9.0
+    grown = _text_layout_deck(
+        tmp_path, rpptx.Inches(4), "Stored extent", b"<a:bodyPr><a:spAutoFit/></a:bodyPr>"
+    )
+    assert grown.text_layout()[0].autofit == "shape"
+
+    assert _assert_rpptx_releases_gil(lambda: tight.text_layout()) == (full,)
 
 
 def test_notes_mutation_preserves_text_through_save_and_reopen(tmp_path):

@@ -9243,6 +9243,552 @@ fn slide_png_conveniences_match_the_resolved_layout_raster_path() {
     }
 }
 
+/// Builds a one-slide deck from slide shape XML, adding `layout_shapes` to its layout.
+fn text_layout_deck(slide_shapes: &str, layout_shapes: &str) -> Presentation {
+    let mut source = Presentation::new().unwrap();
+    source.add_slide(6).unwrap();
+    let mut package = open_opc(&source.to_bytes().unwrap(), "text layout deck");
+    let presentation_part = package.main_document_part().unwrap();
+    let model = CT_Presentation::from_xml(package.get_part(&presentation_part).unwrap()).unwrap();
+    let slide_relationship = package
+        .get_part_rels(&presentation_part)
+        .unwrap()
+        .get_by_id(&model.slide_ids[0].relationship_id)
+        .unwrap();
+    let slide_part = OpcPackage::resolve_rel_target(&presentation_part, &slide_relationship.target);
+    let layout_relationship = package
+        .get_part_rels(&slide_part)
+        .and_then(|relationships| relationships.get_by_type(rel_types::SLIDE_LAYOUT))
+        .unwrap();
+    let layout_part = OpcPackage::resolve_rel_target(&slide_part, &layout_relationship.target);
+    package.set_part(
+        &slide_part,
+        format!(
+            r#"<p:sld xmlns:p="{P_NS}" xmlns:a="{A_NS}" xmlns:r="{R_NS}"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{slide_shapes}</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>"#
+        )
+        .into_bytes(),
+    );
+    let layout_xml = String::from_utf8(package.get_part(&layout_part).unwrap().to_vec()).unwrap();
+    package.set_part(
+        &layout_part,
+        layout_xml
+            .replacen("</p:spTree>", &format!("{layout_shapes}</p:spTree>"), 1)
+            .into_bytes(),
+    );
+    Presentation::from_bytes(&package_bytes(package)).unwrap()
+}
+
+/// One text box with its frame in EMU, its `a:bodyPr`, and its paragraphs.
+fn text_layout_shape(
+    id: u32,
+    name: &str,
+    (x, y, cx, cy): (i64, i64, i64, i64),
+    body_properties: &str,
+    paragraphs: &str,
+) -> String {
+    format!(
+        r#"<p:sp><p:nvSpPr><p:cNvPr id="{id}" name="{name}"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></p:spPr><p:txBody>{body_properties}<a:lstStyle/>{paragraphs}</p:txBody></p:sp>"#
+    )
+}
+
+/// One 18 point paragraph per text, each opened with `paragraph_properties`.
+fn text_layout_paragraphs(texts: &[&str], paragraph_properties: &str) -> String {
+    texts
+        .iter()
+        .map(|text| {
+            format!(
+                r#"<a:p>{paragraph_properties}<a:r><a:rPr lang="en-US" sz="1800"/><a:t>{text}</a:t></a:r></a:p>"#
+            )
+        })
+        .collect()
+}
+
+const TEXT_LAYOUT_NO_INSETS: &str = r#"lIns="0" tIns="0" rIns="0" bIns="0""#;
+const TEXT_LAYOUT_EXACT_20PT: &str = r#"<a:pPr><a:lnSpc><a:spcPts val="2000"/></a:lnSpc></a:pPr>"#;
+
+#[test]
+fn text_layout_reports_usable_boxes_lines_and_a_frame_one_line_too_long() {
+    let exact_lines = |texts: &[&str]| text_layout_paragraphs(texts, TEXT_LAYOUT_EXACT_20PT);
+    let slide_shapes = [
+        text_layout_shape(
+            2,
+            "Inset frame",
+            (914_400, 914_400, 3_657_600, 914_400),
+            r#"<a:bodyPr wrap="square" lIns="127000" tIns="63500" rIns="254000" bIns="190500"/>"#,
+            &text_layout_paragraphs(&["Fits"], ""),
+        ),
+        text_layout_shape(
+            3,
+            "Two lines",
+            (914_400, 2_286_000, 3_657_600, 571_500),
+            &format!(r#"<a:bodyPr wrap="square" {TEXT_LAYOUT_NO_INSETS}/>"#),
+            &exact_lines(&["first", "second"]),
+        ),
+        text_layout_shape(
+            4,
+            "Three lines",
+            (914_400, 3_429_000, 3_657_600, 571_500),
+            &format!(r#"<a:bodyPr wrap="square" {TEXT_LAYOUT_NO_INSETS}/>"#),
+            &exact_lines(&["first", "second", "third"]),
+        ),
+        text_layout_shape(
+            5,
+            "Empty divider",
+            (914_400, 4_572_000, 127_000, 25_400),
+            "<a:bodyPr/>",
+            "<a:p/>",
+        ),
+        r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="6" name="Table"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="5486400" y="914400"/><a:ext cx="25400" cy="25400"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl><a:tblGrid><a:gridCol w="25400"/></a:tblGrid><a:tr h="25400"><a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Table cell</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#.to_owned(),
+    ]
+    .concat();
+    let layout_note = text_layout_shape(
+        90,
+        "Layout note",
+        (5_486_400, 3_429_000, 12_700, 12_700),
+        "<a:bodyPr/>",
+        &text_layout_paragraphs(&["Layout note"], ""),
+    );
+    let presentation = text_layout_deck(&slide_shapes, &layout_note);
+    let (input, _) = presentation.render_deterministic().unwrap();
+    assert!(
+        input.slides[0]
+            .shapes
+            .iter()
+            .any(|shape| resolved_content_text(&shape.content) == "Layout note"),
+        "the layout note must be drawn for its absence below to mean anything"
+    );
+    let divider = input.slides[0]
+        .shapes
+        .iter()
+        .find(|shape| shape.bounds.width == 10.0)
+        .unwrap();
+    let ResolvedContent::Text(divider_text) = &divider.content else {
+        panic!("the empty divider must keep its text body");
+    };
+    let mut fonts = oxml_layout::FontManager::new_deterministic().unwrap();
+    assert!(
+        rpptx_render::layout_shape_text(divider, divider_text, &mut fonts, 1, &[], 1.0)
+            .unwrap()
+            .overflow,
+        "an empty paragraph taller than its box would be a phantom overflow"
+    );
+
+    let frames = presentation.text_layout_deterministic(1.0).unwrap();
+
+    assert_eq!(
+        frames
+            .iter()
+            .map(|frame| (frame.slide_index, frame.shape_id, frame.name.as_deref()))
+            .collect::<Vec<_>>(),
+        [
+            (0, Some(2), Some("Inset frame")),
+            (0, Some(3), Some("Two lines")),
+            (0, Some(4), Some("Three lines")),
+        ]
+    );
+    let inset = &frames[0];
+    assert_eq!(inset.autofit, rpptx::AutofitMode::None);
+    assert_eq!(
+        inset.layout.frame,
+        Rect {
+            x: 72.0,
+            y: 72.0,
+            width: 288.0,
+            height: 72.0,
+        }
+    );
+    assert_eq!(
+        inset.layout.usable,
+        Rect {
+            x: 82.0,
+            y: 77.0,
+            width: 258.0,
+            height: 52.0,
+        }
+    );
+    assert_eq!(inset.layout.font_scale, 1.0);
+    assert!(!inset.layout.overflow);
+    assert_eq!(inset.layout.lines.len(), 1);
+    let line = &inset.layout.lines[0];
+    assert_eq!(
+        (line.paragraph_index, line.text.as_str(), line.font_size),
+        (0, "Fits", 18.0)
+    );
+    assert_eq!((line.bounds.x, line.bounds.y), (82.0, 77.0));
+    assert!(line.baseline > line.bounds.y && line.baseline < line.bounds.y + line.bounds.height);
+    assert!((inset.layout.height - line.bounds.height).abs() < 1.0e-9);
+
+    let (fits, overflows) = (&frames[1].layout, &frames[2].layout);
+    assert_eq!(fits.usable.height, 45.0);
+    assert_eq!((fits.height, fits.overflow), (40.0, false));
+    assert_eq!(
+        fits.lines
+            .iter()
+            .map(|line| (line.paragraph_index, line.bounds.y, line.bounds.height))
+            .collect::<Vec<_>>(),
+        [(0, 180.0, 20.0), (1, 200.0, 20.0)]
+    );
+    assert_eq!(overflows.usable.height, 45.0);
+    assert_eq!((overflows.height, overflows.overflow), (60.0, true));
+    assert_eq!(
+        overflows
+            .lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>(),
+        ["first", "second", "third"]
+    );
+}
+
+#[test]
+fn text_layout_width_factor_flips_a_frame_that_only_fits_at_full_width() {
+    let deck = |width: i64| {
+        text_layout_deck(
+            &text_layout_shape(
+                2,
+                "Tight",
+                (914_400, 914_400, width, 317_500),
+                &format!(r#"<a:bodyPr wrap="square" {TEXT_LAYOUT_NO_INSETS}/>"#),
+                &text_layout_paragraphs(&["Fits only at full width"], TEXT_LAYOUT_EXACT_20PT),
+            ),
+            "",
+        )
+    };
+    let measured = deck(6_350_000).text_layout_deterministic(1.0).unwrap();
+    assert_eq!(measured[0].layout.lines.len(), 1);
+    let natural_width = measured[0].layout.lines[0].bounds.width;
+    let presentation = deck((natural_width / 0.975 * 12_700.0).ceil() as i64);
+
+    let full = presentation.text_layout_deterministic(1.0).unwrap();
+    let narrower = presentation.text_layout_deterministic(0.95).unwrap();
+
+    let (full, narrower) = (&full[0].layout, &narrower[0].layout);
+    assert_eq!(full.usable.height, 25.0);
+    assert_eq!((full.lines.len(), full.overflow), (1, false));
+    assert_eq!((narrower.lines.len(), narrower.overflow), (2, true));
+    assert_eq!(narrower.usable.x, full.usable.x);
+    assert_eq!(narrower.usable.width, full.usable.width * 0.95);
+    assert_eq!(narrower.frame, full.frame);
+    assert_eq!(
+        narrower
+            .lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<String>(),
+        "Fits only at full width"
+    );
+    for factor in [0.0, -0.95, f64::NAN, f64::INFINITY] {
+        assert!(presentation.text_layout_deterministic(factor).is_err());
+    }
+}
+
+#[test]
+fn text_layout_reports_the_scale_and_fit_each_autofit_mode_draws() {
+    let paragraphs = text_layout_paragraphs(&["one", "two", "three", "four"], "");
+    let shape = |id: u32, name: &str, height: i64, autofit: &str| {
+        text_layout_shape(
+            id,
+            name,
+            (
+                914_400,
+                914_400 + i64::from(id) * 914_400,
+                3_657_600,
+                height,
+            ),
+            &format!(r#"<a:bodyPr wrap="square" {TEXT_LAYOUT_NO_INSETS}>{autofit}</a:bodyPr>"#),
+            &paragraphs,
+        )
+    };
+    let presentation = text_layout_deck(
+        &[
+            shape(2, "No autofit", 762_000, "<a:noAutofit/>"),
+            shape(3, "Bare normal", 762_000, "<a:normAutofit/>"),
+            shape(
+                4,
+                "Stored normal",
+                762_000,
+                r#"<a:normAutofit fontScale="62500" lnSpcReduction="20000"/>"#,
+            ),
+            shape(5, "Shape autofit", 762_000, "<a:spAutoFit/>"),
+            shape(6, "Normal floor", 63_500, "<a:normAutofit/>"),
+        ]
+        .concat(),
+        "",
+    );
+
+    let frames = presentation.text_layout_deterministic(1.0).unwrap();
+
+    let by_name = |name: &str| {
+        frames
+            .iter()
+            .find(|frame| frame.name.as_deref() == Some(name))
+            .unwrap()
+    };
+    let none = by_name("No autofit");
+    assert_eq!(none.autofit, rpptx::AutofitMode::None);
+    assert_eq!((none.layout.font_scale, none.layout.overflow), (1.0, true));
+    assert!(none.layout.height > none.layout.usable.height);
+
+    let bare = by_name("Bare normal");
+    assert_eq!(bare.autofit, rpptx::AutofitMode::Normal);
+    let steps = (1.0 - bare.layout.font_scale) / 0.025;
+    assert!(
+        bare.layout.font_scale < 1.0 && bare.layout.font_scale > 0.25,
+        "the ladder must shrink this text without reaching its floor"
+    );
+    assert!((steps - steps.round()).abs() < 1.0e-9);
+    assert!(!bare.layout.overflow);
+    assert!(bare.layout.height <= bare.layout.usable.height + 0.01);
+    assert!(
+        bare.layout
+            .lines
+            .iter()
+            .all(|line| (line.font_size - 18.0 * bare.layout.font_scale).abs() < 1.0e-9)
+    );
+
+    let stored = by_name("Stored normal");
+    assert_eq!(stored.autofit, rpptx::AutofitMode::Normal);
+    assert_eq!(stored.layout.font_scale, 0.625);
+    assert!(
+        stored
+            .layout
+            .lines
+            .iter()
+            .all(|line| line.font_size == 11.25)
+    );
+
+    let shape_autofit = by_name("Shape autofit");
+    assert_eq!(shape_autofit.autofit, rpptx::AutofitMode::Shape);
+    assert_eq!(
+        (
+            shape_autofit.layout.font_scale,
+            shape_autofit.layout.overflow
+        ),
+        (1.0, true)
+    );
+    assert_eq!(shape_autofit.layout.frame.height, 60.0);
+
+    let floor = by_name("Normal floor");
+    assert!(floor.layout.overflow);
+    assert!((floor.layout.font_scale - 0.25).abs() < 1.0e-9);
+    assert!(
+        floor
+            .layout
+            .lines
+            .iter()
+            .all(|line| (line.font_size - 4.5).abs() < 1.0e-9)
+    );
+}
+
+#[test]
+fn text_layout_lines_match_the_glyph_runs_the_renderer_draws() {
+    let wrapped = "Every line the checker reports must be one the renderer draws, \
+                   at the same start and on the same baseline";
+    let slide_shapes = [
+        text_layout_shape(
+            2,
+            "Centred bottom",
+            (914_400, 914_400, 2_286_000, 2_286_000),
+            r#"<a:bodyPr wrap="square" anchor="b"/>"#,
+            &[
+                text_layout_paragraphs(&[wrapped], r#"<a:pPr algn="ctr"/>"#),
+                text_layout_paragraphs(
+                    &["Bulleted paragraph that wraps as well"],
+                    r#"<a:pPr marL="342900" indent="-342900"><a:buChar char="&#8226;"/></a:pPr>"#,
+                ),
+            ]
+            .concat(),
+        ),
+        format!(
+            r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="3" name="Group"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="4572000" y="914400"/><a:ext cx="2286000" cy="914400"/><a:chOff x="0" y="0"/><a:chExt cx="2286000" cy="914400"/></a:xfrm></p:grpSpPr>{}</p:grpSp>"#,
+            text_layout_shape(
+                4,
+                "Grouped",
+                (0, 0, 2_286_000, 914_400),
+                "<a:bodyPr/>",
+                &text_layout_paragraphs(&["Grouped text"], ""),
+            )
+        ),
+        text_layout_shape(
+            5,
+            "Rotated",
+            (914_400, 4_114_800, 2_286_000, 457_200),
+            "<a:bodyPr/>",
+            &text_layout_paragraphs(&["Rotated"], ""),
+        )
+        .replace("<a:xfrm>", r#"<a:xfrm rot="1800000">"#),
+    ]
+    .concat();
+    let presentation = text_layout_deck(&slide_shapes, "");
+    let (_, layout) = presentation.render_deterministic().unwrap();
+    let mut drawn = Vec::new();
+    walk(&layout.pages[0].elements, &mut |element, transform| {
+        let (origin, text) = match element {
+            PositionedElement::Text(run) => (run.origin, &run.text),
+            PositionedElement::MultilingualText(run) => (run.origin, &run.logical_text),
+            _ => return,
+        };
+        let origin = transform.apply(origin);
+        drawn.push((origin.x, origin.y, text.clone()));
+    });
+
+    let frames = presentation.text_layout_deterministic(1.0).unwrap();
+
+    assert_eq!(
+        frames
+            .iter()
+            .map(|frame| frame.name.as_deref())
+            .collect::<Vec<_>>(),
+        [Some("Centred bottom"), Some("Grouped"), Some("Rotated")]
+    );
+    let rotated = &frames[2].layout;
+    assert_eq!(
+        rotated.frame,
+        Rect {
+            x: 72.0,
+            y: 324.0,
+            width: 180.0,
+            height: 36.0,
+        }
+    );
+    assert_eq!(frames[1].layout.frame.x, 360.0);
+    let upright = &frames[..2];
+    assert!(frames[0].layout.lines.len() > 3);
+    assert!(
+        frames[0]
+            .layout
+            .lines
+            .iter()
+            .all(|line| line.bounds.x > 72.0)
+    );
+    let mut matched = 0;
+    for line in upright.iter().flat_map(|frame| &frame.layout.lines) {
+        let mut on_line = drawn
+            .iter()
+            .filter(|(x, y, _)| {
+                (y - line.baseline).abs() < 1.0e-9
+                    && *x >= line.bounds.x - 1.0e-9
+                    && *x < line.bounds.x + line.bounds.width
+            })
+            .collect::<Vec<_>>();
+        on_line.sort_by(|left, right| left.0.total_cmp(&right.0));
+        assert!(
+            (on_line[0].0 - line.bounds.x).abs() < 1.0e-9,
+            "line {:?} must start where its first run is drawn",
+            line.text
+        );
+        let text = on_line
+            .iter()
+            .map(|(_, _, text)| text.as_str())
+            .collect::<String>();
+        assert!(
+            text == line.text || text == format!("\u{2022}{}", line.text),
+            "drawn {text:?} for reported {:?}",
+            line.text
+        );
+        matched += on_line.len();
+    }
+    let rotated_runs = drawn
+        .iter()
+        .filter(|(_, _, text)| text == "Rotated")
+        .count();
+    assert_eq!(matched + rotated_runs, drawn.len());
+}
+
+#[test]
+fn text_layout_places_a_text_box_in_a_scaled_group_where_its_runs_are_drawn() {
+    // The group doubles its child extent. A transparent text box keeps its
+    // child bounds and is drawn through the group scale, so the reported
+    // frame, lines and sizes must scale with it.
+    let presentation = text_layout_deck(
+        &format!(
+            r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="3" name="Scaled group"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="4572000" y="914400"/><a:ext cx="4572000" cy="1828800"/><a:chOff x="0" y="0"/><a:chExt cx="2286000" cy="914400"/></a:xfrm></p:grpSpPr>{}</p:grpSp>"#,
+            text_layout_shape(
+                4,
+                "Scaled",
+                (0, 0, 2_286_000, 914_400),
+                "<a:bodyPr/>",
+                &text_layout_paragraphs(&["Scaled"], ""),
+            )
+        ),
+        "",
+    );
+    let (_, rendered) = presentation.render_deterministic().unwrap();
+    let mut drawn = Vec::new();
+    walk(&rendered.pages[0].elements, &mut |element, transform| {
+        let origin = match element {
+            PositionedElement::Text(run) => run.origin,
+            PositionedElement::MultilingualText(run) => run.origin,
+            _ => return,
+        };
+        drawn.push(transform.apply(origin));
+    });
+
+    let frames = presentation.text_layout_deterministic(1.0).unwrap();
+
+    let layout = &frames[0].layout;
+    assert_eq!(drawn.len(), 1);
+    assert_eq!(
+        layout.frame,
+        Rect {
+            x: 360.0,
+            y: 72.0,
+            width: 360.0,
+            height: 144.0,
+        }
+    );
+    assert!((drawn[0].x - layout.lines[0].bounds.x).abs() < 1.0e-9);
+    assert!((drawn[0].y - layout.lines[0].baseline).abs() < 1.0e-9);
+    assert_eq!(layout.lines[0].font_size, 36.0);
+    assert!(!layout.overflow && layout.height <= layout.usable.height);
+}
+
+#[test]
+fn text_layout_reports_vertical_text_in_its_reading_frame() {
+    // The group doubles only the width of its child, so the reading frame of
+    // the grouped vertical text must scale its height, the physical width.
+    let vertical = |id, name, frame| {
+        text_layout_shape(
+            id,
+            name,
+            frame,
+            &format!(r#"<a:bodyPr vert="vert" wrap="square" {TEXT_LAYOUT_NO_INSETS}/>"#),
+            &text_layout_paragraphs(&["Vertical"], ""),
+        )
+    };
+    let slide_shapes = [
+        vertical(2, "Vertical", (914_400, 914_400, 914_400, 3_657_600)),
+        format!(
+            r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="3" name="Widened group"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="4572000" y="914400"/><a:ext cx="1828800" cy="3657600"/><a:chOff x="0" y="0"/><a:chExt cx="914400" cy="3657600"/></a:xfrm></p:grpSpPr>{}</p:grpSp>"#,
+            vertical(4, "Widened", (0, 0, 914_400, 3_657_600))
+        ),
+    ]
+    .concat();
+    let presentation = text_layout_deck(&slide_shapes, "");
+
+    let frames = presentation.text_layout_deterministic(1.0).unwrap();
+
+    let upright = &frames[0].layout;
+    assert_eq!((upright.frame.width, upright.frame.height), (72.0, 288.0));
+    assert_eq!((upright.usable.width, upright.usable.height), (288.0, 72.0));
+    assert!(!upright.overflow && upright.height <= upright.usable.height);
+    let widened = &frames[1].layout;
+    assert_eq!(
+        widened.frame,
+        Rect {
+            x: 360.0,
+            y: 72.0,
+            width: 144.0,
+            height: 288.0,
+        }
+    );
+    assert_eq!(
+        (widened.usable.width, widened.usable.height),
+        (288.0, 144.0)
+    );
+    assert!(!widened.overflow && widened.height <= widened.usable.height);
+}
+
 #[test]
 fn notes_and_handout_export_resolve_noncanonical_master_theme_and_media_targets() {
     let presentation = Presentation::from_bytes(&f226_fixture_bytes()).unwrap();

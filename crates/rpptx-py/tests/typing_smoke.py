@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from rpptx import (
+    BoundingBox,
     Comment,
     CommentAuthor,
     CommentReply,
@@ -10,6 +11,8 @@ from rpptx import (
     MSO_SHAPE,
     Presentation,
     Pt,
+    TextFrameLayout,
+    TextLineLayout,
 )
 from rpptx._rpptx import (
     Cell,
@@ -134,7 +137,48 @@ def exercise_rpptx_types(path: Path) -> None:
     )
 
 
+def exercise_rpptx_text_layout_types(presentation: Presentation) -> None:
+    frames: tuple[TextFrameLayout, ...] = presentation.text_layout()
+    narrower: tuple[TextFrameLayout, ...] = presentation.text_layout(width_factor=0.95)
+    for frame in frames + narrower:
+        slide_index: int = frame.slide_index
+        shape_id: int | None = frame.shape_id
+        name: str | None = frame.name
+        autofit: str = frame.autofit
+        box: BoundingBox = frame.frame
+        usable: BoundingBox = frame.usable
+        box_edges: tuple[float, float, float, float] = (
+            usable.x,
+            usable.y,
+            usable.width,
+            usable.height,
+        )
+        font_scale: float = frame.font_scale
+        height: float = frame.height
+        overflow: bool = frame.overflow
+        lines: tuple[TextLineLayout, ...] = frame.lines
+        for line in lines:
+            paragraph_index: int = line.paragraph_index
+            text: str = line.text
+            bounds: BoundingBox = line.bounds
+            baseline: float = line.baseline
+            font_size: float = line.font_size
+            (paragraph_index, text, bounds, baseline, font_size)
+        (
+            slide_index,
+            shape_id,
+            name,
+            autofit,
+            box,
+            box_edges,
+            font_scale,
+            height,
+            overflow,
+        )
+
+
 if TYPE_CHECKING:
+    BoundingBox()  # type: ignore[call-arg]
     Cell()  # type: ignore[call-arg]
     Comment()  # type: ignore[call-arg]
     CommentAuthor()  # type: ignore[call-arg]
@@ -155,3 +199,5 @@ if TYPE_CHECKING:
     SlideLayoutCollection()  # type: ignore[call-arg]
     Table()  # type: ignore[call-arg]
     TextFrame()  # type: ignore[call-arg]
+    TextFrameLayout()  # type: ignore[call-arg]
+    TextLineLayout()  # type: ignore[call-arg]

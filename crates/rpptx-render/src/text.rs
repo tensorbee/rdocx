@@ -9,6 +9,8 @@ use rpptx_layout::{
     TextAnchor, TextDirection,
 };
 
+use crate::TextLineLayout;
+
 const DEFAULT_FONT_SIZE: f64 = 18.0;
 
 struct AutoNumberSequence {
@@ -387,9 +389,19 @@ fn text_color(fill: Option<&Paint>) -> Color {
 
 pub(super) struct StackedText {
     pub(super) elements: Vec<PositionedElement>,
+    /// One entry per laid-out line, anchored like `elements`.
+    pub(super) lines: Vec<TextLineLayout>,
     pub(super) width: f64,
     pub(super) height: f64,
+    pub(super) font_scale: f64,
     width_fits: bool,
+}
+
+impl StackedText {
+    /// Applies the fit test that normal autofit uses to accept a candidate.
+    pub(super) fn fits(&self, content: Rect) -> bool {
+        self.width_fits && self.height <= content.height + 0.01
+    }
 }
 
 #[cfg(test)]
@@ -430,7 +442,7 @@ pub(super) fn stack_text_for_page_with_directions(
         } => {
             let mut floor =
                 stack_shaped_text(font_manager, content, text, &shaped_paragraphs, 1.0, None)?;
-            if floor.width_fits && floor.height <= content.height + 0.01 {
+            if floor.fits(content) {
                 return Ok(floor);
             }
             for step in 1..=30 {
@@ -443,7 +455,7 @@ pub(super) fn stack_text_for_page_with_directions(
                     scale,
                     None,
                 )?;
-                if candidate.width_fits && candidate.height <= content.height + 0.01 {
+                if candidate.fits(content) {
                     return Ok(candidate);
                 }
                 floor = candidate;
@@ -590,6 +602,7 @@ fn stack_shaped_text(
 ) -> Result<StackedText, LayoutError> {
     let mut elements = Vec::new();
     let mut line_ranges = Vec::new();
+    let mut laid_out_lines = Vec::new();
     let mut y = content.y;
     let mut width = 0.0_f64;
     let mut width_fits = true;
@@ -614,7 +627,7 @@ fn stack_shaped_text(
             width_fits &= line.width <= line.available_width + 0.01;
             let baseline = y + line.baseline_offset();
             let element_start = elements.len();
-            let occupied_width = emit_line_items(
+            let (start_x, occupied_width) = emit_line_items(
                 line,
                 paragraph.alignment,
                 content.x,
@@ -622,6 +635,18 @@ fn stack_shaped_text(
                 &mut elements,
             );
             line_ranges.push((element_start, elements.len()));
+            laid_out_lines.push(TextLineLayout {
+                paragraph_index: index,
+                text: line_text(line),
+                bounds: Rect {
+                    x: start_x,
+                    y,
+                    width: occupied_width,
+                    height: line.height,
+                },
+                baseline,
+                font_size: line_font_size(line).unwrap_or(font_size),
+            });
             width = width.max(occupied_width);
             y += line.height;
         }
@@ -634,6 +659,7 @@ fn stack_shaped_text(
     let height = y - content.y;
     anchor_lines(
         &mut elements,
+        &mut laid_out_lines,
         &line_ranges,
         text.anchor,
         content.height - height,
@@ -641,10 +667,44 @@ fn stack_shaped_text(
 
     Ok(StackedText {
         elements,
+        lines: laid_out_lines,
         width,
         height,
+        font_scale,
         width_fits,
     })
+}
+
+/// Returns a line's run and field text without its marker.
+///
+/// Rich spans are ordered by their logical index, as `emit_line_items` orders
+/// them for extraction. A paragraph shapes either every run on the rich path or
+/// none, so legacy runs never share a line with rich spans and keep line order.
+fn line_text(line: &LayoutLine) -> String {
+    let mut spans = line
+        .items
+        .iter()
+        .enumerate()
+        .filter_map(|(position, item)| match item {
+            LineItem::Text(segment) => Some((position, segment.text.as_str())),
+            LineItem::MultilingualText(segment) => Some((segment.logical_index(), segment.text())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    spans.sort_by_key(|(order, _)| *order);
+    spans.into_iter().map(|(_, text)| text).collect()
+}
+
+/// Returns the largest scaled run size on a line, ignoring its marker.
+fn line_font_size(line: &LayoutLine) -> Option<f64> {
+    line.items
+        .iter()
+        .filter_map(|item| match item {
+            LineItem::Text(segment) => Some(segment.font_size),
+            LineItem::MultilingualText(segment) => Some(segment.base().font_size),
+            _ => None,
+        })
+        .reduce(f64::max)
 }
 
 fn scaled_inline_items(items: &[InlineItem], scale: f64, indent: f64) -> Vec<InlineItem> {
@@ -733,12 +793,13 @@ fn reduce_line_spacing(
 
 fn anchor_lines(
     elements: &mut [PositionedElement],
+    lines: &mut [TextLineLayout],
     line_ranges: &[(usize, usize)],
     anchor: TextAnchor,
     spare_height: f64,
 ) {
     let line_count = line_ranges.len();
-    for (line_index, &(start, end)) in line_ranges.iter().enumerate() {
+    for (line_index, (&(start, end), line)) in line_ranges.iter().zip(lines).enumerate() {
         let offset = match anchor {
             TextAnchor::Top => 0.0,
             TextAnchor::Center => spare_height / 2.0,
@@ -759,6 +820,8 @@ fn anchor_lines(
         for element in &mut elements[start..end] {
             translate_element_y(element, offset);
         }
+        line.bounds.y += offset;
+        line.baseline += offset;
     }
 }
 
@@ -843,13 +906,14 @@ fn paragraph_spacing(spacing: Option<&ResolvedTextSpacing>, font_size: f64) -> f
     }
 }
 
+/// Emits one line and returns its start x and the width its items occupy.
 fn emit_line_items(
     line: &LayoutLine,
     alignment: ParagraphAlignment,
     content_x: f64,
     baseline: f64,
     elements: &mut Vec<PositionedElement>,
-) -> f64 {
+) -> (f64, f64) {
     let element_start = elements.len();
     let remaining = line.available_width - line.width;
     let distribute = match alignment {
@@ -939,7 +1003,7 @@ fn emit_line_items(
     for (position, run) in rich_positions.into_iter().zip(logical_runs) {
         elements[position] = PositionedElement::MultilingualText(run);
     }
-    x - start_x
+    (start_x, x - start_x)
 }
 
 fn emit_segment(
@@ -2147,14 +2211,15 @@ mod tests {
             (ParagraphAlignment::Right, 74.0),
         ] {
             let mut elements = Vec::new();
-            let width = emit_line_items(&line, alignment, 4.0, 20.0, &mut elements);
+            let (start_x, width) = emit_line_items(&line, alignment, 4.0, 20.0, &mut elements);
             let runs = glyph_runs(&elements);
             assert_close(runs[0].origin.x, expected_x);
+            assert_close(start_x, expected_x);
             assert_close(width, 20.0);
         }
 
         let mut elements = Vec::new();
-        let width = emit_line_items(
+        let (_, width) = emit_line_items(
             &line,
             ParagraphAlignment::Distributed,
             4.0,
@@ -2187,7 +2252,7 @@ mod tests {
             forced_break_after: None,
         };
         let mut elements = Vec::new();
-        let width = emit_line_items(
+        let (_, width) = emit_line_items(
             &justified_line,
             ParagraphAlignment::Justified,
             0.0,
@@ -2199,7 +2264,7 @@ mod tests {
 
         justified_line.is_last = true;
         elements.clear();
-        let width = emit_line_items(
+        let (_, width) = emit_line_items(
             &justified_line,
             ParagraphAlignment::Justified,
             0.0,
@@ -2243,7 +2308,7 @@ mod tests {
         };
         let mut elements = Vec::new();
 
-        let width = emit_line_items(
+        let (_, width) = emit_line_items(
             &line,
             ParagraphAlignment::Justified,
             0.0,
@@ -3245,6 +3310,83 @@ mod tests {
         assert!(runs[0].origin.x > runs[1].origin.x);
         assert!(runs[2].origin.x > runs[3].origin.x);
         assert!(runs[0].origin.y < runs[2].origin.y);
+    }
+
+    #[test]
+    fn stacked_lines_move_with_their_anchored_runs_and_leave_the_marker_out_of_their_text() {
+        let rtl_run = |text: &str| ResolvedTextRun::Text {
+            text: text.to_owned(),
+            style: ResolvedRunStyle {
+                font_size: Some(18.0),
+                ..ResolvedRunStyle::default()
+            },
+        };
+        let body = ResolvedTextBody {
+            anchor: TextAnchor::Bottom,
+            paragraphs: vec![
+                bullet_paragraph(
+                    0,
+                    Some(ResolvedBullet::Character {
+                        character: "*".to_owned(),
+                        font: None,
+                        color: None,
+                        size: None,
+                    }),
+                    "first",
+                ),
+                ResolvedParagraph {
+                    runs: vec![rtl_run("אב"), rtl_run("גד")],
+                    ..ResolvedParagraph::default()
+                },
+            ],
+            ..text_body(TextInsets::default())
+        };
+        let content = test_content_box(2_000.0);
+        let mut fonts = FontManager::new_deterministic().expect("deterministic fonts");
+
+        let stacked = stack_text_for_page_with_directions(
+            &mut fonts,
+            content,
+            &body,
+            1,
+            &[
+                oxml_layout::TextDirection::Auto,
+                oxml_layout::TextDirection::RightToLeft,
+            ],
+        )
+        .expect("stack bullet and right-to-left paragraphs");
+
+        assert_eq!(
+            stacked
+                .lines
+                .iter()
+                .map(|line| (line.paragraph_index, line.text.as_str()))
+                .collect::<Vec<_>>(),
+            [(0, "first"), (1, "אבגד")]
+        );
+        let marker = glyph_runs(&stacked.elements)[0];
+        assert_eq!(marker.text, "*");
+        assert_close(stacked.lines[0].bounds.x, marker.origin.x);
+        assert_close(stacked.lines[0].baseline, marker.origin.y);
+        assert_close(stacked.lines[0].font_size, 12.0);
+        let last = &stacked.lines[1];
+        assert_close(last.font_size, 18.0);
+        assert_close(
+            last.bounds.y + last.bounds.height,
+            content.y + content.height,
+        );
+        let rich_baselines = stacked
+            .elements
+            .iter()
+            .filter_map(|element| match element {
+                PositionedElement::MultilingualText(run) => Some(run.origin.y),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rich_baselines.len(), 2);
+        for baseline in rich_baselines {
+            assert_close(baseline, last.baseline);
+        }
     }
 
     fn bullet_paragraph(

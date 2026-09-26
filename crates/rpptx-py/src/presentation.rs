@@ -5,6 +5,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList, PyTuple};
 use smallvec::smallvec;
 
+use crate::layout::PyTextFrameLayout;
 use crate::slide::{PySlideCollection, PySlideLayoutCollection};
 use crate::{rpptx_to_pyerr, rpptx_value_to_pyerr};
 
@@ -177,6 +178,18 @@ impl PyPresentation {
             .detach(|| self.inner.slide_pngs_deterministic(dpi))
             .map_err(|error| rpptx_to_pyerr(py, error))?;
         PyList::new(py, slides.iter().map(|slide| PyBytes::new(py, slide)))
+    }
+
+    #[pyo3(signature = (*, width_factor = 1.0))]
+    fn text_layout<'py>(
+        &self,
+        py: Python<'py>,
+        width_factor: f64,
+    ) -> PyResult<Bound<'py, PyTuple>> {
+        let frames = py
+            .detach(|| self.inner.text_layout_deterministic(width_factor))
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        PyTuple::new(py, frames.iter().map(PyTextFrameLayout::from))
     }
 
     fn to_notes_pdf<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {

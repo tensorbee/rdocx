@@ -985,6 +985,60 @@ with nothing measurable keeps its declared grid.
   free. If the 25 percent candidate still does not fit, draw it visibly without
   clipping.
 
+### Slide text layout as data
+
+The lines a slide draws are also available as data, so a caller can check a
+deck for overflowing text without rasterising it. `rpptx_render::layout_shape_text`
+takes the path shape lowering takes, the content box, its quarter turn for
+vertical text, paragraph stacking, autofit and anchoring, and returns a
+`ShapeTextLayout` instead of positioned elements. Lowering calls the same
+helper with a width factor of one, so the reported lines cannot drift from the
+PNG and PDF output.
+
+Values are points. Rectangles use slide coordinates for the shape's unrotated
+frame, the box `a:xfrm` describes before rotation and flips, moved with the
+shape's centre through its parent groups. A transparent text box inside a
+scaled group is laid out in child units and drawn through the group scale, so
+its rectangles, heights, baselines and sizes are reported scaled the same way.
+`frame` is that box and `usable` is its text rectangle minus insets, where
+lines wrap. Vertical text is reported in its reading frame, the usable box
+turned a quarter turn about its centre, so its `height` compares with
+`usable.height` exactly as horizontal text does.
+
+Each `TextLineLayout` gives its zero-based paragraph, its run and field text as
+drawn without the bullet marker, its bounds, its baseline, and the largest run
+point size on the line as drawn, after autofit and group scaling. The bounds
+span every drawn item, bullet included, and the full line height. Rich spans
+appear in logical order, as extraction reads them. Line text keeps the spaces
+the renderer draws, so a line can begin or end with one.
+
+`overflow` applies the test the bare normal-autofit ladder uses to accept a
+candidate. Every line must fit its available width and the whole stack,
+paragraph spacing included, must fit the usable height, each within 0.01 point.
+What that means follows from what each mode draws.
+
+- `a:noAutofit`: the text at its own size. A frame one line too long
+  overflows.
+- `a:normAutofit` with stored values: the text at the stored scale, which
+  `font_scale` reports. Overflow means the stored scale no longer fits, for
+  example after an edit.
+- A bare `a:normAutofit`: the first ladder candidate that fits, reported in
+  `font_scale`. It overflows only when the 25 percent floor still does not fit.
+- `a:spAutoFit`: the stored extent, which the renderer does not grow. Overflow
+  means the stored extent is smaller than the text under the bundled fonts, so
+  a renderer that does not resize would spill it.
+
+A width factor multiplies the usable width before line breaking and keeps its
+left edge. Autofit runs against the narrower box, so `0.95` answers whether the
+frame still fits when another renderer takes five percent of its width.
+
+`Presentation::text_layout_deterministic` resolves the same staged package and
+deterministic fonts as `to_pdf_deterministic`. It reports each text-bearing
+shape of each slide's own shape tree with its slide index, shape id, name, and
+effective autofit mode. Layout and master shapes, SmartArt, table cells, and
+text bodies that draw no visible character are left out, since an empty
+paragraph taller than a thin divider would otherwise read as overflow.
+
 ## Performance
 
 `Document` keeps normal-font and deterministic `WordLayoutResult` values in

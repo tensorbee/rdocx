@@ -290,14 +290,26 @@ unmodelled properties.
 
 The presentation binding exposes `to_pdf`, `render_slide_to_png`,
 `render_all_slides`, `to_notes_pdf`, and `render_all_notes` through the native
-deterministic facade. Every render call releases the GIL. A `Slide` exposes
-optional speaker-note text as a readable and writable property. A successful
-notes assignment publishes the native staged mutation, advances the global
-revision once, and makes pre-write handles stale. A rejected assignment leaves
-package bytes and revisions unchanged. A `Slide` also exposes an ordered tuple
-of frozen `Comment` snapshots. Each comment contains an ordered tuple of frozen
-`CommentReply` snapshots, and the presentation exposes an ordered tuple of
-frozen `CommentAuthor` snapshots.
+deterministic facade. Every render call releases the GIL.
+`Presentation.text_layout(*, width_factor=1.0)` returns the native
+deterministic text layout as a tuple of frozen `TextFrameLayout` snapshots in
+slide and draw order. Each carries its zero-based slide index, optional shape
+id and name, the effective autofit mode as `none`, `normal`, or `shape`,
+`frame` and `usable` `BoundingBox` values, `font_scale`, `height`, `overflow`,
+and a tuple of frozen `TextLineLayout` snapshots with paragraph index, text,
+bounds, baseline, and font size. Every coordinate and size is a float in
+points, as in the rdocx `BoundingBox` and `LayoutFragment`, unlike the EMU
+`Length` values of `Shape` and `Font`. The call releases the GIL, and a width
+factor that is not finite and positive raises `RpptxError`, as an invalid
+raster DPI does.
+
+A `Slide` exposes optional speaker-note text as a readable and writable
+property. A successful notes assignment publishes the native staged mutation,
+advances the global revision once, and makes pre-write handles stale. A
+rejected assignment leaves package bytes and revisions unchanged. A `Slide`
+also exposes an ordered tuple of frozen `Comment` snapshots. Each comment
+contains an ordered tuple of frozen `CommentReply` snapshots, and the
+presentation exposes an ordered tuple of frozen `CommentAuthor` snapshots.
 Author, comment, and reply additions accept native GUID and RFC 3339 strings.
 Comment and reply moves retain native final-position semantics. A successful
 collaboration operation advances the global revision once. Constructor or
@@ -1419,6 +1431,30 @@ These additions are native Rust APIs only. Python, WASM, and CLI surfaces add
 no notes or handout methods and continue to preserve the underlying parts. No
 new public surface is added to `rpptx-layout`, `rpptx-render`, or the OXML
 crates. The additive facade API is reviewed through the pre-1.0 release gate.
+
+## Native PowerPoint text layout
+
+The published pre-1.0 `rpptx` facade exposes the concrete `TextFrameLayout`
+value and one render-feature method:
+
+```rust
+Presentation::text_layout_deterministic(&self, width_factor: f64)
+    -> Result<Vec<TextFrameLayout>>;
+```
+
+`TextFrameLayout` carries the zero-based slide index, the optional shape id and
+name, the effective `AutofitMode`, and an `rpptx_render::ShapeTextLayout`. The
+published pre-1.0 `rpptx-render` crate adds the concrete `ShapeTextLayout` and
+`TextLineLayout` values and `layout_shape_text`, which shares its stacking path
+with slide lowering. `08-rendering-spec.md` owns the coordinate, overflow, and
+width factor semantics.
+
+Python gains `Presentation.text_layout` with frozen `BoundingBox`,
+`TextFrameLayout`, and `TextLineLayout` snapshots, described under the Python
+API shape above. WASM and CLI consumers gain no text layout method. This is an
+additive semver change for `rpptx` and `rpptx-render`. It adds no production
+dependency, feature flag, trait, dynamic dispatch, generic parameter, or
+builder.
 
 ## Native PowerPoint executable-content inventory
 
