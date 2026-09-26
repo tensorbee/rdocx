@@ -118,8 +118,10 @@ reader methods.
 
 At the public low-level Rust boundary, `CT_RPr` includes the complete language
 attribute set and its retained foreign attributes, while `LayoutInput` includes
-the document automatic-hyphenation boolean. Full struct literals must provide
-these fields. These are intentional pre-1.0 source breaks for the next stable
+the document automatic-hyphenation boolean and the
+`w:doNotUseHTMLParagraphAutoSpacing` compatibility boolean, and the laid-out
+`TableCell` includes the horizontal border bands above and below its content.
+Full struct literals must provide these fields. These are intentional pre-1.0 source breaks for the next stable
 family. Established `TextSegment` construction and layout entrypoints retain
 their existing shapes.
 

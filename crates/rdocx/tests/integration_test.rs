@@ -8546,8 +8546,11 @@ fn independent_nested_tables_measure_to_one_final_height() {
     assert_eq!(first.len(), 1);
     assert_eq!(second.len(), 1);
     assert!((first[0].height - second[0].height).abs() < 0.001);
+    // A minimum row height excludes the horizontal border bands and the cell's
+    // top and bottom margins, as in Word, so each table keeps its 6 point
+    // margins and its 1 point bottom border outside that minimum.
     assert!(
-        (first[0].height - f64::from(final_height_twips) / 20.0).abs() < 0.001,
+        (first[0].height - (f64::from(final_height_twips) / 20.0 + 12.0 + 1.0)).abs() < 0.001,
         "measured {final_height}, rounded to {final_height_twips} twips, laid out {}",
         first[0].height
     );
@@ -18750,6 +18753,7 @@ mod advanced_table_authoring_and_geometry {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             math_properties: None,
             document,

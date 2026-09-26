@@ -918,6 +918,7 @@ struct ReusableEngineContext {
     automatic_hyphenation: bool,
     mirror_margins: bool,
     gutter_at_top: bool,
+    do_not_use_html_paragraph_auto_spacing: bool,
     default_tab_stop: Option<rdocx_oxml::units::Twips>,
     math_properties: Option<rdocx_oxml::math::MathProperties>,
     has_wrapping_drawing: bool,
@@ -1013,6 +1014,7 @@ impl ReusableEngineContext {
             automatic_hyphenation: input.automatic_hyphenation,
             mirror_margins: input.mirror_margins,
             gutter_at_top: input.gutter_at_top,
+            do_not_use_html_paragraph_auto_spacing: input.do_not_use_html_paragraph_auto_spacing,
             default_tab_stop: input.default_tab_stop,
             math_properties: input.math_properties.clone(),
             has_wrapping_drawing,
@@ -1088,6 +1090,8 @@ impl ReusableEngineContext {
             && self.automatic_hyphenation == input.automatic_hyphenation
             && self.mirror_margins == input.mirror_margins
             && self.gutter_at_top == input.gutter_at_top
+            && self.do_not_use_html_paragraph_auto_spacing
+                == input.do_not_use_html_paragraph_auto_spacing
             && self.default_tab_stop == input.default_tab_stop
             && self.math_properties == input.math_properties
             && self.has_wrapping_drawing == has_wrapping_drawing
@@ -7718,6 +7722,7 @@ fn sect_pr_to_geometry(sect_pr: &CT_SectPr) -> PageGeometry {
         line_numbers: sect_pr_line_numbers(sect_pr),
         vertical_alignment: sect_pr.vertical_alignment,
         mirror_margins: false,
+        do_not_use_html_paragraph_auto_spacing: false,
         // F-269 authors and preserves `w:sectPr/w:textDirection`. This is the
         // render projection over it, and it writes nothing back.
         body_rotation: sect_pr
@@ -7868,6 +7873,7 @@ fn section_page_geometry(
         geometry.column_separator = false;
         geometry = resolve_column_tracks(sect_pr, geometry);
     }
+    geometry.do_not_use_html_paragraph_auto_spacing = input.do_not_use_html_paragraph_auto_spacing;
     if let Some(line_numbers) = geometry.line_numbers.as_mut() {
         line_numbers.font_id = font_manager.resolve_font(Some("serif"), false, false).ok();
     }
@@ -10791,6 +10797,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             math_properties: None,
             document: doc,
@@ -17078,6 +17085,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             math_properties: None,
             document: doc,
@@ -17181,6 +17189,8 @@ mod tests {
             margin_right: 0.0,
             margin_top: 0.0,
             margin_bottom: 0.0,
+            border_band_top: 0.0,
+            border_band_bottom: 0.0,
             is_first_row,
             is_last_row: !is_first_row,
             v_align: None,
@@ -17600,6 +17610,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             math_properties: None,
             document: doc,
@@ -17666,6 +17677,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             math_properties: None,
             document: doc,
@@ -17750,6 +17762,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             math_properties: None,
             document: doc,
@@ -17930,6 +17943,7 @@ mod tests {
                 automatic_hyphenation: false,
                 mirror_margins: false,
                 gutter_at_top: false,
+                do_not_use_html_paragraph_auto_spacing: false,
                 default_tab_stop: None,
                 math_properties: None,
                 document: doc,
@@ -18062,6 +18076,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             math_properties: None,
             document: doc,
@@ -18358,6 +18373,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             math_properties: None,
             document: doc,
@@ -18505,6 +18521,7 @@ mod tests {
                 automatic_hyphenation: false,
                 mirror_margins: false,
                 gutter_at_top: false,
+                do_not_use_html_paragraph_auto_spacing: false,
                 default_tab_stop: None,
                 math_properties: None,
                 document: doc,
@@ -18636,6 +18653,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             math_properties: None,
             document: doc,
@@ -18969,6 +18987,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             math_properties: None,
             document: doc,
@@ -19056,6 +19075,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             math_properties: None,
             document: doc,
@@ -19163,6 +19183,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             math_properties: None,
             document: doc,
@@ -19362,6 +19383,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             math_properties: None,
             document: doc,

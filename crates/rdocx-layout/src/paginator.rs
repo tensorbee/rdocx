@@ -133,6 +133,13 @@ pub struct PageGeometry {
     /// The gutter is already folded into the inside margin when this is set,
     /// so the swap alone puts it on the binding edge of either page.
     pub mirror_margins: bool,
+    /// Whether two consecutive paragraphs are separated by the sum of the
+    /// first one's space after and the second one's space before, rather than
+    /// by the larger of the two.
+    ///
+    /// A document setting, carried with the geometry like `mirror_margins`
+    /// because every pagination pass reads the geometry.
+    pub do_not_use_html_paragraph_auto_spacing: bool,
     /// Degrees the section's body band rotates for `w:sectPr/w:textDirection`.
     ///
     /// `None` is the horizontal section, which keeps the band and the
@@ -203,6 +210,7 @@ impl Default for PageGeometry {
             line_numbers: None,
             vertical_alignment: None,
             mirror_margins: false,
+            do_not_use_html_paragraph_auto_spacing: false,
             body_rotation: None,
         }
     }
@@ -792,6 +800,18 @@ fn paginate_pass_from<B: LayoutBlockLike>(
                 continue;
             }
 
+            // Word closes the table on every page it breaks across with the
+            // table's bottom border below the last row there, so a row other
+            // than the table's last must leave room for that band. The last
+            // row's height already carries the table's bottom band.
+            let last_row = table.rows.len().saturating_sub(1);
+            let closing_band = |row_idx: usize| {
+                if row_idx == last_row {
+                    0.0
+                } else {
+                    crate::table::page_break_band(&table.rows[row_idx], tbl_borders, false)
+                }
+            };
             for (row_idx, row) in table.rows.iter().enumerate() {
                 // Read per row, because finishing a page may have moved the
                 // body into the next column track.
@@ -799,7 +819,9 @@ fn paginate_pass_from<B: LayoutBlockLike>(
                 let row_semantics = table
                     .semantics
                     .and_then(|semantics| semantics.rows.get(row_idx));
-                if pager.cursor_y + row.height > pager.available_height() && pager.has_content() {
+                if pager.cursor_y + row.height + closing_band(row_idx) > pager.available_height()
+                    && pager.has_content()
+                {
                     pager.finish_page();
 
                     // Repeat header rows
@@ -837,6 +859,28 @@ fn paginate_pass_from<B: LayoutBlockLike>(
                     }
                 }
 
+                // A row the break carries to the top of a page takes the
+                // table's top border there, unless repeated headers came
+                // first. The row the next one cannot follow ends its page
+                // with the table's bottom border.
+                let opened;
+                let row = if row_idx > 0 && pager.cursor_y == 0.0 {
+                    opened = crate::table::row_opening_page(row, tbl_borders);
+                    &opened
+                } else {
+                    row
+                };
+                let closed;
+                let row = if table.rows.get(row_idx + 1).is_some_and(|next| {
+                    pager.cursor_y + row.height + next.height + closing_band(row_idx + 1)
+                        > pager.available_height()
+                }) {
+                    closed = crate::table::row_closing_page(row, tbl_borders);
+                    &closed
+                } else {
+                    row
+                };
+
                 if let Some(body_index) = body_index {
                     pager.record_body_fragment(
                         body_index,
@@ -861,6 +905,7 @@ fn paginate_pass_from<B: LayoutBlockLike>(
                     pager.media,
                 );
                 pager.cursor_y += row.height;
+                pager.previous_space_after = 0.0;
                 pager.mark_content();
             }
         }
@@ -968,6 +1013,10 @@ struct Pager<'a> {
     /// would let it eat into the height that was reserved, which is enough to
     /// push a note off the page its own reference sits on.
     ink_bottom: f64,
+    /// Space after of the paragraph that ends the flow above the cursor, which
+    /// `cursor_y` already includes. Zero after a table row, because Word
+    /// collapses spacing only between two paragraphs of the same flow.
+    previous_space_after: f64,
     /// Where the previous pass placed each paragraph-relative wrapping drawing.
     /// Empty on the first pass, which is what makes that pass identical to a
     /// single-pass run.
@@ -1031,6 +1080,7 @@ impl<'a> Pager<'a> {
             page_wraps: Vec::new(),
             page_floats: Vec::new(),
             ink_bottom: 0.0,
+            previous_space_after: 0.0,
             resolved_in,
             resolved_out: ResolvedWraps::new(),
             body_fragments: Vec::new(),
@@ -1142,6 +1192,22 @@ impl<'a> Pager<'a> {
 
     fn has_content(&self) -> bool {
         self.has_content_flag
+    }
+
+    /// The space a paragraph adds above itself at the cursor.
+    ///
+    /// Nothing at the top of a page. Word otherwise keeps the larger of the
+    /// previous paragraph's space after and this space before, so only the
+    /// part of `before` that exceeds the space after already below the cursor
+    /// is added, unless the document asks for the two to be summed.
+    fn space_before(&self, before: f64) -> f64 {
+        if self.cursor_y == 0.0 {
+            0.0
+        } else if self.geometry.do_not_use_html_paragraph_auto_spacing {
+            before
+        } else {
+            (before - self.previous_space_after).max(0.0)
+        }
     }
 
     fn consume_trailing_run_page_break_before(&mut self, block_index: usize) -> bool {
@@ -2899,11 +2965,7 @@ fn paginate_paragraph<B: LayoutBlockLike>(
     blocks: &[B],
     pager: &mut Pager,
 ) {
-    let space_before = if pager.cursor_y == 0.0 {
-        0.0
-    } else {
-        para.space_before
-    };
+    let space_before = pager.space_before(para.space_before);
 
     // Flow the paragraph around anything floating in its band of the page,
     // before anything is measured. A reflow changes the paragraph's height, so
@@ -3046,12 +3108,7 @@ fn paginate_paragraph<B: LayoutBlockLike>(
     }
 
     // Render the paragraph
-    let space = if pager.cursor_y == 0.0 {
-        0.0
-    } else {
-        para.space_before
-    };
-    pager.cursor_y += space;
+    pager.cursor_y += pager.space_before(para.space_before);
 
     if let Some(body_index) = body_index {
         pager.record_body_fragment(
@@ -3116,6 +3173,7 @@ fn paginate_paragraph<B: LayoutBlockLike>(
     pager.cursor_y += para.content_height();
     pager.ink_bottom = pager.cursor_y;
     pager.cursor_y += para.space_after;
+    pager.previous_space_after = para.space_after;
     pager.mark_content();
 }
 
@@ -3285,6 +3343,7 @@ fn render_para_split(
     pager.claim_notes(remaining_lines);
     pager.ink_bottom = remaining_height;
     pager.cursor_y = remaining_height + para.space_after;
+    pager.previous_space_after = para.space_after;
     pager.mark_content();
     if ends_with_run_page_break {
         pager.trailing_run_page_break_before = Some(block_idx + 1);
@@ -4352,12 +4411,15 @@ fn render_table_row(
             .iter()
             .map(crate::table::CellBlock::total_height)
             .sum::<f64>();
-        // A rotated cell is laid out in a same-centre transposed box and the
-        // result is rotated back over the cell. A horizontal cell's box is the
-        // cell itself, so it keeps the arithmetic it always had.
+        // The content sits between the horizontal border bands the row
+        // height includes. A rotated cell is laid out in a same-centre
+        // transposed box and the result is rotated back over the cell. A
+        // horizontal cell's box is the cell itself less those bands.
+        let band_y = row_y + cell.border_band_top;
+        let band_height = (paint_height - cell.border_band_top - cell.border_band_bottom).max(0.0);
         let (box_x, box_y, box_width, box_height) = match cell.rotation {
-            Some(_) => crate::table::transposed_box(cell_x, row_y, cell.width, paint_height),
-            None => (cell_x, row_y, cell.width, paint_height),
+            Some(_) => crate::table::transposed_box(cell_x, band_y, cell.width, band_height),
+            None => (cell_x, band_y, cell.width, band_height),
         };
         let v_offset = match cell.v_align {
             Some(rdocx_oxml::table::ST_VerticalJc::Center) => {
@@ -4373,6 +4435,8 @@ fn render_table_row(
             let block_semantics = cell_semantics.and_then(|cell| cell.blocks.get(block_index));
             match block {
                 crate::table::CellBlock::Paragraph(paragraph) => {
+                    // The space before sits above the lines, as in the body.
+                    content_y += paragraph.space_before;
                     let semantics = match block_semantics {
                         Some(CellBlockSemantics::Paragraph(semantics)) => Some(semantics),
                         _ => None,
@@ -4421,8 +4485,8 @@ fn render_table_row(
                     // geometry it already built instead of cloning it.
                     let (furniture_y, furniture_height) = if rotated {
                         (
-                            row_y - geometry.margin_top + cell.margin_top,
-                            (paint_height - cell.margin_top - cell.margin_bottom).max(0.0),
+                            band_y - geometry.margin_top + cell.margin_top,
+                            (band_height - cell.margin_top - cell.margin_bottom).max(0.0),
                         )
                     } else {
                         (content_y, paragraph.content_height())
@@ -4454,6 +4518,7 @@ fn render_table_row(
                         );
                         change_bar_drawn |= rotated && paragraph.has_visible_revision;
                     }
+                    content_y += paragraph.content_height() + paragraph.space_after;
                 }
                 crate::table::CellBlock::Table(table) => {
                     let semantics = match block_semantics {
@@ -4479,9 +4544,9 @@ fn render_table_row(
                         );
                         nested_y += nested_row.height;
                     }
+                    content_y += table.total_height();
                 }
             }
-            content_y += block.total_height();
         }
         // Rotate the cell's painted content about the box centre, which is
         // the cell centre, so the transposed layout lands back in the cell.
@@ -4489,7 +4554,7 @@ fn render_table_row(
             let transform = Transform::rotate_about(
                 degrees,
                 cell_x + cell.width / 2.0,
-                row_y + paint_height / 2.0,
+                band_y + band_height / 2.0,
             );
             let rotate = |source: &mut Vec<PositionedElement>, start: usize| {
                 let children = source.split_off(start);
@@ -4604,14 +4669,7 @@ fn render_cell_borders(
                     table_edge: Option<&rdocx_oxml::borders::CT_BorderEdge>,
                     outer_edge: bool|
      -> Option<BorderEdge> {
-        let edge = match cell_edge {
-            Some(edge) if edge.val == ST_Border::None && outer_edge => table_edge?,
-            Some(edge) => edge,
-            None => table_edge?,
-        };
-        if edge.val == ST_Border::None {
-            return None;
-        }
+        let edge = crate::table::resolved_cell_edge(cell_edge, table_edge, outer_edge)?;
         let thickness = edge.sz.unwrap_or(4) as f64 / 8.0; // sz is in 1/8 pt
         let color = edge
             .color
@@ -4631,11 +4689,17 @@ fn render_cell_borders(
             b.inside_h.as_ref()
         }
     });
+    // A horizontal border fills the band below the row boundary it sits on,
+    // which the row heights reserve, rather than straddling the boundary.
     let cell_top = cell_borders.as_ref().and_then(|b| b.top.as_ref());
     if let Some((thickness, color, dash_pattern)) = get_edge(cell_top, table_top, is_first_row) {
+        let line_y = y + thickness / 2.0;
         elements.push(PositionedElement::Line {
-            start: Point { x, y },
-            end: Point { x: x + w, y },
+            start: Point { x, y: line_y },
+            end: Point {
+                x: x + w,
+                y: line_y,
+            },
             width: thickness,
             color,
             dash_pattern,
@@ -4653,9 +4717,19 @@ fn render_cell_borders(
     let cell_bottom = cell_borders.as_ref().and_then(|b| b.bottom.as_ref());
     if let Some((thickness, color, dash_pattern)) = get_edge(cell_bottom, table_bottom, is_last_row)
     {
+        // The table's bottom band is the last row's own, so its line sits
+        // inside the row. Any other bottom edge is in the next row's band.
+        let line_y = if is_last_row {
+            y + h - thickness / 2.0
+        } else {
+            y + h + thickness / 2.0
+        };
         elements.push(PositionedElement::Line {
-            start: Point { x, y: y + h },
-            end: Point { x: x + w, y: y + h },
+            start: Point { x, y: line_y },
+            end: Point {
+                x: x + w,
+                y: line_y,
+            },
             width: thickness,
             color,
             dash_pattern,
@@ -6871,6 +6945,8 @@ mod tests {
                 margin_right: 0.0,
                 margin_top: 0.0,
                 margin_bottom: 0.0,
+                border_band_top: 0.0,
+                border_band_bottom: 0.0,
                 is_first_row: true,
                 is_last_row: true,
                 v_align: None,

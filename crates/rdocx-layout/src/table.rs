@@ -1,9 +1,10 @@
 //! Table layout: column widths, cell content, merge handling.
 
+use rdocx_oxml::borders::CT_BorderEdge;
 use rdocx_oxml::content_control::{CT_Sdt, SdtContent};
 use rdocx_oxml::document::CT_DocGrid;
 use rdocx_oxml::drawing::{AnchorAlignH, AnchorAlignV, ST_RelativeFromH, ST_RelativeFromV};
-use rdocx_oxml::shared::ST_Jc;
+use rdocx_oxml::shared::{ST_Border, ST_Jc};
 use rdocx_oxml::styles::{CT_Styles, TableStyleRegion};
 use rdocx_oxml::table::{
     CT_Row, CT_Tbl, CT_TblBorders, CT_TblGrid, CT_TblPPr, CT_TblPr, CT_TblWidth, CT_Tc, CT_TrPr,
@@ -316,6 +317,12 @@ pub struct TableCell {
     pub margin_top: f64,
     /// Cell margin bottom in points.
     pub margin_bottom: f64,
+    /// Points of horizontal border band above the content, which the row
+    /// height includes.
+    pub border_band_top: f64,
+    /// Points of horizontal border band below the content. Only a cell that
+    /// reaches the table's last row has one, the table's bottom border.
+    pub border_band_bottom: f64,
     /// Whether this cell is in the first row.
     pub is_first_row: bool,
     /// Whether this cell is in the last row.
@@ -604,10 +611,6 @@ fn layout_table_inner(
             .or(table_cell_spacing)
             .unwrap_or(0.0);
         let half_spacing = row_cell_spacing / 2.0;
-        let cell_margin_left = cell_margin_left + half_spacing;
-        let cell_margin_right = cell_margin_right + half_spacing;
-        let cell_margin_top = cell_margin_top + half_spacing;
-        let cell_margin_bottom = cell_margin_bottom + half_spacing;
 
         // Omitted edge columns move the row's own origin. The table origin,
         // the table width and every other row stay where they are.
@@ -670,6 +673,19 @@ fn layout_table_inner(
                 .and_then(|shd| shd.fill.as_ref())
                 .filter(|f| f.as_str() != "auto")
                 .map(|f| Color::from_hex(f));
+
+            // A cell's own `w:tcMar` replaces the table's margins edge by edge.
+            let own_margin = cell
+                .properties
+                .as_ref()
+                .and_then(|properties| properties.cell_margin.as_ref());
+            let margin = |own: Option<rdocx_oxml::Twips>, table: f64| {
+                own.map_or(table, |twips| twips.to_pt()) + half_spacing
+            };
+            let cell_margin_left = margin(own_margin.and_then(|m| m.left), cell_margin_left);
+            let cell_margin_right = margin(own_margin.and_then(|m| m.right), cell_margin_right);
+            let cell_margin_top = margin(own_margin.and_then(|m| m.top), cell_margin_top);
+            let cell_margin_bottom = margin(own_margin.and_then(|m| m.bottom), cell_margin_bottom);
 
             // Calculate cell width from spanned columns
             let cell_width: f64 = (col_index..col_index + grid_span as usize)
@@ -761,6 +777,8 @@ fn layout_table_inner(
                 margin_right: cell_margin_right,
                 margin_top: cell_margin_top,
                 margin_bottom: cell_margin_bottom,
+                border_band_top: 0.0,
+                border_band_bottom: 0.0,
                 is_first_row: row_idx == 0,
                 is_last_row: row_idx == num_rows - 1,
                 v_align,
@@ -773,11 +791,6 @@ fn layout_table_inner(
             col_index += grid_span as usize;
         }
 
-        let max_cell_height = cells
-            .iter()
-            .filter(|cell| !cell.starts_vmerge)
-            .map(|cell| cell.height)
-            .fold(0.0f64, f64::max);
         let specified_height = row_properties.height.map(|h| h.to_pt()).unwrap_or(0.0);
         let exact =
             row_properties.height_rule.as_deref() == Some("exact") && specified_height > 0.0;
@@ -785,10 +798,22 @@ fn layout_table_inner(
         for cell in &mut cells {
             cell.clip_content = exact && !cell.is_vmerge_continue;
         }
+        // Word keeps a cell's top and bottom margins outside a minimum height,
+        // which bounds the content between them. An exact height holds the
+        // band and the top margin, and Word adds the bottom margin below it.
+        let row_cells = || cells.iter().filter(|cell| !cell.starts_vmerge);
         let row_height = if exact {
             specified_height
+                + row_cells()
+                    .map(|cell| cell.margin_bottom)
+                    .fold(0.0f64, f64::max)
         } else {
-            max_cell_height.max(specified_height)
+            row_cells()
+                .map(|cell| {
+                    cell.height
+                        .max(specified_height + cell.margin_top + cell.margin_bottom)
+                })
+                .fold(specified_height, f64::max)
         };
 
         rows.push(TableRow {
@@ -842,7 +867,6 @@ fn layout_table_inner(
         }
     }
 
-    let row_heights = rows.iter().map(|row| row.height).collect::<Vec<_>>();
     for row_index in 0..rows.len() {
         let continuing_spans = rows
             .get(row_index + 1)
@@ -856,16 +880,69 @@ fn layout_table_inner(
             })
             .unwrap_or_default();
         for cell in &mut rows[row_index].cells {
-            cell.height = row_heights[row_index];
-            cell.merged_height = row_heights[row_index];
             cell.merge_with_below = continuing_spans.contains(&(cell.col_index, cell.grid_span));
         }
     }
+
+    // Word gives a horizontal border its own height between two rows rather
+    // than drawing it over their content. An exact height already includes
+    // the band above its row, and the last row also carries the band below.
+    let bands = border_bands(&rows, table_borders.as_ref());
+    let table_bottom_band = |last_row: usize| {
+        if last_row + 1 == num_rows {
+            bands[num_rows]
+        } else {
+            0.0
+        }
+    };
+    for (row_index, row) in rows.iter_mut().enumerate() {
+        if !exact_rows[row_index] {
+            row.height += bands[row_index];
+        }
+        row.height += table_bottom_band(row_index);
+        for cell in &mut row.cells {
+            cell.border_band_top = bands[row_index];
+            cell.border_band_bottom = table_bottom_band(row_index);
+        }
+    }
+
+    let row_heights = rows.iter().map(|row| row.height).collect::<Vec<_>>();
+    for (row, height) in rows.iter_mut().zip(&row_heights) {
+        for cell in &mut row.cells {
+            cell.height = *height;
+            cell.merged_height = *height;
+        }
+    }
     for (row_index, cell_index, last_row, required) in spans {
+        // Word paints the bottom edge of a merge from the last cell it covers,
+        // not from the cell that starts it.
+        if last_row > row_index {
+            let (col_index, grid_span) = {
+                let restart = &rows[row_index].cells[cell_index];
+                (restart.col_index, restart.grid_span)
+            };
+            let bottom = rows[last_row]
+                .cells
+                .iter()
+                .find(|cell| {
+                    cell.is_vmerge_continue
+                        && cell.col_index == col_index
+                        && cell.grid_span == grid_span
+                })
+                .and_then(|cell| cell.borders.as_ref()?.bottom.clone());
+            rows[row_index].cells[cell_index]
+                .borders
+                .get_or_insert_with(CT_TblBorders::default)
+                .bottom = bottom;
+        }
         let restart = &mut rows[row_index].cells[cell_index];
         restart.merged_height = row_heights[row_index..=last_row].iter().sum();
         restart.is_last_row = last_row + 1 == num_rows;
-        restart.clip_content = required > restart.merged_height;
+        restart.border_band_bottom = table_bottom_band(last_row);
+        // The painter draws the merged content between the band above the
+        // merge and the table's bottom band, so exact rows clip to that box.
+        restart.clip_content =
+            required > restart.merged_height - restart.border_band_top - restart.border_band_bottom;
     }
 
     Ok((
@@ -884,6 +961,153 @@ fn layout_table_inner(
             rows: row_semantics,
         },
     ))
+}
+
+/// The border one side of a cell draws, or `None` when it draws none.
+///
+/// The cell's own edge wins over the table's, except that a `none` cell edge
+/// on the outside of the table falls back to the table's outer edge.
+pub(crate) fn resolved_cell_edge<'a>(
+    cell_edge: Option<&'a CT_BorderEdge>,
+    table_edge: Option<&'a CT_BorderEdge>,
+    outer_edge: bool,
+) -> Option<&'a CT_BorderEdge> {
+    let edge = match cell_edge {
+        Some(edge) if edge.val == ST_Border::None && outer_edge => table_edge?,
+        Some(edge) => edge,
+        None => table_edge?,
+    };
+    (edge.val != ST_Border::None).then_some(edge)
+}
+
+/// The height in points a horizontal border takes between two rows, as Word 16
+/// reserves it. A single line is its `w:sz` eighths of a point. A compound
+/// style is its lines and gaps, some as wide as the size and some at a width
+/// Word fixes whatever the size, and a wave is a fixed height.
+fn border_band(edge: &CT_BorderEdge) -> f64 {
+    let width = edge.sz.unwrap_or(4) as f64 / 8.0;
+    match edge.val {
+        ST_Border::Double => 3.0 * width,
+        ST_Border::Triple => 5.0 * width,
+        ST_Border::ThinThickSmallGap | ST_Border::ThickThinSmallGap => width + 1.5,
+        ST_Border::ThinThickMediumGap | ST_Border::ThickThinMediumGap => 2.0 * width,
+        ST_Border::ThinThickLargeGap | ST_Border::ThickThinLargeGap => width + 2.25,
+        ST_Border::ThreeDEmboss | ST_Border::ThreeDEngrave if width < 3.0 => width + 1.5,
+        ST_Border::ThreeDEmboss | ST_Border::ThreeDEngrave => width + 3.0,
+        ST_Border::Wave => 3.0,
+        ST_Border::DoubleWave => 5.25,
+        _ => width,
+    }
+}
+
+/// The horizontal border band above each row, then the one below the last.
+///
+/// The band between two rows is the widest edge that meets there, from the
+/// bottom edges of the row above and the top edges of the row below, so a
+/// border the two rows share counts once. Word counts the edges of every
+/// cell, the cells a vertical merge covers included, although it paints none
+/// of them inside the merge.
+fn border_bands(rows: &[TableRow], table_borders: Option<&CT_TblBorders>) -> Vec<f64> {
+    let mut bands = vec![0.0f64; rows.len() + 1];
+    for (row_index, row) in rows.iter().enumerate() {
+        let first_row = row_index == 0;
+        let last_row = row_index + 1 == rows.len();
+        let table_top = table_borders.and_then(|borders| {
+            if first_row {
+                borders.top.as_ref()
+            } else {
+                borders.inside_h.as_ref()
+            }
+        });
+        let table_bottom = table_borders.and_then(|borders| {
+            if last_row {
+                borders.bottom.as_ref()
+            } else {
+                borders.inside_h.as_ref()
+            }
+        });
+        for cell in &row.cells {
+            let cell_borders = cell.borders.as_ref();
+            if let Some(edge) = resolved_cell_edge(
+                cell_borders.and_then(|borders| borders.top.as_ref()),
+                table_top,
+                first_row,
+            ) {
+                bands[row_index] = bands[row_index].max(border_band(edge));
+            }
+            if let Some(edge) = resolved_cell_edge(
+                cell_borders.and_then(|borders| borders.bottom.as_ref()),
+                table_bottom,
+                last_row,
+            ) {
+                bands[row_index + 1] = bands[row_index + 1].max(border_band(edge));
+            }
+        }
+    }
+    bands
+}
+
+/// The band a page break gives a row at the top of a page, or at the bottom
+/// of one. Word closes a table on every page it crosses with the table's own
+/// top and bottom borders, so the row's cell edges resolve against those, as
+/// on the table's first and last row.
+pub(crate) fn page_break_band(
+    row: &TableRow,
+    table_borders: Option<&CT_TblBorders>,
+    top: bool,
+) -> f64 {
+    fn edge(borders: &CT_TblBorders, top: bool) -> Option<&CT_BorderEdge> {
+        if top {
+            borders.top.as_ref()
+        } else {
+            borders.bottom.as_ref()
+        }
+    }
+    let table_edge = table_borders.and_then(|borders| edge(borders, top));
+    row.cells
+        .iter()
+        .filter_map(|cell| {
+            let own = cell.borders.as_ref().and_then(|borders| edge(borders, top));
+            resolved_cell_edge(own, table_edge, true)
+        })
+        .map(border_band)
+        .fold(0.0, f64::max)
+}
+
+/// `row` as the first row of the page a table break carries it to. Its band
+/// becomes the one the top of a page gives it, which Word adds to the row
+/// whatever its height rule, and its cells paint the table's top border.
+pub(crate) fn row_opening_page(row: &TableRow, table_borders: Option<&CT_TblBorders>) -> TableRow {
+    let band = page_break_band(row, table_borders, true);
+    let growth = band - row.cells.first().map_or(0.0, |cell| cell.border_band_top);
+    let mut opened = row.clone();
+    opened.height += growth;
+    for cell in &mut opened.cells {
+        cell.height += growth;
+        cell.merged_height += growth;
+        cell.border_band_top = band;
+        cell.is_first_row = true;
+    }
+    opened
+}
+
+/// `row` as the last row of a page before a table break, carrying below its
+/// content the band and the edges that the table's bottom border gives it. A
+/// merge that goes on to the next page keeps its box.
+pub(crate) fn row_closing_page(row: &TableRow, table_borders: Option<&CT_TblBorders>) -> TableRow {
+    let band = page_break_band(row, table_borders, false);
+    let mut closed = row.clone();
+    closed.height += band;
+    for cell in &mut closed.cells {
+        if cell.merge_with_below {
+            continue;
+        }
+        cell.height += band;
+        cell.merged_height += band;
+        cell.border_band_bottom = band;
+        cell.is_last_row = true;
+    }
+    closed
 }
 
 fn resolve_base_table_properties(table: &CT_Tbl, styles: &CT_Styles) -> CT_TblPr {
@@ -1592,6 +1816,19 @@ fn layout_cell_content(
             )?,
         }
     }
+    // Two consecutive paragraphs of a cell are one flow, so Word keeps the
+    // larger of their facing spacing there as it does in the body. The space
+    // before is reduced here to what it adds below the space after above it,
+    // which keeps the cell height a plain sum. A nested table breaks the run.
+    if !input.do_not_use_html_paragraph_auto_spacing {
+        for index in 1..blocks.len() {
+            if let [CellBlock::Paragraph(previous), CellBlock::Paragraph(next)] =
+                &mut blocks[index - 1..=index]
+            {
+                next.space_before = (next.space_before - previous.space_after).max(0.0);
+            }
+        }
+    }
     Ok((blocks, semantics))
 }
 
@@ -2029,6 +2266,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             math_properties: None,
             document: rdocx_oxml::document::CT_Document {
@@ -2219,6 +2457,7 @@ mod tests {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             math_properties: None,
             document: rdocx_oxml::document::CT_Document {
@@ -2280,6 +2519,112 @@ mod tests {
         // from the declared grid and never exceeds the caller's width.
         assert!(block.table_width > 0.0);
         assert!(block.table_width <= 234.0);
+    }
+
+    #[test]
+    fn compound_borders_reserve_the_band_word_gives_their_lines_and_gaps() {
+        // Word 16 measurements: the points a top, inside or bottom border
+        // takes at w:sz 4 and at w:sz 24.
+        for (style, at_4, at_24) in [
+            (ST_Border::Single, 0.5, 3.0),
+            (ST_Border::Dotted, 0.5, 3.0),
+            (ST_Border::Outset, 0.5, 3.0),
+            (ST_Border::Double, 1.5, 9.0),
+            (ST_Border::Triple, 2.5, 15.0),
+            (ST_Border::ThinThickSmallGap, 2.0, 4.5),
+            (ST_Border::ThickThinSmallGap, 2.0, 4.5),
+            (ST_Border::ThinThickMediumGap, 1.0, 6.0),
+            (ST_Border::ThickThinMediumGap, 1.0, 6.0),
+            (ST_Border::ThinThickLargeGap, 2.75, 5.25),
+            (ST_Border::ThickThinLargeGap, 2.75, 5.25),
+            (ST_Border::ThreeDEmboss, 2.0, 6.0),
+            (ST_Border::ThreeDEngrave, 2.0, 6.0),
+            (ST_Border::Wave, 3.0, 3.0),
+            (ST_Border::DoubleWave, 5.25, 5.25),
+        ] {
+            for (sz, band) in [(4, at_4), (24, at_24)] {
+                let mut edge = CT_BorderEdge::new(style);
+                edge.sz = Some(sz);
+                assert_eq!(border_band(&edge), band, "{style:?} at w:sz {sz}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_merge_over_exact_rows_clips_to_the_box_between_its_bands() {
+        // Two exact 20 point rows under 3 point borders hold a 43 point merge
+        // whose painted box is 37 points, so 39 points of content must clip.
+        let edge = || {
+            let mut edge = CT_BorderEdge::new(ST_Border::Single);
+            edge.sz = Some(24);
+            edge
+        };
+        let mut table = CT_Tbl::new();
+        table.properties = Some(CT_TblPr {
+            borders: Some(CT_TblBorders {
+                top: Some(edge()),
+                bottom: Some(edge()),
+                left: Some(edge()),
+                right: Some(edge()),
+                inside_h: Some(edge()),
+                inside_v: Some(edge()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        table.grid = Some(CT_TblGrid {
+            columns: vec![CT_TblGridCol { width: Twips(3000) }],
+            ..Default::default()
+        });
+        let exact_row = || {
+            let mut row = CT_Row::new();
+            row.properties = Some(CT_TrPr {
+                height: Some(Twips(400)),
+                height_rule: Some("exact".to_owned()),
+                ..Default::default()
+            });
+            row
+        };
+        let mut restart = CT_Tc::new();
+        restart.properties = Some(CT_TcPr {
+            v_merge: Some(VMerge::Restart),
+            ..Default::default()
+        });
+        restart.content.clear();
+        for text in ["one", "two", "three"] {
+            let mut paragraph = rdocx_oxml::text::CT_P::new();
+            paragraph.properties = Some(rdocx_oxml::properties::CT_PPr {
+                line_spacing: Some(Twips(260)),
+                line_rule: Some("exact".to_owned()),
+                space_before: Some(Twips(0)),
+                space_after: Some(Twips(0)),
+                ..Default::default()
+            });
+            paragraph.add_run(text);
+            restart
+                .content
+                .push(rdocx_oxml::table::CellContent::Paragraph(paragraph));
+        }
+        let mut first = exact_row();
+        first.cells.push(restart);
+        let mut continuation = CT_Tc::new();
+        continuation.properties = Some(CT_TcPr {
+            v_merge: Some(VMerge::Continue),
+            ..Default::default()
+        });
+        let mut second = exact_row();
+        second.cells.push(continuation);
+        table.rows = vec![first, second];
+
+        let block = layout_with_defaults(&table, 150.0);
+
+        let restart = &block.rows[0].cells[0];
+        assert_eq!(restart.merged_height, 43.0);
+        assert_eq!(
+            (restart.border_band_top, restart.border_band_bottom),
+            (3.0, 3.0)
+        );
+        assert!(restart.clip_content);
     }
 
     #[test]

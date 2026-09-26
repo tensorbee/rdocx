@@ -1928,7 +1928,13 @@ The Python story-scale gate is `python_story_inventory_scales_linearly`. It
 doubles a corpus containing paragraphs, table cells, and hyperlinks, requires
 exact doubled inventory counts, and bounds the elapsed ratio without relying
 on an absolute machine speed. A native counted companion requires one complete
-story-source build for each item or hyperlink snapshot. The binding companion
+story-source build for each item or hyperlink snapshot. A second counted
+companion, `story_link_snapshots_read_each_link_from_its_own_span`, doubles a
+linked corpus and bounds the XML events the story text walker reads, so reading
+each link from the head of its part fails it.
+`story_link_snapshots_match_story_links_when_a_part_binds_word_twice` requires
+the snapshot, story and item hyperlink projections to agree on the text of a
+header link when the part binds Word to two prefixes. The binding companion
 interleaves direct, inserted, inline-control, and deleted runs, then proves
 StoryItem text, Paragraph text, and live run handles use the same accepted
 order. Nested formatting and splitting survive save and reopen, while an old

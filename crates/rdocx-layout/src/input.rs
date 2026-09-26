@@ -168,6 +168,10 @@ pub struct LayoutInput {
     /// Whether `w:gutterAtTop` puts the binding allowance on the top edge
     /// rather than the inside edge. Read only when mirroring is on.
     pub gutter_at_top: bool,
+    /// Whether `w:compat/w:doNotUseHTMLParagraphAutoSpacing` is on, which makes
+    /// Word add one paragraph's space after to the next one's space before.
+    /// Word otherwise keeps only the larger of the two.
+    pub do_not_use_html_paragraph_auto_spacing: bool,
     /// Document-wide OfficeMath defaults from the settings part.
     pub math_properties: Option<MathProperties>,
     /// The tracked-revision projection to lay out.

@@ -748,7 +748,39 @@ row span and suppresses physical horizontal edges inside that span. Ordinary
 cells establish row minima. Merge content grows the last non-exact row in its
 span only when the complete content needs more room. Exact rows stay pinned
 and clip overflow, while minimum rows may grow. Resolved cell margins define
-the local text and drawing content box.
+the local text and drawing content box. A cell's own `w:tcMar` replaces the
+table's `w:tblCellMar` edge by edge.
+
+A horizontal border takes its own height between two rows, as it does in Word,
+rather than being drawn over their content. The band above a row is the widest
+resolved edge on that boundary, from the bottom edges of the row above and the
+top edges of the row below, so a shared border counts once. The table's top
+border is the first row's band, and its bottom border is a band the last row
+adds below its content. The cells a vertical merge covers keep their edges in
+those bands, although nothing is painted inside the merge, and the merge's
+bottom edge is the bottom edge of the last cell it covers. A
+border is `w:sz` eighths of a point, and a compound style reserves its lines
+and gaps as Word 16 does: `double` three times the size, `triple` five times,
+the medium gap pairs twice, the small gap pairs the size and 1.5 points, the
+large gap pairs the size and 2.25 points, `threeDEmboss` and `threeDEngrave`
+the size and 1.5 points below 3 points and the size and 3 points from there,
+and `wave` and `doubleWave` 3 and 5.25 points whatever the size. The three-line
+gap styles, `dashSmallGap` and `dashDotStroked` are not in the border model
+and reserve nothing. An automatic or minimum row height gains its
+band above, and an exact height already includes it. A minimum height bounds
+each cell's content with its top and bottom margins outside, and an exact
+height holds the top margin, with the row's largest bottom margin added below
+it, which is also what Word does. Content starts below the
+band and each horizontal line fills the band below its boundary. Vertical
+borders do not shift the table or its content.
+
+Word closes a table on every page it breaks across. A row other than the
+table's last stays on a page only when there is room below it for its cells'
+bottom edges resolved against the table's bottom border, as on the last row,
+and the row that ends the page paints them there. A row that a break carries to
+the top of a page takes its cells' top edges resolved against the table's top
+border as its band, whatever its height rule. A row that follows repeated
+header rows keeps its own band.
 
 Borders are physical row or column segments rather than four strokes per cell.
 The renderer maps every logical cell edge onto those segments and emits each

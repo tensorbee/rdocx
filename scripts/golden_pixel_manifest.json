@@ -4,11 +4,11 @@
     "command": "pdftoppm",
     "version": "pdftoppm version 26.01.0"
   },
-  "reason": "F-198 adds the page-one English hyphenation example, rendering representation as repre- and sentation",
+  "reason": "Paragraph spacing keeps the larger of space after and space before, which moves the contract headings, and horizontal table borders take their height between rows, which moves the invoice and quote tables",
   "samples": {
     "contract": {
       "height": 1650,
-      "rgba_sha256": "1e41422da268855e333f73d153e8b9720d8a67567adbb07f07c1eca66a97f24d",
+      "rgba_sha256": "1161c8beb71a576b32e0bd388900efb2aba3e9d95d87ce30fe1a664ee1e3bbb6",
       "width": 1275
     },
     "feature_showcase": {
@@ -18,7 +18,7 @@
     },
     "invoice": {
       "height": 1650,
-      "rgba_sha256": "54bbd55fce156392c178a71697d0f2360c81e6877a2fd57bddcf1f1c1e2e5aa8",
+      "rgba_sha256": "d5d94db1e34f866d254cc0bd7a0917b31aefaa0e7e9d59e9518a4a80cc977eca",
       "width": 1275
     },
     "letter": {
@@ -33,7 +33,7 @@
     },
     "quote": {
       "height": 1650,
-      "rgba_sha256": "4424f65d99b01c23bee9821d88bd908051635b4342328b6c7b4c79bf445f47dd",
+      "rgba_sha256": "260df8dcf5a9964ce46858517cf77328befdd1022b66f760188244c6430b9008",
       "width": 1275
     },
     "report": {

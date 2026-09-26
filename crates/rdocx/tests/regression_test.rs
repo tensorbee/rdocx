@@ -21161,6 +21161,7 @@ fn empty_story_layout_input() -> rdocx_layout::LayoutInput {
         automatic_hyphenation: false,
         mirror_margins: false,
         gutter_at_top: false,
+        do_not_use_html_paragraph_auto_spacing: false,
         default_tab_stop: None,
         math_properties: None,
         document,
@@ -21651,14 +21652,17 @@ fn dense_form_matches_reviewed_one_page_geometry() {
             .iter()
             .any(|(start, end)| (start.x, start.y, end.x, end.y) == (x1, y1, x2, y2))
     };
+    // Horizontal borders fill the band below their row boundary, and the
+    // bands are part of the row heights, so the nested table starts below
+    // the 1 point band of its row and the last row carries the bottom one.
     assert_eq!(table_lines.len(), 26, "table geometry: {table_lines:?}");
-    assert!(has_line(72.0, 70.0, 306.0, 70.0));
+    assert!(has_line(72.0, 70.5, 306.0, 70.5));
     assert!(has_line(72.0, 70.0, 72.0, 109.0));
-    assert!(!has_line(72.0, 91.0, 306.0, 91.0));
-    assert!(has_line(72.0, 109.0, 306.0, 109.0));
-    assert!(has_line(311.4, 91.0, 421.4, 91.0));
-    assert!(has_line(421.4, 103.0, 531.4, 103.0));
-    assert!(has_line(306.0, 127.0, 540.0, 127.0));
+    assert!(!has_line(72.0, 91.5, 306.0, 91.5));
+    assert!(has_line(72.0, 109.5, 306.0, 109.5));
+    assert!(has_line(311.4, 92.375, 421.4, 92.375));
+    assert!(has_line(421.4, 105.125, 531.4, 105.125));
+    assert!(has_line(306.0, 128.5, 540.0, 128.5));
 
     let pdf = document.to_pdf_deterministic().expect("dense form PDF");
     assert!(pdf.starts_with(b"%PDF-"));
@@ -21691,13 +21695,15 @@ fn dense_form_matches_reviewed_one_page_geometry() {
         .chunks_exact(4)
         .filter(|pixel| *pixel == [255, 215, 215, 255])
         .count();
-    assert_eq!(checksum, 0x2319_bcbe_502e_4fe8);
-    assert_eq!(non_white_pixels, 32_221);
+    assert_eq!(checksum, 0xc38a_0cf8_9243_98d1);
+    assert_eq!(non_white_pixels, 32_429);
     assert_eq!(
         behind_pixels, 0,
         "page-behind stamp is covered by cell shading"
     );
-    assert_eq!(foreground_pixels, 1_682);
+    // The 58 pixel wide stamp moved 1 point down with the border band above
+    // its row, which leaves 28 whole pixel rows at 96 dpi rather than 29.
+    assert_eq!(foreground_pixels, 1_624);
 }
 
 #[test]
@@ -30672,6 +30678,7 @@ mod advanced_table_geometry_regressions {
             automatic_hyphenation: false,
             mirror_margins: false,
             gutter_at_top: false,
+            do_not_use_html_paragraph_auto_spacing: false,
             default_tab_stop: None,
             math_properties: None,
             document: rdocx_oxml::document::CT_Document {
@@ -32392,6 +32399,787 @@ mod f266c_character_grid_and_vertical_text_regressions {
             rotated < horizontal / 2.0,
             "the rotated column is sized from the stacked height, \
              {rotated} against {horizontal}"
+        );
+    }
+}
+
+#[test]
+fn story_link_snapshots_read_link_text_from_prefixes_declared_outside_the_link() {
+    // Each hyperlink's runs use a prefix declared on an ancestor outside the
+    // hyperlink span, or on the hyperlink itself. A header part reaches the
+    // scanner as it was read, so the prefixes are not rewritten first. The
+    // package-wide inventory reads each link from its own span with an
+    // inventoried namespace scope, so it must still agree with the per-story
+    // scan that reads from the head of the part.
+    let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let document = document_with_header_story(&format!(
+        concat!(
+            r#"<w:hdr xmlns:w="{0}"><w:p xmlns:ww="{0}">"#,
+            r#"<ww:r><ww:t>before </ww:t></ww:r>"#,
+            r#"<w:hyperlink w:anchor="first"><ww:r><ww:t>first link</ww:t></ww:r></w:hyperlink>"#,
+            r#"</w:p>"#,
+            r#"<w:p><w:hyperlink w:anchor="second" xmlns:x="{0}">"#,
+            r#"<x:r><x:t>second link</x:t></x:r></w:hyperlink></w:p></w:hdr>"#,
+        ),
+        word
+    ));
+    let header = document
+        .stories()
+        .unwrap()
+        .into_iter()
+        .find(|story| story.kind() == StoryKind::Header)
+        .unwrap();
+    let project = |links: Vec<(ContentLocation, rdocx::LinkInfo)>| {
+        links
+            .into_iter()
+            .filter(|(location, _)| location.story() == &header)
+            .map(|(location, link)| (link.text, link.anchor, location.index_path().to_vec()))
+            .collect::<Vec<_>>()
+    };
+
+    let snapshots = project(document.story_link_snapshots().unwrap());
+
+    assert_eq!(snapshots, project(document.story_links(&header).unwrap()));
+    assert_eq!(
+        snapshots
+            .iter()
+            .map(|(text, anchor, _)| (text.as_str(), anchor.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("first link", Some("first")),
+            ("second link", Some("second")),
+        ]
+    );
+}
+
+#[test]
+fn story_link_snapshots_match_story_links_when_a_part_binds_word_twice() {
+    // The header binds Word both as the default namespace and as `q`, and the
+    // tracked insertion inside the link names its attributes with `q`. Reading
+    // the link from its own span must not see more Word prefixes on the link
+    // than the read from the head of the part does.
+    let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let document = document_with_header_story(&format!(
+        concat!(
+            r#"<hdr xmlns="{0}" xmlns:q="{0}"><p><hyperlink q:anchor="a">"#,
+            r#"<ins q:id="1" q:author="A"><r><t>inserted</t></r></ins>"#,
+            r#"</hyperlink></p></hdr>"#,
+        ),
+        word
+    ));
+    let header = document
+        .stories()
+        .unwrap()
+        .into_iter()
+        .find(|story| story.kind() == StoryKind::Header)
+        .unwrap();
+    let project = |links: Vec<(ContentLocation, rdocx::LinkInfo)>| {
+        links
+            .into_iter()
+            .filter(|(location, _)| location.story() == &header)
+            .map(|(location, link)| (link.text, location.index_path().to_vec()))
+            .collect::<Vec<_>>()
+    };
+
+    let snapshots = project(document.story_link_snapshots().unwrap());
+
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots, project(document.story_links(&header).unwrap()));
+    let items = document.story_items(&header).unwrap();
+    assert_eq!(snapshots[0].0, items[0].links().unwrap()[0].text);
+}
+
+mod paragraph_spacing_collapse_regressions {
+    use rdocx::{CompatibilityOption, Document, Length};
+
+    /// One single-line body paragraph on an exact 14 point line, so the gap
+    /// between two of them is their spacing alone and no font enters it.
+    fn add_spaced(document: &mut Document, text: &str, before: f64, after: f64) {
+        let mut paragraph = document.add_paragraph(text);
+        paragraph.set_line_spacing(14.0);
+        paragraph.set_space_before(Length::pt(before));
+        paragraph.set_space_after(Length::pt(after));
+    }
+
+    fn round(value: f64) -> f64 {
+        (value * 100.0).round() / 100.0
+    }
+
+    /// The first fragment of every body item as (page, top of its lines).
+    fn tops(document: &Document) -> Vec<(usize, f64)> {
+        let result = document
+            .layout_deterministic()
+            .expect("document lays out in deterministic font mode");
+        (0..document.content_count())
+            .map(|index| {
+                let fragment = &result
+                    .body_layout_fragments(index)
+                    .expect("body index is in range")[0];
+                (fragment.physical_page, round(fragment.y))
+            })
+            .collect()
+    }
+
+    /// The gap between the lines of each pair of consecutive body items.
+    fn gaps(document: &Document) -> Vec<f64> {
+        tops(document)
+            .windows(2)
+            .map(|pair| round(pair[1].1 - pair[0].1 - 14.0))
+            .collect()
+    }
+
+    /// How many body items start on each page.
+    fn items_per_page(document: &Document) -> Vec<usize> {
+        let mut counts = Vec::new();
+        for (page, _) in tops(document) {
+            if counts.len() < page {
+                counts.resize(page, 0);
+            }
+            counts[page - 1] += 1;
+        }
+        counts
+    }
+
+    /// Word's own probe: the space after of one paragraph and the space
+    /// before of the next, larger on either side in turn.
+    fn boundary_probe() -> Document {
+        let mut document = Document::new();
+        add_spaced(&mut document, "P1", 0.0, 20.0);
+        add_spaced(&mut document, "P2", 10.0, 0.0);
+        add_spaced(&mut document, "P3", 30.0, 5.0);
+        add_spaced(&mut document, "P4", 0.0, 0.0);
+        add_spaced(&mut document, "P5", 12.0, 0.0);
+        document
+    }
+
+    /// The shape of the issue: eighty single-line paragraphs with 6 points
+    /// before and 7 after, which is a table of contents in miniature.
+    fn toc_probe() -> Document {
+        let mut document = Document::new();
+        for index in 0..80 {
+            add_spaced(&mut document, &format!("Entry {index:02}"), 6.0, 7.0);
+        }
+        document
+    }
+
+    fn sum_spacing(document: &mut Document) {
+        document
+            .set_compatibility_option(CompatibilityOption::DoNotUseHTMLParagraphAutoSpacing, true)
+            .expect("the compatibility option is set");
+    }
+
+    /// Layout added the two, which put 24 entries on a page where Word puts
+    /// 31 and spread a table of contents over one more page than Word.
+    #[test]
+    fn consecutive_paragraphs_keep_the_larger_of_space_after_and_space_before() {
+        // Word 16 separates these five paragraphs by 20, 30, 5 and 12 points.
+        assert_eq!(gaps(&boundary_probe()), vec![20.0, 30.0, 5.0, 12.0]);
+        // 31 lines of 14 points and 30 gaps of 7 fill 644 of the 648 points.
+        assert_eq!(items_per_page(&toc_probe()), vec![31, 31, 18]);
+
+        // The compatibility option is the one case where Word adds them.
+        let mut document = boundary_probe();
+        sum_spacing(&mut document);
+        assert_eq!(gaps(&document), vec![30.0, 30.0, 5.0, 12.0]);
+        let mut document = toc_probe();
+        sum_spacing(&mut document);
+        assert_eq!(items_per_page(&document), vec![24, 24, 24, 8]);
+    }
+
+    /// Each painted line of the first page as (text, baseline).
+    fn baselines(document: &Document) -> Vec<(String, f64)> {
+        let result = document
+            .layout_deterministic()
+            .expect("document lays out in deterministic font mode");
+        let mut lines = Vec::new();
+        oxml_layout::walk(&result.layout.pages[0].elements, &mut |element, _| {
+            if let oxml_layout::PositionedElement::Text(run) = element
+                && !run.text.trim().is_empty()
+            {
+                lines.push((run.text.trim().to_owned(), round(run.origin.y)));
+            }
+        });
+        lines
+    }
+
+    fn pitches(lines: &[(String, f64)]) -> Vec<f64> {
+        lines
+            .windows(2)
+            .map(|pair| round(pair[1].1 - pair[0].1))
+            .collect()
+    }
+
+    /// A paragraph, then a one-cell table, then a paragraph. Word adds the
+    /// spacing that meets across each table edge rather than collapsing it.
+    #[test]
+    fn a_table_boundary_adds_the_space_after_and_space_before_that_meet_there() {
+        let mut document = Document::new();
+        add_spaced(&mut document, "above", 0.0, 20.0);
+        {
+            let mut table = document.add_table(1, 1);
+            table.set_cell_margins(
+                Length::pt(0.0),
+                Length::pt(5.0),
+                Length::pt(0.0),
+                Length::pt(5.0),
+            );
+            let mut cell = table.cell(0, 0).expect("cell exists");
+            cell.set_text("inside");
+            let mut paragraph = cell.paragraph_mut(0).expect("cell paragraph");
+            paragraph.set_line_spacing(14.0);
+            paragraph.set_space_before(Length::pt(10.0));
+            paragraph.set_space_after(Length::pt(20.0));
+        }
+        add_spaced(&mut document, "below", 10.0, 0.0);
+
+        let lines = baselines(&document);
+        assert_eq!(
+            lines.iter().map(|line| line.0.as_str()).collect::<Vec<_>>(),
+            ["above", "inside", "below"]
+        );
+        // 14 points of line, then 20 after and 10 before on each side.
+        assert_eq!(pitches(&lines), vec![44.0, 44.0]);
+    }
+
+    /// Three paragraphs in one cell with exact 14 point lines, spaced like the
+    /// Word probe: 20 after, then 10 before and 10 after, then 30 before.
+    fn cell_probe(summed: bool) -> Document {
+        let mut document = Document::new();
+        {
+            let mut table = document.add_table(1, 1);
+            table.set_cell_margins(
+                Length::pt(0.0),
+                Length::pt(5.0),
+                Length::pt(0.0),
+                Length::pt(5.0),
+            );
+            let mut cell = table.cell(0, 0).expect("cell exists");
+            cell.set_text("C1");
+            cell.add_paragraph("C2");
+            cell.add_paragraph("C3");
+            for (index, (before, after)) in [(0.0, 20.0), (10.0, 10.0), (30.0, 0.0)]
+                .into_iter()
+                .enumerate()
+            {
+                let mut paragraph = cell.paragraph_mut(index).expect("cell paragraph");
+                paragraph.set_line_spacing(14.0);
+                paragraph.set_space_before(Length::pt(before));
+                paragraph.set_space_after(Length::pt(after));
+            }
+        }
+        if summed {
+            sum_spacing(&mut document);
+        }
+        document
+    }
+
+    /// Cell paragraphs were drawn at the top of their block with the space
+    /// before below them, and the row summed every facing pair of spacing.
+    #[test]
+    fn consecutive_cell_paragraphs_keep_the_larger_spacing_and_draw_below_their_space_before() {
+        // Word 16 separates the three lines by 20 and 30 points.
+        let document = cell_probe(false);
+        assert_eq!(pitches(&baselines(&document)), vec![34.0, 44.0]);
+        let result = document
+            .layout_deterministic()
+            .expect("document lays out in deterministic font mode");
+        let row = &result.body_layout_fragments(0).expect("the table")[0];
+        assert_eq!(round(row.height), 92.0, "three lines and gaps of 20 and 30");
+
+        // With the compatibility option Word separates them by 30 and 40.
+        assert_eq!(pitches(&baselines(&cell_probe(true))), vec![44.0, 54.0]);
+    }
+}
+
+mod table_row_border_and_margin_regressions {
+    use rdocx::table::{CellBorderEdge, RowHeight, Table, TableBorderEdge};
+    use rdocx::{BorderStyle, Document, Length};
+
+    fn round(value: f64) -> f64 {
+        (value * 100.0).round() / 100.0
+    }
+
+    /// A five-row table of two 4680 twip columns, as in the Word probes: one
+    /// exact 14 point line per cell, no vertical cell margin, 5 points left
+    /// and right. A paragraph on the same kind of line follows it.
+    fn probe(configure: impl FnOnce(&mut Table)) -> Document {
+        let mut document = Document::new();
+        {
+            let mut table = document.add_table(5, 2);
+            table.set_cell_margins(
+                Length::pt(0.0),
+                Length::pt(5.0),
+                Length::pt(0.0),
+                Length::pt(5.0),
+            );
+            for row in 0..5 {
+                for column in 0..2 {
+                    let mut cell = table.cell(row, column).expect("cell exists");
+                    cell.set_text(&format!("R{row}{column}"));
+                    let mut paragraph = cell.paragraph_mut(0).expect("cell paragraph");
+                    paragraph.set_line_spacing(14.0);
+                    paragraph.set_space_before(Length::pt(0.0));
+                    paragraph.set_space_after(Length::pt(0.0));
+                }
+            }
+            configure(&mut table);
+        }
+        let mut next = document.add_paragraph("NEXT");
+        next.set_line_spacing(14.0);
+        next.set_space_before(Length::pt(0.0));
+        next.set_space_after(Length::pt(0.0));
+        document
+    }
+
+    /// Baseline and left edge of each painted line of the first page.
+    fn lines(document: &Document) -> Vec<(String, f64, f64)> {
+        let result = document
+            .layout_deterministic()
+            .expect("document lays out in deterministic font mode");
+        let mut lines = Vec::new();
+        oxml_layout::walk(&result.layout.pages[0].elements, &mut |element, _| {
+            if let oxml_layout::PositionedElement::Text(run) = element
+                && !run.text.trim().is_empty()
+            {
+                lines.push((
+                    run.text.trim().to_owned(),
+                    round(run.origin.y),
+                    round(run.origin.x),
+                ));
+            }
+        });
+        lines
+    }
+
+    /// How far the first row's line sits below where a borderless table puts
+    /// it, then the distance from each first-column line to the next and from
+    /// the last row to the paragraph after the table.
+    fn row_geometry(document: &Document) -> (f64, Vec<f64>) {
+        let baselines = |document: &Document| {
+            lines(document)
+                .into_iter()
+                .filter(|(text, ..)| text.ends_with('0') || text == "NEXT")
+                .map(|(_, baseline, _)| baseline)
+                .collect::<Vec<_>>()
+        };
+        let plain = baselines(&probe(|_| {}));
+        let placed = baselines(document);
+        assert_eq!(placed.len(), 6, "five rows and the paragraph after them");
+        let pitches = placed
+            .windows(2)
+            .map(|pair| round(pair[1] - pair[0]))
+            .collect();
+        (round(placed[0] - plain[0]), pitches)
+    }
+
+    fn all_borders(style: BorderStyle, eighths: u32) -> impl FnOnce(&mut Table) {
+        move |table: &mut Table| table.set_borders(style, eighths, "000000")
+    }
+
+    /// Word 16 measurements. Layout drew horizontal borders over the rows
+    /// without reserving any height for them, so every bordered row was
+    /// shorter than Word's by the border width, about a point per row for a
+    /// Google Docs export, which moved table page breaks a row later.
+    #[test]
+    fn horizontal_table_borders_take_their_width_between_rows() {
+        assert_eq!(row_geometry(&probe(|_| {})), (0.0, vec![14.0; 5]));
+        // A 1 point border above every row and below the last one.
+        assert_eq!(
+            row_geometry(&probe(all_borders(BorderStyle::Single, 8))),
+            (1.0, vec![15.0; 5])
+        );
+        assert_eq!(
+            row_geometry(&probe(all_borders(BorderStyle::Single, 24))),
+            (3.0, vec![17.0; 5])
+        );
+        // A double border is two lines and their gap, three widths in all.
+        assert_eq!(
+            row_geometry(&probe(all_borders(BorderStyle::Double, 4))),
+            (1.5, vec![15.5; 5])
+        );
+        // Top 6, inside 1, bottom 3: each band is the edge on that boundary.
+        let mixed = probe(|table| {
+            for (edge, eighths) in [
+                (TableBorderEdge::Top, 48),
+                (TableBorderEdge::InsideHorizontal, 8),
+                (TableBorderEdge::Bottom, 24),
+            ] {
+                table
+                    .set_border_checked(edge, BorderStyle::Single, eighths, "000000")
+                    .expect("border is valid");
+            }
+        });
+        assert_eq!(
+            row_geometry(&mixed),
+            (6.0, vec![15.0, 15.0, 15.0, 15.0, 17.0])
+        );
+        // Inside borders alone leave the top of the table and its end alone.
+        let inside = probe(|table| {
+            table
+                .set_border_checked(
+                    TableBorderEdge::InsideHorizontal,
+                    BorderStyle::Single,
+                    24,
+                    "000000",
+                )
+                .expect("border is valid");
+        });
+        assert_eq!(
+            row_geometry(&inside),
+            (0.0, vec![17.0, 17.0, 17.0, 17.0, 14.0])
+        );
+    }
+
+    /// The borders straddled each row boundary, so half of every line was
+    /// painted over the row above it.
+    #[test]
+    fn horizontal_table_borders_paint_inside_the_band_they_reserve() {
+        let document = probe(all_borders(BorderStyle::Single, 24));
+        let result = document
+            .layout_deterministic()
+            .expect("document lays out in deterministic font mode");
+        let table = &result.body_layout_fragments(0).expect("the table")[0];
+        assert_eq!(
+            round(table.height),
+            88.0,
+            "five rows of 17 and a 3 point bottom"
+        );
+        let mut centres = Vec::new();
+        oxml_layout::walk(&result.layout.pages[0].elements, &mut |element, _| {
+            if let oxml_layout::PositionedElement::Line {
+                start, end, width, ..
+            } = element
+                && start.y == end.y
+            {
+                assert_eq!(*width, 3.0);
+                centres.push(round(start.y - table.y));
+            }
+        });
+        centres.sort_by(f64::total_cmp);
+        centres.dedup();
+        // Each 3 point line fills the band below a row boundary, and the
+        // table's bottom line fills the last 3 points of the table.
+        assert_eq!(centres, vec![1.5, 18.5, 35.5, 52.5, 69.5, 86.5]);
+    }
+
+    #[test]
+    fn a_cell_border_widens_only_the_row_boundary_it_sits_on() {
+        let cell_edge = |edge: CellBorderEdge, eighths: u32| {
+            move |table: &mut Table| {
+                table
+                    .cell(1, 0)
+                    .expect("cell exists")
+                    .set_border_checked(edge, BorderStyle::Single, eighths, "000000")
+                    .expect("border is valid");
+            }
+        };
+        // A 3 point top on one cell of the second row.
+        assert_eq!(
+            row_geometry(&probe(cell_edge(CellBorderEdge::Top, 24))),
+            (0.0, vec![17.0, 14.0, 14.0, 14.0, 14.0])
+        );
+        // A 3 point bottom on the same cell.
+        assert_eq!(
+            row_geometry(&probe(cell_edge(CellBorderEdge::Bottom, 24))),
+            (0.0, vec![14.0, 17.0, 14.0, 14.0, 14.0])
+        );
+        // Over 1 point table borders, the widest edge on a boundary wins.
+        let widest = probe(|table| {
+            table.set_borders(BorderStyle::Single, 8, "000000");
+            cell_edge(CellBorderEdge::Top, 48)(table);
+        });
+        assert_eq!(
+            row_geometry(&widest),
+            (1.0, vec![20.0, 15.0, 15.0, 15.0, 15.0])
+        );
+    }
+
+    #[test]
+    fn exact_row_heights_include_the_border_above_and_minimum_heights_exclude_it() {
+        let heights = |height: RowHeight| {
+            move |table: &mut Table| {
+                table.set_borders(BorderStyle::Single, 24, "000000");
+                for row in 0..5 {
+                    table
+                        .row(row)
+                        .expect("row exists")
+                        .set_height_checked(height)
+                        .expect("height is valid");
+                }
+            }
+        };
+        // Exact 20 points: the 3 point band is inside the 20, and the table's
+        // bottom border still follows the last row.
+        let (shift, pitches) = row_geometry(&probe(heights(RowHeight::Exact(Length::pt(20.0)))));
+        assert_eq!(pitches, vec![20.0, 20.0, 20.0, 20.0, 20.0]);
+        let (exact_shift, _) = row_geometry(&probe(|table| {
+            table.set_borders(BorderStyle::Single, 24, "000000")
+        }));
+        assert_eq!(shift, exact_shift, "the content starts below the band");
+        // At least 30 points: the minimum is for the content, the band is added.
+        assert_eq!(
+            row_geometry(&probe(heights(RowHeight::AtLeast(Length::pt(30.0))))).1[..4],
+            [33.0, 33.0, 33.0, 33.0]
+        );
+    }
+
+    /// Word 16 measurements. Layout counted a cell's top and bottom margins
+    /// inside a minimum row height and left the bottom margin out of an exact
+    /// one. Word bounds the content with a minimum and keeps both margins
+    /// outside it, and it adds the bottom margin below an exact height, which
+    /// holds the top margin.
+    #[test]
+    fn a_minimum_row_height_leaves_out_both_cell_margins_and_an_exact_one_the_bottom() {
+        let rows = |height: RowHeight, top: f64, bottom: f64| {
+            probe(move |table| {
+                table.set_cell_margins(
+                    Length::pt(top),
+                    Length::pt(5.0),
+                    Length::pt(bottom),
+                    Length::pt(5.0),
+                );
+                for row in 0..5 {
+                    table
+                        .row(row)
+                        .expect("row exists")
+                        .set_height_checked(height)
+                        .expect("height is valid");
+                }
+            })
+        };
+        let exact = RowHeight::Exact(Length::pt(30.0));
+        let at_least = RowHeight::AtLeast(Length::pt(30.0));
+        // An exact 30 point row holds a 10 point top margin, and a 10 point
+        // bottom margin goes below it.
+        assert_eq!(
+            row_geometry(&rows(exact, 10.0, 0.0)),
+            (10.0, vec![30.0, 30.0, 30.0, 30.0, 20.0])
+        );
+        assert_eq!(row_geometry(&rows(exact, 0.0, 10.0)), (0.0, vec![40.0; 5]));
+        // A 30 point minimum bounds the content, with both margins outside.
+        assert_eq!(
+            row_geometry(&rows(at_least, 10.0, 0.0)),
+            (10.0, vec![40.0, 40.0, 40.0, 40.0, 30.0])
+        );
+        assert_eq!(
+            row_geometry(&rows(at_least, 10.0, 10.0)),
+            (10.0, vec![50.0, 50.0, 50.0, 50.0, 40.0])
+        );
+    }
+
+    /// Layout read only the table's `w:tblCellMar` and ignored a cell's own
+    /// `w:tcMar`, which Google Docs writes on every cell.
+    #[test]
+    fn per_cell_margins_override_the_table_cell_margins() {
+        let cell_margins = |top: f64, left: f64, table_vertical: f64| {
+            move |table: &mut Table| {
+                table.set_cell_margins(
+                    Length::pt(table_vertical),
+                    Length::pt(5.0),
+                    Length::pt(table_vertical),
+                    Length::pt(5.0),
+                );
+                for row in 0..5 {
+                    for column in 0..2 {
+                        table
+                            .cell(row, column)
+                            .expect("cell exists")
+                            .set_margins_checked(
+                                Length::pt(top),
+                                Length::pt(5.0),
+                                Length::pt(top),
+                                Length::pt(left),
+                            )
+                            .expect("margins are valid");
+                    }
+                }
+            }
+        };
+        // 5 points on every side of every cell over a table default of none.
+        assert_eq!(
+            row_geometry(&probe(cell_margins(5.0, 5.0, 0.0))),
+            (5.0, vec![24.0, 24.0, 24.0, 24.0, 19.0])
+        );
+        // No vertical cell margin over a table default of 5 points.
+        assert_eq!(
+            row_geometry(&probe(cell_margins(0.0, 5.0, 5.0))),
+            (0.0, vec![14.0; 5])
+        );
+        // The left margin moves the text and the table default does not.
+        let left_edge = |document: &Document| {
+            lines(document)
+                .into_iter()
+                .find(|(text, ..)| text == "R00")
+                .expect("the first cell paints")
+                .2
+        };
+        assert_eq!(
+            round(left_edge(&probe(cell_margins(0.0, 15.0, 0.0))) - left_edge(&probe(|_| {}))),
+            10.0
+        );
+    }
+
+    /// Word 16 measurements. Layout skipped the edges of the cells a vertical
+    /// merge covers, so a merge reserved no band inside itself, and it painted
+    /// the merge's bottom edge from the cell that starts it, even where the
+    /// row boundary below reserved no band for that edge.
+    #[test]
+    fn a_vertical_merge_reserves_every_cell_edge_and_paints_the_bottom_edge_of_its_last_cell() {
+        // The first column of rows 1 and 2 merged, each merged cell with an
+        // optional bottom edge, and no table borders.
+        let merged = |restart_bottom: Option<u32>, continuation_bottom: Option<u32>| {
+            probe(move |table| {
+                for (row, bottom) in [(1, restart_bottom), (2, continuation_bottom)] {
+                    let mut cell = table.cell(row, 0).expect("cell exists");
+                    if row == 1 {
+                        cell.set_v_merge_restart();
+                    } else {
+                        cell.set_v_merge_continue();
+                    }
+                    if let Some(eighths) = bottom {
+                        cell.set_border_checked(
+                            CellBorderEdge::Bottom,
+                            BorderStyle::Single,
+                            eighths,
+                            "000000",
+                        )
+                        .expect("border is valid");
+                    }
+                }
+            })
+        };
+        // Line to line distances down the second column, which no merge
+        // covers, then the width and centre below the table top of every
+        // horizontal line the first column paints.
+        let geometry = |document: &Document| {
+            let baselines = lines(document)
+                .into_iter()
+                .filter(|(text, ..)| text.ends_with('1') || text == "NEXT")
+                .map(|(_, baseline, _)| baseline)
+                .collect::<Vec<_>>();
+            let pitches = baselines
+                .windows(2)
+                .map(|pair| round(pair[1] - pair[0]))
+                .collect::<Vec<_>>();
+            let result = document
+                .layout_deterministic()
+                .expect("document lays out in deterministic font mode");
+            let table_top = result.body_layout_fragments(0).expect("the table")[0].y;
+            let mut painted = Vec::new();
+            oxml_layout::walk(&result.layout.pages[0].elements, &mut |element, _| {
+                if let oxml_layout::PositionedElement::Line {
+                    start, end, width, ..
+                } = element
+                    && start.y == end.y
+                    && start.x.min(end.x) < 300.0
+                {
+                    painted.push((*width, round(start.y - table_top)));
+                }
+            });
+            (pitches, painted)
+        };
+        // A 3 point bottom on the first cell of the merge is reserved inside
+        // it and never painted, and the last cell's 6 point bottom is the
+        // merge's bottom edge, reserved and painted below it.
+        assert_eq!(
+            geometry(&merged(Some(24), Some(48))),
+            (vec![14.0, 17.0, 20.0, 14.0, 14.0], vec![(6.0, 48.0)])
+        );
+        // With no bottom on the last cell, the merge has no bottom edge.
+        assert_eq!(
+            geometry(&merged(Some(48), None)),
+            (vec![14.0, 20.0, 14.0, 14.0, 14.0], Vec::new())
+        );
+    }
+
+    /// Word 16 measurements. Word closes a table on every page it breaks
+    /// across: the last row of a page takes the table's bottom border below
+    /// it, with room kept for it, and the first row of the next page takes
+    /// the table's top border. Layout kept the inside border at both ends, so
+    /// a row that Word moves to the next page stayed on the page.
+    #[test]
+    fn a_table_broken_across_pages_keeps_its_top_and_bottom_borders_on_each_page() {
+        // An exact line of `top` points, then sixty one-line rows under a
+        // 6 point top border, 1 point inside borders and a 3 point bottom.
+        // Per page: the first-column labels and baselines, the horizontal
+        // lines as width and centre, and the table's top and bottom.
+        let layout = |top: f64| {
+            let mut document = Document::new();
+            let mut first = document.add_paragraph("TOP");
+            first.set_line_spacing(top);
+            first.set_space_before(Length::pt(0.0));
+            first.set_space_after(Length::pt(0.0));
+            {
+                let mut table = document.add_table(60, 2);
+                table.set_cell_margins(
+                    Length::pt(0.0),
+                    Length::pt(5.0),
+                    Length::pt(0.0),
+                    Length::pt(5.0),
+                );
+                table.set_borders(BorderStyle::Single, 8, "000000");
+                for (edge, eighths) in [(TableBorderEdge::Top, 48), (TableBorderEdge::Bottom, 24)] {
+                    table
+                        .set_border_checked(edge, BorderStyle::Single, eighths, "000000")
+                        .expect("border is valid");
+                }
+                for row in 0..60 {
+                    for column in 0..2 {
+                        let mut cell = table.cell(row, column).expect("cell exists");
+                        cell.set_text(&format!("{}{row:02}", ["A", "B"][column]));
+                        let mut paragraph = cell.paragraph_mut(0).expect("cell paragraph");
+                        paragraph.set_line_spacing(14.0);
+                        paragraph.set_space_before(Length::pt(0.0));
+                        paragraph.set_space_after(Length::pt(0.0));
+                    }
+                }
+            }
+            let result = document
+                .layout_deterministic()
+                .expect("document lays out in deterministic font mode");
+            let mut pages = Vec::new();
+            for page in &result.layout.pages {
+                let mut rows = Vec::new();
+                let mut lines = Vec::new();
+                oxml_layout::walk(&page.elements, &mut |element, _| match element {
+                    oxml_layout::PositionedElement::Text(run) if run.text.starts_with('A') => {
+                        rows.push((run.text.trim().to_owned(), round(run.origin.y)));
+                    }
+                    oxml_layout::PositionedElement::Line {
+                        start, end, width, ..
+                    } if start.y == end.y => lines.push((*width, round(start.y))),
+                    _ => {}
+                });
+                lines.sort_by(|a, b| a.1.total_cmp(&b.1));
+                lines.dedup();
+                pages.push((rows, lines));
+            }
+            let boxes = result
+                .body_layout_fragments(1)
+                .expect("the table")
+                .iter()
+                .map(|fragment| (round(fragment.y), round(fragment.y + fragment.height)))
+                .collect::<Vec<_>>();
+            (pages, boxes)
+        };
+
+        // 12.5 points leave 15.5 under row 40: room for row 41 and its 1 point
+        // band, but not for the 3 point bottom border it would need below it.
+        let (pages, boxes) = layout(12.5);
+        let (first_rows, first_lines) = &pages[0];
+        let (second_rows, second_lines) = &pages[1];
+        assert_eq!(first_rows.last().expect("rows on page 1").0, "A40");
+        assert_eq!(second_rows[0].0, "A41");
+        // 9.5 points leave 18.5, room for all three.
+        assert_eq!(layout(9.5).0[0].0.last().expect("rows on page 1").0, "A41");
+        // Page 1 ends with the table's 3 point bottom border below row 40.
+        assert_eq!(first_lines.last(), Some(&(3.0, round(boxes[0].1 - 1.5))));
+        // Page 2 opens with the 6 point top border, and row 41 sits under it
+        // exactly as row 0 sits under it on page 1.
+        assert_eq!(second_lines[0], (6.0, round(boxes[1].0 + 3.0)));
+        assert_eq!(
+            round(second_rows[0].1 - boxes[1].0),
+            round(first_rows[0].1 - boxes[0].0)
         );
     }
 }

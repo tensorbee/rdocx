@@ -1158,7 +1158,7 @@ impl<'a> StoryItemRef<'a> {
             .into_iter()
             .map(|link| {
                 self.document
-                    .story_link_info(&self.location.story, source.xml.as_ref(), link)
+                    .story_link_info(&self.location.story, source.xml.as_ref(), link, None)
             })
             .collect()
     }
@@ -4921,6 +4921,7 @@ thread_local! {
     static LAYOUT_INVOCATIONS: Cell<usize> = const { Cell::new(0) };
     static FAIL_NEXT_HEADER_FOOTER_SERIALIZATION: Cell<bool> = const { Cell::new(false) };
     static STORY_SOURCE_BUILDS: Cell<usize> = const { Cell::new(0) };
+    static STORY_TEXT_EVENTS: Cell<usize> = const { Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -5623,6 +5624,51 @@ fn story_item_text_with_scope(
     let (closed, added) = scoped_story_fragment(xml, item.scan.clone(), scope)?;
     let local = local_story_item(item, item.scan.start, closed.len(), added);
     story_item_text(&closed, &local)
+}
+
+/// Read a hyperlink's text from its own span. The inherited bindings sit on a
+/// parent element the text walker skips, so every prefix resolves as it does
+/// in the part while the walker still starts at the link, exactly as the read
+/// from the head of the part does.
+fn story_link_text_with_scope(
+    xml: &[u8],
+    link: &Range<usize>,
+    scope: &BTreeMap<String, String>,
+) -> Result<Option<String>> {
+    let span = xml
+        .get(link.clone())
+        .ok_or_else(|| Error::Other("story link lies outside its source part".to_owned()))?;
+    let mut wrapped = b"<rdocx-link-scope".to_vec();
+    for (prefix, namespace) in scope {
+        if prefix == "xml" {
+            continue;
+        }
+        wrapped.extend_from_slice(b" xmlns");
+        if !prefix.is_empty() {
+            wrapped.push(b':');
+            wrapped.extend_from_slice(prefix.as_bytes());
+        }
+        wrapped.extend_from_slice(b"=\"");
+        wrapped.extend_from_slice(quick_xml::escape::escape(namespace).as_bytes());
+        wrapped.push(b'"');
+    }
+    wrapped.push(b'>');
+    let start = wrapped.len();
+    wrapped.extend_from_slice(span);
+    let end = wrapped.len();
+    wrapped.extend_from_slice(b"</rdocx-link-scope>");
+    story_item_text(
+        &wrapped,
+        &StoryItemSpan {
+            kind: StoryItemKind::Paragraph,
+            full: start..end,
+            scan: start..end,
+            direct_owner_child: false,
+            complex_field: false,
+            complex_ancestors: Vec::new(),
+            sdt_context: None,
+        },
+    )
 }
 
 fn scan_story_item_links_with_scope(
@@ -7821,6 +7867,8 @@ fn story_item_text(xml: &[u8], item: &StoryItemSpan) -> Result<Option<String>> {
         let (namespace, event) = reader
             .read_resolved_event_into(&mut buffer)
             .map_err(|error| Error::Other(format!("story text scan failed: {error}")))?;
+        #[cfg(test)]
+        STORY_TEXT_EVENTS.set(STORY_TEXT_EVENTS.get() + 1);
         let namespace_kind = story_namespace(&namespace);
         let is_word_namespace = namespace_kind == StoryNamespace::Word;
         drop(namespace);
@@ -13141,6 +13189,7 @@ impl Document {
         story: &StoryId,
         xml: &[u8],
         link: StoryLinkSpan,
+        scope: Option<&BTreeMap<String, String>>,
     ) -> Result<LinkInfo> {
         let text_item = StoryItemSpan {
             kind: StoryItemKind::Paragraph,
@@ -13151,7 +13200,13 @@ impl Document {
             complex_ancestors: Vec::new(),
             sdt_context: None,
         };
-        let text = story_item_text(xml, &text_item)?.unwrap_or_default();
+        // A scope inventoried up front lets the text scan read only the link
+        // span. Without one, the scan starts at the head of the part.
+        let text = match scope {
+            Some(scope) => story_link_text_with_scope(xml, &text_item.scan, scope)?,
+            None => story_item_text(xml, &text_item)?,
+        }
+        .unwrap_or_default();
         let url = link
             .rel_id
             .as_deref()
@@ -13176,7 +13231,7 @@ impl Document {
                 let source_position = link.full.start;
                 let source_end = link.full.end;
                 let owner_width = item.full.end - item.full.start;
-                let info = self.story_link_info(story, source.xml.as_ref(), link)?;
+                let info = self.story_link_info(story, source.xml.as_ref(), link, None)?;
                 links.push((
                     source_position,
                     source_end,
@@ -13235,31 +13290,51 @@ impl Document {
                     .iter()
                     .flat_map(|(_, items)| items.iter().map(|item| item.scan.start)),
             )?;
+            let mut story_spans = Vec::new();
             for (story, items) in inventories {
-                let mut links = Vec::new();
+                let mut spans = Vec::new();
                 for (index, item) in items.into_iter().enumerate() {
                     let scope = item_scopes.get(&item.scan.start).ok_or_else(|| {
                         Error::Other("story item namespace scope was not inventoried".to_owned())
                     })?;
                     for link in scan_story_item_links_with_scope(source.xml.as_ref(), &item, scope)?
                     {
-                        let source_position = link.full.start;
-                        let source_end = link.full.end;
-                        let owner_width = item.full.end - item.full.start;
-                        let info = self.story_link_info(&story, source.xml.as_ref(), link)?;
-                        links.push((
-                            source_position,
-                            source_end,
-                            owner_width,
-                            ContentLocation {
-                                story: story.clone(),
-                                item_kind: item.kind,
-                                index_path: vec![index],
-                                is_end: false,
-                            },
-                            info,
-                        ));
+                        spans.push((index, item.kind, item.full.end - item.full.start, link));
                     }
+                }
+                story_spans.push((story, spans));
+            }
+            // One pass inventories the namespace scope of every link, so each
+            // link's text is read from its own span rather than from the head
+            // of the part, which made the whole inventory quadratic.
+            let link_scopes = story_namespace_scopes_at(
+                source.xml.as_ref(),
+                story_spans
+                    .iter()
+                    .flat_map(|(_, spans)| spans.iter().map(|(_, _, _, link)| link.full.start)),
+            )?;
+            for (story, spans) in story_spans {
+                let mut links = Vec::new();
+                for (index, item_kind, owner_width, link) in spans {
+                    let scope = link_scopes.get(&link.full.start).ok_or_else(|| {
+                        Error::Other("story link namespace scope was not inventoried".to_owned())
+                    })?;
+                    let source_position = link.full.start;
+                    let source_end = link.full.end;
+                    let info =
+                        self.story_link_info(&story, source.xml.as_ref(), link, Some(scope))?;
+                    links.push((
+                        source_position,
+                        source_end,
+                        owner_width,
+                        ContentLocation {
+                            story: story.clone(),
+                            item_kind,
+                            index_path: vec![index],
+                            is_end: false,
+                        },
+                        info,
+                    ));
                 }
                 links.sort_by_key(|(source_position, _, owner_width, _, _)| {
                     (*source_position, *owner_width)
@@ -22336,6 +22411,14 @@ impl Document {
                 .as_ref()
                 .and_then(CT_Settings::gutter_at_top)
                 .unwrap_or(false),
+            do_not_use_html_paragraph_auto_spacing: self
+                .settings
+                .as_ref()
+                .and_then(|settings| {
+                    settings
+                        .compatibility_option(CompatibilityOption::DoNotUseHTMLParagraphAutoSpacing)
+                })
+                .unwrap_or(false),
             math_properties: self
                 .settings
                 .as_ref()
@@ -24694,6 +24777,33 @@ mod tests {
             assert!(document.story_link_snapshots().unwrap().is_empty());
             assert_eq!(STORY_SOURCE_BUILDS.get(), 1);
         }
+    }
+
+    #[test]
+    fn story_link_snapshots_read_each_link_from_its_own_span() {
+        let mut events = Vec::new();
+        for paragraph_count in [64, 128] {
+            let mut document = Document::new();
+            let relationship_id = document.add_hyperlink_relationship("https://example.com/");
+            for index in 0..paragraph_count {
+                document
+                    .add_paragraph(&format!("paragraph {index}"))
+                    .add_hyperlink("link", &relationship_id);
+            }
+
+            STORY_TEXT_EVENTS.set(0);
+            assert_eq!(
+                document.story_link_snapshots().unwrap().len(),
+                paragraph_count
+            );
+            events.push(STORY_TEXT_EVENTS.get());
+        }
+        // Reading each link from its own span doubles the events when the
+        // links double. Reading from the head of the part quadruples them.
+        assert!(
+            events[1] <= events[0] * 5 / 2,
+            "story text events {events:?}"
+        );
     }
 
     #[test]
