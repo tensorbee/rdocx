@@ -341,7 +341,8 @@ impl TextUnderline {
         })
     }
 
-    const fn as_str(self) -> &'static str {
+    /// Returns the `ST_TextUnderlineType` token as written in the file.
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::None => "none",
             Self::Words => "words",

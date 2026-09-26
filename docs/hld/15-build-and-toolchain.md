@@ -317,11 +317,11 @@ date, byte size, and digest. The verified package inventory must contain both
 files and the shared raster encoder source graph while every generated archive
 stays below the crates.io 10 MiB ceiling.
 
-The publishable `rpptx-cli` binary contains nine commands. Its `thumbnail`
-command uses the deterministic presentation renderer, and its `outline`
-command depends only on facade traversal. The package dry run and archive-size
-gate therefore cover the complete command surface without adding runtime
-assets to the CLI crate.
+The publishable `rpptx-cli` binary contains ten commands. Its `thumbnail`
+command uses the deterministic presentation renderer, and its `outline` and
+`comment` commands depend only on the facade. The package dry run and
+archive-size gate therefore cover the complete command surface without adding
+runtime assets to the CLI crate.
 
 Rust tags build one selected CLI family across six native targets. GNU Linux
 x86-64 and arm64, macOS Intel and arm64, and Windows x86-64 use the CLI default

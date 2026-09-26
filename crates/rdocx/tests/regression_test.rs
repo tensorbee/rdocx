@@ -32395,3 +32395,89 @@ mod f266c_character_grid_and_vertical_text_regressions {
         );
     }
 }
+
+#[test]
+fn story_link_snapshots_read_link_text_from_prefixes_declared_outside_the_link() {
+    // Each hyperlink's runs use a prefix declared on an ancestor outside the
+    // hyperlink span, or on the hyperlink itself. A header part reaches the
+    // scanner as it was read, so the prefixes are not rewritten first. The
+    // package-wide inventory reads each link from its own span with an
+    // inventoried namespace scope, so it must still agree with the per-story
+    // scan that reads from the head of the part.
+    let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let document = document_with_header_story(&format!(
+        concat!(
+            r#"<w:hdr xmlns:w="{0}"><w:p xmlns:ww="{0}">"#,
+            r#"<ww:r><ww:t>before </ww:t></ww:r>"#,
+            r#"<w:hyperlink w:anchor="first"><ww:r><ww:t>first link</ww:t></ww:r></w:hyperlink>"#,
+            r#"</w:p>"#,
+            r#"<w:p><w:hyperlink w:anchor="second" xmlns:x="{0}">"#,
+            r#"<x:r><x:t>second link</x:t></x:r></w:hyperlink></w:p></w:hdr>"#,
+        ),
+        word
+    ));
+    let header = document
+        .stories()
+        .unwrap()
+        .into_iter()
+        .find(|story| story.kind() == StoryKind::Header)
+        .unwrap();
+    let project = |links: Vec<(ContentLocation, rdocx::LinkInfo)>| {
+        links
+            .into_iter()
+            .filter(|(location, _)| location.story() == &header)
+            .map(|(location, link)| (link.text, link.anchor, location.index_path().to_vec()))
+            .collect::<Vec<_>>()
+    };
+
+    let snapshots = project(document.story_link_snapshots().unwrap());
+
+    assert_eq!(snapshots, project(document.story_links(&header).unwrap()));
+    assert_eq!(
+        snapshots
+            .iter()
+            .map(|(text, anchor, _)| (text.as_str(), anchor.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("first link", Some("first")),
+            ("second link", Some("second")),
+        ]
+    );
+}
+
+#[test]
+fn story_link_snapshots_match_story_links_when_a_part_binds_word_twice() {
+    // The header binds Word both as the default namespace and as `q`, and the
+    // tracked insertion inside the link names its attributes with `q`. Reading
+    // the link from its own span must not see more Word prefixes on the link
+    // than the read from the head of the part does.
+    let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let document = document_with_header_story(&format!(
+        concat!(
+            r#"<hdr xmlns="{0}" xmlns:q="{0}"><p><hyperlink q:anchor="a">"#,
+            r#"<ins q:id="1" q:author="A"><r><t>inserted</t></r></ins>"#,
+            r#"</hyperlink></p></hdr>"#,
+        ),
+        word
+    ));
+    let header = document
+        .stories()
+        .unwrap()
+        .into_iter()
+        .find(|story| story.kind() == StoryKind::Header)
+        .unwrap();
+    let project = |links: Vec<(ContentLocation, rdocx::LinkInfo)>| {
+        links
+            .into_iter()
+            .filter(|(location, _)| location.story() == &header)
+            .map(|(location, link)| (link.text, location.index_path().to_vec()))
+            .collect::<Vec<_>>()
+    };
+
+    let snapshots = project(document.story_link_snapshots().unwrap());
+
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots, project(document.story_links(&header).unwrap()));
+    let items = document.story_items(&header).unwrap();
+    assert_eq!(snapshots[0].0, items[0].links().unwrap()[0].text);
+}

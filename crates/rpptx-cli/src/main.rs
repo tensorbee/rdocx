@@ -23,7 +23,15 @@ enum Command {
         json: bool,
     },
     /// Extract slide text in presentation order
-    Text { file: PathBuf },
+    Text {
+        file: PathBuf,
+        /// Output paragraphs, runs, and speaker notes as schema-1 JSON
+        #[arg(long)]
+        json: bool,
+        /// Print speaker notes after each slide's text (JSON always includes them)
+        #[arg(long)]
+        notes: bool,
+    },
     /// Convert a presentation to deterministic PDF or image output
     Convert {
         file: PathBuf,
@@ -86,7 +94,97 @@ enum Command {
         output: Option<PathBuf>,
     },
     /// Print each slide title and recursive paragraph outline
-    Outline { file: PathBuf },
+    Outline {
+        file: PathBuf,
+        /// Output titles, outline items, and speaker notes as schema-1 JSON
+        #[arg(long)]
+        json: bool,
+        /// Print speaker notes after each slide's outline (JSON always includes them)
+        #[arg(long)]
+        notes: bool,
+    },
+    /// Inspect and mutate modern PowerPoint comment threads
+    Comment {
+        #[command(subcommand)]
+        command: CommentCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum CommentCommand {
+    /// List modern comments and their replies in slide order
+    List {
+        file: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a comment to one slide
+    Add {
+        file: PathBuf,
+        /// One-based slide number
+        #[arg(long)]
+        slide: usize,
+        /// Comment author, reused by name or added to the author list
+        #[arg(long)]
+        author: String,
+        /// Initials recorded when the author is added
+        #[arg(long)]
+        initials: Option<String>,
+        #[arg(long)]
+        text: String,
+        /// RFC 3339 creation timestamp
+        #[arg(long)]
+        date: String,
+        #[arg(long, short = 'o')]
+        output: PathBuf,
+        /// Output the operation record as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reply to an existing comment thread
+    Reply {
+        file: PathBuf,
+        /// Comment id of the thread
+        #[arg(long)]
+        id: String,
+        /// Reply author, reused by name or added to the author list
+        #[arg(long)]
+        author: String,
+        #[arg(long)]
+        text: String,
+        /// RFC 3339 creation timestamp
+        #[arg(long)]
+        date: String,
+        #[arg(long, short = 'o')]
+        output: PathBuf,
+        /// Output the operation record as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Mark one comment thread resolved
+    Resolve {
+        file: PathBuf,
+        /// Comment id of the thread
+        #[arg(long)]
+        id: String,
+        #[arg(long, short = 'o')]
+        output: PathBuf,
+        /// Output the operation record as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove one comment with its replies, or one reply
+    Remove {
+        file: PathBuf,
+        /// Comment or reply id
+        #[arg(long)]
+        id: String,
+        #[arg(long, short = 'o')]
+        output: PathBuf,
+        /// Output the operation record as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() {
@@ -104,7 +202,7 @@ fn main() {
 
     let result = match cli.command {
         Command::Inspect { file, json } => commands::inspect(&file, json),
-        Command::Text { file } => commands::text(&file),
+        Command::Text { file, json, notes } => commands::text(&file, json, notes),
         Command::Convert {
             file,
             to,
@@ -149,7 +247,63 @@ fn main() {
             transparent,
         ),
         Command::Thumbnail { file, output } => commands::thumbnail(&file, output.as_deref()),
-        Command::Outline { file } => commands::outline(&file),
+        Command::Outline { file, json, notes } => commands::outline(&file, json, notes),
+        Command::Comment { command } => match command {
+            CommentCommand::List { file, json } => commands::comment_list(&file, json),
+            CommentCommand::Add {
+                file,
+                slide,
+                author,
+                initials,
+                text,
+                date,
+                output,
+                json,
+            } => commands::comment_add(
+                &file,
+                slide,
+                commands::CommentInput {
+                    author: &author,
+                    initials: initials.as_deref(),
+                    text: &text,
+                    date: &date,
+                },
+                &output,
+                json,
+            ),
+            CommentCommand::Reply {
+                file,
+                id,
+                author,
+                text,
+                date,
+                output,
+                json,
+            } => commands::comment_reply(
+                &file,
+                &id,
+                commands::CommentInput {
+                    author: &author,
+                    initials: None,
+                    text: &text,
+                    date: &date,
+                },
+                &output,
+                json,
+            ),
+            CommentCommand::Resolve {
+                file,
+                id,
+                output,
+                json,
+            } => commands::comment_resolve(&file, &id, &output, json),
+            CommentCommand::Remove {
+                file,
+                id,
+                output,
+                json,
+            } => commands::comment_remove(&file, &id, &output, json),
+        },
     };
     if let Err(error) = result {
         eprintln!("Error: {error}");

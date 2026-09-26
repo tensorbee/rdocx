@@ -137,6 +137,8 @@ Presentation::add_comment(&mut self, slide_index: usize, comment: Comment) -> Re
 Presentation::reply_to_comment(&mut self, slide_index: usize, comment_id: &str, reply: CommentReply) -> Result<()>;
 Presentation::move_comment(&mut self, slide_index: usize, from: usize, to: usize) -> Result<()>;
 Presentation::move_reply(&mut self, slide_index: usize, comment_id: &str, from: usize, to: usize) -> Result<()>;
+Presentation::resolve_comment(&mut self, slide_index: usize, comment_id: &str) -> Result<()>;
+Presentation::remove_comment(&mut self, slide_index: usize, comment_id: &str) -> Result<()>;
 Presentation::sections(&self) -> &[Section];
 Presentation::set_sections(&mut self, sections: Vec<Section>) -> Result<()>;
 Presentation::notes_header_footer_mut(&mut self) -> Option<&mut CT_HeaderFooter>;
@@ -165,9 +167,14 @@ for invalidated package and VBA signature evidence.
 
 Callers supply GUIDs and RFC 3339 timestamps. Mutation validates identities,
 authors, indices, section membership, relationship ownership, and occupied
-part paths before committing a serialized and reopened candidate. Moving a
-slide retains its producer slide id. Removing a slide removes that id from
-section membership and removes only collaboration content owned by that slide.
+part paths before committing a serialized and reopened candidate. Resolving
+writes the `resolved` status on a thread's top-level comment, so a reply id is
+unknown to it. Removing a top-level comment also removes its replies, and
+removing a reply leaves its thread in place. A slide keeps its comment part,
+relationship, and `p188:commentRel` reference after its last comment goes, so
+the part holds an empty `p188:cmLst`. Moving a slide retains its producer
+slide id. Removing a slide removes that id from section membership and removes
+only collaboration content owned by that slide.
 
 Core properties use the package-level relationship described in
 `04-opc-and-packaging.md`. Read access does not dirty the source part. Mutable
@@ -235,6 +242,11 @@ row-major cell text with tabs between cells and newlines between rows. Other
 shape kinds have no direct text. `ShapeRef` equality is node identity. Two
 handles compare equal only when they borrow the same underlying shape-tree
 child, rather than when separate shapes happen to contain equal XML.
+`ShapeRef::rotation` reads the rotation of the child's own transform and
+returns `None` when the child has none, as a placeholder that inherits its
+geometry does. `ShapeRef::placeholder_type` returns the explicit
+`ST_PlaceholderType` token and `None` when the placeholder omits its type,
+without applying an inherited or default type.
 
 `slide_mut(index)` exposes a borrowed `SlideMut` handle. Its `shape(index)`
 method retains read access, while `shape_mut(index)` returns a `ShapeMut` for an

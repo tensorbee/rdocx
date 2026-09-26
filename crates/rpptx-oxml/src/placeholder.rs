@@ -65,7 +65,8 @@ impl PhType {
         }
     }
 
-    fn as_str(&self) -> &str {
+    /// Returns the `ST_PlaceholderType` token as written in the file.
+    pub fn as_str(&self) -> &str {
         match self {
             Self::Title => "title",
             Self::Body => "body",

@@ -300,6 +300,13 @@ impl Comment {
     pub fn move_reply(&mut self, from: usize, to: usize) -> Result<()> {
         move_item(&mut self.replies, from, to, "comment reply")
     }
+
+    /// Removes the reply with `id` and reports whether one was removed.
+    pub fn remove_reply(&mut self, id: &str) -> bool {
+        let count = self.replies.len();
+        self.replies.retain(|reply| reply.id != id);
+        self.replies.len() != count
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -1353,11 +1353,13 @@ and RFC 3339 timestamps, and mutation returns the ordinary facade `Result`
 without creating an allocator, clock, trait, generic, or builder.
 
 The additive methods are `comment_authors`, `add_comment_author`, `comments`,
-`add_comment`, `reply_to_comment`, `move_comment`, `move_reply`, `sections`,
-`set_sections`, `notes_header_footer_mut`, and `handout_header_footer_mut`.
-They remain native Rust only. Python, WASM, and CLI consumers gain no
-collaboration or navigation methods and continue to preserve these package
-parts through their existing `Presentation` owner.
+`add_comment`, `reply_to_comment`, `resolve_comment`, `remove_comment`,
+`move_comment`, `move_reply`, `sections`, `set_sections`,
+`notes_header_footer_mut`, and `handout_header_footer_mut`. Python exposes the
+comment snapshots, additions, and moves described with the presentation
+binding, and `rpptx comment` exposes the comment operations described under
+CLIs. WASM consumers gain no collaboration or navigation methods and continue
+to preserve these package parts through their existing `Presentation` owner.
 
 The low-level `rpptx-oxml` model adds the approved `comments` module and
 extends existing presentation, notes, slide, relationship, and content-type
@@ -1823,12 +1825,26 @@ or tag authority.
 ## CLIs
 
 `rpptx-cli` extends the seven-command `rdocx-cli` surface with `inspect`,
-`text`, `convert`, `diff`, `replace`, `validate`, `render`, `thumbnail`, and
-`outline`. It uses clap derive and `serde_json` for `--json`.
+`text`, `convert`, `diff`, `replace`, `validate`, `render`, `thumbnail`,
+`outline`, and `comment`. It uses clap derive and `serde_json` for `--json`.
 
 `inspect` reports the file, slide and layout counts, slide size, core metadata,
 and each slide's identity, hidden state, and shape count. Its JSON form uses the
-shared schema-1 envelope. `text` emits slide text in presentation order.
+shared schema-1 envelope. Beside each slide's shape count, `shape_details`
+lists every immediate shape in z-order with its index, non-visual id and name,
+kind, placeholder type and index, direct position and size in EMU, rotation in
+degrees, direct autofit mode, paragraphs, table size, and children. A
+placeholder that inherits its transform reports null geometry, and a
+placeholder without an explicit type reports a null type. `text` emits slide
+text in presentation order. `text --json` emits schema-1 slides with a one-based
+slide number, the slide id, paragraphs, and speaker notes, which are null when
+the slide has no notes part. Each paragraph carries a typed zero-based path of
+shape, table row, table cell, and paragraph positions, the owning shape id, its
+level, its visible text, and its regular runs. Run indexes match
+`TextParagraphRef::run`, so fields and line breaks appear only in the paragraph
+text, where a line break is U+000B. Run formatting is null without direct run
+properties. Otherwise it contains nullable direct bold, italic, underline token,
+Latin font, point size, and sRGB colour fields.
 `convert` produces deterministic PDF, PNG, JPEG or TIFF output. Multi-slide PNG
 and JPEG output uses one-based filename suffixes and renders one slide at a
 time, while TIFF writes one multi-page stream. `diff` compares slide text with
@@ -1848,7 +1864,35 @@ wide and preserves the rendered page aspect ratio. Its output defaults through
 the shared extension helper. `outline` prints each slide title once, followed
 by non-title text paragraphs in recursive shape z-order. Tables use row-major
 cell order, paragraph levels add two spaces of indentation, empty text is
-omitted, and embedded paragraph breaks become spaces.
+omitted, and embedded paragraph breaks become spaces. `outline --json` reports
+the same title, or null for an untitled slide, the same items with their
+levels, and the speaker notes. Notes are the plain text of the notes body, with
+paragraphs and line breaks both written as newlines. `text --notes` and
+`outline --notes` print one `Notes:` line for each non-empty notes line after
+the slide's plain output. JSON output always carries the notes.
+
+The structured output reads public facade values only. `ShapeRef` gains
+`rotation` and `placeholder_type`, and `PhType::as_str` and
+`TextUnderline::as_str` become public. These are additive changes to the
+pre-1.0 `rpptx`, `rpptx-oxml`, and `oxml-drawing` crates.
+
+`comment` lists, adds, replies to, resolves, and removes modern PowerPoint
+comments. Legacy comment parts stay preserved and unlisted. `list` shows a
+comment or reply without a status, or with the `active` status, as open, and a
+`resolved` or `closed` one as such. Its JSON carries the `resolved` flag
+beside the raw `status` token. `add` takes a one-based `--slide`. `add` and
+`reply` require an RFC 3339 `--date`, reuse the first author with the given
+name, and otherwise add an author whose `userId` is that name and whose
+`providerId` is `None`. They refuse an author, initials, or text that XML 1.0
+cannot carry before writing anything. New author, comment, and reply ids are
+the first unused sequential GUIDs, so the output depends on neither a clock nor
+a random source. `resolve` accepts only a thread id. `remove` accepts a thread
+id, which removes its replies, or a reply id. Every mutation requires an
+explicit output, refuses an existing one, and publishes through the shared
+staged output set. Its schema-1 record states the action, comment id,
+one-based slide, and output path. The commands use the additive
+`Presentation::resolve_comment` and `Presentation::remove_comment` facade
+methods, which rest on the new `Comment::remove_reply`.
 
 Shared range parsing, output-path defaulting, and JSON envelope rules live in
 `oxml-cli-support`. Ranges are positive, one-based, comma-separated values and

@@ -6,7 +6,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use oxml_opc::relationship::rel_types;
 use oxml_opc::{OpcPackage, content_types};
-use rpptx::{CT_TextCharacterProperties, Emu, Presentation};
+use rpptx::{Angle, CT_TextCharacterProperties, Comment, CommentAuthor, Emu, Presentation};
+use serde_json::json;
 
 static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -209,6 +210,70 @@ fn make_title_field_only(path: &Path) {
     assert!(xml.contains(field));
     package.set_part(&slide_part, xml.into_bytes());
     package.save(path).expect("write field-only title fixture");
+}
+
+/// Writes a title-and-content slide with a rotated, formatted text box, a
+/// table, and an autofit text body, followed by a blank slide.
+fn write_structured_deck(path: &Path) {
+    let mut presentation = Presentation::new().expect("open bundled template");
+    presentation
+        .add_slide(1)
+        .expect("add title and content slide");
+    let title_index = presentation
+        .slide(0)
+        .unwrap()
+        .shapes()
+        .position(|shape| shape.placeholder_type() == Some("title"))
+        .expect("layout supplies a title placeholder");
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .shape_mut(title_index)
+        .unwrap()
+        .set_text("Roadmap")
+        .unwrap();
+    {
+        let mut slide = presentation.slide_mut(0).unwrap();
+        let mut shape = slide
+            .add_textbox(Emu(100_000), Emu(200_000), Emu(3_000_000), Emu(800_000))
+            .unwrap();
+        shape.set_rotation(Angle::from_degrees(45.0)).unwrap();
+        shape.set_text("plain ").unwrap();
+        let mut frame = shape.text_frame().unwrap();
+        frame.paragraph_mut(0).unwrap().add_run("rich").set_properties(
+            CT_TextCharacterProperties::from_xml(
+                br#"<a:rPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" sz="1800" b="1" i="0" u="sng"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill><a:latin typeface="Carlito"/></a:rPr>"#,
+            )
+            .unwrap(),
+        );
+        let mut nested = frame.add_paragraph();
+        nested.set_text("nested");
+        assert!(nested.set_level(1));
+    }
+    {
+        let mut slide = presentation.slide_mut(0).unwrap();
+        let mut frame = slide
+            .add_table(1, 2, Emu(0), Emu(1_000_000), Emu(2_000_000), Emu(400_000))
+            .unwrap();
+        let mut table = frame.table_mut().unwrap();
+        table.cell_mut(0, 0).unwrap().set_text("A1");
+        table.cell_mut(0, 1).unwrap().set_text("B1");
+    }
+    presentation.add_slide(6).expect("add blank slide");
+    presentation.save(path).expect("write structured deck");
+
+    let mut package = OpcPackage::open(path).expect("open structured deck");
+    let slide_part = "/ppt/slides/slide1.xml";
+    let xml = String::from_utf8(package.get_part(slide_part).unwrap().to_vec()).unwrap();
+    let marker = xml.find(">plain </a:t>").expect("text box marker");
+    let body = xml[..marker].rfind("<a:bodyPr/>").expect("text box body");
+    let xml = format!(
+        "{}<a:bodyPr><a:normAutofit/></a:bodyPr>{}",
+        &xml[..body],
+        &xml[body + "<a:bodyPr/>".len()..]
+    );
+    package.set_part(slide_part, xml.into_bytes());
+    package.save(path).expect("write autofit text box");
 }
 
 fn corpus_dir() -> PathBuf {
@@ -426,6 +491,7 @@ fn inspect_and_text_report_presentation_order() {
         "render",
         "thumbnail",
         "outline",
+        "comment",
     ] {
         assert!(help.contains(command), "missing command {command}");
     }
@@ -962,4 +1028,736 @@ fn rpptx_replace_is_guarded_counted_and_includes_notes() {
             .to_string_lossy()
             .ends_with(".tmp")
     }));
+}
+
+#[test]
+fn text_json_anchors_paragraphs_by_typed_shape_paths_with_direct_run_formatting() {
+    let temp = TempWorkspace::new("text-json");
+    let deck = temp.path.join("structured.pptx");
+    write_structured_deck(&deck);
+    add_speaker_notes(&deck, "Presenter reminder");
+    let shape = |index: usize| json!({ "kind": "shape", "index": index });
+    let paragraph = |index: usize| json!({ "kind": "paragraph", "index": index });
+    let cell = |index: usize| json!({ "kind": "cell", "index": index });
+    let row = json!({ "kind": "row", "index": 0 });
+    let plain_run = |text: &str| json!([{ "index": 0, "text": text, "formatting": null }]);
+
+    let output = cli(&["text", deck.to_str().unwrap(), "--json"]);
+    assert!(
+        output.status.success(),
+        "text --json failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        value,
+        json!({
+            "schema": 1,
+            "slides": [
+                {
+                    "slide": 1,
+                    "id": 256,
+                    "paragraphs": [
+                        {
+                            "path": [shape(0), paragraph(0)],
+                            "shape_id": 2,
+                            "level": 0,
+                            "text": "Roadmap",
+                            "runs": plain_run("Roadmap"),
+                        },
+                        {
+                            "path": [shape(1), paragraph(0)],
+                            "shape_id": 3,
+                            "level": 0,
+                            "text": "",
+                            "runs": [],
+                        },
+                        {
+                            "path": [shape(2), paragraph(0)],
+                            "shape_id": 4,
+                            "level": 0,
+                            "text": "plain rich",
+                            "runs": [
+                                { "index": 0, "text": "plain ", "formatting": null },
+                                {
+                                    "index": 1,
+                                    "text": "rich",
+                                    "formatting": {
+                                        "bold": true,
+                                        "italic": false,
+                                        "underline": "sng",
+                                        "font": "Carlito",
+                                        "size_points": 18.0,
+                                        "color": "FF0000",
+                                    },
+                                },
+                            ],
+                        },
+                        {
+                            "path": [shape(2), paragraph(1)],
+                            "shape_id": 4,
+                            "level": 1,
+                            "text": "nested",
+                            "runs": plain_run("nested"),
+                        },
+                        {
+                            "path": [shape(3), row.clone(), cell(0), paragraph(0)],
+                            "shape_id": 5,
+                            "level": 0,
+                            "text": "A1",
+                            "runs": plain_run("A1"),
+                        },
+                        {
+                            "path": [shape(3), row.clone(), cell(1), paragraph(0)],
+                            "shape_id": 5,
+                            "level": 0,
+                            "text": "B1",
+                            "runs": plain_run("B1"),
+                        },
+                    ],
+                    "notes": "Presenter reminder",
+                },
+                { "slide": 2, "id": 257, "paragraphs": [], "notes": null },
+            ],
+        })
+    );
+
+    let grouped = temp.path.join("grouped.pptx");
+    write_outline_deck(&grouped);
+    let output = cli(&["text", grouped.to_str().unwrap(), "--json"]);
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        value["slides"][0]["paragraphs"].as_array().unwrap().last(),
+        Some(&json!({
+            "path": [shape(3), shape(0), paragraph(0)],
+            "shape_id": 6,
+            "level": 0,
+            "text": "Grouped\u{b}item",
+            "runs": [
+                { "index": 0, "text": "Grouped", "formatting": null },
+                { "index": 1, "text": "item", "formatting": null },
+            ],
+        }))
+    );
+}
+
+#[test]
+fn inspect_json_adds_shape_details_without_changing_existing_slide_keys() {
+    let temp = TempWorkspace::new("inspect-shapes");
+    let deck = temp.path.join("structured.pptx");
+    write_structured_deck(&deck);
+    let paragraph = |index: usize, level: u8, text: &str| {
+        json!({
+            "index": index,
+            "level": level,
+            "text": text,
+            "runs": [{ "index": 0, "text": text, "formatting": null }],
+        })
+    };
+
+    let output = cli(&["inspect", deck.to_str().unwrap(), "--json"]);
+    assert!(
+        output.status.success(),
+        "inspect --json failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["slides"], 2);
+    assert_eq!(
+        value["slide_details"],
+        json!([
+            {
+                "id": 256,
+                "name": null,
+                "hidden": false,
+                "shapes": 4,
+                "shape_details": [
+                    {
+                        "index": 0,
+                        "id": 2,
+                        "name": "Placeholder 2",
+                        "kind": "shape",
+                        "placeholder": { "type": "title", "idx": 0 },
+                        "position": null,
+                        "size": null,
+                        "rotation_degrees": null,
+                        "autofit": null,
+                        "paragraphs": [paragraph(0, 0, "Roadmap")],
+                        "table": null,
+                        "children": [],
+                    },
+                    {
+                        "index": 1,
+                        "id": 3,
+                        "name": "Placeholder 3",
+                        "kind": "shape",
+                        "placeholder": { "type": null, "idx": 1 },
+                        "position": null,
+                        "size": null,
+                        "rotation_degrees": null,
+                        "autofit": null,
+                        "paragraphs": [{ "index": 0, "level": 0, "text": "", "runs": [] }],
+                        "table": null,
+                        "children": [],
+                    },
+                    {
+                        "index": 2,
+                        "id": 4,
+                        "name": "TextBox 4",
+                        "kind": "shape",
+                        "placeholder": null,
+                        "position": { "left_emu": 100_000, "top_emu": 200_000 },
+                        "size": { "width_emu": 3_000_000, "height_emu": 800_000 },
+                        "rotation_degrees": 45.0,
+                        "autofit": "normal",
+                        "paragraphs": [
+                            {
+                                "index": 0,
+                                "level": 0,
+                                "text": "plain rich",
+                                "runs": [
+                                    { "index": 0, "text": "plain ", "formatting": null },
+                                    {
+                                        "index": 1,
+                                        "text": "rich",
+                                        "formatting": {
+                                            "bold": true,
+                                            "italic": false,
+                                            "underline": "sng",
+                                            "font": "Carlito",
+                                            "size_points": 18.0,
+                                            "color": "FF0000",
+                                        },
+                                    },
+                                ],
+                            },
+                            paragraph(1, 1, "nested"),
+                        ],
+                        "table": null,
+                        "children": [],
+                    },
+                    {
+                        "index": 3,
+                        "id": 5,
+                        "name": "Table 5",
+                        "kind": "graphic-frame",
+                        "placeholder": null,
+                        "position": { "left_emu": 0, "top_emu": 1_000_000 },
+                        "size": { "width_emu": 2_000_000, "height_emu": 400_000 },
+                        "rotation_degrees": 0.0,
+                        "autofit": null,
+                        "paragraphs": null,
+                        "table": { "rows": 1, "columns": 2 },
+                        "children": [],
+                    },
+                ],
+            },
+            { "id": 257, "name": null, "hidden": false, "shapes": 0, "shape_details": [] },
+        ])
+    );
+
+    let grouped = temp.path.join("grouped.pptx");
+    write_outline_deck(&grouped);
+    let output = cli(&["inspect", grouped.to_str().unwrap(), "--json"]);
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let shapes = &value["slide_details"][0]["shape_details"];
+    assert_eq!(
+        shapes[1]["placeholder"],
+        json!({ "type": "ctrTitle", "idx": 0 })
+    );
+    assert_eq!(shapes[3]["kind"], "group");
+    assert_eq!(shapes[3]["paragraphs"], serde_json::Value::Null);
+    let children = shapes[3]["children"].as_array().unwrap();
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0]["index"], 0);
+    assert_eq!(children[0]["id"], 6);
+    assert_eq!(children[0]["paragraphs"][0]["text"], "Grouped\u{b}item");
+}
+
+#[test]
+fn outline_json_reports_the_plain_outline_titles_levels_and_notes() {
+    let temp = TempWorkspace::new("outline-json");
+    let deck = temp.path.join("structured.pptx");
+    write_structured_deck(&deck);
+    add_speaker_notes(&deck, "Presenter reminder");
+
+    let plain = cli(&["outline", deck.to_str().unwrap()]);
+    assert!(plain.status.success());
+    assert_eq!(
+        String::from_utf8(plain.stdout).unwrap(),
+        "Slide 1: Roadmap\n- plain rich\n  - nested\n- A1\n- B1\nSlide 2\n"
+    );
+
+    let output = cli(&["outline", deck.to_str().unwrap(), "--json"]);
+    assert!(
+        output.status.success(),
+        "outline --json failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let with_notes_flag = cli(&["outline", deck.to_str().unwrap(), "--json", "--notes"]);
+    assert_eq!(with_notes_flag.stdout, output.stdout);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        value,
+        json!({
+            "schema": 1,
+            "slides": [
+                {
+                    "slide": 1,
+                    "id": 256,
+                    "title": "Roadmap",
+                    "items": [
+                        { "level": 0, "text": "plain rich" },
+                        { "level": 1, "text": "nested" },
+                        { "level": 0, "text": "A1" },
+                        { "level": 0, "text": "B1" },
+                    ],
+                    "notes": "Presenter reminder",
+                },
+                { "slide": 2, "id": 257, "title": null, "items": [], "notes": null },
+            ],
+        })
+    );
+}
+
+#[test]
+fn plain_text_and_outline_print_speaker_notes_only_with_the_notes_flag() {
+    let temp = TempWorkspace::new("notes-flag");
+    let deck = temp.path.join("notes.pptx");
+    write_deck(&deck, &["first slide", "second slide"]);
+    // The helper writes its text into one run, so closing that run opens an
+    // empty notes paragraph and a second non-empty one.
+    add_speaker_notes(
+        &deck,
+        "Presenter reminder</a:t></a:r></a:p><a:p/><a:p><a:r><a:t>Second line",
+    );
+    let path = deck.to_str().unwrap();
+
+    for (args, expected) in [
+        (vec!["text", path], "first slide\nsecond slide\n"),
+        (
+            vec!["text", path, "--notes"],
+            "first slide\nNotes: Presenter reminder\nNotes: Second line\nsecond slide\n",
+        ),
+        (
+            vec!["outline", path],
+            "Slide 1\n- first slide\nSlide 2\n- second slide\n",
+        ),
+        (
+            vec!["outline", path, "--notes"],
+            "Slide 1\n- first slide\nNotes: Presenter reminder\nNotes: Second line\nSlide 2\n- second slide\n",
+        ),
+    ] {
+        let output = cli(&args);
+        assert!(output.status.success(), "{args:?} failed");
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            expected,
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn comment_commands_round_trip_one_resolved_thread() {
+    let temp = TempWorkspace::new("comment-round-trip");
+    let input = temp.path.join("input.pptx");
+    let added = temp.path.join("added.pptx");
+    let replied = temp.path.join("replied.pptx");
+    let answered = temp.path.join("answered.pptx");
+    let resolved = temp.path.join("resolved.pptx");
+    let reply_removed = temp.path.join("reply-removed.pptx");
+    let removed = temp.path.join("removed.pptx");
+    write_deck(&input, &["first", "second"]);
+    let input_bytes = fs::read(&input).unwrap();
+    let arg = |path: &Path| path.to_str().unwrap().to_owned();
+    let thread = "{00000000-0000-4000-8000-000000000002}";
+    let bob_reply = "{00000000-0000-4000-8000-000000000004}";
+    let ada_reply = "{00000000-0000-4000-8000-000000000005}";
+    let json_of = |output: Output| -> serde_json::Value {
+        assert!(
+            output.status.success(),
+            "comment command failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+
+    let listed = cli(&["comment", "list", &arg(&input)]);
+    assert_eq!(String::from_utf8(listed.stdout).unwrap(), "(no comments)\n");
+    assert_eq!(
+        json_of(cli(&["comment", "list", &arg(&input), "--json"])),
+        json!({ "schema": 1, "comments": [] })
+    );
+
+    let record = json_of(cli(&[
+        "comment",
+        "add",
+        &arg(&input),
+        "--slide",
+        "2",
+        "--author",
+        "Ada",
+        "--initials",
+        "AL",
+        "--text",
+        "Check this",
+        "--date",
+        "2026-09-25T10:00:00Z",
+        "--output",
+        &arg(&added),
+        "--json",
+    ]));
+    assert_eq!(
+        record,
+        json!({
+            "schema": 1,
+            "action": "add",
+            "comment_id": thread,
+            "slide": 2,
+            "output": arg(&added),
+        })
+    );
+
+    let record = json_of(cli(&[
+        "comment",
+        "reply",
+        &arg(&added),
+        "--id",
+        thread,
+        "--author",
+        "Bob",
+        "--text",
+        "Agreed",
+        "--date",
+        "2026-09-25T11:00:00Z",
+        "--output",
+        &arg(&replied),
+        "--json",
+    ]));
+    assert_eq!(
+        record,
+        json!({
+            "schema": 1,
+            "action": "reply",
+            "comment_id": bob_reply,
+            "parent_id": thread,
+            "slide": 2,
+            "output": arg(&replied),
+        })
+    );
+    let answered_output = cli(&[
+        "comment",
+        "reply",
+        &arg(&replied),
+        "--id",
+        thread,
+        "--author",
+        "Ada",
+        "--text",
+        "Thanks",
+        "--date",
+        "2026-09-25T12:00:00Z",
+        "--output",
+        &arg(&answered),
+    ]);
+    assert!(answered_output.status.success());
+    assert_eq!(
+        String::from_utf8(answered_output.stdout).unwrap(),
+        format!("reply\nWritten to {}\n", answered.display())
+    );
+
+    let resolved_output = cli(&[
+        "comment",
+        "resolve",
+        &arg(&answered),
+        "--id",
+        thread,
+        "--output",
+        &arg(&resolved),
+    ]);
+    assert!(resolved_output.status.success());
+    assert_eq!(
+        String::from_utf8(resolved_output.stdout).unwrap(),
+        format!("resolve\nWritten to {}\n", resolved.display())
+    );
+    let presentation = Presentation::open(&resolved).unwrap();
+    assert_eq!(
+        presentation
+            .comment_authors()
+            .iter()
+            .map(|author| (author.name.as_str(), author.initials.as_deref()))
+            .collect::<Vec<_>>(),
+        [("Ada", Some("AL")), ("Bob", None)]
+    );
+    let entry = |id: &str, author: &str, initials: Option<&str>, date: &str, text: &str| {
+        json!({
+            "slide": 2,
+            "id": id,
+            "author": author,
+            "initials": initials,
+            "date": date,
+            "text": text,
+            "parent_id": (id != thread).then_some(thread),
+            "resolved": id == thread,
+            "status": (id == thread).then_some("resolved"),
+        })
+    };
+    assert_eq!(
+        json_of(cli(&["comment", "list", &arg(&resolved), "--json"])),
+        json!({
+            "schema": 1,
+            "comments": [
+                entry(thread, "Ada", Some("AL"), "2026-09-25T10:00:00Z", "Check this"),
+                entry(bob_reply, "Bob", None, "2026-09-25T11:00:00Z", "Agreed"),
+                entry(ada_reply, "Ada", Some("AL"), "2026-09-25T12:00:00Z", "Thanks"),
+            ],
+        })
+    );
+
+    let record = json_of(cli(&[
+        "comment",
+        "remove",
+        &arg(&resolved),
+        "--id",
+        bob_reply,
+        "--output",
+        &arg(&reply_removed),
+        "--json",
+    ]));
+    assert_eq!(
+        record,
+        json!({
+            "schema": 1,
+            "action": "remove",
+            "comment_id": bob_reply,
+            "slide": 2,
+            "output": arg(&reply_removed),
+        })
+    );
+    let listed = cli(&["comment", "list", &arg(&reply_removed)]);
+    assert_eq!(
+        String::from_utf8(listed.stdout).unwrap(),
+        format!("2\t{thread}\tAda\tresolved\tCheck this\n2\t{ada_reply}\tAda\topen\tThanks\n")
+    );
+
+    let removed_output = cli(&[
+        "comment",
+        "remove",
+        &arg(&reply_removed),
+        "--id",
+        thread,
+        "--output",
+        &arg(&removed),
+    ]);
+    assert!(removed_output.status.success());
+    let listed = cli(&["comment", "list", &arg(&removed)]);
+    assert_eq!(String::from_utf8(listed.stdout).unwrap(), "(no comments)\n");
+
+    for output in [
+        &added,
+        &replied,
+        &answered,
+        &resolved,
+        &reply_removed,
+        &removed,
+    ] {
+        let validated = cli(&["validate", &arg(output)]);
+        assert!(
+            validated.status.success(),
+            "validate failed for {}: {}",
+            output.display(),
+            String::from_utf8_lossy(&validated.stderr)
+        );
+    }
+    assert_eq!(fs::read(&input).unwrap(), input_bytes);
+}
+
+#[test]
+fn comment_list_reports_a_closed_thread_as_closed_rather_than_open() {
+    let temp = TempWorkspace::new("comment-closed");
+    let deck = temp.path.join("closed.pptx");
+    let author = "{11111111-1111-1111-1111-111111111111}";
+    let thread = "{22222222-2222-2222-2222-222222222222}";
+    let mut presentation = Presentation::new().expect("open bundled template");
+    presentation.add_slide(6).expect("add blank slide");
+    presentation
+        .add_comment_author(CommentAuthor::new(author, "Ada", None, "Ada", "None").unwrap())
+        .unwrap();
+    let mut comment = Comment::new(thread, author, "2026-09-25T10:00:00Z", "Done").unwrap();
+    comment.status = Some("closed".to_owned());
+    presentation.add_comment(0, comment).unwrap();
+    presentation.save(&deck).expect("write closed thread deck");
+
+    let listed = cli(&["comment", "list", deck.to_str().unwrap()]);
+    assert!(listed.status.success());
+    assert_eq!(
+        String::from_utf8(listed.stdout).unwrap(),
+        format!("1\t{thread}\tAda\tclosed\tDone\n")
+    );
+    let listed = cli(&["comment", "list", deck.to_str().unwrap(), "--json"]);
+    assert!(listed.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(value["comments"][0]["status"], "closed");
+    assert_eq!(value["comments"][0]["resolved"], false);
+}
+
+#[test]
+fn comment_mutations_fail_without_creating_output() {
+    let temp = TempWorkspace::new("comment-failures");
+    let input = temp.path.join("input.pptx");
+    let commented = temp.path.join("commented.pptx");
+    let replied = temp.path.join("replied.pptx");
+    let output = temp.path.join("output.pptx");
+    write_deck(&input, &["only slide"]);
+    let thread = "{00000000-0000-4000-8000-000000000002}";
+    let reply = "{00000000-0000-4000-8000-000000000004}";
+    let unknown = "{99999999-9999-9999-9999-999999999999}";
+    let date = "2026-09-25T10:00:00Z";
+    let (input, commented, replied, output_path) = (
+        input.to_str().unwrap(),
+        commented.to_str().unwrap(),
+        replied.to_str().unwrap(),
+        output.to_str().unwrap(),
+    );
+    for args in [
+        vec![
+            "comment", "add", input, "--slide", "1", "--author", "Ada", "--text", "Thread",
+            "--date", date, "--output", commented,
+        ],
+        vec![
+            "comment", "reply", commented, "--id", thread, "--author", "Bob", "--text", "Reply",
+            "--date", date, "--output", replied,
+        ],
+    ] {
+        assert!(cli(&args).status.success(), "{args:?} failed");
+    }
+
+    for (args, message) in [
+        (
+            vec![
+                "add", input, "--slide", "0", "--author", "Ada", "--text", "x", "--date", date,
+            ],
+            "slide 0 is out of range for 1 slides".to_owned(),
+        ),
+        (
+            vec![
+                "add", input, "--slide", "2", "--author", "Ada", "--text", "x", "--date", date,
+            ],
+            "slide 2 is out of range for 1 slides".to_owned(),
+        ),
+        (
+            vec![
+                "add",
+                input,
+                "--slide",
+                "1",
+                "--author",
+                "Ada",
+                "--text",
+                "x",
+                "--date",
+                "yesterday",
+            ],
+            "comment timestamp is not RFC 3339: yesterday".to_owned(),
+        ),
+        (
+            vec![
+                "reply", replied, "--id", unknown, "--author", "Ada", "--text", "x", "--date", date,
+            ],
+            format!("comment id {unknown} does not exist"),
+        ),
+        (
+            vec![
+                "reply", replied, "--id", reply, "--author", "Ada", "--text", "x", "--date", date,
+            ],
+            format!("comment id {reply} is a reply in thread {thread}"),
+        ),
+        (
+            vec!["resolve", replied, "--id", reply],
+            format!("comment id {reply} is a reply in thread {thread}"),
+        ),
+        (
+            vec!["resolve", replied, "--id", unknown],
+            format!("comment id {unknown} does not exist"),
+        ),
+        (
+            vec!["remove", replied, "--id", unknown],
+            format!("comment id {unknown} does not exist"),
+        ),
+        (
+            vec![
+                "add",
+                input,
+                "--slide",
+                "1",
+                "--author",
+                "Ada",
+                "--text",
+                "one\u{b}two",
+                "--date",
+                date,
+            ],
+            "comment text contains U+000B, which XML 1.0 cannot carry".to_owned(),
+        ),
+        (
+            vec![
+                "add", input, "--slide", "1", "--author", "A\u{1}da", "--text", "x", "--date", date,
+            ],
+            "comment author contains U+0001, which XML 1.0 cannot carry".to_owned(),
+        ),
+        (
+            vec![
+                "add",
+                input,
+                "--slide",
+                "1",
+                "--author",
+                "Ada",
+                "--initials",
+                "A\u{1f}",
+                "--text",
+                "x",
+                "--date",
+                date,
+            ],
+            "comment initials contains U+001F, which XML 1.0 cannot carry".to_owned(),
+        ),
+        (
+            vec![
+                "reply", replied, "--id", thread, "--author", "Ada", "--text", "x\u{c}", "--date",
+                date,
+            ],
+            "comment text contains U+000C, which XML 1.0 cannot carry".to_owned(),
+        ),
+    ] {
+        let mut command = vec!["comment"];
+        command.extend(&args);
+        command.extend(["--output", output_path, "--json"]);
+        let result = cli(&command);
+        assert_eq!(result.status.code(), Some(1), "{args:?} succeeded");
+        assert!(result.stdout.is_empty(), "{args:?} printed a record");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(&message),
+            "{args:?} reported {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(!output.exists(), "{args:?} created output");
+    }
+
+    fs::write(&output, b"keep me").unwrap();
+    let result = cli(&[
+        "comment",
+        "resolve",
+        replied,
+        "--id",
+        thread,
+        "--output",
+        output_path,
+    ]);
+    assert_eq!(result.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("output already exists"));
+    assert_eq!(fs::read(&output).unwrap(), b"keep me");
 }
