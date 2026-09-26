@@ -95,9 +95,11 @@ and one namespace-correct `body` child, rejects truncation, duplicate roots,
 foreign lookalikes, and non-whitespace content outside that root, and retains
 the first body `sectPr`. Later section owners remain opaque rather than
 disappearing. Self-closing paragraphs, tables, and cells are modeled as empty
-typed owners. Start-and-end forms are modeled only when their complete
-attributes and content satisfy the same grammar. Otherwise their exact
-namespace-complete subtree remains opaque. Header and footer references
+typed owners. An attribute-free self-closing paragraph-property element or
+paragraph mark is modeled like its start-and-end form, while an attributed one
+stays raw with its exact attributes. Start-and-end forms are modeled only when
+their complete attributes and content satisfy the same grammar. Otherwise their
+exact namespace-complete subtree remains opaque. Header and footer references
 recognize `r:id` only when the attribute is bound to the package relationships
 namespace.
 Body comparison excludes the source's direct final `sectPr` from its
@@ -1263,6 +1265,12 @@ Tables with different active grids use one deleted-table record followed by
 one inserted-table record at the aligned boundary. Row markers carry the
 revision metadata, so acceptance retains only the edited grid and rejection
 retains only the original grid. Equal-grid tables keep row and cell comparison.
+An empty paragraph-property element or paragraph mark compares like an absent
+one. A differing unmodelled paragraph or table property child keeps its
+original bytes and yields a formatting diagnostic, even when the modeled
+properties match. A tracked paragraph-property change records `CT_PPrBase`
+only, so the paragraph mark stays out of `w:pPrChange`. A changed mark keeps
+its original run properties and yields a formatting diagnostic.
 Generated revisions use canonical `w`, `xml`, and `mc` prefixes in schema
 order, while reparse remains prefix tolerant. Source-span patching interleaves
 changed owner bytes with the exact original gaps, preserving unowned
@@ -1285,7 +1293,10 @@ on the inline or anchor root before equality. Story-root, paragraph, run, and
 drawing-owner declaration placement is therefore equivalent in the comparison
 model without changing package serialization. Retained drawing payload remains
 significant after declaration placement normalization, so a real drawing
-change is still tracked.
+change is still tracked. A drawing that a redline story writes twice, as a
+move or a deletion beside an insertion, keeps its `wp:docPr` id on the first
+copy and gets a fresh id above every compared drawing id on later copies, as
+Word does. Both postconditions read each fresh id as the id it copies.
 
 Literal redaction also uses the complete package boundary. The Word facade
 flushes a staged clone, removes one non-empty exact literal from relationship-

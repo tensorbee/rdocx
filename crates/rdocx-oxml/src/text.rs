@@ -4938,7 +4938,15 @@ impl CT_P {
                 Ok(Event::Empty(ref e)) => {
                     let name = e.name();
                     let prefixes = word_prefixes_at(e, word_prefixes)?;
-                    if is_word_element(name.as_ref(), b"commentRangeStart", &prefixes)
+                    if is_word_element(name.as_ref(), b"pPr", &prefixes)
+                        && e.attributes().next().is_none()
+                    {
+                        // `<w:pPr/>` is the same element as `<w:pPr></w:pPr>`.
+                        // Kept raw, it read as unknown paragraph content and was
+                        // written beside any properties set later. An attributed
+                        // one stays raw so its producer attributes survive.
+                        properties.get_or_insert_default();
+                    } else if is_word_element(name.as_ref(), b"commentRangeStart", &prefixes)
                         || is_word_element(name.as_ref(), b"commentRangeEnd", &prefixes)
                     {
                         let id = required_word_i32_attribute(e, b"id", &prefixes)?;

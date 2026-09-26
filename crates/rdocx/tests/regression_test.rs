@@ -17391,6 +17391,414 @@ fn a_new_table_property_owner_does_not_adopt_edited_unmodelled_xml() {
     assert!(!rejected.contains(edited_raw), "{rejected}");
 }
 
+/// Word and Google Docs stamp paragraphs with `w:rsid*` and `w14` identities.
+/// Those retained attributes once sent the paragraph down the path that turns
+/// a property change into a diagnostic, and refuses one that comes with a text
+/// change, so the redline kept the original formatting.
+#[test]
+fn paragraph_identity_attributes_do_not_hide_a_paragraph_property_change() {
+    let original_identity =
+        r#" w14:paraId="1A2B3C4D" w14:textId="0A0B0C0D" w:rsidR="00A1B2C3" w:rsidP="00A1B2C3""#;
+    let edited_identity =
+        r#" w14:paraId="1A2B3C4D" w14:textId="7E7E7E7E" w:rsidR="00A1B2C3" w:rsidP="00D4E5F6""#;
+    let document = |identity: &str, keep_next: &str, text: &str| {
+        document_with_content_controls(&format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="{W_NS}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p{identity}><w:pPr>{keep_next}<w:spacing w:after="120"/></w:pPr><w:r w:rsidR="00A1B2C3"><w:t>{text}</w:t></w:r></w:p><w:p w14:paraId="5E6F7A8B" w:rsidR="00A1B2C3"><w:r><w:t>unchanged</w:t></w:r></w:p></w:body></w:document>"#
+        ))
+    };
+    let original = document(original_identity, "", "kept with next");
+    for (identity, text) in [
+        (original_identity, "kept with next"),
+        (edited_identity, "kept with next, edited"),
+    ] {
+        let edited = document(identity, "<w:keepNext/>", text);
+        let mut compared = document(original_identity, "", "kept with next");
+        let diagnostics = compared
+            .compare(&edited, "Ada", "2026-09-20T12:00:00Z")
+            .unwrap();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let tracked_bytes = compared.to_bytes().unwrap();
+        let tracked = document_xml(&mut compared);
+        assert_eq!(tracked.matches("<w:pPrChange").count(), 1, "{tracked}");
+        assert!(tracked.contains(r#"w14:textId="0A0B0C0D""#), "{tracked}");
+        assert!(!tracked.contains("7E7E7E7E"), "{tracked}");
+        assert!(!tracked.contains("00D4E5F6"), "{tracked}");
+
+        let mut accepted = Document::from_bytes(&tracked_bytes).unwrap();
+        accepted.accept_all().unwrap();
+        assert!(
+            accepted
+                .compare(&edited, "postcondition", "2026-09-20T12:01:00Z")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(accepted.revisions().is_empty());
+        let mut rejected = Document::from_bytes(&tracked_bytes).unwrap();
+        rejected.reject_all().unwrap();
+        assert!(
+            rejected
+                .compare(&original, "postcondition", "2026-09-20T12:01:00Z")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(rejected.revisions().is_empty());
+    }
+
+    let header = |session: &str, keep_next: &str| {
+        document_with_comparison_header(&format!(
+            r#"<w:p w:rsidR="00A1B2C3" w:rsidP="{session}"><w:pPr>{keep_next}<w:spacing w:after="120"/></w:pPr><w:r><w:t>header</w:t></w:r></w:p>"#
+        ))
+    };
+    let mut compared = header("00A1B2C3", "");
+    let diagnostics = compared
+        .compare(
+            &header("00D4E5F6", "<w:keepNext/>"),
+            "Ada",
+            "2026-09-20T12:00:00Z",
+        )
+        .unwrap();
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let tracked = comparison_part_xml(&mut compared, "/word/header1.xml");
+    assert_eq!(tracked.matches("<w:pPrChange").count(), 1, "{tracked}");
+    assert!(tracked.contains(r#"w:rsidP="00A1B2C3""#), "{tracked}");
+    assert!(!tracked.contains("00D4E5F6"), "{tracked}");
+}
+
+#[test]
+fn a_paragraph_property_change_leaves_the_paragraph_mark_out_of_its_prior_properties() {
+    // `w:pPrChange` records `CT_PPrBase`, which has no paragraph mark. The
+    // original mark stays, and a change to the mark alone is reported.
+    let paragraph = |alignment: &str, mark: &str| {
+        document_with_content_controls(&wrap_word_body(&format!(
+            r#"<w:p w:rsidR="00A1B2C3"><w:pPr><w:jc w:val="{alignment}"/><w:rPr>{mark}</w:rPr></w:pPr><w:r><w:t>same</w:t></w:r></w:p>"#
+        )))
+    };
+
+    let mut compared = paragraph("left", "<w:b/>");
+    let diagnostics = compared
+        .compare(
+            &paragraph("center", "<w:b/>"),
+            "Ada",
+            "2026-09-20T12:00:00Z",
+        )
+        .unwrap();
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    let tracked = document_xml(&mut compared);
+    let start = tracked
+        .find("<w:pPrChange")
+        .expect("a paragraph property change");
+    let end = start
+        + tracked[start..]
+            .find("</w:pPrChange>")
+            .expect("a closed change");
+    assert!(!tracked[start..end].contains("<w:rPr"), "{tracked}");
+    assert!(tracked[..start].contains("<w:b/>"), "{tracked}");
+
+    let mut compared = paragraph("left", "<w:b/>");
+    let diagnostics = compared
+        .compare(&paragraph("left", "<w:i/>"), "Ada", "2026-09-20T12:00:00Z")
+        .unwrap();
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    let tracked = document_xml(&mut compared);
+    assert!(!tracked.contains("<w:pPrChange"), "{tracked}");
+    assert!(
+        tracked.contains("<w:b/>") && !tracked.contains("<w:i/>"),
+        "{tracked}"
+    );
+}
+
+/// python-docx and Google Docs write an empty `<w:pPr/>`. Read as unknown
+/// paragraph content, it made the paragraph uncomparable in both directions.
+/// An empty paragraph mark added a diagnostic, and the open-close forms in a
+/// header produced a spurious `w:pPrChange`.
+#[test]
+fn an_empty_paragraph_properties_element_compares_like_an_absent_one() {
+    let centered = r#"<w:pPr><w:jc w:val="center"/></w:pPr>"#;
+    let empty_mark = r#"<w:pPr><w:jc w:val="center"/><w:rPr/></w:pPr>"#;
+    let open_close_mark = r#"<w:pPr><w:jc w:val="center"/><w:rPr></w:rPr></w:pPr>"#;
+    let bookmark = r#"<w:bookmarkStart w:id="0" w:name="kept"/><w:bookmarkEnd w:id="0"/>"#;
+    let story = |header: bool, properties: &str, bookmark: &str, text: &str| {
+        let paragraph = format!(r#"<w:p>{properties}{bookmark}<w:r><w:t>{text}</w:t></w:r></w:p>"#);
+        if header {
+            document_with_comparison_header(&paragraph)
+        } else {
+            document_with_content_controls(&wrap_word_body(&paragraph))
+        }
+    };
+    for (original_properties, edited_properties, edited_text, bookmark, revision) in [
+        ("<w:pPr/>", "", "same", "", ""),
+        ("", "<w:pPr/>", "same", "", ""),
+        ("<w:pPr></w:pPr>", "", "same", "", ""),
+        (empty_mark, centered, "same", "", ""),
+        (centered, open_close_mark, "same", "", ""),
+        (open_close_mark, centered, "same", bookmark, ""),
+        ("<w:pPr/>", centered, "same", "", "<w:pPrChange "),
+        (centered, "<w:pPr/>", "same", "", "<w:pPrChange "),
+        ("<w:pPr/>", "", "edited", "", "<w:ins "),
+        (empty_mark, centered, "edited", bookmark, "<w:ins "),
+    ] {
+        for (part, header) in [("/word/document.xml", false), ("/word/header1.xml", true)] {
+            let case =
+                format!("{part}: {original_properties} -> {edited_properties} {edited_text}");
+            let original = story(header, original_properties, bookmark, "same");
+            let edited = story(header, edited_properties, bookmark, edited_text);
+            let mut compared = story(header, original_properties, bookmark, "same");
+            let diagnostics = compared
+                .compare(&edited, "Ada", "2026-09-20T12:00:00Z")
+                .unwrap_or_else(|error| panic!("{case}: {error}"));
+            assert!(diagnostics.is_empty(), "{case}: {diagnostics:?}");
+            let tracked_bytes = compared.to_bytes().unwrap();
+            let tracked = comparison_part_xml(&mut compared, part);
+            assert_eq!(
+                tracked.matches("PrChange w:id=").count(),
+                usize::from(revision == "<w:pPrChange "),
+                "{case}: {tracked}"
+            );
+            for text_revision in ["<w:ins ", "<w:del "] {
+                assert_eq!(
+                    tracked.contains(text_revision),
+                    revision == "<w:ins ",
+                    "{case}: {tracked}"
+                );
+            }
+
+            let mut accepted = Document::from_bytes(&tracked_bytes).unwrap();
+            accepted.accept_all().unwrap();
+            assert!(
+                accepted
+                    .compare(&edited, "postcondition", "2026-09-20T12:01:00Z")
+                    .unwrap()
+                    .is_empty(),
+                "{case}"
+            );
+            let mut rejected = Document::from_bytes(&tracked_bytes).unwrap();
+            rejected.reject_all().unwrap();
+            assert!(
+                rejected
+                    .compare(&original, "postcondition", "2026-09-20T12:01:00Z")
+                    .unwrap()
+                    .is_empty(),
+                "{case}"
+            );
+        }
+    }
+}
+
+/// A raw `<w:pPr/>` stayed beside the properties a setter created, so the
+/// saved paragraph held two `w:pPr` elements, which the schema forbids.
+#[test]
+fn setting_a_property_on_an_empty_paragraph_properties_element_writes_one_owner() {
+    let mut document = document_with_content_controls(&wrap_word_body(
+        r#"<w:p><w:pPr/><w:r><w:t>aligned</w:t></w:r></w:p>"#,
+    ));
+    document
+        .paragraph_mut(0)
+        .unwrap()
+        .set_alignment(rdocx::paragraph::Alignment::Center);
+    let saved = document_xml(&mut document);
+    assert_eq!(saved.matches("<w:pPr").count(), 1, "{saved}");
+    assert!(saved.contains(r#"<w:jc w:val="center"/>"#), "{saved}");
+}
+
+fn picture_comparison_document(body: &str, header: &str) -> Document {
+    let mut seed = Document::new();
+    let mut package =
+        oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(seed.to_bytes().unwrap())).unwrap();
+    let relationships = package.get_or_create_part_rels("/word/document.xml");
+    let header_id = relationships.add(oxml_opc::relationship::rel_types::HEADER, "header1.xml");
+    relationships.add_with_id(
+        "bodyImage",
+        oxml_opc::relationship::rel_types::IMAGE,
+        "media/body.png",
+    );
+    package
+        .get_or_create_part_rels("/word/header1.xml")
+        .add_with_id(
+            "headerImage",
+            oxml_opc::relationship::rel_types::IMAGE,
+            "media/header.png",
+        );
+    package.set_part(
+        "/word/document.xml",
+        format!(
+            r#"<?xml version="1.0"?><w:document xmlns:w="{W_NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>{body}<w:sectPr><w:headerReference w:type="default" r:id="{header_id}"/></w:sectPr></w:body></w:document>"#,
+        )
+        .into_bytes(),
+    );
+    package.set_part(
+        "/word/header1.xml",
+        format!(r#"<w:hdr xmlns:w="{W_NS}">{header}</w:hdr>"#).into_bytes(),
+    );
+    package.content_types.add_override(
+        "/word/header1.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+    );
+    for image in ["/word/media/body.png", "/word/media/header.png"] {
+        package.set_part(image, b"image".to_vec());
+        package.content_types.add_override(image, "image/png");
+    }
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    Document::from_bytes(bytes.get_ref()).unwrap()
+}
+
+/// The redline writes a picture twice when it trades places with a text
+/// paragraph, moved from and moved to, or when it is resized, deleted beside
+/// inserted. Both copies kept the same `wp:docPr` id, which the package
+/// identifier scan rejects, so comparing the two-paragraph Google Docs pair of
+/// issue 136 failed.
+#[test]
+fn a_picture_written_twice_by_a_comparison_gets_a_fresh_drawing_id() {
+    let text = |properties: &str| {
+        format!(r#"<w:p>{properties}<w:r><w:t>Lorem ipsum dolor sit amet.</w:t></w:r></w:p>"#)
+    };
+    let picture = |relationship_id: &str, extent: &str| {
+        format!(
+            r#"<w:p><w:r>{}</w:r></w:p>"#,
+            f_x093_inline_drawing(relationship_id, "moved")
+                .replace(r#"cx="1""#, &format!(r#"cx="{extent}""#))
+        )
+    };
+    let drawing_ids = |xml: &str| {
+        xml.split(r#"docPr id=""#)
+            .skip(1)
+            .map(|rest| rest.split('"').next().unwrap().parse::<u32>().unwrap())
+            .collect::<Vec<_>>()
+    };
+    let story = |relationship_id: &str, picture_first: bool, properties: &str, extent: &str| {
+        if picture_first {
+            format!("{}{}", picture(relationship_id, extent), text(properties))
+        } else {
+            format!("{}{}", text(properties), picture(relationship_id, extent))
+        }
+    };
+    for (part, in_header) in [("/word/document.xml", false), ("/word/header1.xml", true)] {
+        let document = |picture_first: bool, properties: &str, extent: &str| {
+            let body = story("bodyImage", picture_first, properties, extent);
+            let header = story("headerImage", picture_first, properties, extent);
+            if in_header {
+                picture_comparison_document(&text(""), &header)
+            } else {
+                picture_comparison_document(&body, &text(""))
+            }
+        };
+        for (original_first, edited_first, edited_properties, edited_extent) in [
+            (true, false, "", "1"),
+            (true, false, "<w:pPr/>", "1"),
+            (false, true, "", "1"),
+            (true, true, "", "2"),
+        ] {
+            let case = format!(
+                "{part}: {original_first} -> {edited_first} {edited_properties} {edited_extent}"
+            );
+            let original = document(original_first, "", "1");
+            let edited = document(edited_first, edited_properties, edited_extent);
+            let mut compared = document(original_first, "", "1");
+            let diagnostics = compared
+                .compare(&edited, "Ada", "2026-09-20T12:00:00Z")
+                .unwrap_or_else(|error| panic!("{case}: {error}"));
+            assert!(diagnostics.is_empty(), "{case}: {diagnostics:?}");
+            let tracked_bytes = compared.to_bytes().unwrap();
+            let tracked = comparison_part_xml(&mut compared, part);
+            let ids = drawing_ids(&tracked);
+            assert!(ids.contains(&11), "{case}: {tracked}");
+            assert_eq!(
+                ids.iter().collect::<HashSet<_>>().len(),
+                ids.len(),
+                "{case}: {tracked}"
+            );
+
+            let mut accepted = Document::from_bytes(&tracked_bytes).unwrap();
+            accepted.accept_all().unwrap();
+            assert!(
+                accepted
+                    .compare(&edited, "postcondition", "2026-09-20T12:01:00Z")
+                    .unwrap()
+                    .is_empty(),
+                "{case}"
+            );
+            let mut rejected = Document::from_bytes(&tracked_bytes).unwrap();
+            rejected.reject_all().unwrap();
+            assert!(
+                rejected
+                    .compare(&original, "postcondition", "2026-09-20T12:01:00Z")
+                    .unwrap()
+                    .is_empty(),
+                "{case}"
+            );
+        }
+    }
+}
+
+/// Paragraph and table properties that the comparison does not model were
+/// dropped with success whenever the modeled properties matched, so a changed
+/// or removed producer element vanished from the redline without a word.
+#[test]
+fn an_unmodelled_property_change_is_reported_instead_of_dropped() {
+    let paragraph = |extension: &str, bookmark: &str| {
+        format!(
+            r#"<w:p><w:pPr xmlns:x="urn:producer"><w:jc w:val="center"/>{extension}</w:pPr>{bookmark}<w:r><w:t>same</w:t></w:r></w:p>"#
+        )
+    };
+    let table = |extension: &str| {
+        format!(
+            r#"<w:tbl><w:tblPr xmlns:x="urn:producer"><w:tblW w:w="0" w:type="auto"/>{extension}</w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>"#
+        )
+    };
+    let bookmark = r#"<w:bookmarkStart w:id="0" w:name="kept"/><w:bookmarkEnd w:id="0"/>"#;
+    let kept = r#"<x:ext x:val="kept"/>"#;
+    for (original, edited, location) in [
+        (
+            paragraph(kept, ""),
+            paragraph(r#"<x:ext x:val="edited"/>"#, ""),
+            "body/paragraph[0]",
+        ),
+        (paragraph(kept, ""), paragraph("", ""), "body/paragraph[0]"),
+        (
+            paragraph(kept, bookmark),
+            paragraph(r#"<w:bogus w:val="edited"/>"#, bookmark),
+            "body/paragraph[0]",
+        ),
+        (
+            table(kept),
+            table(r#"<x:ext x:val="edited"/>"#),
+            "body/table[0]",
+        ),
+    ] {
+        let mut compared = document_with_content_controls(&wrap_word_body(&original));
+        let diagnostics = compared
+            .compare(
+                &document_with_content_controls(&wrap_word_body(&edited)),
+                "Ada",
+                "2026-09-20T12:00:00Z",
+            )
+            .unwrap();
+        assert_eq!(
+            diagnostics,
+            vec![rdocx::ComparisonDiagnostic {
+                location: location.to_owned(),
+                message: "formatting differs and the original formatting was retained".to_owned(),
+            }],
+            "{original} -> {edited}"
+        );
+        assert!(compared.revisions().is_empty(), "{original} -> {edited}");
+        let tracked = document_xml(&mut compared);
+        assert!(tracked.contains(r#"x:val="kept""#), "{tracked}");
+    }
+
+    let mut compared = document_with_comparison_header(&paragraph(kept, ""));
+    let diagnostics = compared
+        .compare(
+            &document_with_comparison_header(&paragraph("", "")),
+            "Ada",
+            "2026-09-20T12:00:00Z",
+        )
+        .unwrap();
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    let tracked = comparison_part_xml(&mut compared, "/word/header1.xml");
+    assert!(tracked.contains(r#"x:val="kept""#), "{tracked}");
+}
+
 #[test]
 fn comparison_replaces_paragraphs_and_tables_before_an_anchor() {
     let paragraph_xml = wrap_word_body(
@@ -32394,4 +32802,90 @@ mod f266c_character_grid_and_vertical_text_regressions {
              {rotated} against {horizontal}"
         );
     }
+}
+
+#[test]
+fn story_link_snapshots_read_link_text_from_prefixes_declared_outside_the_link() {
+    // Each hyperlink's runs use a prefix declared on an ancestor outside the
+    // hyperlink span, or on the hyperlink itself. A header part reaches the
+    // scanner as it was read, so the prefixes are not rewritten first. The
+    // package-wide inventory reads each link from its own span with an
+    // inventoried namespace scope, so it must still agree with the per-story
+    // scan that reads from the head of the part.
+    let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let document = document_with_header_story(&format!(
+        concat!(
+            r#"<w:hdr xmlns:w="{0}"><w:p xmlns:ww="{0}">"#,
+            r#"<ww:r><ww:t>before </ww:t></ww:r>"#,
+            r#"<w:hyperlink w:anchor="first"><ww:r><ww:t>first link</ww:t></ww:r></w:hyperlink>"#,
+            r#"</w:p>"#,
+            r#"<w:p><w:hyperlink w:anchor="second" xmlns:x="{0}">"#,
+            r#"<x:r><x:t>second link</x:t></x:r></w:hyperlink></w:p></w:hdr>"#,
+        ),
+        word
+    ));
+    let header = document
+        .stories()
+        .unwrap()
+        .into_iter()
+        .find(|story| story.kind() == StoryKind::Header)
+        .unwrap();
+    let project = |links: Vec<(ContentLocation, rdocx::LinkInfo)>| {
+        links
+            .into_iter()
+            .filter(|(location, _)| location.story() == &header)
+            .map(|(location, link)| (link.text, link.anchor, location.index_path().to_vec()))
+            .collect::<Vec<_>>()
+    };
+
+    let snapshots = project(document.story_link_snapshots().unwrap());
+
+    assert_eq!(snapshots, project(document.story_links(&header).unwrap()));
+    assert_eq!(
+        snapshots
+            .iter()
+            .map(|(text, anchor, _)| (text.as_str(), anchor.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("first link", Some("first")),
+            ("second link", Some("second")),
+        ]
+    );
+}
+
+#[test]
+fn story_link_snapshots_match_story_links_when_a_part_binds_word_twice() {
+    // The header binds Word both as the default namespace and as `q`, and the
+    // tracked insertion inside the link names its attributes with `q`. Reading
+    // the link from its own span must not see more Word prefixes on the link
+    // than the read from the head of the part does.
+    let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let document = document_with_header_story(&format!(
+        concat!(
+            r#"<hdr xmlns="{0}" xmlns:q="{0}"><p><hyperlink q:anchor="a">"#,
+            r#"<ins q:id="1" q:author="A"><r><t>inserted</t></r></ins>"#,
+            r#"</hyperlink></p></hdr>"#,
+        ),
+        word
+    ));
+    let header = document
+        .stories()
+        .unwrap()
+        .into_iter()
+        .find(|story| story.kind() == StoryKind::Header)
+        .unwrap();
+    let project = |links: Vec<(ContentLocation, rdocx::LinkInfo)>| {
+        links
+            .into_iter()
+            .filter(|(location, _)| location.story() == &header)
+            .map(|(location, link)| (link.text, location.index_path().to_vec()))
+            .collect::<Vec<_>>()
+    };
+
+    let snapshots = project(document.story_link_snapshots().unwrap());
+
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots, project(document.story_links(&header).unwrap()));
+    let items = document.story_items(&header).unwrap();
+    assert_eq!(snapshots[0].0, items[0].links().unwrap()[0].text);
 }

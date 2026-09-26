@@ -883,6 +883,12 @@ impl CT_PPr {
                     } else if is_word_element(name.as_ref(), b"numPr", &prefixes) {
                         ppr.num_pr_extra_attributes =
                             preserved_num_pr_root_attributes(e, &prefixes, owner_bindings)?.0;
+                    } else if is_word_element(name.as_ref(), b"rPr", &prefixes)
+                        && e.attributes().next().is_none()
+                    {
+                        // A bare empty paragraph mark, the same as
+                        // `<w:rPr></w:rPr>`. An attributed one stays raw.
+                        ppr.rpr.get_or_insert_default();
                     } else if is_word_element(name.as_ref(), b"pPrChange", &prefixes) {
                         let raw = crate::text::raw_with_external_bindings(
                             &capture_empty_element(e)?,

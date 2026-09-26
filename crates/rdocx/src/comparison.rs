@@ -369,6 +369,7 @@ impl Document {
             )?;
             candidate.package.set_part(&story.part_name, tracked_story);
         }
+        let drawing_ids = renumber_repeated_drawing_ids(&mut candidate, &original_stories)?;
         candidate = reopen_staged(candidate)?;
         #[cfg(test)]
         FAIL_AFTER_COMPARISON_STAGING.with(|fail| {
@@ -379,30 +380,56 @@ impl Document {
             }
             Ok(())
         })?;
-        let mut accepted = candidate.clone_for_staging();
-        accepted.accept_all()?;
-        let accepted_body =
-            normalized_package(&accepted, &original_stories, options, &text_box_markers)?;
-        let mut edited_package =
-            normalized_package(&edited, &edited_stories, options, &text_box_markers)?;
+        let accepted_body = resolved_package(
+            &candidate,
+            Document::accept_all,
+            &original_stories,
+            options,
+            &text_box_markers,
+            &drawing_ids,
+        )?;
+        let mut edited_package = normalized_package(
+            &edited,
+            &edited_stories,
+            options,
+            &text_box_markers,
+            &HashMap::new(),
+        )?;
         if story_ignored(options, ComparisonStoryKind::Main) {
-            edited_package.0 =
-                normalized_package(&original, &original_stories, options, &text_box_markers)?.0;
+            edited_package.0 = normalized_package(
+                &original,
+                &original_stories,
+                options,
+                &text_box_markers,
+                &HashMap::new(),
+            )?
+            .0;
         }
         if accepted_body != edited_package {
             return Err(Error::Other(format!(
-                "comparison acceptance does not reproduce the edited stories: {accepted_body:?} != {edited_package:?}"
+                "comparison acceptance does not reproduce the edited stories: {}",
+                first_story_difference(&accepted_body, &edited_package)
             )));
         }
-        let mut rejected = candidate.clone_for_staging();
-        rejected.reject_all()?;
-        let rejected_package =
-            normalized_package(&rejected, &original_stories, options, &text_box_markers)?;
-        let original_package =
-            normalized_package(&original, &original_stories, options, &text_box_markers)?;
+        let rejected_package = resolved_package(
+            &candidate,
+            Document::reject_all,
+            &original_stories,
+            options,
+            &text_box_markers,
+            &drawing_ids,
+        )?;
+        let original_package = normalized_package(
+            &original,
+            &original_stories,
+            options,
+            &text_box_markers,
+            &HashMap::new(),
+        )?;
         if rejected_package != original_package {
             return Err(Error::Other(format!(
-                "comparison rejection does not reproduce the original stories: {rejected_package:?} != {original_package:?}"
+                "comparison rejection does not reproduce the original stories: {}",
+                first_story_difference(&rejected_package, &original_package)
             )));
         }
 
@@ -1515,6 +1542,112 @@ fn close_drawing_namespaces(
     Ok(output)
 }
 
+/// Give each `wp:docPr` id that a tracked story repeats a fresh id on its later
+/// copies, as Word does for a drawing its redline writes twice. The fresh ids
+/// exceed every drawing id in the compared parts. The returned map sends each
+/// fresh id back to the id it copies.
+fn renumber_repeated_drawing_ids(
+    candidate: &mut Document,
+    stories: &[StoryPart],
+) -> Result<HashMap<u32, u32>> {
+    let mut part_names = vec![candidate.doc_part_name.clone()];
+    part_names.extend(stories.iter().map(|story| story.part_name.clone()));
+    let mut next = 0u32;
+    for part_name in &part_names {
+        let xml = candidate
+            .package
+            .get_part(part_name)
+            .ok_or_else(|| Error::Other(format!("missing compared story {part_name}")))?;
+        rewrite_drawing_ids(xml, |id| {
+            next = next.max(id);
+            None
+        })?;
+    }
+    let mut fresh = HashMap::new();
+    for part_name in &part_names {
+        let xml = candidate
+            .package
+            .get_part(part_name)
+            .ok_or_else(|| Error::Other(format!("missing compared story {part_name}")))?;
+        let mut seen = HashSet::new();
+        let renumbered = rewrite_drawing_ids(xml, |id| {
+            if seen.insert(id) {
+                return None;
+            }
+            next = next.checked_add(1)?;
+            fresh.insert(next, id);
+            Some(next)
+        })?;
+        if renumbered != xml {
+            candidate.package.set_part(part_name, renumbered);
+        }
+    }
+    Ok(fresh)
+}
+
+/// Replace each `wp:docPr` id for which `rewrite` returns a new value, leaving
+/// every other byte in place.
+fn rewrite_drawing_ids(xml: &[u8], mut rewrite: impl FnMut(u32) -> Option<u32>) -> Result<Vec<u8>> {
+    let mut reader = NsReader::from_reader(xml);
+    reader.config_mut().trim_text(false);
+    let mut edits = Vec::new();
+    let mut buffer = Vec::new();
+    loop {
+        let start = reader.buffer_position() as usize;
+        match reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| Error::Other(format!("comparison drawing id scan failed: {error}")))?
+        {
+            Event::Start(element) | Event::Empty(element)
+                if element.local_name().as_ref() == b"docPr"
+                    && matches!(
+                        reader.resolver().resolve_element(element.name()).0,
+                        ResolveResult::Bound(value)
+                            if value.as_ref() == rdocx_oxml::drawing::drawing_ns::WP.as_bytes()
+                    ) =>
+            {
+                let content: &[u8] = &element;
+                for attribute in element.attributes() {
+                    let attribute = attribute.map_err(|error| {
+                        Error::Other(format!("comparison drawing id scan failed: {error}"))
+                    })?;
+                    if attribute.key.as_ref() != b"id" {
+                        continue;
+                    }
+                    let Some(replacement) = attribute
+                        .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+                        .ok()
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .and_then(&mut rewrite)
+                    else {
+                        break;
+                    };
+                    let offset = (attribute.value.as_ptr() as usize)
+                        .checked_sub(content.as_ptr() as usize)
+                        .filter(|offset| offset + attribute.value.len() <= content.len())
+                        .ok_or_else(|| {
+                            Error::Other("drawing id lies outside its opening tag".to_owned())
+                        })?;
+                    let value_start = start + 1 + offset;
+                    edits.push((
+                        value_start..value_start + attribute.value.len(),
+                        replacement.to_string().into_bytes(),
+                    ));
+                    break;
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    let mut output = xml.to_vec();
+    for (range, replacement) in edits.into_iter().rev() {
+        output.splice(range, replacement);
+    }
+    Ok(output)
+}
+
 fn comparison_root_namespace_scope(
     xml: &[u8],
 ) -> Result<std::collections::BTreeMap<String, String>> {
@@ -1825,6 +1958,55 @@ pub(crate) fn reopen_staged(candidate: Document) -> Result<Document> {
 
 type NormalizedPackage = (Vec<String>, Vec<(ComparisonStoryKind, String, Vec<String>)>);
 
+/// Name the first story item where two normalized packages differ, with a
+/// short excerpt of each side around the first differing character. A story
+/// item can hold a whole drawing, so the items themselves are never printed.
+fn first_story_difference(actual: &NormalizedPackage, expected: &NormalizedPackage) -> String {
+    let mut stories = vec![("body".to_owned(), &actual.0, &expected.0)];
+    for ((kind, part_name, actual), (_, _, expected)) in actual.1.iter().zip(&expected.1) {
+        stories.push((format!("{} {part_name}", kind.label()), actual, expected));
+    }
+    for (story, actual, expected) in stories {
+        let Some(index) = (0..actual.len().max(expected.len()))
+            .find(|index| actual.get(*index) != expected.get(*index))
+        else {
+            continue;
+        };
+        let (Some(actual), Some(expected)) = (actual.get(index), expected.get(index)) else {
+            return format!(
+                "{story} item count {} differs from {}",
+                actual.len(),
+                expected.len()
+            );
+        };
+        let at = actual
+            .chars()
+            .zip(expected.chars())
+            .take_while(|(left, right)| left == right)
+            .count();
+        let excerpt = |item: &str| {
+            let start = at.saturating_sub(24);
+            let excerpt = item.chars().skip(start).take(64).collect::<String>();
+            let more = item.chars().count() > start + 64;
+            format!(
+                "{}{excerpt:?}{}",
+                if start > 0 { "..." } else { "" },
+                if more { "..." } else { "" }
+            )
+        };
+        return format!(
+            "{story} item {index} differs at character {at}: {} != {}",
+            excerpt(actual),
+            excerpt(expected)
+        );
+    }
+    format!(
+        "related story count {} differs from {}",
+        actual.1.len(),
+        expected.1.len()
+    )
+}
+
 fn comparison_text_box_markers(
     original: &Document,
     edited: &Document,
@@ -1860,19 +2042,42 @@ fn comparison_text_box_markers(
     Ok(markers)
 }
 
+/// Accept or reject every revision in a staged copy of `candidate` and
+/// normalize the result. Kept out of `compare_with_options`, whose debug frame
+/// already holds many `Document` values, so that the resolution and reopen run
+/// on a shallower stack.
+fn resolved_package(
+    candidate: &Document,
+    resolve: fn(&mut Document) -> Result<usize>,
+    stories: &[StoryPart],
+    options: &ComparisonOptions,
+    text_box_markers: &TextBoxMarkers,
+    drawing_ids: &HashMap<u32, u32>,
+) -> Result<NormalizedPackage> {
+    let mut resolved = candidate.clone_for_staging();
+    resolve(&mut resolved)?;
+    normalized_package(&resolved, stories, options, text_box_markers, drawing_ids)
+}
+
+/// Normalize a package's stories, reading each drawing id that
+/// `renumber_repeated_drawing_ids` gave a fresh value as the id it copies.
 fn normalized_package(
     document: &Document,
     stories: &[StoryPart],
     options: &ComparisonOptions,
     text_box_markers: &TextBoxMarkers,
+    drawing_ids: &HashMap<u32, u32>,
 ) -> Result<NormalizedPackage> {
     let mut related = Vec::with_capacity(stories.len());
     for story in stories {
+        let xml = rewrite_drawing_ids(story_xml(document, story)?, |id| {
+            drawing_ids.get(&id).copied()
+        })?;
         related.push((
             story.kind,
             story.part_name.clone(),
             normalized_story_part(
-                story_xml(document, story)?,
+                &xml,
                 story.kind,
                 options,
                 text_box_markers
@@ -1886,7 +2091,8 @@ fn normalized_package(
         .package
         .get_part(&document.doc_part_name)
         .ok_or_else(|| Error::Other(format!("missing main story {}", document.doc_part_name)))?;
-    let source = std::str::from_utf8(source).map_err(utf8_error)?;
+    let source = rewrite_drawing_ids(source, |id| drawing_ids.get(&id).copied())?;
+    let source = std::str::from_utf8(&source).map_err(utf8_error)?;
     let main_source;
     let source = if story_ignored(options, ComparisonStoryKind::TextBox) {
         let (masked, _) = mask_text_box_subtrees(source, "w", &text_box_markers.main)?;
@@ -2513,8 +2719,8 @@ fn compare_paragraph(
         || !edited.bookmark_markers.is_empty()
         || !original.content_controls.is_empty()
         || !edited.content_controls.is_empty()
-        || !original.extra_xml.is_empty()
-        || !edited.extra_xml.is_empty()
+        || !semantic_paragraph_raw(original).is_empty()
+        || !semantic_paragraph_raw(edited).is_empty()
     {
         return compare_complex_paragraph(
             original,
@@ -2526,7 +2732,7 @@ fn compare_paragraph(
         );
     }
 
-    let mut output = String::from("<w:p>");
+    let mut output = paragraph_start_xml(original)?;
     output.push_str(&paragraph_properties_xml(
         original,
         edited,
@@ -3391,9 +3597,13 @@ fn compare_complex_paragraph(
     if original.hyperlinks != edited.hyperlinks
         || (!metadata.options.ignore_comments && original.comment_ranges != edited.comment_ranges)
         || original.bookmark_markers != edited.bookmark_markers
-        || original.extra_xml != edited.extra_xml
+        || semantic_paragraph_raw(original) != semantic_paragraph_raw(edited)
         || paragraph_control_boundaries(original) != paragraph_control_boundaries(edited)
-        || (!metadata.options.ignore_formatting && original.properties != edited.properties)
+        || (!metadata.options.ignore_formatting
+            && paragraph_properties_differ(
+                original.properties.as_ref(),
+                edited.properties.as_ref(),
+            ))
     {
         return Err(Error::Other(format!(
             "comparison cannot revise paragraph boundary structures at {location}"
@@ -3575,6 +3785,16 @@ fn paragraph_properties_xml(
     };
     current.sect_pr = None;
     current.change = None;
+    // `w:pPrChange` records `CT_PPrBase`, which has no paragraph mark. A mark
+    // change would need a `w:rPrChange` inside the mark, which comparison does
+    // not write, so the original mark stays and the change is reported.
+    if paragraph_mark(original.properties.as_ref()) != paragraph_mark(edited.properties.as_ref()) {
+        formatting_diagnostic(diagnostics, location.to_owned());
+    }
+    current.rpr = original
+        .properties
+        .as_ref()
+        .and_then(|properties| properties.rpr.clone());
     let (
         original_numbering_xml,
         original_numbering_positions,
@@ -3594,11 +3814,13 @@ fn paragraph_properties_xml(
             )
         })
         .unwrap_or_default();
-    if current.numbering_revision_xml != original_numbering_xml
-        || current.numbering_revision_xml_positions != original_numbering_positions
-        || current.numbering_revision_position != original_numbering_position
-        || current.revision_xml != original_revision_xml
-        || current.revision_xml_positions != original_revision_positions
+    let absent = CT_PPr::default();
+    let edited_properties = edited.properties.as_ref().unwrap_or(&absent);
+    if edited_properties.numbering_revision_xml != original_numbering_xml
+        || edited_properties.numbering_revision_xml_positions != original_numbering_positions
+        || edited_properties.numbering_revision_position != original_numbering_position
+        || edited_properties.revision_xml != original_revision_xml
+        || edited_properties.revision_xml_positions != original_revision_positions
     {
         formatting_diagnostic(diagnostics, location.to_owned());
     }
@@ -3635,7 +3857,7 @@ fn paragraph_properties_xml(
 }
 
 fn modeled_paragraph_properties(properties: Option<&CT_PPr>) -> Option<CT_PPr> {
-    properties.cloned().map(|mut properties| {
+    properties.cloned().and_then(|mut properties| {
         properties.sect_pr = None;
         properties.num_ilvl_raw = None;
         properties.num_id_raw = None;
@@ -3646,8 +3868,34 @@ fn modeled_paragraph_properties(properties: Option<&CT_PPr>) -> Option<CT_PPr> {
         properties.change = None;
         properties.revision_xml.clear();
         properties.revision_xml_positions.clear();
-        properties
+        properties.rpr = None;
+        nonempty_paragraph_properties(properties)
     })
+}
+
+/// The paragraph mark's run properties, with an empty mark read as absent.
+fn paragraph_mark(properties: Option<&CT_PPr>) -> Option<&rdocx_oxml::properties::CT_RPr> {
+    properties
+        .and_then(|properties| properties.rpr.as_ref())
+        .filter(|mark| **mark != rdocx_oxml::properties::CT_RPr::default())
+}
+
+/// An empty `w:pPr` or paragraph-mark `w:rPr` carries no formatting, so it
+/// compares like an absent one.
+fn nonempty_paragraph_properties(mut properties: CT_PPr) -> Option<CT_PPr> {
+    if properties
+        .rpr
+        .as_ref()
+        .is_some_and(|mark| *mark == rdocx_oxml::properties::CT_RPr::default())
+    {
+        properties.rpr = None;
+    }
+    (properties != CT_PPr::default()).then_some(properties)
+}
+
+fn paragraph_properties_differ(original: Option<&CT_PPr>, edited: Option<&CT_PPr>) -> bool {
+    original.cloned().and_then(nonempty_paragraph_properties)
+        != edited.cloned().and_then(nonempty_paragraph_properties)
 }
 
 fn section_properties_xml(
@@ -3888,6 +4136,15 @@ fn table_properties_xml(
     }
     let original_modeled = modeled_table_properties(original);
     let edited_modeled = modeled_table_properties(edited);
+    let unmodeled = |properties: &CT_TblPr| {
+        (
+            properties.extra_xml.clone(),
+            properties.revision_xml.clone(),
+        )
+    };
+    if original.map(unmodeled).unwrap_or_default() != edited.map(unmodeled).unwrap_or_default() {
+        formatting_diagnostic(diagnostics, location.to_owned());
+    }
     if original_modeled == edited_modeled {
         return original
             .map(table_property_xml)
@@ -3896,17 +4153,7 @@ fn table_properties_xml(
     }
     let mut current = edited.cloned().unwrap_or_default();
     current.change = None;
-    let (original_extra_xml, original_revision_xml) = original
-        .map(|properties| {
-            (
-                properties.extra_xml.clone(),
-                properties.revision_xml.clone(),
-            )
-        })
-        .unwrap_or_default();
-    if current.extra_xml != original_extra_xml || current.revision_xml != original_revision_xml {
-        formatting_diagnostic(diagnostics, location.to_owned());
-    }
+    let (original_extra_xml, original_revision_xml) = original.map(unmodeled).unwrap_or_default();
     current.extra_xml = original_extra_xml;
     current.revision_xml = original_revision_xml;
     let previous = original_modeled
@@ -5016,11 +5263,7 @@ fn body_signature(content: &BodyContent) -> String {
 
 fn paragraph_signature(paragraph: &CT_P) -> String {
     let numbering = paragraph_numbering(paragraph);
-    let extra_xml = paragraph
-        .extra_xml
-        .iter()
-        .filter(|(position, raw)| !CT_P::raw_is_root_attributes(*position, raw))
-        .collect::<Vec<_>>();
+    let extra_xml = semantic_paragraph_raw(paragraph);
     format!(
         "{numbering:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}",
         paragraph.runs.iter().map(run_signature).collect::<Vec<_>>(),
@@ -5039,6 +5282,14 @@ fn paragraph_signature(paragraph: &CT_P) -> String {
             ))
             .collect::<Vec<_>>(),
     )
+}
+
+fn semantic_paragraph_raw(paragraph: &CT_P) -> Vec<&(usize, Vec<u8>)> {
+    paragraph
+        .extra_xml
+        .iter()
+        .filter(|(position, raw)| !CT_P::raw_is_root_attributes(*position, raw))
+        .collect()
 }
 
 fn paragraph_numbering(paragraph: &CT_P) -> Option<(Option<u32>, Option<u32>)> {
@@ -5254,11 +5505,7 @@ fn paragraph_signature_with_options(paragraph: &CT_P, options: &ComparisonOption
             )
         })
         .collect::<Vec<_>>();
-    let extra_xml = paragraph
-        .extra_xml
-        .iter()
-        .filter(|(position, raw)| !CT_P::raw_is_root_attributes(*position, raw))
-        .collect::<Vec<_>>();
+    let extra_xml = semantic_paragraph_raw(paragraph);
     format!(
         "{numbering:?}:{runs:?}:{:?}:{comment_ranges:?}:{:?}:{:?}:{:?}",
         hyperlinks,
@@ -5415,7 +5662,7 @@ fn control_content_signature_with_options(
 }
 
 fn paragraph_formatting(paragraph: &CT_P) -> Option<CT_PPr> {
-    paragraph.properties.clone().map(|mut properties| {
+    paragraph.properties.clone().and_then(|mut properties| {
         properties.num_id = None;
         properties.num_ilvl = None;
         properties.num_id_raw = None;
@@ -5425,8 +5672,7 @@ fn paragraph_formatting(paragraph: &CT_P) -> Option<CT_PPr> {
         properties.numbering_revision_xml_positions.clear();
         properties.numbering_revision_position = None;
         properties.change = None;
-        properties.revision_xml.clear();
-        properties
+        nonempty_paragraph_properties(properties)
     })
 }
 
@@ -5451,6 +5697,26 @@ fn paragraph_xml(paragraph: &CT_P) -> Result<String> {
     let mut bytes = Vec::new();
     paragraph.to_xml(&mut Writer::new(&mut bytes))?;
     String::from_utf8(bytes).map_err(utf8_error)
+}
+
+/// Open a rebuilt paragraph with the original paragraph's root attributes.
+///
+/// The redline is the original package, and its unchanged paragraphs keep
+/// their source bytes, so a compared paragraph keeps the original identities
+/// too. None is taken from the edited side, which could duplicate a
+/// `w14:paraId` that another original paragraph still carries.
+fn paragraph_start_xml(paragraph: &CT_P) -> Result<String> {
+    let mut shell = CT_P::new();
+    shell.extra_xml = paragraph
+        .extra_xml
+        .iter()
+        .filter(|(position, raw)| CT_P::raw_is_root_attributes(*position, raw))
+        .cloned()
+        .collect();
+    if shell.extra_xml.is_empty() {
+        return Ok("<w:p>".to_owned());
+    }
+    owner_start_signature(&paragraph_xml(&shell)?)
 }
 
 fn property_xml(properties: &CT_PPr) -> Result<String> {
@@ -5955,8 +6221,9 @@ fn utf8_error(error: impl std::fmt::Display) -> Error {
 #[cfg(test)]
 mod tests {
     use super::{
-        ComparisonGranularity, ComparisonOptions, FAIL_AFTER_COMPARISON_STAGING,
-        attributed_run_units, story_document, word_fragments,
+        ComparisonGranularity, ComparisonOptions, ComparisonStoryKind,
+        FAIL_AFTER_COMPARISON_STAGING, attributed_run_units, first_story_difference,
+        story_document, word_fragments,
     };
     use crate::Document;
     use rdocx_oxml::document::BodyContent;
@@ -5986,6 +6253,41 @@ mod tests {
         assert_eq!(
             ComparisonOptions::default().granularity,
             ComparisonGranularity::Run
+        );
+    }
+
+    /// A failed postcondition printed both normalized packages whole, about
+    /// 20 000 characters for one picture, without naming the story or item.
+    #[test]
+    fn a_failed_postcondition_names_the_story_and_item_in_a_bounded_message() {
+        let drawing = format!("p:Drawing({})", "7, ".repeat(6_000));
+        let header = (
+            ComparisonStoryKind::Header,
+            "/word/header1.xml".to_owned(),
+            vec!["p:header".to_owned()],
+        );
+        let accepted = (
+            vec!["p:same".to_owned(), format!("{drawing}:[]:[]")],
+            vec![header.clone()],
+        );
+        let edited = (
+            vec!["p:same".to_owned(), format!("{drawing}:[(0, <w:pPr/>)]:[]")],
+            vec![header],
+        );
+        let message = first_story_difference(&accepted, &edited);
+        assert!(
+            message.starts_with("body item 1 differs at character 18013: "),
+            "{message}"
+        );
+        assert!(message.contains("<w:pPr/>"), "{message}");
+        assert!(message.len() < 240, "{message}");
+
+        let mut longer = accepted.clone();
+        longer.1[0].2.push(drawing.clone());
+        let message = first_story_difference(&accepted, &longer);
+        assert_eq!(
+            message,
+            "header /word/header1.xml item count 1 differs from 2"
         );
     }
 
