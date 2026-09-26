@@ -683,20 +683,10 @@ impl Document {
         if !has_package_signature(&self.package)? {
             return Ok(false);
         }
+        // The flush keeps an untouched body as stored under the rule the save
+        // uses, so any body it rewrites is one the save rewrites too.
         let mut staged = self.clone_for_staging();
         staged.flush_to_package()?;
-        if self
-            .package
-            .get_part(&self.doc_part_name)
-            .and_then(|xml| rdocx_oxml::document::CT_Document::from_xml(xml).ok())
-            .as_ref()
-            == Some(&self.document)
-            && let Some(original) = self.package.get_part(&self.doc_part_name)
-        {
-            staged
-                .package
-                .set_part(&self.doc_part_name, original.to_vec());
-        }
         Ok(!packages_are_semantically_equal(
             &staged.package,
             &self.package,

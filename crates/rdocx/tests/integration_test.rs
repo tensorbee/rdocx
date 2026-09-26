@@ -8855,6 +8855,9 @@ fn word_fractional_line_spacing_opens_with_nearest_twip_values() {
 
     assert_eq!(multiples, [257.0 / 240.0, 320.0 / 240.0, 343.0 / 240.0]);
 
+    // A no-op save keeps the untouched body as Word wrote it. An edit makes
+    // the save serialize it, which writes the nearest twips.
+    assert_eq!(document.try_replace_text("one", "uno").unwrap(), 1);
     let saved = document.to_bytes().unwrap();
     let saved_package = OpcPackage::from_reader(std::io::Cursor::new(&saved)).unwrap();
     let saved_xml =
@@ -8886,7 +8889,8 @@ fn word_fractional_line_spacing_opens_with_nearest_twip_values() {
     integer_package.set_part("/word/document.xml", integer_xml.into_bytes());
     let mut integer_bytes = std::io::Cursor::new(Vec::new());
     integer_package.write_to(&mut integer_bytes).unwrap();
-    let integer_document = Document::from_bytes(integer_bytes.get_ref()).unwrap();
+    let mut integer_document = Document::from_bytes(integer_bytes.get_ref()).unwrap();
+    assert_eq!(integer_document.try_replace_text("one", "uno").unwrap(), 1);
     assert_eq!(
         document.render_page_to_png_deterministic(0, 72.0).unwrap(),
         integer_document
@@ -9948,6 +9952,7 @@ fn table_style_updates_merge_nested_borders_and_margins() {
                         space: None,
                         color: Some("AABBCC".to_owned()),
                         extra_attributes: Vec::new(),
+                        nil: false,
                     }),
                     ..CT_TblBorders::default()
                 }),
@@ -11280,6 +11285,9 @@ fn encoded_comment_ids_reopen_as_one_complete_comment_anchor() {
         .collect::<Vec<_>>();
     assert_eq!(reference_ids, [7]);
 
+    // A no-op save keeps the untouched body as written. An edit makes the
+    // save serialize it, which writes the decoded ids.
+    document.add_paragraph("edited");
     let saved = document.to_bytes().unwrap();
     let reopened = Document::from_bytes(&saved).expect("saved comment package reopens");
     assert_eq!(reopened.comments()[0].id(), 7);
@@ -11310,6 +11318,22 @@ fn comments_part_uses_its_existing_relationship_target() {
     let mut input = std::io::Cursor::new(Vec::new());
     package.write_to(&mut input).unwrap();
     let mut document = Document::from_bytes(input.get_ref()).unwrap();
+    // A no-op save keeps the untouched comments part as written. A second
+    // comment makes the save serialize the part, which must stay at the target
+    // its relationship already names.
+    let range = RunRange {
+        start: RunPosition {
+            body_index: 0,
+            run_index: 0,
+        },
+        end: RunPosition {
+            body_index: 0,
+            run_index: 1,
+        },
+    };
+    document
+        .add_comment(range, "Editor", None, "added")
+        .unwrap();
     let assert_canonical_package = |saved_package: &OpcPackage| {
         assert!(saved_package.get_part("/word/comments.xml").is_none());
         assert_eq!(
@@ -16979,6 +17003,9 @@ mod f269_section_page_semantics {
             1,
         );
         let mut reparsed = document_from_xml(&document_with_sect_pr(&aliased));
+        // A no-op save keeps the untouched body as written, so an edit makes
+        // the save serialize it.
+        reparsed.add_paragraph("edited");
         assert_eq!(saved_sect_pr(&mut reparsed), sect_pr);
     }
 
@@ -19981,6 +20008,9 @@ mod f266b_ruby_and_emphasis_typography {
             r#"<q:rubyBase><q:r><q:t>漢字</q:t></q:r></q:rubyBase></q:ruby></w:p>"#,
         ));
         let mut document = Document::from_bytes(&aliased).unwrap();
+        // A no-op save keeps the untouched body as written, so an edit makes
+        // the save serialize it.
+        document.add_paragraph("edited");
         let xml = saved_document_xml(&document.to_bytes().unwrap());
         assert!(
             xml.contains(
@@ -21060,7 +21090,9 @@ mod f266c_character_grid_and_vertical_text {
 
         // A modeled toggle writes the canonical spelling, which is bare for
         // an on value and `w:val="false"` for an off one, exactly as the
-        // toggles F-264 already modeled do.
+        // toggles F-264 already modeled do. A no-op save keeps the untouched
+        // body as written, so an edit makes the save serialize it.
+        document.add_paragraph("edited");
         let saved = String::from_utf8(
             OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap()))
                 .unwrap()

@@ -757,15 +757,18 @@ Malformed choices are not parsed merely because they contain a modelled
 descendant.
 
 The gate on this is a full-corpus round-trip. Every modelled root parses,
-serialises, reparses, and compares structurally. The expected package replaces
-each modelled root with those exact canonical serialised bytes. After save and
-reopen, every rewritten root must match its expected bytes, while every
-unmodelled part must match its original bytes. Content types, relationships,
-part names, and part counts must remain structurally unchanged.
+serialises, reparses, and compares structurally. A facade save of each
+untouched deck must then equal, byte for byte, the archive the OPC writer
+writes for the package it opened. Every modelled root, every unmodelled part,
+and every relationship part therefore keeps its original bytes, and content
+types, relationships, part names, and part counts remain unchanged.
 
-Security staging serialises a modelled part only when its retained typed value
-has changed. An untouched producer-shaped presentation therefore keeps the
-exact signed part bytes, including lexical choices and namespace prefixes.
+Save staging writes a modelled part only when its serialisation differs from
+what the part's current bytes serialise to. Ordinary, class-converting,
+encrypted, and signing output and staged commits all stage this way, so an
+untouched producer-shaped presentation keeps its exact part bytes, including
+lexical choices and namespace prefixes, and an untouched signed package keeps a
+valid signature. Rendering stages canonical bytes for every modelled root.
 Relevant typed mutation stages new bytes without deleting retained signature
 parts, so verification reports the preserved signature evidence as invalid for
 the current presentation.
@@ -917,6 +920,11 @@ Contents: 16:9 slide size, one master with the standard colour map and full
 `p:txStyles`, the eleven standard layouts, a full theme, `presProps`,
 `viewProps`, `tableStyles` defaulted to Medium Style 2 Accent 1, a notes master,
 and **zero slides**.
+
+Its relationship parts are stored exactly as the OPC writer serialises them. A
+save keeps an unchanged relationship part byte for byte, so every deck built
+from the template carries those parts forward as stored, and SHA-bound decks
+such as the M11 candidate keep the bytes their viewer evidence records.
 
 The asset must live under the crate's own directory. A workspace-root `assets/`
 compiles locally but is not included in the published `.crate`.

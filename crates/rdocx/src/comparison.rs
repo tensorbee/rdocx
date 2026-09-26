@@ -385,9 +385,12 @@ impl Document {
             normalized_package(&accepted, &original_stories, options, &text_box_markers)?;
         let mut edited_package =
             normalized_package(&edited, &edited_stories, options, &text_box_markers)?;
-        if story_ignored(options, ComparisonStoryKind::Main) {
-            edited_package.0 =
-                normalized_package(&original, &original_stories, options, &text_box_markers)?.0;
+        // An ignored main story is copied from the original rather than
+        // compared, so it resolves together with its own revisions and is not
+        // part of either check.
+        let main_ignored = story_ignored(options, ComparisonStoryKind::Main);
+        if main_ignored {
+            edited_package.0 = accepted_body.0.clone();
         }
         if accepted_body != edited_package {
             return Err(Error::Other(format!(
@@ -398,8 +401,11 @@ impl Document {
         rejected.reject_all()?;
         let rejected_package =
             normalized_package(&rejected, &original_stories, options, &text_box_markers)?;
-        let original_package =
+        let mut original_package =
             normalized_package(&original, &original_stories, options, &text_box_markers)?;
+        if main_ignored {
+            original_package.0 = rejected_package.0.clone();
+        }
         if rejected_package != original_package {
             return Err(Error::Other(format!(
                 "comparison rejection does not reproduce the original stories: {rejected_package:?} != {original_package:?}"
@@ -1415,6 +1421,19 @@ fn comparison_input(document: &Document) -> Result<Document> {
         } else {
             retain_matching_drawing_namespaces(&mut candidate.document, &scoped_document);
         }
+    }
+    // A save keeps an untouched body as stored, and the main-story helpers
+    // read the fixed `w:` prefix. A main story stored under another prefix is
+    // staged in its canonical form, while a `w:` one keeps its source bytes.
+    let fixed_prefix = candidate
+        .package
+        .get_part(&candidate.doc_part_name)
+        .and_then(|xml| std::str::from_utf8(xml).ok())
+        .is_some_and(|xml| root_prefix(xml, "document").is_ok_and(|prefix| prefix == "w"));
+    if !fixed_prefix && let Some(canonical) = candidate.canonical_main_story()? {
+        candidate
+            .package
+            .set_part(&candidate.doc_part_name, canonical);
     }
     candidate.prepare_staged_package()?;
     let source = candidate

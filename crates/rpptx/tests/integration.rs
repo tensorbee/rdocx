@@ -8232,10 +8232,14 @@ fn m21_notes_handout_fixture_bytes() -> Vec<u8> {
     package.content_types.add_default("png", "image/png");
     for (index, slide_part) in slide_parts.iter().enumerate() {
         let notes_part = format!("/ppt/notesSlides/notesSlide{}.xml", index + 1);
-        package.set_part(
-            &notes_part,
-            f226_notes_slide_xml(&format!("M21 speaker note {}", index + 1)),
-        );
+        // Stored as the facade serializes it, so the SHA-bound M21 source
+        // keeps the exact bytes its PowerPoint oracle was recorded against.
+        let notes = CT_NotesSlide::from_xml(&f226_notes_slide_xml(&format!(
+            "M21 speaker note {}",
+            index + 1
+        )))
+        .unwrap();
+        package.set_part(&notes_part, notes.to_xml().unwrap());
         package
             .content_types
             .add_override(&notes_part, content_types::NOTES_SLIDE);
@@ -11131,7 +11135,7 @@ fn presentation_security_features_are_default_off_and_binding_manifests_do_not_e
 }
 
 #[test]
-fn ordinary_save_still_canonicalizes_untouched_modelled_notes_parts() {
+fn ordinary_save_keeps_untouched_modelled_notes_parts_byte_for_byte() {
     let mut package = fixture_package();
     let source_notes = String::from_utf8(notes_xml()).unwrap();
     let producer_notes = format!(
@@ -11147,17 +11151,155 @@ fn ordinary_save_still_canonicalizes_untouched_modelled_notes_parts() {
         .to_xml()
         .unwrap();
     assert_ne!(producer_notes, canonical_notes);
-    package.set_part(NOTES_PART, producer_notes);
+    package.set_part(NOTES_PART, producer_notes.clone());
 
     let saved = Presentation::from_bytes(&package_bytes(package))
         .unwrap()
         .to_bytes()
         .unwrap();
-    let saved_package = open_opc(&saved, "ordinary canonical notes save");
+    let saved_package = open_opc(&saved, "ordinary producer notes save");
     assert_eq!(
         saved_package.get_part(NOTES_PART),
-        Some(canonical_notes.as_slice())
+        Some(producer_notes.as_slice())
     );
+}
+
+/// `xml` as another producer writes it: a single-quoted declaration and CRLF,
+/// indentation between elements, and a root namespace declaration nothing
+/// uses.
+fn producer_formatted(xml: &[u8]) -> Vec<u8> {
+    let xml = std::str::from_utf8(xml).unwrap();
+    let root = xml
+        .strip_prefix("<?xml")
+        .map_or(xml, |declared| {
+            &declared[declared.find("?>").unwrap() + 2..]
+        })
+        .trim_start();
+    let name_end = root.find([' ', '>']).unwrap();
+    format!(
+        "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>\r\n{} xmlns:unused=\"urn:producer:unused\"{}",
+        &root[..name_end],
+        &root[name_end..]
+    )
+    .replace("><", ">\r\n  <")
+    .into_bytes()
+}
+
+fn zip_entries(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+    (0..archive.len())
+        .map(|index| {
+            let mut entry = archive.by_index(index).unwrap();
+            let mut data = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut data).unwrap();
+            (entry.name().to_owned(), data)
+        })
+        .collect()
+}
+
+/// The ZIP entries whose bytes differ between two packages, added and removed
+/// entries included.
+fn rewritten_entries(source: &[u8], saved: &[u8]) -> Vec<String> {
+    let (before, after) = (zip_entries(source), zip_entries(saved));
+    let mut names = before
+        .keys()
+        .chain(after.keys())
+        .filter(|name| before.get(*name) != after.get(*name))
+        .cloned()
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
+}
+
+#[test]
+fn a_save_rewrites_only_the_modelled_parts_and_relationships_an_edit_changes() {
+    let fixture = package_bytes(fixture_package());
+    let mut entries = zip_entries(&fixture);
+    for name in [
+        "custom/presentation-main.xml",
+        "custom/slides/first.xml",
+        "custom/slides/second.xml",
+        "custom/notes/speaker.xml",
+        "_rels/.rels",
+        "custom/_rels/presentation-main.xml.rels",
+        "custom/slides/_rels/second.xml.rels",
+        "custom/notes/_rels/speaker.xml.rels",
+    ] {
+        let formatted = producer_formatted(&entries[name]);
+        entries.insert(name.to_owned(), formatted);
+    }
+    let mut source = Cursor::new(Vec::new());
+    {
+        let mut archive = zip::ZipWriter::new(&mut source);
+        for (name, bytes) in &entries {
+            archive
+                .start_file(name.as_str(), zip::write::SimpleFileOptions::default())
+                .unwrap();
+            std::io::Write::write_all(&mut archive, bytes).unwrap();
+        }
+        archive.finish().unwrap();
+    }
+    let source = source.into_inner();
+
+    type Edit = fn(&mut Presentation);
+    let edits: [(&str, Edit, &[&str]); 6] = [
+        ("no-op", |_| {}, &[]),
+        (
+            "text replacement",
+            |presentation| {
+                assert_eq!(presentation.try_replace_text("plain", "VALUE").unwrap(), 1);
+            },
+            &["custom/slides/second.xml"],
+        ),
+        (
+            "slide shape",
+            |presentation| {
+                presentation
+                    .slide_mut(1)
+                    .unwrap()
+                    .add_textbox(Emu(0), Emu(0), Emu(914_400), Emu(457_200))
+                    .unwrap();
+            },
+            &["custom/slides/first.xml"],
+        ),
+        (
+            "notes",
+            |presentation| {
+                presentation
+                    .slide_mut(0)
+                    .unwrap()
+                    .set_notes_text("edited note")
+                    .unwrap();
+            },
+            &["custom/notes/speaker.xml"],
+        ),
+        (
+            "slide order",
+            |presentation| presentation.move_slide(0, 1).unwrap(),
+            &["custom/presentation-main.xml"],
+        ),
+        (
+            "slide removal, through a staged reopen",
+            |presentation| presentation.remove_slide(1).unwrap(),
+            &[
+                "[Content_Types].xml",
+                "custom/_rels/presentation-main.xml.rels",
+                "custom/presentation-main.xml",
+                "custom/slides/_rels/first.xml.rels",
+                "custom/slides/first.xml",
+            ],
+        ),
+    ];
+    for (edit_name, edit, expected) in edits {
+        let mut presentation = Presentation::from_bytes(&source).unwrap();
+        edit(&mut presentation);
+        assert_eq!(
+            rewritten_entries(&source, &presentation.to_bytes().unwrap()),
+            expected,
+            "{edit_name}"
+        );
+    }
 }
 
 fn f124_chart_data() -> ChartData {
@@ -15279,7 +15421,7 @@ fn all_corpus_modelled_parts_reparse_structurally() {
         let deck = deck_name(&path);
         let bytes = fs::read(&path).unwrap_or_else(|error| panic!("{deck}: {error}"));
         let package = open_opc(&bytes, deck);
-        for (content_type, count) in modelled_part_bytes(&package, deck).1 {
+        for (content_type, count) in modelled_part_coverage(&package, deck) {
             *coverage.entry(content_type).or_insert(0) += count;
         }
     }
@@ -15458,40 +15600,23 @@ fn all_modelled_corpus_packages_match_expected_parts() {
     for path in paths {
         let deck = deck_name(&path);
         let original_bytes = fs::read(&path).unwrap_or_else(|error| panic!("{deck}: {error}"));
-        let original = open_opc(&original_bytes, deck);
-        let (rewritten, _) = modelled_part_bytes(&original, deck);
-
-        let mut expected = original.clone();
-        for (part_name, bytes) in &rewritten {
-            expected.set_part(part_name, bytes.clone());
-        }
-        let expected = reopen_written_package(&expected, deck, "expected package");
-
-        let facade_bytes = Presentation::from_bytes(&original_bytes)
+        // An untouched deck saves every modelled root, every other part, and
+        // every relationship part as read, so the facade writes exactly what
+        // the OPC writer writes for the package it opened.
+        let expected_bytes = write_package(&open_opc(&original_bytes, deck), deck, "original");
+        let actual_bytes = Presentation::from_bytes(&original_bytes)
             .unwrap_or_else(|error| panic!("{deck}: open facade: {error}"))
             .to_bytes()
             .unwrap_or_else(|error| panic!("{deck}: save facade: {error}"));
-        let mut actual = open_opc(&facade_bytes, deck);
-        for (part_name, bytes) in &rewritten {
-            let content_type = original
-                .content_types
-                .overrides
-                .get(part_name)
-                .map(String::as_str)
-                .unwrap_or_else(|| panic!("{deck} {part_name}: missing content-type override"));
-            if matches!(
-                content_type,
-                content_types::SLIDE_LAYOUT
-                    | content_types::SLIDE_MASTER
-                    | content_types::NOTES_MASTER
-                    | content_types::THEME
-            ) {
-                actual.set_part(part_name, bytes.clone());
-            }
-        }
-        let actual_bytes = write_package(&actual, deck, "modelled package");
-        let actual = open_opc(&actual_bytes, deck);
-        assert_packages_equal(&expected, &actual, deck);
+        assert_packages_equal(
+            &open_opc(&expected_bytes, deck),
+            &open_opc(&actual_bytes, deck),
+            deck,
+        );
+        assert!(
+            actual_bytes == expected_bytes,
+            "{deck}: a no-op save rewrote relationship or content-type bytes"
+        );
 
         if let Some(directory) = &save_dir {
             let saved_path = directory.join(deck);
@@ -15661,6 +15786,27 @@ fn bundled_template_has_the_documented_part_graph() {
             .windows(b"{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}".len())
             .any(|window| window == b"{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}")
     );
+}
+
+#[test]
+#[cfg(feature = "default-template")]
+fn bundled_template_relationship_parts_are_stored_as_the_writer_serializes_them() {
+    // A save keeps an unchanged relationship part byte for byte, so every deck
+    // built from the template carries these parts forward exactly as stored.
+    let asset = workspace_root().join("crates/rpptx/assets/default.pptx");
+    let bytes = fs::read(&asset)
+        .unwrap_or_else(|error| panic!("read bundled template {}: {error}", asset.display()));
+    let relationship_parts = zip_entries(&bytes)
+        .into_iter()
+        .filter(|(name, _)| name.ends_with(".rels"))
+        .collect::<Vec<_>>();
+    assert_eq!(relationship_parts.len(), 15);
+    for (name, xml) in relationship_parts {
+        let serialized = oxml_opc::Relationships::from_xml(&xml)
+            .and_then(|relationships| relationships.to_xml())
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert!(xml == serialized, "{name} is not stored in written form");
+    }
 }
 
 #[test]
@@ -19527,13 +19673,9 @@ fn presentation_with_three_dimensional_chart_fallback(preview: Option<(&[u8], &s
     output.into_inner()
 }
 
-fn modelled_part_bytes(
-    package: &OpcPackage,
-    deck: &str,
-) -> (BTreeMap<String, Vec<u8>>, BTreeMap<&'static str, usize>) {
+fn modelled_part_coverage(package: &OpcPackage, deck: &str) -> BTreeMap<&'static str, usize> {
     let mut overrides = package.content_types.overrides.iter().collect::<Vec<_>>();
     overrides.sort_by_key(|(part_name, _)| *part_name);
-    let mut rewritten = BTreeMap::new();
     let mut coverage = BTreeMap::new();
     for (part_name, content_type) in overrides {
         let Some(canonical_type) = MODELLED_CONTENT_TYPES
@@ -19546,13 +19688,11 @@ fn modelled_part_bytes(
         let Some(bytes) = package.get_part(part_name) else {
             panic!("{deck} {part_name}: content-type override has no package part");
         };
-        let serialised = serialise_modelled_part(content_type, bytes, deck, part_name);
-        if let Some(serialised) = serialised {
+        if serialise_modelled_part(content_type, bytes, deck, part_name).is_some() {
             *coverage.entry(canonical_type).or_insert(0) += 1;
-            rewritten.insert(part_name.clone(), serialised);
         }
     }
-    (rewritten, coverage)
+    coverage
 }
 
 fn serialise_modelled_part(
@@ -19642,10 +19782,6 @@ fn serialise_modelled_part(
         }
         _ => None,
     }
-}
-
-fn reopen_written_package(package: &OpcPackage, deck: &str, action: &str) -> OpcPackage {
-    open_opc(&write_package(package, deck, action), deck)
 }
 
 fn write_package(package: &OpcPackage, deck: &str, action: &str) -> Vec<u8> {

@@ -1007,10 +1007,12 @@ def test_word_structure_snapshots_preserve_order_ownership_and_types():
     reopened = rdocx.Document.from_bytes(document.to_bytes())
 
     assert len(reopened.sections) == 3
+    # The untouched body is saved as written, so the explicit portrait
+    # orientation survives the round trip.
     assert reopened.sections[0] == rdocx.Section(
         ordinal=0,
         is_final=False,
-        orientation=None,
+        orientation="portrait",
         page_width=7_772_400,
         page_height=10_058_400,
         margin_top=914_400,

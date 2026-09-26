@@ -997,14 +997,9 @@ impl Presentation {
             "invalid presentation at byte save boundary: {:?}",
             self.validate()
         );
-        let preserve_signed_parts = self
-            .package
-            .package_rels
-            .get_by_type(rel_types::DIGITAL_SIGNATURE_ORIGIN)
-            .is_some();
         let package_signatures_invalidated = self.package_signatures_invalidated
             || self.retained_package_signature_would_be_invalidated()?;
-        let mut package = self.staged_package(preserve_signed_parts)?;
+        let mut package = self.staged_package(true)?;
         embedded::persist_invalidated_package_signature(
             &mut package,
             package_signatures_invalidated,
@@ -1044,7 +1039,7 @@ impl Presentation {
         let package_signatures_invalidated = self.package_signatures_invalidated
             || self.retained_package_signature_would_be_invalidated()?
             || (class_changed && preserve_signed_parts);
-        let mut package = self.staged_package(preserve_signed_parts)?;
+        let mut package = self.staged_package(true)?;
         package
             .content_types
             .add_override(&self.presentation_part, class.content_type());
@@ -1277,22 +1272,23 @@ impl Presentation {
                 package.package_rels.add(rel_types::CORE_PROPERTIES, target);
             }
         }
-        let presentation_changed = self
-            .package
-            .get_part(&self.presentation_part)
-            .and_then(|xml| CT_Presentation::from_xml(xml).ok())
-            .as_ref()
-            != Some(&self.presentation);
-        if !preserve_unchanged_modelled_parts || presentation_changed {
-            package.set_part(
+        // A modelled part whose model serializes exactly as its stored bytes
+        // would keeps those bytes, with their producer formatting.
+        let presentation_xml =
+            self.presentation
+                .to_xml()
+                .map_err(|error| Error::MalformedPart {
+                    part_name: self.presentation_part.clone(),
+                    message: error.to_string(),
+                })?;
+        if !preserve_unchanged_modelled_parts
+            || !self.package.part_matches_serialization(
                 &self.presentation_part,
-                self.presentation
-                    .to_xml()
-                    .map_err(|error| Error::MalformedPart {
-                        part_name: self.presentation_part.clone(),
-                        message: error.to_string(),
-                    })?,
-            );
+                &presentation_xml,
+                |xml| CT_Presentation::from_xml(xml).ok()?.to_xml().ok(),
+            )
+        {
+            package.set_part(&self.presentation_part, presentation_xml);
         }
         if let Some(part_name) = self
             .comment_authors_part
@@ -1341,39 +1337,35 @@ impl Presentation {
             );
         }
         for record in &self.slides {
-            let slide_changed = self
-                .package
-                .get_part(&record.part_name)
-                .and_then(|xml| CT_Slide::from_xml(xml).ok())
-                .as_ref()
-                != Some(&record.slide);
-            if !preserve_unchanged_modelled_parts || slide_changed {
-                package.set_part(
-                    &record.part_name,
-                    record
-                        .slide
-                        .to_xml()
-                        .map_err(|error| Error::MalformedPart {
-                            part_name: record.part_name.clone(),
-                            message: error.to_string(),
-                        })?,
-                );
+            let slide_xml = record
+                .slide
+                .to_xml()
+                .map_err(|error| Error::MalformedPart {
+                    part_name: record.part_name.clone(),
+                    message: error.to_string(),
+                })?;
+            if !preserve_unchanged_modelled_parts
+                || !self
+                    .package
+                    .part_matches_serialization(&record.part_name, &slide_xml, |xml| {
+                        CT_Slide::from_xml(xml).ok()?.to_xml().ok()
+                    })
+            {
+                package.set_part(&record.part_name, slide_xml);
             }
             if let Some(notes) = &record.notes {
-                let notes_changed = self
-                    .package
-                    .get_part(&notes.part_name)
-                    .and_then(|xml| CT_NotesSlide::from_xml(xml).ok())
-                    .as_ref()
-                    != Some(&notes.notes);
-                if !preserve_unchanged_modelled_parts || notes_changed {
-                    package.set_part(
+                let notes_xml = notes.notes.to_xml().map_err(|error| Error::MalformedPart {
+                    part_name: notes.part_name.clone(),
+                    message: error.to_string(),
+                })?;
+                if !preserve_unchanged_modelled_parts
+                    || !self.package.part_matches_serialization(
                         &notes.part_name,
-                        notes.notes.to_xml().map_err(|error| Error::MalformedPart {
-                            part_name: notes.part_name.clone(),
-                            message: error.to_string(),
-                        })?,
-                    );
+                        &notes_xml,
+                        |xml| CT_NotesSlide::from_xml(xml).ok()?.to_xml().ok(),
+                    )
+                {
+                    package.set_part(&notes.part_name, notes_xml);
                 }
             }
             if let Some(comments) = record.comments.as_ref().filter(|comments| comments.dirty) {
@@ -2036,7 +2028,7 @@ impl Presentation {
         let embedded_invalidated_signatures = staged.embedded_invalidated_signatures.clone();
         let package_signatures_invalidated = staged.package_signatures_invalidated
             || staged.retained_package_signature_would_be_invalidated()?;
-        let mut package = staged.staged_package(false)?;
+        let mut package = staged.staged_package(true)?;
         embedded::persist_invalidated_package_signature(
             &mut package,
             package_signatures_invalidated,

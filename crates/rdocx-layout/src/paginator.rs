@@ -5957,6 +5957,7 @@ mod tests {
                 space: Some(0),
                 color: Some("000000".to_owned()),
                 extra_attributes: Vec::new(),
+                nil: false,
             }),
             ..Default::default()
         });
@@ -6246,6 +6247,7 @@ mod tests {
                     space: Some(1),
                     color: Some("000000".to_string()),
                     extra_attributes: Vec::new(),
+                    nil: false,
                 }),
                 bottom: Some(CT_BorderEdge {
                     val: ST_Border::Single,
@@ -6253,6 +6255,7 @@ mod tests {
                     space: Some(1),
                     color: Some("000000".to_string()),
                     extra_attributes: Vec::new(),
+                    nil: false,
                 }),
                 ..Default::default()
             }),

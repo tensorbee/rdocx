@@ -4505,6 +4505,9 @@ fn rejected_complex_field_does_not_hide_valid_paragraph_siblings() {
         r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:x="urn:producer"><w:body><w:p>{left}{rejected}{right}</w:p></w:body></w:document>"#
     );
     let mut document = document_with_content_controls(&xml);
+    // A no-op save keeps the untouched body as written, so an unrelated edit
+    // makes every save below serialize it the same way.
+    document.add_paragraph("unrelated mutation");
     let initial = document_xml(&mut document);
     let rejected_start = initial.find("<x:rejected-start/>").unwrap();
     let rejected_end_start = initial.find("<x:rejected-end/>").unwrap();
@@ -4602,6 +4605,9 @@ fn unclosed_complex_field_does_not_hide_fields_in_later_paragraphs() {
         r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:x="urn:producer"><w:body><w:p>{malformed}</w:p><w:p>{later}</w:p><w:p>{nested}</w:p></w:body></w:document>"#
     );
     let mut document = document_with_content_controls(&xml);
+    // A no-op save keeps the untouched body as written, so an unrelated edit
+    // makes every save below serialize it the same way.
+    document.add_paragraph("unrelated mutation");
     let initial = document_xml(&mut document);
     let malformed_start = initial.find("<x:malformed-start/>").unwrap();
     let malformed_end_start = initial.find("<x:malformed-end/>").unwrap();
@@ -8615,7 +8621,15 @@ fn toc_bookmark_ids_names_and_references_follow_final_heading_order() {
             })
             .collect::<Vec<_>>()
     };
-    assert_eq!(history_xml, final_xml);
+    // Each save keeps the bytes its own last edit wrote, so the two histories
+    // are compared through the typed serializer rather than byte for byte.
+    let serialized = |xml: &str| {
+        CT_Document::from_xml(xml.as_bytes())
+            .unwrap()
+            .to_xml()
+            .unwrap()
+    };
+    assert_eq!(serialized(&history_xml), serialized(&final_xml));
     assert_eq!(bookmark_pairs(&history_xml), bookmark_pairs(&final_xml));
     assert_eq!(
         bookmark_pairs(&history_xml),
@@ -8625,7 +8639,6 @@ fn toc_bookmark_ids_names_and_references_follow_final_heading_order() {
         ]
     );
     assert!(history_xml.contains(r#"w:instr="REF _Toc2""#));
-    assert_eq!(history.to_bytes().unwrap(), final_order.to_bytes().unwrap());
 }
 
 #[test]
@@ -12562,16 +12575,27 @@ fn word_namespace_alias_used_by_raw_marker_replays_after_save_and_reopen() {
             if modified {
                 document.add_paragraph("changed");
             }
+            // An untouched body is saved as the producer wrote it, alias and
+            // all. A modified one is serialized with the declaration kept on
+            // the owner of the raw marker.
+            let assert_binding_kept = |xml: &str| {
+                if modified {
+                    assert_namespace_on_raw_owner(
+                        xml,
+                        "p",
+                        &format!(r#"xmlns:x="{word_namespace}""#),
+                        raw,
+                    );
+                } else {
+                    let owner = format!(r#"<q:p xmlns:x="{word_namespace}">{raw}"#);
+                    assert!(xml.contains(&owner), "{xml}");
+                }
+            };
             let saved = document.to_bytes().unwrap();
             let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(&saved)).unwrap();
             let saved_xml =
                 std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
-            assert_namespace_on_raw_owner(
-                saved_xml,
-                "p",
-                &format!(r#"xmlns:x="{word_namespace}""#),
-                raw,
-            );
+            assert_binding_kept(saved_xml);
 
             let mut reopened = Document::from_bytes(&saved).unwrap();
             assert!(reopened.paragraph(0).unwrap().items().any(
@@ -12582,12 +12606,7 @@ fn word_namespace_alias_used_by_raw_marker_replays_after_save_and_reopen() {
                 oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(&resaved)).unwrap();
             let resaved_xml =
                 std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
-            assert_namespace_on_raw_owner(
-                resaved_xml,
-                "p",
-                &format!(r#"xmlns:x="{word_namespace}""#),
-                raw,
-            );
+            assert_binding_kept(resaved_xml);
         }
     }
 
@@ -12933,6 +12952,9 @@ fn nested_table_cell_owner_ignores_independent_same_uri_local_binding() {
     );
 
     let mut reopened = Document::from_bytes(&saved).unwrap();
+    // A no-op save keeps the reopened body as written, so a second edit makes
+    // the save serialize it again.
+    reopened.add_paragraph("second unrelated mutation");
     let resaved = reopened.to_bytes().unwrap();
     let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(&resaved)).unwrap();
     let resaved_xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
@@ -14720,6 +14742,9 @@ fn hyperlink_relationship_ids_use_expanded_names_and_safe_output_prefixes() {
     let spans = paragraph.hyperlink_spans();
     assert_eq!(spans[0].2, Some("right"));
     assert_eq!(spans[1].2, None);
+    // A no-op save keeps the untouched body as written, so an edit makes the
+    // save serialize it.
+    document.add_paragraph("unrelated mutation");
     let output = document_xml(&mut document);
     assert!(output.contains(r#"xmlns:r="urn:foreign""#));
     assert!(output.contains(r#"r:id="wrong""#));
@@ -24280,12 +24305,19 @@ fn ignored_stories_are_excluded_before_revision_checks_and_id_seeding() {
     fn add_main_revision(mut document: Document) -> Document {
         let bytes = document.to_bytes().unwrap();
         let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
-        let main = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec())
-            .unwrap()
-            .replace(
-                "<w:r><w:t>same body</w:t></w:r>",
-                r#"<w:ins w:id="0" w:author="Earlier" w:date="2026-09-03T09:00:00Z"><w:r><w:t>same body</w:t></w:r></w:ins>"#,
-            );
+        let main =
+            String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+        // The run is found by its text, so the revision lands whatever
+        // indentation the save wrote around it.
+        let text = main.find("<w:t>same body</w:t>").unwrap();
+        let run_start = main[..text].rfind("<w:r>").unwrap();
+        let run_end = text + main[text..].find("</w:r>").unwrap() + "</w:r>".len();
+        let main = format!(
+            r#"{}<w:ins w:id="0" w:author="Earlier" w:date="2026-09-03T09:00:00Z">{}</w:ins>{}"#,
+            &main[..run_start],
+            &main[run_start..run_end],
+            &main[run_end..],
+        );
         package.set_part("/word/document.xml", main.into_bytes());
         let mut output = std::io::Cursor::new(Vec::new());
         package.write_to(&mut output).unwrap();
@@ -32393,5 +32425,730 @@ mod f266c_character_grid_and_vertical_text_regressions {
             "the rotated column is sized from the stacked height, \
              {rotated} against {horizontal}"
         );
+    }
+}
+
+#[test]
+fn story_link_snapshots_read_link_text_from_prefixes_declared_outside_the_link() {
+    // Each hyperlink's runs use a prefix declared on an ancestor outside the
+    // hyperlink span, or on the hyperlink itself. A header part reaches the
+    // scanner as it was read, so the prefixes are not rewritten first. The
+    // package-wide inventory reads each link from its own span with an
+    // inventoried namespace scope, so it must still agree with the per-story
+    // scan that reads from the head of the part.
+    let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let document = document_with_header_story(&format!(
+        concat!(
+            r#"<w:hdr xmlns:w="{0}"><w:p xmlns:ww="{0}">"#,
+            r#"<ww:r><ww:t>before </ww:t></ww:r>"#,
+            r#"<w:hyperlink w:anchor="first"><ww:r><ww:t>first link</ww:t></ww:r></w:hyperlink>"#,
+            r#"</w:p>"#,
+            r#"<w:p><w:hyperlink w:anchor="second" xmlns:x="{0}">"#,
+            r#"<x:r><x:t>second link</x:t></x:r></w:hyperlink></w:p></w:hdr>"#,
+        ),
+        word
+    ));
+    let header = document
+        .stories()
+        .unwrap()
+        .into_iter()
+        .find(|story| story.kind() == StoryKind::Header)
+        .unwrap();
+    let project = |links: Vec<(ContentLocation, rdocx::LinkInfo)>| {
+        links
+            .into_iter()
+            .filter(|(location, _)| location.story() == &header)
+            .map(|(location, link)| (link.text, link.anchor, location.index_path().to_vec()))
+            .collect::<Vec<_>>()
+    };
+
+    let snapshots = project(document.story_link_snapshots().unwrap());
+
+    assert_eq!(snapshots, project(document.story_links(&header).unwrap()));
+    assert_eq!(
+        snapshots
+            .iter()
+            .map(|(text, anchor, _)| (text.as_str(), anchor.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("first link", Some("first")),
+            ("second link", Some("second")),
+        ]
+    );
+}
+
+#[test]
+fn story_link_snapshots_match_story_links_when_a_part_binds_word_twice() {
+    // The header binds Word both as the default namespace and as `q`, and the
+    // tracked insertion inside the link names its attributes with `q`. Reading
+    // the link from its own span must not see more Word prefixes on the link
+    // than the read from the head of the part does.
+    let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let document = document_with_header_story(&format!(
+        concat!(
+            r#"<hdr xmlns="{0}" xmlns:q="{0}"><p><hyperlink q:anchor="a">"#,
+            r#"<ins q:id="1" q:author="A"><r><t>inserted</t></r></ins>"#,
+            r#"</hyperlink></p></hdr>"#,
+        ),
+        word
+    ));
+    let header = document
+        .stories()
+        .unwrap()
+        .into_iter()
+        .find(|story| story.kind() == StoryKind::Header)
+        .unwrap();
+    let project = |links: Vec<(ContentLocation, rdocx::LinkInfo)>| {
+        links
+            .into_iter()
+            .filter(|(location, _)| location.story() == &header)
+            .map(|(location, link)| (link.text, location.index_path().to_vec()))
+            .collect::<Vec<_>>()
+    };
+
+    let snapshots = project(document.story_link_snapshots().unwrap());
+
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots, project(document.story_links(&header).unwrap()));
+    let items = document.story_items(&header).unwrap();
+    assert_eq!(snapshots[0].0, items[0].links().unwrap()[0].text);
+}
+
+mod save_fidelity_regressions {
+    use std::collections::BTreeMap;
+    use std::io::{Cursor, Read, Write};
+
+    use rdocx::{
+        CustomProperty, CustomPropertyValue, Document, Length, ListLevel, PictureOptions,
+        RunPosition, RunRange, StoryKind, StyleBuilder,
+    };
+    use rdocx_oxml::namespace::W_NS;
+
+    const NIL: &str = r#"w:val="nil""#;
+    const NONE: &str = r#"w:val="none""#;
+
+    /// A fresh Word package with the named parts replaced, opened.
+    fn document_with_parts(parts: &[(&str, String)]) -> Document {
+        let mut seed = Document::new();
+        let mut package =
+            oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(seed.to_bytes().unwrap()))
+                .unwrap();
+        for (part_name, xml) in parts {
+            package.set_part(part_name, xml.clone().into_bytes());
+        }
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        package.write_to(&mut bytes).unwrap();
+        Document::from_bytes(&bytes.into_inner()).unwrap()
+    }
+
+    fn saved_part(document: &mut Document, part_name: &str) -> String {
+        let bytes = document.to_bytes().unwrap();
+        let package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+        String::from_utf8(package.get_part(part_name).unwrap().to_vec()).unwrap()
+    }
+
+    /// Paragraph, run, table, cell and page borders plus a paragraph style and
+    /// a table style, every one of them spelled with `token`.
+    fn bordered_document(token: &str) -> Document {
+        let body = format!(
+            concat!(
+                r#"<w:document xmlns:w="{ns}"><w:body>"#,
+                r#"<w:p><w:pPr><w:pBdr><w:top w:val="{t}" w:sz="0" w:space="0"/></w:pBdr></w:pPr>"#,
+                r#"<w:r><w:rPr><w:bdr w:val="{t}"/></w:rPr><w:t>boxed</w:t></w:r></w:p>"#,
+                r#"<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblBorders>"#,
+                r#"<w:top w:val="single" w:sz="8"/><w:bottom w:val="single" w:sz="8"/>"#,
+                r#"<w:insideH w:val="{t}"/></w:tblBorders></w:tblPr>"#,
+                r#"<w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>"#,
+                r#"<w:tr><w:tc><w:tcPr><w:tcBorders><w:bottom w:val="{t}" w:sz="0" w:space="0"/>"#,
+                r#"</w:tcBorders></w:tcPr><w:p><w:r><w:t>first</w:t></w:r></w:p></w:tc></w:tr>"#,
+                r#"<w:tr><w:tc><w:p><w:r><w:t>second</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+                r#"<w:sectPr><w:pgBorders><w:top w:val="{t}"/></w:pgBorders></w:sectPr>"#,
+                r#"</w:body></w:document>"#,
+            ),
+            ns = W_NS,
+            t = token,
+        );
+        let styles = format!(
+            concat!(
+                r#"<w:styles xmlns:w="{ns}">"#,
+                r#"<w:style w:type="paragraph" w:styleId="Boxed"><w:name w:val="Boxed"/>"#,
+                r#"<w:pPr><w:pBdr><w:left w:val="{t}"/></w:pBdr></w:pPr></w:style>"#,
+                r#"<w:style w:type="table" w:styleId="Open"><w:name w:val="Open"/>"#,
+                r#"<w:tcPr><w:tcBorders><w:right w:val="{t}"/></w:tcBorders></w:tcPr></w:style>"#,
+                r#"</w:styles>"#,
+            ),
+            ns = W_NS,
+            t = token,
+        );
+        document_with_parts(&[("/word/document.xml", body), ("/word/styles.xml", styles)])
+    }
+
+    #[test]
+    fn nil_borders_are_not_rewritten_as_none_when_their_part_is_serialized() {
+        let mut document = bordered_document("nil");
+        // Both parts change, so both go through the typed serializers.
+        document.add_paragraph("edited");
+        document
+            .add_style(StyleBuilder::paragraph("Added", "Added"))
+            .unwrap();
+
+        let body = saved_part(&mut document, "/word/document.xml");
+        assert!(body.contains("edited"), "{body}");
+        assert_eq!(body.matches(NIL).count(), 5, "{body}");
+        assert_eq!(body.matches(NONE).count(), 0, "{body}");
+        let styles = saved_part(&mut document, "/word/styles.xml");
+        assert!(styles.contains(r#"w:styleId="Added""#), "{styles}");
+        assert_eq!(styles.matches(NIL).count(), 2, "{styles}");
+        assert_eq!(styles.matches(NONE).count(), 0, "{styles}");
+
+        // The spelling is the only difference, and nothing renders differently.
+        let mut none = bordered_document("none");
+        none.add_paragraph("edited");
+        document = bordered_document("nil");
+        document.add_paragraph("edited");
+        assert_eq!(
+            saved_part(&mut none, "/word/document.xml").replace(NONE, NIL),
+            saved_part(&mut document, "/word/document.xml")
+        );
+        assert_eq!(
+            document.render_page_to_png_deterministic(0, 36.0).unwrap(),
+            none.render_page_to_png_deterministic(0, 36.0).unwrap()
+        );
+    }
+
+    const W14_NS: &str = "http://schemas.microsoft.com/office/word/2010/wordml";
+    const MC_NS: &str = "http://schemas.openxmlformats.org/markup-compatibility/2006";
+    const RELATIONSHIPS_NS: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
+    const OFFICE_RELATIONSHIPS: &str =
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+    /// A Word package as another producer writes it: indentation, single
+    /// quoted declarations, and namespace declarations no part element uses.
+    /// Every modelled part a save flushes is present.
+    fn producer_package() -> Vec<u8> {
+        let declaration = "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>\n";
+        let word_root = format!(
+            r#"xmlns:w="{W_NS}" xmlns:r="{OFFICE_RELATIONSHIPS}" xmlns:w14="{W14_NS}" xmlns:mc="{MC_NS}" xmlns:unused="urn:producer:unused" mc:Ignorable="w14""#
+        );
+        let parts = [
+            (
+                "[Content_Types].xml",
+                concat!(
+                    "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\n",
+                    "  <Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\n",
+                    "  <Default Extension=\"xml\" ContentType=\"application/xml\"/>\n",
+                    "  <Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>\n",
+                    "  <Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/>\n",
+                    "  <Override PartName=\"/word/numbering.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml\"/>\n",
+                    "  <Override PartName=\"/word/comments.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml\"/>\n",
+                    "  <Override PartName=\"/word/commentsExtended.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml\"/>\n",
+                    "  <Override PartName=\"/docProps/core.xml\" ContentType=\"application/vnd.openxmlformats-package.core-properties+xml\"/>\n",
+                    "  <Override PartName=\"/docProps/app.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.extended-properties+xml\"/>\n",
+                    "  <Override PartName=\"/docProps/custom.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.custom-properties+xml\"/>\n",
+                    "</Types>",
+                )
+                .to_owned(),
+            ),
+            (
+                "_rels/.rels",
+                format!(
+                    concat!(
+                        "{declaration}<Relationships xmlns=\"{rels}\">\n",
+                        "  <Relationship Id=\"rId3\" Type=\"{office}/extended-properties\" Target=\"docProps/app.xml\"/>\n",
+                        "  <Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties\" Target=\"docProps/core.xml\"/>\n",
+                        "  <Relationship Id=\"rId1\" Type=\"{office}/officeDocument\" Target=\"word/document.xml\"/>\n",
+                        "  <Relationship Id=\"rId4\" Type=\"{office}/custom-properties\" Target=\"docProps/custom.xml\"/>\n",
+                        "</Relationships>",
+                    ),
+                    declaration = declaration,
+                    rels = RELATIONSHIPS_NS,
+                    office = OFFICE_RELATIONSHIPS,
+                ),
+            ),
+            (
+                "word/_rels/document.xml.rels",
+                format!(
+                    concat!(
+                        "{declaration}<Relationships xmlns=\"{rels}\">\n",
+                        "  <Relationship Id=\"rId1\" Type=\"{office}/styles\" Target=\"styles.xml\"/>\n",
+                        "  <Relationship Id=\"rId2\" Type=\"{office}/numbering\" Target=\"numbering.xml\"/>\n",
+                        "  <Relationship Id=\"rId3\" Type=\"{office}/comments\" Target=\"comments.xml\"/>\n",
+                        "  <Relationship Id=\"rId4\" Type=\"http://schemas.microsoft.com/office/2011/relationships/commentsExtended\" Target=\"commentsExtended.xml\"/>\n",
+                        "</Relationships>",
+                    ),
+                    declaration = declaration,
+                    rels = RELATIONSHIPS_NS,
+                    office = OFFICE_RELATIONSHIPS,
+                ),
+            ),
+            (
+                "word/document.xml",
+                format!(
+                    concat!(
+                        "{declaration}<w:document {root}>\n",
+                        "  <w:body>\n",
+                        "    <w:p w14:paraId=\"1A2B3C4D\">\n",
+                        "      <w:pPr>\n",
+                        "        <w:numPr><w:ilvl w:val=\"0\"/><w:numId w:val=\"1\"/></w:numPr>\n",
+                        "      </w:pPr>\n",
+                        "      <w:commentRangeStart w:id=\"0\"/>\n",
+                        "      <w:r><w:t>Replace PLACEHOLDER here</w:t></w:r>\n",
+                        "      <w:commentRangeEnd w:id=\"0\"/>\n",
+                        "      <w:r><w:commentReference w:id=\"0\"/></w:r>\n",
+                        "    </w:p>\n",
+                        "    <w:sectPr>\n",
+                        "      <w:pgSz w:w=\"12240\" w:h=\"15840\"/>\n",
+                        "    </w:sectPr>\n",
+                        "  </w:body>\n",
+                        "</w:document>",
+                    ),
+                    declaration = declaration,
+                    root = word_root,
+                ),
+            ),
+            (
+                "word/styles.xml",
+                format!(
+                    concat!(
+                        "{declaration}<w:styles {root}>\n",
+                        "  <w:docDefaults>\n",
+                        "    <w:rPrDefault><w:rPr><w:sz w:val=\"22\"/></w:rPr></w:rPrDefault>\n",
+                        "  </w:docDefaults>\n",
+                        "  <w:style w:type=\"paragraph\" w:default=\"1\" w:styleId=\"Normal\">\n",
+                        "    <w:name w:val=\"Normal\"/>\n",
+                        "    <w:qFormat/>\n",
+                        "  </w:style>\n",
+                        "</w:styles>",
+                    ),
+                    declaration = declaration,
+                    root = word_root,
+                ),
+            ),
+            (
+                "word/numbering.xml",
+                format!(
+                    concat!(
+                        "{declaration}<w:numbering {root}>\n",
+                        "  <w:abstractNum w:abstractNumId=\"0\">\n",
+                        "    <w:multiLevelType w:val=\"hybridMultilevel\"/>\n",
+                        "    <w:lvl w:ilvl=\"0\">\n",
+                        "      <w:start w:val=\"1\"/>\n",
+                        "      <w:numFmt w:val=\"decimal\"/>\n",
+                        "      <w:lvlText w:val=\"%1.\"/>\n",
+                        "      <w:lvlJc w:val=\"left\"/>\n",
+                        "    </w:lvl>\n",
+                        "  </w:abstractNum>\n",
+                        "  <w:num w:numId=\"1\"><w:abstractNumId w:val=\"0\"/></w:num>\n",
+                        "</w:numbering>",
+                    ),
+                    declaration = declaration,
+                    root = word_root,
+                ),
+            ),
+            (
+                "word/comments.xml",
+                format!(
+                    concat!(
+                        "{declaration}<w:comments {root}>\n",
+                        "  <w:comment w:id=\"0\" w:author=\"Reviewer\" w:initials=\"R\">\n",
+                        "    <w:p w14:paraId=\"0C0FFEE0\"><w:r><w:t>Check this</w:t></w:r></w:p>\n",
+                        "  </w:comment>\n",
+                        "</w:comments>",
+                    ),
+                    declaration = declaration,
+                    root = word_root,
+                ),
+            ),
+            (
+                "word/commentsExtended.xml",
+                format!(
+                    concat!(
+                        "{declaration}<w15:commentsEx xmlns:w15=\"http://schemas.microsoft.com/office/word/2012/wordml\" xmlns:mc=\"{mc}\" mc:Ignorable=\"w15\">\n",
+                        "  <w15:commentEx w15:paraId=\"0C0FFEE0\" w15:done=\"0\"/>\n",
+                        "</w15:commentsEx>",
+                    ),
+                    declaration = declaration,
+                    mc = MC_NS,
+                ),
+            ),
+            (
+                "docProps/core.xml",
+                format!(
+                    concat!(
+                        "{declaration}<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" ",
+                        "xmlns:dc=\"http://purl.org/dc/elements/1.1/\" xmlns:dcterms=\"http://purl.org/dc/terms/\" ",
+                        "xmlns:dcmitype=\"http://purl.org/dc/dcmitype/\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n",
+                        "  <dc:title>Producer title</dc:title>\n",
+                        "  <dc:creator>Producer</dc:creator>\n",
+                        "</cp:coreProperties>",
+                    ),
+                    declaration = declaration,
+                ),
+            ),
+            (
+                "docProps/app.xml",
+                format!(
+                    concat!(
+                        "{declaration}<Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties\" ",
+                        "xmlns:vt=\"http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes\">\n",
+                        "  <Application>Producer</Application>\n",
+                        "  <Company>Example</Company>\n",
+                        "</Properties>",
+                    ),
+                    declaration = declaration,
+                ),
+            ),
+            (
+                "docProps/custom.xml",
+                format!(
+                    concat!(
+                        "{declaration}<Properties xmlns=\"http://schemas.openxmlformats.org/officeDocument/2006/custom-properties\" ",
+                        "xmlns:vt=\"http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes\">\n",
+                        "  <property fmtid=\"{{D5CDD505-2E9C-101B-9397-08002B2CF9AE}}\" pid=\"2\" name=\"Client\">\n",
+                        "    <vt:lpwstr>Example</vt:lpwstr>\n",
+                        "  </property>\n",
+                        "</Properties>",
+                    ),
+                    declaration = declaration,
+                ),
+            ),
+        ];
+        let mut output = Cursor::new(Vec::new());
+        let mut archive = zip::ZipWriter::new(&mut output);
+        for (name, xml) in parts {
+            archive
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            archive.write_all(xml.as_bytes()).unwrap();
+        }
+        archive.finish().unwrap();
+        output.into_inner()
+    }
+
+    fn zip_entries(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        (0..archive.len())
+            .map(|index| {
+                let mut entry = archive.by_index(index).unwrap();
+                let mut data = Vec::new();
+                entry.read_to_end(&mut data).unwrap();
+                (entry.name().to_owned(), data)
+            })
+            .collect()
+    }
+
+    /// The ZIP entries whose bytes differ between two packages, added and
+    /// removed entries included.
+    fn rewritten_entries(source: &[u8], saved: &[u8]) -> Vec<String> {
+        let (before, after) = (zip_entries(source), zip_entries(saved));
+        let mut names = before
+            .keys()
+            .chain(after.keys())
+            .filter(|name| before.get(*name) != after.get(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    #[test]
+    fn a_no_op_save_keeps_every_producer_formatted_part_byte_for_byte() {
+        let source = producer_package();
+        let mut document = Document::from_bytes(&source).unwrap();
+        assert_eq!(
+            rewritten_entries(&source, &document.to_bytes().unwrap()),
+            Vec::<String>::new()
+        );
+    }
+
+    #[cfg(all(feature = "agile-encryption", not(target_arch = "wasm32")))]
+    #[test]
+    fn an_encrypted_no_op_save_keeps_every_producer_formatted_part_byte_for_byte() {
+        let source = producer_package();
+        let document = Document::from_bytes(&source).unwrap();
+        let encrypted = document.to_encrypted_bytes("secret").unwrap();
+        let decrypted =
+            oxml_opc::OpcPackage::from_encrypted_reader(Cursor::new(encrypted), "secret").unwrap();
+        // Parts are compared as decrypted. Relationship and content-type
+        // parts are rewritten by the plain writer only when they changed.
+        for (name, bytes) in zip_entries(&source) {
+            if let Some(part) = decrypted.get_part(&format!("/{name}")) {
+                assert_eq!(part, bytes.as_slice(), "{name}");
+            }
+        }
+        let mut plain = Cursor::new(Vec::new());
+        decrypted.write_to(&mut plain).unwrap();
+        assert_eq!(
+            rewritten_entries(&source, plain.get_ref()),
+            Vec::<String>::new()
+        );
+    }
+
+    #[cfg(all(feature = "digital-signatures", not(target_arch = "wasm32")))]
+    fn signature_fixture(name: &str) -> Vec<u8> {
+        use base64::Engine as _;
+
+        let source = include_str!("../../oxml-opc/src/signature.rs");
+        let prefix = format!("const {name}: &str = \"");
+        let encoded = source
+            .split_once(&prefix)
+            .and_then(|(_, remainder)| remainder.split_once("\";").map(|(value, _)| value))
+            .expect("signature fixture remains available");
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap()
+    }
+
+    #[cfg(all(feature = "digital-signatures", not(target_arch = "wasm32")))]
+    #[test]
+    fn a_no_op_save_of_a_signed_producer_document_keeps_its_signature_valid() {
+        let mut package =
+            oxml_opc::OpcPackage::from_reader(Cursor::new(producer_package())).unwrap();
+        let report = package
+            .sign(
+                &signature_fixture("TEST_PRIVATE_KEY_PKCS8_BASE64"),
+                &signature_fixture("TEST_CERTIFICATE_DER_BASE64"),
+            )
+            .unwrap();
+        assert!(report.cryptographically_valid && report.coverage_complete);
+        let mut signed = Cursor::new(Vec::new());
+        package.write_to(&mut signed).unwrap();
+        let signed = signed.into_inner();
+
+        let saved = Document::from_bytes(&signed).unwrap().to_bytes().unwrap();
+        assert_eq!(rewritten_entries(&signed, &saved), Vec::<String>::new());
+        let reports = Document::from_bytes(&saved)
+            .unwrap()
+            .verify_signatures()
+            .unwrap();
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0].cryptographically_valid && reports[0].coverage_complete);
+    }
+
+    #[cfg(all(feature = "digital-signatures", not(target_arch = "wasm32")))]
+    #[test]
+    fn respelling_a_nil_border_as_none_marks_a_retained_signature_invalidated() {
+        use rdocx::{BorderStyle, ParagraphBorderEdge};
+
+        // Model equality ignores the `nil` spelling, while the saved bytes
+        // change, so the signature check must follow the save's own rule.
+        let body = format!(
+            r#"<w:document xmlns:w="{W_NS}"><w:body><w:p><w:pPr><w:pBdr><w:top w:val="nil" w:sz="4" w:space="1" w:color="000000"/></w:pBdr></w:pPr><w:r><w:t>boxed</w:t></w:r></w:p></w:body></w:document>"#
+        );
+        let source = document_with_parts(&[("/word/document.xml", body)])
+            .to_bytes()
+            .unwrap();
+        let mut package = oxml_opc::OpcPackage::from_reader(Cursor::new(source)).unwrap();
+        package
+            .sign(
+                &signature_fixture("TEST_PRIVATE_KEY_PKCS8_BASE64"),
+                &signature_fixture("TEST_CERTIFICATE_DER_BASE64"),
+            )
+            .unwrap();
+        let mut signed = Cursor::new(Vec::new());
+        package.write_to(&mut signed).unwrap();
+
+        let mut document = Document::from_bytes(&signed.into_inner()).unwrap();
+        document.paragraph_mut(0).unwrap().set_border(
+            ParagraphBorderEdge::Top,
+            BorderStyle::None,
+            4,
+            "000000",
+        );
+        let saved = document.to_bytes().unwrap();
+
+        let body =
+            String::from_utf8(zip_entries(&saved).remove("word/document.xml").unwrap()).unwrap();
+        assert!(body.contains(NONE) && !body.contains(NIL), "{body}");
+        let package = oxml_opc::OpcPackage::from_reader(Cursor::new(saved)).unwrap();
+        assert!(package.package_rels.items.iter().any(|relationship| {
+            relationship.rel_type == "urn:rdocx:relationships/invalidated-package-signature"
+        }));
+    }
+
+    #[test]
+    fn comparing_untouched_documents_with_an_aliased_word_prefix_tracks_the_edit() {
+        // A save keeps an untouched body as stored, but comparison reads the
+        // main story in the canonical form with its fixed `w:` prefix.
+        let aliased = |text: &str| {
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><q:document xmlns:q="{W_NS}"><q:body><q:p><q:r><q:t>{text}</q:t></q:r></q:p></q:body></q:document>"#
+            )
+        };
+        let mut original = document_with_parts(&[("/word/document.xml", aliased("old text"))]);
+        let edited = document_with_parts(&[("/word/document.xml", aliased("new text"))]);
+
+        let diagnostics = original
+            .compare(&edited, "Ada", "2026-09-04T09:00:00Z")
+            .unwrap();
+
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(!original.revisions().is_empty());
+        let mut accepted = Document::from_bytes(&original.to_bytes().unwrap()).unwrap();
+        accepted.accept_all().unwrap();
+        assert!(
+            accepted
+                .compare(&edited, "postcondition", "2026-09-04T09:01:00Z")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(accepted.revisions().is_empty());
+    }
+
+    #[test]
+    fn a_text_replacement_rewrites_only_the_body() {
+        let source = producer_package();
+        let mut document = Document::from_bytes(&source).unwrap();
+        assert_eq!(
+            document.try_replace_text("PLACEHOLDER", "VALUE").unwrap(),
+            1
+        );
+        let saved = document.to_bytes().unwrap();
+        assert_eq!(rewritten_entries(&source, &saved), ["word/document.xml"]);
+        let body =
+            String::from_utf8(zip_entries(&saved).remove("word/document.xml").unwrap()).unwrap();
+        assert!(body.contains("Replace VALUE here"), "{body}");
+    }
+
+    #[test]
+    fn an_edit_rewrites_the_parts_it_changes_and_leaves_the_others_byte_for_byte() {
+        const PNG: &[u8] = &[
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9c, 0x63, 0x60, 0xf8, 0xcf, 0xf0, 0x00, 0x00, 0x04, 0x01, 0x01, 0x08, 0x9d, 0x1d,
+            0xe1, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ];
+        type Edit = fn(&mut Document);
+        let edits: [(&str, Edit, &[&str]); 9] = [
+            (
+                "style",
+                |document| {
+                    document
+                        .add_style(StyleBuilder::paragraph("Added", "Added"))
+                        .unwrap();
+                },
+                &["word/styles.xml"],
+            ),
+            (
+                "numbering",
+                |document| {
+                    document
+                        .add_numbering_definition(&[ListLevel::decimal()])
+                        .unwrap();
+                },
+                &["word/numbering.xml"],
+            ),
+            (
+                "core properties",
+                |document| document.set_title("Edited title"),
+                &["docProps/core.xml"],
+            ),
+            (
+                "application properties",
+                |document| {
+                    let mut properties = document.application_properties().unwrap().clone();
+                    properties.company = Some("Edited".to_owned());
+                    document.set_application_properties(properties).unwrap();
+                },
+                &["docProps/app.xml"],
+            ),
+            (
+                "custom properties",
+                |document| {
+                    document
+                        .set_custom_property(CustomProperty {
+                            fmtid: "{D5CDD505-2E9C-101B-9397-08002B2CF9AE}".to_owned(),
+                            pid: 3,
+                            name: Some("Edited".to_owned()),
+                            value: CustomPropertyValue::Bool(true),
+                        })
+                        .unwrap();
+                },
+                &["docProps/custom.xml"],
+            ),
+            (
+                "comment",
+                |document| {
+                    let run = |run_index| RunPosition {
+                        body_index: 0,
+                        run_index,
+                    };
+                    document
+                        .add_comment(
+                            RunRange {
+                                start: run(0),
+                                end: run(1),
+                            },
+                            "Editor",
+                            None,
+                            "Added",
+                        )
+                        .unwrap();
+                },
+                &[
+                    "word/comments.xml",
+                    "word/commentsExtended.xml",
+                    "word/document.xml",
+                ],
+            ),
+            (
+                "body",
+                |document| {
+                    document.add_paragraph("Added");
+                },
+                &["word/document.xml"],
+            ),
+            (
+                "relationship",
+                |document| {
+                    document.add_hyperlink_relationship("https://example.com/");
+                },
+                &["word/_rels/document.xml.rels"],
+            ),
+            (
+                "picture, through a staged reopen",
+                |document| {
+                    let body = document
+                        .stories()
+                        .unwrap()
+                        .into_iter()
+                        .find(|story| story.kind() == StoryKind::Body)
+                        .unwrap();
+                    document
+                        .add_picture_with_options(
+                            &body,
+                            PNG,
+                            "pixel.png",
+                            PictureOptions {
+                                width: Length::pt(1.0),
+                                height: Length::pt(1.0),
+                                crop: None,
+                                anchor: None,
+                                name: None,
+                                description: None,
+                            },
+                        )
+                        .unwrap();
+                },
+                &[
+                    "[Content_Types].xml",
+                    "word/_rels/document.xml.rels",
+                    "word/document.xml",
+                    "word/media/image1.png",
+                ],
+            ),
+        ];
+        let source = producer_package();
+        for (edit_name, edit, expected) in edits {
+            let mut document = Document::from_bytes(&source).unwrap();
+            edit(&mut document);
+            assert_eq!(
+                rewritten_entries(&source, &document.to_bytes().unwrap()),
+                expected,
+                "{edit_name}"
+            );
+        }
     }
 }

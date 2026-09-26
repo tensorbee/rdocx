@@ -1547,12 +1547,11 @@ Eight gates run against it:
    harness before any PresentationML modelling exists.
 3. **Modelled round-trip** (M8 exit): parse and serialise the presentation,
    slide, layout, master, notes slide, notes master, and theme roots. Reparse
-   each canonical result and compare it structurally. Build the expected
-   package from those exact modelled bytes, retain the original bytes for all
-   unmodelled parts, save through deterministic OPC output, reopen, and compare
-   content types, relationships, part names, part counts, and every part byte
-   against that expectation. The gate requires nonzero corpus coverage for all
-   seven root types.
+   each canonical result and compare it structurally. The gate requires
+   nonzero corpus coverage for all seven root types. A facade save of each
+   untouched deck must then equal the deterministic OPC output of the package
+   it opened byte for byte, so every modelled root, every unmodelled part, and
+   every relationship part keeps its original bytes.
 4. **Timing model round-trip**: every slide, layout, and master timing or
    transition subtree projects the supported model while unsupported siblings
    retain exact bytes. Coverage counters must remain nonzero for every bounded
@@ -1928,7 +1927,13 @@ The Python story-scale gate is `python_story_inventory_scales_linearly`. It
 doubles a corpus containing paragraphs, table cells, and hyperlinks, requires
 exact doubled inventory counts, and bounds the elapsed ratio without relying
 on an absolute machine speed. A native counted companion requires one complete
-story-source build for each item or hyperlink snapshot. The binding companion
+story-source build for each item or hyperlink snapshot. A second counted
+companion, `story_link_snapshots_read_each_link_from_its_own_span`, doubles a
+linked corpus and bounds the XML events the story text walker reads, so reading
+each link from the head of its part fails it.
+`story_link_snapshots_match_story_links_when_a_part_binds_word_twice` requires
+the snapshot, story and item hyperlink projections to agree on the text of a
+header link when the part binds Word to two prefixes. The binding companion
 interleaves direct, inserted, inline-control, and deleted runs, then proves
 StoryItem text, Paragraph text, and live run handles use the same accepted
 order. Nested formatting and splitting survive save and reopen, while an old

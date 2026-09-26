@@ -15,7 +15,7 @@ use crate::units::Twips;
 const MAX_TAB_XML_DEPTH: usize = 64;
 
 /// A single border edge (top, bottom, left, right, between).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct CT_BorderEdge {
     /// Border style
     pub val: ST_Border,
@@ -34,6 +34,31 @@ pub struct CT_BorderEdge {
     /// verbatim, so a caller storing one itself is storing attribute-value
     /// syntax and owns the escaping.
     pub extra_attributes: Vec<(String, String)>,
+    /// Whether an `ST_Border::None` style is spelled `nil` rather than `none`.
+    ///
+    /// The two tokens mean the same thing and render the same, so this only
+    /// selects the token a save writes. A parsed edge sets it from its source
+    /// token, and it is ignored for any other style and by equality.
+    pub nil: bool,
+}
+
+impl PartialEq for CT_BorderEdge {
+    fn eq(&self, other: &Self) -> bool {
+        // Destructured so that a new field cannot be left out by accident.
+        let CT_BorderEdge {
+            val,
+            sz,
+            space,
+            color,
+            extra_attributes,
+            nil: _,
+        } = self;
+        *val == other.val
+            && *sz == other.sz
+            && *space == other.space
+            && *color == other.color
+            && *extra_attributes == other.extra_attributes
+    }
 }
 
 impl CT_BorderEdge {
@@ -44,6 +69,7 @@ impl CT_BorderEdge {
             space: None,
             color: None,
             extra_attributes: Vec::new(),
+            nil: false,
         }
     }
 
@@ -56,6 +82,7 @@ impl CT_BorderEdge {
             let v = std::str::from_utf8(&attr.value)?;
             if matches_local_name(key, b"val") {
                 edge.val = ST_Border::from_str(v).unwrap_or(edge.val);
+                edge.nil = v == "nil";
             } else if matches_local_name(key, b"sz") {
                 edge.sz = Some(v.parse()?);
             } else if matches_local_name(key, b"space") {
@@ -83,6 +110,7 @@ impl CT_BorderEdge {
             let value = std::str::from_utf8(&attr.value)?;
             if is_word_attribute(key, b"val", word_prefixes) {
                 edge.val = ST_Border::from_str(value).unwrap_or(edge.val);
+                edge.nil = value == "nil";
             } else if is_word_attribute(key, b"sz", word_prefixes) {
                 edge.sz = Some(value.parse()?);
             } else if is_word_attribute(key, b"space", word_prefixes) {
@@ -106,7 +134,12 @@ impl CT_BorderEdge {
                 value: Cow::Borrowed(value.as_bytes()),
             });
         }
-        e.push_attribute(("w:val", self.val.to_str()));
+        let val = if self.nil && self.val == ST_Border::None {
+            "nil"
+        } else {
+            self.val.to_str()
+        };
+        e.push_attribute(("w:val", val));
         if let Some(sz) = self.sz {
             e.push_attribute(("w:sz", buf.format(sz)));
         }
@@ -492,6 +525,54 @@ mod tests {
     }
 
     #[test]
+    fn a_nil_border_edge_is_not_rewritten_as_none() {
+        let source = concat!(
+            r#"<q:pBdr xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main">"#,
+            r#"<q:top q:val="nil"/><q:bottom q:val="none" q:sz="4"/></q:pBdr>"#,
+        );
+        let mut reader = Reader::from_str(source);
+        loop {
+            match reader.read_event() {
+                Ok(Event::Start(_)) => break,
+                Ok(Event::Eof) => panic!("missing pBdr start"),
+                _ => {}
+            }
+        }
+        let mut borders = CT_PBdr::from_xml_with_prefixes(&mut reader, &["q".to_owned()]).unwrap();
+        let top = borders.top.clone().expect("a typed top edge");
+        assert_eq!(top.val, ST_Border::None);
+        assert!(top.nil);
+        assert!(!borders.bottom.as_ref().unwrap().nil);
+        // Both tokens are the same style, so equality does not see the spelling.
+        assert_eq!(top, CT_BorderEdge::new(ST_Border::None));
+
+        let serialize = |borders: &CT_PBdr| {
+            let mut output = Vec::new();
+            borders.to_xml(&mut Writer::new(&mut output)).unwrap();
+            String::from_utf8(output).unwrap()
+        };
+        assert_eq!(
+            serialize(&borders),
+            r#"<w:pBdr><w:top w:val="nil"/><w:bottom w:val="none" w:sz="4"/></w:pBdr>"#
+        );
+
+        // An authored edge writes `none`, and a changed style writes its own token.
+        borders.bottom = Some(CT_BorderEdge::new(ST_Border::None));
+        borders.top.as_mut().unwrap().val = ST_Border::Single;
+        assert_eq!(
+            serialize(&borders),
+            r#"<w:pBdr><w:top w:val="single"/><w:bottom w:val="none"/></w:pBdr>"#
+        );
+
+        let start = BytesStart::from_content(r#"w:bdr w:val="nil" w:sz="0""#, 5);
+        let edge = CT_BorderEdge::from_xml_attrs(&start).unwrap();
+        assert_eq!(
+            (edge.val, edge.nil, edge.sz),
+            (ST_Border::None, true, Some(0))
+        );
+    }
+
+    #[test]
     fn round_trip_borders() {
         let bdr = CT_PBdr {
             top: Some(CT_BorderEdge {
@@ -500,6 +581,7 @@ mod tests {
                 space: Some(1),
                 color: Some("000000".to_string()),
                 extra_attributes: Vec::new(),
+                nil: false,
             }),
             bottom: Some(CT_BorderEdge {
                 val: ST_Border::Double,
@@ -507,6 +589,7 @@ mod tests {
                 space: Some(2),
                 color: Some("FF0000".to_string()),
                 extra_attributes: Vec::new(),
+                nil: false,
             }),
             ..Default::default()
         };
@@ -709,6 +792,7 @@ mod tests {
                     space: Some(0),
                     color: Some("FF00FF".to_string()),
                     extra_attributes: Vec::new(),
+                    nil: false,
                 }),
                 ..Default::default()
             };

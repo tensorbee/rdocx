@@ -578,6 +578,7 @@ fn checked_table_border(
         space: Some(0),
         color: Some(checked_table_color("border color", color)?),
         extra_attributes: Vec::new(),
+        nil: false,
     })
 }
 
@@ -845,6 +846,7 @@ impl<'a> Table<'a> {
             space: Some(0),
             color: Some(color.to_string()),
             extra_attributes: Vec::new(),
+            nil: false,
         };
         let borders = self
             .ensure_tbl_pr()

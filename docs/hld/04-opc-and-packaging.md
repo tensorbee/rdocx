@@ -29,7 +29,10 @@ the same identity. The first authored spelling remains the serialized key.
 Direct mutation of the public maps remains supported, with deterministic lookup
 if callers create an invalid case conflict. Serialization rejects that conflict
 before writing output. Every loaded package retains unchanged producer
-content-types bytes and element order regardless of enabled features.
+content-types bytes and element order regardless of enabled features. Each
+loaded relationship part likewise keeps its producer bytes while its ordered
+relationships, compared by id, type, target, and target mode, are unchanged.
+Any difference writes the canonical form.
 
 Relationship XML rejects duplicate `Id` values during parsing and before
 serialization. Package serialization validates content-type identity, part
@@ -44,6 +47,27 @@ opened. Relationships added to the current graph afterward are authored state,
 including internal theme and other typed edges that have no modeled `r:id`.
 They join deterministic semantic ordering by relationship type and normalized
 target. Unknown and external authored edges retain their target and mode.
+
+**Saves keep untouched parts.** A typed Word or PowerPoint part keeps its
+current package bytes when its model serializes exactly as those bytes do after
+one parse and serialization. `OpcPackage::part_matches_serialization` states
+that rule once for both facades. The comparison always reads the part's current
+bytes, so bytes an operation wrote directly stay when its model agrees with
+them, and an edit that reaches the model always writes the model. A missing
+part, or bytes that no longer parse, never match. Word applies the rule to the
+body, styles, numbering, comments, comments extensions, and the core,
+application, and custom properties parts, next to the retained-source settings,
+theme, font table, glossary, and footnote paths. PowerPoint applies it to the
+presentation, slide, and notes-slide parts on every save, class conversion,
+encrypted save, signature operation, and staged commit, while rendering stages
+canonical bytes. Unless the save itself repairs identifiers, a no-op save
+therefore writes every part and relationship part byte for byte, and an
+untouched signed package keeps a valid signature. The check that marks a
+retained signature invalidated flushes under the same rule, so a change model
+equality ignores, such as a `nil` border edge respelled as `none`, still
+invalidates it. Document comparison stages a main story stored under another
+Word prefix in its canonical form, because its story helpers read the fixed
+`w:` prefix.
 
 Modern presentation package identity is the main presentation part's exact
 content type. `oxml-opc` names the ordinary presentation, macro-enabled
@@ -1083,7 +1107,9 @@ fixed `w` attributes at each child's `xsd:sequence` position and replays every
 retained raw child at its recorded slot and occurrence. `w:framePr` and each
 border edge write their retained attributes before the modeled ones, so typing
 those elements drops no producer attribute and keeps the retained ones in
-source order. A modeled toggle whose source element carried an attribute the
+source order. A border edge spelled `nil` types as the same no-border style as
+`none` and is written back as `nil`, on paragraph, run, table, cell, and page
+borders alike, while an authored no-border edge writes `none`. A modeled toggle whose source element carried an attribute the
 model does not own replays that element in place of the canonical form, which
 keeps a parse and save of an untouched paragraph byte identical.
 

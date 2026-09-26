@@ -1329,6 +1329,12 @@ table-cell, header, footer, footnote, and endnote readers, so `CT_PPr` does not
 expose a partially contextual parser. Established aliased and default
 WordprocessingML inputs remain accepted outside numbering.
 
+`CT_BorderEdge` also exposes `nil: bool`. It records a producer edge spelled
+`nil`, which types as the same no-border style as `none` and is written back as
+`nil` while the style stays none. Authored edges carry `false`, and semantic
+equality ignores the spelling. Exhaustive `rdocx-oxml` struct literals must
+provide the field or use `CT_BorderEdge::new`.
+
 The Word table facade gains an additive advanced-geometry surface. `Table`
 gains checked `set_float_position`, `set_overlap`, `set_bidi_visual`,
 `set_cell_spacing`, `set_caption`, and `set_description`. `Row` gains checked

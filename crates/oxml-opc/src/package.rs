@@ -10,8 +10,9 @@ use zip::write::SimpleFileOptions;
 
 use crate::content_types::ContentTypes;
 use crate::error::{OpcError, Result};
-use crate::relationship::{Relationships, rel_types};
+use crate::relationship::{Relationship, Relationships, rel_types};
 
+const PACKAGE_RELATIONSHIPS_PATH: &str = "_rels/.rels";
 const EOCD_SIGNATURE: [u8; 4] = [0x50, 0x4b, 0x05, 0x06];
 const ZIP64_EOCD_LOCATOR_SIGNATURE: [u8; 4] = [0x50, 0x4b, 0x06, 0x07];
 const ZIP64_EOCD_SIGNATURE: [u8; 4] = [0x50, 0x4b, 0x06, 0x06];
@@ -35,6 +36,13 @@ pub struct PackagePart {
 pub(crate) struct ContentTypesSource {
     xml: Vec<u8>,
     content_types: ContentTypes,
+}
+
+/// A relationship part's producer bytes and the relationships parsed from them.
+#[derive(Debug, Clone)]
+struct RelationshipsSource {
+    xml: Vec<u8>,
+    items: Vec<Relationship>,
 }
 
 struct SerializedPackage<'a> {
@@ -74,6 +82,9 @@ pub struct OpcPackage {
     /// All parts keyed by their URI (e.g. "/word/document.xml").
     pub parts: HashMap<String, Vec<u8>>,
     content_types_source: Option<ContentTypesSource>,
+    /// Relationship parts as read, keyed by the ZIP entry name they are
+    /// written back to.
+    relationship_sources: HashMap<String, RelationshipsSource>,
 }
 
 impl OpcPackage {
@@ -189,10 +200,19 @@ impl OpcPackage {
         let content_types = ContentTypes::from_xml(ct_xml)?;
 
         // Parse package-level relationships: _rels/.rels
+        let mut relationship_sources = HashMap::new();
         let package_rels = if let Some(rels_xml) =
             deterministic_part_key(&raw_parts, "/_rels/.rels").and_then(|name| raw_parts.get(name))
         {
-            Relationships::from_xml(rels_xml)?
+            let relationships = Relationships::from_xml(rels_xml)?;
+            relationship_sources.insert(
+                PACKAGE_RELATIONSHIPS_PATH.to_owned(),
+                RelationshipsSource {
+                    xml: rels_xml.clone(),
+                    items: relationships.items.clone(),
+                },
+            );
+            relationships
         } else {
             Relationships::new()
         };
@@ -214,6 +234,13 @@ impl OpcPackage {
                 // Convert rels path to the part name it belongs to.
                 // e.g. "word/_rels/document.xml.rels" → "/word/document.xml"
                 let part_name = rels_path_to_part_name(&rels_path);
+                relationship_sources.insert(
+                    part_name_to_rels_path(&part_name),
+                    RelationshipsSource {
+                        xml: xml_data.clone(),
+                        items: rels.items.clone(),
+                    },
+                );
                 part_rels.insert(part_name, rels);
             }
         }
@@ -244,6 +271,7 @@ impl OpcPackage {
                 xml: ct_xml.clone(),
                 content_types: ContentTypes::from_xml(ct_xml)?,
             }),
+            relationship_sources,
         })
     }
 
@@ -272,7 +300,7 @@ impl OpcPackage {
         zip.write_all(&serialized.content_types)?;
 
         // Write _rels/.rels
-        zip.start_file("_rels/.rels", options)?;
+        zip.start_file(PACKAGE_RELATIONSHIPS_PATH, options)?;
         zip.write_all(&serialized.package_relationships)?;
 
         // Write part-level .rels files. Both loops iterate in sorted order so
@@ -330,6 +358,24 @@ impl OpcPackage {
         self.parts.insert(key, data);
     }
 
+    /// Return whether a stored part already says what a typed model serializes to.
+    ///
+    /// `reserialize` parses a part and serializes the result, which is what the
+    /// stored bytes are written as when nothing changed. When that equals
+    /// `serialized`, no edit reached the part and its stored bytes can stay,
+    /// with their producer formatting, namespace declarations, and unmodelled
+    /// content. An absent part, or bytes that no longer parse, do not match.
+    pub fn part_matches_serialization(
+        &self,
+        part_name: &str,
+        serialized: &[u8],
+        reserialize: impl FnOnce(&[u8]) -> Option<Vec<u8>>,
+    ) -> bool {
+        self.get_part(part_name).is_some_and(|stored| {
+            stored == serialized || reserialize(stored).as_deref() == Some(serialized)
+        })
+    }
+
     /// Remove and return a case-equivalent normalized part.
     pub fn remove_part(&mut self, part_name: &str) -> Option<Vec<u8>> {
         let key = deterministic_part_key(&self.parts, part_name)?.clone();
@@ -344,6 +390,19 @@ impl OpcPackage {
             return Ok(source.xml.clone());
         }
         self.content_types.to_xml()
+    }
+
+    /// Return a relationship part's producer bytes while its relationships are
+    /// unchanged, and the canonical serialization otherwise.
+    fn relationships_bytes(
+        &self,
+        rels_path: &str,
+        relationships: &Relationships,
+    ) -> Result<Vec<u8>> {
+        match self.relationship_sources.get(rels_path) {
+            Some(source) if source.items == relationships.items => Ok(source.xml.clone()),
+            _ => relationships.to_xml(),
+        }
     }
 
     /// Verify every digital signature discovered through the OPC relationship graph.
@@ -459,6 +518,7 @@ impl OpcPackage {
             part_rels: HashMap::new(),
             parts: HashMap::new(),
             content_types_source: None,
+            relationship_sources: HashMap::new(),
         }
     }
 
@@ -477,12 +537,15 @@ impl OpcPackage {
         self.validate_graph()?;
 
         let content_types = self.content_types_bytes()?;
-        let package_relationships = self.package_rels.to_xml()?;
+        let package_relationships =
+            self.relationships_bytes(PACKAGE_RELATIONSHIPS_PATH, &self.package_rels)?;
         let mut part_relationships = Vec::with_capacity(self.part_rels.len());
         let mut relationship_owners = self.part_rels.iter().collect::<Vec<_>>();
         relationship_owners.sort_by_key(|(owner, _)| owner.as_str());
         for (owner, relationships) in relationship_owners {
-            part_relationships.push((part_name_to_rels_path(owner), relationships.to_xml()?));
+            let rels_path = part_name_to_rels_path(owner);
+            let xml = self.relationships_bytes(&rels_path, relationships)?;
+            part_relationships.push((rels_path, xml));
         }
 
         let mut parts = self
@@ -856,6 +919,76 @@ mod tests {
             .read_to_end(&mut saved)
             .unwrap();
         assert_eq!(saved, PRODUCER_CONTENT_TYPES);
+    }
+
+    #[test]
+    fn unchanged_relationship_parts_are_not_reformatted_on_save() {
+        const PACKAGE_RELS: &[u8] = br#"<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="word/document.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Id="rId1"/></Relationships>"#;
+        const DOCUMENT_RELS: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
+<pr:Relationships xmlns:pr="http://schemas.openxmlformats.org/package/2006/relationships" xmlns:x="urn:producer">
+    <pr:Relationship Id="rId7" Type="urn:first" Target="first.xml"/>
+    <pr:Relationship Id="rId3" Type="urn:link" Target="https://example.com/?a=1&amp;b=2" TargetMode="External"/>
+</pr:Relationships>"#;
+        let saved = |package: &OpcPackage, name: &str| {
+            let mut output = std::io::Cursor::new(Vec::new());
+            package.write_to(&mut output).unwrap();
+            output.set_position(0);
+            let mut archive = ZipArchive::new(output).unwrap();
+            let mut bytes = Vec::new();
+            archive
+                .by_name(name)
+                .unwrap()
+                .read_to_end(&mut bytes)
+                .unwrap();
+            bytes
+        };
+        let mut package = OpcPackage::from_reader(package_zip(&[
+            ("[Content_Types].xml", MINIMAL_CONTENT_TYPES),
+            ("_rels/.rels", PACKAGE_RELS),
+            ("word/_rels/document.xml.rels", DOCUMENT_RELS),
+            ("word/document.xml", b"<document/>"),
+            ("word/first.xml", b"<first/>"),
+        ]))
+        .unwrap();
+        assert_eq!(saved(&package, "_rels/.rels"), PACKAGE_RELS);
+        assert_eq!(
+            saved(&package, "word/_rels/document.xml.rels"),
+            DOCUMENT_RELS
+        );
+
+        // Removing and restoring the same relationships is not a change.
+        let relationships = package.remove_part_rels("/word/document.xml").unwrap();
+        package.set_part_rels("/word/document.xml", relationships);
+        assert_eq!(
+            saved(&package, "word/_rels/document.xml.rels"),
+            DOCUMENT_RELS
+        );
+
+        // A changed relationship set is written from the model, and only that
+        // relationship part moves.
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .add_with_id("rId8", "urn:second", "second.xml");
+        let rewritten = saved(&package, "word/_rels/document.xml.rels");
+        assert_ne!(rewritten, DOCUMENT_RELS);
+        let reparsed = Relationships::from_xml(&rewritten).unwrap();
+        assert_eq!(
+            reparsed
+                .items
+                .iter()
+                .map(|relationship| relationship.id.as_str())
+                .collect::<Vec<_>>(),
+            ["rId7", "rId3", "rId8"]
+        );
+        assert_eq!(saved(&package, "_rels/.rels"), PACKAGE_RELS);
+
+        package.package_rels.items[0].target = "word/renamed.xml".to_owned();
+        let package_rels = saved(&package, "_rels/.rels");
+        assert_eq!(
+            Relationships::from_xml(&package_rels).unwrap().items[0].target,
+            "word/renamed.xml"
+        );
     }
 
     #[test]

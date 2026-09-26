@@ -1434,6 +1434,7 @@ impl<'a> Paragraph<'a> {
             space: Some(1),
             color: Some(color.to_string()),
             extra_attributes: Vec::new(),
+            nil: false,
         };
         self.ensure_ppr().borders = Some(Box::new(CT_PBdr {
             top: Some(edge.clone()),
@@ -1482,6 +1483,7 @@ impl<'a> Paragraph<'a> {
             space: Some(space_points),
             color: Some(color.to_string()),
             extra_attributes: Vec::new(),
+            nil: false,
         };
         let borders = self
             .ensure_ppr()
@@ -1876,6 +1878,7 @@ impl<'a> Paragraph<'a> {
                     space: Some(1),
                     color: Some(color.to_owned()),
                     extra_attributes: retained,
+                    nil: false,
                 });
             }
             None => *slot = None,

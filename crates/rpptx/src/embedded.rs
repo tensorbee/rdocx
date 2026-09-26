@@ -521,7 +521,7 @@ impl Presentation {
     fn commit_embedded_candidate(&mut self, staged: Self) -> Result<()> {
         let embedded_invalidated_signatures = staged.embedded_invalidated_signatures.clone();
         let package_signatures_invalidated = staged.package_signatures_invalidated;
-        let mut package = staged.staged_package(false)?;
+        let mut package = staged.staged_package(true)?;
         persist_invalidated_package_signature(&mut package, package_signatures_invalidated)?;
         let mut output = Cursor::new(Vec::new());
         package.write_to(&mut output)?;
