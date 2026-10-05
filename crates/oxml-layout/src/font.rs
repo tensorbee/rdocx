@@ -2039,6 +2039,10 @@ fn font_data_for_face(
         },
         #[cfg(feature = "system-fonts")]
         fontdb::Source::File(path) => shared_file_font_bytes(path).map(|data| (data, face_index)),
+        // A source that fontdb features enabled elsewhere in the build add,
+        // such as `memmap`'s shared file, read through fontdb itself.
+        #[allow(unreachable_patterns)]
+        _ => db.with_face_data(id, |data, index| (Arc::from(data), index)),
     }
 }
 
