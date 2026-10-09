@@ -7,6 +7,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyBoundingBox>()?;
     module.add_class::<PyTextLineLayout>()?;
     module.add_class::<PyTextFrameLayout>()?;
+    module.add_class::<PyAutofitResult>()?;
     Ok(())
 }
 
@@ -169,5 +170,127 @@ impl PyTextFrameLayout {
     #[getter]
     fn lines<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
         PyTuple::new(py, self.lines.iter().cloned())
+    }
+}
+
+/// What an autofit refresh or `fit_text` stored for one slide text frame.
+#[pyclass(name = "AutofitResult", frozen, eq, skip_from_py_object)]
+#[derive(Clone, PartialEq)]
+pub struct PyAutofitResult {
+    slide_index: usize,
+    shape_id: Option<u32>,
+    name: Option<String>,
+    autofit: &'static str,
+    font_scale: f64,
+    line_spacing_reduction: f64,
+    height: Option<i64>,
+    width: Option<i64>,
+    font_size: Option<f64>,
+    fits: bool,
+    font_substitutions: Vec<(String, String)>,
+}
+
+impl From<rpptx::AutofitResult> for PyAutofitResult {
+    fn from(result: rpptx::AutofitResult) -> Self {
+        Self {
+            slide_index: result.slide_index,
+            shape_id: result.shape_id,
+            name: result.name,
+            autofit: match result.autofit {
+                rpptx::AutofitMode::None => "none",
+                rpptx::AutofitMode::Normal => "normal",
+                rpptx::AutofitMode::Shape => "shape",
+            },
+            font_scale: result.font_scale,
+            line_spacing_reduction: result.line_spacing_reduction,
+            height: result.height.map(|height| height.0),
+            width: result.width.map(|width| width.0),
+            font_size: result.font_size,
+            fits: result.fits,
+            font_substitutions: result.font_substitutions,
+        }
+    }
+}
+
+fn length(py: Python<'_>, emu: i64) -> PyResult<Py<PyAny>> {
+    py.import("rpptx")?
+        .getattr("Length")?
+        .call1((emu,))
+        .map(Bound::unbind)
+}
+
+#[pymethods]
+impl PyAutofitResult {
+    #[getter]
+    fn slide_index(&self) -> usize {
+        self.slide_index
+    }
+
+    #[getter]
+    fn shape_id(&self) -> Option<u32> {
+        self.shape_id
+    }
+
+    #[getter]
+    fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    #[getter]
+    fn autofit(&self) -> &'static str {
+        self.autofit
+    }
+
+    #[getter]
+    fn font_scale(&self) -> f64 {
+        self.font_scale
+    }
+
+    #[getter]
+    fn line_spacing_reduction(&self) -> f64 {
+        self.line_spacing_reduction
+    }
+
+    #[getter]
+    fn height(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.height.map(|emu| length(py, emu)).transpose()
+    }
+
+    #[getter]
+    fn width(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.width.map(|emu| length(py, emu)).transpose()
+    }
+
+    #[getter]
+    fn font_size(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.font_size
+            .map(|points| length(py, (points * 12_700.0).round() as i64))
+            .transpose()
+    }
+
+    #[getter]
+    fn fits(&self) -> bool {
+        self.fits
+    }
+
+    #[getter]
+    fn font_substitutions<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, self.font_substitutions.iter().cloned())
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "AutofitResult(slide_index={}, shape_id={:?}, autofit={:?}, font_scale={}, line_spacing_reduction={}, height={:?}, width={:?}, font_size={:?}, fits={}, font_substitutions={:?})",
+            self.slide_index,
+            self.shape_id,
+            self.autofit,
+            self.font_scale,
+            self.line_spacing_reduction,
+            self.height,
+            self.width,
+            self.font_size,
+            self.fits,
+            self.font_substitutions
+        )
     }
 }

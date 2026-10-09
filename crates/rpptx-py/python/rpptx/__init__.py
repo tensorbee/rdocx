@@ -36,8 +36,10 @@ class ReplacementCountError(RpptxError):
 
 from ._rpptx import Comment, CommentAuthor, CommentReply, Presentation
 from ._rpptx import BoundingBox, TextFrameLayout, TextLineLayout, ValidationIssue
+from ._rpptx import AutofitResult
 
 __all__ = [
+    "AutofitResult",
     "BoundingBox",
     "Inches",
     "Length",

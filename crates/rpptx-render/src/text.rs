@@ -432,13 +432,16 @@ pub(super) struct StackedText {
     pub(super) width: f64,
     pub(super) height: f64,
     pub(super) font_scale: f64,
+    /// The height PowerPoint fits and sizes shapes by: a last line taller
+    /// than single spacing ends at its descent, not at the bottom of its box.
+    pub(super) fit_height: f64,
     width_fits: bool,
 }
 
 impl StackedText {
     /// Applies the fit test that normal autofit uses to accept a candidate.
     pub(super) fn fits(&self, content: Rect) -> bool {
-        self.width_fits && self.height <= content.height + 0.01
+        self.width_fits && self.fit_height <= content.height + 0.01
     }
 }
 
@@ -471,15 +474,26 @@ pub(super) fn stack_text_for_page_with_directions(
     let shaped_paragraphs =
         shape_paragraphs(font_manager, text, page_number, paragraph_directions)?;
     match text.autofit {
-        ResolvedAutofit::None | ResolvedAutofit::Shape => {
-            stack_shaped_text(font_manager, content, text, &shaped_paragraphs, 1.0, None)
-        }
+        ResolvedAutofit::None | ResolvedAutofit::Shape => stack_shaped_text(
+            font_manager,
+            content,
+            text,
+            &shaped_paragraphs,
+            FontScale::Exact(1.0),
+            None,
+        ),
         ResolvedAutofit::Normal {
             font_scale: None,
             line_spacing_reduction: None,
         } => {
-            let mut floor =
-                stack_shaped_text(font_manager, content, text, &shaped_paragraphs, 1.0, None)?;
+            let mut floor = stack_shaped_text(
+                font_manager,
+                content,
+                text,
+                &shaped_paragraphs,
+                FontScale::Exact(1.0),
+                None,
+            )?;
             if floor.fits(content) {
                 return Ok(floor);
             }
@@ -490,7 +504,7 @@ pub(super) fn stack_text_for_page_with_directions(
                     content,
                     text,
                     &shaped_paragraphs,
-                    scale,
+                    FontScale::Exact(scale),
                     None,
                 )?;
                 if candidate.fits(content) {
@@ -508,9 +522,97 @@ pub(super) fn stack_text_for_page_with_directions(
             content,
             text,
             &shaped_paragraphs,
-            font_scale.unwrap_or(1.0),
+            FontScale::WholePoints(font_scale.unwrap_or(1.0)),
             line_spacing_reduction,
         ),
+    }
+}
+
+/// The `fontScale` and `lnSpcReduction` pairs PowerPoint tries, in order,
+/// when it refits normal-autofit text, as fractions.
+///
+/// Recorded from PowerPoint for Mac 16 by refitting Arial frames of every
+/// overflow from a few points to several times the box: it never stores a
+/// line spacing reduction without first trying 10 %, never shrinks the font
+/// before reducing line spacing, keeps 10 % only down to 85 %, and stops at
+/// 25 % with 20 % even when the text still overflows.
+pub(super) const POWERPOINT_AUTOFIT_STEPS: [(f64, f64); 14] = [
+    (1.0, 0.0),
+    (1.0, 0.1),
+    (0.925, 0.1),
+    (0.925, 0.2),
+    (0.85, 0.1),
+    (0.85, 0.2),
+    (0.775, 0.2),
+    (0.7, 0.2),
+    (0.625, 0.2),
+    (0.55, 0.2),
+    (0.475, 0.2),
+    (0.4, 0.2),
+    (0.325, 0.2),
+    (0.25, 0.2),
+];
+
+/// Picks the first [`POWERPOINT_AUTOFIT_STEPS`] pair that fits `content`, or
+/// the last one, and returns it with the text laid out at that pair.
+pub(super) fn fit_powerpoint_autofit(
+    font_manager: &mut FontManager,
+    content: Rect,
+    text: &ResolvedTextBody,
+    page_number: usize,
+    paragraph_directions: &[oxml_layout::TextDirection],
+) -> Result<((f64, f64), StackedText), LayoutError> {
+    let shaped_paragraphs =
+        shape_paragraphs(font_manager, text, page_number, paragraph_directions)?;
+    let mut last = None;
+    for (font_scale, line_spacing_reduction) in POWERPOINT_AUTOFIT_STEPS {
+        let candidate = stack_shaped_text(
+            font_manager,
+            content,
+            text,
+            &shaped_paragraphs,
+            FontScale::WholePoints(font_scale),
+            Some(line_spacing_reduction),
+        )?;
+        if candidate.fits(content) {
+            return Ok(((font_scale, line_spacing_reduction), candidate));
+        }
+        last = Some(((font_scale, line_spacing_reduction), candidate));
+    }
+    Ok(last.expect("the PowerPoint autofit step table is not empty"))
+}
+
+/// How a normal-autofit font scale applies to each run size.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum FontScale {
+    /// Every size scales exactly, as rpptx shrinks a bare `a:normAutofit`.
+    Exact(f64),
+    /// A shrunk size rounds to whole points, half up, as PowerPoint draws and
+    /// fits a stored `fontScale`: 18 points at 92.5 % draw at 17 points.
+    WholePoints(f64),
+}
+
+impl FontScale {
+    fn factor(self) -> f64 {
+        match self {
+            Self::Exact(scale) | Self::WholePoints(scale) => scale,
+        }
+    }
+
+    fn size(self, size: f64) -> f64 {
+        match self {
+            Self::WholePoints(scale) if scale < 1.0 => (size * scale + 0.5).floor().max(1.0),
+            Self::Exact(scale) | Self::WholePoints(scale) => size * scale,
+        }
+    }
+
+    /// The factor that takes `size` to its scaled size.
+    fn factor_for(self, size: f64) -> f64 {
+        if size > 0.0 {
+            self.size(size) / size
+        } else {
+            self.factor()
+        }
     }
 }
 
@@ -635,7 +737,7 @@ fn stack_shaped_text(
     content: Rect,
     text: &ResolvedTextBody,
     shaped_paragraphs: &[(Vec<InlineItem>, oxml_layout::TextDirection)],
-    font_scale: f64,
+    font_scale: FontScale,
     line_spacing_reduction: Option<f64>,
 ) -> Result<StackedText, LayoutError> {
     let mut elements = Vec::new();
@@ -644,12 +746,14 @@ fn stack_shaped_text(
     let mut y = content.y;
     let mut width = 0.0_f64;
     let mut width_fits = true;
+    // The leading below the last line's descent, which the fit leaves out.
+    let mut trailing_leading = 0.0_f64;
 
     let last_paragraph = text.paragraphs.len().saturating_sub(1);
     for (index, (paragraph, (shaped_items, base_direction))) in
         text.paragraphs.iter().zip(shaped_paragraphs).enumerate()
     {
-        let font_size = first_run_font_size(paragraph) * font_scale;
+        let font_size = font_scale.size(first_run_font_size(paragraph));
         if index > 0 || text.space_first_last_paragraph {
             y += paragraph_spacing(paragraph.space_before.as_ref(), font_size);
         }
@@ -665,7 +769,13 @@ fn stack_shaped_text(
         for line in &lines {
             width_fits &= ink_width(line) <= line.available_width + 0.01;
             let line_size = line_font_size(line).unwrap_or(font_size);
-            let baseline = y + baseline_offset(line, SINGLE_SPACING_EM * line_size);
+            let single_height = SINGLE_SPACING_EM * line_size;
+            let baseline = y + baseline_offset(line, single_height);
+            trailing_leading = if line.height > single_height + 0.01 {
+                (y + line.height - baseline - line.descent).max(0.0)
+            } else {
+                0.0
+            };
             let element_start = elements.len();
             let (start_x, occupied_width) = emit_line_items(
                 line,
@@ -692,7 +802,11 @@ fn stack_shaped_text(
         }
 
         if index < last_paragraph || text.space_first_last_paragraph {
-            y += paragraph_spacing(paragraph.space_after.as_ref(), font_size);
+            let space_after = paragraph_spacing(paragraph.space_after.as_ref(), font_size);
+            if space_after > 0.0 {
+                trailing_leading = 0.0;
+            }
+            y += space_after;
         }
     }
 
@@ -710,7 +824,8 @@ fn stack_shaped_text(
         lines: laid_out_lines,
         width,
         height,
-        font_scale,
+        font_scale: font_scale.factor(),
+        fit_height: height - trailing_leading,
         width_fits,
     })
 }
@@ -765,18 +880,22 @@ fn line_font_size(line: &LayoutLine) -> Option<f64> {
         .reduce(f64::max)
 }
 
-fn scaled_inline_items(items: &[InlineItem], scale: f64, indent: f64) -> Vec<InlineItem> {
+fn scaled_inline_items(
+    items: &[InlineItem],
+    font_scale: FontScale,
+    indent: f64,
+) -> Vec<InlineItem> {
     items
         .iter()
         .cloned()
         .map(|item| match item {
             InlineItem::Text(mut segment) => {
-                scale_segment(&mut segment, scale);
+                scale_segment(&mut segment, font_scale);
                 InlineItem::Text(segment)
             }
             InlineItem::MultilingualText(segment) => {
                 let mut base = segment.base().clone();
-                scale_segment(&mut base, scale);
+                let scale = scale_segment(&mut base, font_scale);
                 InlineItem::MultilingualText(
                     oxml_layout::MultilingualTextSegment::new(
                         base,
@@ -812,7 +931,7 @@ fn scaled_inline_items(items: &[InlineItem], scale: f64, indent: f64) -> Vec<Inl
                 )
             }
             InlineItem::Marker(mut segment) => {
-                scale_segment(&mut segment, scale);
+                scale_segment(&mut segment, font_scale);
                 if indent < 0.0 {
                     segment.width = -indent;
                 }
@@ -823,7 +942,9 @@ fn scaled_inline_items(items: &[InlineItem], scale: f64, indent: f64) -> Vec<Inl
         .collect()
 }
 
-fn scale_segment(segment: &mut TextSegment, scale: f64) {
+/// Scales one shaped segment and returns the factor its size took.
+fn scale_segment(segment: &mut TextSegment, font_scale: FontScale) -> f64 {
+    let scale = font_scale.factor_for(segment.font_size);
     segment.font_size *= scale;
     segment.width *= scale;
     segment.ascent *= scale;
@@ -833,6 +954,7 @@ fn scale_segment(segment: &mut TextSegment, scale: f64) {
     for advance in &mut segment.advances {
         *advance *= scale;
     }
+    scale
 }
 
 /// Distance from a line box's top to its baseline, where PowerPoint puts it.
@@ -3382,7 +3504,9 @@ mod tests {
     }
 
     #[test]
-    fn stored_font_scale_renders_at_exactly_sixty_two_point_five_percent() {
+    fn stored_font_scale_rounds_each_shrunk_size_to_whole_points() {
+        // PowerPoint draws 20 points at 62.5 % at 13 points and a 10 point
+        // bullet at 6: its stored steps only fit the text at those sizes.
         let mut fonts = FontManager::new_deterministic().expect("deterministic fonts");
         let mut body = autofit_body(
             ResolvedAutofit::Normal {
@@ -3403,8 +3527,67 @@ mod tests {
             .expect("stack stored autofit text");
         let runs = glyph_runs(&stacked.elements);
 
-        assert_close(runs[0].font_size, 6.25);
-        assert_close(runs[1].font_size, 12.5);
+        assert_close(runs[0].font_size, 6.0);
+        assert_close(runs[1].font_size, 13.0);
+        assert_close(stacked.font_scale, 0.625);
+    }
+
+    #[test]
+    fn powerpoint_autofit_takes_the_first_step_that_fits() {
+        // Five 18 point lines are 108 points tall at full size. PowerPoint
+        // first reduces line spacing by 10 %, then shrinks to 92.5 % (17
+        // points), and stores the first pair whose lines fit.
+        let mut fonts = FontManager::new_deterministic().expect("deterministic fonts");
+        let mut body = autofit_body(ResolvedAutofit::None, 18.0, "line");
+        body.paragraphs = vec![body.paragraphs[0].clone(); 5];
+        for (usable, step) in [
+            (108.0, (1.0, 0.0)),
+            (98.0, (1.0, 0.1)),
+            (97.0, (0.925, 0.1)),
+            (91.0, (0.925, 0.2)),
+            (81.0, (0.85, 0.1)),
+            (80.0, (0.85, 0.2)),
+            (71.0, (0.775, 0.2)),
+        ] {
+            let content = Rect {
+                height: usable,
+                ..test_content_box(400.0)
+            };
+            let (fitted, stacked) = fit_powerpoint_autofit(&mut fonts, content, &body, 1, &[])
+                .expect("fit autofit text");
+            assert_eq!(fitted, step, "usable height {usable}");
+            assert!(stacked.fits(content));
+        }
+
+        let content = Rect {
+            height: 1.0,
+            ..test_content_box(400.0)
+        };
+        let (fitted, stacked) =
+            fit_powerpoint_autofit(&mut fonts, content, &body, 1, &[]).expect("fit floor text");
+        assert_eq!(fitted, (0.25, 0.2));
+        assert!(!stacked.fits(content));
+        assert_close(glyph_runs(&stacked.elements)[0].font_size, 5.0);
+    }
+
+    #[test]
+    fn a_tall_last_line_fits_down_to_its_descent() {
+        // At 150 % the last line's box ends a quarter of its leading below
+        // the text, which PowerPoint's fit leaves out.
+        let mut fonts = FontManager::new_deterministic().expect("deterministic fonts");
+        let mut body = autofit_body(ResolvedAutofit::None, 20.0, "leading");
+        body.paragraphs[0].line_spacing = Some(ResolvedTextSpacing::Percent(1.5));
+
+        let stacked =
+            stack_text(&mut fonts, test_content_box(200.0), &body).expect("stack tall line");
+
+        assert_close(stacked.height, 36.0);
+        assert!(stacked.fit_height < stacked.height);
+        assert!(stacked.fit_height > 0.75 * 36.0);
+        assert!(stacked.fits(Rect {
+            height: stacked.fit_height,
+            ..test_content_box(200.0)
+        }));
     }
 
     #[test]

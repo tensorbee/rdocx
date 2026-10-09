@@ -1192,6 +1192,182 @@ def _replace_in_slide(source, target, old, new):
             archive.writestr(name, data)
 
 
+def _autofit_textbox(rpptx, lines, *, height=None, size=18):
+    """A python-pptx-style 3 x 1.5 inch text box of Arial lines."""
+    presentation = rpptx.Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    slide.shapes.add_textbox(
+        rpptx.Inches(1), rpptx.Inches(1), rpptx.Inches(3), height or rpptx.Inches(1.5)
+    )
+    presentation.slides[0].shapes[0].text_frame.word_wrap = True
+    _write_arial_lines(rpptx, presentation, lines, size)
+    return presentation, presentation.slides[0].shapes[0]
+
+
+def _write_arial_lines(rpptx, presentation, lines, size=18):
+    """Replaces the first shape's text with numbered Arial lines."""
+    presentation.slides[0].shapes[0].text_frame.text = "\n".join(
+        f"Item {index}" for index in range(lines)
+    )
+    frame = presentation.slides[0].shapes[0].text_frame
+    for paragraph in frame.paragraphs:
+        for run in paragraph.runs:
+            run.font.name = "Arial"
+            run.font.size = rpptx.Pt(size)
+    return frame
+
+
+def test_setting_text_to_fit_shape_stores_the_shrink_powerpoint_chose(tmp_path):
+    # Six 18 point Arial lines in a 1.5 inch box: PowerPoint for Mac stores
+    # fontScale 92.5 % with 20 % less line spacing (ground truth, #310).
+    import rpptx
+    from rpptx import MSO_AUTO_SIZE
+
+    presentation, shape = _autofit_textbox(rpptx, 6)
+    frame = shape.text_frame
+    frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+    output = tmp_path / "autofit.pptx"
+    presentation.save(output)
+
+    assert '<a:normAutofit fontScale="92500" lnSpcReduction="20000"/>' in _text_body_xml(output)
+    assert frame.auto_size is MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+    (layout,) = presentation.text_layout()
+    assert (layout.font_scale, layout.overflow) == (0.925, False)
+    assert {line.font_size for line in layout.lines} == {17.0}
+
+    # Later edits need an explicit refresh, as PowerPoint refits on edit.
+    frame = _write_arial_lines(rpptx, presentation, 12)
+    assert '<a:normAutofit fontScale="92500" lnSpcReduction="20000"/>' in _text_body_xml(output)
+    result = frame.refresh_autofit()
+    assert isinstance(result, rpptx.AutofitResult)
+    assert (result.autofit, result.fits, result.height, result.font_size) == (
+        "normal",
+        True,
+        None,
+        None,
+    )
+    assert result.font_scale < 0.925 and result.line_spacing_reduction == 0.2
+    assert ("Arial", "Liberation Sans") in result.font_substitutions
+    assert presentation.refresh_autofit() == (result,)
+    assert not presentation.text_layout()[0].overflow
+
+    frame.auto_size = MSO_AUTO_SIZE.NONE
+    assert frame.refresh_autofit() is None
+    assert presentation.refresh_autofit() == ()
+
+
+def test_setting_shape_to_fit_text_resizes_the_shape_keeping_its_anchored_edge():
+    import rpptx
+    from rpptx import MSO_ANCHOR, MSO_AUTO_SIZE
+
+    # The python-pptx order: autofit first, text afterwards, then save.
+    presentation, shape = _autofit_textbox(rpptx, 0)
+    bottom = shape.top + shape.height
+    shape.text_frame.vertical_anchor = MSO_ANCHOR.BOTTOM
+    shape.text_frame.auto_size = MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT
+    assert shape.height == rpptx.Inches(1.5)
+    _write_arial_lines(rpptx, presentation, 2)
+    presentation.to_bytes()
+
+    # PowerPoint for Mac sizes two 18 point lines to 646331 EMU.
+    shape = presentation.slides[0].shapes[0]
+    assert shape.height == 646_331
+    assert shape.top + shape.height == bottom
+    assert shape.left == rpptx.Inches(1)
+    (result,) = presentation.refresh_autofit()
+    assert (result.autofit, result.height, result.width) == (
+        "shape",
+        rpptx.Length(646_331),
+        None,
+    )
+
+
+def test_marked_frames_refresh_on_save_and_none_unmarks_them(tmp_path):
+    import rpptx
+    from rpptx import MSO_AUTO_SIZE
+
+    presentation, shape = _autofit_textbox(rpptx, 0)
+    shape.text_frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+    _write_arial_lines(rpptx, presentation, 6)
+    output = tmp_path / "marked.pptx"
+    presentation.save(output)
+    assert '<a:normAutofit fontScale="92500" lnSpcReduction="20000"/>' in _text_body_xml(output)
+
+    # Text edited after a save is refitted by the next one.
+    _write_arial_lines(rpptx, presentation, 8)
+    presentation.save(output)
+    assert '<a:normAutofit fontScale="70000" lnSpcReduction="20000"/>' in _text_body_xml(output)
+
+    # Back to NONE, the frame is no longer refitted.
+    frame = presentation.slides[0].shapes[0].text_frame
+    frame.auto_size = MSO_AUTO_SIZE.NONE
+    presentation.save(output)
+    assert "<a:noAutofit/>" in _text_body_xml(output)
+
+    # A marked shape that is removed is forgotten.
+    presentation.slides[0].shapes[0].text_frame.auto_size = MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT
+    shapes = presentation.slides[0].shapes
+    shapes.remove(shapes[0])
+    assert presentation.text_layout() == ()
+    presentation.save(output)
+
+
+def test_fit_text_writes_the_largest_fitting_size_on_every_run(tmp_path):
+    import pathlib
+
+    import rpptx
+    from rpptx import MSO_AUTO_SIZE
+
+    presentation, shape = _autofit_textbox(rpptx, 6)
+    frame = shape.text_frame
+    frame.auto_size = MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE
+    result = frame.fit_text(font_family="Calibri", max_size=40, bold=True)
+
+    # Six Calibri lines fit the 100.8 point text area at 14 points.
+    assert result.font_size == rpptx.Pt(14)
+    assert result.font_substitutions == (("Calibri", "Carlito"),)
+    assert frame.auto_size is MSO_AUTO_SIZE.NONE
+    assert frame.word_wrap is True
+    for paragraph in frame.paragraphs:
+        font = paragraph.runs[0].font
+        assert (font.name, font.size, font.bold, font.italic) == (
+            "Calibri",
+            rpptx.Pt(14),
+            True,
+            False,
+        )
+    output = tmp_path / "fit.pptx"
+    presentation.save(output)
+    body = _text_body_xml(output)
+    assert "<a:noAutofit/>" in body
+    assert body.count('sz="1400"') == 12
+
+    # The python-pptx defaults keep each run's typeface, cap at 18 points,
+    # and measure with a caller font file when one is given.
+    font_file = (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "oxml-layout"
+        / "fonts"
+        / "LiberationSans-Regular.ttf"
+    )
+    result = frame.fit_text(font_file=font_file)
+    assert result.font_size == rpptx.Pt(14)
+    assert frame.paragraphs[0].runs[0].font.name == "Calibri"
+    assert frame.paragraphs[0].runs[0].font.bold is False
+
+    # python-pptx takes int(max_size).
+    assert frame.fit_text(max_size=18.9).font_size == rpptx.Pt(14)
+    with pytest.raises(ValueError, match="max_size"):
+        frame.fit_text(max_size=0)
+    with pytest.raises(ValueError, match="font_file"):
+        frame.fit_text(font_file=tmp_path / "missing.ttf")
+    tiny, tiny_shape = _autofit_textbox(rpptx, 40, height=rpptx.Pt(2))
+    with pytest.raises(rpptx.RpptxError, match="even at 1 point"):
+        tiny_shape.text_frame.fit_text()
+    empty, empty_shape = _autofit_textbox(rpptx, 0)
+    assert empty_shape.text_frame.fit_text() is None
+
+
 def test_text_frame_margins_anchor_wrap_and_auto_size_round_trip_and_clear(tmp_path):
     import rpptx
     from rpptx import MSO_ANCHOR, MSO_AUTO_SIZE

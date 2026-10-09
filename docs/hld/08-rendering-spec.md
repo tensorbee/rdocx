@@ -1100,7 +1100,9 @@ with nothing measurable keeps its declared grid.
 - `a:normAutofit fontScale="62500" lnSpcReduction="20000"`: apply verbatim. This
   is both cheapest and most faithful, because it reproduces exactly what the
   authoring application decided. Font scale applies to every effective run and
-  bullet size. Line-spacing reduction comes off the percentage, so 150 percent
+  bullet size, and a shrunk size rounds to whole points, half up, as PowerPoint
+  draws it: 18 points at 92.5 percent draw at 17 points and 20 points at 62.5
+  percent at 13. Line-spacing reduction comes off the percentage, so 150 percent
   less `lnSpcReduction="20000"` is 130 percent, and omitted spacing counts as
   100 percent. Exact point spacing is unchanged.
 - Only a bare `<a:normAutofit/>` needs iteration, and then walk PowerPoint's own
@@ -1110,6 +1112,50 @@ with nothing measurable keeps its declared grid.
   typically one to three. A per-layout shaping cache makes repeat passes nearly
   free. If the 25 percent candidate still does not fit, draw it visibly without
   clipping.
+
+### Writing autofit back
+
+PowerPoint refits only when someone edits the text, and Google Slides never
+does, so a generated deck must carry the values itself (issue #310). The
+ground truth was recorded once from PowerPoint for Mac 16 through osascript:
+about 280 frames, each refitted by editing its last paragraph or by setting
+"shape to fit text", then saved and read back.
+
+- Normal autofit tries PowerPoint's steps in order and stores the first that
+  fits: `(fontScale, lnSpcReduction)` of (100, 0), (100, 10), (92.5, 10),
+  (92.5, 20), (85, 10), (85, 20), then 77.5 down to 25 in 7.5 percent steps
+  with 20. PowerPoint never stores 100 with 20 or a 10 percent reduction
+  below 85. The 25 percent step is stored even when the text still overflows.
+  Each candidate is laid out with sizes rounded to whole points, as drawn.
+- The fit test is the renderer's, with one PowerPoint detail: a last line
+  taller than single spacing counts down to its descent, not to the bottom of
+  its line box. Frames at 150 percent spacing match PowerPoint only with it.
+- Shape autofit sets the shape height to its text rectangle, insets included,
+  scaled by 1034/1024 as PowerPoint for Mac sizes `a:spAutoFit` shapes, with
+  half an EMU rounding up. A preset whose text rectangle is a share of the
+  shape grows by that share. The top, middle or bottom edge the vertical
+  anchor names stays where it was drawn, along the shape's own axes when it
+  is rotated or flipped, and the offset moves by whole EMU toward zero. Text
+  that does not wrap also sets the width to its widest line, keeping the
+  left edge, the centre or the right edge as the first paragraph aligns, as
+  PowerPoint does. The widths PowerPoint recorded are within about 0.4
+  percent of rpptx's, which measures 1.2 points more on a 300 point line.
+  Each group around a resized member is then refit to its members, innermost
+  first, so no other member moves. PowerPoint could not be scripted to resize
+  a group member, so that refit follows python-pptx. Vertical text is left
+  unchanged.
+- `fit_text` follows python-pptx: the largest whole size up to `int(max_size)`
+  whose text fits with no autofit and word wrap. `font_family=None` keeps each
+  run's typeface where python-pptx writes Calibri, and an empty frame is left
+  unchanged and returns `None`.
+
+Against the recorded frames, Arial, Calibri and Times New Roman at 10 to 32
+points, single and 150 percent spacing, wrapped and unwrapped, every stored
+pair and every shape-autofit height at single spacing matches. A shape-autofit
+height at 150 percent spacing is about 0.3 point short, because the bundled
+clones' descent differs from the one PowerPoint uses. The measurement uses
+bundled metric clones, and every result lists each typeface it replaced so a
+caller can tell when a fallback face measured the text.
 
 ### Slide text layout as data
 
@@ -1138,6 +1184,8 @@ line can begin or end with one.
 `overflow` applies the test the bare normal-autofit ladder uses to accept a
 candidate. Every line must fit its available width and the whole stack,
 paragraph spacing included, must fit the usable height, each within 0.01 point.
+A last line taller than single spacing counts down to its descent, as
+PowerPoint's own fit counts it.
 What that means follows from what each mode draws.
 
 - `a:noAutofit`: the text at its own size. A frame one line too long

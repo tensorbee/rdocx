@@ -19,6 +19,9 @@ presentation, notes, handout, PDF, and animation outputs.
   connectors, groups, tables, and pictures.
 - Insert and remove table rows and columns, extending or shrinking merged
   cells and growing or shrinking the frame by the row or column size.
+- Store autofit results that stick: the `fontScale` and `lnSpcReduction`
+  PowerPoint would choose, the height of a shape that fits its text, and the
+  largest size that fits, as python-pptx's `fit_text` writes it.
 - Produce PDF, PDF/A, resolved slide frames, notes, handouts, and animations.
 - Import HTML, ODP, and PDF through explicit facade APIs.
 - Resolve master, layout, placeholder, theme, chart, SmartArt, media, notes,
@@ -28,7 +31,7 @@ presentation, notes, handout, PDF, and animation outputs.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rpptx | 463,749 compressed bytes, 2,402,551 member bytes, 16 members | 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --no-verify` | Tracked `rpptx` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-09 |
+| Crates.io archive: rpptx | 477,553 compressed bytes, 2,462,196 member bytes, 16 members | 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --no-verify` | Tracked `rpptx` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-10 |
 
 ## Use it when
 

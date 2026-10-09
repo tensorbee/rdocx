@@ -64,7 +64,7 @@ its cost is recorded in `00-vision.md`.
 | Alignment, level, line spacing, space before and after | |
 | Font: bold, italic, underline, strike, size, name, colour, caps, language | |
 | Bullets: character, auto-number, none, size percent, colour | python-pptx has no bullet API. This is beyond parity |
-| Margins, vertical anchor, word wrap, auto-size | |
+| Margins, vertical anchor, word wrap, auto-size | Normal autofit stores PowerPoint's `fontScale` and `lnSpcReduction` and shape autofit resizes the shape, measured with deterministic fonts. `fit_text` as python-pptx |
 | Nine-level list style inheritance | |
 
 ### Tables

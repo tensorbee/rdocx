@@ -11,11 +11,11 @@ use oxml_layout::{
     Paint, Path, PathCommand, PathElement, Point, PositionedElement, Rect, Stroke, Transform,
 };
 use rpptx_layout::{
-    CropRect, ResolvedBackground, ResolvedContent, ResolvedGeometry, ResolvedImage,
-    ResolvedImagePlacement, ResolvedLineEnd, ResolvedLineEndKind, ResolvedLineEndSize,
-    ResolvedRectAlignment, ResolvedShape, ResolvedSlide, ResolvedSlideTextDirections,
-    ResolvedTable, ResolvedTableBorder, ResolvedTextBody, ResolvedTileFlip, ResolvedTilePlacement,
-    ScopedHyperlinkTargets,
+    CropRect, ResolvedAutofit, ResolvedBackground, ResolvedContent, ResolvedGeometry,
+    ResolvedImage, ResolvedImagePlacement, ResolvedLineEnd, ResolvedLineEndKind,
+    ResolvedLineEndSize, ResolvedRectAlignment, ResolvedShape, ResolvedSlide,
+    ResolvedSlideTextDirections, ResolvedTable, ResolvedTableBorder, ResolvedTextBody,
+    ResolvedTileFlip, ResolvedTilePlacement, ScopedHyperlinkTargets,
 };
 use rpptx_oxml::notes_parts::CT_NotesSlide;
 use rpptx_oxml::slide_parts::{CT_Slide, CT_SlideLayout, CT_SlideMaster};
@@ -242,6 +242,20 @@ pub struct TextLineLayout {
     pub font_size: f64,
 }
 
+/// The `a:normAutofit` values PowerPoint stores for one shape's text.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NormalAutofitFit {
+    /// The `fontScale` fraction, from `1.0` down to `0.25`.
+    pub font_scale: f64,
+    /// The `lnSpcReduction` fraction, `0.0`, `0.1` or `0.2`.
+    pub line_spacing_reduction: f64,
+    /// Whether the text fits at these values. It is false only at the last
+    /// step, which PowerPoint stores for text that overflows even there.
+    pub fits: bool,
+    /// The height of the laid-out text at these values, in points.
+    pub height: f64,
+}
+
 /// Lower every resolved slide to one fixed-size page in presentation order.
 pub fn layout_presentation(input: &RenderInput) -> Result<LayoutResult, RenderInputError> {
     let mut font_manager = FontManager::new();
@@ -413,6 +427,76 @@ pub fn layout_shape_text(
             })
             .collect(),
     })
+}
+
+/// Picks the normal-autofit values PowerPoint stores for a shape's text.
+///
+/// The arguments are those of [`layout_shape_text`]. The text is laid out at
+/// each of PowerPoint's steps, shrunk sizes rounded to whole points as
+/// PowerPoint draws them, and the first step that fits the text rectangle
+/// wins. The stored autofit on `text` is ignored, so the result is what
+/// PowerPoint writes when someone edits the text.
+pub fn fit_normal_autofit(
+    shape: &ResolvedShape,
+    text: &ResolvedTextBody,
+    font_manager: &mut FontManager,
+    page_number: usize,
+    text_directions: &[Vec<oxml_layout::TextDirection>],
+) -> Result<NormalAutofitFit, RenderInputError> {
+    let (content_box, _) =
+        text::oriented_content_box(text::content_box(shape, text), text.vertical);
+    let paragraph_directions = text_directions.first().map(Vec::as_slice).unwrap_or(&[]);
+    let ((font_scale, line_spacing_reduction), stacked) = text::fit_powerpoint_autofit(
+        font_manager,
+        content_box,
+        text,
+        page_number,
+        paragraph_directions,
+    )
+    .map_err(|error| RenderInputError::TextLayout {
+        detail: error.to_string(),
+    })?;
+    Ok(NormalAutofitFit {
+        font_scale,
+        line_spacing_reduction,
+        fits: stacked.fits(content_box),
+        height: stacked.fit_height,
+    })
+}
+
+/// Returns the text rectangle height and width PowerPoint gives a
+/// shape-autofit text body, in points, insets included.
+///
+/// The arguments are those of [`layout_shape_text`], and the text is laid
+/// out at full size. The text is measured as PowerPoint's fit measures it,
+/// the width as its widest line, and each length with its insets is then
+/// scaled by 1034/1024, as PowerPoint for Mac 16 sizes `a:spAutoFit` shapes:
+/// Arial, Calibri and Times New Roman frames of 1 to 9 lines at 10 to 32
+/// points, with and without paragraph spacing, match it to the EMU. The
+/// width is the one a shape that does not wrap takes.
+pub fn shape_autofit_size(
+    shape: &ResolvedShape,
+    text: &ResolvedTextBody,
+    font_manager: &mut FontManager,
+    page_number: usize,
+    text_directions: &[Vec<oxml_layout::TextDirection>],
+) -> Result<(f64, f64), RenderInputError> {
+    const POWERPOINT_SCALE: f64 = 1034.0 / 1024.0;
+    let mut text = text.clone();
+    text.autofit = ResolvedAutofit::None;
+    let (_, _, stacked) = stack_shape_text(
+        shape,
+        &text,
+        font_manager,
+        page_number,
+        text_directions,
+        1.0,
+    )?;
+    let insets = text.insets;
+    Ok((
+        (stacked.fit_height + insets.top + insets.bottom) * POWERPOINT_SCALE,
+        (stacked.width + insets.left + insets.right) * POWERPOINT_SCALE,
+    ))
 }
 
 fn layout_slide_with_fonts(
