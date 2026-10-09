@@ -44,6 +44,10 @@ oxml-pdf.workspace = true
 rpptx = { workspace = true, features = ["render"] }
 serde_json.workspace = true
 
+# The local calendar date for `footer --date auto`, which std does not expose.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 oxml-opc.workspace = true
 rpptx = { workspace = true, features = ["default-template", "render"] }

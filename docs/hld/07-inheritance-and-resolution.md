@@ -290,14 +290,13 @@ Two further suppressions while flattening passes 2 and 3:
   inherits from, and a slide placeholder suppresses the layout one with the same
   `idx`.
 - An occupied slide-level `dt`, `ftr` or `sldNum` is direct slide content and
-  renders independently of layout and master `p:hf` flags. An occupied latent
-  placeholder inherited from a layout or master requires a `p:hf` container on
-  that same source part, and that container must permit its type. An absent
-  attribute on a present container retains the schema default of enabled.
-  Omitting the source container does not make template date and slide-number
-  fields visible. Their text comes from the slide's own shape when present,
-  otherwise from the deepest occupied layout or master shape selected by the
-  shadowing rule below.
+  renders independently of layout and master `p:hf` flags. Layout and master
+  date, footer and slide-number placeholders are templates like every other
+  placeholder and are never drawn, whatever their `p:hf` flags say. PowerPoint
+  for Mac 16.111 exports none of them on a slide that owns none, with the
+  master `p:hf` enabling all three (issue 311). The flags only decide which
+  placeholders a new slide receives. A slide-number field with no cached text
+  still occupies its placeholder and draws the number.
 
 This logic belongs in the flattener, not the renderer.
 
@@ -333,15 +332,13 @@ satisfy it.
 The layout `showMasterSp` controls only the master non-placeholder pass. The
 slide `showMasterSp` controls only the layout non-placeholder pass. An absent
 value means true. Ordinary master and layout placeholders remain templates and
-are omitted. An occupied latent placeholder has nonempty field or run text.
-Latent placeholders match by type across the level-specific indices used by
-masters, layouts and slides. Direct slide placeholders stay in slide document
-order and suppress the matching inherited type once. The deepest matching
-occupied layout placeholder claims the inherited type before source visibility
-is evaluated, so a hidden layout date cannot expose a stale master date. The
-selected layout or master placeholder is emitted once when its own source
-header-footer policy permits its type. Empty latent shapes fall back to the
-deepest occupied layout or master match.
+are omitted, latent ones included. An occupied latent placeholder has
+nonempty run text or at least one field. Latent placeholders match by type
+across the level-specific indices used by masters, layouts and slides. Direct
+slide placeholders stay in slide document order and a second one of the same
+type is not drawn. An empty slide-owned latent placeholder draws nothing.
+Slide-number fields show the slide's position plus `p:presentation/@firstSlideNum`
+minus one, so with `firstSlideNum="0"` the second slide shows 1.
 
 ## The chains
 

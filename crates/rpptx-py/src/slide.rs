@@ -2,7 +2,7 @@ use oxml_py_support::{ContentPath, PathSeg};
 use pyo3::PyClass;
 use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyList, PySlice, PyTuple};
+use pyo3::types::{PyAny, PyDict, PyList, PySlice, PyTuple};
 use smallvec::smallvec;
 
 use crate::dml::{FillTarget, PyFillFormat};
@@ -18,6 +18,13 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PySlide>()?;
     module.add_class::<PySlideCollection>()?;
     module.add_class::<PyBackground>()?;
+    module.add_class::<PyHeaderFooter>()?;
+    module.add_class::<PySlideTransition>()?;
+    module.add_class::<PySlideMaster>()?;
+    module.add_class::<PySlideMasterCollection>()?;
+    module.add_class::<PyTheme>()?;
+    module.add_class::<PyThemeFonts>()?;
+    module.add_class::<PyThemeFontSet>()?;
     Ok(())
 }
 
@@ -514,6 +521,34 @@ impl PySlide {
         presentation.revisions.bump();
         Ok(())
     }
+
+    // Header and footer, transition (#311).
+
+    /// The slide's own date, footer and slide number (rpptx extension).
+    #[getter]
+    fn header_footer(&self, py: Python<'_>) -> PyResult<Py<PyHeaderFooter>> {
+        self.validate(py)?;
+        Py::new(
+            py,
+            PyHeaderFooter {
+                presentation: self.presentation.clone_ref(py),
+                path: self.path.clone(),
+            },
+        )
+    }
+
+    /// The slide's transition and advance timing (rpptx extension).
+    #[getter]
+    fn transition(&self, py: Python<'_>) -> PyResult<Py<PySlideTransition>> {
+        self.validate(py)?;
+        Py::new(
+            py,
+            PySlideTransition {
+                presentation: self.presentation.clone_ref(py),
+                path: self.path.clone(),
+            },
+        )
+    }
 }
 
 #[pyclass(name = "SlideCollection")]
@@ -804,4 +839,592 @@ where
     Err(PyTypeError::new_err(format!(
         "{kind} indices must be integers or slices"
     )))
+}
+
+// Header and footer, transitions, masters and themes (#311).
+
+/// The index path of every shape on a slide, groups included, by shape id.
+fn shape_paths(
+    presentation: &rpptx::Presentation,
+    slide_index: usize,
+) -> std::collections::HashMap<u32, Vec<usize>> {
+    fn walk<'a>(
+        shapes: impl Iterator<Item = rpptx::ShapeRef<'a>>,
+        prefix: &[usize],
+        paths: &mut std::collections::HashMap<u32, Vec<usize>>,
+    ) {
+        for (index, shape) in shapes.enumerate() {
+            let mut path = prefix.to_vec();
+            path.push(index);
+            walk(shape.children(), &path, paths);
+            if let Some(id) = shape.non_visual_id() {
+                paths.insert(id, path);
+            }
+        }
+    }
+    let mut paths = std::collections::HashMap::new();
+    if let Some(slide) = presentation.slide(slide_index) {
+        walk(slide.shapes(), &[], &mut paths);
+    }
+    paths
+}
+
+/// Every slide's shape paths, to tell whether a header-footer edit moved any.
+pub(crate) fn all_shape_paths(
+    presentation: &rpptx::Presentation,
+) -> Vec<std::collections::HashMap<u32, Vec<usize>>> {
+    (0..presentation.len())
+        .map(|index| shape_paths(presentation, index))
+        .collect()
+}
+
+/// Whether every shape that survived an edit kept its index path. Date,
+/// footer and slide-number placeholders are appended after the other shapes,
+/// so adding them or rewriting their text leaves every held handle valid,
+/// and only removing one before another shape moves anything.
+pub(crate) fn paths_kept(
+    before: &[std::collections::HashMap<u32, Vec<usize>>],
+    after: &[std::collections::HashMap<u32, Vec<usize>>],
+) -> bool {
+    before.len() == after.len()
+        && before.iter().zip(after).all(|(before, after)| {
+            before
+                .iter()
+                .all(|(id, path)| after.get(id).is_none_or(|moved| moved == path))
+        })
+}
+
+/// Today's local date as the cached text of a `datetime1` to `datetime7` field.
+///
+/// `hint` names how the caller supplies the text instead for a time format.
+pub(crate) fn today_field_text(py: Python<'_>, field_type: &str, hint: &str) -> PyResult<String> {
+    let today = py
+        .import("datetime")?
+        .getattr("date")?
+        .call_method0("today")?;
+    let year: i32 = today.getattr("year")?.extract()?;
+    let month: u32 = today.getattr("month")?.extract()?;
+    let day: u32 = today.getattr("day")?.extract()?;
+    rpptx::date_field_text(field_type, year, month, day).map_err(|_| {
+        PyValueError::new_err(format!(
+            "{field_type} is not a date format rpptx can fill with today's date, use datetime1 to datetime7{hint}"
+        ))
+    })
+}
+
+/// Builds the Rust settings from python values: `date` is `None`, fixed
+/// text, or `"auto"` for a `date_format` field holding today's date.
+pub(crate) fn header_footer_settings(
+    py: Python<'_>,
+    slide_number: bool,
+    footer: Option<String>,
+    date: Option<String>,
+    date_format: &str,
+) -> PyResult<rpptx::HeaderFooter> {
+    let date = match date.as_deref() {
+        None => rpptx::HeaderFooterDate::Off,
+        Some("auto") => rpptx::HeaderFooterDate::Automatic {
+            field_type: date_format.to_owned(),
+            text: today_field_text(py, date_format, "")?,
+        },
+        Some(text) => rpptx::HeaderFooterDate::Fixed(text.to_owned()),
+    };
+    Ok(rpptx::HeaderFooter {
+        slide_number,
+        footer,
+        date,
+    })
+}
+
+/// One slide's date, footer and slide number, read and written live.
+///
+/// Each assignment adds or removes the slide's own placeholders, copied from
+/// its layout. Added placeholders go after the other shapes, so held slide
+/// and shape handles stay valid. Only removing a placeholder that other
+/// shapes follow advances the revision, which stales held handles.
+#[pyclass(name = "HeaderFooter")]
+pub struct PyHeaderFooter {
+    presentation: Py<PyPresentation>,
+    path: ContentPath,
+}
+
+impl PyHeaderFooter {
+    fn slide_index(&self, py: Python<'_>) -> PyResult<usize> {
+        PySlide::new(self.presentation.clone_ref(py), self.path.clone()).validate(py)
+    }
+
+    fn current(&self, py: Python<'_>) -> PyResult<(usize, rpptx::HeaderFooter)> {
+        let index = self.slide_index(py)?;
+        let settings = self
+            .presentation
+            .borrow(py)
+            .inner
+            .slide_header_footer(index)
+            .ok_or_else(|| PyIndexError::new_err("slide index out of range"))?;
+        Ok((index, settings))
+    }
+
+    /// Writes the change and advances the revision. This handle names the
+    /// slide, which stays where it is, so it follows the new revision.
+    fn update(
+        &mut self,
+        py: Python<'_>,
+        change: impl FnOnce(&mut rpptx::HeaderFooter),
+    ) -> PyResult<()> {
+        let (index, mut settings) = self.current(py)?;
+        change(&mut settings);
+        let mut presentation = self.presentation.borrow_mut(py);
+        let before = shape_paths(&presentation.inner, index);
+        presentation
+            .inner
+            .set_slide_header_footer(index, &settings)
+            .map_err(|error| crate::rpptx_to_pyerr(py, error))?;
+        let after = shape_paths(&presentation.inner, index);
+        if !paths_kept(&[before], &[after]) {
+            presentation.revisions.bump();
+            self.path = presentation.revisions.capture(self.path.segs.clone());
+        }
+        Ok(())
+    }
+}
+
+#[pymethods]
+impl PyHeaderFooter {
+    /// Whether the slide owns a slide-number placeholder.
+    #[getter]
+    fn slide_number(&self, py: Python<'_>) -> PyResult<bool> {
+        Ok(self.current(py)?.1.slide_number)
+    }
+
+    #[setter]
+    fn set_slide_number(&mut self, py: Python<'_>, value: bool) -> PyResult<()> {
+        self.update(py, |settings| settings.slide_number = value)
+    }
+
+    /// The footer text, `None` without a footer placeholder.
+    #[getter]
+    fn footer(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        Ok(self.current(py)?.1.footer)
+    }
+
+    #[setter]
+    fn set_footer(&mut self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        self.update(py, |settings| settings.footer = value)
+    }
+
+    /// `None`, the fixed date text, or `"auto"` for a date field.
+    #[getter]
+    fn date(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        Ok(match self.current(py)?.1.date {
+            rpptx::HeaderFooterDate::Off => None,
+            rpptx::HeaderFooterDate::Fixed(text) => Some(text),
+            rpptx::HeaderFooterDate::Automatic { .. } => Some("auto".to_owned()),
+        })
+    }
+
+    /// Sets `None`, fixed text, or `"auto"` for a field PowerPoint refreshes,
+    /// caching today's date in the current `date_format`, else `datetime1`.
+    #[setter]
+    fn set_date(&mut self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        let date_format = self
+            .date_format(py)?
+            .unwrap_or_else(|| "datetime1".to_owned());
+        let date = header_footer_settings(py, false, None, value, &date_format)?.date;
+        self.update(py, |settings| settings.date = date)
+    }
+
+    /// The date field type, such as `datetime1`, `None` for a fixed or no date.
+    #[getter]
+    fn date_format(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        Ok(match self.current(py)?.1.date {
+            rpptx::HeaderFooterDate::Automatic { field_type, .. } => Some(field_type),
+            _ => None,
+        })
+    }
+
+    #[setter]
+    fn set_date_format(&mut self, py: Python<'_>, value: &str) -> PyResult<()> {
+        if self.date_format(py)?.is_none() {
+            return Err(PyValueError::new_err(
+                "the slide has no date field, set header_footer.date = \"auto\" first",
+            ));
+        }
+        let date = header_footer_settings(py, false, None, Some("auto".to_owned()), value)?.date;
+        self.update(py, |settings| settings.date = date)
+    }
+}
+
+/// One slide's transition, read and written live (rpptx extension).
+///
+/// `type` is one of `fade`, `push`, `wipe`, `split`, `cover`, `uncover`,
+/// `cut`, `zoom`, or `None`. Another producer's effect reads as its element
+/// name and cannot be assigned. Durations are in seconds.
+#[pyclass(name = "SlideTransition")]
+pub struct PySlideTransition {
+    presentation: Py<PyPresentation>,
+    path: ContentPath,
+}
+
+impl PySlideTransition {
+    fn current(&self, py: Python<'_>) -> PyResult<(usize, rpptx::SlideTransition)> {
+        let index =
+            PySlide::new(self.presentation.clone_ref(py), self.path.clone()).validate(py)?;
+        let transition = self
+            .presentation
+            .borrow(py)
+            .inner
+            .slide(index)
+            .ok_or_else(|| PyIndexError::new_err("slide index out of range"))?
+            .transition()
+            .unwrap_or_default();
+        Ok((index, transition))
+    }
+
+    fn update(
+        &self,
+        py: Python<'_>,
+        change: impl FnOnce(&mut rpptx::SlideTransition) -> PyResult<()>,
+    ) -> PyResult<()> {
+        let (index, mut transition) = self.current(py)?;
+        change(&mut transition)?;
+        let mut presentation = self.presentation.borrow_mut(py);
+        presentation
+            .inner
+            .slide_mut(index)
+            .ok_or_else(|| PyIndexError::new_err("slide index out of range"))?
+            .set_transition(Some(&transition))
+            // The only failures are values the effect does not take.
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+}
+
+fn seconds_to_ms(name: &str, value: Option<f64>) -> PyResult<Option<u64>> {
+    value
+        .map(|seconds| {
+            if seconds.is_finite() && (0.0..=86_400.0).contains(&seconds) {
+                Ok((seconds * 1000.0).round() as u64)
+            } else {
+                Err(PyValueError::new_err(format!(
+                    "{name} must be between 0 and 86400 seconds, got {seconds}"
+                )))
+            }
+        })
+        .transpose()
+}
+
+#[pymethods]
+impl PySlideTransition {
+    #[getter]
+    fn r#type(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        Ok(self.current(py)?.1.kind.map(|kind| kind.name().to_owned()))
+    }
+
+    /// Sets the effect, keeping the direction when the new effect takes it.
+    #[setter]
+    fn set_type(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        let kind = value
+            .map(|name| {
+                rpptx::TransitionKind::parse(&name).ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "unknown transition type {name:?}, use one of {}",
+                        rpptx::TransitionKind::NAMES.join(", ")
+                    ))
+                })
+            })
+            .transpose()?;
+        self.update(py, |transition| {
+            let keeps_direction = transition.direction.is_some_and(|direction| {
+                kind.as_ref()
+                    .is_some_and(|kind| kind.directions().contains(&direction))
+            });
+            if !keeps_direction {
+                transition.direction = None;
+            }
+            if kind.is_none() {
+                transition.duration_ms = None;
+            }
+            transition.kind = kind;
+            Ok(())
+        })
+    }
+
+    /// The direction the incoming slide moves, such as `left` (`dir="l"`,
+    /// PowerPoint's "From Right"), `None` for the effect's default.
+    #[getter]
+    fn direction(&self, py: Python<'_>) -> PyResult<Option<&'static str>> {
+        Ok(self
+            .current(py)?
+            .1
+            .direction
+            .map(rpptx::TransitionDirection::name))
+    }
+
+    #[setter]
+    fn set_direction(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        let direction = value
+            .map(|name| {
+                rpptx::TransitionDirection::parse(&name).ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "unknown transition direction {name:?}, use one of {}",
+                        rpptx::TransitionDirection::NAMES.join(", ")
+                    ))
+                })
+            })
+            .transpose()?;
+        self.update(py, |transition| {
+            transition.direction = direction;
+            Ok(())
+        })
+    }
+
+    /// The effect duration in seconds, `None` for the default speed.
+    #[getter]
+    fn duration(&self, py: Python<'_>) -> PyResult<Option<f64>> {
+        Ok(self.current(py)?.1.duration_ms.map(|ms| ms as f64 / 1000.0))
+    }
+
+    #[setter]
+    fn set_duration(&self, py: Python<'_>, value: Option<f64>) -> PyResult<()> {
+        let duration = seconds_to_ms("duration", value)?;
+        self.update(py, |transition| {
+            transition.duration_ms = duration;
+            Ok(())
+        })
+    }
+
+    /// Whether a click advances the slide show, true by default.
+    #[getter]
+    fn advance_on_click(&self, py: Python<'_>) -> PyResult<bool> {
+        Ok(self.current(py)?.1.advance_on_click)
+    }
+
+    #[setter]
+    fn set_advance_on_click(&self, py: Python<'_>, value: bool) -> PyResult<()> {
+        self.update(py, |transition| {
+            transition.advance_on_click = value;
+            Ok(())
+        })
+    }
+
+    /// Seconds after which the slide show advances by itself, or `None`.
+    #[getter]
+    fn advance_after(&self, py: Python<'_>) -> PyResult<Option<f64>> {
+        Ok(self
+            .current(py)?
+            .1
+            .advance_after_ms
+            .map(|ms| ms as f64 / 1000.0))
+    }
+
+    #[setter]
+    fn set_advance_after(&self, py: Python<'_>, value: Option<f64>) -> PyResult<()> {
+        let after = seconds_to_ms("advance_after", value)?;
+        self.update(py, |transition| {
+            transition.advance_after_ms = after;
+            Ok(())
+        })
+    }
+
+    /// Gives every slide this slide's transition, as PowerPoint's Apply To All.
+    fn apply_to_all(&self, py: Python<'_>) -> PyResult<()> {
+        let (_, transition) = self.current(py)?;
+        self.presentation
+            .borrow_mut(py)
+            .inner
+            .set_all_transitions(Some(&transition))
+            .map_err(|error| crate::rpptx_to_pyerr(py, error))
+    }
+}
+
+/// A slide master, read-only for now: its layouts and its theme.
+#[pyclass(name = "SlideMaster")]
+pub struct PySlideMaster {
+    presentation: Py<PyPresentation>,
+    index: usize,
+    path: ContentPath,
+}
+
+impl PySlideMaster {
+    fn validate(&self, py: Python<'_>) -> PyResult<()> {
+        validate_path(
+            py,
+            &self.presentation.borrow(py),
+            &self.path,
+            "slide master",
+            &format!(".slide_masters[{}]", self.index),
+        )
+    }
+}
+
+#[pymethods]
+impl PySlideMaster {
+    /// The theme this master uses, read when accessed.
+    #[getter]
+    fn theme(&self, py: Python<'_>) -> PyResult<PyTheme> {
+        self.validate(py)?;
+        let theme = self
+            .presentation
+            .borrow(py)
+            .inner
+            .theme(self.index)
+            .map_err(|error| crate::rpptx_to_pyerr(py, error))?
+            .ok_or_else(|| PyIndexError::new_err("slide master index out of range"))?;
+        let fonts = |fonts: &rpptx::ThemeFonts| PyThemeFontSet {
+            latin: fonts.latin.clone(),
+            east_asian: fonts.east_asian.clone(),
+            complex_script: fonts.complex_script.clone(),
+        };
+        Ok(PyTheme {
+            name: theme.name.clone(),
+            colors: theme
+                .colors
+                .iter()
+                .map(|(slot, color)| ((*slot).to_owned(), color.map(|color| color.components())))
+                .collect(),
+            fonts: PyThemeFonts {
+                major: fonts(&theme.major_font),
+                minor: fonts(&theme.minor_font),
+            },
+        })
+    }
+
+    /// The layouts this master owns, as `prs.slide_layouts` members.
+    #[getter]
+    fn slide_layouts<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        self.validate(py)?;
+        let layouts = self
+            .presentation
+            .borrow(py)
+            .inner
+            .master_layouts(self.index)
+            .ok_or_else(|| PyIndexError::new_err("slide master index out of range"))?;
+        let collection =
+            PySlideLayoutCollection::new(self.presentation.clone_ref(py), self.path.clone());
+        let items = layouts
+            .into_iter()
+            .map(|index| collection.item(py, index))
+            .collect::<PyResult<Vec<_>>>()?;
+        PyTuple::new(py, items)
+    }
+
+    /// Two handles are equal when they name the same master of one presentation.
+    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
+        other
+            .extract::<PyRef<'_, PySlideMaster>>()
+            .is_ok_and(|other| {
+                other.presentation.is(&self.presentation) && other.index == self.index
+            })
+    }
+}
+
+#[pyclass(name = "SlideMasterCollection")]
+pub struct PySlideMasterCollection {
+    presentation: Py<PyPresentation>,
+    path: ContentPath,
+}
+
+impl PySlideMasterCollection {
+    pub(crate) fn new(presentation: Py<PyPresentation>, path: ContentPath) -> Self {
+        Self { presentation, path }
+    }
+
+    fn len(&self, py: Python<'_>) -> PyResult<usize> {
+        validate_path(
+            py,
+            &self.presentation.borrow(py),
+            &self.path,
+            "slide master collection",
+            ".slide_masters",
+        )?;
+        Ok(self.presentation.borrow(py).inner.master_count())
+    }
+
+    pub(crate) fn item(&self, py: Python<'_>, index: usize) -> PyResult<Py<PySlideMaster>> {
+        Py::new(
+            py,
+            PySlideMaster {
+                presentation: self.presentation.clone_ref(py),
+                index,
+                path: self.path.clone(),
+            },
+        )
+    }
+}
+
+#[pymethods]
+impl PySlideMasterCollection {
+    fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
+        self.len(py)
+    }
+
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        sequence_item(py, key, self.len(py)?, "slide master", |index| {
+            self.item(py, index)
+        })
+    }
+
+    fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let items = (0..self.len(py)?)
+            .map(|index| self.item(py, index))
+            .collect::<PyResult<Vec<_>>>()?;
+        PyTuple::new(py, items)?
+            .into_any()
+            .try_iter()
+            .map(Bound::into_any)
+    }
+}
+
+/// A snapshot of one master's theme: name, colour scheme and fonts.
+#[pyclass(name = "Theme", frozen)]
+pub struct PyTheme {
+    name: Option<String>,
+    colors: Vec<(String, Option<[u8; 3]>)>,
+    fonts: PyThemeFonts,
+}
+
+#[pymethods]
+impl PyTheme {
+    #[getter]
+    fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// `dk1`, `lt1`, `dk2`, `lt2`, `accent1` to `accent6`, `hlink` and
+    /// `folHlink` mapped to an `RGBColor`, or `None` for a colour rpptx
+    /// cannot resolve.
+    #[getter]
+    fn colors<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let rgb = py.import("rpptx.dml.color")?.getattr("RGBColor")?;
+        let colors = PyDict::new(py);
+        for (slot, color) in &self.colors {
+            let value = match color {
+                Some([red, green, blue]) => rgb.call1((*red, *green, *blue))?.unbind(),
+                None => py.None(),
+            };
+            colors.set_item(slot, value)?;
+        }
+        Ok(colors)
+    }
+
+    #[getter]
+    fn fonts(&self) -> PyThemeFonts {
+        self.fonts.clone()
+    }
+}
+
+/// The theme's heading (`major`) and body (`minor`) fonts.
+#[pyclass(name = "ThemeFonts", frozen, get_all, skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyThemeFonts {
+    major: PyThemeFontSet,
+    minor: PyThemeFontSet,
+}
+
+/// One theme font collection's typefaces, empty when the theme names none.
+#[pyclass(name = "ThemeFontSet", frozen, get_all, skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyThemeFontSet {
+    latin: String,
+    east_asian: String,
+    complex_script: String,
 }

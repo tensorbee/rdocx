@@ -178,6 +178,23 @@ pub struct CT_HeaderFooter {
 }
 
 impl CT_HeaderFooter {
+    /// Creates a container with these flags, `None` keeping the enabled default.
+    pub fn new(
+        slide_number: Option<bool>,
+        header: Option<bool>,
+        footer: Option<bool>,
+        date_time: Option<bool>,
+    ) -> Self {
+        Self {
+            slide_number,
+            header,
+            footer,
+            date_time,
+            raw_attributes: RawAttributes::new(),
+            raw_children: OrderedRawChildren::default(),
+        }
+    }
+
     pub fn slide_number_enabled(&self) -> bool {
         self.slide_number.unwrap_or(true)
     }
@@ -269,9 +286,9 @@ impl RootKind {
                 _ => None,
             },
             Self::Layout => match name {
-                b"hf" => Some(2),
+                b"transition" => Some(2),
                 b"timing" => Some(3),
-                b"transition" => Some(4),
+                b"hf" => Some(4),
                 b"extLst" => Some(5),
                 _ => None,
             },
@@ -304,7 +321,6 @@ struct ParsedRoot {
     raw_attributes: RawAttributes,
     raw_children: OrderedRawChildren,
     boundary: usize,
-    empty_layout_transition_before_hf: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -738,6 +754,14 @@ impl CT_SlideLayout {
         })
     }
 
+    /// Returns the `type` attribute, such as `title` for a title slide layout.
+    pub fn layout_type(&self) -> Option<&str> {
+        self.raw_attributes
+            .iter()
+            .find(|(name, _)| name == "type")
+            .map(|(_, value)| value.as_str())
+    }
+
     pub fn to_xml(&self) -> Result<Vec<u8>> {
         write_slide_like(
             RootKind::Layout,
@@ -877,26 +901,14 @@ fn parse_root_children(
                 let name = local_name(child.name().as_ref()).to_vec();
                 let namespace_uri = namespaces.element_uri(child.name().as_ref());
                 let raw = capture_element(reader, &child)?;
-                parsed.capture_child(&name, namespace_uri, false, &namespaces, raw, kind)?;
+                parsed.capture_child(&name, namespace_uri, &namespaces, raw, kind)?;
             }
             Event::Empty(child) => {
                 let namespaces = root_namespaces.with_start(&child)?;
                 let name = local_name(child.name().as_ref()).to_vec();
                 let namespace_uri = namespaces.element_uri(child.name().as_ref());
-                let empty_layout_transition_marker = namespace_uri == Some(P_NS)
-                    && name == b"transition"
-                    && all_attributes(&child)?
-                        .iter()
-                        .all(|(name, _)| name == "xmlns" || name.starts_with("xmlns:"));
                 let raw = capture_empty_element(&child)?;
-                parsed.capture_child(
-                    &name,
-                    namespace_uri,
-                    empty_layout_transition_marker,
-                    &namespaces,
-                    raw,
-                    kind,
-                )?;
+                parsed.capture_child(&name, namespace_uri, &namespaces, raw, kind)?;
             }
             Event::End(end) if local_name(end.name().as_ref()) == kind.local_name() => {
                 return Ok(parsed);
@@ -913,13 +925,10 @@ impl ParsedRoot {
         &mut self,
         name: &[u8],
         namespace_uri: Option<&str>,
-        empty_layout_transition_marker: bool,
         namespaces: &NamespaceBindings,
         raw: Vec<u8>,
         kind: RootKind,
     ) -> Result<()> {
-        let follows_empty_layout_transition = self.empty_layout_transition_before_hf;
-        self.empty_layout_transition_before_hf = false;
         let is_p = namespace_uri == Some(P_NS);
         let is_mc = namespace_uri == Some(MC_NS);
         if is_p && name == b"cSld" {
@@ -966,21 +975,17 @@ impl ParsedRoot {
                 return Err(duplicate("hf"));
             }
             let (before, after) = match kind {
-                RootKind::Layout => (2, 3),
+                RootKind::Layout => (4, 5),
                 RootKind::Master => (5, 6),
                 RootKind::Slide => unreachable!(),
             };
-            if !matches!(kind, RootKind::Layout) || !follows_empty_layout_transition {
-                self.advance_modelled_child("hf", before, after)?;
-            }
+            self.advance_modelled_child("hf", before, after)?;
             self.header_footer = Some(CT_HeaderFooter::from_fragment(&raw, namespaces)?);
             return Ok(());
         }
         if is_p && name == b"transition" {
             let transition = CT_SlideTransition::from_fragment(&raw, namespaces)?;
             self.capture_transition(transition, kind)?;
-            self.empty_layout_transition_before_hf =
-                matches!(kind, RootKind::Layout) && empty_layout_transition_marker;
             return Ok(());
         }
         if is_mc
@@ -1024,7 +1029,7 @@ impl ParsedRoot {
         }
         let (before, after) = match kind {
             RootKind::Slide => (2, 3),
-            RootKind::Layout => (4, 5),
+            RootKind::Layout => (2, 3),
             RootKind::Master => (3, 4),
         };
         if self.boundary > before {
@@ -1084,16 +1089,16 @@ fn write_slide_like(
         }
         RootKind::Layout => {
             emit_raw(&mut writer, raw.at(2))?;
-            if let Some(header_footer) = header_footer {
-                header_footer.write_xml(&mut writer)?;
+            if let Some(transition) = transition {
+                transition.write_xml(&mut writer)?;
             }
             emit_raw(&mut writer, raw.at(3))?;
             if let Some(timing) = timing {
                 timing.write_xml(&mut writer)?;
             }
             emit_raw(&mut writer, raw.at(4))?;
-            if let Some(transition) = transition {
-                transition.write_xml(&mut writer)?;
+            if let Some(header_footer) = header_footer {
+                header_footer.write_xml(&mut writer)?;
             }
             emit_raw(&mut writer, raw.at(5))?;
             emit_raw(&mut writer, raw.at(6))?;

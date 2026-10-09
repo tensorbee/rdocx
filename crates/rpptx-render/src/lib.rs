@@ -203,6 +203,9 @@ pub struct RenderInput {
     pub media: HashMap<MediaId, MediaData>,
     pub fonts: Vec<FontFile>,
     pub metadata: Option<DocumentMetadata>,
+    /// The number the first slide's slide-number fields show, the
+    /// presentation's `firstSlideNum`, normally 1.
+    pub first_slide_number: usize,
 }
 
 /// One shape's text as the slide renderer lays it out, in points.
@@ -470,6 +473,9 @@ pub(crate) fn layout_resolved_slide_with_fonts_text_directions_and_states(
     text_directions: Option<&[Vec<Vec<oxml_layout::TextDirection>>]>,
     shape_states: Option<&[rpptx_layout::timeline::EvaluatedShapeState]>,
 ) -> Result<PageFrame, RenderInputError> {
+    // Slide-number fields show the page's position offset by `firstSlideNum`,
+    // so with `firstSlideNum="0"` the second slide shows 1, as in PowerPoint.
+    let slide_number = (page_number + input.first_slide_number).saturating_sub(1);
     let mut elements = Vec::new();
     let mut background_paint = None;
     match slide.background.as_ref() {
@@ -517,7 +523,7 @@ pub(crate) fn layout_resolved_slide_with_fonts_text_directions_and_states(
                     input,
                     shape,
                     font_manager,
-                    page_number,
+                    slide_number,
                     text_directions
                         .and_then(|directions| directions.get(shape_index))
                         .map(Vec::as_slice),
@@ -561,6 +567,7 @@ pub(crate) fn layout_resolved_slide_with_fonts_text_directions_and_states(
             .collect::<Result<Vec<_>, _>>()?,
     );
     let mut page = PageFrame::new(page_number, slide.size.0, slide.size.1, elements);
+    page.displayed_page_number = slide_number;
     page.background = background_paint;
     Ok(page)
 }
@@ -2266,6 +2273,7 @@ mod tests {
             media: HashMap::new(),
             fonts: Vec::new(),
             metadata: None,
+            first_slide_number: 1,
         }
     }
 
@@ -3587,6 +3595,7 @@ mod tests {
             media,
             fonts: Vec::new(),
             metadata: None,
+            first_slide_number: 1,
         }
     }
 
@@ -4103,6 +4112,7 @@ mod tests {
             media: HashMap::new(),
             fonts: Vec::new(),
             metadata: None,
+            first_slide_number: 1,
         };
 
         assert!(input.slides.is_empty());

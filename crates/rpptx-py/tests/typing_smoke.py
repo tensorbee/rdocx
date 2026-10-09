@@ -503,6 +503,43 @@ def exercise_rpptx_text_layout_types(presentation: Presentation) -> None:
         )
 
 
+def exercise_rpptx_header_footer_theme_transition_types(presentation: Presentation) -> None:
+    from rpptx._rpptx import HeaderFooter, SlideMaster, SlideTransition, Theme
+    from rpptx.enum.shapes import PP_PLACEHOLDER
+
+    presentation.set_header_footer(slide_number=True, footer="ACME", date="auto", hide_on_title=True)
+    slide = presentation.slides[0]
+    header_footer: HeaderFooter = slide.header_footer
+    numbered: bool = header_footer.slide_number
+    footer: str | None = header_footer.footer
+    date: str | None = header_footer.date
+    date_format: str | None = header_footer.date_format
+    header_footer.footer = None
+    header_footer.date = "Q3"
+    for shape in slide.shapes:
+        if shape.is_placeholder:
+            kind: PP_PLACEHOLDER = shape.placeholder_format.type
+            idx: int = shape.placeholder_format.idx
+            (kind, idx)
+    transition: SlideTransition = slide.transition
+    transition.type = "push"
+    transition.direction = "left"
+    transition.duration = 1.0
+    transition.advance_after = None
+    transition.advance_on_click = True
+    kind_name: str | None = transition.type
+    transition.apply_to_all()
+    master: SlideMaster = presentation.slide_master
+    theme: Theme = master.theme
+    accent: RGBColor | None = theme.colors["accent1"]
+    heading: str = theme.fonts.major.latin
+    body: str = theme.fonts.minor.east_asian
+    masters: int = len(presentation.slide_masters)
+    layouts: tuple[SlideLayout, ...] = master.slide_layouts
+    slide.shapes[0].text_frame.paragraphs[0].add_field("slidenum")
+    (numbered, footer, date, date_format, kind_name, accent, heading, body, masters, layouts)
+
+
 if TYPE_CHECKING:
     BoundingBox()  # type: ignore[call-arg]
     AdjustmentCollection()  # type: ignore[call-arg]

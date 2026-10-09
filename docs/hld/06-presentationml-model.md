@@ -193,7 +193,41 @@ Presentation::sections(&self) -> &[Section];
 Presentation::set_sections(&mut self, sections: Vec<Section>) -> Result<()>;
 Presentation::notes_header_footer_mut(&mut self) -> Option<&mut CT_HeaderFooter>;
 Presentation::handout_header_footer_mut(&mut self) -> Option<&mut CT_HeaderFooter>;
+Presentation::set_header_footer(&mut self, settings: &HeaderFooter, hide_on_title: bool) -> Result<()>;
+Presentation::set_slide_header_footer(&mut self, slide_index: usize, settings: &HeaderFooter) -> Result<()>;
+Presentation::slide_header_footer(&self, slide_index: usize) -> Option<HeaderFooter>;
+Presentation::master_count(&self) -> usize;
+Presentation::master_layouts(&self, master_index: usize) -> Option<Vec<usize>>;
+Presentation::master_header_footer(&self, master_index: usize) -> Result<Option<HeaderFooterFlags>>;
+Presentation::layout_header_footer(&self, layout_index: usize) -> Option<HeaderFooterFlags>;
+Presentation::theme(&self, master_index: usize) -> Result<Option<Theme>>;
+Presentation::set_all_transitions(&mut self, transition: Option<&SlideTransition>) -> Result<()>;
+SlideRef::transition(&self) -> Option<SlideTransition>;
+SlideMut::set_transition(&mut self, transition: Option<&SlideTransition>) -> Result<()>;
+TextParagraphMut::add_field(&mut self, field_type: &str, text: Option<&str>) -> Result<()>;
 ```
+
+Slide numbers, footers and dates follow PowerPoint's Header and Footer dialog.
+A slide shows them only through date, footer and slide-number placeholders it
+owns, which is also the only form Google Slides imports. `set_header_footer`
+copies the missing ones from each slide's layout, or from its master with an
+explicit transform when the layout has none, removes the switched-off ones,
+and writes matching `p:hf` flags and footer and date text on every master and
+layout. With `hide_on_title`, slides on a layout of type `title` show none and
+the title layouts' `p:hf` disables all three. `add_slide` copies the layout's
+date, footer and slide-number placeholders that the layout's `p:hf`, else the
+master's, enables. Without either container a new slide receives none, as
+before. A slide number is an `a:fld type="slidenum"` field. An automatic date
+is a `datetime1` to `datetime13` field whose cached text the caller supplies,
+`date_field_text` formatting it for `datetime1` to `datetime7`.
+
+`theme` reads one master's theme: its name, the twelve scheme colours as RGB
+and the major and minor Latin, East Asian and complex-script typefaces.
+Transitions read any `p:transition` and author fade, push, wipe, split, cover,
+uncover (`p:pull`), cut and zoom with a direction, a duration written as
+`p14:dur` inside `mc:AlternateContent` with an `spd` fallback, and click or
+timed advance. Another effect reads as `TransitionKind::Other` and is refused
+on write.
 
 Native audio and video package access is concrete and keyed by slide index and
 `p:cNvPr/@id`. `MediaInfo` reports `MediaKind`, embedded part metadata or the
@@ -1161,11 +1195,13 @@ target without changing the public `TimingCondition` fields. Both queries read
 the existing namespace-aware projection, and the captured subtree remains the
 serialization source.
 
-Readers reject duplicate or out-of-order modelled timing children. One narrow
-PowerPoint compatibility case accepts an attribute-free empty layout
-`p:transition` immediately before `p:hf`, keeps both values typed, and writes
-them in canonical `p:hf`, `p:transition` order. This is the producer shape in
-the pinned `ArtisticEffectSample.pptx` corpus deck.
+Readers reject duplicate or out-of-order modelled timing children. A slide
+layout follows `CT_SlideLayout`: `p:cSld`, `p:clrMapOvr`, `p:transition`,
+`p:timing`, `p:hf`, `p:extLst`. A master follows `CT_SlideMaster`: `p:cSld`,
+`p:clrMap`, `p:sldLayoutIdLst`, `p:transition`, `p:timing`, `p:hf`,
+`p:txStyles`, `p:extLst`. Both read and write in that order, as the pinned
+`ArtisticEffectSample.pptx` corpus deck writes a layout transition before its
+`p:hf`.
 
 Modern Office 2021 comment authors, comments, threaded replies, and
 `p14:sectionLst` are typed only at the fields callers inspect or mutate. Their

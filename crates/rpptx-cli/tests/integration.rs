@@ -2093,3 +2093,92 @@ fn comment_mutations_fail_without_creating_output() {
     assert!(String::from_utf8_lossy(&result.stderr).contains("output already exists"));
     assert_eq!(fs::read(&output).unwrap(), b"keep me");
 }
+
+#[test]
+fn footer_numbers_every_slide_but_the_title_and_inspect_lists_masters() {
+    let temp = TempWorkspace::new("footer");
+    let deck = temp.path.join("deck.pptx");
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(0).unwrap();
+    presentation.add_slide(1).unwrap();
+    presentation.add_slide(1).unwrap();
+    presentation.save(&deck).unwrap();
+    let output = temp.path.join("numbered.pptx");
+
+    let footer = cli(&[
+        "footer",
+        deck.to_str().unwrap(),
+        "--slide-number",
+        "--footer",
+        "ACME",
+        "--date",
+        "Q3",
+        "--skip-title",
+        "-o",
+        output.to_str().unwrap(),
+        "--json",
+    ]);
+    assert!(
+        footer.status.success(),
+        "{}",
+        String::from_utf8_lossy(&footer.stderr)
+    );
+    let record: serde_json::Value = serde_json::from_slice(&footer.stdout).unwrap();
+    assert_eq!(
+        record["slides"],
+        json!([
+            {"slide_number": false, "footer": null, "date": null},
+            {"slide_number": true, "footer": "ACME", "date": "Q3"},
+            {"slide_number": true, "footer": "ACME", "date": "Q3"},
+        ])
+    );
+    let numbered = Presentation::open(&output).unwrap();
+    assert!(numbered.validate().is_empty());
+    assert_eq!(
+        numbered.slide_header_footer(2).unwrap().footer.as_deref(),
+        Some("ACME")
+    );
+
+    let inspected = cli(&["inspect", output.to_str().unwrap(), "--json"]);
+    assert!(inspected.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&inspected.stdout).unwrap();
+    let master = &value["masters"][0];
+    assert_eq!(
+        master["header_footer"],
+        json!({"date": true, "footer": true, "slide_number": true})
+    );
+    assert_eq!(
+        master["layouts"][0]["header_footer"],
+        json!({"date": false, "footer": false, "slide_number": false})
+    );
+    assert_eq!(master["layouts"][0]["name"], "Title Slide");
+    assert_eq!(master["theme"]["colors"]["accent1"], "4F81BD");
+    assert_eq!(master["theme"]["fonts"]["major"]["latin"], "Calibri");
+
+    let inspected = String::from_utf8(cli(&["inspect", output.to_str().unwrap()]).stdout).unwrap();
+    for expected in [
+        "Masters: 1",
+        "Master 1: theme=Office Theme, p:hf slide number, footer, date",
+        "accent1=4F81BD",
+        "Layout 1: Title Slide, p:hf none",
+    ] {
+        assert!(inspected.contains(expected), "{expected}\n{inspected}");
+    }
+
+    let refused = cli(&[
+        "footer",
+        deck.to_str().unwrap(),
+        "--date",
+        "auto",
+        "--date-format",
+        "datetime9",
+        "-o",
+        temp.path.join("refused.pptx").to_str().unwrap(),
+    ]);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("use datetime1 to datetime7"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+}

@@ -4689,3 +4689,98 @@ def test_issue_158_deck_fixture_acceptance(tmp_path):
         close = sum(max(errors[offset:offset + 3]) <= 24 for offset in range(0, len(errors), 3))
         assert close / (len(errors) / 3) >= min_close, label
         assert sum(errors) / len(errors) <= max_mean, label
+
+
+def slide_text(prs, index):
+    return "".join(line.text for frame in prs.text_layout() if frame.slide_index == index
+                   for line in frame.lines)
+
+
+def test_header_footer_fields_theme_and_transitions_from_python(tmp_path):
+    from rpptx import Presentation, RpptxError, StaleElementError
+    from rpptx.enum.shapes import PP_PLACEHOLDER
+
+    prs = Presentation()
+    prs.slides.add_slide(prs.slide_layouts[0])
+    for _ in range(2):
+        prs.slides.add_slide(prs.slide_layouts[1])
+    # The default template has no p:hf, so new slides own no footers.
+    assert not any(shape.is_placeholder and shape.placeholder_format.type == PP_PLACEHOLDER.SLIDE_NUMBER
+                   for slide in prs.slides for shape in slide.shapes)
+
+    held = prs.slides[1]
+    prs.set_header_footer(slide_number=True, footer="ACME - Confidential", date="Q3 review")
+    # The placeholders go after the other shapes, so held handles stay valid.
+    assert held.header_footer.footer == "ACME - Confidential"
+    title, first, second = prs.slides
+    assert (title.header_footer.slide_number, title.header_footer.footer) == (False, None)
+    assert (first.header_footer.slide_number, first.header_footer.footer, first.header_footer.date) == (
+        True, "ACME - Confidential", "Q3 review")
+    kinds = [shape.placeholder_format.type for shape in second.shapes if shape.is_placeholder]
+    assert kinds[-3:] == [PP_PLACEHOLDER.DATE, PP_PLACEHOLDER.FOOTER, PP_PLACEHOLDER.SLIDE_NUMBER]
+    assert second.shapes[1].placeholder_format.idx == 1
+    with pytest.raises(ValueError, match="not a placeholder"):
+        title.shapes.add_textbox(0, 0, 914400, 914400).placeholder_format
+
+    # Placeholders are added after the other shapes and rewritten in place,
+    # so held handles stay valid. Removing the footer moves the slide number
+    # that follows it, which advances the revision, and the header-footer
+    # handle follows it.
+    second = prs.slides[2]
+    header_footer = second.header_footer
+    header_footer.date = "auto"
+    assert (header_footer.date, header_footer.date_format) == ("auto", "datetime1")
+    header_footer.date_format = "datetime4"
+    assert header_footer.date_format == "datetime4"
+    assert len(second.shapes) == 5
+    header_footer.footer = None
+    assert header_footer.footer is None
+    with pytest.raises(StaleElementError):
+        second.shapes
+    second = prs.slides[2]
+    second.header_footer.footer = "Back"
+    assert len(second.shapes) == 5
+    with pytest.raises(ValueError, match="use datetime1 to datetime7$"):
+        second.header_footer.date_format = "datetime9"
+    with pytest.raises(ValueError, match="use datetime1 to datetime7$"):
+        prs.set_header_footer(date="auto", date_format="datetime9")
+
+    prs.slides[1].shapes.add_textbox(0, 0, 914400, 914400).text_frame.paragraphs[0].add_run("Page ")
+    paragraph = prs.slides[1].shapes[-1].text_frame.paragraphs[0]
+    paragraph.add_field("slidenum")
+    assert paragraph.text == "Page \u2039#\u203a"
+    assert slide_text(prs, 1).replace(" ", "").endswith("Page2")
+    with pytest.raises(RpptxError, match="slidenum or datetime1 to datetime13"):
+        paragraph.add_field("pagenum")
+
+    theme = prs.slide_master.theme
+    assert theme.name == "Office Theme"
+    assert str(theme.colors["accent1"]) == "4F81BD"
+    assert list(theme.colors)[:2] == ["dk1", "lt1"] and len(theme.colors) == 12
+    assert theme.fonts.major.latin == "Calibri"
+    assert len(prs.slide_masters) == 1 and prs.slide_masters[0] == prs.slide_master
+    assert len(prs.slide_master.slide_layouts) == len(prs.slide_layouts)
+
+    first, second = prs.slides[1], prs.slides[2]
+    transition = first.transition
+    assert transition.type is None and transition.advance_on_click
+    transition.type = "push"
+    transition.direction = "up"
+    transition.duration = 1.5
+    transition.advance_after = 3
+    with pytest.raises(ValueError, match="fade takes no direction"):
+        second.transition.type = "fade"
+        second.transition.direction = "left"
+    with pytest.raises(ValueError, match="unknown transition type"):
+        second.transition.type = "vortex"
+    transition.apply_to_all()
+
+    path = tmp_path / "numbered.pptx"
+    prs.save(path)
+    reopened = Presentation(path)
+    assert [slide.transition.type for slide in reopened.slides] == ["push"] * 3
+    assert (reopened.slides[2].transition.direction, reopened.slides[2].transition.duration,
+            reopened.slides[2].transition.advance_after) == ("up", 1.5, 3.0)
+    # A slide added after the round trip follows the master and layout flags.
+    added = reopened.slides.add_slide(reopened.slide_layouts[1])
+    assert (added.header_footer.slide_number, added.header_footer.footer) == (True, "ACME - Confidential")

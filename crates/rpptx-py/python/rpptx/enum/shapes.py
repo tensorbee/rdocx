@@ -453,10 +453,79 @@ _CONNECTORS: dict[int, str] = {
 MSO_CONNECTOR = MSO_CONNECTOR_TYPE
 
 
+class PP_PLACEHOLDER_TYPE(IntEnum):
+    """A placeholder's type, as `shape.placeholder_format.type` reports it.
+
+    Values and names follow python-pptx `PP_PLACEHOLDER`.
+    """
+
+    BITMAP = 9
+    BODY = 2
+    CENTER_TITLE = 3
+    CHART = 8
+    DATE = 16
+    FOOTER = 15
+    HEADER = 14
+    MEDIA_CLIP = 10
+    OBJECT = 7
+    ORG_CHART = 11
+    PICTURE = 18
+    SLIDE_IMAGE = 101
+    SLIDE_NUMBER = 13
+    SUBTITLE = 4
+    TABLE = 12
+    TITLE = 1
+    VERTICAL_BODY = 6
+    VERTICAL_OBJECT = 17
+    VERTICAL_TITLE = 5
+    MIXED = -2
+
+    @property
+    def xml_value(self) -> str:
+        """The `p:ph` type token, empty for `MIXED`."""
+        return _PLACEHOLDER_TYPES[self.value]
+
+    @classmethod
+    def from_xml(cls, value: str) -> "PP_PLACEHOLDER_TYPE":
+        """The member a `p:ph` type token names."""
+        for member, token in _PLACEHOLDER_TYPES.items():
+            if token == value and token:
+                return cls(member)
+        raise ValueError(f"unknown placeholder type {value!r}")
+
+
+_PLACEHOLDER_TYPES: dict[int, str] = {
+    9: "clipArt",
+    2: "body",
+    3: "ctrTitle",
+    8: "chart",
+    16: "dt",
+    15: "ftr",
+    14: "hdr",
+    10: "media",
+    7: "obj",
+    11: "dgm",
+    18: "pic",
+    101: "sldImg",
+    13: "sldNum",
+    4: "subTitle",
+    12: "tbl",
+    1: "title",
+    6: "vertBody",
+    17: "vertObj",
+    5: "vertTitle",
+    -2: "",
+}
+
+PP_PLACEHOLDER = PP_PLACEHOLDER_TYPE
+
+
 __all__ = [
     "MSO_AUTO_SHAPE_TYPE",
     "MSO_CONNECTOR",
     "MSO_CONNECTOR_TYPE",
     "MSO_SHAPE",
     "MSO_SHAPE_TYPE",
+    "PP_PLACEHOLDER",
+    "PP_PLACEHOLDER_TYPE",
 ]

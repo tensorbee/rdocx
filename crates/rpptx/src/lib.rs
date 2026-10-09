@@ -6,6 +6,8 @@
 //! `screen16x9`, and python-pptx generated the notes-master infrastructure.
 
 mod embedded;
+mod header_footer;
+mod transition;
 
 pub use embedded::{
     EmbeddedContentInfo, EmbeddedContentKind, EmbeddedMutationPolicy, EmbeddedSignatureState,
@@ -17,6 +19,9 @@ use std::path::Path;
 
 #[cfg(feature = "render")]
 use diagram::{DiagramResources, ScopedDiagramResources};
+pub use header_footer::{
+    HeaderFooter, HeaderFooterDate, HeaderFooterFlags, SLIDE_NUMBER_FIELD_TEXT, date_field_text,
+};
 #[cfg(feature = "render")]
 use oxml_chart::CT_ChartSpace;
 pub use oxml_chart::{ChartData, ChartKind, RgbColor};
@@ -130,6 +135,7 @@ use rpptx_render::{
     MediaData, RenderInput, layout_presentation_with_font_manager_and_text_directions_mut,
 };
 use thiserror::Error;
+pub use transition::{SlideTransition, TransitionDirection, TransitionKind};
 
 #[cfg(feature = "render")]
 mod animation;
@@ -600,6 +606,39 @@ pub enum ValidationIssue {
     MissingThemeRel {
         master: usize,
     },
+}
+
+/// One slide master's theme, as [`Presentation::theme`] reads it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Theme {
+    /// The `a:theme/@name`.
+    pub name: Option<String>,
+    /// The colour scheme in `dk1`, `lt1`, `dk2`, `lt2`, `accent1` to
+    /// `accent6`, `hlink`, `folHlink` order. A system colour reads as its
+    /// last computed value, and a colour rpptx cannot resolve as `None`.
+    pub colors: Vec<(&'static str, Option<RgbColor>)>,
+    /// The heading fonts, `+mj-lt` and its East Asian and complex-script peers.
+    pub major_font: ThemeFonts,
+    /// The body fonts, `+mn-lt` and its East Asian and complex-script peers.
+    pub minor_font: ThemeFonts,
+}
+
+impl Theme {
+    /// Returns one scheme colour by its slot name, such as `accent1`.
+    pub fn color(&self, slot: &str) -> Option<RgbColor> {
+        self.colors
+            .iter()
+            .find(|(name, _)| *name == slot)
+            .and_then(|(_, color)| *color)
+    }
+}
+
+/// The typefaces of one theme font collection, empty when the theme names none.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ThemeFonts {
+    pub latin: String,
+    pub east_asian: String,
+    pub complex_script: String,
 }
 
 /// An opened PresentationML package and its ordered slide read model.
@@ -1255,7 +1294,7 @@ impl Presentation {
                     shape,
                     text,
                     &mut assembly.font_manager,
-                    slide_index + 1,
+                    slide_index + assembly.input.first_slide_number,
                     directions.get(shape_index).map_or(&[], Vec::as_slice),
                     width_factor,
                 )
@@ -1945,6 +1984,115 @@ impl Presentation {
         self.layouts
             .get(index)
             .and_then(|record| record.layout.common_slide_data.name.as_deref())
+    }
+
+    /// Returns the number of slide masters, in `p:sldMasterIdLst` order.
+    pub fn master_count(&self) -> usize {
+        self.presentation.slide_master_ids.len()
+    }
+
+    /// Returns the zero-based layout indices one master owns, in the order
+    /// [`Self::layout_name`] numbers them, or `None` for an unknown master.
+    pub fn master_layouts(&self, master_index: usize) -> Option<Vec<usize>> {
+        let master_part = self.master_part(master_index).ok()??;
+        Some(
+            (0..self.layouts.len())
+                .filter(|&layout_index| {
+                    self.layout_master_part(layout_index)
+                        .is_ok_and(|(part, _)| part.eq_ignore_ascii_case(&master_part))
+                })
+                .collect(),
+        )
+    }
+
+    /// Returns the `p:hf` flags of one master, `None` without the element
+    /// or for an unknown master. New slides receive the date, footer and
+    /// slide-number placeholders these flags enable.
+    pub fn master_header_footer(&self, master_index: usize) -> Result<Option<HeaderFooterFlags>> {
+        let Some(master_part) = self.master_part(master_index)? else {
+            return Ok(None);
+        };
+        let master = CT_SlideMaster::from_xml(required_part(&self.package, &master_part)?)
+            .map_err(|error| Error::MalformedPart {
+                part_name: master_part,
+                message: error.to_string(),
+            })?;
+        Ok(master.header_footer.as_ref().map(HeaderFooterFlags::from))
+    }
+
+    /// Returns the `p:hf` flags of one layout, which win over its master's,
+    /// `None` without the element or for an unknown layout.
+    pub fn layout_header_footer(&self, layout_index: usize) -> Option<HeaderFooterFlags> {
+        self.layouts
+            .get(layout_index)
+            .and_then(|record| record.layout.header_footer.as_ref())
+            .map(HeaderFooterFlags::from)
+    }
+
+    /// Returns the theme one slide master uses: its name, colour scheme as
+    /// RGB values and major and minor fonts. `Ok(None)` is an unknown master.
+    pub fn theme(&self, master_index: usize) -> Result<Option<Theme>> {
+        let Some(master_part) = self.master_part(master_index)? else {
+            return Ok(None);
+        };
+        let theme_part = related_internal_part(&self.package, &master_part, rel_types::THEME)?
+            .ok_or_else(|| Error::MalformedPart {
+                part_name: master_part.clone(),
+                message: "slide master has no theme relationship".to_owned(),
+            })?;
+        let theme = oxml_drawing::theme::CT_OfficeStyleSheet::from_xml(required_part(
+            &self.package,
+            &theme_part,
+        )?)
+        .map_err(|error| Error::MalformedPart {
+            part_name: theme_part,
+            message: error.to_string(),
+        })?;
+        let elements = &theme.theme_elements;
+        let fonts = |collection: &oxml_drawing::theme::CT_FontCollection| ThemeFonts {
+            latin: collection.latin.typeface.clone(),
+            east_asian: collection.east_asian.typeface.clone(),
+            complex_script: collection.complex_script.typeface.clone(),
+        };
+        Ok(Some(Theme {
+            name: theme.name.clone(),
+            colors: elements
+                .color_scheme
+                .iter()
+                .map(|(slot, choice)| {
+                    let color = oxml_drawing::color::resolve_color(
+                        choice,
+                        &oxml_drawing::color::ColorMap::default(),
+                        &[],
+                    )
+                    .ok()
+                    .map(|color| RgbColor::new(color.red, color.green, color.blue));
+                    (slot.as_str(), color)
+                })
+                .collect(),
+            major_font: fonts(&elements.font_scheme.major_font),
+            minor_font: fonts(&elements.font_scheme.minor_font),
+        }))
+    }
+
+    /// Resolves one master's part name, `Ok(None)` for an unknown index.
+    fn master_part(&self, master_index: usize) -> Result<Option<String>> {
+        let Some(master) = self.presentation.slide_master_ids.get(master_index) else {
+            return Ok(None);
+        };
+        let relationship = self
+            .package
+            .get_part_rels(&self.presentation_part)
+            .and_then(|relationships| relationships.get_by_id(&master.relationship_id))
+            .ok_or_else(|| Error::MissingRelationship {
+                source_part: self.presentation_part.clone(),
+                relationship_id: master.relationship_id.clone(),
+            })?;
+        reject_external(&self.presentation_part, relationship)?;
+        Ok(Some(OpcPackage::resolve_rel_target(
+            &self.presentation_part,
+            &relationship.target,
+        )))
     }
 
     /// Returns the zero-based index of the layout one slide uses.
@@ -3282,6 +3430,9 @@ impl Presentation {
                         part_name: "new slide".to_owned(),
                         message: error.to_string(),
                     })?;
+            shape_tree.children.push(ShapeTreeChild::Shape(shape));
+        }
+        for shape in self.new_slide_latent_shapes(layout_index, &mut shape_ids)? {
             shape_tree.children.push(ShapeTreeChild::Shape(shape));
         }
 
@@ -9319,6 +9470,25 @@ impl TextParagraphMut<'_> {
             .nth(index)
     }
 
+    /// Appends an `a:fld` field after the existing ordered text choices.
+    ///
+    /// `field_type` is `slidenum`, which shows the slide's number, or a date
+    /// field `datetime` or `datetime1` to `datetime13`, which PowerPoint
+    /// refreshes when it opens the file. `text` is the cached value other
+    /// readers show, by default [`SLIDE_NUMBER_FIELD_TEXT`] for a slide
+    /// number, which rpptx renders as the number, and empty for a date
+    /// (see [`date_field_text`]). Any other type is an error.
+    pub fn add_field(&mut self, field_type: &str, text: Option<&str>) -> Result<()> {
+        let text = text.unwrap_or(if field_type == "slidenum" {
+            SLIDE_NUMBER_FIELD_TEXT
+        } else {
+            ""
+        });
+        let field = header_footer::text_field(field_type, text)?;
+        header_footer::push_field(self.paragraph, field);
+        Ok(())
+    }
+
     /// Sets the direct paragraph level.
     pub fn set_level(&mut self, level: u8) -> bool {
         if level > 8 {
@@ -10723,6 +10893,7 @@ fn render_export_surface(
         media: deck_media.clone(),
         fonts: Vec::new(),
         metadata: None,
+        first_slide_number: 1,
     };
     let layout_result = layout_presentation_with_font_manager_and_text_directions_mut(
         &input,
@@ -11256,6 +11427,7 @@ fn prepare_render_context(
         media,
         fonts: Vec::new(),
         metadata: None,
+        first_slide_number: presentation.first_slide_number() as usize,
     };
     #[cfg(test)]
     PREPARED_LAYOUT_COUNT.with(|count| count.set(count.get() + 1));

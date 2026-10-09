@@ -113,6 +113,34 @@ enum Command {
         #[arg(long)]
         notes: bool,
     },
+    /// Set the slide number, footer and date of every slide, as PowerPoint's
+    /// Header and Footer dialog with Apply to All. Every flag is opt-in, while
+    /// Python's set_header_footer turns the slide number and the title-slide
+    /// skip on by default
+    Footer {
+        file: PathBuf,
+        /// Show the slide number
+        #[arg(long)]
+        slide_number: bool,
+        /// Footer text, no footer when omitted
+        #[arg(long)]
+        footer: Option<String>,
+        /// off, auto for a date PowerPoint refreshes, cached with today's local
+        /// date, or fixed text
+        #[arg(long, default_value = "off")]
+        date: String,
+        /// Date field format for --date auto, datetime1 to datetime7
+        #[arg(long, default_value = "datetime1")]
+        date_format: String,
+        /// Show none of them on slides with a title slide layout
+        #[arg(long)]
+        skip_title: bool,
+        #[arg(long, short = 'o')]
+        output: PathBuf,
+        /// Output the operation record as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Inspect and mutate modern PowerPoint comment threads
     Comment {
         #[command(subcommand)]
@@ -285,6 +313,27 @@ fn run_cli() {
             force,
         } => commands::thumbnail(&file, output.as_deref(), force),
         Command::Outline { file, json, notes } => commands::outline(&file, json, notes),
+        Command::Footer {
+            file,
+            slide_number,
+            footer,
+            date,
+            date_format,
+            skip_title,
+            output,
+            json,
+        } => commands::footer(
+            &file,
+            commands::FooterInput {
+                slide_number,
+                footer: footer.as_deref(),
+                date: &date,
+                date_format: &date_format,
+                skip_title,
+            },
+            &output,
+            json,
+        ),
         Command::Comment { command } => match command {
             CommentCommand::List { file, json } => commands::comment_list(&file, json),
             CommentCommand::Add {

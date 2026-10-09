@@ -27925,3 +27925,509 @@ fn names_and_chart_text_xml_cannot_carry_are_refused() {
         "{error}"
     );
 }
+
+/// Slide numbers, date and footer, fields, theme reading and transitions (#311).
+#[cfg(all(feature = "render", feature = "default-template"))]
+mod header_footer_theme_and_transitions {
+    use std::io::Cursor;
+
+    use oxml_layout::{PositionedElement, walk};
+    use oxml_opc::OpcPackage;
+    use rpptx::{
+        HeaderFooter, HeaderFooterDate, Presentation, SlideTransition, TransitionDirection,
+        TransitionKind, date_field_text,
+    };
+
+    fn slide_texts(presentation: &Presentation) -> Vec<Vec<String>> {
+        let (_, layout) = presentation.render_deterministic().unwrap();
+        layout
+            .pages
+            .iter()
+            .map(|page| {
+                let mut texts = Vec::new();
+                walk(&page.elements, &mut |element, _| match element {
+                    PositionedElement::Text(run) => texts.push(run.text.trim().to_owned()),
+                    PositionedElement::MultilingualText(run) => {
+                        texts.push(run.logical_text.trim().to_owned());
+                    }
+                    _ => {}
+                });
+                texts
+            })
+            .collect()
+    }
+
+    /// A title slide then three content slides on the default template.
+    fn deck() -> Presentation {
+        let mut presentation = Presentation::new().unwrap();
+        presentation.add_slide(0).unwrap();
+        for _ in 0..3 {
+            presentation.add_slide(1).unwrap();
+        }
+        presentation
+    }
+
+    fn part_text(bytes: &[u8], part: &str) -> String {
+        let package = OpcPackage::from_reader(Cursor::new(bytes)).unwrap();
+        String::from_utf8(package.get_part(part).unwrap().to_vec()).unwrap()
+    }
+
+    fn numbered() -> HeaderFooter {
+        HeaderFooter {
+            slide_number: true,
+            footer: Some("ACME - Confidential".to_owned()),
+            date: HeaderFooterDate::Off,
+        }
+    }
+
+    #[test]
+    fn one_call_numbers_every_slide_but_the_title_and_new_slides_follow() {
+        let mut presentation = deck();
+        // The default template has no p:hf, so a new slide gets no footer.
+        assert!(
+            (0..4)
+                .all(|index| presentation.slide_header_footer(index)
+                    == Some(HeaderFooter::default()))
+        );
+
+        presentation.set_header_footer(&numbered(), true).unwrap();
+        assert!(
+            presentation.validate().is_empty(),
+            "{:?}",
+            presentation.validate()
+        );
+        assert_eq!(
+            presentation.slide_header_footer(0),
+            Some(HeaderFooter::default())
+        );
+        for index in 1..4 {
+            assert_eq!(presentation.slide_header_footer(index), Some(numbered()));
+        }
+        let texts = slide_texts(&presentation);
+        assert!(!texts[0].iter().any(|text| text == "1"), "{:?}", texts[0]);
+        for (index, texts) in texts.iter().enumerate().skip(1) {
+            assert!(
+                texts.contains(&(index + 1).to_string()),
+                "slide {}: {texts:?}",
+                index + 1
+            );
+            assert!(texts.concat().contains("ACME-Confidential"), "{texts:?}");
+        }
+
+        // The masters and layouts carry the flags, so a slide added after a
+        // round trip receives its number and footer as in PowerPoint.
+        let bytes = presentation.to_bytes().unwrap();
+        let master = part_text(&bytes, "/ppt/slideMasters/slideMaster1.xml");
+        assert!(master.contains("<p:hf"), "{master}");
+        let mut reopened = Presentation::from_bytes(&bytes).unwrap();
+        reopened.add_slide(1).unwrap();
+        assert_eq!(reopened.slide_header_footer(4), Some(numbered()));
+        reopened.add_slide(0).unwrap();
+        assert_eq!(
+            reopened.slide_header_footer(5),
+            Some(HeaderFooter::default())
+        );
+        let texts = slide_texts(&reopened);
+        assert!(texts[4].contains(&"5".to_owned()), "{:?}", texts[4]);
+
+        // Switching everything off removes the slide placeholders again.
+        reopened
+            .set_header_footer(&HeaderFooter::default(), false)
+            .unwrap();
+        assert!(
+            (0..6)
+                .all(|index| reopened.slide_header_footer(index) == Some(HeaderFooter::default()))
+        );
+    }
+
+    #[test]
+    fn layout_and_master_footers_are_never_drawn_on_a_slide_that_owns_none() {
+        let mut presentation = deck();
+        presentation.set_header_footer(&numbered(), false).unwrap();
+        // The master and layouts still enable every placeholder, as
+        // PowerPoint's own decks do, but slide 3 owns none of them.
+        presentation
+            .set_slide_header_footer(2, &HeaderFooter::default())
+            .unwrap();
+        let texts = slide_texts(&presentation);
+        assert!(texts[1].contains(&"2".to_owned()), "{:?}", texts[1]);
+        assert!(
+            !texts[2]
+                .iter()
+                .any(|text| text == "3" || text.contains("ACME")),
+            "{:?}",
+            texts[2]
+        );
+    }
+
+    #[test]
+    fn one_slide_takes_a_fixed_or_automatic_date() {
+        let mut presentation = deck();
+        let fixed = HeaderFooter {
+            slide_number: false,
+            footer: None,
+            date: HeaderFooterDate::Fixed("Q3 review".to_owned()),
+        };
+        presentation.set_slide_header_footer(1, &fixed).unwrap();
+        assert_eq!(presentation.slide_header_footer(1), Some(fixed));
+        assert!(slide_texts(&presentation)[1].concat().contains("Q3review"));
+
+        let text = date_field_text("datetime4", 2026, 10, 9).unwrap();
+        let automatic = HeaderFooter {
+            date: HeaderFooterDate::Automatic {
+                field_type: "datetime4".to_owned(),
+                text: text.clone(),
+            },
+            ..HeaderFooter::default()
+        };
+        presentation.set_slide_header_footer(1, &automatic).unwrap();
+        assert_eq!(presentation.slide_header_footer(1), Some(automatic));
+        let bytes = presentation.to_bytes().unwrap();
+        let slide = part_text(&bytes, "/ppt/slides/slide2.xml");
+        assert!(slide.contains("type=\"datetime4\""), "{slide}");
+        assert!(
+            slide_texts(&presentation)[1]
+                .concat()
+                .contains(&text.replace(' ', ""))
+        );
+
+        let error = presentation
+            .set_slide_header_footer(
+                1,
+                &HeaderFooter {
+                    date: HeaderFooterDate::Automatic {
+                        field_type: "slidenum".to_owned(),
+                        text: String::new(),
+                    },
+                    ..HeaderFooter::default()
+                },
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("datetime1 to datetime13"), "{error}");
+    }
+
+    #[test]
+    fn date_fields_format_like_powerpoint_english() {
+        let cases = [
+            ("datetime", "10/9/2026"),
+            ("datetime1", "10/9/2026"),
+            ("datetime2", "Friday, October 9, 2026"),
+            ("datetime3", "9 October 2026"),
+            ("datetime4", "October 9, 2026"),
+            ("datetime5", "9-Oct-26"),
+            ("datetime6", "October 26"),
+            ("datetime7", "Oct-26"),
+        ];
+        for (field_type, expected) in cases {
+            assert_eq!(date_field_text(field_type, 2026, 10, 9).unwrap(), expected);
+        }
+        assert_eq!(
+            date_field_text("datetime2", 2000, 2, 29).unwrap(),
+            "Tuesday, February 29, 2000"
+        );
+        assert!(date_field_text("datetime8", 2026, 10, 9).is_err());
+        assert!(date_field_text("datetime1", 2026, 2, 29).is_err());
+    }
+
+    #[test]
+    fn a_slide_number_field_renders_without_cached_text_and_honours_first_slide_number() {
+        let mut presentation = deck();
+        for index in [2, 3] {
+            let mut slide = presentation.slide_mut(index).unwrap();
+            let mut shape = slide
+                .add_textbox(
+                    rpptx::Emu(0),
+                    rpptx::Emu(0),
+                    rpptx::Emu(914_400),
+                    rpptx::Emu(914_400),
+                )
+                .unwrap();
+            let mut frame = shape.text_frame().unwrap();
+            let mut paragraph = frame.paragraph_mut(0).unwrap();
+            paragraph.add_run("Page ");
+            // Slide 4's field has no cached text, as some producers write it.
+            let text = (index == 3).then_some("");
+            paragraph.add_field("slidenum", text).unwrap();
+        }
+        let error = presentation
+            .slide_mut(2)
+            .unwrap()
+            .shape_mut(0)
+            .unwrap()
+            .text_frame()
+            .unwrap()
+            .paragraph_mut(0)
+            .unwrap()
+            .add_field("pagenum", None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("slidenum or datetime1 to datetime13"),
+            "{error}"
+        );
+        let texts = slide_texts(&presentation);
+        assert_eq!(texts[2].concat(), "Page3", "{:?}", texts[2]);
+        assert_eq!(texts[3].concat(), "Page4", "{:?}", texts[3]);
+
+        let bytes = presentation.to_bytes().unwrap();
+        let mut package = OpcPackage::from_reader(Cursor::new(&bytes)).unwrap();
+        let xml = String::from_utf8(package.get_part("/ppt/presentation.xml").unwrap().to_vec())
+            .unwrap()
+            .replacen(
+                "<p:presentation ",
+                "<p:presentation firstSlideNum=\"0\" ",
+                1,
+            );
+        package.set_part("/ppt/presentation.xml", xml.into_bytes());
+        let mut output = Cursor::new(Vec::new());
+        package.write_to(&mut output).unwrap();
+        let renumbered = Presentation::from_bytes(output.get_ref()).unwrap();
+        let texts = slide_texts(&renumbered);
+        assert_eq!(texts[2].concat(), "Page2", "{:?}", texts[2]);
+        assert_eq!(texts[3].concat(), "Page3", "{:?}", texts[3]);
+    }
+
+    #[test]
+    fn the_theme_reads_colours_fonts_masters_and_flags() {
+        let mut presentation = deck();
+        assert_eq!(presentation.master_count(), 1);
+        assert_eq!(
+            presentation.master_layouts(0).map(|layouts| layouts.len()),
+            Some(presentation.layout_count())
+        );
+        assert_eq!(presentation.master_layouts(1), None);
+        let theme = presentation.theme(0).unwrap().unwrap();
+        assert_eq!(theme.colors.len(), 12);
+        assert_eq!(theme.colors[0].0, "dk1");
+        assert_eq!(theme.colors[11].0, "folHlink");
+        assert!(theme.colors.iter().all(|(_, color)| color.is_some()));
+        assert!(!theme.major_font.latin.is_empty());
+        assert!(!theme.minor_font.latin.is_empty());
+        assert!(theme.color("accent1").is_some());
+        assert!(presentation.theme(1).unwrap().is_none());
+
+        assert_eq!(presentation.master_header_footer(0).unwrap(), None);
+        presentation.set_header_footer(&numbered(), true).unwrap();
+        let flags = presentation.master_header_footer(0).unwrap().unwrap();
+        assert!(flags.slide_number && flags.footer && !flags.date);
+        let title = presentation.layout_header_footer(0).unwrap();
+        assert!(!title.slide_number && !title.footer && !title.date);
+    }
+
+    /// The default deck with one layout part rewritten by `edit`.
+    fn deck_with_layout(part: &str, edit: impl Fn(&str) -> String) -> Presentation {
+        let bytes = deck().to_bytes().unwrap();
+        let mut package = OpcPackage::from_reader(Cursor::new(&bytes)).unwrap();
+        let xml = String::from_utf8(package.get_part(part).unwrap().to_vec()).unwrap();
+        package.set_part(part, edit(&xml).into_bytes());
+        let mut output = Cursor::new(Vec::new());
+        package.write_to(&mut output).unwrap();
+        Presentation::from_bytes(output.get_ref()).unwrap()
+    }
+
+    fn latent_shape_xml(slide: &str, ph_type: &str) -> String {
+        let marker = format!("type=\"{ph_type}\"");
+        slide
+            .split("<p:sp>")
+            .find(|shape| shape.contains(&marker))
+            .unwrap_or_else(|| panic!("no {ph_type} placeholder in {slide}"))
+            .to_owned()
+    }
+
+    #[test]
+    fn a_layout_without_a_slide_number_falls_back_on_the_whole_master_placeholder() {
+        let layout = "/ppt/slideLayouts/slideLayout2.xml";
+        let mut presentation = deck_with_layout(layout, |xml| {
+            let start = xml.find("<p:sp><p:nvSpPr><p:cNvPr id=\"6\"").unwrap();
+            let end = start + xml[start..].find("</p:sp>").unwrap() + "</p:sp>".len();
+            assert!(xml[start..end].contains("type=\"sldNum\""));
+            format!("{}{}", &xml[..start], &xml[end..])
+        });
+        presentation.set_header_footer(&numbered(), true).unwrap();
+        presentation.add_slide(1).unwrap();
+        let bytes = presentation.to_bytes().unwrap();
+        // Slide 2 existed before the call and slide 5 was added after it.
+        for part in ["/ppt/slides/slide2.xml", "/ppt/slides/slide5.xml"] {
+            let number = latent_shape_xml(&part_text(&bytes, part), "sldNum");
+            for expected in [
+                "<a:xfrm>",
+                "algn=\"r\"",
+                "sz=\"1200\"",
+                "anchor=\"ctr\"",
+                "type=\"slidenum\"",
+            ] {
+                assert!(number.contains(expected), "{part} {expected}: {number}");
+            }
+        }
+        let texts = slide_texts(&presentation);
+        assert!(texts[4].contains(&"5".to_owned()), "{:?}", texts[4]);
+    }
+
+    #[test]
+    fn layout_children_keep_the_schema_sequence_and_fields_keep_their_language() {
+        // CT_SlideLayout is cSld, clrMapOvr, transition, timing, hf, extLst.
+        let layout = "/ppt/slideLayouts/slideLayout2.xml";
+        let mut presentation = deck_with_layout(layout, |xml| {
+            xml.replace(
+                "</p:clrMapOvr>",
+                "</p:clrMapOvr><p:transition spd=\"slow\"><p:fade/></p:transition><p:timing><p:tnLst><p:par><p:cTn id=\"1\" dur=\"indefinite\" restart=\"never\" nodeType=\"tmRoot\"/></p:par></p:tnLst></p:timing>",
+            )
+        });
+        let date = HeaderFooterDate::Automatic {
+            field_type: "datetime1".to_owned(),
+            text: date_field_text("datetime1", 2026, 10, 9).unwrap(),
+        };
+        presentation
+            .set_header_footer(&HeaderFooter { date, ..numbered() }, true)
+            .unwrap();
+        let bytes = presentation.to_bytes().unwrap();
+        let written = part_text(&bytes, layout);
+        let positions = ["<p:clrMapOvr", "<p:transition", "<p:timing", "<p:hf"].map(|tag| {
+            written
+                .find(tag)
+                .unwrap_or_else(|| panic!("{tag} in {written}"))
+        });
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "{written}"
+        );
+        assert!(Presentation::from_bytes(&bytes).is_ok());
+
+        let slide = part_text(&bytes, "/ppt/slides/slide2.xml");
+        let date = latent_shape_xml(&slide, "dt");
+        assert!(
+            date.contains("type=\"datetime1\"><a:rPr lang=\"en-US\""),
+            "{date}"
+        );
+        let presentation_xml = part_text(&bytes, "/ppt/presentation.xml");
+        assert!(presentation_xml.contains("showSpecialPlsOnTitleSld=\"0\""));
+        let mut reopened = Presentation::from_bytes(&bytes).unwrap();
+        reopened.set_header_footer(&numbered(), false).unwrap();
+        let bytes = reopened.to_bytes().unwrap();
+        assert!(!part_text(&bytes, "/ppt/presentation.xml").contains("showSpecialPlsOnTitleSld"));
+    }
+
+    #[test]
+    fn transition_directions_read_schema_defaults() {
+        let presentation = deck();
+        for (effect, expected) in [
+            (
+                "<p:split orient=\"vert\"/>",
+                Some(TransitionDirection::VerticalOut),
+            ),
+            (
+                "<p:split dir=\"in\"/>",
+                Some(TransitionDirection::HorizontalIn),
+            ),
+            ("<p:split/>", None),
+            ("<p:zoom dir=\"out\"/>", Some(TransitionDirection::Out)),
+        ] {
+            let bytes = presentation.to_bytes().unwrap();
+            let mut package = OpcPackage::from_reader(Cursor::new(&bytes)).unwrap();
+            let part = "/ppt/slides/slide2.xml";
+            let xml = String::from_utf8(package.get_part(part).unwrap().to_vec())
+                .unwrap()
+                .replacen(
+                    "</p:clrMapOvr>",
+                    &format!("</p:clrMapOvr><p:transition>{effect}</p:transition>"),
+                    1,
+                );
+            package.set_part(part, xml.into_bytes());
+            let mut output = Cursor::new(Vec::new());
+            package.write_to(&mut output).unwrap();
+            let reopened = Presentation::from_bytes(output.get_ref()).unwrap();
+            assert_eq!(
+                reopened.slide(1).unwrap().transition().unwrap().direction,
+                expected,
+                "{effect}"
+            );
+        }
+        assert_eq!(
+            TransitionKind::Zoom.directions().first(),
+            Some(&TransitionDirection::Out)
+        );
+    }
+
+    #[test]
+    fn transitions_round_trip_and_refuse_what_they_cannot_write() {
+        let mut presentation = deck();
+        assert_eq!(presentation.slide(1).unwrap().transition(), None);
+        let push = SlideTransition {
+            kind: Some(TransitionKind::Push),
+            direction: Some(TransitionDirection::Up),
+            duration_ms: Some(1500),
+            advance_on_click: true,
+            advance_after_ms: Some(3000),
+        };
+        presentation
+            .slide_mut(1)
+            .unwrap()
+            .set_transition(Some(&push))
+            .unwrap();
+        let bytes = presentation.to_bytes().unwrap();
+        let slide = part_text(&bytes, "/ppt/slides/slide2.xml");
+        assert!(slide.contains("p14:dur=\"1500\""), "{slide}");
+        assert!(slide.contains("<p:push dir=\"u\"/>"), "{slide}");
+        let reopened = Presentation::from_bytes(&bytes).unwrap();
+        assert_eq!(reopened.slide(1).unwrap().transition(), Some(push));
+        assert!(reopened.validate().is_empty());
+
+        let uncover = SlideTransition {
+            kind: Some(TransitionKind::Uncover),
+            direction: Some(TransitionDirection::RightDown),
+            ..SlideTransition::default()
+        };
+        presentation.set_all_transitions(Some(&uncover)).unwrap();
+        for index in 0..4 {
+            assert_eq!(
+                presentation.slide(index).unwrap().transition(),
+                Some(uncover.clone())
+            );
+        }
+        let bytes = presentation.to_bytes().unwrap();
+        assert!(part_text(&bytes, "/ppt/slides/slide1.xml").contains("<p:pull dir=\"rd\"/>"));
+
+        for kind in TransitionKind::NAMES {
+            let transition = SlideTransition {
+                kind: TransitionKind::parse(kind),
+                duration_ms: Some(700),
+                ..SlideTransition::default()
+            };
+            let mut slide = presentation.slide_mut(2).unwrap();
+            slide.set_transition(Some(&transition)).unwrap();
+            assert_eq!(
+                presentation.slide(2).unwrap().transition(),
+                Some(transition),
+                "{kind}"
+            );
+        }
+
+        let mut slide = presentation.slide_mut(3).unwrap();
+        let fade_left = SlideTransition {
+            kind: Some(TransitionKind::Fade),
+            direction: Some(TransitionDirection::Left),
+            ..SlideTransition::default()
+        };
+        let error = slide
+            .set_transition(Some(&fade_left))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("fade takes no direction"), "{error}");
+        let blinds = SlideTransition {
+            kind: Some(TransitionKind::Other("blinds".to_owned())),
+            ..SlideTransition::default()
+        };
+        let error = slide.set_transition(Some(&blinds)).unwrap_err().to_string();
+        assert!(error.contains("cannot be authored"), "{error}");
+        let timed = SlideTransition {
+            advance_after_ms: Some(2000),
+            ..SlideTransition::default()
+        };
+        slide.set_transition(Some(&timed)).unwrap();
+        slide
+            .set_transition(Some(&SlideTransition::default()))
+            .unwrap();
+        assert_eq!(presentation.slide(3).unwrap().transition(), None);
+    }
+}

@@ -635,6 +635,35 @@ impl PyParagraph {
         Py::new(py, PyRun::new(self.presentation.clone_ref(py), path))
     }
 
+    /// Appends a field, `slidenum` for the slide number or a date field
+    /// `datetime` or `datetime1` to `datetime13`, which PowerPoint refreshes
+    /// when it opens the file (rpptx extension).
+    ///
+    /// `text` is the cached value other readers show. By default a slide
+    /// number caches the placeholder PowerPoint writes, which rpptx renders
+    /// as the number, and a date field caches today's date in its format.
+    /// `paragraph.runs` lists regular runs only, so it does not change.
+    #[pyo3(signature = (field_type, text = None))]
+    fn add_field(&self, py: Python<'_>, field_type: &str, text: Option<String>) -> PyResult<()> {
+        let index = self.validate(py)?;
+        let text = match text {
+            Some(text) => Some(text),
+            None if field_type.starts_with("datetime") => Some(crate::slide::today_field_text(
+                py,
+                field_type,
+                " or pass text= with the cached value",
+            )?),
+            None => None,
+        };
+        let mut presentation = self.presentation.borrow_mut(py);
+        shape_mut_at(&mut presentation.inner, &self.path)
+            .and_then(rpptx::ShapeMut::into_text_frame)
+            .and_then(|frame| frame.into_paragraph_mut(index))
+            .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?
+            .add_field(field_type, text.as_deref())
+            .map_err(|error| crate::rpptx_to_pyerr(py, error))
+    }
+
     #[getter]
     fn alignment(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         self.read(py, |properties| {

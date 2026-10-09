@@ -13,6 +13,8 @@ replaces text, and produces deterministic fixed output.
 - PDF, PNG, JPEG, and multi-page TIFF conversion.
 - Selected-slide rendering, thumbnails, text diff, replacement, and validation.
 - Modern comment thread listing, addition, replies, resolution, and removal.
+- Slide numbers, footer and date on every slide through `footer`, and masters,
+  layouts, theme colours and fonts, and header-footer flags in `inspect`.
 - Scriptable output covers slide order, notes, comments, recursive group
   content, relationship-backed media, and deterministic rendering diagnostics.
 
@@ -20,7 +22,7 @@ replaces text, and produces deterministic fixed output.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rpptx-cli | 40,886 compressed bytes, 179,264 member bytes, 8 members | 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --no-verify` | Tracked `rpptx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-09 |
+| Crates.io archive: rpptx-cli | 44,332 compressed bytes, 193,122 member bytes, 8 members | 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --no-verify` | Tracked `rpptx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-09 |
 
 ## Use it when
 
@@ -40,6 +42,7 @@ rpptx outline deck.pptx --notes
 rpptx comment add deck.pptx --slide 2 --author Reviewer \
   --text "Check the figures" --date 2026-09-25T10:00:00Z -o reviewed.pptx
 rpptx comment list reviewed.pptx --json
+rpptx footer deck.pptx --slide-number --footer "ACME" --skip-title -o numbered.pptx
 rpptx convert deck.pptx --to pdf -o deck.pdf
 rpptx thumbnail deck.pptx -o thumbnail.png
 ```
@@ -50,6 +53,21 @@ placeholder type and index, direct position and size in EMU, rotation in
 degrees, direct autofit mode, paragraphs, table size, and children. A
 placeholder that inherits its geometry from its layout reports `null` geometry,
 and a placeholder without an explicit type reports a `null` type.
+
+Both inspection forms list each slide master with its theme name, scheme
+colours and major and minor fonts, its `p:hf` flags and its layouts with
+theirs. `inspect --json` adds them as `masters`, where a missing `p:hf` is
+`null`.
+
+`footer` sets the slide number, footer and date of every slide, as PowerPoint's
+Header and Footer dialog with Apply to All. `--date` takes `off`, the default,
+`auto` for a field PowerPoint refreshes, cached with today's local date in the
+`--date-format` from `datetime1` to `datetime7`, or fixed text. `--skip-title`
+leaves slides on a title layout without them. Every flag is opt-in, where
+Python's `set_header_footer` turns the slide number and the title-slide skip on
+by default. Each slide owns the placeholders
+it shows, which is what PowerPoint and Google Slides display, and the masters
+and layouts receive matching `p:hf` flags so slides added later follow.
 
 Both inspection forms report every core property the deck sets. Beside title,
 creator, subject, description, keywords, last modified by, created and

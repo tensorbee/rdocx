@@ -34,9 +34,7 @@ use rpptx_oxml::graphic_frame::GraphicDataPayload;
 use rpptx_oxml::picture::CT_Picture;
 use rpptx_oxml::placeholder::{CT_Placeholder, PhType, PlaceholderKey};
 use rpptx_oxml::shape_tree::{CT_Shape, ShapeTreeChild};
-use rpptx_oxml::slide_parts::{
-    BackgroundRendering, CT_HeaderFooter, CT_Slide, CT_SlideLayout, CT_SlideMaster,
-};
+use rpptx_oxml::slide_parts::{BackgroundRendering, CT_Slide, CT_SlideLayout, CT_SlideMaster};
 
 use crate::ResolveError;
 use crate::style::{referenced_fill, substitute_fill};
@@ -274,34 +272,16 @@ impl<'a> ResolveCtx<'a> {
         let slide_children = &self.slide.common_slide_data.shape_tree.children;
         let layout_children = &self.layout.common_slide_data.shape_tree.children;
         let master_children = &self.master.common_slide_data.shape_tree.children;
-        let mut slide_latent = Vec::new();
-        let mut layout_latent = Vec::new();
-        collect_occupied_latent(slide_children, &mut slide_latent);
-        collect_occupied_latent(layout_children, &mut layout_latent);
 
         let mut flattened = Vec::new();
         if let Some(background) = self.effective_background() {
             flattened.push(FlattenedItem::Background(background));
         }
-        let master_latent_policy = self
-            .master
-            .header_footer
-            .as_ref()
-            .map(LatentPolicy::from_header_footer);
-        let layout_latent_policy = self
-            .layout
-            .header_footer
-            .as_ref()
-            .map(LatentPolicy::from_header_footer);
-        let mut master_deeper = layout_latent.clone();
-        master_deeper.extend(slide_latent.iter().cloned());
         emit_tree(
             master_children,
             PassRules {
                 source: FlattenedSource::Master,
                 emit_non_placeholders: self.layout.show_master_shapes.unwrap_or(true),
-                deeper_latent: &master_deeper,
-                latent_policy: master_latent_policy,
             },
             &mut flattened,
         );
@@ -310,8 +290,6 @@ impl<'a> ResolveCtx<'a> {
             PassRules {
                 source: FlattenedSource::Layout,
                 emit_non_placeholders: self.slide.show_master_shapes.unwrap_or(true),
-                deeper_latent: &slide_latent,
-                latent_policy: layout_latent_policy,
             },
             &mut flattened,
         );
@@ -320,8 +298,6 @@ impl<'a> ResolveCtx<'a> {
             PassRules {
                 source: FlattenedSource::Slide,
                 emit_non_placeholders: true,
-                deeper_latent: &[],
-                latent_policy: None,
             },
             &mut flattened,
         );
@@ -3057,62 +3033,9 @@ fn resolved_text_body(
 }
 
 #[derive(Clone, Copy)]
-struct LatentPolicy {
-    date_time: bool,
-    footer: bool,
-    slide_number: bool,
-}
-
-impl LatentPolicy {
-    fn from_header_footer(header_footer: &CT_HeaderFooter) -> Self {
-        Self {
-            date_time: header_footer.date_time_enabled(),
-            footer: header_footer.footer_enabled(),
-            slide_number: header_footer.slide_number_enabled(),
-        }
-    }
-
-    fn permits(self, ph_type: &PhType) -> bool {
-        match ph_type {
-            PhType::DateTime => self.date_time,
-            PhType::Footer => self.footer,
-            PhType::SlideNumber => self.slide_number,
-            _ => true,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct PassRules<'a> {
+struct PassRules {
     source: FlattenedSource,
     emit_non_placeholders: bool,
-    deeper_latent: &'a [PlaceholderKey],
-    latent_policy: Option<LatentPolicy>,
-}
-
-fn collect_occupied_latent(children: &[ShapeTreeChild], keys: &mut Vec<PlaceholderKey>) {
-    for child in children {
-        match child {
-            ShapeTreeChild::GroupShape(group) => collect_occupied_latent(&group.children, keys),
-            ShapeTreeChild::AlternateContent(alternate) => {
-                if let Some(fallback) = alternate.selected_fallback() {
-                    collect_occupied_latent(fallback, keys);
-                }
-            }
-            ShapeTreeChild::Shape(shape) => {
-                if let Some(placeholder) = shape.placeholder.as_ref()
-                    && is_latent(&placeholder.effective_type())
-                    && shape
-                        .text_body
-                        .as_ref()
-                        .is_some_and(|body| !body.plain_text().trim().is_empty())
-                {
-                    push_unmatched(keys, placeholder.key());
-                }
-            }
-            _ => {}
-        }
-    }
 }
 
 fn push_unmatched(keys: &mut Vec<PlaceholderKey>, key: PlaceholderKey) {
@@ -3561,7 +3484,7 @@ fn intersect_optional_rect(left: Option<Rect>, right: Option<Rect>) -> Option<Re
 
 fn emit_tree<'a>(
     children: &'a [ShapeTreeChild],
-    rules: PassRules<'_>,
+    rules: PassRules,
     output: &mut Vec<FlattenedItem<'a>>,
 ) {
     let mut emitted_latent = Vec::new();
@@ -3577,7 +3500,7 @@ fn emit_tree<'a>(
 
 fn emit_tree_inner<'a>(
     children: &'a [ShapeTreeChild],
-    rules: PassRules<'_>,
+    rules: PassRules,
     parent_transform: Transform,
     parent_issues: u8,
     emitted_latent: &mut Vec<PlaceholderKey>,
@@ -3634,7 +3557,7 @@ fn emit_tree_inner<'a>(
 
 fn emit_leaf<'a>(
     child: &'a ShapeTreeChild,
-    rules: PassRules<'_>,
+    rules: PassRules,
     group_transform: Transform,
     group_issues: u8,
     emitted_latent: &mut Vec<PlaceholderKey>,
@@ -3659,31 +3582,12 @@ fn emit_leaf<'a>(
         return;
     }
 
-    let Some(placeholder) = placeholder else {
-        if rules.emit_non_placeholders {
-            push_flattened_shape(output, rules.source, child, group_transform, group_issues);
-        }
-        return;
-    };
-    let ph_type = placeholder.effective_type();
-    let key = placeholder.key();
-    if !is_latent(&ph_type)
-        || !rules
-            .latent_policy
-            .is_some_and(|policy| policy.permits(&ph_type))
-        || !child_is_occupied(child)
-        || rules
-            .deeper_latent
-            .iter()
-            .any(|deeper| placeholder_keys_match(&key, deeper))
-        || emitted_latent
-            .iter()
-            .any(|emitted| placeholder_keys_match(&key, emitted))
-    {
-        return;
+    // Layout and master placeholders are templates. That includes their
+    // date, footer and slide-number placeholders, which PowerPoint draws only
+    // through a slide-owned copy whatever the `p:hf` flags say.
+    if placeholder.is_none() && rules.emit_non_placeholders {
+        push_flattened_shape(output, rules.source, child, group_transform, group_issues);
     }
-    push_unmatched(emitted_latent, key);
-    push_flattened_shape(output, rules.source, child, group_transform, group_issues);
 }
 
 fn push_flattened_shape<'a>(
@@ -3812,12 +3716,21 @@ fn child_placeholder(child: &ShapeTreeChild) -> Option<&CT_Placeholder> {
     }
 }
 
+/// Whether a slide-owned latent placeholder has content to draw.
+///
+/// A field counts even without cached text, as PowerPoint draws the slide
+/// number of a `slidenum` field whose `a:t` is absent or empty.
 fn child_is_occupied(child: &ShapeTreeChild) -> bool {
     match child {
-        ShapeTreeChild::Shape(shape) => shape
-            .text_body
-            .as_ref()
-            .is_some_and(|body| !body.plain_text().trim().is_empty()),
+        ShapeTreeChild::Shape(shape) => shape.text_body.as_ref().is_some_and(|body| {
+            !body.plain_text().trim().is_empty()
+                || body.paragraphs().iter().any(|paragraph| {
+                    paragraph
+                        .runs
+                        .iter()
+                        .any(|run| matches!(run, TextRun::Field(_)))
+                })
+        }),
         ShapeTreeChild::Picture(picture) => picture.blip_fill.is_some(),
         _ => false,
     }
@@ -5080,59 +4993,38 @@ mod tests {
     }
 
     #[test]
-    fn inherited_latent_placeholders_obey_their_source_header_footer_flags() {
+    fn inherited_latent_placeholders_are_never_drawn_whatever_the_header_footer_flags() {
+        // PowerPoint for Mac 16 exports neither layout nor master date,
+        // footer or slide-number placeholders on a slide that owns none,
+        // whether `p:hf` enables them or not.
         let latent_shapes = [
             shape_with_text(Some("dt"), Some(1), "date"),
             shape_with_text(Some("ftr"), Some(2), "footer"),
             shape_with_text(Some("sldNum"), Some(3), "number"),
         ]
         .join("");
-        let layout_fixture = Fixture::from_xml(
-            &slide_xml_with("", "", ""),
-            &layout_xml_with("", "", &latent_shapes, "<p:hf dt=\"0\"/>"),
-            &master_xml_with("", "", "<p:hf sldNum=\"0\"/>"),
-        );
-
-        let layout_sources_and_text = layout_fixture
-            .context()
-            .flatten()
-            .iter()
-            .filter_map(|item| item_text(item).map(|text| (item.source(), text)))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            layout_sources_and_text,
-            [
-                (FlattenedSource::Layout, "footer".to_owned()),
-                (FlattenedSource::Layout, "number".to_owned()),
-            ]
-        );
-
-        let master_fixture = Fixture::from_xml(
-            &slide_xml_with("", "", ""),
-            &layout_xml_with("", "", "", ""),
-            &master_xml_with(
-                "",
-                &latent_shapes,
-                "<p:hf dt=\"1\" ftr=\"1\" sldNum=\"0\"/>",
-            ),
-        );
-        let master_sources_and_text = master_fixture
-            .context()
-            .flatten()
-            .iter()
-            .filter_map(|item| item_text(item).map(|text| (item.source(), text)))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            master_sources_and_text,
-            [
-                (FlattenedSource::Master, "date".to_owned()),
-                (FlattenedSource::Master, "footer".to_owned()),
-            ]
-        );
+        for (layout_hf, master_hf) in [
+            ("<p:hf dt=\"0\"/>", "<p:hf sldNum=\"0\"/>"),
+            ("<p:hf/>", "<p:hf/>"),
+            ("", "<p:hf hdr=\"0\"/>"),
+        ] {
+            let fixture = Fixture::from_xml(
+                &slide_xml_with("", "", ""),
+                &layout_xml_with("", "", &latent_shapes, layout_hf),
+                &master_xml_with("", &latent_shapes, master_hf),
+            );
+            let texts = fixture
+                .context()
+                .flatten()
+                .iter()
+                .filter_map(item_text)
+                .collect::<Vec<_>>();
+            assert!(texts.is_empty(), "{layout_hf} {master_hf}: {texts:?}");
+        }
     }
 
     #[test]
-    fn empty_latent_placeholders_fall_back_by_type_and_source() {
+    fn slide_latent_placeholders_draw_only_their_own_content() {
         fn source_texts(fixture: &Fixture) -> Vec<(FlattenedSource, String)> {
             fixture
                 .context()
@@ -5143,19 +5035,12 @@ mod tests {
         }
 
         for ph_type in ["dt", "ftr", "sldNum"] {
+            let layout = shape_with_text(Some(ph_type), Some(2), "layout");
+            let master = shape_with_text(Some(ph_type), Some(3), "master");
             let occupied_slide = Fixture::from_xml(
                 &slide_xml_with("", "", &shape_with_text(Some(ph_type), Some(1), "slide")),
-                &layout_xml_with(
-                    "",
-                    "",
-                    &shape_with_text(Some(ph_type), Some(2), "layout"),
-                    "<p:hf dt=\"0\" ftr=\"0\" sldNum=\"0\"/>",
-                ),
-                &master_xml_with(
-                    "",
-                    &shape_with_text(Some(ph_type), Some(3), "master"),
-                    "<p:hf dt=\"0\" ftr=\"0\" sldNum=\"0\"/>",
-                ),
+                &layout_xml_with("", "", &layout, "<p:hf/>"),
+                &master_xml_with("", &master, "<p:hf/>"),
             );
             assert_eq!(
                 source_texts(&occupied_slide),
@@ -5165,54 +5050,33 @@ mod tests {
 
             let empty_slide = Fixture::from_xml(
                 &slide_xml_with("", "", &shape_with_text(Some(ph_type), Some(1), "")),
-                &layout_xml_with(
-                    "",
-                    "",
-                    &shape_with_text(Some(ph_type), Some(2), "layout"),
-                    "<p:hf/>",
-                ),
-                &master_xml_with(
-                    "",
-                    &shape_with_text(Some(ph_type), Some(3), "master"),
-                    "<p:hf/>",
-                ),
-            );
-            assert_eq!(
-                source_texts(&empty_slide),
-                [(FlattenedSource::Layout, "layout".to_owned())],
-                "empty slide {ph_type}"
-            );
-
-            let empty_layout = Fixture::from_xml(
-                &slide_xml_with("", "", ""),
-                &layout_xml_with(
-                    "",
-                    "",
-                    &shape_with_text(Some(ph_type), Some(2), ""),
-                    "<p:hf/>",
-                ),
-                &master_xml_with(
-                    "",
-                    &shape_with_text(Some(ph_type), Some(3), "master"),
-                    "<p:hf/>",
-                ),
-            );
-            assert_eq!(
-                source_texts(&empty_layout),
-                [(FlattenedSource::Master, "master".to_owned())],
-                "empty layout {ph_type}"
-            );
-
-            let empty_master = Fixture::from_xml(
-                &slide_xml_with("", "", ""),
-                &layout_xml_with("", "", "", ""),
-                &master_xml_with("", &shape_with_text(Some(ph_type), Some(3), ""), "<p:hf/>"),
+                &layout_xml_with("", "", &layout, "<p:hf/>"),
+                &master_xml_with("", &master, "<p:hf/>"),
             );
             assert!(
-                source_texts(&empty_master).is_empty(),
-                "empty master {ph_type}"
+                source_texts(&empty_slide).is_empty(),
+                "empty slide {ph_type}"
             );
         }
+    }
+
+    #[test]
+    fn a_slide_number_field_without_cached_text_still_occupies_its_placeholder() {
+        let field = "<p:sp><p:nvSpPr><p:cNvPr/><p:cNvSpPr/><p:nvPr><p:ph type=\"sldNum\" idx=\"12\"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:fld id=\"{00000000-0000-4000-8000-000000000001}\" type=\"slidenum\"/></a:p></p:txBody></p:sp>";
+        let fixture = Fixture::from_xml(
+            &slide_xml_with("", "", field),
+            &layout_xml_with("", "", "", ""),
+            &master_xml_with("", "", ""),
+        );
+
+        let sources = fixture
+            .context()
+            .flatten()
+            .iter()
+            .filter(|item| matches!(item, FlattenedItem::Shape { .. }))
+            .map(FlattenedItem::source)
+            .collect::<Vec<_>>();
+        assert_eq!(sources, [FlattenedSource::Slide]);
     }
 
     #[test]

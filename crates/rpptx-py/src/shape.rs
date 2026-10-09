@@ -38,6 +38,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyPlaceholderCollection>()?;
     module.add_class::<PyImage>()?;
     module.add_class::<PyAdjustmentCollection>()?;
+    module.add_class::<PyPlaceholderFormat>()?;
     Ok(())
 }
 
@@ -722,6 +723,59 @@ impl PyShape {
             py,
             PyTable::new(self.presentation.clone_ref(py), self.path.clone()),
         )
+    }
+
+    // Placeholders (#311).
+
+    /// True when the shape is a placeholder, a `p:ph` in its properties.
+    #[getter]
+    fn is_placeholder(&self, py: Python<'_>) -> PyResult<bool> {
+        self.read(py, |shape| shape.placeholder_idx().is_some())
+    }
+
+    /// The placeholder's type and index, like python-pptx `placeholder_format`.
+    ///
+    /// Raises `ValueError` when the shape is not a placeholder.
+    #[getter]
+    fn placeholder_format(&self, py: Python<'_>) -> PyResult<PyPlaceholderFormat> {
+        let (idx, token) = self.read(py, |shape| {
+            (
+                shape.placeholder_idx(),
+                shape.placeholder_type().map(str::to_owned),
+            )
+        })?;
+        let idx = idx.ok_or_else(|| PyValueError::new_err("shape is not a placeholder"))?;
+        // An omitted type is the schema default `obj`, as python-pptx reads it.
+        let token = token.unwrap_or_else(|| "obj".to_owned());
+        let placeholder_type = py
+            .import("rpptx.enum.shapes")?
+            .getattr("PP_PLACEHOLDER")?
+            .call_method1("from_xml", (token,))?
+            .unbind();
+        Ok(PyPlaceholderFormat {
+            idx,
+            placeholder_type,
+        })
+    }
+}
+
+/// A placeholder's index and type, read when `Shape.placeholder_format` is.
+#[pyclass(name = "PlaceholderFormat", frozen)]
+pub struct PyPlaceholderFormat {
+    idx: u32,
+    placeholder_type: Py<PyAny>,
+}
+
+#[pymethods]
+impl PyPlaceholderFormat {
+    #[getter]
+    fn idx(&self) -> u32 {
+        self.idx
+    }
+
+    #[getter]
+    fn r#type(&self, py: Python<'_>) -> Py<PyAny> {
+        self.placeholder_type.clone_ref(py)
     }
 }
 
