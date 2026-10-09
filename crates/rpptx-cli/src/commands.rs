@@ -8,10 +8,11 @@ use oxml_cli_support::{
     StagedOutputSet, default_output_path, ensure_output_paths_allowed,
     ensure_output_paths_available, json_envelope, parse_range,
 };
+use oxml_layout::LayoutResult;
 use oxml_pdf::{RasterFormat, RasterOptions, RasterOutput};
 use rpptx::{
-    AutofitMode, Comment, CommentAuthor, CommentReply, Presentation, ShapeKind, ShapeRef, SlideRef,
-    TextFrameRef, TextParagraphRef, TextRunRef,
+    AutofitMode, Comment, CommentAuthor, CommentReply, FontFile, Presentation, ShapeKind, ShapeRef,
+    SlideRef, TextFrameRef, TextParagraphRef, TextRunRef,
 };
 use serde_json::{Value, json};
 
@@ -25,6 +26,18 @@ pub struct ImageOptions<'a> {
     pub slides: Option<&'a str>,
     pub quality: u8,
     pub transparent: bool,
+    pub font_dir: Option<&'a Path>,
+}
+
+/// The presentation laid out with the fonts of `--font-dir` over the bundled
+/// fonts. A missing directory is an error rather than one without fonts.
+fn render_layout(presentation: &Presentation, font_dir: Option<&Path>) -> Result<LayoutResult> {
+    let fonts = match font_dir {
+        Some(dir) => FontFile::load_dir(dir)?,
+        None => Vec::new(),
+    };
+    let (_, layout) = presentation.render_deterministic_with_fonts(&FontFile::as_refs(&fonts))?;
+    Ok(layout)
 }
 
 pub fn inspect(file: &Path, as_json: bool) -> Result<()> {
@@ -379,17 +392,15 @@ pub fn convert(
     let mut stdout = io::stdout().lock();
     match format {
         "pdf" => {
-            stage_and_publish(
-                &[(output.clone(), presentation.to_pdf_deterministic()?)],
-                force,
-            )?;
+            let layout = render_layout(&presentation, image.font_dir)?;
+            stage_and_publish(&[(output.clone(), oxml_pdf::render_to_pdf(&layout))], force)?;
             writeln!(stdout, "Written to {}", output.display())?;
         }
         "png" | "jpg" | "jpeg" | "tif" | "tiff" => {
             if presentation.is_empty() {
                 return Err("cannot convert a presentation with no slides to an image".into());
             }
-            let (_, layout) = presentation.render_deterministic()?;
+            let layout = render_layout(&presentation, image.font_dir)?;
             if layout.pages.len() != presentation.len() {
                 return Err(format!(
                     "rendered {} image pages for {} slides",
@@ -590,7 +601,7 @@ pub fn render(
     let selected = selected_zero_based_slides(presentation.len(), image.slides)?;
     let output = output.unwrap_or_else(|| Path::new("."));
     let stem = file.file_stem().unwrap_or_default().to_string_lossy();
-    let (_, layout) = presentation.render_deterministic()?;
+    let layout = render_layout(&presentation, image.font_dir)?;
     for index in &selected {
         let page = layout
             .pages
@@ -639,7 +650,12 @@ pub fn render(
     Ok(())
 }
 
-pub fn thumbnail(file: &Path, output: Option<&Path>, force: bool) -> Result<()> {
+pub fn thumbnail(
+    file: &Path,
+    output: Option<&Path>,
+    force: bool,
+    font_dir: Option<&Path>,
+) -> Result<()> {
     let presentation = Presentation::open(file)?;
     if presentation.is_empty() {
         return Err("cannot thumbnail a presentation with no slides".into());
@@ -648,7 +664,7 @@ pub fn thumbnail(file: &Path, output: Option<&Path>, force: bool) -> Result<()> 
         .map(Path::to_path_buf)
         .unwrap_or_else(|| default_output_path(file, "png"));
     ensure_output_paths_allowed(std::slice::from_ref(&output), file, force)?;
-    let (_, layout) = presentation.render_deterministic()?;
+    let layout = render_layout(&presentation, font_dir)?;
     let page = layout
         .pages
         .first()

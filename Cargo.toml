@@ -130,7 +130,7 @@ scraper = { version = "0.27", default-features = false, features = ["errors"] }
 lopdf = { version = "0.44.0", default-features = false }
 smallvec = "1.15"
 pdf-writer = "0.15"
-subsetter = "0.2"
+subsetter = "0.2.6"
 miniz_oxide = "0.9"
 tiny-skia = "0.12"
 gif = "0.14.2"

@@ -25,7 +25,7 @@ and produces fixed or flow output without an Office host.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rdocx-cli | 72,988 compressed bytes, 326,487 member bytes, 8 members | 0.16.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --no-verify` | Tracked `rdocx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-09 |
+| Crates.io archive: rdocx-cli | 74,278 compressed bytes, 332,454 member bytes, 8 members | 0.16.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --no-verify` | Tracked `rdocx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-09 |
 
 ## Use it when
 
@@ -153,6 +153,13 @@ because comments annotate a document rather than belong to it.
 default. `--revision-view tracked` shows both sides of tracked changes.
 Unknown view names are usage errors. HTML and Markdown conversion refuse
 the tracked view before creating output.
+
+`--font-dir DIR` gives `convert` to PDF or images, `render`, and `layout` a
+directory of `.ttf`, `.otf`, and `.ttc` files, each labelled with its file
+name, whose faces come before every other font. A family the directory does
+not provide resolves as without it: from the installed and bundled fonts for
+PDF, from the bundled fonts for images and `layout`. A missing directory is an
+error, and HTML and Markdown conversion refuse the option.
 
 `validate` exits unsuccessfully when a relationship of the main document points
 at a missing part, when a part has no declared content type, when an XML part

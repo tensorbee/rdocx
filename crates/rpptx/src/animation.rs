@@ -196,7 +196,7 @@ impl Presentation {
         let samples = validate_and_sample(segments, options, self.slides.len())?;
         let package = self.staged_package(false)?;
         let mut prepared = PreparedAnimationAssembly {
-            assembly: prepare_render_context(&package, true)?,
+            assembly: prepare_render_context(&package, true, &[])?,
             slide_count: self.slides.len(),
             fallback: options.media_fallback,
         };
@@ -905,7 +905,7 @@ mod tests {
 
         let package = presentation.staged_package(false).unwrap();
         let mut prepared = super::PreparedAnimationAssembly {
-            assembly: prepare_render_context(&package, true).unwrap(),
+            assembly: prepare_render_context(&package, true, &[]).unwrap(),
             slide_count: 2,
             fallback: MediaFallbackPolicy::DeterministicPlaceholder,
         };

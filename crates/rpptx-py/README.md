@@ -50,7 +50,9 @@ with open("review.pdf", "wb") as output:
 - File and byte-based PPTX input and output.
 - Slide layouts, slides, placeholders, shapes, text frames, paragraphs, runs,
   pictures, preset shapes, and tables.
-- Deterministic PDF and PNG output for slides and speaker notes.
+- Deterministic PDF and PNG output for slides and speaker notes. The render
+  methods and `text_layout` take caller fonts as keyword-only `fonts=` and
+  `font_dir=`, so a fit check measures with the faces the render draws.
 - Formatting-preserving text replacement across slides and speaker notes,
   on one slide or in one text frame, with an optional expected count that
   leaves the deck unchanged on a mismatch.

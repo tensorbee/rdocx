@@ -494,6 +494,10 @@ impl PageFrame {
     }
 }
 
+/// Stroke width, in ems, that renderers add around the outlines of a face
+/// marked [`FontData::synthetic_bold`]. Half of it lands outside each edge.
+pub const SYNTHETIC_BOLD_STROKE_EM: f64 = 1.0 / 30.0;
+
 /// Font data for embedding in PDF output.
 #[derive(Debug, Clone)]
 pub struct FontData {
@@ -509,6 +513,13 @@ pub struct FontData {
     pub bold: bool,
     /// Whether this is an italic variant.
     pub italic: bool,
+    /// Variation-axis coordinates the face is drawn at, as `(tag, value)` in
+    /// user space. Empty for a static face or the face's default instance.
+    /// Layout shaped with these, so renderers draw and embed this instance.
+    pub variations: Vec<([u8; 4], f32)>,
+    /// Whether renderers embolden the outlines, as Word does, because the run
+    /// is bold and the face has no bold weight. Advances stay the face's own.
+    pub synthetic_bold: bool,
 }
 
 /// Document metadata to pass through to PDF output.
@@ -792,6 +803,8 @@ mod group_output_tests {
                 face_index: 0,
                 bold: false,
                 italic: false,
+                variations: Vec::new(),
+                synthetic_bold: false,
             }],
             None,
             Vec::new(),

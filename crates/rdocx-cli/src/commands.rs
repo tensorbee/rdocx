@@ -16,7 +16,7 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::{Namespace, ResolveResult};
 use quick_xml::reader::NsReader;
 use rdocx::{
-    BodyItemRef, ComparisonGranularity, ComparisonOptions, ComparisonStoryKind, Document,
+    BodyItemRef, ComparisonGranularity, ComparisonOptions, ComparisonStoryKind, Document, FontFile,
     HdrFtrType, HeaderFooterKind, RasterFormat, RasterOptions, RasterOutput, RevisionKind,
     RevisionView, RunRange, StoryId, StoryItemKind, StoryKind,
 };
@@ -42,6 +42,16 @@ pub struct RenderOptions<'a> {
     pub quality: u8,
     pub transparent: bool,
     pub revision_view: RevisionView,
+    pub font_dir: Option<&'a Path>,
+}
+
+/// The fonts of `--font-dir`, none without one. A missing directory is an
+/// error rather than a directory without fonts.
+fn caller_fonts(font_dir: Option<&Path>) -> Result<Vec<FontFile>> {
+    Ok(match font_dir {
+        Some(dir) => FontFile::load_dir(dir)?,
+        None => Vec::new(),
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -407,9 +417,17 @@ fn push_html_stories(html: &mut String, stories: &[StoryText]) {
 }
 
 /// Emit deterministic point-space extents for every direct body item.
-pub fn layout(file: &Path, json_output: bool) -> Result<()> {
+pub fn layout(file: &Path, json_output: bool, font_dir: Option<&Path>) -> Result<()> {
     let doc = Document::open(file)?;
-    let layout = doc.layout_deterministic()?;
+    let fonts = caller_fonts(font_dir)?;
+    let (cached, owned);
+    let layout = if fonts.is_empty() {
+        cached = doc.layout_deterministic()?;
+        &*cached
+    } else {
+        owned = doc.layout_with_fonts_and_bundled_fallback(&FontFile::as_refs(&fonts))?;
+        &owned
+    };
     let body_items = doc
         .body_items()
         .enumerate()
@@ -697,6 +715,10 @@ pub fn convert(
     if revision_view == RevisionView::Tracked && matches!(default_ext, "html" | "md") {
         return Err("--revision-view tracked applies only to PDF and image output".into());
     }
+    if font_dir.is_some() && matches!(default_ext, "html" | "md") {
+        return Err("--font-dir applies only to PDF and image output".into());
+    }
+    let fonts = caller_fonts(font_dir)?;
 
     let output_path = match output {
         Some(p) => p.to_path_buf(),
@@ -711,15 +733,10 @@ pub fn convert(
     let mut stdout = io::stdout().lock();
     match to {
         "pdf" => {
-            let bytes = if let Some(dir) = font_dir {
-                let font_files = Document::load_fonts_from_dir(dir);
-                let font_refs: Vec<(&str, &[u8])> = font_files
-                    .iter()
-                    .map(|f| (f.family.as_str(), f.data.as_slice()))
-                    .collect();
-                doc.to_pdf_with_fonts_and_options(&font_refs, render_options)?
-            } else {
+            let bytes = if fonts.is_empty() {
                 doc.to_pdf_with_options(render_options)?
+            } else {
+                doc.to_pdf_with_fonts_and_options(&FontFile::as_refs(&fonts), render_options)?
             };
             stage_and_publish(&[(output_path.clone(), bytes)], force)?;
         }
@@ -739,7 +756,17 @@ pub fn convert(
         }
         "png" | "jpg" | "jpeg" | "tif" | "tiff" => {
             let (format, extension) = parse_image_format(to, image.quality, image.transparent)?;
-            let layout = doc.layout_deterministic_with_options(render_options)?;
+            let (cached, owned);
+            let layout = if fonts.is_empty() {
+                cached = doc.layout_deterministic_with_options(render_options)?;
+                &*cached
+            } else {
+                owned = doc.layout_with_fonts_and_bundled_fallback_and_options(
+                    &FontFile::as_refs(&fonts),
+                    render_options,
+                )?;
+                &owned
+            };
             let selected = selected_zero_based_pages(layout.layout.pages.len(), image.pages)?;
             match format {
                 RasterFormat::Tiff => {
@@ -1985,9 +2012,21 @@ pub fn render(
     let out_dir = output_dir.unwrap_or_else(|| Path::new("."));
     let (format, extension) =
         parse_image_format(options.format, options.quality, options.transparent)?;
-    let layout = doc.layout_deterministic_with_options(rdocx::RenderOptions {
+    let render_options = rdocx::RenderOptions {
         revision_view: options.revision_view,
-    })?;
+    };
+    let fonts = caller_fonts(options.font_dir)?;
+    let (cached, owned);
+    let layout = if fonts.is_empty() {
+        cached = doc.layout_deterministic_with_options(render_options)?;
+        &*cached
+    } else {
+        owned = doc.layout_with_fonts_and_bundled_fallback_and_options(
+            &FontFile::as_refs(&fonts),
+            render_options,
+        )?;
+        &owned
+    };
     let selected = selected_render_pages(layout.layout.pages.len(), options.page, options.pages)?;
     let stem = file.file_stem().unwrap_or_default().to_string_lossy();
     let legacy_single_page = options.page.is_some();

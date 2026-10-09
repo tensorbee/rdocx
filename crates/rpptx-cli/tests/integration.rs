@@ -827,6 +827,155 @@ fn convert_and_render_write_deterministic_pdf_and_png_outputs() {
     assert!(!output_dir.join("rendered_slide1.png").exists());
 }
 
+/// Issue 296: `--font-dir` reaches the PDF, image, render, and thumbnail
+/// outputs, and a missing directory is an error.
+#[test]
+fn font_dir_reaches_every_rendering_command() {
+    let temp = TempWorkspace::new("font-dir");
+    let deck = temp.path.join("caller.pptx");
+    let fonts = temp.path.join("fonts");
+    fs::create_dir(&fonts).unwrap();
+    let mono = fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../oxml-layout/fonts/LiberationMono-Regular.ttf"),
+    )
+    .unwrap();
+    fs::write(fonts.join("Rpptx Caller Mono.ttf"), &mono).unwrap();
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    let mut slide = presentation.slide_mut(0).unwrap();
+    let mut textbox = slide
+        .add_textbox(Emu(500_000), Emu(500_000), Emu(8_000_000), Emu(900_000))
+        .unwrap();
+    textbox.set_text("Caller face everywhere").unwrap();
+    let mut frame = textbox.text_frame().unwrap();
+    let mut paragraph = frame.paragraph_mut(0).unwrap();
+    paragraph
+        .run_mut(0)
+        .unwrap()
+        .set_font(Some(rpptx::TextFont::new("Rpptx Caller Mono").unwrap()));
+    presentation.save(&deck).unwrap();
+    let caller = [("Rpptx Caller Mono", mono.as_slice())];
+    let caller_png = presentation
+        .slide_png_deterministic_with_fonts(0, 24.0, &caller)
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        caller_png,
+        presentation
+            .slide_png_deterministic(0, 24.0)
+            .unwrap()
+            .unwrap()
+    );
+    let source = deck.to_str().unwrap();
+    let font_dir = fonts.to_str().unwrap();
+
+    let pdf = temp.path.join("caller.pdf");
+    let output = cli(&[
+        "convert",
+        source,
+        "--to",
+        "pdf",
+        "--font-dir",
+        font_dir,
+        "-o",
+        pdf.to_str().unwrap(),
+    ]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&fs::read(&pdf).unwrap()).contains("/BaseFont /LiberationMono")
+    );
+
+    let png = temp.path.join("caller.png");
+    let output = cli(&[
+        "convert",
+        source,
+        "--to",
+        "png",
+        "--dpi",
+        "24",
+        "--font-dir",
+        font_dir,
+        "-o",
+        png.to_str().unwrap(),
+    ]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(fs::read(&png).unwrap(), caller_png);
+
+    let rendered = temp.path.join("rendered");
+    let output = cli(&[
+        "render",
+        source,
+        "--output",
+        rendered.to_str().unwrap(),
+        "--dpi",
+        "24",
+        "--font-dir",
+        font_dir,
+    ]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        fs::read(rendered.join("caller_slide1.png")).unwrap(),
+        caller_png
+    );
+
+    let thumbnail = temp.path.join("thumbnail.png");
+    let bundled_thumbnail = temp.path.join("bundled-thumbnail.png");
+    for (path, font_args) in [
+        (&thumbnail, vec!["--font-dir", font_dir]),
+        (&bundled_thumbnail, vec![]),
+    ] {
+        let mut args = vec!["thumbnail", source, "-o", path.to_str().unwrap()];
+        args.extend(font_args);
+        let output = cli(&args);
+        assert!(output.status.success(), "{output:?}");
+    }
+    assert_ne!(
+        fs::read(thumbnail).unwrap(),
+        fs::read(bundled_thumbnail).unwrap()
+    );
+
+    let unwritten = temp.path.join("unwritten");
+    let unwritten = unwritten.to_str().unwrap();
+    for args in [
+        vec![
+            "convert",
+            source,
+            "--to",
+            "pdf",
+            "--font-dir",
+            "missing-fonts",
+            "-o",
+            unwritten,
+        ],
+        vec![
+            "render",
+            source,
+            "--font-dir",
+            "missing-fonts",
+            "--output",
+            unwritten,
+        ],
+        vec![
+            "thumbnail",
+            source,
+            "--font-dir",
+            "missing-fonts",
+            "-o",
+            unwritten,
+        ],
+    ] {
+        let output = cli(&args);
+        assert!(!output.status.success(), "{args:?} must fail");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("font directory missing-fonts does not exist"),
+            "{args:?} stderr: {stderr}"
+        );
+        assert!(!Path::new(unwritten).exists());
+    }
+}
+
 #[test]
 fn image_export_options_write_declared_formats_and_ranges() {
     let temp = TempWorkspace::new("image-options");

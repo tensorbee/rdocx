@@ -217,54 +217,113 @@ impl PyPresentation {
             .map_err(|error| rpptx_to_pyerr(py, error))
     }
 
-    fn to_pdf<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        py.detach(|| self.inner.to_pdf_deterministic())
-            .map(|bytes| PyBytes::new(py, &bytes))
-            .map_err(|error| rpptx_to_pyerr(py, error))
+    #[pyo3(signature = (*, fonts = None, font_dir = None))]
+    fn to_pdf<'py>(
+        &self,
+        py: Python<'py>,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let fonts = caller_fonts(fonts, font_dir)?;
+        py.detach(|| {
+            self.inner
+                .to_pdf_deterministic_with_fonts(&rpptx::FontFile::as_refs(&fonts))
+        })
+        .map(|bytes| PyBytes::new(py, &bytes))
+        .map_err(|error| rpptx_to_pyerr(py, error))
     }
 
-    #[pyo3(signature = (slide_index, dpi = 150.0))]
+    #[pyo3(signature = (slide_index, dpi = 150.0, *, fonts = None, font_dir = None))]
     fn render_slide_to_png<'py>(
         &self,
         py: Python<'py>,
         slide_index: usize,
         dpi: f64,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
     ) -> PyResult<Option<Bound<'py, PyBytes>>> {
-        py.detach(|| self.inner.slide_png_deterministic(slide_index, dpi))
-            .map(|bytes| bytes.map(|bytes| PyBytes::new(py, &bytes)))
-            .map_err(|error| rpptx_to_pyerr(py, error))
+        let fonts = caller_fonts(fonts, font_dir)?;
+        py.detach(|| {
+            self.inner.slide_png_deterministic_with_fonts(
+                slide_index,
+                dpi,
+                &rpptx::FontFile::as_refs(&fonts),
+            )
+        })
+        .map(|bytes| bytes.map(|bytes| PyBytes::new(py, &bytes)))
+        .map_err(|error| rpptx_to_pyerr(py, error))
     }
 
-    #[pyo3(signature = (dpi = 150.0))]
-    fn render_all_slides<'py>(&self, py: Python<'py>, dpi: f64) -> PyResult<Bound<'py, PyList>> {
+    #[pyo3(signature = (dpi = 150.0, *, fonts = None, font_dir = None))]
+    fn render_all_slides<'py>(
+        &self,
+        py: Python<'py>,
+        dpi: f64,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let fonts = caller_fonts(fonts, font_dir)?;
         let slides = py
-            .detach(|| self.inner.slide_pngs_deterministic(dpi))
+            .detach(|| {
+                self.inner
+                    .slide_pngs_deterministic_with_fonts(dpi, &rpptx::FontFile::as_refs(&fonts))
+            })
             .map_err(|error| rpptx_to_pyerr(py, error))?;
         PyList::new(py, slides.iter().map(|slide| PyBytes::new(py, slide)))
     }
 
-    #[pyo3(signature = (*, width_factor = 1.0))]
+    #[pyo3(signature = (*, width_factor = 1.0, fonts = None, font_dir = None))]
     fn text_layout<'py>(
         &self,
         py: Python<'py>,
         width_factor: f64,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
     ) -> PyResult<Bound<'py, PyTuple>> {
+        let fonts = caller_fonts(fonts, font_dir)?;
         let frames = py
-            .detach(|| self.inner.text_layout_deterministic(width_factor))
+            .detach(|| {
+                self.inner.text_layout_deterministic_with_fonts(
+                    width_factor,
+                    &rpptx::FontFile::as_refs(&fonts),
+                )
+            })
             .map_err(|error| rpptx_to_pyerr(py, error))?;
         PyTuple::new(py, frames.iter().map(PyTextFrameLayout::from))
     }
 
-    fn to_notes_pdf<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        py.detach(|| self.inner.to_notes_pdf_deterministic())
-            .map(|bytes| PyBytes::new(py, &bytes))
-            .map_err(|error| rpptx_to_pyerr(py, error))
+    #[pyo3(signature = (*, fonts = None, font_dir = None))]
+    fn to_notes_pdf<'py>(
+        &self,
+        py: Python<'py>,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let fonts = caller_fonts(fonts, font_dir)?;
+        py.detach(|| {
+            self.inner
+                .to_notes_pdf_deterministic_with_fonts(&rpptx::FontFile::as_refs(&fonts))
+        })
+        .map(|bytes| PyBytes::new(py, &bytes))
+        .map_err(|error| rpptx_to_pyerr(py, error))
     }
 
-    #[pyo3(signature = (dpi = 150.0))]
-    fn render_all_notes<'py>(&self, py: Python<'py>, dpi: f64) -> PyResult<Bound<'py, PyList>> {
+    #[pyo3(signature = (dpi = 150.0, *, fonts = None, font_dir = None))]
+    fn render_all_notes<'py>(
+        &self,
+        py: Python<'py>,
+        dpi: f64,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let fonts = caller_fonts(fonts, font_dir)?;
         let notes = py
-            .detach(|| self.inner.notes_page_pngs_deterministic(dpi))
+            .detach(|| {
+                self.inner.notes_page_pngs_deterministic_with_fonts(
+                    dpi,
+                    &rpptx::FontFile::as_refs(&fonts),
+                )
+            })
             .map_err(|error| rpptx_to_pyerr(py, error))?;
         PyList::new(py, notes.iter().map(|page| PyBytes::new(py, page)))
     }
@@ -388,4 +447,25 @@ impl PyPresentation {
         let path = slf.borrow(py).revisions.capture(smallvec![]);
         Py::new(py, PySlideCollection::new(slf, path))
     }
+}
+
+/// The fonts of a `fonts=` and `font_dir=` pair, the `(family, bytes)` pairs
+/// first. A missing `font_dir` raises `FileNotFoundError` and a file
+/// `NotADirectoryError`, before any layout.
+fn caller_fonts(
+    fonts: Option<Vec<(String, Bound<'_, PyBytes>)>>,
+    font_dir: Option<PathBuf>,
+) -> PyResult<Vec<rpptx::FontFile>> {
+    let mut files = fonts
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(family, data)| rpptx::FontFile {
+            family,
+            data: data.as_bytes().to_vec(),
+        })
+        .collect::<Vec<_>>();
+    if let Some(font_dir) = font_dir {
+        files.extend(rpptx::FontFile::load_dir(&font_dir)?);
+    }
+    Ok(files)
 }

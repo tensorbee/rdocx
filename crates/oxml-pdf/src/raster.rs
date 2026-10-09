@@ -952,12 +952,18 @@ fn render_positioned_glyph_run(
     y_offsets: &[f64],
     y_advances: &[f64],
 ) {
-    let Ok(face) = ttf_parser::Face::parse(&font_data.data, font_data.face_index) else {
+    let Some(face) = crate::font::instanced_face(font_data) else {
         return;
     };
 
     let upem = face.units_per_em() as f64;
     let scale = glyph_run.font_size / upem;
+    // A synthetic bold outline gains the PDF writer's stroke, in font units.
+    let embolden = font_data.synthetic_bold.then(|| Stroke {
+        width: (upem * oxml_layout::SYNTHETIC_BOLD_STROKE_EM) as f32,
+        line_join: tiny_skia::LineJoin::Round,
+        ..Stroke::default()
+    });
 
     let mut paint = Paint::default();
     paint.set_color_rgba8(
@@ -989,6 +995,9 @@ fn render_positioned_glyph_run(
                 .pre_scale(scale as f32, -(scale as f32));
 
             pixmap.fill_path(&path, &paint, FillRule::Winding, glyph_transform, mask);
+            if let Some(stroke) = &embolden {
+                pixmap.stroke_path(&path, &paint, stroke, glyph_transform, mask);
+            }
         }
 
         if i < glyph_run.advances.len() {
@@ -2179,5 +2188,60 @@ mod tests {
 
         assert_eq!(rgb(pixmap.pixel(3, 8).unwrap()), (0, 0, 0));
         assert_eq!(rgb(pixmap.pixel(7, 8).unwrap()), (255, 255, 255));
+    }
+
+    /// Issue 297: a bold run draws more ink than a regular one, through a
+    /// variable face's bold instance or a regular-only face's synthetic bold.
+    #[test]
+    fn caller_bold_runs_draw_bolder_than_regular_runs() {
+        let mut fonts = oxml_layout::FontManager::new_deterministic().unwrap();
+        fonts.load_additional_fonts(&[
+            oxml_layout::FontFile {
+                family: "Caller Variable".to_owned(),
+                data: include_bytes!("../../oxml-layout/fonts/NotoSansSC-FX058-subset.ttf")
+                    .to_vec(),
+            },
+            oxml_layout::FontFile {
+                family: "Caller Mono".to_owned(),
+                data: include_bytes!("../../oxml-layout/fonts/LiberationMono-Regular.ttf").to_vec(),
+            },
+        ]);
+        for family in ["Caller Variable", "Caller Mono"] {
+            let mut ink = Vec::new();
+            for bold in [false, true] {
+                let font_id = fonts.resolve_font(Some(family), bold, false).unwrap();
+                let shaped = fonts.shape_text(font_id, "Hill bold", 24.0).unwrap();
+                let run = PositionedElement::Text(oxml_layout::GlyphRun {
+                    origin: Point { x: 10.0, y: 40.0 },
+                    font_id,
+                    font_size: 24.0,
+                    glyph_ids: shaped.glyph_ids,
+                    advances: shaped.advances,
+                    text: "Hill bold".to_owned(),
+                    source: None,
+                    color: Color::BLACK,
+                    bold,
+                    italic: false,
+                    field_kind: None,
+                    field_source: None,
+                    tab_aligned: None,
+                    note: None,
+                    note_reference_source: None,
+                });
+                let page = PageFrame::new(1, 200.0, 60.0, vec![run]);
+                let pixmap = render_page_to_pixmap(&page, &fonts.all_font_data(), 144.0).unwrap();
+                ink.push(
+                    pixmap
+                        .pixels()
+                        .iter()
+                        .map(|pixel| 255 - u32::from(pixel.red()))
+                        .sum::<u32>(),
+                );
+            }
+            assert!(
+                f64::from(ink[1]) > f64::from(ink[0]) * 1.15,
+                "{family}: {ink:?}"
+            );
+        }
     }
 }

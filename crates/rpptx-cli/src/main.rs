@@ -54,6 +54,9 @@ enum Command {
         /// Preserve unpainted PNG pixels as transparent
         #[arg(long)]
         transparent: bool,
+        /// Directory of font files (.ttf/.otf/.ttc) used before the bundled fonts
+        #[arg(long)]
+        font_dir: Option<PathBuf>,
     },
     /// Compare slide text using a longest-common-subsequence diff
     Diff { file_a: PathBuf, file_b: PathBuf },
@@ -93,6 +96,9 @@ enum Command {
         /// Preserve unpainted PNG pixels as transparent
         #[arg(long)]
         transparent: bool,
+        /// Directory of font files (.ttf/.otf/.ttc) used before the bundled fonts
+        #[arg(long)]
+        font_dir: Option<PathBuf>,
     },
     /// Render slide one as a proportional 320-pixel-wide PNG
     Thumbnail {
@@ -102,6 +108,9 @@ enum Command {
         /// Replace an existing output file, but never the input file
         #[arg(long)]
         force: bool,
+        /// Directory of font files (.ttf/.otf/.ttc) used before the bundled fonts
+        #[arg(long)]
+        font_dir: Option<PathBuf>,
     },
     /// Print each slide title and recursive paragraph outline
     Outline {
@@ -237,6 +246,7 @@ fn run_cli() {
             slides,
             quality,
             transparent,
+            font_dir,
         } => commands::convert(
             &file,
             &to,
@@ -247,6 +257,7 @@ fn run_cli() {
                 slides: slides.as_deref(),
                 quality,
                 transparent,
+                font_dir: font_dir.as_deref(),
             },
         ),
         Command::Diff { file_a, file_b } => commands::diff(&file_a, &file_b),
@@ -267,6 +278,7 @@ fn run_cli() {
             format,
             quality,
             transparent,
+            font_dir,
         } => commands::render(
             &file,
             output.as_deref(),
@@ -277,13 +289,15 @@ fn run_cli() {
                 slides: slide.as_deref(),
                 quality,
                 transparent,
+                font_dir: font_dir.as_deref(),
             },
         ),
         Command::Thumbnail {
             file,
             output,
             force,
-        } => commands::thumbnail(&file, output.as_deref(), force),
+            font_dir,
+        } => commands::thumbnail(&file, output.as_deref(), force, font_dir.as_deref()),
         Command::Outline { file, json, notes } => commands::outline(&file, json, notes),
         Command::Comment { command } => match command {
             CommentCommand::List { file, json } => commands::comment_list(&file, json),

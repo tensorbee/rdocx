@@ -58,6 +58,47 @@ def _tracked_document():
     return document
 
 
+def test_issue_296_every_render_and_layout_method_takes_caller_fonts(tmp_path):
+    import shutil
+    from pathlib import Path
+
+    import rdocx
+
+    mono = Path(__file__).parents[2] / "oxml-layout" / "fonts" / "LiberationMono-Regular.ttf"
+    shutil.copy(mono, tmp_path / "Rdocx Caller Mono.ttf")
+    fonts = [("Rdocx Caller Mono", mono.read_bytes())]
+    document = rdocx.Document()
+    document.add_paragraph("").add_run("Caller face in every output").font.name = (
+        "Rdocx Caller Mono"
+    )
+
+    png = document.render_page_to_png(0, 36.0, fonts=fonts)
+    assert png is not None and png != document.render_page_to_png(0, 36.0)
+    assert document.render_page_to_png(0, 36.0, font_dir=tmp_path) == png
+    assert document.render_all_pages(36.0, fonts=fonts) == [png]
+    assert document.render_pages(dpi=36.0, fonts=fonts) == [png]
+    assert document.render_pages(dpi=36.0, pages=[0], font_dir=str(tmp_path)) == [png]
+    svg = document.render_page_to_svg(0, fonts=fonts)
+    plain_svg = document.render_page_to_svg(0)
+    assert svg is not None and plain_svg is not None and svg.svg != plain_svg.svg
+    assert len(document.layout(fonts=fonts)) == len(document.layout())
+    assert document.layout_page(0, font_dir=tmp_path) is not None
+
+    missing = tmp_path / "missing"
+    for render in (
+        lambda **caller: document.render_page_to_png(0, 36.0, **caller),
+        lambda **caller: document.render_all_pages(36.0, **caller),
+        lambda **caller: document.render_pages(dpi=36.0, **caller),
+        lambda **caller: document.render_page_to_svg(0, **caller),
+        lambda **caller: document.layout(**caller),
+        lambda **caller: document.layout_page(0, **caller),
+    ):
+        with pytest.raises(FileNotFoundError, match="missing does not exist"):
+            render(font_dir=missing)
+        with pytest.raises(NotADirectoryError, match="is not a directory"):
+            render(font_dir=mono)
+
+
 def test_issue_253_python_render_views():
     from pathlib import Path
 

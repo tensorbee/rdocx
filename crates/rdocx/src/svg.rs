@@ -283,6 +283,36 @@ impl<'a> SvgState<'a> {
             number(run.color.a.clamp(0.0, 1.0))
         )
         .unwrap();
+        if let Some(font) = self.layout.fonts.iter().find(|font| font.id == run.font_id) {
+            // Draw the variable instance and synthetic bold the layout measured.
+            if !font.variations.is_empty() {
+                output.push_str(" style=\"font-variation-settings:");
+                for (index, (tag, value)) in font.variations.iter().enumerate() {
+                    if index != 0 {
+                        output.push(',');
+                    }
+                    let tag = String::from_utf8_lossy(tag);
+                    write!(
+                        output,
+                        "'{}' {}",
+                        escape_attribute(&tag),
+                        number(f64::from(*value))
+                    )
+                    .unwrap();
+                }
+                output.push('"');
+            }
+            if font.synthetic_bold {
+                write!(
+                    output,
+                    " stroke=\"{}\" stroke-opacity=\"{}\" stroke-width=\"{}\" stroke-linejoin=\"round\"",
+                    color_hex(run.color),
+                    number(run.color.a.clamp(0.0, 1.0)),
+                    number(run.font_size * oxml_layout::SYNTHETIC_BOLD_STROKE_EM)
+                )
+                .unwrap();
+            }
+        }
 
         let scalar_count = run.text.chars().count();
         if scalar_count == run.glyph_ids.len() && run.advances.len() == run.glyph_ids.len() {
@@ -1084,6 +1114,8 @@ mod tests {
             face_index: 0,
             bold: false,
             italic: false,
+            variations: Vec::new(),
+            synthetic_bold: false,
         }
     }
 

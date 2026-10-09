@@ -4,12 +4,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use oxml_layout::{
-    Color, FillRule, FontId, GradientStop, LayoutResult, LineCap, LineJoin, Paint, Path,
+    Color, FillRule, FontData, FontId, GradientStop, LayoutResult, LineCap, LineJoin, Paint, Path,
     PathCommand, PathElement, PositionedElement, Stroke, Transform, walk,
 };
 use pdf_writer::types::{
     ActionType, AnnotationFlags, AnnotationType, CidFontType, ColorSpaceOperand, FontFlags,
     FunctionShadingType, LineCapStyle, LineJoinStyle, OutputIntentSubtype, SystemInfo,
+    TextRenderingMode,
 };
 use pdf_writer::{Content, Filter, Finish, Name, Pdf, Rect, Ref, Str, TextStr};
 
@@ -1326,6 +1327,7 @@ fn emit_elements(
 
                     content.begin_text();
                     content.set_font(Name(font_name.as_bytes()), run.font_size as f32);
+                    embolden_text(content, &prepared.font_data, run.color, run.font_size);
 
                     // Cancel the page flip so glyphs remain upright.
                     content.set_text_matrix([
@@ -1399,6 +1401,7 @@ fn emit_elements(
                     apply_alpha(content, run.color.a, state.alpha_states);
                     content.begin_text();
                     content.set_font(Name(font_name.as_bytes()), run.font_size as f32);
+                    embolden_text(content, &prepared.font_data, run.color, run.font_size);
                     emit_multilingual_glyphs(
                         content,
                         run,
@@ -1507,6 +1510,18 @@ fn emit_elements(
             }
         }
     }
+}
+
+/// Stroke the glyphs of a synthetic bold face in their fill colour as well as
+/// filling them. The caller's saved graphics state scopes the change.
+fn embolden_text(content: &mut Content, font: &FontData, color: Color, font_size: f64) {
+    if !font.synthetic_bold {
+        return;
+    }
+    content.set_stroke_rgb(color.r as f32, color.g as f32, color.b as f32);
+    content.set_line_width((font_size * oxml_layout::SYNTHETIC_BOLD_STROKE_EM) as f32);
+    content.set_line_join(LineJoinStyle::RoundJoin);
+    content.set_text_rendering_mode(TextRenderingMode::FillStroke);
 }
 
 fn apply_alpha(content: &mut Content, alpha: f64, states: &AlphaStates) {
@@ -2116,6 +2131,10 @@ mod tests {
     }
 
     fn content_for_multilingual_runs(elements: Vec<PositionedElement>) -> String {
+        content_with_test_font(elements, false)
+    }
+
+    fn content_with_test_font(elements: Vec<PositionedElement>, synthetic_bold: bool) -> String {
         let font_id = FontId(9);
         let mut remapper = subsetter::GlyphRemapper::new();
         for glyph_id in 1..=64 {
@@ -2129,6 +2148,8 @@ mod tests {
                 face_index: 0,
                 bold: false,
                 italic: false,
+                variations: Vec::new(),
+                synthetic_bold,
             },
             subset_bytes: Vec::new(),
             remapper,
@@ -2171,6 +2192,25 @@ mod tests {
             },
         ))
         .expect("PDF content operators are ASCII")
+    }
+
+    /// Issue 297: a synthetic bold face strokes its glyphs in the fill colour.
+    #[test]
+    fn a_synthetic_bold_run_fills_and_strokes_its_glyphs() {
+        let run = || {
+            PositionedElement::MultilingualText(multilingual_run(
+                "אב",
+                0,
+                Point { x: 10.0, y: 20.0 },
+                None,
+            ))
+        };
+        let regular = content_for_multilingual_runs(vec![run()]);
+        let emboldened = content_with_test_font(vec![run()], true);
+        assert!(!regular.contains(" Tr"));
+        assert!(emboldened.contains("2 Tr"), "{emboldened}");
+        assert!(emboldened.contains("1 j"));
+        assert!(emboldened.contains("0 0 0 RG"));
     }
 
     #[test]
@@ -2981,6 +3021,8 @@ mod tests {
                 face_index: 0,
                 bold: false,
                 italic: false,
+                variations: Vec::new(),
+                synthetic_bold: false,
             }],
             None,
             Vec::new(),
@@ -3582,6 +3624,8 @@ mod tests {
                 face_index: 0,
                 bold: false,
                 italic: false,
+                variations: Vec::new(),
+                synthetic_bold: false,
             },
             subset_bytes: Vec::new(),
             remapper,

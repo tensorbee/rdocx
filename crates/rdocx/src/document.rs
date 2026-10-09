@@ -27978,14 +27978,9 @@ impl Document {
     ) -> rdocx_layout::LayoutInput {
         let mut input = self.build_layout_input();
         input.revision_view = options.revision_view;
-        input.fonts.extend(
-            font_files
-                .iter()
-                .map(|(family, data)| rdocx_layout::FontFile {
-                    family: (*family).to_owned(),
-                    data: data.to_vec(),
-                }),
-        );
+        input
+            .fonts
+            .extend(rdocx_layout::FontFile::from_refs(font_files));
         input
     }
 
@@ -28058,11 +28053,21 @@ impl Document {
         font_files: &[(&str, &[u8])],
         options: RenderOptions,
     ) -> Result<Vec<u8>> {
+        let layout = self.layout_with_fonts_over_normal_fonts(font_files, options)?;
+        Ok(oxml_pdf::render_to_pdf(&layout.layout))
+    }
+
+    /// Lay out uncached with caller fonts over the fonts `to_pdf` resolves
+    /// from, which every `*_with_fonts_and_options` renderer shares.
+    fn layout_with_fonts_over_normal_fonts(
+        &self,
+        font_files: &[(&str, &[u8])],
+        options: RenderOptions,
+    ) -> Result<rdocx_layout::WordLayoutResult> {
         let input = self.build_layout_input_with_fonts(font_files, options);
         #[cfg(test)]
         record_layout_invocation();
-        let layout = rdocx_layout::layout_document_with_provenance(&input)?;
-        Ok(oxml_pdf::render_to_pdf(&layout.layout))
+        Ok(rdocx_layout::layout_document_with_provenance(&input)?)
     }
 
     /// Save the document as a PDF file.
@@ -28172,6 +28177,25 @@ impl Document {
         ))
     }
 
+    /// Render one page to PNG with user-provided font files.
+    ///
+    /// The fonts resolve as [`Self::to_pdf_with_fonts_and_options`] resolves
+    /// them, so the PNG and the PDF of the same call draw the same faces.
+    pub fn render_page_to_png_with_fonts_and_options(
+        &self,
+        page_index: usize,
+        dpi: f64,
+        font_files: &[(&str, &[u8])],
+        options: RenderOptions,
+    ) -> Result<Option<Vec<u8>>> {
+        let layout = self.layout_with_fonts_over_normal_fonts(font_files, options)?;
+        Ok(oxml_pdf::render_page_to_png(
+            &layout.layout,
+            page_index,
+            dpi,
+        ))
+    }
+
     /// Render a single page to PNG using bundled fonts without system font
     /// discovery.
     ///
@@ -28223,6 +28247,18 @@ impl Document {
         Ok(crate::svg::render_page(&layout.layout, page_index))
     }
 
+    /// Render one page as SVG with user-provided font files, resolved as
+    /// [`Self::to_pdf_with_fonts_and_options`] resolves them.
+    pub fn render_page_to_svg_with_fonts_and_options(
+        &self,
+        page_index: usize,
+        font_files: &[(&str, &[u8])],
+        options: RenderOptions,
+    ) -> Result<Option<crate::SvgRenderResult>> {
+        let layout = self.layout_with_fonts_over_normal_fonts(font_files, options)?;
+        Ok(crate::svg::render_page(&layout.layout, page_index))
+    }
+
     /// Render one page as SVG using bundled fonts without system font discovery.
     pub fn render_page_to_svg_deterministic(
         &self,
@@ -28261,6 +28297,27 @@ impl Document {
         Ok(oxml_pdf::render_pages(
             &layout.layout,
             page_indices,
+            raster_options,
+        )?)
+    }
+
+    /// Render zero-based pages with user-provided font files, resolved as
+    /// [`Self::to_pdf_with_fonts_and_options`] resolves them.
+    ///
+    /// `None` selects every page. A caller cannot count the pages of this
+    /// uncached layout without laying the document out a second time.
+    pub fn render_pages_with_fonts_and_options(
+        &self,
+        page_indices: Option<&[usize]>,
+        raster_options: oxml_pdf::RasterOptions,
+        font_files: &[(&str, &[u8])],
+        options: RenderOptions,
+    ) -> Result<oxml_pdf::RasterOutput> {
+        let layout = self.layout_with_fonts_over_normal_fonts(font_files, options)?;
+        let every_page = (0..layout.layout.pages.len()).collect::<Vec<_>>();
+        Ok(oxml_pdf::render_pages(
+            &layout.layout,
+            page_indices.unwrap_or(&every_page),
             raster_options,
         )?)
     }
@@ -28305,6 +28362,18 @@ impl Document {
         options: RenderOptions,
     ) -> Result<Vec<Vec<u8>>> {
         let layout = self.layout_with_options(options)?;
+        Ok(oxml_pdf::render_all_pages(&layout.layout, dpi))
+    }
+
+    /// Render every page to PNG with user-provided font files, resolved as
+    /// [`Self::to_pdf_with_fonts_and_options`] resolves them.
+    pub fn render_all_pages_with_fonts_and_options(
+        &self,
+        dpi: f64,
+        font_files: &[(&str, &[u8])],
+        options: RenderOptions,
+    ) -> Result<Vec<Vec<u8>>> {
+        let layout = self.layout_with_fonts_over_normal_fonts(font_files, options)?;
         Ok(oxml_pdf::render_all_pages(&layout.layout, dpi))
     }
 
@@ -28859,31 +28928,11 @@ impl Document {
     /// Load font files from a directory and return them as FontFile entries.
     ///
     /// This is useful for CLI tools that accept a `--font-dir` argument.
-    /// Supports `.ttf`, `.otf`, and `.ttc` files.
+    /// Supports `.ttf`, `.otf`, and `.ttc` files, read in file name order. A
+    /// directory that cannot be read yields no fonts. [`crate::FontFile::load_dir`]
+    /// reports that as an error instead.
     pub fn load_fonts_from_dir<P: AsRef<Path>>(dir: P) -> Vec<rdocx_layout::FontFile> {
-        let mut fonts = Vec::new();
-        let dir = dir.as_ref();
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let ext = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                if (ext == "ttf" || ext == "otf" || ext == "ttc")
-                    && let Ok(data) = std::fs::read(&path)
-                {
-                    let family = path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("Unknown")
-                        .to_string();
-                    fonts.push(rdocx_layout::FontFile { family, data });
-                }
-            }
-        }
-        fonts
+        rdocx_layout::FontFile::load_dir(dir.as_ref()).unwrap_or_default()
     }
 
     /// Save a header/footer part back to the OPC package.
@@ -33709,6 +33758,144 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_none()
         );
+    }
+
+    /// Issue 296: the raster and SVG renderers take the caller fonts the PDF
+    /// takes, so a preview draws the face the PDF embeds.
+    #[test]
+    fn raster_and_svg_renderers_draw_the_caller_fonts_the_pdf_embeds() {
+        let mono = include_bytes!("../../oxml-layout/fonts/LiberationMono-Regular.ttf");
+        let family = "Rdocx Caller Mono";
+        let mut document = Document::new();
+        document
+            .add_paragraph("")
+            .add_run("caller face in every output")
+            .font(family);
+        let fonts = [(family, mono.as_slice())];
+        let options = RenderOptions::default();
+
+        let layout = document
+            .layout_with_fonts_over_normal_fonts(&fonts, options)
+            .unwrap();
+        assert!(
+            layout
+                .layout
+                .fonts
+                .iter()
+                .any(|font| font.data.as_ref() == mono.as_slice()),
+            "the caller face is laid out"
+        );
+        let png = document
+            .render_page_to_png_with_fonts_and_options(0, 36.0, &fonts, options)
+            .unwrap()
+            .expect("page one renders");
+        assert_eq!(
+            Some(&png),
+            oxml_pdf::render_page_to_png(&layout.layout, 0, 36.0).as_ref()
+        );
+        assert_ne!(
+            Some(&png),
+            document.render_page_to_png(0, 36.0).unwrap().as_ref()
+        );
+        assert_eq!(
+            document
+                .render_all_pages_with_fonts_and_options(36.0, &fonts, options)
+                .unwrap(),
+            vec![png.clone()]
+        );
+        let raster = oxml_pdf::RasterOptions {
+            dpi: 36.0,
+            format: oxml_pdf::RasterFormat::Png {
+                transparent_background: false,
+            },
+        };
+        for selection in [None, Some([0].as_slice())] {
+            let oxml_pdf::RasterOutput::SeparatePages(pages) = document
+                .render_pages_with_fonts_and_options(selection, raster, &fonts, options)
+                .unwrap()
+            else {
+                panic!("PNG output is one image per page");
+            };
+            assert_eq!(pages, vec![png.clone()]);
+        }
+        let svg = document
+            .render_page_to_svg_with_fonts_and_options(0, &fonts, options)
+            .unwrap()
+            .expect("page one renders");
+        assert_eq!(
+            Some(svg.svg),
+            crate::svg::render_page(&layout.layout, 0).map(|result| result.svg)
+        );
+    }
+
+    /// Issue 297: a bold run of a variable caller face is drawn at the face's
+    /// bold instance, and one of a regular-only caller face is emboldened, in
+    /// the PDF and the SVG alike.
+    #[test]
+    fn caller_bold_runs_use_a_variable_instance_or_synthetic_bold() {
+        let variable = include_bytes!("../../oxml-layout/fonts/NotoSansSC-FX058-subset.ttf");
+        let mono = include_bytes!("../../oxml-layout/fonts/LiberationMono-Regular.ttf");
+        let mut document = Document::new();
+        for (family, bold) in [
+            ("Rdocx Variable", false),
+            ("Rdocx Variable", true),
+            ("Rdocx Mono", true),
+        ] {
+            document
+                .add_paragraph("")
+                .add_run("Hill")
+                .font(family)
+                .bold(bold);
+        }
+        let fonts = [
+            ("Rdocx Variable", variable.as_slice()),
+            ("Rdocx Mono", mono.as_slice()),
+        ];
+        let options = RenderOptions::default();
+
+        let layout = document
+            .layout_with_fonts_over_normal_fonts(&fonts, options)
+            .unwrap();
+        let mut instances = layout
+            .layout
+            .fonts
+            .iter()
+            .filter(|font| font.data.as_ref() == variable.as_slice())
+            .map(|font| (font.bold, font.variations.clone(), font.synthetic_bold))
+            .collect::<Vec<_>>();
+        instances.sort_by_key(|(bold, _, _)| *bold);
+        assert_eq!(
+            instances,
+            [
+                (false, vec![(*b"wght", 400.0)], false),
+                (true, vec![(*b"wght", 700.0)], false),
+            ]
+        );
+        assert!(
+            layout
+                .layout
+                .fonts
+                .iter()
+                .any(|font| font.data.as_ref() == mono.as_slice()
+                    && font.bold
+                    && font.synthetic_bold
+                    && font.variations.is_empty())
+        );
+
+        let pdf = document
+            .to_pdf_with_fonts_and_options(&fonts, options)
+            .unwrap();
+        let pdf = String::from_utf8_lossy(&pdf);
+        assert!(pdf.contains("/BaseFont /NotoSansSC-Bold"));
+        assert!(pdf.contains("/BaseFont /LiberationMono-Bold"));
+        let svg = document
+            .render_page_to_svg_with_fonts_and_options(0, &fonts, options)
+            .unwrap()
+            .unwrap()
+            .svg;
+        assert!(svg.contains("style=\"font-variation-settings:'wght' 700\""));
+        assert!(svg.contains("style=\"font-variation-settings:'wght' 400\""));
+        assert_eq!(svg.matches("stroke-linejoin=\"round\"").count(), 1);
     }
 
     /// `to_pdf_with_fonts` documents caller fonts over the fonts `to_pdf`

@@ -941,6 +941,45 @@ def _text_layout_deck(tmp_path, width, text, body_properties=None):
     return rpptx.Presentation(target)
 
 
+def test_every_render_method_and_text_layout_take_caller_fonts(tmp_path):
+    import shutil
+    from pathlib import Path
+
+    import rpptx
+
+    mono = Path(__file__).parents[2] / "oxml-layout" / "fonts" / "LiberationMono-Regular.ttf"
+    shutil.copy(mono, tmp_path / "Rpptx Caller Mono.ttf")
+    fonts = [("Rpptx Caller Mono", mono.read_bytes())]
+    presentation = _text_layout_deck(tmp_path, rpptx.Inches(8), "Caller face everywhere")
+    run = presentation.slides[0].shapes[0].text_frame.paragraphs[0].runs[0]
+    run.font.name = "Rpptx Caller Mono"
+
+    assert b"/BaseFont /LiberationMono" in presentation.to_pdf(fonts=fonts)
+    assert b"/BaseFont /LiberationMono" not in presentation.to_pdf()
+    png = presentation.render_slide_to_png(0, 36.0, font_dir=tmp_path)
+    assert png is not None and png != presentation.render_slide_to_png(0, 36.0)
+    assert presentation.render_all_slides(36.0, fonts=fonts) == [png]
+    assert presentation.to_notes_pdf(fonts=fonts).startswith(b"%PDF")
+    assert len(presentation.render_all_notes(24.0, font_dir=str(tmp_path))) == 1
+    (caller,) = presentation.text_layout(fonts=fonts)
+    (bundled,) = presentation.text_layout()
+    assert caller.lines[0].bounds.width > bundled.lines[0].bounds.width
+
+    missing = tmp_path / "missing"
+    for render in (
+        lambda **caller: presentation.to_pdf(**caller),
+        lambda **caller: presentation.render_slide_to_png(0, **caller),
+        lambda **caller: presentation.render_all_slides(**caller),
+        lambda **caller: presentation.text_layout(**caller),
+        lambda **caller: presentation.to_notes_pdf(**caller),
+        lambda **caller: presentation.render_all_notes(**caller),
+    ):
+        with pytest.raises(FileNotFoundError, match="missing does not exist"):
+            render(font_dir=missing)
+        with pytest.raises(NotADirectoryError, match="is not a directory"):
+            render(font_dir=mono)
+
+
 def test_text_layout_reports_the_renderer_fit_at_full_and_reduced_width(tmp_path):
     import rpptx
 

@@ -1,5 +1,5 @@
 import os as _os
-from collections.abc import Iterator as _Iterator
+from collections.abc import Iterator as _Iterator, Sequence as _Sequence
 from typing import (
     IO as _IO,
     ClassVar as _ClassVar,
@@ -161,12 +161,57 @@ class Presentation:
     def from_bytes(bytes: bytes) -> Presentation: ...
     def save(self, path: _Path) -> None: ...
     def to_bytes(self) -> bytes: ...
-    def to_pdf(self) -> bytes: ...
-    def render_slide_to_png(self, slide_index: int, dpi: float = 150.0) -> bytes | None: ...
-    def render_all_slides(self, dpi: float = 150.0) -> list[bytes]: ...
-    def text_layout(self, *, width_factor: float = 1.0) -> tuple[TextFrameLayout, ...]: ...
-    def to_notes_pdf(self) -> bytes: ...
-    def render_all_notes(self, dpi: float = 150.0) -> list[bytes]: ...
+    def to_pdf(
+        self,
+        *,
+        fonts: _Sequence[tuple[str, bytes]] | None = None,
+        font_dir: _Path | None = None,
+    ) -> bytes:
+        """Render the presentation to PDF bytes.
+
+        ``fonts`` gives ``(family, font bytes)`` pairs and ``font_dir`` a
+        directory whose ``.ttf``, ``.otf`` and ``.ttc`` files are named after
+        their family. Those fonts come before the bundled fonts, as
+        ``rpptx convert --font-dir`` does. A missing ``font_dir`` raises
+        ``FileNotFoundError`` and a file ``NotADirectoryError``. Every render
+        method and ``text_layout`` take the same two arguments, so a fit check
+        measures with the fonts the render draws.
+        """
+    def render_slide_to_png(
+        self,
+        slide_index: int,
+        dpi: float = 150.0,
+        *,
+        fonts: _Sequence[tuple[str, bytes]] | None = None,
+        font_dir: _Path | None = None,
+    ) -> bytes | None: ...
+    def render_all_slides(
+        self,
+        dpi: float = 150.0,
+        *,
+        fonts: _Sequence[tuple[str, bytes]] | None = None,
+        font_dir: _Path | None = None,
+    ) -> list[bytes]: ...
+    def text_layout(
+        self,
+        *,
+        width_factor: float = 1.0,
+        fonts: _Sequence[tuple[str, bytes]] | None = None,
+        font_dir: _Path | None = None,
+    ) -> tuple[TextFrameLayout, ...]: ...
+    def to_notes_pdf(
+        self,
+        *,
+        fonts: _Sequence[tuple[str, bytes]] | None = None,
+        font_dir: _Path | None = None,
+    ) -> bytes: ...
+    def render_all_notes(
+        self,
+        dpi: float = 150.0,
+        *,
+        fonts: _Sequence[tuple[str, bytes]] | None = None,
+        font_dir: _Path | None = None,
+    ) -> list[bytes]: ...
     def try_replace_text(
         self, placeholder: str, replacement: str, *, expect: int | None = None
     ) -> int: ...

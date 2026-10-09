@@ -132,6 +132,10 @@ def exercise_rdocx_types(path: Path) -> None:
     pages: list[bytes] = opened.render_all_pages()
     maybe_page: bytes | None = opened.render_page_to_png(0)
     font_pdf: bytes = opened.to_pdf(fonts=[("Carlito", b"font")], font_dir=path)
+    font_page: bytes | None = opened.render_page_to_png(0, fonts=[("Carlito", b"font")])
+    font_pages: list[bytes] = opened.render_all_pages(font_dir=path)
+    font_images: list[bytes] | bytes = opened.render_pages(font_dir=path, fonts=())
+    font_svg: SvgRenderResult | None = opened.render_page_to_svg(0, font_dir=path)
     archival_pdf: bytes = opened.to_pdfa_deterministic("pdfa-3b")
     svg_page: SvgRenderResult | None = opened.render_page_to_svg(0)
     if svg_page is not None:
@@ -242,6 +246,8 @@ def exercise_rdocx_types(path: Path) -> None:
     )
     fragments: tuple[LayoutFragment, ...] = document.layout()
     maybe_layout_page: LayoutPage | None = document.layout_page(0)
+    font_fragments: tuple[LayoutFragment, ...] = document.layout(fonts=[("Carlito", b"font")])
+    font_layout_page: LayoutPage | None = document.layout_page(0, font_dir="fonts")
     report: TocRebuildReport = document.rebuild_toc()
     core: CoreProperties = document.core_properties
     core.title = "Typed title"

@@ -42,6 +42,9 @@ enum Command {
         /// Output point-space body fragments as schema-1 JSON
         #[arg(long)]
         json: bool,
+        /// Directory of font files (.ttf/.otf/.ttc) used before the bundled fonts
+        #[arg(long)]
+        font_dir: Option<PathBuf>,
     },
     /// Convert DOCX to another format (pdf, html, md, png, jpeg, tiff)
     Convert {
@@ -59,7 +62,8 @@ enum Command {
         /// DPI for image rendering (default: 150)
         #[arg(long, default_value = "150")]
         dpi: u32,
-        /// Directory containing font files (.ttf/.otf) to use for PDF rendering
+        /// Directory of font files (.ttf/.otf/.ttc) used before any other font
+        /// for PDF and image output
         #[arg(long)]
         font_dir: Option<PathBuf>,
         /// Revision view for PDF and image output
@@ -149,6 +153,9 @@ enum Command {
         /// Preserve unpainted PNG pixels as transparent
         #[arg(long)]
         transparent: bool,
+        /// Directory of font files (.ttf/.otf/.ttc) used before the bundled fonts
+        #[arg(long)]
+        font_dir: Option<PathBuf>,
     },
     /// Inspect and mutate Word comment threads
     Comment {
@@ -469,7 +476,11 @@ fn run_cli() {
     let result = match cli.command {
         Command::Inspect { file, json } => commands::inspect(&file, json),
         Command::Text { file, json } => commands::text(&file, json),
-        Command::Layout { file, json } => commands::layout(&file, json),
+        Command::Layout {
+            file,
+            json,
+            font_dir,
+        } => commands::layout(&file, json, font_dir.as_deref()),
         Command::Convert {
             file,
             to,
@@ -521,6 +532,7 @@ fn run_cli() {
             revision_view,
             quality,
             transparent,
+            font_dir,
         } => commands::render(
             &file,
             output_dir.as_deref(),
@@ -533,6 +545,7 @@ fn run_cli() {
                 revision_view,
                 quality,
                 transparent,
+                font_dir: font_dir.as_deref(),
             },
         ),
         Command::Comment { command } => match command {

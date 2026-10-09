@@ -2040,6 +2040,127 @@ fn validate_rejects_malformed_related_parts_and_undefined_style_ids() {
     );
 }
 
+/// Issue 296: `--font-dir` reaches every output that lays text out, and an
+/// output that cannot use it refuses it instead of ignoring it.
+#[test]
+fn font_dir_reaches_pdf_image_render_and_layout_output() {
+    let temp = TempWorkspace::new("font-dir");
+    let input = temp.path.join("caller.docx");
+    let fonts = temp.path.join("fonts");
+    fs::create_dir(&fonts).unwrap();
+    let mono = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../oxml-layout/fonts/LiberationMono-Regular.ttf");
+    let mono_bytes = fs::read(&mono).unwrap();
+    fs::write(fonts.join("Rdocx Caller Mono.ttf"), &mono_bytes).unwrap();
+    let mut document = fixture_document(&[]);
+    document
+        .add_paragraph("")
+        .add_run("Caller face in every output")
+        .set_font("Rdocx Caller Mono");
+    document.save(&input).unwrap();
+    let source = path_text(&input);
+    let font_dir = path_text(&fonts);
+    let opened = Document::open(&input).unwrap();
+    let caller_png = opened
+        .layout_with_fonts_and_bundled_fallback(&[("Rdocx Caller Mono", &mono_bytes)])
+        .map(|layout| oxml_pdf_page_png(&layout.layout))
+        .unwrap();
+    let bundled_png = opened
+        .render_page_to_png_deterministic(0, 24.0)
+        .unwrap()
+        .unwrap();
+    assert_ne!(caller_png, bundled_png);
+
+    let pdf = temp.path.join("caller.pdf");
+    let output = cli(&[
+        "convert",
+        source,
+        "--to",
+        "pdf",
+        "--font-dir",
+        font_dir,
+        "-o",
+        path_text(&pdf),
+    ]);
+    assert_success(&output, "convert PDF with --font-dir");
+    assert!(
+        String::from_utf8_lossy(&fs::read(&pdf).unwrap()).contains("/BaseFont /LiberationMono")
+    );
+
+    let png = temp.path.join("caller.png");
+    let output = cli(&[
+        "convert",
+        source,
+        "--to",
+        "png",
+        "--dpi",
+        "24",
+        "--font-dir",
+        font_dir,
+        "-o",
+        path_text(&png),
+    ]);
+    assert_success(&output, "convert PNG with --font-dir");
+    assert_eq!(fs::read(&png).unwrap(), caller_png);
+
+    let rendered = temp.path.join("rendered");
+    let output = cli(&[
+        "render",
+        source,
+        "--output-dir",
+        path_text(&rendered),
+        "--dpi",
+        "24",
+        "--font-dir",
+        font_dir,
+    ]);
+    assert_success(&output, "render with --font-dir");
+    assert_eq!(
+        fs::read(rendered.join("caller_page1.png")).unwrap(),
+        caller_png
+    );
+
+    let output = cli(&["layout", source, "--json", "--font-dir", font_dir]);
+    assert_success(&output, "layout with --font-dir");
+
+    let markdown = temp.path.join("caller.md");
+    for (args, message) in [
+        (
+            vec!["convert", source, "--to", "md", "--font-dir", font_dir],
+            "--font-dir applies only to PDF and image output",
+        ),
+        (
+            vec![
+                "convert",
+                source,
+                "--to",
+                "png",
+                "--font-dir",
+                "missing-fonts",
+            ],
+            "font directory missing-fonts does not exist",
+        ),
+        (
+            vec!["render", source, "--font-dir", source],
+            "is not a directory",
+        ),
+        (
+            vec!["layout", source, "--font-dir", "missing-fonts"],
+            "font directory missing-fonts does not exist",
+        ),
+    ] {
+        let output = cli(&args);
+        assert!(!output.status.success(), "{args:?} must fail");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(message), "{args:?} stderr: {stderr}");
+    }
+    assert!(!markdown.exists());
+}
+
+fn oxml_pdf_page_png(layout: &oxml_layout::LayoutResult) -> Vec<u8> {
+    oxml_pdf::render_page_to_png(layout, 0, 24.0).expect("page one renders")
+}
+
 #[test]
 fn render_uses_the_bundled_font_deterministic_path() {
     let temp = TempWorkspace::new("render");

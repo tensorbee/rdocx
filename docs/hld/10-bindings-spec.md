@@ -2242,15 +2242,32 @@ the GIL for rendering, returns `list[bytes]` for PNG or JPEG, and returns one
 Python `Document.to_pdf(*, fonts=None, font_dir=None, revision_view="accepted")`
 uses `Document::to_pdf_with_options` when no fonts are supplied. With `fonts`,
 a sequence of `(family, bytes)` pairs, or `font_dir`, a directory whose `.ttf`,
-`.otf`, and `.ttc` files
-`Document::load_fonts_from_dir` labels by file name, it calls
-`Document::to_pdf_with_fonts_and_options` with the given fonts first, as
-`rdocx convert --font-dir` does. That call lays out with the caller fonts only,
-so a family they do not provide, even through the automatic label aliases and
-metric-compatible names, raises `LayoutError`. The native loader reads a
-missing directory as an empty one, so the binding raises `FileNotFoundError`
-for a missing `font_dir` and `NotADirectoryError` for a file, before any
-layout. SVG and raster output take no caller fonts.
+`.otf`, and `.ttc` files `FontFile::load_dir` reads in file name order and
+labels by file name, it calls `Document::to_pdf_with_fonts_and_options` with
+the given fonts first, as `rdocx convert --font-dir` does. The caller fonts
+come before every other source, and a family they do not provide resolves as
+`to_pdf` resolves it. `FontFile::load_dir` reports a missing directory as a
+`NotFound` error and a file as a `NotADirectory` error, so the binding raises
+`FileNotFoundError` or `NotADirectoryError` before any layout.
+
+`render_page_to_png`, `render_all_pages`, `render_pages`, and
+`render_page_to_svg` take the same keyword-only `fonts` and `font_dir` and call
+the matching `Document::*_with_fonts_and_options` method, which resolves fonts
+as `to_pdf_with_fonts_and_options` does, so a preview and the PDF of one call
+draw the same faces. `render_pages_with_fonts_and_options` takes an optional
+page selection, `None` for every page, because the uncached layout cannot be
+counted without laying out twice. `layout` and `layout_page` take them too and
+call `Document::layout_with_fonts_and_bundled_fallback`, which keeps their
+bundled-font-only base. When both are given, the directory fonts follow the
+`fonts` pairs. `to_pdfa_deterministic` takes no caller fonts.
+
+Python `Presentation.to_pdf`, `to_notes_pdf`, `render_slide_to_png`,
+`render_all_slides`, `render_all_notes`, and `text_layout` take the same
+keyword-only `fonts` and `font_dir` and call the matching
+`Presentation::*_deterministic_with_fonts` method. Those load the caller fonts
+over the bundled fonts in the one font manager that lowers the slides, so the
+fit `text_layout` reports holds for the faces the render draws. System fonts
+stay out.
 
 Native Word SVG adds `SvgDiagnostic`, `SvgRenderResult`, and four additive
 `Document` methods. `render_page_to_svg` and

@@ -386,11 +386,42 @@ pub(crate) fn collect_glyph_usage(layout: &LayoutResult) -> HashMap<FontId, Font
     usage
 }
 
+/// Parse a face at the variation instance layout shaped it with.
+pub(crate) fn instanced_face(font_data: &FontData) -> Option<ttf_parser::Face<'_>> {
+    let mut face = ttf_parser::Face::parse(&font_data.data, font_data.face_index).ok()?;
+    for (tag, value) in &font_data.variations {
+        face.set_variation(ttf_parser::Tag::from_bytes(tag), *value);
+    }
+    Some(face)
+}
+
 /// Subset a font and prepare it for PDF embedding.
+///
+/// A variable face is instanced at its layout coordinates, so the embedded
+/// outlines are the ones layout measured rather than the default instance.
+/// Should instancing fail, the default outlines are embedded instead, still
+/// placed at the layout advances, so the text never disappears.
 pub(crate) fn prepare_font(font_data: &FontData, usage: &mut FontUsage) -> Option<PreparedFont> {
-    // Subset the font
-    let subset_bytes =
-        subsetter::subset(&font_data.data, font_data.face_index, &usage.remapper).ok()?;
+    let coordinates = font_data
+        .variations
+        .iter()
+        .map(|(tag, value)| (subsetter::Tag::new(tag), *value))
+        .collect::<Vec<_>>();
+    let instanced = (!coordinates.is_empty())
+        .then(|| {
+            subsetter::subset_with_variations(
+                &font_data.data,
+                font_data.face_index,
+                &coordinates,
+                &usage.remapper,
+            )
+            .ok()
+        })
+        .flatten();
+    let subset_bytes = match instanced {
+        Some(bytes) => bytes,
+        None => subsetter::subset(&font_data.data, font_data.face_index, &usage.remapper).ok()?,
+    };
 
     // Build ToUnicode CMap
     let mut cmap = UnicodeCmap::new(
@@ -425,9 +456,8 @@ pub(crate) fn prepare_font(font_data: &FontData, usage: &mut FontUsage) -> Optio
 fn compute_glyph_widths(font_data: &FontData, usage: &FontUsage) -> Vec<(u16, f64)> {
     let mut widths = Vec::new();
 
-    let face = match ttf_parser::Face::parse(&font_data.data, font_data.face_index) {
-        Ok(f) => f,
-        Err(_) => return widths,
+    let Some(face) = instanced_face(font_data) else {
+        return widths;
     };
 
     let units_per_em = face.units_per_em() as f64;
@@ -460,7 +490,7 @@ pub(crate) struct FontMetricsInfo {
 }
 
 pub(crate) fn get_font_metrics(font_data: &FontData) -> Option<FontMetricsInfo> {
-    let face = ttf_parser::Face::parse(&font_data.data, font_data.face_index).ok()?;
+    let face = instanced_face(font_data)?;
     let units_per_em = face.units_per_em() as f64;
     let scale = 1000.0 / units_per_em;
 
@@ -648,6 +678,60 @@ mod tests {
                 entries.get(&subset_glyph).cloned().unwrap_or_default()
             })
             .collect()
+    }
+
+    /// Issue 297: a bold run of a variable caller face embeds the static
+    /// instance layout shaped, with the widths layout measured.
+    #[test]
+    fn a_variable_caller_face_embeds_the_instance_layout_measured() {
+        let variable = include_bytes!("../../oxml-layout/fonts/NotoSansSC-FX058-subset.ttf");
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        fonts.load_additional_fonts(&[oxml_layout::FontFile {
+            family: "Caller Variable".to_owned(),
+            data: variable.to_vec(),
+        }]);
+        let regular = fonts
+            .resolve_font(Some("Caller Variable"), false, false)
+            .unwrap();
+        let bold = fonts
+            .resolve_font(Some("Caller Variable"), true, false)
+            .unwrap();
+        let runs = vec![
+            plain_run(&fonts, regular, "Hill"),
+            plain_run(&fonts, bold, "Hill"),
+        ];
+        let layout = layout_of(&fonts, runs.clone());
+        let mut usage = collect_glyph_usage(&layout);
+        let l_glyph = ttf_parser::Face::parse(variable, 0)
+            .unwrap()
+            .glyph_index('l')
+            .unwrap()
+            .0;
+        let mut stems = Vec::new();
+        for (font_id, run) in [(regular, &runs[0]), (bold, &runs[1])] {
+            let PositionedElement::Text(run) = run else {
+                unreachable!("plain runs are glyph runs");
+            };
+            let font = layout.fonts.iter().find(|font| font.id == font_id).unwrap();
+            let prepared = prepare_font(font, usage.get_mut(&font_id).unwrap()).unwrap();
+            let subset = ttf_parser::Face::parse(&prepared.subset_bytes, 0).unwrap();
+            assert!(
+                !subset.is_variable(),
+                "the embedded face is a static instance"
+            );
+            for (glyph, advance) in run.glyph_ids.iter().zip(&run.advances) {
+                let subset_glyph = prepared.remapper.get(*glyph).unwrap();
+                let (_, width) = prepared
+                    .widths
+                    .iter()
+                    .find(|(glyph, _)| *glyph == subset_glyph)
+                    .unwrap();
+                assert!((width * 11.0 / 1000.0 - advance).abs() < 0.01);
+            }
+            let l = ttf_parser::GlyphId(prepared.remapper.get(l_glyph).unwrap());
+            stems.push(subset.glyph_bounding_box(l).unwrap().width());
+        }
+        assert!(stems[1] > stems[0], "the bold stem is wider: {stems:?}");
     }
 
     #[test]

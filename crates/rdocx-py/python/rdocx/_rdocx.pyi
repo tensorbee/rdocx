@@ -618,17 +618,41 @@ class Document:
 
         ``fonts`` gives ``(family, font bytes)`` pairs and ``font_dir`` a
         directory whose ``.ttf``, ``.otf`` and ``.ttc`` files are named after
-        their family. When either is given, layout uses only those fonts, as
-        ``rdocx convert --font-dir`` does, so a family they do not provide
-        raises ``LayoutError``. A missing ``font_dir`` raises
-        ``FileNotFoundError``.
+        their family. When both are given, the directory fonts follow the
+        ``fonts`` pairs. Those fonts come before every other font source, as
+        ``rdocx convert --font-dir`` does, and a family they do not provide
+        resolves as without them. A missing ``font_dir`` raises
+        ``FileNotFoundError`` and a file ``NotADirectoryError``. The PNG, image
+        and SVG render methods, ``layout`` and ``layout_page`` take the same two
+        arguments. ``to_pdfa_deterministic`` does not.
         """
     def to_pdfa_deterministic(
         self, profile: _Literal["pdfa-2b", "pdfa-3b"] = "pdfa-2b"
     ) -> bytes: ...
-    def render_page_to_png(self, page_index: int, dpi: float = 150.0, *, revision_view: _RevisionView = "accepted") -> bytes | None: ...
-    def render_page_to_svg(self, page_index: int) -> SvgRenderResult | None: ...
-    def render_all_pages(self, dpi: float = 150.0, *, revision_view: _RevisionView = "accepted") -> list[bytes]: ...
+    def render_page_to_png(
+        self,
+        page_index: int,
+        dpi: float = 150.0,
+        *,
+        revision_view: _RevisionView = "accepted",
+        fonts: _Sequence[tuple[str, bytes]] | None = None,
+        font_dir: _Path | None = None,
+    ) -> bytes | None: ...
+    def render_page_to_svg(
+        self,
+        page_index: int,
+        *,
+        fonts: _Sequence[tuple[str, bytes]] | None = None,
+        font_dir: _Path | None = None,
+    ) -> SvgRenderResult | None: ...
+    def render_all_pages(
+        self,
+        dpi: float = 150.0,
+        *,
+        revision_view: _RevisionView = "accepted",
+        fonts: _Sequence[tuple[str, bytes]] | None = None,
+        font_dir: _Path | None = None,
+    ) -> list[bytes]: ...
     def render_pages(
         self,
         *,
@@ -638,6 +662,8 @@ class Document:
         transparent: bool = False,
         pages: list[int] | None = None,
         revision_view: _RevisionView = "accepted",
+        fonts: _Sequence[tuple[str, bytes]] | None = None,
+        font_dir: _Path | None = None,
     ) -> list[bytes] | bytes: ...
     def compare(
         self,
@@ -818,8 +844,19 @@ class Document:
     @property
     def bookmarks(self) -> tuple[Bookmark, ...]: ...
     def add_bookmark(self, name: str, range: RunRange) -> int: ...
-    def layout(self) -> tuple[LayoutFragment, ...]: ...
-    def layout_page(self, page_index: int) -> LayoutPage | None: ...
+    def layout(
+        self,
+        *,
+        fonts: _Sequence[tuple[str, bytes]] | None = None,
+        font_dir: _Path | None = None,
+    ) -> tuple[LayoutFragment, ...]: ...
+    def layout_page(
+        self,
+        page_index: int,
+        *,
+        fonts: _Sequence[tuple[str, bytes]] | None = None,
+        font_dir: _Path | None = None,
+    ) -> LayoutPage | None: ...
     def rebuild_toc(self) -> TocRebuildReport: ...
     def replace_text_at(
         self, item: StoryItem, old: str, new: str, *, expect: int | None = None

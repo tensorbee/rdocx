@@ -3,10 +3,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::PathBuf;
 
 use oxml_py_support::{PathSeg, RevisionCounter, StaleElementError};
-use pyo3::exceptions::{
-    PyFileNotFoundError, PyIndexError, PyNotADirectoryError, PyOverflowError, PyTypeError,
-    PyValueError,
-};
+use pyo3::exceptions::{PyIndexError, PyOverflowError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyList, PyTuple};
 use smallvec::smallvec;
@@ -2233,47 +2230,12 @@ impl PyDocument {
         revision_view: &str,
     ) -> PyResult<Bound<'py, PyBytes>> {
         let options = parse_render_options(revision_view)?;
-        if fonts.is_none() && font_dir.is_none() {
-            return py
-                .detach(|| self.inner.to_pdf_with_options(options))
-                .map(|bytes| PyBytes::new(py, &bytes))
-                .map_err(|error| rdocx_to_pyerr(py, error));
-        }
-        let mut font_files = fonts
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(family, data)| (family, data.as_bytes().to_vec()))
-            .collect::<Vec<_>>();
-        // The native loader reads a missing directory as one without fonts.
-        if let Some(font_dir) = &font_dir
-            && !font_dir.is_dir()
-        {
-            return Err(if font_dir.exists() {
-                PyNotADirectoryError::new_err(format!(
-                    "font directory {} is not a directory",
-                    font_dir.display()
-                ))
-            } else {
-                PyFileNotFoundError::new_err(format!(
-                    "font directory {} does not exist",
-                    font_dir.display()
-                ))
-            });
-        }
-        py.detach(|| {
-            if let Some(font_dir) = &font_dir {
-                font_files.extend(
-                    rdocx::Document::load_fonts_from_dir(font_dir)
-                        .into_iter()
-                        .map(|font| (font.family, font.data)),
-                );
-            }
-            let font_files = font_files
-                .iter()
-                .map(|(family, data)| (family.as_str(), data.as_slice()))
-                .collect::<Vec<_>>();
-            self.inner
-                .to_pdf_with_fonts_and_options(&font_files, options)
+        let fonts = caller_fonts(fonts, font_dir)?;
+        py.detach(|| match &fonts {
+            None => self.inner.to_pdf_with_options(options),
+            Some(fonts) => self
+                .inner
+                .to_pdf_with_fonts_and_options(&rdocx::FontFile::as_refs(fonts), options),
         })
         .map(|bytes| PyBytes::new(py, &bytes))
         .map_err(|error| rdocx_to_pyerr(py, error))
@@ -2299,30 +2261,51 @@ impl PyDocument {
             .map_err(|error| rdocx_to_pyerr(py, error))
     }
 
-    #[pyo3(signature = (page_index, dpi = 150.0, *, revision_view = "accepted"))]
+    #[pyo3(signature = (page_index, dpi = 150.0, *, revision_view = "accepted", fonts = None, font_dir = None))]
     fn render_page_to_png<'py>(
         &self,
         py: Python<'py>,
         page_index: usize,
         dpi: f64,
         revision_view: &str,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
     ) -> PyResult<Option<Bound<'py, PyBytes>>> {
         let options = parse_render_options(revision_view)?;
-        py.detach(|| {
-            self.inner
-                .render_page_to_png_with_options(page_index, dpi, options)
+        let fonts = caller_fonts(fonts, font_dir)?;
+        py.detach(|| match &fonts {
+            None => self
+                .inner
+                .render_page_to_png_with_options(page_index, dpi, options),
+            Some(fonts) => self.inner.render_page_to_png_with_fonts_and_options(
+                page_index,
+                dpi,
+                &rdocx::FontFile::as_refs(fonts),
+                options,
+            ),
         })
         .map(|bytes| bytes.map(|bytes| PyBytes::new(py, &bytes)))
         .map_err(|error| rdocx_to_pyerr(py, error))
     }
 
-    fn render_page_to_svg(
+    #[pyo3(signature = (page_index, *, fonts = None, font_dir = None))]
+    fn render_page_to_svg<'py>(
         &self,
-        py: Python<'_>,
+        py: Python<'py>,
         page_index: usize,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
     ) -> PyResult<Option<PySvgRenderResult>> {
+        let fonts = caller_fonts(fonts, font_dir)?;
         let rendered = py
-            .detach(|| self.inner.render_page_to_svg(page_index))
+            .detach(|| match &fonts {
+                None => self.inner.render_page_to_svg(page_index),
+                Some(fonts) => self.inner.render_page_to_svg_with_fonts_and_options(
+                    page_index,
+                    &rdocx::FontFile::as_refs(fonts),
+                    rdocx::RenderOptions::default(),
+                ),
+            })
             .map_err(|error| rdocx_to_pyerr(py, error))?;
         Ok(rendered.map(|result| PySvgRenderResult {
             svg: result.svg,
@@ -2337,36 +2320,57 @@ impl PyDocument {
         }))
     }
 
-    #[pyo3(signature = (dpi = 150.0, *, revision_view = "accepted"))]
+    #[pyo3(signature = (dpi = 150.0, *, revision_view = "accepted", fonts = None, font_dir = None))]
     fn render_all_pages<'py>(
         &self,
         py: Python<'py>,
         dpi: f64,
         revision_view: &str,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
     ) -> PyResult<Bound<'py, PyList>> {
         let options = parse_render_options(revision_view)?;
+        let fonts = caller_fonts(fonts, font_dir)?;
         let pages = py
-            .detach(|| self.inner.render_all_pages_with_options(dpi, options))
+            .detach(|| match &fonts {
+                None => self.inner.render_all_pages_with_options(dpi, options),
+                Some(fonts) => self.inner.render_all_pages_with_fonts_and_options(
+                    dpi,
+                    &rdocx::FontFile::as_refs(fonts),
+                    options,
+                ),
+            })
             .map_err(|error| rdocx_to_pyerr(py, error))?;
         PyList::new(py, pages.iter().map(|page| PyBytes::new(py, page)))
     }
 
-    #[pyo3(signature = (*, dpi = 150.0, format = "png", quality = 90, transparent = false, pages = None, revision_view = "accepted"))]
+    #[pyo3(signature = (*, dpi = 150.0, format = "png", quality = 90, transparent = false, pages = None, revision_view = "accepted", fonts = None, font_dir = None))]
     #[allow(clippy::too_many_arguments)]
-    fn render_pages(
+    fn render_pages<'py>(
         &self,
-        py: Python<'_>,
+        py: Python<'py>,
         dpi: f64,
         format: &str,
         quality: u8,
         transparent: bool,
         pages: Option<Vec<usize>>,
         revision_view: &str,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
     ) -> PyResult<Py<PyAny>> {
         let options = parse_render_options(revision_view)?;
+        let fonts = caller_fonts(fonts, font_dir)?;
         let rendered = py
             .detach(|| {
                 let format = parse_raster_format(format, quality, transparent)?;
+                if let Some(fonts) = &fonts {
+                    return self.inner.render_pages_with_fonts_and_options(
+                        pages.as_deref(),
+                        rdocx::RasterOptions { dpi, format },
+                        &rdocx::FontFile::as_refs(fonts),
+                        options,
+                    );
+                }
                 let selected = match pages {
                     Some(pages) => pages,
                     None => {
@@ -3423,10 +3427,29 @@ impl PyDocument {
             .map_err(|error| rdocx_to_pyerr(py, error))
     }
 
-    fn layout<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+    #[pyo3(signature = (*, fonts = None, font_dir = None))]
+    fn layout<'py>(
+        &self,
+        py: Python<'py>,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
+    ) -> PyResult<Bound<'py, PyTuple>> {
+        let fonts = caller_fonts(fonts, font_dir)?;
         let fragments = py
             .detach(|| {
-                let layout = self.inner.layout_deterministic()?;
+                let (cached, owned);
+                let layout = match &fonts {
+                    None => {
+                        cached = self.inner.layout_deterministic()?;
+                        &*cached
+                    }
+                    Some(fonts) => {
+                        owned = self.inner.layout_with_fonts_and_bundled_fallback(
+                            &rdocx::FontFile::as_refs(fonts),
+                        )?;
+                        &owned
+                    }
+                };
                 let mut fragments = Vec::new();
                 for body_index in 0..self.inner.content_count() {
                     let Some(body_fragments) = layout.body_layout_fragments(body_index) else {
@@ -3450,9 +3473,29 @@ impl PyDocument {
         PyTuple::new(py, fragments)
     }
 
-    fn layout_page(&self, page_index: usize, py: Python<'_>) -> PyResult<Option<PyLayoutPage>> {
+    #[pyo3(signature = (page_index, *, fonts = None, font_dir = None))]
+    fn layout_page<'py>(
+        &self,
+        page_index: usize,
+        py: Python<'py>,
+        fonts: Option<Vec<(String, Bound<'py, PyBytes>)>>,
+        font_dir: Option<PathBuf>,
+    ) -> PyResult<Option<PyLayoutPage>> {
+        let fonts = caller_fonts(fonts, font_dir)?;
         py.detach(|| {
-            let layout = self.inner.layout_deterministic()?;
+            let (cached, owned);
+            let layout = match &fonts {
+                None => {
+                    cached = self.inner.layout_deterministic()?;
+                    &*cached
+                }
+                Some(fonts) => {
+                    owned = self
+                        .inner
+                        .layout_with_fonts_and_bundled_fallback(&rdocx::FontFile::as_refs(fonts))?;
+                    &owned
+                }
+            };
             Ok(layout
                 .layout
                 .pages
@@ -3939,6 +3982,30 @@ impl PyDocument {
         slf.borrow_mut(py).revisions.bump();
         Ok(())
     }
+}
+
+/// The fonts of a `fonts=` and `font_dir=` pair, or `None` when neither is
+/// given. A missing `font_dir` raises `FileNotFoundError` and a file
+/// `NotADirectoryError`, before any layout.
+fn caller_fonts(
+    fonts: Option<Vec<(String, Bound<'_, PyBytes>)>>,
+    font_dir: Option<PathBuf>,
+) -> PyResult<Option<Vec<rdocx::FontFile>>> {
+    if fonts.is_none() && font_dir.is_none() {
+        return Ok(None);
+    }
+    let mut files = fonts
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(family, data)| rdocx::FontFile {
+            family,
+            data: data.as_bytes().to_vec(),
+        })
+        .collect::<Vec<_>>();
+    if let Some(font_dir) = font_dir {
+        files.extend(rdocx::FontFile::load_dir(&font_dir)?);
+    }
+    Ok(Some(files))
 }
 
 fn parse_render_options(revision_view: &str) -> PyResult<rdocx::RenderOptions> {

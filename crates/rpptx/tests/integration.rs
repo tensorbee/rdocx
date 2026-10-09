@@ -9709,6 +9709,91 @@ fn text_layout_width_factor_flips_a_frame_that_only_fits_at_full_width() {
     }
 }
 
+/// Issue 296: caller fonts reach every rendered output and the text layout
+/// fit check, all from one font manager.
+#[test]
+fn caller_fonts_reach_every_render_and_the_text_layout_fit_check() {
+    let family = "Rpptx Caller Mono";
+    let mono = include_bytes!("../../oxml-layout/fonts/LiberationMono-Regular.ttf").as_slice();
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    let mut slide = presentation.slide_mut(0).unwrap();
+    let mut textbox = slide
+        .add_textbox(Emu(500_000), Emu(500_000), Emu(8_000_000), Emu(900_000))
+        .unwrap();
+    textbox.set_text("Caller face everywhere").unwrap();
+    let mut frame = textbox.text_frame().unwrap();
+    let mut paragraph = frame.paragraph_mut(0).unwrap();
+    paragraph
+        .run_mut(0)
+        .unwrap()
+        .set_font(Some(TextFont::new(family).unwrap()));
+    let fonts = [(family, mono)];
+
+    let pdf = String::from_utf8_lossy(
+        &presentation
+            .to_pdf_deterministic_with_fonts(&fonts)
+            .unwrap(),
+    )
+    .into_owned();
+    assert!(pdf.contains("/BaseFont /LiberationMono"));
+    assert!(
+        !String::from_utf8_lossy(&presentation.to_pdf_deterministic().unwrap())
+            .contains("/BaseFont /LiberationMono")
+    );
+    let png = presentation
+        .slide_png_deterministic_with_fonts(0, 36.0, &fonts)
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        png,
+        presentation
+            .slide_png_deterministic(0, 36.0)
+            .unwrap()
+            .unwrap()
+    );
+    assert_eq!(
+        presentation
+            .slide_pngs_deterministic_with_fonts(36.0, &fonts)
+            .unwrap(),
+        vec![png]
+    );
+
+    // The fit check measures the line the render draws in the caller face.
+    let (_, layout) = presentation
+        .render_deterministic_with_fonts(&fonts)
+        .unwrap();
+    let mut drawn_width = 0.0;
+    walk(&layout.pages[0].elements, &mut |element, _| match element {
+        PositionedElement::Text(run) => drawn_width += run.advances.iter().sum::<f64>(),
+        PositionedElement::MultilingualText(run) => {
+            drawn_width += run.x_advances.iter().sum::<f64>();
+        }
+        _ => {}
+    });
+    let measured = presentation
+        .text_layout_deterministic_with_fonts(1.0, &fonts)
+        .unwrap();
+    let bundled = presentation.text_layout_deterministic(1.0).unwrap();
+    let measured_width = measured[0].layout.lines[0].bounds.width;
+    assert!((measured_width - drawn_width).abs() < 0.01);
+    assert!(measured_width > bundled[0].layout.lines[0].bounds.width);
+
+    assert_eq!(
+        presentation
+            .to_notes_pdf_deterministic_with_fonts(&[])
+            .unwrap(),
+        presentation.to_notes_pdf_deterministic().unwrap()
+    );
+    assert_eq!(
+        presentation
+            .notes_page_pngs_deterministic_with_fonts(24.0, &fonts)
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
 #[test]
 fn text_layout_reports_the_scale_and_fit_each_autofit_mode_draws() {
     let paragraphs = text_layout_paragraphs(&["one", "two", "three", "four"], "");

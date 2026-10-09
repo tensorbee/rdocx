@@ -20,7 +20,7 @@ replaces text, and produces deterministic fixed output.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rpptx-cli | 40,886 compressed bytes, 179,264 member bytes, 8 members | 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --no-verify` | Tracked `rpptx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-09 |
+| Crates.io archive: rpptx-cli | 41,986 compressed bytes, 185,081 member bytes, 8 members | 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --no-verify` | Tracked `rpptx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-09 |
 
 ## Use it when
 
@@ -84,6 +84,10 @@ neither a clock nor a random source. `resolve` takes a thread id. `remove`
 takes a thread id, which also removes its replies, or a reply id. Every
 mutation requires `-o/--output`, refuses an existing output, publishes only a
 complete presentation, and supports a schema-1 record through `--json`.
+
+`convert`, `render`, and `thumbnail` take `--font-dir DIR`, a directory of
+`.ttf`, `.otf`, and `.ttc` files, each labelled with its file name, whose faces
+come before the bundled fonts. A missing directory is an error.
 
 `convert`, `render`, and `thumbnail` refuse an output file that already exists
 unless `--force` is given. Even with `--force` they refuse their own input file

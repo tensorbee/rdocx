@@ -187,6 +187,12 @@ def exercise_rpptx_types(path: Path) -> None:
     slide_pngs: list[bytes] = presentation.render_all_slides()
     notes_pdf: bytes = presentation.to_notes_pdf()
     notes_pngs: list[bytes] = presentation.render_all_notes()
+    caller_fonts = [("Lora", b"font")]
+    font_pdf: bytes = presentation.to_pdf(fonts=caller_fonts, font_dir="fonts")
+    font_png: bytes | None = presentation.render_slide_to_png(0, fonts=caller_fonts)
+    font_pngs: list[bytes] = presentation.render_all_slides(font_dir="fonts")
+    font_notes_pdf: bytes = presentation.to_notes_pdf(font_dir="fonts")
+    font_notes_pngs: list[bytes] = presentation.render_all_notes(150.0, fonts=caller_fonts)
     notes_text: str | None = presentation.slides[0].notes_text
     presentation.slides[0].notes_text = "Updated speaker note"
     presentation.add_comment_author(
@@ -466,6 +472,7 @@ def exercise_rpptx_click_action_types(shape: Shape, slide: Slide) -> None:
 def exercise_rpptx_text_layout_types(presentation: Presentation) -> None:
     frames: tuple[TextFrameLayout, ...] = presentation.text_layout()
     narrower: tuple[TextFrameLayout, ...] = presentation.text_layout(width_factor=0.95)
+    with_fonts: tuple[TextFrameLayout, ...] = presentation.text_layout(fonts=[("Lora", b"font")])
     for frame in frames + narrower:
         slide_index: int = frame.slide_index
         shape_id: int | None = frame.shape_id

@@ -53,6 +53,7 @@ pub use oxml_drawing::text::{
 #[cfg(feature = "render")]
 use oxml_drawing::theme::CT_OfficeStyleSheet;
 use oxml_drawing::xfrm::{CT_Point2D, CT_PositiveSize2D, CT_Transform2D};
+pub use oxml_layout::FontFile;
 use oxml_layout::MediaId;
 #[cfg(feature = "render")]
 use oxml_layout::{
@@ -1106,7 +1107,26 @@ impl Presentation {
     /// Resolves and lays out the current presentation with deterministic fonts.
     #[cfg(feature = "render")]
     pub fn render_deterministic(&self) -> Result<(RenderInput, LayoutResult)> {
-        assemble_render_input(&self.staged_package(false)?)
+        self.render_deterministic_with_fonts(&[])
+    }
+
+    /// Resolves and lays out the current presentation with caller fonts.
+    ///
+    /// Each entry is `(family, font bytes)`. Caller faces take priority over
+    /// the bundled fonts, and system fonts are still never read, so the
+    /// output stays reproducible. Every `*_deterministic_with_fonts` method
+    /// resolves fonts this way.
+    #[cfg(feature = "render")]
+    pub fn render_deterministic_with_fonts(
+        &self,
+        font_files: &[(&str, &[u8])],
+    ) -> Result<(RenderInput, LayoutResult)> {
+        let assembly = prepare_render_context(
+            &self.staged_package(false)?,
+            false,
+            &FontFile::from_refs(font_files),
+        )?;
+        Ok((assembly.input, assembly.layout))
     }
 
     /// Evaluates and renders one slide at an explicit slide-local timestamp.
@@ -1151,7 +1171,7 @@ impl Presentation {
         fallback_policy: Option<MediaFallbackPolicy>,
     ) -> Result<(DeterministicTimelineFrame, Vec<EvaluatedMediaState>)> {
         let package = self.staged_package(false)?;
-        let mut assembly = prepare_render_context(&package, fallback_policy.is_some())?;
+        let mut assembly = prepare_render_context(&package, fallback_policy.is_some(), &[])?;
         render_prepared_timeline_request(
             &mut assembly,
             TimelineRequest {
@@ -1168,21 +1188,51 @@ impl Presentation {
     /// Renders the current presentation to a complete deterministic PDF.
     #[cfg(feature = "render")]
     pub fn to_pdf_deterministic(&self) -> Result<Vec<u8>> {
-        let (_, layout) = self.render_deterministic()?;
+        self.to_pdf_deterministic_with_fonts(&[])
+    }
+
+    /// Renders the current presentation to a PDF with caller fonts, resolved
+    /// as [`Self::render_deterministic_with_fonts`] resolves them.
+    #[cfg(feature = "render")]
+    pub fn to_pdf_deterministic_with_fonts(&self, font_files: &[(&str, &[u8])]) -> Result<Vec<u8>> {
+        let (_, layout) = self.render_deterministic_with_fonts(font_files)?;
         Ok(oxml_pdf::render_to_pdf(&layout))
     }
 
     /// Renders one deterministic slide PNG at `dpi` by zero-based index.
     #[cfg(feature = "render")]
     pub fn slide_png_deterministic(&self, slide_index: usize, dpi: f64) -> Result<Option<Vec<u8>>> {
-        let (_, layout) = self.render_deterministic()?;
+        self.slide_png_deterministic_with_fonts(slide_index, dpi, &[])
+    }
+
+    /// Renders one slide PNG with caller fonts, resolved as
+    /// [`Self::render_deterministic_with_fonts`] resolves them.
+    #[cfg(feature = "render")]
+    pub fn slide_png_deterministic_with_fonts(
+        &self,
+        slide_index: usize,
+        dpi: f64,
+        font_files: &[(&str, &[u8])],
+    ) -> Result<Option<Vec<u8>>> {
+        let (_, layout) = self.render_deterministic_with_fonts(font_files)?;
         render_export_png(&layout, slide_index, dpi)
     }
 
     /// Renders one deterministic PNG per slide at `dpi`.
     #[cfg(feature = "render")]
     pub fn slide_pngs_deterministic(&self, dpi: f64) -> Result<Vec<Vec<u8>>> {
-        let (_, layout) = self.render_deterministic()?;
+        self.slide_pngs_deterministic_with_fonts(dpi, &[])
+    }
+
+    /// Renders one PNG per slide with caller fonts, resolved as
+    /// [`Self::render_deterministic_with_fonts`] resolves them.
+    #[cfg(feature = "render")]
+    pub fn slide_pngs_deterministic_with_fonts(
+        &self,
+        dpi: f64,
+        font_files: &[(&str, &[u8])],
+    ) -> Result<Vec<Vec<u8>>> {
+        let (_, layout) = self.render_deterministic_with_fonts(font_files)?;
         render_export_pngs(&layout, dpi)
     }
 
@@ -1197,13 +1247,28 @@ impl Presentation {
     /// rendered layout and `0.95` asks whether the text fits a narrower frame.
     #[cfg(feature = "render")]
     pub fn text_layout_deterministic(&self, width_factor: f64) -> Result<Vec<TextFrameLayout>> {
+        self.text_layout_deterministic_with_fonts(width_factor, &[])
+    }
+
+    /// Lays out the text of every text-bearing slide shape with caller fonts.
+    ///
+    /// The fonts resolve as [`Self::render_deterministic_with_fonts`] resolves
+    /// them, so the fit this reports holds for the slides
+    /// [`Self::slide_png_deterministic_with_fonts`] draws with the same fonts.
+    #[cfg(feature = "render")]
+    pub fn text_layout_deterministic_with_fonts(
+        &self,
+        width_factor: f64,
+        font_files: &[(&str, &[u8])],
+    ) -> Result<Vec<TextFrameLayout>> {
         if !width_factor.is_finite() || width_factor <= 0.0 {
             return Err(render_failure(format!(
                 "text layout width factor must be finite and positive, found {width_factor}"
             )));
         }
         let package = self.staged_package(false)?;
-        let mut assembly = prepare_render_context(&package, false)?;
+        let mut assembly =
+            prepare_render_context(&package, false, &FontFile::from_refs(font_files))?;
         let mut frames = Vec::new();
         for (slide_index, ((prepared, slide), directions)) in assembly
             .slides
@@ -1300,16 +1365,37 @@ impl Presentation {
     /// Renders one deterministic speaker-notes page per source slide.
     #[cfg(feature = "render")]
     pub fn to_notes_pdf_deterministic(&self) -> Result<Vec<u8>> {
+        self.to_notes_pdf_deterministic_with_fonts(&[])
+    }
+
+    /// Renders the speaker-notes pages to a PDF with caller fonts, resolved
+    /// as [`Self::render_deterministic_with_fonts`] resolves them.
+    #[cfg(feature = "render")]
+    pub fn to_notes_pdf_deterministic_with_fonts(
+        &self,
+        font_files: &[(&str, &[u8])],
+    ) -> Result<Vec<u8>> {
         let package = self.staged_package(false)?;
-        let layout = render_notes_pages(&package)?;
+        let layout = render_notes_pages(&package, &FontFile::from_refs(font_files))?;
         Ok(oxml_pdf::render_to_pdf(&layout))
     }
 
     /// Renders one deterministic PNG per speaker-notes page at `dpi`.
     #[cfg(feature = "render")]
     pub fn notes_page_pngs_deterministic(&self, dpi: f64) -> Result<Vec<Vec<u8>>> {
+        self.notes_page_pngs_deterministic_with_fonts(dpi, &[])
+    }
+
+    /// Renders one PNG per speaker-notes page with caller fonts, resolved as
+    /// [`Self::render_deterministic_with_fonts`] resolves them.
+    #[cfg(feature = "render")]
+    pub fn notes_page_pngs_deterministic_with_fonts(
+        &self,
+        dpi: f64,
+        font_files: &[(&str, &[u8])],
+    ) -> Result<Vec<Vec<u8>>> {
         let package = self.staged_package(false)?;
-        let layout = render_notes_pages(&package)?;
+        let layout = render_notes_pages(&package, &FontFile::from_refs(font_files))?;
         render_export_pngs(&layout, dpi)
     }
 
@@ -9949,12 +10035,6 @@ fn replace_text_in_run_segment(runs: &mut [TextRun], placeholder: &str, value: &
 }
 
 #[cfg(feature = "render")]
-fn assemble_render_input(package: &OpcPackage) -> Result<(RenderInput, LayoutResult)> {
-    let assembly = prepare_render_context(package, false)?;
-    Ok((assembly.input, assembly.layout))
-}
-
-#[cfg(feature = "render")]
 const MAX_PRESENTATION_EXPORT_DPI: f64 = 600.0;
 #[cfg(feature = "render")]
 const MAX_PRESENTATION_EXPORT_RASTER_BYTES: u64 = 256 * 1024 * 1024;
@@ -10010,8 +10090,8 @@ fn validate_export_png_pages(pages: &[std::sync::Arc<PageFrame>], dpi: f64) -> R
 }
 
 #[cfg(feature = "render")]
-fn render_notes_pages(package: &OpcPackage) -> Result<LayoutResult> {
-    let mut assembly = prepare_render_context(package, false)?;
+fn render_notes_pages(package: &OpcPackage, fonts: &[FontFile]) -> Result<LayoutResult> {
+    let mut assembly = prepare_render_context(package, false, fonts)?;
     if assembly.slides.is_empty() {
         return Ok(LayoutResult::new(
             Vec::new(),
@@ -10216,7 +10296,7 @@ fn render_handout_pages(
     package: &OpcPackage,
     handout_layout: HandoutLayout,
 ) -> Result<LayoutResult> {
-    let mut assembly = prepare_render_context(package, false)?;
+    let mut assembly = prepare_render_context(package, false, &[])?;
     if assembly.slides.is_empty() {
         return Ok(LayoutResult::new(
             Vec::new(),
@@ -11079,6 +11159,7 @@ fn max_resolved_sample_retention_count() -> usize {
 fn prepare_render_context(
     package: &OpcPackage,
     collect_media_diagnostics: bool,
+    fonts: &[FontFile],
 ) -> Result<PreparedRenderAssembly> {
     #[cfg(test)]
     PREPARED_RENDER_ASSEMBLY_COUNT.with(|count| count.set(count.get() + 1));
@@ -11109,6 +11190,7 @@ fn prepare_render_context(
     PREPARED_FONT_MANAGER_COUNT.with(|count| count.set(count.get() + 1));
     let mut font_manager = FontManager::new_deterministic()
         .map_err(|error| render_failure(format!("deterministic fonts: {error}")))?;
+    font_manager.load_additional_fonts(fonts);
     let mut resolved_slides = Vec::with_capacity(presentation.slide_ids.len());
     let mut text_directions = Vec::with_capacity(presentation.slide_ids.len());
     let mut prepared_slides = Vec::with_capacity(presentation.slide_ids.len());
@@ -11254,7 +11336,7 @@ fn prepare_render_context(
     let input = RenderInput {
         slides: resolved_slides,
         media,
-        fonts: Vec::new(),
+        fonts: fonts.to_vec(),
         metadata: None,
     };
     #[cfg(test)]
