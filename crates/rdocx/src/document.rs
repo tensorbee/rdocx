@@ -507,7 +507,34 @@ pub struct PictureOptions {
     pub crop: Option<PictureCrop>,
     pub anchor: Option<PictureAnchor>,
     pub name: Option<String>,
+    /// Alt text (`wp:docPr/@descr`).
     pub description: Option<String>,
+    /// Alt-text title (`wp:docPr/@title`).
+    pub title: Option<String>,
+    /// Mark the picture decorative, so screen readers skip it.
+    pub decorative: bool,
+}
+
+impl PictureOptions {
+    /// Check the size, crop and anchor distances that picture authoring
+    /// checks, without changing anything.
+    pub fn validate(&self) -> Result<()> {
+        validate_picture_options(self)
+    }
+
+    /// An inline picture of this size with no crop, name or alt text.
+    pub fn new(width: Length, height: Length) -> Self {
+        Self {
+            width,
+            height,
+            crop: None,
+            anchor: None,
+            name: None,
+            description: None,
+            title: None,
+            decorative: false,
+        }
+    }
 }
 
 /// Text flow direction inside an authored Word text box.
@@ -620,7 +647,7 @@ impl From<DrawingWrap> for WrapType {
     }
 }
 
-fn validate_picture_options(options: &PictureOptions) -> Result<()> {
+pub(crate) fn validate_picture_options(options: &PictureOptions) -> Result<()> {
     if options.width.to_emu() <= 0 || options.height.to_emu() <= 0 {
         return Err(Error::Other(
             "picture width and height must be positive".to_owned(),
@@ -721,6 +748,51 @@ fn validate_text_watermark_options(options: &TextWatermarkOptions) -> Result<()>
 
 fn is_rgb_hex(value: &str) -> bool {
     value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Build the drawing of one authored picture from checked options.
+pub(crate) fn picture_drawing(
+    relationship_id: &str,
+    drawing_id: u32,
+    options: PictureOptions,
+) -> CT_Drawing {
+    let source_rect = options.crop.map(|crop| SourceRect {
+        left: crop.left,
+        top: crop.top,
+        right: crop.right,
+        bottom: crop.bottom,
+    });
+    match options.anchor {
+        Some(anchor_options) => {
+            let mut anchor = CT_Anchor::background(
+                relationship_id,
+                options.width.to_emu(),
+                options.height.to_emu(),
+            );
+            apply_picture_anchor(&mut anchor, anchor_options);
+            anchor.doc_pr_id = drawing_id;
+            anchor.name = options.name;
+            anchor.description = options.description;
+            anchor.title = options.title;
+            anchor.decorative = options.decorative;
+            anchor.source_rect = source_rect;
+            CT_Drawing::anchor(anchor)
+        }
+        None => {
+            let mut inline = CT_Inline::new(
+                relationship_id,
+                options.width.to_emu(),
+                options.height.to_emu(),
+            );
+            inline.doc_pr_id = drawing_id;
+            inline.name = options.name;
+            inline.description = options.description;
+            inline.title = options.title;
+            inline.decorative = options.decorative;
+            inline.source_rect = source_rect;
+            CT_Drawing::inline(inline)
+        }
+    }
 }
 
 fn apply_picture_anchor(anchor: &mut CT_Anchor, options: PictureAnchor) {
@@ -5788,6 +5860,7 @@ struct StoryLinkSpan {
     full: Range<usize>,
     rel_id: Option<String>,
     anchor: Option<String>,
+    tooltip: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -6751,6 +6824,7 @@ fn scan_story_item_links_with_scope(
                 full,
                 rel_id: link.rel_id,
                 anchor: link.anchor,
+                tooltip: link.tooltip,
             })
         })
         .collect()
@@ -9677,8 +9751,8 @@ fn scan_story_item_links(xml: &[u8], item: &StoryItemSpan) -> Result<Vec<StoryLi
                     && is_word_namespace
                     && local_name == b"hyperlink"
                 {
-                    let (rel_id, anchor) = story_hyperlink_attributes(&reader, &element)?;
-                    open_links.push((before, rel_id, anchor));
+                    let (rel_id, anchor, tooltip) = story_hyperlink_attributes(&reader, &element)?;
+                    open_links.push((before, rel_id, anchor, tooltip));
                 }
                 let inherited = stack
                     .last()
@@ -9722,11 +9796,12 @@ fn scan_story_item_links(xml: &[u8], item: &StoryItemSpan) -> Result<Vec<StoryLi
                     && is_word_namespace
                     && local_name.as_ref() == b"hyperlink"
                 {
-                    let (rel_id, anchor) = story_hyperlink_attributes(&reader, &element)?;
+                    let (rel_id, anchor, tooltip) = story_hyperlink_attributes(&reader, &element)?;
                     links.push(StoryLinkSpan {
                         full: before..after,
                         rel_id,
                         anchor,
+                        tooltip,
                     });
                 }
             }
@@ -9741,13 +9816,14 @@ fn scan_story_item_links(xml: &[u8], item: &StoryItemSpan) -> Result<Vec<StoryLi
                     && frame.namespace == StoryNamespace::Word
                     && frame.local_name == b"hyperlink"
                 {
-                    let (start, rel_id, anchor) = open_links.pop().ok_or_else(|| {
+                    let (start, rel_id, anchor, tooltip) = open_links.pop().ok_or_else(|| {
                         Error::Other("story hyperlink has no matching start".to_owned())
                     })?;
                     links.push(StoryLinkSpan {
                         full: start..after,
                         rel_id,
                         anchor,
+                        tooltip,
                     });
                 }
                 if !frame.opaque
@@ -9777,9 +9853,10 @@ fn scan_story_item_links(xml: &[u8], item: &StoryItemSpan) -> Result<Vec<StoryLi
 fn story_hyperlink_attributes(
     reader: &NsReader<&[u8]>,
     element: &BytesStart<'_>,
-) -> Result<(Option<String>, Option<String>)> {
+) -> Result<(Option<String>, Option<String>, Option<String>)> {
     let mut rel_id = None;
     let mut anchor = None;
+    let mut tooltip = None;
     for attribute in element.attributes() {
         let attribute = attribute.map_err(|error| {
             Error::Other(format!("story hyperlink attribute scan failed: {error}"))
@@ -9793,6 +9870,8 @@ fn story_hyperlink_attributes(
             &mut rel_id
         } else if word_element(&namespace) && local_name.as_ref() == b"anchor" {
             &mut anchor
+        } else if word_element(&namespace) && local_name.as_ref() == b"tooltip" {
+            &mut tooltip
         } else {
             continue;
         };
@@ -9805,7 +9884,7 @@ fn story_hyperlink_attributes(
                 .into_owned(),
         );
     }
-    Ok((rel_id, anchor))
+    Ok((rel_id, anchor, tooltip))
 }
 
 /// Return the start tag range of one hyperlink element and, unless it is
@@ -10065,26 +10144,103 @@ fn unwrap_story_hyperlink(
     Ok(updated)
 }
 
-/// Resize every `pic:pic` drawing in `xml` whose blip names `relationship_id`,
-/// returning the edited XML and the number of drawings resized.
+/// One `w:bookmarkStart` or `w:bookmarkEnd` element and its byte span.
+struct BookmarkMarkerSpan {
+    start: bool,
+    id: String,
+    span: Range<usize>,
+}
+
+/// Every empty bookmark marker of `xml` with its `w:id`. A marker that holds
+/// child content is refused, since removing it would drop that content.
+fn bookmark_marker_spans(xml: &[u8]) -> Result<Vec<BookmarkMarkerSpan>> {
+    let mut reader = NsReader::from_reader(xml);
+    reader.config_mut().trim_text(false);
+    let mut buffer = Vec::new();
+    let mut markers = Vec::new();
+    loop {
+        let before = reader.buffer_position() as usize;
+        let (namespace, event) = reader
+            .read_resolved_event_into(&mut buffer)
+            .map_err(|error| Error::Other(format!("bookmark scan failed: {error}")))?;
+        let word = matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == WORD_NAMESPACE.as_bytes());
+        let after = reader.buffer_position() as usize;
+        match event {
+            Event::Empty(ref element) | Event::Start(ref element)
+                if word
+                    && matches!(
+                        element.local_name().as_ref(),
+                        b"bookmarkStart" | b"bookmarkEnd"
+                    ) =>
+            {
+                if matches!(event, Event::Start(_)) {
+                    return Err(Error::Other(
+                        "a bookmark marker with child content cannot be removed".to_owned(),
+                    ));
+                }
+                let id = element
+                    .attributes()
+                    .flatten()
+                    .find(|attribute| attribute.key.local_name().as_ref() == b"id")
+                    .map(|attribute| String::from_utf8_lossy(&attribute.value).into_owned())
+                    .unwrap_or_default();
+                markers.push(BookmarkMarkerSpan {
+                    start: element.local_name().as_ref() == b"bookmarkStart",
+                    id,
+                    span: before..after,
+                });
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(markers)
+}
+
+/// One `pic:pic` drawing of a story, as [`scan_picture_drawings`] finds it.
+struct PictureDrawing {
+    /// The `r:embed` and `r:link` values of its blip.
+    relationship_ids: Vec<String>,
+    extent: Range<usize>,
+    effect_extent: Option<Range<usize>>,
+    shape_extent: Option<Range<usize>>,
+    width: i64,
+    height: i64,
+    is_anchor: bool,
+    /// Inside a tracked deletion or move source, or in an `mc:Fallback`
+    /// copy, so not a picture the reader sees.
+    hidden: bool,
+    name: Option<String>,
+    description: Option<String>,
+    title: Option<String>,
+    decorative: bool,
+}
+
+/// Every `pic:pic` drawing of `xml` in document order: pictures in runs,
+/// table cells, tracked insertions and text boxes, and hidden ones in
+/// tracked deletions and compatibility fallbacks.
 ///
-/// `wp:extent` and the `a:ext` of `pic:spPr/a:xfrm` take the new size, and
-/// `wp:effectExtent` scales with the extent on each axis.
-fn resize_story_pictures(
-    xml: &[u8],
-    relationship_id: &str,
-    cx: i64,
-    cy: i64,
-) -> Result<(Vec<u8>, usize)> {
-    struct Drawing {
+/// `Document::picture_drawings` lists the visible ones and the picture
+/// resize edits the same spans, so both count the same pictures.
+fn scan_picture_drawings(xml: &[u8]) -> Result<Vec<PictureDrawing>> {
+    struct Open {
         depth: usize,
+        hidden: bool,
+        is_anchor: bool,
         extent: Option<Range<usize>>,
         effect_extent: Option<Range<usize>>,
         shape_extent: Option<Range<usize>>,
-        shows_image: bool,
+        relationship_ids: Vec<String>,
+        shows_picture: bool,
+        name: Option<String>,
+        description: Option<String>,
+        title: Option<String>,
+        decorative: bool,
     }
     const A: &str = drawing_ns::A;
     const PIC: &str = drawing_ns::PIC;
+    const MC: &str = "http://schemas.openxmlformats.org/markup-compatibility/2006";
     let on_path = |path: &[(String, Vec<u8>)], expected: &[(&str, &[u8])]| {
         path.len() == expected.len()
             && path.iter().zip(expected).all(
@@ -10093,7 +10249,7 @@ fn resize_story_pictures(
                 },
             )
     };
-    let attribute_value = |tag: Range<usize>, name: &[u8]| -> Result<(Range<usize>, i64)> {
+    let attribute_value = |tag: Range<usize>, name: &[u8]| -> Result<i64> {
         let (start, end) =
             story_attribute_value_span(&xml[tag.clone()], name).ok_or_else(|| {
                 Error::Other(format!(
@@ -10101,8 +10257,7 @@ fn resize_story_pictures(
                     String::from_utf8_lossy(name)
                 ))
             })?;
-        let range = tag.start + start..tag.start + end;
-        let value = std::str::from_utf8(&xml[range.clone()])
+        std::str::from_utf8(&xml[tag.start + start..tag.start + end])
             .ok()
             .and_then(|value| value.trim().parse::<i64>().ok())
             .ok_or_else(|| {
@@ -10110,16 +10265,14 @@ fn resize_story_pictures(
                     "picture drawing {} is not an integer",
                     String::from_utf8_lossy(name)
                 ))
-            })?;
-        Ok((range, value))
+            })
     };
     let mut reader = NsReader::from_reader(xml);
     reader.config_mut().trim_text(false);
     let mut buffer = Vec::new();
     let mut stack: Vec<(String, Vec<u8>)> = Vec::new();
-    let mut drawings: Vec<Drawing> = Vec::new();
-    let mut edits = Vec::new();
-    let mut resized = 0usize;
+    let mut open: Vec<Open> = Vec::new();
+    let mut found = Vec::new();
     loop {
         let before = reader.buffer_position() as usize;
         let (namespace, event) = reader
@@ -10133,14 +10286,40 @@ fn resize_story_pictures(
         match event {
             Event::Start(ref element) | Event::Empty(ref element) => {
                 let local = element.local_name().as_ref().to_vec();
-                if let Some(drawing) = drawings.last_mut() {
+                if let Some(drawing) = open.last_mut() {
                     let path = &stack[drawing.depth + 1..];
                     if path.is_empty() && namespace == drawing_ns::WP {
                         match local.as_slice() {
                             b"extent" => drawing.extent = Some(before..after),
                             b"effectExtent" => drawing.effect_extent = Some(before..after),
+                            b"docPr" => {
+                                for attribute in element.attributes().flatten() {
+                                    let value = attribute
+                                        .decoded_and_normalized_value(
+                                            XmlVersion::Implicit1_0,
+                                            reader.decoder(),
+                                        )
+                                        .map_err(|error| Error::Other(error.to_string()))?
+                                        .into_owned();
+                                    match attribute.key.as_ref() {
+                                        b"name" => drawing.name = Some(value),
+                                        b"descr" => drawing.description = Some(value),
+                                        b"title" => drawing.title = Some(value),
+                                        _ => {}
+                                    }
+                                }
+                            }
                             _ => {}
                         }
+                    } else if local == b"decorative"
+                        && path.first().is_some_and(|(namespace, local)| {
+                            namespace == drawing_ns::WP && local.as_slice() == b"docPr"
+                        })
+                    {
+                        drawing.decorative |= element.attributes().flatten().any(|attribute| {
+                            attribute.key.local_name().as_ref() == b"val"
+                                && matches!(attribute.value.as_ref(), b"1" | b"true" | b"on")
+                        });
                     } else if namespace == A
                         && local == b"blip"
                         && on_path(
@@ -10153,13 +10332,18 @@ fn resize_story_pictures(
                             ],
                         )
                     {
-                        drawing.shows_image |= element.attributes().flatten().any(|attribute| {
+                        drawing.shows_picture = true;
+                        for attribute in element.attributes().flatten() {
                             let (attribute_namespace, name) =
                                 reader.resolver().resolve_attribute(attribute.key);
-                            matches!(attribute_namespace, ResolveResult::Bound(Namespace(uri)) if uri == drawing_ns::R.as_bytes())
+                            if matches!(attribute_namespace, ResolveResult::Bound(Namespace(uri)) if uri == drawing_ns::R.as_bytes())
                                 && matches!(name.as_ref(), b"embed" | b"link")
-                                && attribute.value.as_ref() == relationship_id.as_bytes()
-                        });
+                            {
+                                drawing
+                                    .relationship_ids
+                                    .push(String::from_utf8_lossy(&attribute.value).into_owned());
+                            }
+                        }
                     } else if namespace == A
                         && local == b"ext"
                         && on_path(
@@ -10180,12 +10364,24 @@ fn resize_story_pictures(
                     if namespace == drawing_ns::WP
                         && matches!(local.as_slice(), b"inline" | b"anchor")
                     {
-                        drawings.push(Drawing {
+                        let hidden = stack.iter().any(|(namespace, local)| {
+                            (namespace == WORD_NAMESPACE
+                                && matches!(local.as_slice(), b"del" | b"moveFrom"))
+                                || (namespace == MC && local.as_slice() == b"Fallback")
+                        });
+                        open.push(Open {
                             depth: stack.len(),
+                            hidden,
+                            is_anchor: local == b"anchor",
                             extent: None,
                             effect_extent: None,
                             shape_extent: None,
-                            shows_image: false,
+                            relationship_ids: Vec::new(),
+                            shows_picture: false,
+                            name: None,
+                            description: None,
+                            title: None,
+                            decorative: false,
                         });
                     }
                     stack.push((namespace, local));
@@ -10193,43 +10389,27 @@ fn resize_story_pictures(
             }
             Event::End(_) => {
                 stack.pop();
-                if drawings
+                if open
                     .last()
                     .is_some_and(|drawing| drawing.depth == stack.len())
-                    && let Some(drawing) = drawings.pop()
-                    && drawing.shows_image
+                    && let Some(drawing) = open.pop()
+                    && drawing.shows_picture
                     && let Some(extent) = drawing.extent
                 {
-                    let (cx_range, old_cx) = attribute_value(extent.clone(), b"cx")?;
-                    let (cy_range, old_cy) = attribute_value(extent, b"cy")?;
-                    edits.push((cx_range, cx));
-                    edits.push((cy_range, cy));
-                    if let Some(shape_extent) = drawing.shape_extent {
-                        edits.push((attribute_value(shape_extent.clone(), b"cx")?.0, cx));
-                        edits.push((attribute_value(shape_extent, b"cy")?.0, cy));
-                    }
-                    if let Some(effect_extent) = drawing.effect_extent {
-                        for (name, new, old) in [
-                            (&b"l"[..], cx, old_cx),
-                            (b"t", cy, old_cy),
-                            (b"r", cx, old_cx),
-                            (b"b", cy, old_cy),
-                        ] {
-                            let (range, value) = attribute_value(effect_extent.clone(), name)?;
-                            let scaled = if old == 0 {
-                                0
-                            } else {
-                                i64::try_from(i128::from(value) * i128::from(new) / i128::from(old))
-                                    .map_err(|_| {
-                                        Error::Other(
-                                            "scaled picture effect extent overflows".to_owned(),
-                                        )
-                                    })?
-                            };
-                            edits.push((range, scaled));
-                        }
-                    }
-                    resized += 1;
+                    found.push(PictureDrawing {
+                        width: attribute_value(extent.clone(), b"cx")?,
+                        height: attribute_value(extent.clone(), b"cy")?,
+                        relationship_ids: drawing.relationship_ids,
+                        extent,
+                        effect_extent: drawing.effect_extent,
+                        shape_extent: drawing.shape_extent,
+                        is_anchor: drawing.is_anchor,
+                        hidden: drawing.hidden,
+                        name: drawing.name,
+                        description: drawing.description,
+                        title: drawing.title,
+                        decorative: drawing.decorative,
+                    });
                 }
             }
             Event::Eof => break,
@@ -10237,12 +10417,102 @@ fn resize_story_pictures(
         }
         buffer.clear();
     }
+    Ok(found)
+}
+
+/// Which picture drawings a resize edits.
+#[derive(Clone, Copy)]
+enum PictureSelection<'a> {
+    /// Every drawing that shows the relationship, hidden ones included.
+    Relationship(&'a str),
+    /// The visible drawing at this position of `Document::picture_drawings`.
+    Visible(usize),
+}
+
+/// Resize the selected picture drawings of `xml`, returning the edited XML
+/// and how many drawings were resized.
+///
+/// `wp:extent` and the `a:ext` of `pic:spPr/a:xfrm` take the new size, and
+/// `wp:effectExtent` scales with the extent on each axis.
+fn resize_story_pictures(
+    xml: &[u8],
+    selection: PictureSelection<'_>,
+    cx: i64,
+    cy: i64,
+) -> Result<(Vec<u8>, usize)> {
+    let attribute_range = |tag: &Range<usize>, name: &[u8]| -> Result<(Range<usize>, i64)> {
+        let (start, end) =
+            story_attribute_value_span(&xml[tag.clone()], name).ok_or_else(|| {
+                Error::Other(format!(
+                    "picture drawing has no {} attribute",
+                    String::from_utf8_lossy(name)
+                ))
+            })?;
+        let range = tag.start + start..tag.start + end;
+        let value = std::str::from_utf8(&xml[range.clone()])
+            .ok()
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .ok_or_else(|| {
+                Error::Other(format!(
+                    "picture drawing {} is not an integer",
+                    String::from_utf8_lossy(name)
+                ))
+            })?;
+        Ok((range, value))
+    };
+    let drawings = scan_picture_drawings(xml)?;
+    let selected: Vec<&PictureDrawing> = match selection {
+        PictureSelection::Relationship(relationship_id) => drawings
+            .iter()
+            .filter(|drawing| {
+                drawing
+                    .relationship_ids
+                    .iter()
+                    .any(|id| id == relationship_id)
+            })
+            .collect(),
+        PictureSelection::Visible(index) => drawings
+            .iter()
+            .filter(|drawing| !drawing.hidden)
+            .nth(index)
+            .into_iter()
+            .collect(),
+    };
+    let mut edits = Vec::new();
+    for drawing in &selected {
+        let (cx_range, old_cx) = attribute_range(&drawing.extent, b"cx")?;
+        let (cy_range, old_cy) = attribute_range(&drawing.extent, b"cy")?;
+        edits.push((cx_range, cx));
+        edits.push((cy_range, cy));
+        if let Some(shape_extent) = &drawing.shape_extent {
+            edits.push((attribute_range(shape_extent, b"cx")?.0, cx));
+            edits.push((attribute_range(shape_extent, b"cy")?.0, cy));
+        }
+        if let Some(effect_extent) = &drawing.effect_extent {
+            for (name, new, old) in [
+                (&b"l"[..], cx, old_cx),
+                (b"t", cy, old_cy),
+                (b"r", cx, old_cx),
+                (b"b", cy, old_cy),
+            ] {
+                let (range, value) = attribute_range(effect_extent, name)?;
+                let scaled = if old == 0 {
+                    0
+                } else {
+                    i64::try_from(i128::from(value) * i128::from(new) / i128::from(old)).map_err(
+                        |_| Error::Other("scaled picture effect extent overflows".to_owned()),
+                    )?
+                };
+                edits.push((range, scaled));
+            }
+        }
+    }
     edits.sort_by_key(|(range, _)| range.start);
     let mut updated = xml.to_vec();
     for (range, value) in edits.into_iter().rev() {
         updated.splice(range, value.to_string().into_bytes());
     }
-    Ok((updated, resized))
+    Ok((updated, selected.len()))
 }
 
 fn story_item_text(xml: &[u8], item: &StoryItemSpan) -> Result<Option<String>> {
@@ -17364,6 +17634,7 @@ impl Document {
             url,
             anchor: link.anchor,
             rel_id: link.rel_id,
+            tooltip: link.tooltip,
         })
     }
 
@@ -17502,7 +17773,25 @@ impl Document {
         width: Option<Length>,
         height: Option<Length>,
     ) -> Result<ContentLocation> {
-        let (width, height) = match (width, height) {
+        let (width, height) = Self::picture_extent(image_data, image_filename, width, height)?;
+        self.insert_picture_with_options(
+            story,
+            after,
+            image_data,
+            image_filename,
+            PictureOptions::new(width, height),
+        )
+    }
+
+    /// The display size of a picture: `width` and `height` when both are
+    /// given, or the image's native size at 72 DPI when both are omitted.
+    pub fn picture_extent(
+        image_data: &[u8],
+        image_filename: &str,
+        width: Option<Length>,
+        height: Option<Length>,
+    ) -> Result<(Length, Length)> {
+        Ok(match (width, height) {
             (Some(width), Some(height)) => (width, height),
             (None, None) => {
                 let native_size = oxml_media::probe(image_data)
@@ -17520,7 +17809,23 @@ impl Document {
                     "picture width and height must both be provided or both be omitted".to_owned(),
                 ));
             }
-        };
+        })
+    }
+
+    /// Insert a configured picture paragraph after checked story content,
+    /// or append it when `after` is omitted.
+    ///
+    /// The options carry the size, crop, alt text, title, decorative marker
+    /// and, for a floating picture, its anchor and wrapping.
+    pub fn insert_picture_with_options(
+        &mut self,
+        story: &StoryId,
+        after: Option<&ContentLocation>,
+        image_data: &[u8],
+        image_filename: &str,
+        options: PictureOptions,
+    ) -> Result<ContentLocation> {
+        validate_picture_options(&options)?;
         let mut candidate = self.clone_for_staging();
         candidate.flush_to_package()?;
         let (source, mut story_owner) = candidate.story_source_and_owner(story)?;
@@ -17562,13 +17867,11 @@ impl Document {
         let relationship_id =
             candidate.add_image_relationship_checked(&part_name, image_data, image_filename)?;
         let drawing_id = candidate.identifiers.reserve_drawing_id()?;
-
-        let mut inline = CT_Inline::new(&relationship_id, width.to_emu(), height.to_emu());
-        inline.doc_pr_id = drawing_id;
+        let drawing = picture_drawing(&relationship_id, drawing_id, options);
         let run = CT_R {
             alt_drawings: Vec::new(),
             properties: None,
-            content: vec![RunContent::Drawing(CT_Drawing::inline(inline))],
+            content: vec![RunContent::Drawing(drawing)],
             extra_xml: Vec::new(),
             extra_xml_positions: Vec::new(),
         };
@@ -17642,39 +17945,7 @@ impl Document {
         let relationship_id =
             candidate.add_image_relationship_checked(&owner, image_data, image_filename)?;
         let drawing_id = candidate.identifiers.reserve_drawing_id()?;
-        let source_rect = options.crop.map(|crop| SourceRect {
-            left: crop.left,
-            top: crop.top,
-            right: crop.right,
-            bottom: crop.bottom,
-        });
-        let drawing = match options.anchor {
-            Some(anchor_options) => {
-                let mut anchor = CT_Anchor::background(
-                    &relationship_id,
-                    options.width.to_emu(),
-                    options.height.to_emu(),
-                );
-                apply_picture_anchor(&mut anchor, anchor_options);
-                anchor.doc_pr_id = drawing_id;
-                anchor.name = options.name;
-                anchor.description = options.description;
-                anchor.source_rect = source_rect;
-                CT_Drawing::anchor(anchor)
-            }
-            None => {
-                let mut inline = CT_Inline::new(
-                    &relationship_id,
-                    options.width.to_emu(),
-                    options.height.to_emu(),
-                );
-                inline.doc_pr_id = drawing_id;
-                inline.name = options.name;
-                inline.description = options.description;
-                inline.source_rect = source_rect;
-                CT_Drawing::inline(inline)
-            }
-        };
+        let drawing = picture_drawing(&relationship_id, drawing_id, options);
         let mut paragraph = CT_P::new();
         paragraph.runs.push(CT_R {
             alt_drawings: Vec::new(),
@@ -19887,6 +20158,61 @@ impl Document {
         Ok(true)
     }
 
+    /// Remove grid column `column` from table `table_index`, counted as
+    /// [`Self::table_mut`] counts.
+    ///
+    /// A cell that spans the column narrows by one grid column, a cell that
+    /// covers only that column is removed with its content, and the grid,
+    /// row omissions and fixed widths stay synchronized. A table keeps at
+    /// least one column, and a row keeps at least one cell. Comment anchors in
+    /// removed cells go with them as row removal does. The document is
+    /// unchanged on error.
+    pub fn remove_table_column(&mut self, table_index: usize, column: usize) -> Result<()> {
+        let mut candidate = self.clone_for_staging();
+        let table = candidate
+            .table_mut(table_index)
+            .ok_or_else(|| Error::Other(format!("table index {table_index} is out of range")))?
+            .inner;
+        crate::table::remove_grid_column(table, column)?;
+        // A bookmark whose start or end went with a removed cell would be
+        // left half open, so its other marker goes too.
+        let paired = |markers: &[BookmarkMarkerSpan]| {
+            let starts = markers
+                .iter()
+                .filter(|marker| marker.start)
+                .map(|marker| marker.id.clone())
+                .collect::<HashSet<_>>();
+            markers
+                .iter()
+                .filter(|marker| !marker.start && starts.contains(&marker.id))
+                .map(|marker| marker.id.clone())
+                .collect::<HashSet<_>>()
+        };
+        let paired_before = paired(&bookmark_marker_spans(&self.document.to_xml()?)?);
+        let xml = candidate.document.to_xml()?;
+        let markers = bookmark_marker_spans(&xml)?;
+        let paired_after = paired(&markers);
+        let mut orphans = markers
+            .into_iter()
+            .filter(|marker| {
+                paired_before.contains(&marker.id) && !paired_after.contains(&marker.id)
+            })
+            .collect::<Vec<_>>();
+        if !orphans.is_empty() {
+            orphans.sort_by_key(|marker| marker.span.start);
+            let mut updated = xml;
+            for marker in orphans.into_iter().rev() {
+                updated.splice(marker.span, std::iter::empty());
+            }
+            let owner = candidate.doc_part_name.clone();
+            set_story_source_xml(&mut candidate, &owner, updated)?;
+        }
+        candidate.reconcile_comment_removal(self)?;
+        let reopened = candidate.prepare_and_reopen_staged()?;
+        self.commit_staged_mutation(reopened);
+        Ok(())
+    }
+
     /// Set one body's table cell text through a checked package transaction.
     #[doc(hidden)]
     pub fn try_set_cell_text(
@@ -20647,6 +20973,27 @@ impl Document {
         self.package.get_part(&target).map(|b| b.to_vec())
     }
 
+    /// The content type and part name of an embedded body image, by its
+    /// relationship ID.
+    pub fn image_content_type(&self, rel_id: &str) -> Option<(String, String)> {
+        let rels = self.package.get_part_rels(&self.doc_part_name)?;
+        let rel = rels.items.iter().find(|relationship| {
+            relationship.id == rel_id
+                && relationship.rel_type == rel_types::IMAGE
+                && relationship_is_internal(relationship)
+        })?;
+        let target = OpcPackage::resolve_rel_target(&self.doc_part_name, &rel.target);
+        let content_type = self.package.content_types.content_type_for(&target)?;
+        Some((content_type.to_owned(), target))
+    }
+
+    /// Reserve a document-unique drawing identifier for a picture authored
+    /// with [`crate::Run::add_picture_with_options`].
+    #[doc(hidden)]
+    pub fn reserve_drawing_id(&mut self) -> Result<u32> {
+        self.identifiers.reserve_drawing_id()
+    }
+
     /// Replace an embedded body picture by its relationship ID.
     ///
     /// The relationship and every drawing that shows the picture, with its
@@ -20675,15 +21022,6 @@ impl Document {
         width: Length,
         height: Length,
     ) -> Result<usize> {
-        const MAX_POSITIVE_COORDINATE: i64 = 27_273_042_316_900;
-        let (cx, cy) = (width.to_emu(), height.to_emu());
-        if !(1..=MAX_POSITIVE_COORDINATE).contains(&cx)
-            || !(1..=MAX_POSITIVE_COORDINATE).contains(&cy)
-        {
-            return Err(Error::Other(format!(
-                "picture size {cx} x {cy} EMU must be positive and within the DrawingML coordinate range"
-            )));
-        }
         let owner = self.doc_part_name.clone();
         let is_image = self
             .package
@@ -20695,14 +21033,86 @@ impl Document {
                 "relationship owner {owner} has no image relationship {rel_id}"
             )));
         }
+        self.resize_pictures(PictureSelection::Relationship(rel_id), width, height)
+            .and_then(|resized| {
+                if resized == 0 {
+                    Err(Error::Other(format!(
+                        "no picture drawing shows image relationship {rel_id}"
+                    )))
+                } else {
+                    Ok(resized)
+                }
+            })
+    }
+
+    /// Resize one main-document picture, the one at `index` of
+    /// [`Self::picture_drawings`].
+    ///
+    /// The other pictures sharing its image keep their size. The extents
+    /// change as [`Self::set_picture_size`] changes them, and a missing
+    /// picture is an error that leaves the document unchanged.
+    pub fn set_picture_size_at(
+        &mut self,
+        index: usize,
+        width: Length,
+        height: Length,
+    ) -> Result<()> {
+        match self.resize_pictures(PictureSelection::Visible(index), width, height)? {
+            0 => Err(Error::Other(format!("the document has no picture {index}"))),
+            _ => Ok(()),
+        }
+    }
+
+    /// The main-document pictures a reader sees, in document order: inline
+    /// and floating pictures in body and table-cell runs, tracked insertions
+    /// and text boxes. Pictures in tracked deletions and compatibility
+    /// fallbacks are left out.
+    ///
+    /// [`Self::set_picture_size_at`] counts the same list. `embed_id` is the
+    /// blip's first relationship, embedded or linked.
+    pub fn picture_drawings(&self) -> Result<Vec<ImageInfo>> {
+        Ok(scan_picture_drawings(&self.document.to_xml()?)?
+            .into_iter()
+            .filter(|drawing| !drawing.hidden)
+            .map(|drawing| ImageInfo {
+                embed_id: drawing
+                    .relationship_ids
+                    .into_iter()
+                    .next()
+                    .unwrap_or_default(),
+                name: drawing.name,
+                description: drawing.description,
+                title: drawing.title,
+                decorative: drawing.decorative,
+                width_emu: drawing.width,
+                height_emu: drawing.height,
+                is_anchor: drawing.is_anchor,
+            })
+            .collect())
+    }
+
+    fn resize_pictures(
+        &mut self,
+        selection: PictureSelection<'_>,
+        width: Length,
+        height: Length,
+    ) -> Result<usize> {
+        const MAX_POSITIVE_COORDINATE: i64 = 27_273_042_316_900;
+        let (cx, cy) = (width.to_emu(), height.to_emu());
+        if !(1..=MAX_POSITIVE_COORDINATE).contains(&cx)
+            || !(1..=MAX_POSITIVE_COORDINATE).contains(&cy)
+        {
+            return Err(Error::Other(format!(
+                "picture size {cx} x {cy} EMU must be positive and within the DrawingML coordinate range"
+            )));
+        }
+        let owner = self.doc_part_name.clone();
         let mut candidate = self.clone_for_staging();
         candidate.flush_to_package()?;
         let (updated, resized) =
-            resize_story_pictures(&candidate.document.to_xml()?, rel_id, cx, cy)?;
+            resize_story_pictures(&candidate.document.to_xml()?, selection, cx, cy)?;
         if resized == 0 {
-            return Err(Error::Other(format!(
-                "no picture drawing shows image relationship {rel_id}"
-            )));
+            return Ok(0);
         }
         set_story_source_xml(&mut candidate, &owner, updated)?;
         let reopened = candidate.prepare_and_reopen_staged()?;
@@ -28944,6 +29354,8 @@ impl Document {
                     embed_id: inline.embed_id.clone(),
                     name: inline.name.clone(),
                     description: inline.description.clone(),
+                    title: inline.title.clone(),
+                    decorative: inline.decorative,
                     width_emu: inline.extent_cx.0,
                     height_emu: inline.extent_cy.0,
                     is_anchor: false,
@@ -28954,6 +29366,8 @@ impl Document {
                     embed_id: anchor.embed_id.clone(),
                     name: anchor.name.clone(),
                     description: anchor.description.clone(),
+                    title: anchor.title.clone(),
+                    decorative: anchor.decorative,
                     width_emu: anchor.extent_cx.0,
                     height_emu: anchor.extent_cy.0,
                     is_anchor: true,
@@ -28999,6 +29413,7 @@ impl Document {
                     url,
                     anchor: hl.anchor.clone(),
                     rel_id: hl.rel_id.clone(),
+                    tooltip: hl.tooltip.clone(),
                 });
             }
             for field in p.complex_field_hyperlinks() {
@@ -29010,6 +29425,7 @@ impl Document {
                     url: Some(field.target),
                     anchor: None,
                     rel_id: None,
+                    tooltip: None,
                 });
             }
         }
@@ -30667,6 +31083,10 @@ pub struct ImageInfo {
     pub name: Option<String>,
     /// Optional description (alt text).
     pub description: Option<String>,
+    /// Optional alt-text title.
+    pub title: Option<String>,
+    /// Whether the picture is marked decorative.
+    pub decorative: bool,
     /// Width in EMUs (English Metric Units, 914400 EMU = 1 inch).
     pub width_emu: i64,
     /// Height in EMUs.
@@ -30686,6 +31106,8 @@ pub struct LinkInfo {
     pub anchor: Option<String>,
     /// The relationship ID.
     pub rel_id: Option<String>,
+    /// The hover tooltip (`w:tooltip`).
+    pub tooltip: Option<String>,
 }
 
 /// Severity level for accessibility issues.
@@ -32627,6 +33049,8 @@ mod tests {
                 anchor: None,
                 name: None,
                 description: None,
+                title: None,
+                decorative: false,
             },
         );
         assert!(result.is_err());
@@ -38320,6 +38744,7 @@ mod tests {
                 url: Some("https://example.test".to_owned()),
                 anchor: None,
                 rel_id: None,
+                tooltip: None,
             }]
         );
     }

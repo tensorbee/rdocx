@@ -1037,6 +1037,78 @@ impl Document {
         self.insert_bookmark(name, range)
     }
 
+    /// The name of a bookmark around the whole of direct body paragraph
+    /// `body_index`, adding one when it has none, so an internal hyperlink
+    /// can target the paragraph as Word's and Google Docs' "link to a
+    /// heading" does.
+    ///
+    /// An existing bookmark that covers exactly the paragraph's runs, such as
+    /// Word's `_Toc` bookmark of a heading, is reused, and otherwise one that
+    /// starts at the paragraph start. A new one is named
+    /// after the paragraph text, such as `Heading_Results`, with a number
+    /// added when that name is taken.
+    pub fn heading_bookmark(&mut self, body_index: usize) -> Result<String> {
+        let Some(BodyContent::Paragraph(paragraph)) = self.document.body.content.get(body_index)
+        else {
+            return Err(Error::Other(format!(
+                "body item {body_index} is not a direct body paragraph"
+            )));
+        };
+        let paragraph = crate::ParagraphRef { inner: paragraph };
+        let range = RunRange {
+            start: RunPosition {
+                body_index,
+                run_index: 0,
+            },
+            end: RunPosition {
+                body_index,
+                run_index: paragraph.run_count(),
+            },
+        };
+        let text = paragraph.text();
+        let bookmarks = self.bookmarks();
+        // A bookmark around the paragraph, or else one that starts with it,
+        // such as the point bookmark Google Docs puts before a heading.
+        let starts_here = |bookmark: &&BookmarkRef| {
+            bookmark
+                .direct_range()
+                .is_some_and(|candidate| candidate.start == range.start)
+        };
+        if let Some(name) = bookmarks
+            .iter()
+            .find(|bookmark| bookmark.direct_range() == Some(range))
+            .or_else(|| bookmarks.iter().find(starts_here))
+            .and_then(BookmarkRef::name)
+        {
+            return Ok(name.to_owned());
+        }
+        let mut stem = String::from("Heading_");
+        for word in text.split(|character: char| !character.is_ascii_alphanumeric()) {
+            if !word.is_empty() && stem.len() + word.len() < 34 {
+                stem.push_str(word);
+                stem.push('_');
+            }
+        }
+        let stem = stem.trim_end_matches('_').to_owned();
+        let taken = |name: &str| {
+            bookmarks
+                .iter()
+                .any(|bookmark| bookmark.name() == Some(name))
+        };
+        let name = (1..)
+            .map(|number| {
+                if number == 1 {
+                    stem.clone()
+                } else {
+                    format!("{stem}_{number}")
+                }
+            })
+            .find(|name| !taken(name))
+            .expect("an unbounded sequence holds a free name");
+        self.insert_bookmark(&name, range)?;
+        Ok(name)
+    }
+
     fn insert_bookmark(&mut self, name: &str, range: RunRange) -> Result<i32> {
         validate_bookmark_name(name)?;
         validate_bookmark_range(&self.document.body.content, range)?;

@@ -8,6 +8,14 @@ use crate::document::PyDocument;
 use crate::run::{PyRun, PyRunCollection};
 use crate::{normalize_index, stale_to_pyerr};
 
+/// Where a hyperlink run points.
+enum LinkTarget<'a> {
+    /// A web address, written as an external relationship.
+    Url(&'a str),
+    /// A bookmark of the same document, written as `w:anchor`.
+    Anchor(String),
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum ParagraphLocation {
     Body(usize),
@@ -160,14 +168,69 @@ impl PyParagraph {
         self.document.bind(py).is(document.bind(py))
     }
 
-    /// Append one run, or one external hyperlink run when `url` is given, and
+    /// Check that a bookmark exists, since Word ignores a link to a
+    /// missing one.
+    fn bookmark_anchor(&self, py: Python<'_>, name: &str) -> PyResult<String> {
+        let document = self.document.borrow(py);
+        if document
+            .inner
+            .bookmarks()
+            .iter()
+            .any(|bookmark| bookmark.name() == Some(name))
+        {
+            Ok(name.to_owned())
+        } else {
+            Err(PyKeyError::new_err(format!(
+                "no bookmark is named '{name}', add one with Document.add_bookmark or pass \
+                 the heading paragraph itself as anchor=paragraph"
+            )))
+        }
+    }
+
+    /// The bookmark around a body heading paragraph, added when it has none.
+    fn heading_anchor(&self, py: Python<'_>, heading: &PyParagraph) -> PyResult<String> {
+        if !heading.belongs_to(py, &self.document) {
+            return Err(PyValueError::new_err(
+                "the heading paragraph belongs to a different document",
+            ));
+        }
+        let ParagraphLocation::Body(paragraph) = heading.validate(py)? else {
+            return Err(PyValueError::new_err(
+                "a link target paragraph must be a body paragraph, bookmark a cell paragraph \
+                 with Document.add_bookmark and pass its name",
+            ));
+        };
+        let mut document = self.document.borrow_mut(py);
+        let content = document
+            .inner
+            .content_index_of_paragraph(paragraph)
+            .ok_or_else(|| {
+                PyValueError::new_err(
+                    "the heading paragraph is not a direct body child, bookmark it with \
+                     Document.add_bookmark and pass its name",
+                )
+            })?;
+        // Bookmark markers sit between runs, so no content moves.
+        document
+            .inner
+            .heading_bookmark(content)
+            .map_err(|error| crate::rdocx_to_pyerr(py, error))
+    }
+
+    /// Append one run, or one hyperlink run when `link` is given, and
     /// return its handle.
-    fn append_run(&self, py: Python<'_>, text: &str, url: Option<&str>) -> PyResult<Py<PyRun>> {
+    fn append_run(
+        &self,
+        py: Python<'_>,
+        text: &str,
+        link: Option<LinkTarget<'_>>,
+        tooltip: Option<&str>,
+    ) -> PyResult<Py<PyRun>> {
         let location = self.validate(py)?;
         let (path, run_path) = {
             let mut document = self.document.borrow_mut(py);
-            let relationship_id = match url {
-                Some(url) => {
+            let relationship_id = match link {
+                Some(LinkTarget::Url(url)) => {
                     // Check the paragraph first, so a failure leaves no
                     // orphaned relationship behind.
                     let exists = match location {
@@ -188,15 +251,18 @@ impl PyParagraph {
                     }
                     Some(document.inner.add_hyperlink_relationship(url))
                 }
-                None => None,
+                Some(LinkTarget::Anchor(_)) | None => None,
             };
             let append = |paragraph: &mut rdocx::Paragraph<'_>| {
                 let run_index = paragraph.run_count();
-                match &relationship_id {
-                    Some(relationship_id) => {
-                        paragraph.add_hyperlink(text, relationship_id);
+                match (&relationship_id, &link) {
+                    (Some(relationship_id), _) => {
+                        paragraph.add_hyperlink_with_tooltip(text, relationship_id, tooltip);
                     }
-                    None => {
+                    (None, Some(LinkTarget::Anchor(anchor))) => {
+                        paragraph.add_internal_hyperlink(text, anchor, tooltip);
+                    }
+                    (None, _) => {
                         paragraph.add_run(text);
                     }
                 }
@@ -417,11 +483,50 @@ impl PyParagraph {
     }
 
     fn add_run(&self, py: Python<'_>, text: &str) -> PyResult<Py<PyRun>> {
-        self.append_run(py, text, None)
+        self.append_run(py, text, None, None)
     }
 
-    fn add_hyperlink(&self, py: Python<'_>, text: &str, url: &str) -> PyResult<Py<PyRun>> {
-        self.append_run(py, text, Some(url))
+    /// Append a hyperlink run: to a web address with `url`, or inside the
+    /// document with `anchor`, a bookmark name or a body heading paragraph.
+    ///
+    /// A heading without a bookmark around it gets one, as Google Docs' link
+    /// to a heading does. A `url` that starts with `#` names a bookmark.
+    #[pyo3(signature = (text, url = None, *, anchor = None, tooltip = None))]
+    fn add_hyperlink(
+        &self,
+        py: Python<'_>,
+        text: &str,
+        url: Option<&str>,
+        anchor: Option<&Bound<'_, PyAny>>,
+        tooltip: Option<&str>,
+    ) -> PyResult<Py<PyRun>> {
+        let link = match (url, anchor) {
+            (Some(_), Some(_)) => {
+                return Err(PyTypeError::new_err(
+                    "pass url for a web link or anchor for a link inside the document, not both",
+                ));
+            }
+            (None, None) => {
+                return Err(PyTypeError::new_err(
+                    "add_hyperlink needs url=\"https://...\" or anchor=<bookmark name or heading paragraph>",
+                ));
+            }
+            (Some(url), None) => match url.strip_prefix('#') {
+                Some(name) => LinkTarget::Anchor(self.bookmark_anchor(py, name)?),
+                None => LinkTarget::Url(url),
+            },
+            (None, Some(anchor)) => {
+                if let Ok(heading) = anchor.cast::<PyParagraph>() {
+                    LinkTarget::Anchor(self.heading_anchor(py, &heading.borrow())?)
+                } else {
+                    let name = anchor.extract::<String>().map_err(|_| {
+                        PyTypeError::new_err("anchor is a bookmark name or a heading Paragraph")
+                    })?;
+                    LinkTarget::Anchor(self.bookmark_anchor(py, &name)?)
+                }
+            }
+        };
+        self.append_run(py, text, Some(link), tooltip)
     }
 
     #[getter]

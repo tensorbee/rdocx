@@ -8,6 +8,7 @@ from rdocx import (
     Cell,
     CellCollection,
     CellParagraphCollection,
+    Column,
     Comment,
     ComparisonDiagnostic,
     ContentFragment,
@@ -27,6 +28,7 @@ from rdocx import (
     Paragraph,
     ParagraphCollection,
     ParagraphFormat,
+    Picture,
     Revision,
     Row,
     RowCollection,
@@ -101,6 +103,18 @@ def exercise_rdocx_types(path: Path) -> None:
     assert_type(table.grid_widths, tuple[Length, ...])
     table.grid_widths = [Inches(1)]
     table.set_column_width(0, Inches(2))
+    table.autofit = False
+    assert_type(table.first_row, bool)
+    table.horz_banding = True
+    added_row: Row = table.add_row()
+    column: Column = table.add_column(Inches(1))
+    column_cells: list[Cell] = table.columns[0].cells
+    assert_type(column.width, Length | None)
+    table.insert_column(0)
+    table.remove_column(0)
+    nested: Table = cell.add_table(1, 1)
+    nested_tables: list[Table] = cell.tables
+    assert_type(cell.split(), int)
     assert_type(row.height, Length | None)
     assert_type(row.height_rule, WD_ROW_HEIGHT_RULE | None)
     assert_type(row.cant_split, bool | None)
@@ -207,6 +221,26 @@ def exercise_rdocx_types(path: Path) -> None:
     document.replace_image("rId1", b"image")
     document.replace_image_for_story(stories[0], "rId1", b"image")
     resized: int = document.set_picture_size("rId1", width=Inches(1), height=Inches(1))
+    pictures: tuple[Picture, ...] = document.pictures
+    resized_one: int = document.set_picture_size(pictures[0], Inches(1), Inches(1))
+    assert_type(pictures[0].blob, bytes | None)
+    assert_type(pictures[0].width, Length)
+    floating: StoryItem = document.add_picture(
+        "chart.png",
+        width=Inches(2),
+        description="Chart",
+        wrap="square",
+        position=("right", 0),
+        relative_to=("margin", "paragraph"),
+        crop=(0.1, 0.0, 0.1, 0.0),
+    )
+    logo: Picture = document.paragraphs[0].add_run("").add_picture(
+        b"png", Inches(1), title="Logo"
+    )
+    internal: Run = document.paragraphs[0].add_hyperlink(
+        "see", anchor=document.paragraphs[0], tooltip="Jump"
+    )
+    assert_type(document.hyperlinks[0].tooltip, str | None)
     story_items: tuple[StoryItem, ...] = document.story_items
     inserted_picture: StoryItem = document.add_picture(
         b"png", "image.png", Inches(1), Inches(1), after=story_items[0]
@@ -348,11 +382,13 @@ if TYPE_CHECKING:
     Cell()  # type: ignore[call-arg]
     CellCollection()  # type: ignore[call-arg]
     CellParagraphCollection()  # type: ignore[call-arg]
+    Column()  # type: ignore[call-arg]
     CoreProperties()  # type: ignore[call-arg]
     Font()  # type: ignore[call-arg]
     Paragraph()  # type: ignore[call-arg]
     ParagraphCollection()  # type: ignore[call-arg]
     ParagraphFormat()  # type: ignore[call-arg]
+    Picture()  # type: ignore[call-arg]
     Row()  # type: ignore[call-arg]
     RowCollection()  # type: ignore[call-arg]
     Run()  # type: ignore[call-arg]

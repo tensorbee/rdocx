@@ -5500,6 +5500,138 @@ fn html_fragment_rejects_unreviewed_story_kinds_atomically() {
 }
 
 #[test]
+fn internal_links_target_a_heading_bookmark_created_once() {
+    let mut document = Document::new();
+    document.add_paragraph("Results and Discussion");
+    document.add_paragraph("See ");
+    let name = document.heading_bookmark(0).unwrap();
+    assert_eq!(name, "Heading_Results_and_Discussion");
+    assert_eq!(document.heading_bookmark(0).unwrap(), name);
+    document
+        .last_paragraph_mut()
+        .unwrap()
+        .add_internal_hyperlink("the results", &name, Some("Jump to the results"));
+    // A second heading with the same text gets a numbered name.
+    document.add_paragraph("Results and Discussion");
+    assert_eq!(
+        document.heading_bookmark(2).unwrap(),
+        "Heading_Results_and_Discussion_2"
+    );
+    assert!(document.heading_bookmark(9).is_err());
+
+    let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+    let links = reopened.links();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].anchor.as_deref(), Some(name.as_str()));
+    assert_eq!(links[0].url, None);
+    assert_eq!(links[0].rel_id, None);
+    assert_eq!(links[0].tooltip.as_deref(), Some("Jump to the results"));
+    let bookmark = reopened
+        .bookmarks()
+        .into_iter()
+        .find(|bookmark| bookmark.name() == Some(name.as_str()))
+        .unwrap();
+    assert_eq!(bookmark.text(), "Results and Discussion");
+}
+
+#[test]
+fn configured_pictures_insert_resize_one_at_a_time_and_list_their_alt_text() {
+    let mut document = Document::new();
+    document.add_paragraph("pictures");
+    let body = document
+        .stories()
+        .unwrap()
+        .into_iter()
+        .find(|story| story.kind() == StoryKind::Body)
+        .unwrap();
+    let png = mhtml_pixel_png();
+    let mut floating = rdocx::PictureOptions::new(Length::pt(90.0), Length::pt(45.0));
+    floating.description = Some("A floating chart".to_owned());
+    floating.title = Some("Chart".to_owned());
+    floating.anchor = Some(rdocx::PictureAnchor {
+        horizontal_relative_from: rdocx::DrawingHorizontalRelativeFrom::Column,
+        horizontal_offset: Length::pt(0.0),
+        horizontal_alignment: Some(rdocx::DrawingHorizontalAlignment::Right),
+        vertical_relative_from: rdocx::DrawingVerticalRelativeFrom::Paragraph,
+        vertical_offset: Length::pt(6.0),
+        vertical_alignment: None,
+        wrap: rdocx::DrawingWrap::TopAndBottom,
+        distance_top: Length::pt(0.0),
+        distance_bottom: Length::pt(0.0),
+        distance_left: Length::pt(9.0),
+        distance_right: Length::pt(9.0),
+        relative_height: 1,
+        behind_text: false,
+    });
+    let first = document
+        .insert_picture_with_options(&body, None, &png, "chart.png", floating)
+        .unwrap();
+    let mut decorative = rdocx::PictureOptions::new(Length::pt(20.0), Length::pt(20.0));
+    decorative.decorative = true;
+    let body = first.story().clone();
+    document
+        .insert_picture_with_options(&body, Some(&first), &png, "rule.png", decorative)
+        .unwrap();
+
+    // A run picture shares the first picture's relationship.
+    let relationship = document.images()[0].embed_id.clone();
+    let drawing_id = document.reserve_drawing_id().unwrap();
+    let mut inline = rdocx::PictureOptions::new(Length::pt(10.0), Length::pt(10.0));
+    inline.description = Some("Inline copy".to_owned());
+    document
+        .add_paragraph("")
+        .add_run("")
+        .add_picture_with_options(&relationship, drawing_id, inline)
+        .unwrap();
+
+    assert_eq!(document.picture_drawings().unwrap().len(), 3);
+    document
+        .set_picture_size_at(2, Length::pt(30.0), Length::pt(30.0))
+        .unwrap();
+    assert!(
+        document
+            .set_picture_size_at(3, Length::pt(1.0), Length::pt(1.0))
+            .is_err()
+    );
+    let bytes = document.to_bytes().unwrap();
+    let reopened = Document::from_bytes(&bytes).unwrap();
+    let images = reopened.images();
+    assert_eq!(images.len(), 3);
+    assert!(images[0].is_anchor);
+    assert_eq!(images[0].description.as_deref(), Some("A floating chart"));
+    assert_eq!(images[0].title.as_deref(), Some("Chart"));
+    assert_eq!(images[0].width_emu, Length::pt(90.0).to_emu());
+    assert!(images[1].decorative && !images[1].is_anchor);
+    assert_eq!(images[2].description.as_deref(), Some("Inline copy"));
+    assert_eq!(images[2].width_emu, Length::pt(30.0).to_emu());
+    let (content_type, part) = reopened.image_content_type(&images[0].embed_id).unwrap();
+    assert_eq!(content_type, "image/png");
+    assert!(part.starts_with("/word/media/") || part.starts_with("word/media/"));
+
+    let xml = String::from_utf8(
+        OpcPackage::from_reader(std::io::Cursor::new(bytes))
+            .unwrap()
+            .get_part("word/document.xml")
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(xml.contains("<wp:wrapTopAndBottom/>"));
+    assert!(xml.contains("adec:decorative"));
+    let ids = xml
+        .match_indices("<wp:docPr id=\"")
+        .map(|(at, found)| {
+            xml[at + found.len()..]
+                .split('"')
+                .next()
+                .unwrap()
+                .to_owned()
+        })
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(ids.len(), 3);
+}
+
+#[test]
 fn m23_drawings_text_boxes_and_watermarks_match_word() {
     let mut document = Document::new();
     document.add_paragraph("drawing matrix");
@@ -5528,6 +5660,8 @@ fn m23_drawings_text_boxes_and_watermarks_match_word() {
                 anchor: None,
                 name: Some("Cropped inline".to_owned()),
                 description: Some("inline corpus picture".to_owned()),
+                title: None,
+                decorative: false,
             },
         )
         .unwrap();
@@ -5563,6 +5697,8 @@ fn m23_drawings_text_boxes_and_watermarks_match_word() {
                 }),
                 name: Some("Floating picture".to_owned()),
                 description: None,
+                title: None,
+                decorative: false,
             },
         )
         .unwrap();
@@ -5693,6 +5829,8 @@ fn drawing_option_matrix_round_trips_with_story_relationships() {
                 anchor: None,
                 name: None,
                 description: None,
+                title: None,
+                decorative: false,
             },
         )
         .unwrap();
@@ -5794,6 +5932,8 @@ fn staged_drawing_invariants_reject_invalid_inputs_atomically() {
         anchor: None,
         name: None,
         description: None,
+        title: None,
+        decorative: false,
     };
     assert!(
         document
@@ -5838,6 +5978,8 @@ fn staged_drawing_invariants_reject_invalid_inputs_atomically() {
         anchor: None,
         name: None,
         description: None,
+        title: None,
+        decorative: false,
     };
     assert!(
         document
@@ -8727,6 +8869,358 @@ fn checked_row_cell_topology_is_atomic() {
     for (cell, width) in original_widths.into_iter().enumerate() {
         assert_eq!(table.cell(0, cell).unwrap().width(), Some(width));
     }
+}
+
+/// One cell as `(grid span, vertical merge, fixed width in twips, text)`.
+type CellShape = (u32, Option<rdocx::table::VMerge>, Option<i32>, String);
+
+/// The grid widths of table `index` in twips, and every row's cells.
+fn table_shape(document: &Document, index: usize) -> (Vec<i32>, Vec<Vec<CellShape>>) {
+    let table = document.table(index).unwrap();
+    let grid = table
+        .grid_widths()
+        .iter()
+        .map(|width| width.to_twips())
+        .collect::<Vec<_>>();
+    let rows = (0..table.row_count())
+        .map(|row| {
+            let row = table.row(row).unwrap();
+            (0..row.cell_count())
+                .map(|cell| {
+                    let cell = row.cell(cell).unwrap();
+                    (
+                        cell.grid_span().unwrap_or(1),
+                        cell.v_merge().copied(),
+                        cell.width().map(|width| width.to_twips()),
+                        cell.text(),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+    (grid, rows)
+}
+
+/// A 3 x 3 table whose first row merges two cells and whose last column
+/// merges the two lower rows, with each cell's text naming its position.
+fn merged_table_document() -> Document {
+    let mut document = Document::new();
+    let mut table = document.add_table(3, 3);
+    table.set_grid_widths(&[Length::twips(3120); 3]).unwrap();
+    for row in 0..3 {
+        for cell in 0..3 {
+            table
+                .cell(row, cell)
+                .unwrap()
+                .set_text(&format!("{row}{cell}"));
+        }
+    }
+    table.cell(0, 1).unwrap().set_text("");
+    table.set_cell_grid_span_checked(0, 0, Some(2)).unwrap();
+    table
+        .set_cell_vertical_merge(1, 2, Some(rdocx::table::VMerge::Restart))
+        .unwrap();
+    table
+        .set_cell_vertical_merge(2, 2, Some(rdocx::table::VMerge::Continue))
+        .unwrap();
+    table.cell(1, 0).unwrap().set_shading("D9E2F3");
+    document
+}
+
+fn reopened(document: &mut Document) -> Document {
+    Document::from_bytes(&document.to_bytes().unwrap()).unwrap()
+}
+
+#[test]
+fn inserted_columns_widen_spans_and_copy_the_neighbour_cell() {
+    use rdocx::table::VMerge::{Continue, Restart};
+    let mut document = merged_table_document();
+    // Inside the first row's span, at a cell boundary in the other rows.
+    document
+        .table_mut(0)
+        .unwrap()
+        .insert_column(1, None)
+        .unwrap();
+    let document = reopened(&mut document);
+    let (grid, rows) = table_shape(&document, 0);
+    assert_eq!(grid, vec![3120; 4]);
+    assert_eq!(
+        document.table(0).unwrap().width(),
+        Some(Length::twips(12480))
+    );
+    assert_eq!(
+        rows,
+        vec![
+            vec![
+                (3, None, Some(9360), "00".to_owned()),
+                (1, None, Some(3120), "02".to_owned()),
+            ],
+            vec![
+                (1, None, Some(3120), "10".to_owned()),
+                (1, None, Some(3120), String::new()),
+                (1, None, Some(3120), "11".to_owned()),
+                (1, Some(Restart), Some(3120), "12".to_owned()),
+            ],
+            vec![
+                (1, None, Some(3120), "20".to_owned()),
+                (1, None, Some(3120), String::new()),
+                (1, None, Some(3120), "21".to_owned()),
+                (1, Some(Continue), Some(3120), "22".to_owned()),
+            ],
+        ]
+    );
+    // The new cell copies the formatting of the cell before it.
+    assert_eq!(
+        document
+            .table(0)
+            .unwrap()
+            .cell(1, 1)
+            .unwrap()
+            .shading_fill(),
+        Some("D9E2F3")
+    );
+
+    let mut document = document;
+    let mut table = document.table_mut(0).unwrap();
+    table.insert_column(0, Some(Length::twips(1000))).unwrap();
+    table.insert_column(5, None).unwrap();
+    assert!(table.insert_column(7, None).is_err());
+    assert!(table.insert_column(0, Some(Length::twips(0))).is_err());
+    let document = reopened(&mut document);
+    let (grid, rows) = table_shape(&document, 0);
+    assert_eq!(grid, vec![1000, 3120, 3120, 3120, 3120, 3120]);
+    assert_eq!(rows.iter().map(Vec::len).collect::<Vec<_>>(), vec![4, 6, 6]);
+    // The appended column copies the vertically merged cell without its merge.
+    assert_eq!(rows[1][5], (1, None, Some(3120), String::new()));
+    assert_eq!(rows[2][4].1, Some(Continue));
+}
+
+#[test]
+fn removed_columns_narrow_spans_and_drop_merged_columns() {
+    use rdocx::table::VMerge::{Continue, Restart};
+    let mut document = merged_table_document();
+    // Inside the first row's span: it narrows, the other rows lose a cell.
+    document.remove_table_column(0, 1).unwrap();
+    let (grid, rows) = table_shape(&reopened(&mut document), 0);
+    assert_eq!(grid, vec![3120, 3120]);
+    assert_eq!(
+        rows,
+        vec![
+            vec![
+                (1, None, Some(3120), "00".to_owned()),
+                (1, None, Some(3120), "02".to_owned()),
+            ],
+            vec![
+                (1, None, Some(3120), "10".to_owned()),
+                (1, Some(Restart), Some(3120), "12".to_owned()),
+            ],
+            vec![
+                (1, None, Some(3120), "20".to_owned()),
+                (1, Some(Continue), Some(3120), "22".to_owned()),
+            ],
+        ]
+    );
+    assert_eq!(
+        document.table(0).unwrap().width(),
+        Some(Length::twips(6240))
+    );
+    // The vertically merged column goes as a whole.
+    document.remove_table_column(0, 1).unwrap();
+    let (grid, rows) = table_shape(&reopened(&mut document), 0);
+    assert_eq!(grid, vec![3120]);
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.iter().map(|cell| cell.3.as_str()).collect::<Vec<_>>())
+            .collect::<Vec<_>>(),
+        vec![vec!["00"], vec!["10"], vec!["20"]]
+    );
+    let before = document.to_bytes().unwrap();
+    assert!(document.remove_table_column(0, 0).is_err());
+    assert!(document.remove_table_column(0, 1).is_err());
+    assert!(document.remove_table_column(1, 0).is_err());
+    assert_eq!(document.to_bytes().unwrap(), before);
+}
+
+#[test]
+fn removing_a_column_keeps_grid_omissions_consistent() {
+    let mut document = Document::new();
+    document.add_table(2, 3);
+    document
+        .table_mut(0)
+        .unwrap()
+        .set_row_grid_omissions(1, Some(1), None)
+        .unwrap();
+    document.remove_table_column(0, 0).unwrap();
+    let document = reopened(&mut document);
+    let table = document.table(0).unwrap();
+    assert_eq!(table.grid_widths().len(), 2);
+    assert_eq!(table.row(0).unwrap().cell_count(), 2);
+    assert_eq!(table.row(1).unwrap().cell_count(), 2);
+    assert_eq!(table.row(1).unwrap().grid_before(), None);
+}
+
+#[test]
+fn splitting_a_cell_undoes_horizontal_and_vertical_merges() {
+    use rdocx::table::VMerge::Restart;
+    let mut document = merged_table_document();
+    {
+        let mut table = document.table_mut(0).unwrap();
+        // A continuation cell splits its whole vertical merge.
+        assert_eq!(table.split_cell(2, 2).unwrap(), 2);
+        assert_eq!(table.split_cell(0, 0).unwrap(), 2);
+        assert_eq!(table.split_cell(1, 1).unwrap(), 1);
+        assert!(table.split_cell(3, 0).is_err());
+    }
+    let (grid, rows) = table_shape(&reopened(&mut document), 0);
+    assert_eq!(grid, vec![3120; 3]);
+    for row in &rows {
+        assert_eq!(row.len(), 3);
+        assert!(row.iter().all(|cell| cell.0 == 1 && cell.1.is_none()));
+        assert!(row.iter().all(|cell| cell.2 == Some(3120)));
+    }
+    assert_eq!(rows[0][0].3, "00");
+    assert_eq!(rows[0][1].3, "");
+    assert_eq!(rows[2][2].3, "22");
+
+    // A cell merged both ways becomes one cell per grid position.
+    let mut document = Document::new();
+    let mut table = document.add_table(2, 3);
+    table.set_cell_grid_span_checked(0, 0, Some(2)).unwrap();
+    table.set_cell_grid_span_checked(1, 0, Some(2)).unwrap();
+    table.set_cell_vertical_merge(0, 0, Some(Restart)).unwrap();
+    table
+        .set_cell_vertical_merge(1, 0, Some(rdocx::table::VMerge::Continue))
+        .unwrap();
+    table.cell(0, 0).unwrap().set_shading("FFF2CC");
+    assert_eq!(table.split_cell(0, 0).unwrap(), 4);
+    let document = reopened(&mut document);
+    let (_, rows) = table_shape(&document, 0);
+    assert_eq!(rows.iter().map(Vec::len).collect::<Vec<_>>(), vec![3, 3]);
+    assert!(rows.iter().flatten().all(|cell| cell.1.is_none()));
+    assert_eq!(
+        document
+            .table(0)
+            .unwrap()
+            .cell(0, 1)
+            .unwrap()
+            .shading_fill(),
+        Some("FFF2CC")
+    );
+}
+
+#[test]
+fn added_rows_copy_the_last_row_formatting_without_merges() {
+    let mut document = merged_table_document();
+    {
+        let mut table = document.table_mut(0).unwrap();
+        table.cell(2, 0).unwrap().set_shading("E2EFDA");
+        table.row(2).unwrap().set_cant_split();
+        let row = table.add_row().unwrap();
+        assert_eq!(row.cell_count(), 3);
+    }
+    let document = reopened(&mut document);
+    let table = document.table(0).unwrap();
+    assert_eq!(table.row_count(), 4);
+    let row = table.row(3).unwrap();
+    assert_eq!(row.cant_split_value(), Some(true));
+    assert_eq!(row.cell(0).unwrap().shading_fill(), Some("E2EFDA"));
+    assert!(row.cell(2).unwrap().v_merge().is_none());
+    assert!((0..3).all(|cell| row.cell(cell).unwrap().text().is_empty()));
+}
+
+/// A document whose body is `body`, written through a blank package.
+fn document_with_body(body: &str) -> Document {
+    let mut package =
+        OpcPackage::from_reader(std::io::Cursor::new(Document::new().to_bytes().unwrap())).unwrap();
+    let xml = String::from_utf8(package.get_part("word/document.xml").unwrap().to_vec()).unwrap();
+    let start = xml.find("<w:body>").unwrap() + "<w:body>".len();
+    let end = xml.find("<w:sectPr").unwrap();
+    let xml = format!("{}{body}{}", &xml[..start], &xml[end..]);
+    package.set_part("word/document.xml", xml.into_bytes());
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    Document::from_bytes(bytes.get_ref()).unwrap()
+}
+
+#[test]
+fn removing_a_column_drops_the_other_marker_of_a_cut_bookmark() {
+    let cell = |inner: &str| {
+        format!(
+            "<w:tc><w:tcPr><w:tcW w:w=\"2000\" w:type=\"dxa\"/></w:tcPr><w:p>{inner}</w:p></w:tc>"
+        )
+    };
+    let body = format!(
+        "<w:tbl><w:tblPr><w:tblW w:w=\"4000\" w:type=\"dxa\"/></w:tblPr><w:tblGrid><w:gridCol w:w=\"2000\"/><w:gridCol w:w=\"2000\"/></w:tblGrid><w:tr>{}{}</w:tr><w:tr>{}{}</w:tr></w:tbl><w:p/>",
+        cell(r#"<w:bookmarkStart w:id="7" w:name="cut"/><w:r><w:t>a</w:t></w:r>"#),
+        cell(r#"<w:r><w:t>b</w:t></w:r>"#),
+        cell(r#"<w:r><w:t>c</w:t></w:r><w:bookmarkEnd w:id="7"/>"#),
+        cell(
+            r#"<w:bookmarkStart w:id="8" w:name="kept"/><w:r><w:t>d</w:t></w:r><w:bookmarkEnd w:id="8"/>"#
+        ),
+    );
+    let mut document = document_with_body(&body);
+    document.remove_table_column(0, 0).unwrap();
+    let mut document = reopened(&mut document);
+    let names = document
+        .bookmarks()
+        .iter()
+        .filter_map(|bookmark| bookmark.name().map(str::to_owned))
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["kept".to_owned()]);
+    let xml = compact_body_xml(&mut document);
+    assert!(!xml.contains("w:id=\"7\""), "{xml}");
+}
+
+#[test]
+fn added_rows_and_splits_refuse_what_they_cannot_keep_consistent() {
+    let mut document = document_with_body(
+        "<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w=\"2000\"/><w:gridCol w:w=\"2000\"/></w:tblGrid><w:tr><w:tc><w:p/></w:tc><w:sdt><w:sdtPr/><w:sdtContent><w:tc><w:p/></w:tc></w:sdtContent></w:sdt></w:tr></w:tbl><w:p/>",
+    );
+    let error = document.table_mut(0).unwrap().add_row().err().unwrap();
+    assert!(error.to_string().contains("content controls"), "{error}");
+    assert_eq!(document.table(0).unwrap().row_count(), 1);
+
+    let mut document = document_with_body(
+        "<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w=\"2000\"/><w:gridCol w:w=\"2000\"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:hMerge w:val=\"restart\"/></w:tcPr><w:p/></w:tc><w:tc><w:tcPr><w:hMerge/></w:tcPr><w:p/></w:tc></w:tr></w:tbl><w:p/>",
+    );
+    let error = document.table_mut(0).unwrap().split_cell(0, 0).unwrap_err();
+    assert!(error.to_string().contains("w:hMerge"), "{error}");
+}
+
+#[test]
+fn nested_tables_are_reachable_from_their_cell() {
+    let mut document = Document::new();
+    document.add_table(1, 2);
+    {
+        let mut table = document.table_mut(0).unwrap();
+        let mut cell = table.cell(0, 1).unwrap();
+        cell.add_table_checked(2, 2).unwrap();
+        cell.add_table_checked(1, 1).unwrap();
+    }
+    {
+        let mut nested = document
+            .table_mut(0)
+            .unwrap()
+            .into_nested_table(0, 1, 1)
+            .unwrap();
+        nested.cell(0, 0).unwrap().set_text("inner");
+        nested.insert_column(1, None).unwrap();
+    }
+    assert!(
+        document
+            .table_mut(0)
+            .unwrap()
+            .into_nested_table(0, 0, 0)
+            .is_none()
+    );
+    let document = reopened(&mut document);
+    assert_eq!(document.table_count(), 1);
+    let table = document.table(0).unwrap();
+    let cell = table.cell(0, 1).unwrap();
+    assert_eq!(cell.tables().count(), 2);
+    let nested = table.nested_table(0, 1, 1).unwrap();
+    assert_eq!(nested.cell(0, 0).unwrap().text(), "inner");
+    assert_eq!(nested.column_count(), 2);
 }
 
 /// `test_table_acceptance_workflow_writes_the_native_body` in

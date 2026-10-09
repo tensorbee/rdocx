@@ -128,6 +128,90 @@ impl PyRun {
         Ok(())
     }
 
+    /// Append a picture to this run, as python-docx `Run.add_picture` does,
+    /// in a body or table-cell paragraph.
+    ///
+    /// `image` is bytes, a path or a binary stream. The keyword options are
+    /// those of `Document.add_picture`.
+    #[pyo3(signature = (
+        image,
+        width=None,
+        height=None,
+        *,
+        filename=None,
+        description=None,
+        title=None,
+        decorative=false,
+        name=None,
+        crop=None,
+        wrap="inline",
+        position=None,
+        relative_to=None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_picture<'py>(
+        &self,
+        py: Python<'py>,
+        image: &Bound<'py, PyAny>,
+        width: Option<i64>,
+        height: Option<i64>,
+        filename: Option<&str>,
+        description: Option<String>,
+        title: Option<String>,
+        decorative: bool,
+        name: Option<String>,
+        crop: Option<(f64, f64, f64, f64)>,
+        wrap: &str,
+        position: Option<(Bound<'py, PyAny>, Bound<'py, PyAny>)>,
+        relative_to: Option<(String, String)>,
+    ) -> PyResult<Py<crate::document::PyPicture>> {
+        self.validate(py)?;
+        let (data, filename) = crate::document::picture_source(image, filename)?;
+        let options = crate::document::PictureArguments {
+            width,
+            height,
+            description,
+            title,
+            decorative,
+            name,
+            crop,
+            wrap: wrap.to_owned(),
+            position,
+            relative_to,
+        }
+        .options(&data, &filename)?;
+        // Check before embedding, so a refused option leaves no media part.
+        options
+            .validate()
+            .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
+        let (relationship_id, drawing_id) = {
+            let mut document = self.document.borrow_mut(py);
+            let relationship_id = document.inner.embed_image(&data, &filename);
+            let drawing_id = document
+                .inner
+                .reserve_drawing_id()
+                .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
+            (relationship_id, drawing_id)
+        };
+        let mut added = Ok(());
+        self.edit(py, |run| {
+            added = run.add_picture_with_options(&relationship_id, drawing_id, options)
+        })?;
+        added.map_err(|error| crate::rdocx_to_pyerr(py, error))?;
+        // The drawing becomes a story item of its own, which moves the index
+        // path of every later story item.
+        let mut document = self.document.borrow_mut(py);
+        document.revisions.bump();
+        // The new relationship is the picture's own, as python-docx returns
+        // the inline shape it adds.
+        let picture = document
+            .picture_snapshots(py)?
+            .into_iter()
+            .find(|picture| picture.relationship_id == relationship_id)
+            .ok_or_else(|| PyRuntimeError::new_err("the added picture was not found"))?;
+        Py::new(py, picture)
+    }
+
     /// Remove this run from its paragraph, keeping the markers around it.
     fn remove(&self, py: Python<'_>) -> PyResult<()> {
         let (location, run_index) = self.validate(py)?;

@@ -15,15 +15,15 @@ use oxml_py_support::StaleElementError;
 use document::{
     PyBookmark, PyBoundingBox, PyComment, PyComparisonDiagnostic, PyContentFragment,
     PyCoreProperties, PyDocument, PyHeaderFooterVariant, PyHyperlink,
-    PyLayoutBackedFieldUpdateReport, PyLayoutFragment, PyLayoutPage, PyListLevel, PyRevision,
-    PyRunPosition, PyRunRange, PySection, PyStory, PyStoryItem, PyStoryRunPosition,
+    PyLayoutBackedFieldUpdateReport, PyLayoutFragment, PyLayoutPage, PyListLevel, PyPicture,
+    PyRevision, PyRunPosition, PyRunRange, PySection, PyStory, PyStoryItem, PyStoryRunPosition,
     PyStoryRunRange, PyStyle, PySvgDiagnostic, PySvgRenderResult, PyTocRebuildReport,
 };
 use formatting::{PyFont, PyParagraphFormat};
 use paragraph::{PyParagraph, PyParagraphCollection};
 use run::{PyRun, PyRunCollection};
 use table::{
-    PyCell, PyCellCollection, PyCellParagraphCollection, PyRow, PyRowCollection, PyTable,
+    PyCell, PyCellCollection, PyCellParagraphCollection, PyColumn, PyRow, PyRowCollection, PyTable,
     PyTableCollection,
 };
 
@@ -137,6 +137,7 @@ fn _rdocx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyContentFragment>()?;
     module.add_class::<PyCoreProperties>()?;
     module.add_class::<PyHyperlink>()?;
+    module.add_class::<PyPicture>()?;
     module.add_class::<PyHeaderFooterVariant>()?;
     module.add_class::<PySection>()?;
     module.add_class::<PyStyle>()?;
@@ -148,6 +149,7 @@ fn _rdocx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyFont>()?;
     module.add_class::<PyParagraphFormat>()?;
     module.add_class::<PyTable>()?;
+    module.add_class::<PyColumn>()?;
     module.add_class::<PyTableCollection>()?;
     module.add_class::<PyRow>()?;
     module.add_class::<PyRowCollection>()?;

@@ -2661,6 +2661,8 @@ fn render_drawing_projection(drawing: &CT_Drawing) -> CT_Drawing {
         link_id: None,
         chart_rel_id: chart_rel_id.cloned(),
         description: description.cloned(),
+        title: None,
+        decorative: false,
         name: None,
         source_rect: None,
         raw_xml: None,

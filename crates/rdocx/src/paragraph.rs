@@ -1125,6 +1125,35 @@ impl<'a> Paragraph<'a> {
         }
     }
 
+    /// Add a run wrapped in a hyperlink to bookmark `anchor` of the same
+    /// document (`w:hyperlink w:anchor`), with an optional hover tooltip.
+    ///
+    /// No relationship is written, so the link stays inside the document.
+    /// [`crate::Document::heading_bookmark`] names a heading's bookmark.
+    pub fn add_internal_hyperlink(
+        &mut self,
+        text: &str,
+        anchor: &str,
+        tooltip: Option<&str>,
+    ) -> Run<'_> {
+        let run_start = self.inner.runs.len();
+        self.inner.runs.push(CT_R::new(text));
+        self.inner.hyperlinks.push(HyperlinkSpan {
+            rel_id: None,
+            anchor: Some(anchor.to_owned()),
+            tooltip: tooltip.map(str::to_owned),
+            doc_location: None,
+            run_start,
+            run_end: run_start + 1,
+            extra_attributes: Vec::new(),
+            extra_xml: Vec::new(),
+            preserved_raw_before: None,
+        });
+        Run {
+            inner: self.inner.runs.last_mut().unwrap(),
+        }
+    }
+
     /// Get the number of runs in this paragraph.
     pub fn run_count(&self) -> usize {
         self.inner.accepted_run_paths().len()

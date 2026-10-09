@@ -503,6 +503,25 @@ impl<'a> Run<'a> {
             .append_content(RunContent::Drawing(CT_Drawing::inline(inline)));
     }
 
+    /// Append a configured picture using a relationship already embedded in
+    /// the document: alt text, title, decorative marker, crop and, for a
+    /// floating picture, its anchor and wrapping.
+    ///
+    /// Obtain `relationship_id` from [`crate::Document::embed_image`] and
+    /// `drawing_id` from the same document, so every `wp:docPr` stays unique.
+    #[doc(hidden)]
+    pub fn add_picture_with_options(
+        &mut self,
+        relationship_id: &str,
+        drawing_id: u32,
+        options: crate::PictureOptions,
+    ) -> Result<()> {
+        crate::document::validate_picture_options(&options)?;
+        let drawing = crate::document::picture_drawing(relationship_id, drawing_id, options);
+        self.inner.append_content(RunContent::Drawing(drawing));
+        Ok(())
+    }
+
     /// Append a Word field with its cached display result.
     pub fn add_field(&mut self, instruction: &str, cached_result: &str) -> Result<()> {
         oxml_core::xml::reject_non_xml_characters("field instruction", instruction)?;

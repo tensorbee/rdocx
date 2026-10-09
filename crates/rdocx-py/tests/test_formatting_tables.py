@@ -1059,3 +1059,261 @@ def test_word_highlight_keywords_round_trip_and_clear():
     assert reopened.paragraphs[0].runs[0].font.highlight == "yellow"
     reopened.paragraphs[0].runs[0].font.highlight = None
     assert Document.from_bytes(reopened.to_bytes()).paragraphs[0].runs[0].font.highlight is None
+
+
+def test_table_look_layout_and_style_by_name():
+    from rdocx import Document
+
+    document = Document()
+    table = document.add_table(2, 2)
+    assert table.autofit is True
+    table.autofit = False
+    assert table.autofit is False
+    assert (table.first_row, table.horz_banding, table.vert_banding) == (
+        False,
+        True,
+        True,
+    )
+    table.first_row = True
+    table.first_col = True
+    table.vert_banding = False
+    table.last_row = True
+    table.last_col = False
+    table.horz_banding = True
+    reopened = Document.from_bytes(document.to_bytes())
+    table = reopened.tables[0]
+    assert table.autofit is False
+    assert [
+        table.first_row,
+        table.last_row,
+        table.first_col,
+        table.last_col,
+        table.horz_banding,
+        table.vert_banding,
+    ] == [True, True, True, False, True, False]
+    xml = _part(reopened, "word/document.xml")
+    assert '<w:tblLayout w:type="fixed"/>' in xml
+    assert 'w:noVBand="1"' in xml
+
+    # A table style is found by name, and a value naming no style stays an ID
+    # with a warning, as python-docx writes it.
+    style_ids = {style.name: style.style_id for style in reopened.styles}
+    table_styles = [
+        style for style in reopened.styles if style.style_type == "table"
+    ]
+    if table_styles:
+        table.style = table_styles[0].name
+        assert table.style == table_styles[0].style_id
+    with pytest.warns(UserWarning, match="add_style"):
+        table.style = "NoSuchTableStyle"
+    assert table.style == "NoSuchTableStyle"
+    if "Normal" in style_ids:
+        with pytest.raises(ValueError, match="not a table style"):
+            table.style = "Normal"
+
+
+def _merged_table():
+    """A 3 x 3 table whose first row merges two cells and whose last column
+    merges the two lower rows, each cell's text naming its position."""
+    from rdocx import Document, Inches
+
+    document = Document()
+    table = document.add_table(3, 3)
+    table.grid_widths = [Inches(1)] * 3
+    for row in range(3):
+        for col in range(3):
+            document.tables[0].cell(row, col).text = f"{row}{col}"
+    document.tables[0].cell(0, 1).text = ""
+    document.tables[0].set_cell_grid_span(0, 0, 2)
+    table = document.tables[0]
+    table.set_cell_vertical_merge(1, 2, "restart")
+    table.set_cell_vertical_merge(2, 2, "continue")
+    table.cell(1, 0).shading = "D9E2F3"
+    return document
+
+
+def _shape(table):
+    return [
+        [(cell.grid_span, cell.vertical_merge, cell.text) for cell in row.cells]
+        for row in table.rows
+    ]
+
+
+def test_table_columns_are_inserted_and_removed_through_merges():
+    from rdocx import Document, Inches, RdocxError
+
+    document = _merged_table()
+    table = document.tables[0]
+    table.insert_column(1)
+    # The table handle stays valid across its own column edits.
+    assert len(table.grid_widths) == 4
+    table = Document.from_bytes(document.to_bytes()).tables[0]
+    assert table.grid_widths == (Inches(1),) * 4
+    assert table.width == Inches(4)
+    assert _shape(table) == [
+        [(3, None, "00"), (1, None, "02")],
+        [(1, None, "10"), (1, None, ""), (1, None, "11"), (1, "restart", "12")],
+        [(1, None, "20"), (1, None, ""), (1, None, "21"), (1, "continue", "22")],
+    ]
+    assert table.cell(1, 1).shading == "D9E2F3"
+    assert table.cell(0, 0).width == Inches(3)
+
+    document = _merged_table()
+    document.tables[0].add_column(Inches(0.5))
+    assert document.tables[0].grid_widths[-1] == Inches(0.5)
+    assert [len(row.cells) for row in document.tables[0].rows] == [3, 4, 4]
+    document.tables[0].insert_column(-1)
+    assert len(document.tables[0].grid_widths) == 5
+
+    document = _merged_table()
+    document.tables[0].remove_column(1)
+    assert _shape(document.tables[0]) == [
+        [(1, None, "00"), (1, None, "02")],
+        [(1, None, "10"), (1, "restart", "12")],
+        [(1, None, "20"), (1, "continue", "22")],
+    ]
+    document.tables[0].remove_column(-1)
+    assert _shape(document.tables[0]) == [
+        [(1, None, "00")],
+        [(1, None, "10")],
+        [(1, None, "20")],
+    ]
+    with pytest.raises(RdocxError, match="at least one column"):
+        document.tables[0].remove_column(0)
+    with pytest.raises(IndexError):
+        document.tables[0].remove_column(1)
+
+
+def test_merged_cells_split_back_into_grid_cells():
+    from rdocx import Document, Inches
+
+    document = _merged_table()
+    assert document.tables[0].cell(2, 2).split() == 2
+    assert document.tables[0].cell(0, 0).split() == 2
+    assert document.tables[0].cell(1, 1).split() == 1
+    reopened = Document.from_bytes(document.to_bytes())
+    table = reopened.tables[0]
+    assert [[cell.text for cell in row.cells] for row in table.rows] == [
+        ["00", "", "02"],
+        ["10", "11", "12"],
+        ["20", "21", "22"],
+    ]
+    assert all(
+        cell.grid_span == 1 and cell.vertical_merge is None and cell.width == Inches(1)
+        for row in table.rows
+        for cell in row.cells
+    )
+
+
+def test_add_row_copies_the_last_row_formatting():
+    from rdocx import Document, Inches
+
+    document = _merged_table()
+    document.tables[0].cell(2, 0).shading = "E2EFDA"
+    document.tables[0].rows[2].cant_split = True
+    row = document.tables[0].add_row()
+    row.cells[0].text = "added"
+    reopened = Document.from_bytes(document.to_bytes())
+    table = reopened.tables[0]
+    assert len(table.rows) == 4
+    last = table.rows[3]
+    assert last.cant_split is True
+    assert [cell.text for cell in last.cells] == ["added", "", ""]
+    assert last.cells[0].shading == "E2EFDA"
+    assert last.cells[2].vertical_merge is None
+    assert last.cells[1].width == Inches(1)
+
+
+def test_nested_tables_are_added_and_edited_through_their_cell():
+    from rdocx import Document, Inches
+
+    document = Document()
+    document.add_table(1, 2)
+    nested = document.tables[0].cell(0, 1).add_table(2, 2)
+    nested.cell(0, 0).text = "inner"
+    nested = document.tables[0].cell(0, 1).tables[0]
+    nested.autofit = False
+    nested.cell(0, 1).shading = "FFF2CC"
+    nested.insert_column(2)
+    nested = document.tables[0].cell(0, 1).tables[0]
+    nested.add_row()
+    nested = document.tables[0].cell(0, 1).tables[0]
+    nested.set_cell_grid_span(2, 0, 2)
+    assert document.tables[0].cell(0, 1).tables[0].cell(2, 0).split() == 2
+
+    reopened = Document.from_bytes(document.to_bytes())
+    assert len(reopened.tables) == 1
+    outer_cell = reopened.tables[0].cell(0, 1)
+    assert len(outer_cell.tables) == 1
+    inner = outer_cell.tables[0]
+    assert len(inner.rows) == 3
+    assert len(inner.grid_widths) == 3
+    assert inner.cell(0, 0).text == "inner"
+    assert inner.cell(0, 1).shading == "FFF2CC"
+    assert inner.autofit is False
+    assert reopened.tables[0].cell(0, 0).tables == []
+    with pytest.raises(NotImplementedError):
+        inner.cell(0, 0).paragraphs
+    with pytest.raises(NotImplementedError):
+        inner.remove_row(0)
+    with pytest.raises(ValueError, match="not a direct body child"):
+        reopened.find_content_index(inner)
+
+
+def test_python_docx_row_and_column_idioms_keep_handles_valid():
+    from rdocx import Document, Inches, StaleElementError
+
+    document = Document()
+    table = document.add_table(1, 3)
+    header = table.rows[0].cells
+    header[0].text = "Name"
+    header[1].text = "Qty"
+    header[2].text = "Price"
+    for name, qty, price in [("apple", "3", "1.0"), ("pear", "5", "2.5")]:
+        cells = table.add_row().cells
+        cells[0].text = name
+        cells[1].text = qty
+        cells[2].text = price
+    table.add_row()
+    table.add_row()
+    column = table.add_column(Inches(1))
+    assert column.index == 3
+    assert column.width == Inches(1)
+    column.cells[0].text = "Note"
+    assert len(table.columns) == 4
+    assert [cell.text for cell in table.columns[0].cells] == [
+        "Name",
+        "apple",
+        "pear",
+        "",
+        "",
+    ]
+    held = table.cell(1, 2)
+    table.cell(1, 0).text = "apples"
+    assert held.text == "1.0"
+    # An inserted column moves cells, so cell handles retire but the
+    # table handle stays.
+    table.insert_column(0)
+    with pytest.raises(StaleElementError):
+        held.text
+    assert table.cell(1, 1).text == "apples"
+    reopened = Document.from_bytes(document.to_bytes())
+    assert [cell.text for cell in reopened.tables[0].rows[0].cells] == [
+        "",
+        "Name",
+        "Qty",
+        "Price",
+        "Note",
+    ]
+    assert len(reopened.tables[0].rows) == 5
+
+
+def test_nested_tables_take_the_cell_width_and_a_bookmark_survives_column_removal():
+    from rdocx import Document, Inches
+
+    document = Document()
+    table = document.add_table(1, 2)
+    table.grid_widths = [Inches(2), Inches(3)]
+    nested = table.cell(0, 1).add_table(1, 3)
+    assert nested.grid_widths == (Inches(1),) * 3
+    assert nested.width == Inches(3)

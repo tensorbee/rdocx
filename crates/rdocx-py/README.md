@@ -61,7 +61,20 @@ with open("report.pdf", "wb") as output:
   paragraph styles linked to a numbering level.
 - Core document properties such as title, author, and revision, read and
   written through `Document.core_properties` under python-docx's names.
-- Picture replacement and resizing by image relationship.
+- Pictures from bytes, a path or a stream, in the body or in a run with
+  `Run.add_picture`, with alt text, title, decorative marker, crop, wrapping
+  and floating position. `Document.pictures` lists them with their bytes,
+  content type and size, and `Document.set_picture_size` resizes one picture
+  or every picture of an image relationship. Pictures are also replaced by
+  image relationship.
+- Table edits that keep the grid, merges and widths consistent: `add_row`,
+  `add_column`, `columns`, `insert_column`, `remove_column` and `Cell.split`,
+  nested tables through `Cell.add_table` and `Cell.tables`, table styles by
+  name, `autofit` and the table style region flags. These edits and cell text
+  edits keep the table handle, and the row and cell handles they cannot move,
+  valid.
+- Hyperlinks to a web address or, with `anchor=`, to a bookmark or a heading
+  that gets a bookmark when it has none, with optional tooltips.
 - Complete paragraph and run formatting, multilingual and vertical typography,
   conditional and floating tables, section semantics, settings, fields, forms,
   equations, drawings, comments, and metadata.
