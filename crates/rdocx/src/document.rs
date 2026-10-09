@@ -8306,6 +8306,134 @@ fn first_text_box_start(xml: &[u8], start: usize) -> Result<Option<usize>> {
     }
 }
 
+/// The copies Word writes of the text box around the element that starts at
+/// `start`, whatever their prefixes.
+///
+/// Word writes a text box as DrawingML in `mc:Choice` and as VML in
+/// `mc:Fallback`, and the story is read from the Choice, see
+/// `modeled_story_event`. Each branch of the `mc:AlternateContent` after that
+/// Choice is a copy, and the copy of the text box is the `txbxContent` at the
+/// same position among the text boxes of the branch. A branch without a text
+/// box has nothing to keep in step and is left out. A text box without an
+/// `mc:AlternateContent` around it has no copy. A text box nested in another
+/// one, or a branch with another number of text boxes, is refused.
+fn text_box_copies(xml: &[u8], start: usize) -> Result<Vec<Range<usize>>> {
+    let scan_error =
+        |error: quick_xml::Error| Error::Other(format!("text box scan failed: {error}"));
+    let mut reader = quick_xml::Reader::from_reader(xml);
+    reader.config_mut().trim_text(false);
+    let mut ancestors: Vec<(Vec<u8>, usize)> = Vec::new();
+    let mut buffer = Vec::new();
+    loop {
+        let before = reader.buffer_position() as usize;
+        match reader.read_event_into(&mut buffer).map_err(scan_error)? {
+            Event::Start(element) | Event::Empty(element) if before == start => {
+                ancestors.push((element.local_name().as_ref().to_vec(), before));
+                break;
+            }
+            Event::Start(element) => {
+                ancestors.push((element.local_name().as_ref().to_vec(), before));
+            }
+            Event::End(_) => {
+                ancestors.pop();
+            }
+            Event::Eof => {
+                return Err(Error::Other(
+                    "text box scan found no element at the selected position".to_owned(),
+                ));
+            }
+            _ => {}
+        }
+        buffer.clear();
+    }
+    let Some(text_box) = ancestors
+        .iter()
+        .rposition(|(name, _)| name == b"txbxContent")
+    else {
+        return Ok(Vec::new());
+    };
+    let outer = &ancestors[..text_box];
+    let alternates = outer
+        .iter()
+        .enumerate()
+        .filter(|(_, (name, _))| name == b"AlternateContent")
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let nested = outer.iter().any(|(name, _)| name == b"txbxContent");
+    let alternate = match alternates[..] {
+        [] => return Ok(Vec::new()),
+        [alternate] if !nested && alternate + 1 < text_box => alternate,
+        _ => {
+            return Err(Error::Other(
+                "the copies of a text box nested in another one cannot be kept in step".to_owned(),
+            ));
+        }
+    };
+    // The starts of the elements inside the element at `outer`, at a depth
+    // below it, that `select` picks by depth, local name and the number of
+    // text boxes open around them.
+    let starts = |outer: usize, select: &dyn Fn(usize, &[u8], usize) -> bool| {
+        let end = story_element_end(xml, outer)?;
+        let mut reader = quick_xml::Reader::from_reader(&xml[outer..end]);
+        reader.config_mut().trim_text(false);
+        let mut open: Vec<bool> = Vec::new();
+        let mut found = Vec::new();
+        let mut buffer = Vec::new();
+        loop {
+            let before = outer + reader.buffer_position() as usize;
+            let event = reader.read_event_into(&mut buffer).map_err(scan_error)?;
+            let is_start = matches!(event, Event::Start(_));
+            match event {
+                Event::Start(element) | Event::Empty(element) => {
+                    let name = element.local_name();
+                    let open_boxes = open.iter().filter(|text_box| **text_box).count();
+                    if !open.is_empty() && select(open.len(), name.as_ref(), open_boxes) {
+                        found.push(before);
+                    }
+                    if is_start {
+                        open.push(name.as_ref() == b"txbxContent");
+                    }
+                }
+                Event::End(_) => {
+                    open.pop();
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+            buffer.clear();
+        }
+        Ok::<_, Error>(found)
+    };
+    let text_boxes = |branch: usize| {
+        starts(branch, &|_, name, open_boxes| {
+            name == b"txbxContent" && open_boxes == 0
+        })
+    };
+    let choice = ancestors[alternate + 1].1;
+    let choice_boxes = text_boxes(choice)?;
+    let position = choice_boxes
+        .iter()
+        .position(|box_start| *box_start == ancestors[text_box].1)
+        .ok_or_else(|| Error::Other("the selected text box is not one of its Choice".to_owned()))?;
+    let mut copies = Vec::new();
+    for branch in starts(ancestors[alternate].1, &|depth, _, _| depth == 1)? {
+        if branch <= choice {
+            continue;
+        }
+        let boxes = text_boxes(branch)?;
+        if boxes.is_empty() {
+            continue;
+        }
+        if boxes.len() != choice_boxes.len() {
+            return Err(Error::Other(
+                "a copy of the text box holds another number of text boxes".to_owned(),
+            ));
+        }
+        copies.push(boxes[position]..story_element_end(xml, boxes[position])?);
+    }
+    Ok(copies)
+}
+
 fn opaque_story_event(
     stack: &[XmlElementFrame],
     namespace: StoryNamespace,
@@ -26806,6 +26934,12 @@ impl Document {
     /// Replace literal text only within one checked paragraph, table or block control.
     /// Matching retains run formatting and never crosses paragraph or wrapper boundaries.
     /// Count mismatch and preparation failures leave the complete document unchanged.
+    ///
+    /// Word writes a text box twice, as DrawingML in `mc:Choice` and as VML
+    /// in `mc:Fallback`. An item of a text box takes the same edit in both
+    /// copies and counts once, as [`Self::try_replace_text`] does. Copies
+    /// that hold different paragraphs or match a different number of times,
+    /// and a cell of a table inside a text box with copies, are refused.
     pub fn try_replace_text_at(
         &mut self,
         location: &ContentLocation,
@@ -26930,7 +27064,7 @@ impl Document {
                 "scoped replacement namespace context changes physical ownership".into(),
             ));
         }
-        let (canonical_span, span) = if let Some(location) = path {
+        let (canonical_span, span, copies) = if let Some(location) = path {
             let canonical_items = scan_story_items(&canonical.xml, &canonical_owner)?;
             let index = location.index_path[0];
             let selected = canonical_items.get(index).ok_or(StoryError::OutOfBounds {
@@ -26961,6 +27095,42 @@ impl Document {
                 }
                 .into());
             }
+            // Word writes a text box twice, see `text_box_copies`. The item
+            // of each copy is the one at the same slot, once the copy proves
+            // to hold the same items and the same paragraph texts.
+            let copy_boxes = text_box_copies(&source.xml, owner.full.start)?;
+            if !copy_boxes.is_empty() && story.kind != StoryKind::TextBox {
+                return Err(Error::Other(
+                    "scoped replacement cannot keep the copies of a text box in step from a cell inside it".into(),
+                ));
+            }
+            let box_texts = |range: &Range<usize>| -> Result<Vec<String>> {
+                let scope = story_namespace_scope_at(&source.xml, range.start)?;
+                let closed = close_content_fragment_namespaces(&source.xml[range.clone()], &scope)?;
+                Ok(rdocx_oxml::placeholder::xml_part_replaceable_texts(
+                    &closed,
+                )?)
+            };
+            let kinds =
+                |items: &[StoryItemSpan]| items.iter().map(|item| item.kind).collect::<Vec<_>>();
+            let mut copy_items = Vec::new();
+            for copy in copy_boxes {
+                let copy_owner = StoryOwnerSpan {
+                    kind: StoryKind::TextBox,
+                    owner_index: 0,
+                    full: copy.clone(),
+                    fingerprint: 0,
+                };
+                let copy_direct = direct_story_content_items(&source.xml, &copy_owner)?;
+                if kinds(&copy_direct) != kinds(&actual_direct)
+                    || box_texts(&copy)? != box_texts(&owner.full)?
+                {
+                    return Err(Error::Other(
+                        "the copies of the text box hold different paragraphs, so scoped replacement cannot keep them in step".into(),
+                    ));
+                }
+                copy_items.push(copy_direct[slot].clone());
+            }
             if let [_, ordinal] = location.index_path.as_slice() {
                 let canonical_paragraphs = scan_story_control_paragraphs(&canonical.xml, selected)?;
                 let paragraphs = scan_story_control_paragraphs(&source.xml, item)?;
@@ -26973,12 +27143,17 @@ impl Document {
                             len: paragraphs.len(),
                         })
                 };
-                (select(&canonical_paragraphs)?, select(&paragraphs)?)
+                let copies = copy_items
+                    .iter()
+                    .map(|copy| Ok(select(&scan_story_control_paragraphs(&source.xml, copy)?)?))
+                    .collect::<Result<Vec<_>>>()?;
+                (select(&canonical_paragraphs)?, select(&paragraphs)?, copies)
             } else {
-                (selected.full.clone(), item.full.clone())
+                let copies = copy_items.into_iter().map(|copy| copy.full).collect();
+                (selected.full.clone(), item.full.clone(), copies)
             }
         } else {
-            (canonical_owner.full.clone(), owner.full.clone())
+            (canonical_owner.full.clone(), owner.full.clone(), Vec::new())
         };
         if source.part_name == candidate.doc_part_name {
             candidate.prove_scoped_main_source(
@@ -27015,7 +27190,29 @@ impl Document {
         if count == 0 {
             return Ok(Ok(0));
         }
-        xml.splice(span, raw);
+        // The copies of a text box take the same edit and are not counted,
+        // as the document-wide replacement edits them.
+        let mut edits = vec![(span, raw)];
+        for copy in copies {
+            let scope = story_namespace_scope_at(&xml, copy.start)?;
+            let mut copy_raw = close_content_fragment_namespaces(&xml[copy.clone()], &scope)?;
+            let copy_count = rdocx_oxml::placeholder::try_replace_in_block(
+                &mut copy_raw,
+                paragraph,
+                placeholder,
+                replacement,
+            )?;
+            if copy_count != count {
+                return Err(Error::Other(format!(
+                    "a copy of the text box matches {copy_count} times where the text box matches {count}, so scoped replacement cannot keep them in step"
+                )));
+            }
+            edits.push((copy, copy_raw));
+        }
+        edits.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
+        for (range, raw) in edits {
+            xml.splice(range, raw);
+        }
         set_story_source_xml(&mut candidate, &part, xml)?;
         candidate.prepare_staged_package()?;
         let limits = PackageReadLimits::UNBOUNDED;
@@ -29095,7 +29292,7 @@ impl Document {
         let mut consecutive_empty = 0u32;
         for content in &self.document.body.content {
             if let BodyContent::Paragraph(p) = content {
-                if p.text().trim().is_empty() {
+                if !p.has_visible_content() {
                     consecutive_empty += 1;
                     if consecutive_empty >= 3 {
                         issues.push(AccessibilityIssue {
@@ -38275,6 +38472,31 @@ mod tests {
                 .iter()
                 .any(|i| i.message.contains("Heading level gap"))
         );
+    }
+
+    /// #298: a paragraph that holds only a picture is not empty.
+    #[test]
+    fn audit_counts_picture_paragraphs_as_content() {
+        let consecutive_empty = |doc: &Document| {
+            doc.audit_accessibility()
+                .iter()
+                .filter(|issue| issue.message.contains("consecutive empty paragraphs"))
+                .count()
+        };
+        let mut doc = Document::new();
+        for _ in 0..3 {
+            doc.add_picture(
+                b"picture",
+                "red.png",
+                Length::inches(1.0),
+                Length::inches(0.5),
+            );
+        }
+        assert_eq!(consecutive_empty(&doc), 0);
+        for _ in 0..3 {
+            doc.add_paragraph("");
+        }
+        assert_eq!(consecutive_empty(&doc), 1);
     }
 
     #[test]

@@ -4076,6 +4076,53 @@ def test_scoped_control_paragraph_handles_use_direct_owner_ordinals():
     assert held_nested.text == "Version nested"
 
 
+def _word_text_box_body(choice, fallback):
+    def paragraphs(texts):
+        return "".join(f"<w:p><w:r><w:t>{text}</w:t></w:r></w:p>" for text in texts)
+
+    return (
+        '<w:p><w:r><w:t>Host NEEDLE</w:t></w:r><w:r><mc:AlternateContent'
+        ' xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"'
+        ' xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"'
+        ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+        ' xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"'
+        ' xmlns:v="urn:schemas-microsoft-com:vml">'
+        '<mc:Choice Requires="wps"><w:drawing><wp:anchor><wp:extent cx="914400" cy="457200"/>'
+        '<wp:docPr id="1" name="Text Box 1"/><a:graphic><a:graphicData'
+        ' uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp>'
+        f"<wps:txbx><w:txbxContent>{paragraphs(choice)}</w:txbxContent></wps:txbx><wps:bodyPr/>"
+        "</wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></mc:Choice>"
+        '<mc:Fallback><w:pict><v:shape style="width:72pt;height:36pt"><v:textbox>'
+        f"<w:txbxContent>{paragraphs(fallback)}</w:txbxContent></v:textbox></v:shape></w:pict>"
+        "</mc:Fallback></mc:AlternateContent></w:r></w:p>"
+    )
+
+
+def test_replace_text_at_edits_both_copies_of_a_word_text_box():
+    """#301: the VML copy of a text box kept the old text."""
+    import rdocx
+
+    def text_box_paragraph(document):
+        return next(item for item in document.story_items
+                    if item.story.kind == "text_box" and item.kind == "paragraph")
+
+    texts = ["Box NEEDLE one", "Box NEEDLE two"]
+    document = _replace_document_body(rdocx.Document(), _word_text_box_body(texts, texts))
+    assert document.replace_text_at(text_box_paragraph(document), "NEEDLE", "PIN", expect=1) == 1
+    xml = _document_xml(document).decode()
+    choice, fallback = xml[xml.index("<mc:Choice"):xml.index("<mc:Fallback>")], xml[xml.index("<mc:Fallback>"):]
+    for copy in (choice, fallback):
+        assert "Box PIN one" in copy and "Box NEEDLE two" in copy, copy
+    assert "Host NEEDLE" in xml
+
+    document = _replace_document_body(
+        rdocx.Document(), _word_text_box_body(texts, ["Box OLD one", "Box NEEDLE two"]))
+    before = document.to_bytes()
+    with pytest.raises(rdocx.RdocxError, match="copies of the text box"):
+        document.replace_text_at(text_box_paragraph(document), "NEEDLE", "PIN")
+    assert document.to_bytes() == before
+
+
 @pytest.mark.parametrize("kind", ["header", "footer"])
 def test_whole_story_comment_refusals_preserve_bytes_and_revision(kind):
     import rdocx

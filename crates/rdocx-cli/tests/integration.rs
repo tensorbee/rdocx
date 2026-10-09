@@ -1881,6 +1881,42 @@ fn validate_exit_status_is_a_verdict() {
     );
 }
 
+/// #298: validate counted a paragraph that holds only a picture, a tab or a
+/// break as empty, since it has no text.
+#[test]
+fn validate_counts_only_paragraphs_without_visible_content_as_empty() {
+    let temp = TempWorkspace::new("validate-empty");
+    let path = temp.path.join("pictures.docx");
+    let mut document = fixture_document(&["Before"]);
+    for _ in 0..3 {
+        document.add_picture(
+            b"picture",
+            "red.png",
+            rdocx::Length::inches(1.0),
+            rdocx::Length::inches(0.5),
+        );
+    }
+    document.add_paragraph("").add_run("").add_tab();
+    document
+        .add_paragraph("")
+        .add_run("")
+        .add_break(rdocx::BreakKind::Page);
+    document.add_paragraph("   ");
+    document.add_paragraph("");
+    document.add_paragraph("After");
+    document.save(&path).unwrap();
+
+    let output = cli(&["validate", path_text(&path)]);
+    assert_success(&output, "validate a document with picture paragraphs");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!(
+            "1 warning(s) in {}:\n  1. 2 empty paragraph(s) found\n",
+            path.display()
+        )
+    );
+}
+
 /// #160: rdocx 0.14 rewrote an empty comments root without its `w14`
 /// declaration while `mc:Ignorable` still listed `w14`, and validate passed
 /// the part.

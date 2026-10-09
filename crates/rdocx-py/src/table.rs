@@ -6,7 +6,10 @@ use smallvec::smallvec;
 
 use crate::document::PyDocument;
 use crate::paragraph::PyParagraph;
-use crate::{enum_object, length_object, normalize_index, rdocx_to_pyerr, stale_to_pyerr};
+use crate::{
+    color_hex, color_object, enum_object, length_object, normalize_index, rdocx_to_pyerr,
+    stale_to_pyerr,
+};
 
 fn path_index(
     path: &ContentPath,
@@ -132,15 +135,16 @@ fn cell_border_edge(value: &str) -> PyResult<rdocx::CellBorderEdge> {
     }
 }
 
-/// A border edge as `(style, size in eighths of a point, color)`.
-type BorderSnapshot = (String, Option<u32>, Option<String>);
+/// A border edge as `(style, size in eighths of a point, color)`, the color
+/// an `RGBColor`, or `None` when it is absent or `auto`.
+type BorderSnapshot = (String, Option<u32>, Option<Py<PyAny>>);
 
-fn border_snapshot(border: rdocx::TableBorderRef<'_>) -> BorderSnapshot {
-    (
-        border.style().to_owned(),
-        border.size_eighths_pt(),
-        border.color().map(str::to_owned),
-    )
+fn border_snapshot(py: Python<'_>, border: rdocx::TableBorderRef<'_>) -> PyResult<BorderSnapshot> {
+    let color = match border.color() {
+        Some(value) => color_object(py, value)?,
+        None => None,
+    };
+    Ok((border.style().to_owned(), border.size_eighths_pt(), color))
 }
 
 /// Cell margins as `(top, right, bottom, left)`, each a `Length` or `None`.
@@ -442,11 +446,43 @@ impl PyTable {
         Ok(())
     }
 
+    /// The table indentation from the left margin, `w:tblInd`. A negative
+    /// value pulls the table into the margin, and `None` removes it.
+    #[getter]
+    fn indent(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let index = self.validate(py)?;
+        self.document
+            .borrow(py)
+            .inner
+            .table(index)
+            .and_then(|table| table.indent())
+            .map(|value| length_object(py, value))
+            .transpose()
+    }
+
+    #[setter]
+    fn set_indent(&self, py: Python<'_>, value: Option<i64>) -> PyResult<()> {
+        self.edit(py, |table| match value {
+            Some(emu) => table.set_indent_checked(rdocx::Length::emu(emu)),
+            None => {
+                table.clear_indent();
+                Ok(())
+            }
+        })
+    }
+
     #[pyo3(signature = (style, *, size, color))]
-    fn set_borders(&self, py: Python<'_>, style: &str, size: u32, color: &str) -> PyResult<()> {
+    fn set_borders(
+        &self,
+        py: Python<'_>,
+        style: &str,
+        size: u32,
+        color: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
         let style = border_style_from_name(style)?;
+        let color = color_hex(color, "color")?;
         self.edit(py, |table| {
-            table.set_all_borders_checked(style, size, color)
+            table.set_all_borders_checked(style, size, &color)
         })
     }
 
@@ -457,24 +493,25 @@ impl PyTable {
         edge: &str,
         style: &str,
         size: u32,
-        color: &str,
+        color: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let edge = table_border_edge(edge)?;
         let style = border_style_from_name(style)?;
+        let color = color_hex(color, "color")?;
         self.edit(py, |table| {
-            table.set_border_checked(edge, style, size, color)
+            table.set_border_checked(edge, style, size, &color)
         })
     }
 
     fn border(&self, py: Python<'_>, edge: &str) -> PyResult<Option<BorderSnapshot>> {
         let edge = table_border_edge(edge)?;
         let index = self.validate(py)?;
-        Ok(self
-            .document
+        self.document
             .borrow(py)
             .inner
             .table(index)
-            .and_then(|table| table.border(edge).map(border_snapshot)))
+            .and_then(|table| table.border(edge).map(|border| border_snapshot(py, border)))
+            .transpose()
     }
 
     #[getter]
@@ -1182,18 +1219,26 @@ impl PyCell {
     }
 
     #[getter]
-    fn shading(&self, py: Python<'_>) -> PyResult<Option<String>> {
-        self.read(py, |cell| cell.shading_fill().map(str::to_owned))
+    fn shading(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        match self.read(py, |cell| cell.shading_fill().map(str::to_owned))? {
+            Some(value) => color_object(py, &value),
+            None => Ok(None),
+        }
     }
 
     #[setter]
-    fn set_shading(&self, py: Python<'_>, value: &str) -> PyResult<()> {
-        self.edit(py, |cell| cell.set_shading_checked(value))
+    fn set_shading(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let value = color_hex(value, "shading")?;
+        self.edit(py, |cell| cell.set_shading_checked(&value))
     }
 
     fn border(&self, py: Python<'_>, edge: &str) -> PyResult<Option<BorderSnapshot>> {
         let edge = cell_border_edge(edge)?;
-        self.read(py, |cell| cell.border(edge).map(border_snapshot))
+        self.read(py, |cell| {
+            cell.border(edge)
+                .map(|border| border_snapshot(py, border))
+                .transpose()
+        })?
     }
 
     #[pyo3(signature = (edge, style, *, size, color))]
@@ -1203,11 +1248,14 @@ impl PyCell {
         edge: &str,
         style: &str,
         size: u32,
-        color: &str,
+        color: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         let edge = cell_border_edge(edge)?;
         let style = border_style_from_name(style)?;
-        self.edit(py, |cell| cell.set_border_checked(edge, style, size, color))
+        let color = color_hex(color, "color")?;
+        self.edit(py, |cell| {
+            cell.set_border_checked(edge, style, size, &color)
+        })
     }
 
     #[getter]

@@ -16,8 +16,8 @@ use rdocx_oxml::{ST_PageOrientation, ST_SectionType};
 use crate::paragraph::{
     ParagraphLocation, PyParagraph, PyParagraphCollection, defined_style, style_id_of_type,
 };
-use crate::rdocx_to_pyerr;
 use crate::table::{PyTable, PyTableCollection};
+use crate::{color_hex, rdocx_to_pyerr};
 
 #[pyclass(name = "RunPosition", frozen, get_all, eq, skip_from_py_object)]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -983,7 +983,7 @@ struct StyleFormatting {
     font_size: Option<i64>,
     bold: Option<bool>,
     italic: Option<bool>,
-    color: Option<(u8, u8, u8)>,
+    color: Option<String>,
     space_before: Option<i64>,
     space_after: Option<i64>,
     left_indent: Option<i64>,
@@ -1009,9 +1009,7 @@ impl StyleFormatting {
             italic_cs: self.italic,
             sz: size,
             sz_cs: size,
-            color: self
-                .color
-                .map(|(red, green, blue)| format!("{red:02X}{green:02X}{blue:02X}")),
+            color: self.color.clone(),
             ..rdocx::CT_RPr::default()
         };
         (properties != rdocx::CT_RPr::default()).then_some(properties)
@@ -2760,7 +2758,7 @@ impl PyDocument {
         font_size: Option<i64>,
         bold: Option<bool>,
         italic: Option<bool>,
-        color: Option<(u8, u8, u8)>,
+        color: Option<&Bound<'_, PyAny>>,
         space_before: Option<i64>,
         space_after: Option<i64>,
         left_indent: Option<i64>,
@@ -2805,7 +2803,7 @@ impl PyDocument {
             font_size,
             bold,
             italic,
-            color,
+            color: color.map(|color| color_hex(color, "color")).transpose()?,
             space_before,
             space_after,
             left_indent,
@@ -2878,7 +2876,7 @@ impl PyDocument {
         font_size: Option<i64>,
         bold: Option<bool>,
         italic: Option<bool>,
-        color: Option<(u8, u8, u8)>,
+        color: Option<&Bound<'_, PyAny>>,
         space_before: Option<i64>,
         space_after: Option<i64>,
         left_indent: Option<i64>,
@@ -2914,7 +2912,7 @@ impl PyDocument {
             font_size,
             bold,
             italic,
-            color,
+            color: color.map(|color| color_hex(color, "color")).transpose()?,
             space_before,
             space_after,
             left_indent,

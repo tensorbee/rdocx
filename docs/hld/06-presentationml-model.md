@@ -480,8 +480,10 @@ is total and returns `Option`. Table handles expose row and column counts,
 column widths, row heights, and the first-row, last-row, first-column,
 last-column, horizontal-banding, and vertical-banding flags. Cell handles
 expose plain text, typed text-frame mutation, direct fill, four optional
-margins, the direct line of each edge, merge-origin and continuation state, and
-span height and width.
+margins, the direct line of each edge, the `a:tcPr/@anchor` vertical anchor,
+merge-origin and continuation state, and span height and width. PowerPoint
+places a cell's text by that anchor, not by the `a:bodyPr` anchor of the cell
+text body, so the resolver lets it win over the body anchor.
 
 ```rust
 pub enum CellBorder { Left, Right, Top, Bottom }
@@ -494,6 +496,9 @@ TableMut::insert_column(&mut self, index: usize) -> Result<()>;
 TableMut::remove_column(&mut self, index: usize) -> Result<()>;
 TableCellRef::border(&self, edge: CellBorder) -> Option<&CT_LineProperties>;
 TableCellMut::set_border(&mut self, edge: CellBorder, line: Option<CT_LineProperties>);
+TableCellRef::vertical_anchor(&self) -> Option<TextAnchor>;
+TableCellMut::set_vertical_anchor(&mut self, anchor: Option<TextAnchor>);
+TableCellMut::into_text_frame(self) -> TextFrame<'a>;
 ```
 
 Changing a column width uses a checked sum and synchronizes the graphic-frame

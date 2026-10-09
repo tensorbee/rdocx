@@ -14814,6 +14814,48 @@ fn add_table_round_trips_cells_formatting_banding_and_widths() {
 }
 
 #[test]
+fn table_cell_vertical_anchor_lives_on_tc_pr_and_the_cell_frame_is_owned() {
+    use rpptx::TextAnchor;
+
+    let mut presentation = Presentation::new().expect("open bundled template");
+    presentation.add_slide(0).expect("add slide");
+    {
+        let mut slide = presentation.slide_mut(0).unwrap();
+        let mut shape = slide
+            .add_table(1, 2, Emu(0), Emu(0), Emu(200), Emu(100))
+            .expect("add table");
+        let table = shape.table_mut().unwrap();
+        let mut cell = table.into_cell_mut(0, 1).unwrap();
+        assert_eq!(cell.vertical_anchor(), None);
+        cell.set_vertical_anchor(Some(TextAnchor::Center));
+        let mut frame = cell.into_text_frame();
+        frame.set_text("anchored");
+        frame.add_paragraph().set_text("second");
+    }
+
+    let saved = presentation.to_bytes().unwrap();
+    let package = open_opc(&saved, "table cell anchor");
+    let xml = std::str::from_utf8(package.get_part("/ppt/slides/slide1.xml").unwrap()).unwrap();
+    assert!(xml.contains(r#"<a:tcPr anchor="ctr"/>"#), "{xml}");
+    let reopened = Presentation::from_bytes(&saved).unwrap();
+    let slide = reopened.slide(0).unwrap();
+    let table = slide.shapes().last().unwrap().table().unwrap();
+    let cell = table.cell(0, 1).unwrap();
+    assert_eq!(cell.vertical_anchor(), Some(TextAnchor::Center));
+    assert_eq!(cell.text_frame().unwrap().text(), "anchored\nsecond");
+    assert_eq!(table.cell(0, 0).unwrap().vertical_anchor(), None);
+    let index = slide.shapes().len() - 1;
+
+    let mut presentation = reopened;
+    let mut slide = presentation.slide_mut(0).unwrap();
+    let mut shape = slide.shape_mut(index).unwrap();
+    let mut table = shape.table_mut().unwrap();
+    let mut cell = table.cell_mut(0, 1).unwrap();
+    cell.set_vertical_anchor(None);
+    assert_eq!(cell.vertical_anchor(), None);
+}
+
+#[test]
 fn table_mutation_rejects_invalid_ranges_without_partial_changes() {
     let mut presentation = Presentation::new().expect("open bundled template");
     presentation.add_slide(0).expect("add slide");

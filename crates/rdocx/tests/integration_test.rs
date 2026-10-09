@@ -8059,7 +8059,7 @@ fn checked_table_setters_are_atomic() {
                 .set_width_mode(TableWidth::Fixed(Length::emu(i64::MAX)))
                 .is_err()
         );
-        assert!(table.set_indent_checked(Length::twips(-1)).is_err());
+        assert!(table.set_indent_checked(Length::emu(i64::MIN)).is_err());
         assert!(table.set_shading_checked("not-a-color").is_err());
         assert!(
             table
@@ -8122,6 +8122,33 @@ fn checked_table_setters_are_atomic() {
             .is_err()
     );
     assert_eq!(document.to_bytes().unwrap(), invalid_coverage);
+}
+
+#[test]
+fn a_negative_table_indent_round_trips_and_clears() {
+    let mut document = Document::new();
+    document.add_table(1, 2);
+    document
+        .table_mut(0)
+        .unwrap()
+        .set_indent_checked(Length::twips(-720))
+        .unwrap();
+
+    let xml = String::from_utf8(document_xml(&mut document)).unwrap();
+    assert!(
+        xml.contains(r#"<w:tblInd w:w="-720" w:type="dxa"/>"#),
+        "{xml}"
+    );
+    let mut reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+    assert_eq!(
+        reopened.table(0).unwrap().indent(),
+        Some(Length::twips(-720))
+    );
+
+    reopened.table_mut(0).unwrap().clear_indent();
+    let cleared = Document::from_bytes(&reopened.to_bytes().unwrap()).unwrap();
+    assert_eq!(cleared.table(0).unwrap().indent(), None);
+    assert!(!cleared.table(0).unwrap().has_indent());
 }
 
 #[test]
@@ -21165,6 +21192,32 @@ mod floating_table_placement_and_wrap {
         let float = float_at(TableAnchor::Margin, TableAnchor::Margin, 0, 0);
         assert_eq!(indented(Some(float)), MARGIN_LEFT);
         assert_eq!(indented(None), MARGIN_LEFT + 72.0);
+    }
+
+    /// A negative `w:tblInd` pulls an inline table into the left margin by
+    /// exactly the indent, as Word places it.
+    #[test]
+    fn a_negative_table_indent_moves_the_table_into_the_left_margin() {
+        let origin = |indent: Option<Length>| {
+            let mut document = Document::new();
+            document.add_paragraph("One line above the table.");
+            {
+                let mut table = document.add_table(2, 2);
+                table.set_column_width(0, Length::twips(1000));
+                table.set_column_width(1, Length::twips(1000));
+                table.set_width(Length::twips(2000));
+                if let Some(indent) = indent {
+                    table
+                        .set_indent_checked(indent)
+                        .expect("a negative indent is valid");
+                }
+            }
+            let result = document.layout_deterministic().expect("document lays out");
+            placed(&result, 1)[0].1
+        };
+
+        assert_eq!(origin(None), MARGIN_LEFT);
+        assert_eq!(origin(Some(Length::twips(-720))), MARGIN_LEFT - 36.0);
     }
 }
 

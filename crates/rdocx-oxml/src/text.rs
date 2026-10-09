@@ -2308,6 +2308,40 @@ impl CT_R {
         self.content.iter().map(Self::content_text).collect()
     }
 
+    /// Whether this run shows anything: text other than white space, or a
+    /// child that draws without text, such as a drawing, a picture, an
+    /// object, a field, a symbol, a tab, a break or a note reference.
+    /// Deleted text, comment references, soft hyphens, field characters and
+    /// the last rendered page break show nothing.
+    fn has_visible_content(&self) -> bool {
+        let visible_item = |content: &RunContent| match content {
+            RunContent::Text(text) => !text.text.trim().is_empty(),
+            RunContent::DeletedText(_)
+            | RunContent::CommentReference { .. }
+            | RunContent::SpecialCharacter(SpecialCharacter::SoftHyphen) => false,
+            _ => true,
+        };
+        let visible_raw = |(raw, position): (&Vec<u8>, &usize)| {
+            *position & (RAW_ROOT_ATTRIBUTES_FLAG | RAW_COMMENT_REFERENCE_FLAG) == 0
+                && !is_xml_whitespace(raw)
+                && !raw_root_is_one_of(
+                    raw,
+                    &[
+                        b"fldChar",
+                        b"instrText",
+                        b"delInstrText",
+                        b"lastRenderedPageBreak",
+                    ],
+                )
+        };
+        self.content.iter().any(visible_item)
+            || self
+                .extra_xml
+                .iter()
+                .zip(&self.extra_xml_positions)
+                .any(visible_raw)
+    }
+
     /// The text one content item contributes to [`Self::text`].
     fn content_text(content: &RunContent) -> &str {
         match content {
@@ -5397,13 +5431,19 @@ fn is_run_wrapper(raw: &[u8]) -> bool {
 /// content [`with_run_wrapper_content`] could not write back, because `w`
 /// does not name WordprocessingML there.
 pub(crate) fn run_wrapper_paragraph(raw: &[u8], inherited: &[String]) -> Option<CT_P> {
+    wrapper_content_paragraph(raw, inherited, &["smartTag", "customXml", "fldSimple"])
+}
+
+/// The content of `raw`, a Word element named by one of `wrappers`, parsed
+/// as a paragraph, see [`run_wrapper_paragraph`].
+fn wrapper_content_paragraph(raw: &[u8], inherited: &[String], wrappers: &[&str]) -> Option<CT_P> {
     let mut reader = Reader::from_reader(raw);
     let mut buffer = Vec::new();
     let Ok(Event::Start(start)) = reader.read_event_into(&mut buffer) else {
         return None;
     };
     let prefixes = word_prefixes_at(&start, inherited).ok()?;
-    if !["smartTag", "customXml", "fldSimple"]
+    if !wrappers
         .iter()
         .any(|local| is_word_element(start.name().as_ref(), local.as_bytes(), &prefixes))
         || !prefixes.iter().any(|prefix| prefix == "w")
@@ -6014,6 +6054,29 @@ impl CT_P {
     /// Get the combined text of all runs in this paragraph.
     pub fn text(&self) -> String {
         self.runs().iter().map(|run| run.text()).collect()
+    }
+
+    /// Whether the accepted view of this paragraph shows anything, so that
+    /// a paragraph without it reads as empty: text other than white space,
+    /// an equation, or a run that draws without text, such as a drawing, a
+    /// picture, an object, a field, a symbol, a tab, a break or a note
+    /// reference. The runs inside content controls, insertions, smart tags,
+    /// inline custom XML elements and bidirectional embeddings or overrides
+    /// count, deleted runs do not.
+    pub fn has_visible_content(&self) -> bool {
+        !self.equations.is_empty()
+            || self
+                .accepted_bookmark_runs()
+                .into_iter()
+                .any(CT_R::has_visible_content)
+            || self.extra_xml.iter().any(|(_, raw)| {
+                wrapper_content_paragraph(
+                    raw,
+                    &["w".to_owned()],
+                    &["smartTag", "customXml", "bdo", "dir"],
+                )
+                .is_some_and(|content| content.has_visible_content())
+            })
     }
 
     /// Return valid complex `HYPERLINK` fields projected into synthetic runs.
@@ -11854,12 +11917,17 @@ pub(crate) fn remap_authored_bookmark_marker(
 /// a run keeps as raw XML when the rest of its complex field lies in other
 /// runs.
 fn raw_is_complex_field_part(raw: &[u8]) -> bool {
+    raw_root_is_one_of(raw, &[b"fldChar", b"instrText", b"delInstrText"])
+}
+
+/// Whether the root element of a preserved child has one of `local_names`.
+fn raw_root_is_one_of(raw: &[u8], local_names: &[&[u8]]) -> bool {
     let mut reader = Reader::from_reader(raw);
     let mut buffer = Vec::new();
     loop {
         match reader.read_event_into(&mut buffer) {
             Ok(Event::Start(element) | Event::Empty(element)) => {
-                return [b"fldChar".as_slice(), b"instrText", b"delInstrText"]
+                return local_names
                     .iter()
                     .any(|local| matches_local_name(element.name().as_ref(), local));
             }
@@ -17280,6 +17348,46 @@ mod tests {
             })
         );
         assert_eq!(serialized_paragraph(&paragraph), before);
+    }
+
+    /// #298: a paragraph that holds a picture, an object, a field or a break
+    /// and no text is not empty.
+    #[test]
+    fn paragraphs_without_text_can_still_show_content() {
+        let visible = [
+            r#"<w:r><w:drawing><wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"/></w:drawing></w:r>"#,
+            r#"<w:r><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml"/></w:pict></w:r>"#,
+            r#"<w:r><w:object><o:OLEObject xmlns:o="urn:schemas-microsoft-com:office:office"/></w:object></w:r>"#,
+            r#"<w:r><mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Fallback/></mc:AlternateContent></w:r>"#,
+            r#"<w:fldSimple w:instr=" PAGE "/>"#,
+            r#"<w:r><w:sym w:font="Wingdings" w:char="F0FC"/></w:r>"#,
+            r#"<w:r><w:tab/></w:r>"#,
+            r#"<w:r><w:br w:type="page"/></w:r>"#,
+            r#"<w:r><w:footnoteReference w:id="1"/></w:r>"#,
+            r#"<w:sdt><w:sdtContent><w:r><w:pict/></w:r></w:sdtContent></w:sdt>"#,
+            r#"<w:ins w:id="1" w:author="A"><w:r><w:br/></w:r></w:ins>"#,
+            r#"<w:smartTag w:element="place"><w:r><w:tab/></w:r></w:smartTag>"#,
+            r#"<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:r><m:t>x</m:t></m:r></m:oMath>"#,
+            r#"<w:bdo w:val="rtl"><w:r><w:t>abc</w:t></w:r></w:bdo>"#,
+            r#"<w:dir w:val="rtl"><w:r><w:pict/></w:r></w:dir>"#,
+        ];
+        for xml in visible {
+            assert!(parse_paragraph(xml).has_visible_content(), "{xml}");
+        }
+        let empty = [
+            "",
+            r#"<w:r><w:t xml:space="preserve">  </w:t></w:r>"#,
+            r#"<w:r><w:lastRenderedPageBreak/></w:r>"#,
+            r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+            r#"<w:del w:id="1" w:author="A"><w:r><w:delText>gone</w:delText></w:r></w:del>"#,
+            r#"<w:bookmarkStart w:id="0" w:name="b"/><w:bookmarkEnd w:id="0"/>"#,
+            r#"<w:sdt><w:sdtContent><w:r><w:t> </w:t></w:r></w:sdtContent></w:sdt>"#,
+            r#"<w:r><w:softHyphen/></w:r>"#,
+            r#"<w:bdo w:val="rtl"><w:r><w:t> </w:t></w:r></w:bdo>"#,
+        ];
+        for xml in empty {
+            assert!(!parse_paragraph(xml).has_visible_content(), "{xml}");
+        }
     }
 
     #[test]

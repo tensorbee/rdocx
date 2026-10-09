@@ -78,12 +78,61 @@ class MSO_ARROWHEAD_LENGTH(IntEnum):
     LONG = 3
 
 
+class MSO_COLOR_TYPE(IntEnum):
+    """The kind of a colour, as reported by `ColorFormat.type`."""
+
+    RGB = 1
+    SCHEME = 2
+    HSL = 101
+    PRESET = 102
+    SCRGB = 103
+    SYSTEM = 104
+
+
+MSO_COLOR = MSO_COLOR_TYPE
+
+
+class MSO_THEME_COLOR_INDEX(IntEnum):
+    """A theme colour, as `ColorFormat.theme_color` reads and writes it.
+
+    Values follow python-pptx. Each member writes the `a:schemeClr` token
+    PowerPoint uses, such as `accent1` for `ACCENT_1`. `NOT_THEME_COLOR` and
+    `MIXED` are never read and cannot be written.
+    """
+
+    NOT_THEME_COLOR = 0
+    ACCENT_1 = 5
+    ACCENT_2 = 6
+    ACCENT_3 = 7
+    ACCENT_4 = 8
+    ACCENT_5 = 9
+    ACCENT_6 = 10
+    BACKGROUND_1 = 14
+    BACKGROUND_2 = 16
+    DARK_1 = 1
+    DARK_2 = 3
+    FOLLOWED_HYPERLINK = 12
+    HYPERLINK = 11
+    LIGHT_1 = 2
+    LIGHT_2 = 4
+    TEXT_1 = 13
+    TEXT_2 = 15
+    MIXED = -2
+
+
+MSO_THEME_COLOR = MSO_THEME_COLOR_INDEX
+
+
 __all__ = [
     "MSO_ARROWHEAD_LENGTH",
     "MSO_ARROWHEAD_STYLE",
     "MSO_ARROWHEAD_WIDTH",
+    "MSO_COLOR",
+    "MSO_COLOR_TYPE",
     "MSO_FILL",
     "MSO_FILL_TYPE",
     "MSO_LINE",
     "MSO_LINE_DASH_STYLE",
+    "MSO_THEME_COLOR",
+    "MSO_THEME_COLOR_INDEX",
 ]

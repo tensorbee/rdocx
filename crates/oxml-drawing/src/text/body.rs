@@ -135,7 +135,7 @@ pub enum TextAnchor {
 }
 
 impl TextAnchor {
-    fn parse(value: &str) -> Option<Self> {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
         match value {
             "t" => Some(Self::Top),
             "ctr" => Some(Self::Center),
@@ -146,7 +146,7 @@ impl TextAnchor {
         }
     }
 
-    const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Top => "t",
             Self::Center => "ctr",

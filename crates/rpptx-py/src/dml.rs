@@ -7,6 +7,7 @@
 use oxml_py_support::ContentPath;
 use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyString;
 
 use crate::presentation::PyPresentation;
 use crate::shape::{
@@ -14,6 +15,7 @@ use crate::shape::{
     shape_ref_at, slide_index,
 };
 use crate::table::{cell_mut_at, cell_ref_at};
+use crate::text::{PyFont, font_properties};
 use crate::{rpptx_to_pyerr, validate_path};
 
 const MAX_LINE_WIDTH_EMU: i64 = 20_116_800;
@@ -292,18 +294,110 @@ fn no_foreground(fill: Option<&rpptx::Fill>) -> PyErr {
     ))
 }
 
-fn with_rgb(color: Option<rpptx::ColorChoice>, rgb: rpptx::RgbColor) -> rpptx::ColorChoice {
-    match color {
-        Some(rpptx::ColorChoice::Srgb {
-            transforms,
-            raw_children,
-            ..
-        }) => rpptx::ColorChoice::Srgb {
-            value: rgb,
+/// Reads a colour argument. Every parameter and property that sets a colour
+/// reads it here, so all of them accept the same forms: an `RGBColor` or any
+/// triple of 0 to 255 integers, or a six-digit hex string with or without
+/// `#`. `name` is the parameter the errors name.
+pub(crate) fn rgb_color(value: &Bound<'_, PyAny>, name: &str) -> PyResult<rpptx::RgbColor> {
+    if value.is_instance_of::<PyString>() {
+        let text = value.extract::<String>()?;
+        let digits = text.strip_prefix('#').unwrap_or(&text);
+        return rpptx::RgbColor::parse(digits).map_err(|_| {
+            PyValueError::new_err(format!(
+                "{name} must be six hexadecimal digits such as \"FF0000\", got {text:?}"
+            ))
+        });
+    }
+    if let Ok(channels) = value.extract::<(i64, i64, i64)>() {
+        let channel = |value: i64| {
+            u8::try_from(value).map_err(|_| {
+                PyValueError::new_err(format!("{name} channels must be from 0 to 255"))
+            })
+        };
+        let (red, green, blue) = (
+            channel(channels.0)?,
+            channel(channels.1)?,
+            channel(channels.2)?,
+        );
+        return Ok(rpptx::RgbColor::new(red, green, blue));
+    }
+    Err(PyTypeError::new_err(format!(
+        "{name} must be an RGBColor or a hex string such as \"FF0000\", got {}",
+        value.get_type().name()?
+    )))
+}
+
+/// Returns a colour as an `RGBColor`, whose `str()` is its hex value.
+pub(crate) fn rgb_object(py: Python<'_>, color: rpptx::RgbColor) -> PyResult<Py<PyAny>> {
+    let [red, green, blue] = color.components();
+    py.import("rpptx.dml.color")?
+        .getattr("RGBColor")?
+        .call1((red, green, blue))
+        .map(Bound::unbind)
+}
+
+/// `MSO_THEME_COLOR` values and the `a:schemeClr` token each one writes, as
+/// python-pptx maps them.
+const THEME_COLORS: [(i32, &str); 16] = [
+    (1, "dk1"),
+    (2, "lt1"),
+    (3, "dk2"),
+    (4, "lt2"),
+    (5, "accent1"),
+    (6, "accent2"),
+    (7, "accent3"),
+    (8, "accent4"),
+    (9, "accent5"),
+    (10, "accent6"),
+    (11, "hlink"),
+    (12, "folHlink"),
+    (13, "tx1"),
+    (14, "bg1"),
+    (15, "tx2"),
+    (16, "bg2"),
+];
+
+/// The colour a colour format writes.
+enum NewColor {
+    Rgb(rpptx::RgbColor),
+    Scheme(&'static str),
+}
+
+/// Gives a colour a new value. A colour of the same kind keeps its
+/// transforms, such as python-pptx's brightness, and other preserved
+/// children. A colour of another kind is replaced whole.
+fn recolor(color: Option<rpptx::ColorChoice>, new: &NewColor) -> rpptx::ColorChoice {
+    match (color, new) {
+        (
+            Some(rpptx::ColorChoice::Srgb {
+                transforms,
+                raw_children,
+                ..
+            }),
+            NewColor::Rgb(rgb),
+        ) => rpptx::ColorChoice::Srgb {
+            value: *rgb,
             transforms,
             raw_children,
         },
-        _ => rpptx::ColorChoice::srgb(rgb),
+        (
+            Some(rpptx::ColorChoice::Scheme {
+                transforms,
+                raw_children,
+                ..
+            }),
+            NewColor::Scheme(scheme),
+        ) => rpptx::ColorChoice::Scheme {
+            value: (*scheme).to_owned(),
+            transforms,
+            raw_children,
+        },
+        (_, NewColor::Rgb(rgb)) => rpptx::ColorChoice::srgb(*rgb),
+        (_, NewColor::Scheme(scheme)) => rpptx::ColorChoice::Scheme {
+            value: (*scheme).to_owned(),
+            transforms: Vec::new(),
+            raw_children: Default::default(),
+        },
     }
 }
 
@@ -377,25 +471,27 @@ impl PyFillFormat {
         }
         Py::new(
             py,
-            PyColorFormat {
-                presentation: self.presentation.clone_ref(py),
-                path: self.path.clone(),
-                source: ColorSource::Fill {
+            PyColorFormat::new(
+                self.presentation.clone_ref(py),
+                self.path.clone(),
+                ColorSource::Fill {
                     target: self.target,
                     solidify: false,
                 },
-            },
+            ),
         )
     }
 }
 
 /// The colour one colour format reads and writes.
 #[derive(Clone, Copy)]
-enum ColorSource {
+pub(crate) enum ColorSource {
     /// The foreground of a fill. `solidify` makes a set colour a solid fill.
     Fill { target: FillTarget, solidify: bool },
     /// The colour of the outer shadow.
     Shadow,
+    /// The solid fill of a run or paragraph font.
+    Font,
 }
 
 impl ColorSource {
@@ -403,11 +499,13 @@ impl ColorSource {
         match self {
             Self::Fill { target, .. } => target.suffix(),
             Self::Shadow => ".shadow.color",
+            Self::Font => ".font.color",
         }
     }
 }
 
-/// A live view of the foreground colour of one fill, or of a shadow colour.
+/// A live view of the foreground colour of one fill, of a shadow colour, or
+/// of a font colour.
 #[pyclass(name = "ColorFormat")]
 pub struct PyColorFormat {
     presentation: Py<PyPresentation>,
@@ -415,13 +513,23 @@ pub struct PyColorFormat {
     source: ColorSource,
 }
 
-#[pymethods]
 impl PyColorFormat {
-    #[getter]
-    fn rgb(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+    pub(crate) fn new(
+        presentation: Py<PyPresentation>,
+        path: ContentPath,
+        source: ColorSource,
+    ) -> Self {
+        Self {
+            presentation,
+            path,
+            source,
+        }
+    }
+
+    fn color(&self, py: Python<'_>) -> PyResult<Option<rpptx::ColorChoice>> {
         let presentation = self.presentation.borrow(py);
         validate_path(py, &presentation, &self.path, "color", self.source.suffix())?;
-        let color = match self.source {
+        Ok(match self.source {
             ColorSource::Fill { target, .. } => {
                 match current_fill(&presentation.inner, &self.path, target)? {
                     Some(rpptx::Fill::Solid(fill)) => fill.color,
@@ -432,56 +540,131 @@ impl PyColorFormat {
             ColorSource::Shadow => {
                 current_shadow(&presentation.inner, &self.path)?.and_then(|shadow| shadow.color)
             }
-        };
-        drop(presentation);
-        let Some(rpptx::ColorChoice::Srgb { value, .. }) = color else {
-            return Ok(None);
-        };
-        let [red, green, blue] = value.components();
-        py.import("rpptx.dml.color")?
-            .getattr("RGBColor")?
-            .call1((red, green, blue))
-            .map(|color| Some(color.unbind()))
+            ColorSource::Font => {
+                match font_properties(&presentation.inner, &self.path).and_then(|font| font.fill) {
+                    Some(rpptx::Fill::Solid(fill)) => fill.color,
+                    _ => None,
+                }
+            }
+        })
     }
 
-    #[setter]
-    fn set_rgb(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<()> {
-        let rgb_class = py.import("rpptx.dml.color")?.getattr("RGBColor")?;
-        if !value.is_instance(&rgb_class)? {
-            return Err(PyValueError::new_err(
-                "assigned value must be type RGBColor",
-            ));
+    fn set_color(&self, py: Python<'_>, new: NewColor) -> PyResult<()> {
+        if let ColorSource::Font = self.source {
+            return PyFont::new(self.presentation.clone_ref(py), self.path.clone()).update(
+                py,
+                |properties| match properties.fill.as_mut() {
+                    Some(rpptx::Fill::Solid(fill)) => {
+                        fill.color = Some(recolor(fill.color.take(), &new));
+                    }
+                    _ => {
+                        let mut fill = rpptx::SolidFill::default();
+                        fill.color = Some(recolor(None, &new));
+                        properties.fill = Some(rpptx::Fill::Solid(fill));
+                    }
+                },
+            );
         }
-        let (red, green, blue) = value.extract::<(u8, u8, u8)>()?;
-        let rgb = rpptx::RgbColor::new(red, green, blue);
         let mut presentation = self.presentation.borrow_mut(py);
         validate_path(py, &presentation, &self.path, "color", self.source.suffix())?;
         let (target, solidify) = match self.source {
             ColorSource::Fill { target, solidify } => (target, solidify),
             ColorSource::Shadow => {
                 return edit_shadow(py, &mut presentation.inner, &self.path, |shadow| {
-                    let color = shadow_rgb(shadow.color.take(), rgb);
+                    let color = shadow_recolor(shadow.color.take(), &new);
                     shadow.replace_color(color);
                 });
             }
+            ColorSource::Font => unreachable!("a font colour is written above"),
         };
         let fill = match current_fill(&presentation.inner, &self.path, target)? {
             Some(rpptx::Fill::Solid(mut fill)) => {
-                fill.color = Some(with_rgb(fill.color.take(), rgb));
+                fill.color = Some(recolor(fill.color.take(), &new));
                 rpptx::Fill::Solid(fill)
             }
             Some(rpptx::Fill::Pattern(mut fill)) => {
-                fill.foreground = Some(with_rgb(fill.foreground.take(), rgb));
+                fill.foreground = Some(recolor(fill.foreground.take(), &new));
                 rpptx::Fill::Pattern(fill)
             }
             _ if solidify => {
                 let mut fill = rpptx::SolidFill::default();
-                fill.color = Some(rpptx::ColorChoice::srgb(rgb));
+                fill.color = Some(recolor(None, &new));
                 rpptx::Fill::Solid(fill)
             }
             other => return Err(no_foreground(other.as_ref())),
         };
         write_fill(py, &mut presentation.inner, &self.path, target, fill)
+    }
+}
+
+#[pymethods]
+impl PyColorFormat {
+    /// The sRGB colour as an `RGBColor`, or `None` for no colour or a colour
+    /// of another kind.
+    #[getter]
+    fn rgb(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        match self.color(py)? {
+            Some(rpptx::ColorChoice::Srgb { value, .. }) => rgb_object(py, value).map(Some),
+            _ => Ok(None),
+        }
+    }
+
+    /// Sets an sRGB colour from an `RGBColor` or a hex string. As in
+    /// python-pptx, `None` does not clear the colour and raises `TypeError`.
+    #[setter]
+    fn set_rgb(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let rgb = rgb_color(value, "rgb")?;
+        self.set_color(py, NewColor::Rgb(rgb))
+    }
+
+    /// The kind of colour as an `MSO_COLOR_TYPE` member, or `None` without
+    /// one. A colour rpptx does not model, `a:scrgbClr` or `a:hslClr`, reads
+    /// `None`.
+    #[getter(r#type)]
+    fn color_type(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let value = match self.color(py)? {
+            None => return Ok(None),
+            Some(rpptx::ColorChoice::Srgb { .. }) => 1,
+            Some(rpptx::ColorChoice::Scheme { .. }) => 2,
+            Some(rpptx::ColorChoice::Preset { .. }) => 102,
+            Some(rpptx::ColorChoice::System { .. }) => 104,
+        };
+        dml_enum(py, "MSO_COLOR_TYPE", value).map(Some)
+    }
+
+    /// The theme colour as an `MSO_THEME_COLOR` member, or `None` for a
+    /// colour of another kind or a placeholder colour.
+    #[getter]
+    fn theme_color(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let Some(rpptx::ColorChoice::Scheme { value, .. }) = self.color(py)? else {
+            return Ok(None);
+        };
+        THEME_COLORS
+            .iter()
+            .find(|(_, token)| *token == value)
+            .map(|(member, _)| dml_enum(py, "MSO_THEME_COLOR", *member))
+            .transpose()
+    }
+
+    /// Sets a theme colour, an `a:schemeClr`. An existing theme colour keeps
+    /// its transforms, such as a brightness. As in python-pptx, `None` does
+    /// not clear the colour and raises `TypeError`.
+    #[setter]
+    fn set_theme_color(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let Ok(value) = value.extract::<i32>() else {
+            return Err(PyTypeError::new_err(format!(
+                "theme_color must be an MSO_THEME_COLOR member, got {}",
+                value.get_type().name()?
+            )));
+        };
+        let token = THEME_COLORS
+            .iter()
+            .find(|(member, _)| *member == value)
+            .map(|(_, token)| *token)
+            .ok_or_else(|| {
+                PyValueError::new_err("theme_color must be an MSO_THEME_COLOR member")
+            })?;
+        self.set_color(py, NewColor::Scheme(token))
     }
 }
 
@@ -528,14 +711,14 @@ impl PyLineFormat {
         self.validate(py)?;
         Py::new(
             py,
-            PyColorFormat {
-                presentation: self.presentation.clone_ref(py),
-                path: self.path.clone(),
-                source: ColorSource::Fill {
+            PyColorFormat::new(
+                self.presentation.clone_ref(py),
+                self.path.clone(),
+                ColorSource::Fill {
                     target: self.target,
                     solidify: true,
                 },
-            },
+            ),
         )
     }
 
@@ -833,22 +1016,26 @@ fn edit_shadow(
     write_effects(py, presentation, path, Some(effects))
 }
 
-/// Gives a shadow colour a new sRGB value. The opacity survives a change of
+/// Gives a shadow colour a new value. The opacity survives a change of
 /// colour kind, which a theme or preset colour's other transforms do not.
-fn shadow_rgb(color: Option<rpptx::ColorChoice>, rgb: rpptx::RgbColor) -> rpptx::ColorChoice {
-    if let Some(color @ rpptx::ColorChoice::Srgb { .. }) = color {
-        return with_rgb(Some(color), rgb);
+fn shadow_recolor(color: Option<rpptx::ColorChoice>, new: &NewColor) -> rpptx::ColorChoice {
+    let same_kind = matches!(
+        (&color, new),
+        (Some(rpptx::ColorChoice::Srgb { .. }), NewColor::Rgb(_))
+            | (Some(rpptx::ColorChoice::Scheme { .. }), NewColor::Scheme(_))
+    );
+    if same_kind {
+        return recolor(color, new);
     }
-    rpptx::ColorChoice::Srgb {
-        value: rgb,
-        transforms: color
-            .iter()
-            .flat_map(rpptx::ColorChoice::transforms)
-            .filter(|transform| matches!(transform, rpptx::ColorTransform::Alpha(_)))
-            .copied()
-            .collect(),
-        raw_children: Default::default(),
-    }
+    let alpha = color
+        .iter()
+        .flat_map(rpptx::ColorChoice::transforms)
+        .filter(|transform| matches!(transform, rpptx::ColorTransform::Alpha(_)))
+        .copied()
+        .collect::<Vec<_>>();
+    let mut recolored = recolor(None, new);
+    *color_transforms_mut(&mut recolored) = alpha;
+    recolored
 }
 
 fn color_transforms_mut(color: &mut rpptx::ColorChoice) -> &mut Vec<rpptx::ColorTransform> {
@@ -979,11 +1166,11 @@ impl PyShadowFormat {
         self.read(py, |_| ())?;
         Py::new(
             py,
-            PyColorFormat {
-                presentation: self.presentation.clone_ref(py),
-                path: self.path.clone(),
-                source: ColorSource::Shadow,
-            },
+            PyColorFormat::new(
+                self.presentation.clone_ref(py),
+                self.path.clone(),
+                ColorSource::Shadow,
+            ),
         )
     }
 

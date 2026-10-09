@@ -206,7 +206,9 @@ doc.save_pdf("out.pdf")                        # documented as an rdocx extensio
 - The bounded core enum inventory is pure-Python `IntEnum`:
   `WD_ALIGN_PARAGRAPH` and `WD_UNDERLINE` in `rdocx.enum.text`, plus
   `WD_TABLE_ALIGNMENT`, `WD_CELL_VERTICAL_ALIGNMENT` and `WD_ROW_HEIGHT_RULE`
-  in `rdocx.enum.table`. All five are also top-level exports. Their checked
+  in `rdocx.enum.table`, plus `MSO_COLOR_TYPE` and `MSO_THEME_COLOR` in
+  `rdocx.enum.dml` with python-docx's values. All seven are also top-level
+  exports. Their checked
   integer literals cover the paragraph, run and table variants exposed by the
   facade, including `WD_ALIGN_PARAGRAPH.CENTER == 1`. Underline codes use a
   total binding-oriented facade value accessor rather than expanding the
@@ -225,8 +227,23 @@ control. Assigning `None` clears direct tri-state formatting. `Paragraph` also
 exposes its style ID and its list numbering as a `(num_id, level)` pair, `Run`
 its character `style_id`, and `Font` its named Word highlight and separate
 shading fill. Highlight reads and writes `ST_HighlightColor` names through
-`w:highlight`. Shading accepts six hexadecimal digits or `auto` through
-`w:shd`. These setters also clear with `None`. The S33 table
+`w:highlight`. Shading writes `w:shd`. These setters also clear with `None`.
+
+Colours follow one rule in both bindings. Every parameter and property that
+sets a colour reads it through one shared helper per binding, which accepts an
+`RGBColor` or any triple of 0 to 255 integers and a six-digit hex string with
+or without `#`, and rdocx also `auto`, which Word stores for an automatic
+colour. A value of another type raises `TypeError` naming the parameter and the
+accepted forms, such as `color must be an RGBColor or a hex string such as
+"FF0000", got int`, a malformed string or channel raises `ValueError`, and
+either leaves the document unchanged. Every getter returns an `RGBColor`, whose
+`str()` is the hex, and rdocx reads `auto` as `None`. `Font.color` returns a
+live `ColorFormat` as python-docx does. Its `rgb` reads the literal `w:val`
+and writes it, removing any theme colour, `type` reads `MSO_COLOR_TYPE.RGB`,
+`THEME` or `AUTO`, and `theme_color` reads and writes `w:themeColor` as an
+`MSO_THEME_COLOR` member, writing `000000` as the literal when the run has none.
+`None` on `rgb` or `theme_color` removes the colour. Assigning a colour to
+`Font.color` itself sets `rgb`, as a shortcut. The S33 table
 inventory is lazy table, row, cell and nested paragraph lookup, table style,
 alignment and width, plus cell text, width and vertical alignment. These
 handles use `Body`, `Row`, `Cell`, `Para` and `Run` path segments and reach the
@@ -246,17 +263,19 @@ mapping. Removing the only direct row is rejected.
 `set_border(edge, style, *, size, color)` sets one. The style is an
 `ST_Border` name from `none`, `single`, `thick`, `double`, `dotted`, `dashed`,
 `dotDash` and `wave`, the edge is `top`, `bottom`, `left`, `right`, `insideH`
-or `insideV`, the size is in eighths of a point and the color is six
-hexadecimal digits or `auto`. `border(edge)` reads a `(style, size, color)`
-tuple or `None`. `set_cell_margins` takes four keyword EMU lengths and
+or `insideV`, the size is in eighths of a point and the color follows the
+colour rule above. `border(edge)` reads a `(style, size, color)` tuple or
+`None`. `set_cell_margins` takes four keyword EMU lengths and
 `cell_margins` reads a `(top, right, bottom, left)` tuple of optional
 `Length` values. `grid_widths` reads and replaces every grid column, and
 `set_column_width(column, width)` changes one. Both keep the table width and
-every covering cell width in step. `Row.height` and `Row.height_rule` follow
-python-docx with `WD_ROW_HEIGHT_RULE.AT_LEAST` and `EXACTLY`. Assigning a
-height keeps an exact rule, and a rule needs a height to apply to. Unlike
-python-docx, a row whose `w:trHeight` has an `auto` rule or no value reads no
-height, and assigning one writes a minimum.
+every covering cell width in step. `Table.indent` reads and writes `w:tblInd`
+as a `Length`. A negative indent pulls the table into the left margin, as Word
+writes and honours it, and `None` removes the indent. `Row.height` and
+`Row.height_rule` follow python-docx with `WD_ROW_HEIGHT_RULE.AT_LEAST` and
+`EXACTLY`. Assigning a height keeps an exact rule, and a rule needs a height to
+apply to. Unlike python-docx, a row whose `w:trHeight` has an `auto` rule or no
+value reads no height, and assigning one writes a minimum.
 `Row.cant_split` and `Row.is_header` are tri-state. `Cell.shading`,
 `Cell.border(edge)`, `Cell.set_border`, `Cell.margins` and `Cell.set_margins`
 are the same forms for one cell. These edits move no content, so they keep
@@ -417,7 +436,9 @@ literal replacement count. Paragraphs keep run formatting and never join
 separate paragraphs. Cells search their supported nested tables and controls,
 without visiting neighboring cells. The explicit Document operation accepts
 checked paragraph, table and block-control StoryItems, including related header,
-footer and normal note paragraphs. StoryItem remains frozen and detached.
+footer and normal note paragraphs. A text box paragraph edits the DrawingML and
+VML copies of the box together and counts once, or raises `RdocxError` when the
+copies cannot be paired. StoryItem remains frozen and detached.
 Paragraph handles inside block controls retain their checked two-segment paths.
 Cell and cell-paragraph handles use physical table, row and cell coordinates.
 
@@ -509,7 +530,16 @@ return live `FillFormat` and `LineFormat` views for ordinary shapes, pictures,
 and connectors, and raise `ValueError` for other kinds. `FillFormat` offers
 `type`, `solid()`, `background()`, and `fore_color`. `ColorFormat.rgb` reads an
 sRGB colour as `RGBColor`, or `None` for any other colour, and writing it keeps
-the transforms of an existing sRGB colour. Reading `LineFormat.color` changes
+the transforms of an existing sRGB colour. It takes any form of the colour rule
+in the rdocx section above, so a hex string works too. `ColorFormat.type` reads
+an `MSO_COLOR_TYPE` member and `theme_color` reads and writes an
+`a:schemeClr` as an `MSO_THEME_COLOR` member, keeping the transforms of an
+existing theme colour. Unlike rdocx, where `None` on `rgb` or `theme_color`
+removes the colour, rpptx follows python-pptx: `None` clears nothing and
+raises `TypeError` naming the parameter and the accepted forms. Both
+enumerations live in `rpptx.enum.dml` with python-pptx's values, and
+`MSO_COLOR` aliases `MSO_COLOR_TYPE` as in rdocx. Reading
+`LineFormat.color` changes
 nothing, and assigning its `rgb` makes the line fill solid. `LineFormat.width`
 reads zero without a width, writes `None` as zero, and rejects values above
 the `ST_LineWidth` maximum. `LineFormat.dash_style` reads the `a:prstDash`
@@ -633,6 +663,19 @@ of `Row` handles, like `columns`. `Row.height` reads the stored height as
 as a column width keeps the frame width. A height that is not positive raises
 `RpptxError`. None of these writes advances the revision.
 
+`Cell.text_frame` returns the same `TextFrame` a shape returns, over the cell's
+`a:txBody`, so its paragraphs, runs and fonts format table text as python-pptx's
+`_Cell.text_frame` does. Its handles carry the cell's `Row` and `Cell` path
+segments and follow the same revision rules as a shape's. A cell without a
+text body gets an empty one when the frame is first read, as python-pptx adds
+one. `Cell.vertical_anchor` reads and writes `a:tcPr/@anchor` as an
+`MSO_ANCHOR` member, which is where PowerPoint reads a cell's anchor, while
+`text_frame.vertical_anchor` writes the `a:bodyPr` anchor that PowerPoint
+ignores in a table. The renderer places cell text by `a:tcPr/@anchor` when it
+is present and by the body anchor otherwise. Assigning a hyperlink address to
+a run in a cell raises `ValueError`, because the native hyperlink setter
+addresses a shape text frame.
+
 python-pptx has no public API to add or remove table rows and columns, and its
 users call `table._tbl.add_tr(height)`, which appends a row without cell
 formatting and leaves the frame height unchanged.
@@ -662,7 +705,7 @@ edit. A style GUID supplied this way is a package-level edit, not a Python
 
 `TextFrame.autofit`
 reports `none`, `normal`, or `shape` when the body carries an explicit choice.
-`Run.font` reads the run's direct Latin name, size, and sRGB colour, while the
+`Run.font` reads the run's direct Latin name, size, and colour, while the
 `Run.text` setter replaces only that run's text and preserves its typed and
 unmodelled properties. `Run.hyperlink` returns a live `Hyperlink` whose
 `address` reads the target of the run's `a:hlinkClick`, or `None`. Assigning
@@ -717,11 +760,12 @@ place and do not advance the revision. `rpptx` and `rpptx.enum.text` export
   `MSO_UNDERLINE` member otherwise. `strike` reads `True` for a single or
   double strike, and assigning `True` keeps a double strike. `all_caps` does
   not name `cap="small"`, which is preserved until `all_caps` is assigned.
-  `color` still reads the direct sRGB solid fill as an `RRGGBB` string for
-  compatibility, and the setter takes an `RGBColor`, any triple of 0 to 255
-  integers, or a six-digit hexadecimal string. It changes an existing sRGB
-  value in place, keeping transforms such as `a:alpha`, replaces any other
-  colour, and `None` removes the direct fill.
+  `color` returns a live `ColorFormat` over the direct solid fill, as
+  python-pptx does, so `font.color.rgb = RGBColor(...)` and
+  `font.color.theme_color` work. Assigning a colour to `color` itself sets
+  `rgb` as a shortcut and takes any form of the colour rule. It changes an
+  existing sRGB value in place, keeping transforms such as `a:alpha`, replaces
+  any other colour, and `None` removes the direct fill.
 
 `Presentation.try_replace_text(placeholder, replacement, *, expect=None)`
 runs the native staged literal replacement over slides and speaker notes with

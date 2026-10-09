@@ -8545,7 +8545,7 @@ pub struct TableCellRef<'a> {
     cell: &'a CT_TableCell,
 }
 
-impl TableCellRef<'_> {
+impl<'a> TableCellRef<'a> {
     /// Returns the cell's visible plain text.
     pub fn text(&self) -> String {
         self.cell
@@ -8555,11 +8555,16 @@ impl TableCellRef<'_> {
     }
 
     /// Returns the cell text body when present.
-    pub fn text_frame(&self) -> Option<TextFrameRef<'_>> {
+    pub fn text_frame(&self) -> Option<TextFrameRef<'a>> {
         self.cell
             .text_body
             .as_ref()
             .map(|body| TextFrameRef { body })
+    }
+
+    /// Returns the direct vertical anchor of the cell text, `a:tcPr/@anchor`.
+    pub fn vertical_anchor(&self) -> Option<TextAnchor> {
+        self.cell.properties.as_ref()?.anchor
     }
 
     /// Returns whether this cell is the top-left origin of a merge.
@@ -8646,6 +8651,21 @@ impl TableCellMut<'_> {
             .text_body
             .get_or_insert_with(CT_TextBody::new);
         TextFrame { body }
+    }
+
+    /// Returns the direct vertical anchor of the cell text, `a:tcPr/@anchor`.
+    pub fn vertical_anchor(&self) -> Option<TextAnchor> {
+        self.cell_ref().vertical_anchor()
+    }
+
+    /// Sets or clears the vertical anchor of the cell text on `a:tcPr`, where
+    /// PowerPoint reads it. The `a:bodyPr` anchor of a cell's text frame is
+    /// not what PowerPoint places table text by.
+    pub fn set_vertical_anchor(&mut self, anchor: Option<TextAnchor>) {
+        if anchor.is_none() && self.cell_ref().cell.properties.is_none() {
+            return;
+        }
+        self.properties_mut().anchor = anchor;
     }
 
     /// Replaces or clears the direct cell fill.
@@ -8762,6 +8782,17 @@ impl TableCellMut<'_> {
 
     fn cell_mut(&mut self) -> &mut CT_TableCell {
         &mut self.table.rows[self.row].cells[self.column]
+    }
+}
+
+impl<'a> TableCellMut<'a> {
+    /// Consumes this handle and returns the cell text body for mutation,
+    /// creating an empty one when the cell has none.
+    pub fn into_text_frame(self) -> TextFrame<'a> {
+        let body = self.table.rows[self.row].cells[self.column]
+            .text_body
+            .get_or_insert_with(CT_TextBody::new);
+        TextFrame { body }
     }
 
     fn properties_mut(&mut self) -> &mut CT_TableCellProperties {

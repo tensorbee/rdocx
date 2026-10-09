@@ -7,6 +7,7 @@ use crate::dml::{FillTarget, PyFillFormat, PyLineFormat};
 use crate::normalize_index;
 use crate::presentation::PyPresentation;
 use crate::shape::{length, shape_mut_at, shape_ref_at};
+use crate::text::{PyTextFrame, anchor_from_value, anchor_object};
 use crate::{rpptx_to_pyerr, validate_path};
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -636,6 +637,38 @@ impl PyCell {
             .and_then(|table| table.into_cell_mut(row, cell))
             .map(|mut cell| cell.set_text(value))
             .ok_or_else(|| PyIndexError::new_err("cell index out of range"))
+    }
+
+    /// The cell's text frame, the same `TextFrame` a shape returns, so its
+    /// paragraphs, runs and fonts format the cell text. A cell without a
+    /// text body gets an empty one, as python-pptx adds one.
+    #[getter]
+    fn text_frame(&self, py: Python<'_>) -> PyResult<Py<PyTextFrame>> {
+        if self.read(py, |cell| cell.text_frame().is_none())? {
+            self.edit(py, |cell| {
+                cell.text_frame();
+            })?;
+        }
+        Py::new(
+            py,
+            PyTextFrame::new(self.presentation.clone_ref(py), self.path.clone()),
+        )
+    }
+
+    /// The vertical anchor of the cell text, `a:tcPr/@anchor`, an
+    /// `MSO_ANCHOR` member or `None`. PowerPoint places table text by this
+    /// anchor, not by `text_frame.vertical_anchor`.
+    #[getter]
+    fn vertical_anchor(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.read(py, |cell| cell.vertical_anchor())?
+            .map(|anchor| anchor_object(py, anchor))
+            .transpose()
+    }
+
+    #[setter]
+    fn set_vertical_anchor(&self, py: Python<'_>, value: Option<i32>) -> PyResult<()> {
+        let anchor = value.map(anchor_from_value).transpose()?;
+        self.edit(py, |cell| cell.set_vertical_anchor(anchor))
     }
 
     /// Merges the rectangle between this cell and `other_cell`, moving the

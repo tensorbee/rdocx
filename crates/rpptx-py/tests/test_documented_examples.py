@@ -1094,7 +1094,7 @@ def test_python_round_three_authoring_and_inspection_is_typed_and_lossless(tmp_p
     run = shape.text_frame.paragraphs[0].runs[0]
     assert run.font.name == "Aptos"
     assert run.font.size == rpptx.Pt(18)
-    assert run.font.color == "123456"
+    assert str(run.font.color.rgb) == "123456"
     run.text = "updated"
     presentation.slides[0].notes_text = "final note"
     presentation.save(output)
@@ -1356,7 +1356,12 @@ def test_run_font_setters_round_trip_and_none_clears_each_attribute(tmp_path):
     presentation = _textbox_presentation(rpptx)
     font = presentation.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font
     names = ("italic", "underline", "strike", "all_caps", "name", "color", "size", "bold")
-    assert [getattr(font, name) for name in names] == [None] * len(names)
+
+    def read(font, name):
+        value = getattr(font, name)
+        return value.rgb if name == "color" else value
+
+    assert [read(font, name) for name in names] == [None] * len(names)
 
     font.italic = True
     font.underline = True
@@ -1376,13 +1381,13 @@ def test_run_font_setters_round_trip_and_none_clears_each_attribute(tmp_path):
     ) in _text_body_xml(output)
     presentation = rpptx.Presentation(output)
     font = presentation.slides[0].shapes[0].text_frame.paragraphs[0].runs[0].font
-    assert [getattr(font, name) for name in names] == [
+    assert [read(font, name) for name in names] == [
         True,
         True,
         True,
         True,
         "Georgia",
-        "123456",
+        RGBColor(0x12, 0x34, 0x56),
         rpptx.Pt(20),
         False,
     ]
@@ -1432,14 +1437,14 @@ def test_font_color_takes_triples_or_hex_and_keeps_transforms_it_does_not_name(t
     presentation = rpptx.Presentation(colored)
     paragraph = presentation.slides[0].shapes[0].text_frame.paragraphs[0]
     alpha, theme = paragraph.runs[0].font, paragraph.runs[1].font
-    assert alpha.color == "FF0000"
-    assert theme.color is None
+    assert str(alpha.color.rgb) == "FF0000"
+    assert theme.color.rgb is None
     alpha.color = "00ff00"
     theme.color = (1, 2, 3)
-    assert (alpha.color, theme.color) == ("00FF00", "010203")
-    assert paragraph.font.color is None
+    assert (str(alpha.color.rgb), str(theme.color.rgb)) == ("00FF00", "010203")
+    assert paragraph.font.color.rgb is None
     paragraph.font.color = rpptx.RGBColor.from_string("ABCDEF")
-    assert paragraph.font.color == "ABCDEF"
+    assert paragraph.font.color.rgb == rpptx.RGBColor(0xAB, 0xCD, 0xEF)
     presentation.save(output)
 
     body = _text_body_xml(output)
@@ -1451,6 +1456,79 @@ def test_font_color_takes_triples_or_hex_and_keeps_transforms_it_does_not_name(t
     alpha.color = None
     presentation.save(output)
     assert "00FF00" not in _text_body_xml(output)
+
+
+def test_font_color_is_a_color_format_and_every_color_takes_rgbcolor_or_hex(tmp_path):
+    import rpptx
+    from rpptx import RGBColor
+    from rpptx.enum.dml import MSO_COLOR_TYPE, MSO_THEME_COLOR
+
+    presentation = _textbox_presentation(rpptx)
+    shape = presentation.slides[0].shapes[0]
+    font = shape.text_frame.paragraphs[0].runs[0].font
+    color = font.color
+    assert (color.rgb, color.type, color.theme_color) == (None, None, None)
+    font.color.rgb = RGBColor(0x12, 0x34, 0x56)
+    assert (font.color.rgb, font.color.type) == (RGBColor(0x12, 0x34, 0x56), MSO_COLOR_TYPE.RGB)
+    assert isinstance(font.color.rgb, RGBColor)
+    font.color.rgb = "#abcdef"
+    assert str(font.color.rgb) == "ABCDEF"
+    font.color.theme_color = MSO_THEME_COLOR.ACCENT_2
+    assert (font.color.type, font.color.theme_color, font.color.rgb) == (
+        MSO_COLOR_TYPE.SCHEME,
+        MSO_THEME_COLOR.ACCENT_2,
+        None,
+    )
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = "00FF00"
+    shape.line.color.rgb = "#0000ff"
+    shape.shadow.color.rgb = "112233"
+    assert (shape.fill.fore_color.rgb, shape.line.color.rgb, shape.shadow.color.rgb) == (
+        RGBColor(0, 0xFF, 0),
+        RGBColor(0, 0, 0xFF),
+        RGBColor(0x11, 0x22, 0x33),
+    )
+    shape.fill.fore_color.theme_color = MSO_THEME_COLOR.BACKGROUND_1
+    assert shape.fill.fore_color.type == MSO_COLOR_TYPE.SCHEME
+
+    path = tmp_path / "colors.pptx"
+    presentation.save(path)
+    body = _text_body_xml(path)
+    assert '<a:solidFill><a:schemeClr val="accent2"/></a:solidFill>' in body
+    reopened = rpptx.Presentation(path).slides[0].shapes[0]
+    assert reopened.text_frame.paragraphs[0].runs[0].font.color.theme_color == (
+        MSO_THEME_COLOR.ACCENT_2
+    )
+    assert reopened.fill.fore_color.theme_color == MSO_THEME_COLOR.BACKGROUND_1
+
+    before = presentation.to_bytes()
+    with pytest.raises(
+        TypeError, match='color must be an RGBColor or a hex string such as "FF0000", got int'
+    ):
+        font.color = 0xFF0000
+    with pytest.raises(TypeError, match="rgb must be an RGBColor or a hex string"):
+        font.color.rgb = 1.5
+    with pytest.raises(ValueError, match='rgb must be six hexadecimal digits .* got "red"'):
+        shape.line.color.rgb = "red"
+    with pytest.raises(ValueError, match="theme_color must be an MSO_THEME_COLOR member"):
+        font.color.theme_color = MSO_THEME_COLOR.MIXED
+    # As in python-pptx, None does not clear a colour.
+    with pytest.raises(TypeError, match="theme_color must be an MSO_THEME_COLOR member, got NoneType"):
+        font.color.theme_color = None
+    with pytest.raises(TypeError, match='rgb must be an RGBColor or a hex string such as "FF0000", got NoneType'):
+        font.color.rgb = None
+    assert presentation.to_bytes() == before
+
+    pptx = pytest.importorskip("pptx", reason="python-pptx is the differential oracle")
+    oracle = pptx.Presentation(path).slides[0].shapes[0]
+    assert oracle.text_frame.paragraphs[0].runs[0].font.color.theme_color == (
+        pptx.enum.dml.MSO_THEME_COLOR.ACCENT_2
+    )
+    assert oracle.line.color.rgb == pptx.dml.color.RGBColor(0, 0, 0xFF)
+    assert rpptx.enum.dml.MSO_COLOR is MSO_COLOR_TYPE
+    for name in ("MSO_COLOR_TYPE", "MSO_THEME_COLOR"):
+        expected = {member.name: int(member) for member in getattr(pptx.enum.dml, name)}
+        assert {member.name: int(member) for member in getattr(rpptx.enum.dml, name)} == expected
 
 
 def test_font_strike_caps_and_name_keep_the_variants_they_cannot_name(tmp_path):
@@ -1679,7 +1757,7 @@ def test_text_properties_agree_with_python_pptx_in_both_directions(tmp_path):
     assert paragraph.line_spacing == 2.5
     assert (paragraph.space_before, paragraph.space_after) == (rpptx.Pt(12), rpptx.Pt(3))
     font = paragraph.runs[0].font
-    assert (font.italic, font.underline, font.name, font.color, font.size) == (
+    assert (font.italic, font.underline, font.name, str(font.color.rgb), font.size) == (
         True,
         rpptx.MSO_UNDERLINE.DOUBLE_LINE,
         "Georgia",
@@ -2345,8 +2423,10 @@ def test_fill_and_line_formats_write_what_python_pptx_reads(tmp_path):
     fill.solid()
     assert shape.fill.fore_color.rgb == RGBColor(0xFF, 0x00, 0x00)
     assert str(shape.fill.fore_color.rgb) == "FF0000"
-    with pytest.raises(ValueError, match="assigned value must be type RGBColor"):
-        fill.fore_color.rgb = (1, 2, 3)
+    with pytest.raises(
+        TypeError, match='rgb must be an RGBColor or a hex string such as "FF0000", got int'
+    ):
+        fill.fore_color.rgb = 0xFF0000
 
     line = shape.line
     assert (line.width, line.color.rgb, line.fill.type) == (0, None, None)
@@ -2492,6 +2572,69 @@ def test_table_cells_merge_split_fill_and_margins_like_python_pptx(tmp_path):
     read = rpptx.Presentation(source).slides[0].shapes[0].table.cell(0, 0)
     assert (read.margin_left, read.margin_bottom) == (None, rpptx.Pt(4))
     assert read.fill.fore_color.rgb == RGBColor(0xAB, 0xCD, 0xEF)
+
+
+def test_table_cell_text_frame_formats_cell_text_and_survives_save_render_and_pdf(tmp_path):
+    import rpptx
+    from rpptx import MSO_ANCHOR, PP_ALIGN, Inches, Pt
+
+    prs = rpptx.Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    table = slide.shapes.add_table(2, 2, Inches(1), Inches(1), Inches(4), Inches(1.5)).table
+    cell = table.cell(0, 0)
+    cell.text = "Header"
+    plain_png = prs.render_slide_to_png(0, dpi=36.0)
+    plain_pdf = prs.to_pdf()
+
+    frame = cell.text_frame
+    assert isinstance(frame, rpptx._rpptx.TextFrame)
+    assert frame.text == "Header"
+    second = frame.add_paragraph()
+    second.alignment = PP_ALIGN.CENTER
+    second.text = "second line"
+    cell = prs.slides[0].shapes[0].table.cell(0, 0)
+    font = cell.text_frame.paragraphs[0].runs[0].font
+    font.size = Pt(18)
+    font.bold = True
+    font.name = "Arial"
+    cell.text_frame.word_wrap = False
+    assert cell.vertical_anchor is None
+    cell.vertical_anchor = MSO_ANCHOR.MIDDLE
+    assert cell.text == "Header\nsecond line"
+    assert cell.vertical_anchor == MSO_ANCHOR.MIDDLE
+    assert prs.render_slide_to_png(0, dpi=36.0) != plain_png
+    assert prs.to_pdf() != plain_pdf
+
+    path = tmp_path / "cell-text.pptx"
+    prs.save(path)
+    with zipfile.ZipFile(path) as archive:
+        xml = archive.read("ppt/slides/slide1.xml").decode()
+    assert '<a:tcPr anchor="ctr"/>' in xml
+    assert 'sz="1800" b="1"' in xml
+
+    reopened = rpptx.Presentation(path)
+    cell = reopened.slides[0].shapes[0].table.cell(0, 0)
+    font = cell.text_frame.paragraphs[0].runs[0].font
+    assert (font.size, font.bold, font.name) == (Pt(18), True, "Arial")
+    paragraphs = cell.text_frame.paragraphs
+    assert [paragraph.text for paragraph in paragraphs] == ["Header", "second line"]
+    assert paragraphs[1].alignment == PP_ALIGN.CENTER
+    assert cell.text_frame.word_wrap is False
+    assert cell.vertical_anchor == MSO_ANCHOR.MIDDLE
+    cell.vertical_anchor = None
+    assert cell.vertical_anchor is None
+
+    empty = reopened.slides[0].shapes[0].table.cell(1, 1)
+    assert empty.text_frame.text == ""
+    held_paragraphs = cell.text_frame.paragraphs
+    held_run = held_paragraphs[0].runs[0]
+    with pytest.raises(ValueError, match="table cell"):
+        held_run.hyperlink.address = "https://example.com"
+    reopened.slides.add_slide(reopened.slide_layouts[6])
+    with pytest.raises(
+        rpptx.StaleElementError, match=r"table\.cell\(0, 0\)\.text_frame\.paragraphs"
+    ):
+        len(held_paragraphs)
 
 
 def test_table_row_heights_and_cell_borders_write_what_python_pptx_reads(tmp_path):
@@ -3001,8 +3144,8 @@ def test_shadow_parameters_write_the_outer_shadow_on_every_kind_python_pptx_shad
         shapes[0].shadow.blur_radius = -1
     with pytest.raises(ValueError, match="shadow direction must be a finite number"):
         shapes[0].shadow.direction = float("nan")
-    with pytest.raises(ValueError, match="assigned value must be type RGBColor"):
-        shapes[0].shadow.color.rgb = (1, 2, 3)
+    with pytest.raises(TypeError, match="rgb must be an RGBColor or a hex string"):
+        shapes[0].shadow.color.rgb = [1, 2, 3]
     held = shapes[0].shadow
     held_color = held.color
     prs.slides.add_slide(prs.slide_layouts[6])

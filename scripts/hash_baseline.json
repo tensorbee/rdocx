@@ -8,10 +8,10 @@
     "contract:word/numbering.xml": "831dc1977beaa48b4f2999f50751dc3b075418daabe1307cc7b3242267b7f1b4",
     "contract:word/styles.xml": "49687b10d19688bf634d4967a488eca42eec85ee54c4730af334e5fb1107a7f4",
     "feature_showcase:page1.png": "e1d30437e2618cff6da70163038427c32e1cd6523b0b58c5cd6376594ee742eb",
-    "feature_showcase:pdf/bytes": "0fcd5bef68348a257279df911c26192ba6307bedb2744e5dec6688675ce09255",
-    "feature_showcase:pdf/pages": "4ad484ddcaff0704fc7c449a95b3d2d1f6a1590a250cba351eb39b7f5d6a99c0",
+    "feature_showcase:pdf/bytes": "b4fe360e1dc26d0f3d848b3d9be0bcba8af613cb417e3d310b8ee17b150f993b",
+    "feature_showcase:pdf/pages": "f0578124411527a6dcccbcd0701908226ce570dfc94c62bb55961f4df60d9fa2",
     "feature_showcase:pdf/resources": "3573cc6e7183b5e912bfde97f11edea4ec44bb40e1b8f066eeb9b4e5e7726d62",
-    "feature_showcase:word/document.xml": "7a985fd34f69576f4876e75e9f541b000a0c320c85fd74941667f1f95f87b51c",
+    "feature_showcase:word/document.xml": "ada34bba6c97288dce7f60a96b32f2d20c3ea2254f6f82e08c660a39ecfc3b54",
     "feature_showcase:word/numbering.xml": "59283ab7d3fbd70ab110b2c9aa4b9f7f41443ef7c24bc6db3c248ee908e44232",
     "feature_showcase:word/styles.xml": "36e2057c493e6695e41dc5b96a369c72a31bc1f271f6bbafdd58899352450033",
     "invoice:page1.png": "b1e2dd50226d2760eef9de6e2e2b46c719b1d56ed56d3feb4e2ccf9832a9fa72",
@@ -50,5 +50,5 @@
     "report:word/numbering.xml": "59283ab7d3fbd70ab110b2c9aa4b9f7f41443ef7c24bc6db3c248ee908e44232",
     "report:word/styles.xml": "49687b10d19688bf634d4967a488eca42eec85ee54c4730af334e5fb1107a7f4"
   },
-  "reason": "F-X183 reviewed zero table side padding: exact14 keys are six samples PDF bytes/pages plus invoice and quote PNG;35 entries including source XML and PDF resources unchanged"
+  "reason": "#298: audit_accessibility no longer counts picture paragraphs as empty, so the feature showcase lists one accessibility issue fewer"
 }

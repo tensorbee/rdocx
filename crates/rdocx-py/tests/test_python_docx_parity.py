@@ -390,7 +390,7 @@ def _paragraph_record(paragraph, oracle):
     runs = []
     for run in paragraph.runs:
         font = run.font
-        color = font.color.rgb if oracle else font.color
+        color = font.color.rgb
         runs.append(
             (
                 run.text,

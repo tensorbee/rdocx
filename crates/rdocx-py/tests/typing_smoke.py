@@ -8,6 +8,7 @@ from rdocx import (
     Cell,
     CellCollection,
     CellParagraphCollection,
+    ColorFormat,
     Comment,
     ComparisonDiagnostic,
     ContentFragment,
@@ -22,6 +23,8 @@ from rdocx import (
     LayoutBackedFieldUpdateReport,
     LayoutPage,
     ListLevel,
+    MSO_COLOR_TYPE,
+    MSO_THEME_COLOR,
     RGBColor,
     ReplacementCountError,
     Paragraph,
@@ -70,10 +73,21 @@ def exercise_rdocx_types(path: Path) -> None:
     font.bold = True
     font.size = Inches(1)
     font.highlight = "yellow"
+    assert_type(font.shading, RGBColor | None)
     font.shading = "FFFF00"
+    font.shading = RGBColor(0xFF, 0xFF, 0)
     color = RGBColor(1, 2, 3)
     assert_type(color[0], int)
     channels: tuple[int, int, int] = color
+    color_format: ColorFormat = font.color
+    assert_type(color_format.rgb, RGBColor | None)
+    assert_type(color_format.type, MSO_COLOR_TYPE | None)
+    assert_type(color_format.theme_color, MSO_THEME_COLOR | None)
+    color_format.rgb = color
+    color_format.rgb = "#123456"
+    color_format.theme_color = MSO_THEME_COLOR.ACCENT_1
+    font.color = "FF0000"
+    font.color = None
     paragraph_format: ParagraphFormat = paragraph.paragraph_format
     paragraph_format.keep_together = None
     split_boundary: int = document.split_run(0, 0, 1)
@@ -90,8 +104,9 @@ def exercise_rdocx_types(path: Path) -> None:
     table.remove_row(0)
     cell: Cell = row.cells[0]
     cell.text = first.text
-    assert_type(table.border("top"), tuple[str, int | None, str | None] | None)
+    assert_type(table.border("top"), tuple[str, int | None, RGBColor | None] | None)
     table.set_borders("single", size=4, color="000000")
+    table.set_borders("single", size=4, color=RGBColor(0, 0, 0))
     table.set_border("insideV", "dashed", size=8, color="FF0000")
     assert_type(
         table.cell_margins,
@@ -101,6 +116,9 @@ def exercise_rdocx_types(path: Path) -> None:
     assert_type(table.grid_widths, tuple[Length, ...])
     table.grid_widths = [Inches(1)]
     table.set_column_width(0, Inches(2))
+    assert_type(table.indent, Length | None)
+    table.indent = Inches(-0.25)
+    table.indent = None
     assert_type(row.height, Length | None)
     assert_type(row.height_rule, WD_ROW_HEIGHT_RULE | None)
     assert_type(row.cant_split, bool | None)
@@ -109,8 +127,8 @@ def exercise_rdocx_types(path: Path) -> None:
     row.height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
     row.cant_split = True
     row.is_header = None
-    assert_type(cell.shading, str | None)
-    assert_type(cell.border("bottom"), tuple[str, int | None, str | None] | None)
+    assert_type(cell.shading, RGBColor | None)
+    assert_type(cell.border("bottom"), tuple[str, int | None, RGBColor | None] | None)
     assert_type(
         cell.margins,
         tuple[Length | None, Length | None, Length | None, Length | None] | None,

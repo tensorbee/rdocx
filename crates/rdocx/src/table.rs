@@ -405,8 +405,9 @@ fn checked_table_twips(name: &str, value: Length) -> Result<i32> {
 
 /// Check a twip measurement that Word allows to be negative.
 ///
-/// `w:tblpX` and `w:tblpY` place a float on either side of their anchor, so
-/// the nonnegative rule in [`checked_table_twips`] does not apply to them.
+/// `w:tblpX` and `w:tblpY` place a float on either side of their anchor, and
+/// `w:tblInd` may pull a table into the left margin, so the nonnegative rule
+/// in [`checked_table_twips`] does not apply to them.
 fn checked_table_offset_twips(name: &str, value: Length) -> Result<i32> {
     i32::try_from(value.to_emu() / 635)
         .map_err(|_| Error::Other(format!("table {name} exceeds the signed twip range")))
@@ -794,11 +795,22 @@ impl<'a> Table<'a> {
         self.ensure_tbl_pr().indent = Some(CT_TblWidth::dxa(length.as_twips().0));
     }
 
-    /// Set a checked nonnegative table indentation.
+    /// Set a checked table indentation from the left margin.
+    ///
+    /// A negative indent places the table left of the text column. Word
+    /// writes and honours it, and it is the usual way to line a table's
+    /// text, rather than its border, up with the body text.
     pub fn set_indent_checked(&mut self, length: Length) -> Result<()> {
-        let twips = checked_table_twips("indentation", length)?;
+        let twips = checked_table_offset_twips("indentation", length)?;
         self.ensure_tbl_pr().indent = Some(CT_TblWidth::dxa(twips));
         Ok(())
+    }
+
+    /// Remove the table indentation, so the table starts at the margin.
+    pub fn clear_indent(&mut self) {
+        if let Some(properties) = self.inner.properties.as_mut() {
+            properties.indent = None;
+        }
     }
 
     /// Set the table width as a percentage (0–100).

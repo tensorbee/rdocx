@@ -15,7 +15,7 @@ use crate::line::CT_LineProperties;
 use crate::namespace::{A_NS, reject_conflicting_a_prefix};
 use crate::order::OrderedRawChildren;
 use crate::style_ref::StyleReference;
-use crate::text::CT_TextBody;
+use crate::text::{CT_TextBody, TextAnchor};
 
 pub type Result<T> = std::result::Result<T, OxmlError>;
 type RawAttributes = Vec<(String, String)>;
@@ -107,6 +107,9 @@ pub struct CT_TableCellProperties {
     pub margin_right: Option<Emu>,
     pub margin_top: Option<Emu>,
     pub margin_bottom: Option<Emu>,
+    /// The vertical anchor of the cell text, `@anchor`. PowerPoint reads a
+    /// cell's anchor here, not from the `a:bodyPr` of its text body.
+    pub anchor: Option<TextAnchor>,
     pub fill: Option<Fill>,
     pub left: Option<CT_LineProperties>,
     pub right: Option<CT_LineProperties>,
@@ -1746,7 +1749,18 @@ impl CT_TableCellProperties {
             margin_right: optional_emu_attr(start, b"marR")?,
             margin_top: optional_emu_attr(start, b"marT")?,
             margin_bottom: optional_emu_attr(start, b"marB")?,
-            raw_attributes: raw_attributes(start, &[b"marL", b"marR", b"marT", b"marB"], false)?,
+            anchor: decoded_attr(start, b"anchor")?
+                .map(|value| {
+                    TextAnchor::parse(&value).ok_or_else(|| {
+                        OxmlError::InvalidValue(format!("invalid a:tcPr anchor: {value}"))
+                    })
+                })
+                .transpose()?,
+            raw_attributes: raw_attributes(
+                start,
+                &[b"marL", b"marR", b"marT", b"marB", b"anchor"],
+                false,
+            )?,
             ..Self::default()
         })
     }
@@ -1811,6 +1825,9 @@ impl CT_TableCellProperties {
         push_optional_emu(&mut start, "marR", self.margin_right);
         push_optional_emu(&mut start, "marT", self.margin_top);
         push_optional_emu(&mut start, "marB", self.margin_bottom);
+        if let Some(anchor) = self.anchor {
+            start.push_attribute(("anchor", anchor.as_str()));
+        }
         push_attributes(&mut start, &self.raw_attributes);
         let has_modelled = self.left.is_some()
             || self.right.is_some()

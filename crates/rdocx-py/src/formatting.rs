@@ -5,7 +5,7 @@ use pyo3::types::PyAny;
 
 use crate::document::PyDocument;
 use crate::paragraph::{ParagraphLocation, paragraph_location};
-use crate::{enum_object, length_object, stale_to_pyerr};
+use crate::{color_hex, color_object, enum_object, length_object, stale_to_pyerr};
 
 pub(crate) fn alignment_from_int(value: i32) -> PyResult<rdocx::Alignment> {
     match value {
@@ -44,22 +44,32 @@ fn checked_highlight(value: &str) -> PyResult<&str> {
     }
 }
 
-fn checked_shading(value: &str) -> PyResult<&str> {
-    if value.eq_ignore_ascii_case("auto") {
-        Ok("auto")
-    } else if value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        Ok(value)
-    } else {
-        Err(PyValueError::new_err(
-            "shading must be six hexadecimal digits or auto",
-        ))
-    }
-}
+/// `MSO_THEME_COLOR` values and the `w:themeColor` token each one writes,
+/// as python-docx maps them.
+const THEME_COLORS: [(i32, &str); 16] = [
+    (1, "dark1"),
+    (2, "light1"),
+    (3, "dark2"),
+    (4, "light2"),
+    (5, "accent1"),
+    (6, "accent2"),
+    (7, "accent3"),
+    (8, "accent4"),
+    (9, "accent5"),
+    (10, "accent6"),
+    (11, "hyperlink"),
+    (12, "followedHyperlink"),
+    (13, "text1"),
+    (14, "background1"),
+    (15, "text2"),
+    (16, "background2"),
+];
 
 pub(crate) struct FontSnapshot {
     name: Option<String>,
     size: Option<f64>,
     color: Option<String>,
+    color_theme: Option<String>,
     bold: Option<bool>,
     italic: Option<bool>,
     underline: Option<i32>,
@@ -75,6 +85,7 @@ impl FontSnapshot {
             name: run.font_name().map(str::to_owned),
             size: run.size(),
             color: run.color().map(str::to_owned),
+            color_theme: run.color_theme().map(str::to_owned),
             bold: run.bold_value(),
             italic: run.italic_value(),
             underline: run.underline_code_value(),
@@ -90,12 +101,18 @@ pub(crate) enum FontUpdate<'a> {
     Name(Option<&'a str>),
     Size(Option<f64>),
     Color(Option<String>),
+    /// A theme colour reference, written beside the literal `w:val` Word
+    /// requires and keeps as the colour it last computed.
+    ThemeColor {
+        theme: String,
+        value: String,
+    },
     Bold(Option<bool>),
     Italic(Option<bool>),
     Underline(Option<i32>),
     Strike(Option<bool>),
     Highlight(Option<&'a str>),
-    Shading(Option<&'a str>),
+    Shading(Option<String>),
     Style(Option<&'a str>),
 }
 
@@ -105,6 +122,10 @@ impl FontUpdate<'_> {
             Self::Name(value) => run.set_font_value(value),
             Self::Size(value) => run.set_size_value(value),
             Self::Color(value) => run.set_color_value(value.as_deref()),
+            Self::ThemeColor { theme, value } => {
+                run.set_color_value(Some(&value));
+                run.set_color_theme(Some(&theme), None, None);
+            }
             Self::Bold(value) => run.set_bold_value(value),
             Self::Italic(value) => run.set_italic_value(value),
             Self::Underline(value) => {
@@ -116,7 +137,7 @@ impl FontUpdate<'_> {
                 let applied = run.set_highlight_value(value);
                 debug_assert!(applied);
             }
-            Self::Shading(value) => run.set_shading_value(value),
+            Self::Shading(value) => run.set_shading_value(value.as_deref()),
             Self::Style(value) => run.set_style_value(value),
         }
     }
@@ -272,27 +293,18 @@ impl PyFont {
         )
     }
 
+    /// The run colour as a `ColorFormat`, as python-docx returns it.
     #[getter]
-    fn color(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
-        let Some(value) = self.snapshot(py)?.color else {
-            return Ok(None);
-        };
-        if value.eq_ignore_ascii_case("auto") {
-            return Ok(None);
-        }
-        py.import("rdocx")?
-            .getattr("RGBColor")?
-            .call_method1("from_string", (value,))
-            .map(Bound::unbind)
-            .map(Some)
+    fn color(slf: Bound<'_, Self>) -> PyResult<Py<PyColorFormat>> {
+        slf.borrow().validate(slf.py())?;
+        Py::new(slf.py(), PyColorFormat { font: slf.unbind() })
     }
 
+    /// Assigning an `RGBColor` or a hex string sets `color.rgb` directly.
     #[setter]
-    fn set_color(&self, py: Python<'_>, value: Option<(u8, u8, u8)>) -> PyResult<()> {
-        self.apply(
-            py,
-            FontUpdate::Color(value.map(|(r, g, b)| format!("{r:02X}{g:02X}{b:02X}"))),
-        )
+    fn set_color(&self, py: Python<'_>, value: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        let value = value.map(|value| color_hex(value, "color")).transpose()?;
+        self.apply(py, FontUpdate::Color(value))
     }
 
     #[getter]
@@ -362,14 +374,96 @@ impl PyFont {
     }
 
     #[getter]
-    fn shading(&self, py: Python<'_>) -> PyResult<Option<String>> {
-        Ok(self.snapshot(py)?.shading)
+    fn shading(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        match self.snapshot(py)?.shading {
+            Some(value) => color_object(py, &value),
+            None => Ok(None),
+        }
     }
 
     #[setter]
-    fn set_shading(&self, py: Python<'_>, value: Option<&str>) -> PyResult<()> {
-        let value = value.map(checked_shading).transpose()?;
+    fn set_shading(&self, py: Python<'_>, value: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        let value = value.map(|value| color_hex(value, "shading")).transpose()?;
         self.apply(py, FontUpdate::Shading(value))
+    }
+}
+
+/// The colour of one run, `w:color`, as python-docx's `ColorFormat` reads
+/// and writes it.
+#[pyclass(name = "ColorFormat")]
+pub struct PyColorFormat {
+    font: Py<PyFont>,
+}
+
+#[pymethods]
+impl PyColorFormat {
+    /// The literal colour as an `RGBColor`, or `None` when the run has no
+    /// colour or an `auto` one. A theme colour also reads the literal Word
+    /// stores beside it.
+    #[getter]
+    fn rgb(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        match self.font.borrow(py).snapshot(py)?.color {
+            Some(value) => color_object(py, &value),
+            None => Ok(None),
+        }
+    }
+
+    /// Sets the literal colour and removes any theme colour, or with `None`
+    /// removes the colour.
+    #[setter]
+    fn set_rgb(&self, py: Python<'_>, value: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        let value = value.map(|value| color_hex(value, "rgb")).transpose()?;
+        self.font.borrow(py).apply(py, FontUpdate::Color(value))
+    }
+
+    /// `MSO_COLOR_TYPE.THEME`, `AUTO` or `RGB`, or `None` without a colour.
+    #[getter(r#type)]
+    fn color_type(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let snapshot = self.font.borrow(py).snapshot(py)?;
+        let value = match (snapshot.color_theme, snapshot.color) {
+            (Some(_), _) => 2,
+            (None, Some(value)) if value.eq_ignore_ascii_case("auto") => 101,
+            (None, Some(_)) => 1,
+            (None, None) => return Ok(None),
+        };
+        enum_object(py, "MSO_COLOR_TYPE", value).map(Some)
+    }
+
+    /// The theme colour as an `MSO_THEME_COLOR` member, or `None`.
+    #[getter]
+    fn theme_color(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let theme = self.font.borrow(py).snapshot(py)?.color_theme;
+        theme
+            .and_then(|theme| {
+                THEME_COLORS
+                    .iter()
+                    .find(|(_, token)| *token == theme)
+                    .map(|(value, _)| *value)
+            })
+            .map(|value| enum_object(py, "MSO_THEME_COLOR", value))
+            .transpose()
+    }
+
+    /// Sets a theme colour, keeping the stored literal or writing `000000`
+    /// when there is none, or with `None` removes the colour.
+    #[setter]
+    fn set_theme_color(&self, py: Python<'_>, value: Option<i32>) -> PyResult<()> {
+        let font = self.font.borrow(py);
+        let Some(value) = value else {
+            return font.apply(py, FontUpdate::Color(None));
+        };
+        let theme = THEME_COLORS
+            .iter()
+            .find(|(member, _)| *member == value)
+            .map(|(_, token)| (*token).to_owned())
+            .ok_or_else(|| {
+                PyValueError::new_err("theme_color must be an MSO_THEME_COLOR member or None")
+            })?;
+        let value = font
+            .snapshot(py)?
+            .color
+            .unwrap_or_else(|| "000000".to_owned());
+        font.apply(py, FontUpdate::ThemeColor { theme, value })
     }
 }
 

@@ -6,9 +6,9 @@ mod paragraph;
 mod run;
 mod table;
 
-use pyo3::exceptions::{PyIndexError, PyRuntimeError};
+use pyo3::exceptions::{PyIndexError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyType};
+use pyo3::types::{PyAny, PyString, PyType};
 
 use oxml_py_support::StaleElementError;
 
@@ -19,7 +19,7 @@ use document::{
     PyRunPosition, PyRunRange, PySection, PyStory, PyStoryItem, PyStoryRunPosition,
     PyStoryRunRange, PyStyle, PySvgDiagnostic, PySvgRenderResult, PyTocRebuildReport,
 };
-use formatting::{PyFont, PyParagraphFormat};
+use formatting::{PyColorFormat, PyFont, PyParagraphFormat};
 use paragraph::{PyParagraph, PyParagraphCollection};
 use run::{PyRun, PyRunCollection};
 use table::{
@@ -51,6 +51,59 @@ pub(crate) fn enum_object(py: Python<'_>, name: &str, value: i32) -> PyResult<Py
         .getattr(name)?
         .call1((value,))
         .map(Bound::unbind)
+}
+
+/// Reads a colour argument as the value Word stores, six uppercase
+/// hexadecimal digits or `auto`.
+///
+/// Every parameter and property that sets a colour reads it here, so all of
+/// them accept the same forms: an `RGBColor` or any triple of 0 to 255
+/// integers, a six-digit hex string with or without `#`, or `auto`. `name`
+/// is the parameter the errors name.
+pub(crate) fn color_hex(value: &Bound<'_, PyAny>, name: &str) -> PyResult<String> {
+    if value.is_instance_of::<PyString>() {
+        let text = value.extract::<String>()?;
+        let digits = text.strip_prefix('#').unwrap_or(&text);
+        if digits.len() == 6 && digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Ok(digits.to_ascii_uppercase());
+        }
+        if text.eq_ignore_ascii_case("auto") {
+            return Ok("auto".to_owned());
+        }
+        return Err(PyValueError::new_err(format!(
+            "{name} must be six hexadecimal digits such as \"FF0000\" or \"auto\", got {text:?}"
+        )));
+    }
+    if let Ok(channels) = value.extract::<(i64, i64, i64)>() {
+        let channel = |value: i64| {
+            u8::try_from(value).map_err(|_| {
+                PyValueError::new_err(format!("{name} channels must be from 0 to 255"))
+            })
+        };
+        let (red, green, blue) = (
+            channel(channels.0)?,
+            channel(channels.1)?,
+            channel(channels.2)?,
+        );
+        return Ok(format!("{red:02X}{green:02X}{blue:02X}"));
+    }
+    Err(PyTypeError::new_err(format!(
+        "{name} must be an RGBColor or a hex string such as \"FF0000\", got {}",
+        value.get_type().name()?
+    )))
+}
+
+/// Returns the `RGBColor` of a stored colour value, or `None` for `auto`,
+/// which names no colour of its own, and for a value that is not six
+/// hexadecimal digits.
+pub(crate) fn color_object(py: Python<'_>, value: &str) -> PyResult<Option<Py<PyAny>>> {
+    if value.len() != 6 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Ok(None);
+    }
+    py.import("rdocx")?
+        .getattr("RGBColor")?
+        .call_method1("from_string", (value,))
+        .map(|color| Some(color.unbind()))
 }
 
 fn public_exception_type<'py>(py: Python<'py>, class_name: &str) -> PyResult<Bound<'py, PyType>> {
@@ -146,6 +199,7 @@ fn _rdocx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyRun>()?;
     module.add_class::<PyRunCollection>()?;
     module.add_class::<PyFont>()?;
+    module.add_class::<PyColorFormat>()?;
     module.add_class::<PyParagraphFormat>()?;
     module.add_class::<PyTable>()?;
     module.add_class::<PyTableCollection>()?;

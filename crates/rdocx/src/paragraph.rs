@@ -2561,6 +2561,14 @@ impl<'a> ParagraphRef<'a> {
         self.inner.accepted_text()
     }
 
+    /// Whether this paragraph shows anything: text other than white space,
+    /// or a drawing, picture, object, chart, equation, field, symbol, tab,
+    /// break or note reference, inside a content control too. A paragraph
+    /// without any of them is empty.
+    pub fn has_visible_content(&self) -> bool {
+        self.inner.has_visible_content()
+    }
+
     /// Iterate over typed equations in paragraph source order.
     pub fn equations(&self) -> impl Iterator<Item = &'a OfficeMath> {
         self.inner.equations.iter().map(|(_, _, equation)| equation)

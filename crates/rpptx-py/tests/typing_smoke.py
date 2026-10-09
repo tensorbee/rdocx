@@ -58,8 +58,10 @@ from rpptx.enum.dml import (
     MSO_ARROWHEAD_LENGTH,
     MSO_ARROWHEAD_STYLE,
     MSO_ARROWHEAD_WIDTH,
+    MSO_COLOR_TYPE,
     MSO_FILL_TYPE,
     MSO_LINE_DASH_STYLE,
+    MSO_THEME_COLOR,
 )
 from rpptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE_TYPE
 
@@ -90,7 +92,7 @@ def exercise_rpptx_types(path: Path) -> None:
     run.text = "updated"
     run_font_name: str | None = run.font.name
     run_font_size: Length | None = run.font.size
-    run_font_color: str | None = run.font.color
+    run_font_color: RGBColor | None = run.font.color.rgb
     frame: TextFrame = presentation.slides[0].shapes[-1].text_frame
     frame.margin_left = Inches(0.1)
     frame.margin_right = None
@@ -138,6 +140,11 @@ def exercise_rpptx_types(path: Path) -> None:
     font.color = RGBColor(0x12, 0x34, 0x56)
     font.color = "123456"
     font.color = None
+    font.color.rgb = "#123456"
+    font.color.theme_color = MSO_THEME_COLOR.ACCENT_1
+    font_color_type: MSO_COLOR_TYPE | None = font.color.type
+    font_theme_color: MSO_THEME_COLOR | None = font.color.theme_color
+    (font_color_type, font_theme_color)
     font.italic = True
     font.underline = True
     font.underline = MSO_UNDERLINE.DOUBLE_LINE
@@ -403,7 +410,11 @@ def exercise_rpptx_table_types(table: Table) -> None:
         origin.border_bottom,
     )
     borders[0].width = Pt(1)
-    (spans, cell_margins, row_heights, rows[:])
+    cell_frame: TextFrame = origin.text_frame
+    cell_frame.paragraphs[0].font.size = Pt(18)
+    origin.vertical_anchor = MSO_ANCHOR.MIDDLE
+    cell_anchor: MSO_ANCHOR | None = origin.vertical_anchor
+    (spans, cell_margins, row_heights, rows[:], cell_anchor)
 
 
 def exercise_rpptx_table_structure_types(table: Table) -> None:

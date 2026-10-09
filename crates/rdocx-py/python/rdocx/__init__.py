@@ -1,5 +1,6 @@
 """Python bindings for rdocx."""
 
+from .enum.dml import MSO_COLOR_TYPE, MSO_THEME_COLOR
 from .enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_ROW_HEIGHT_RULE, WD_TABLE_ALIGNMENT
 from .enum.text import WD_ALIGN_PARAGRAPH, WD_UNDERLINE
 from .shared import Cm, Emu, Inches, Length, Mm, Pt, RGBColor
@@ -50,6 +51,7 @@ from ._rdocx import (
     Cell,
     CellCollection,
     CellParagraphCollection,
+    ColorFormat,
     Comment,
     ComparisonDiagnostic,
     ContentFragment,
@@ -92,6 +94,7 @@ __all__ = [
     "Cell",
     "CellCollection",
     "CellParagraphCollection",
+    "ColorFormat",
     "Comment",
     "ComparisonDiagnostic",
     "ContentFragment",
@@ -108,6 +111,8 @@ __all__ = [
     "LayoutBackedFieldUpdateReport",
     "LayoutPage",
     "ListLevel",
+    "MSO_COLOR_TYPE",
+    "MSO_THEME_COLOR",
     "Mm",
     "PackageError",
     "Paragraph",

@@ -121,7 +121,7 @@ def test_font_and_paragraph_format_values_round_trip():
     paragraph_format = paragraph.paragraph_format
     assert font.name == "Aptos"
     assert font.size == Pt(12)
-    assert font.color == RGBColor(0x12, 0x34, 0x56)
+    assert font.color.rgb == RGBColor(0x12, 0x34, 0x56)
     assert font.underline == WD_UNDERLINE.DOT_DASH
     assert paragraph.alignment == WD_ALIGN_PARAGRAPH.RIGHT
     assert paragraph_format.alignment == WD_ALIGN_PARAGRAPH.RIGHT
@@ -271,7 +271,7 @@ def test_unrepresentable_table_justify_reads_as_none_after_reopen():
 
 
 def test_automatic_font_color_reads_as_none_after_reopen():
-    from rdocx import Document, RGBColor
+    from rdocx import MSO_COLOR_TYPE, Document, RGBColor
 
     document = Document()
     font = document.add_paragraph("").add_run("automatic").font
@@ -283,7 +283,87 @@ def test_automatic_font_color_reads_as_none_after_reopen():
     )
     reopened = Document.from_bytes(automatic)
 
-    assert reopened.paragraphs[0].runs[0].font.color is None
+    color = reopened.paragraphs[0].runs[0].font.color
+    assert color.rgb is None
+    assert color.type == MSO_COLOR_TYPE.AUTO
+
+
+def test_every_color_takes_an_rgbcolor_or_a_hex_string_and_reads_an_rgbcolor():
+    from rdocx import MSO_COLOR_TYPE, MSO_THEME_COLOR, Document, RGBColor
+
+    document = Document()
+    document.add_paragraph("text")
+    document.add_table(1, 1)
+    run = document.paragraphs[0].runs[0]
+    table = document.tables[0]
+    cell = table.cell(0, 0)
+
+    run.font.color.rgb = RGBColor(0x12, 0x34, 0x56)
+    assert (run.font.color.rgb, run.font.color.type) == (
+        RGBColor(0x12, 0x34, 0x56),
+        MSO_COLOR_TYPE.RGB,
+    )
+    run.font.color = "#abcdef"
+    assert str(run.font.color.rgb) == "ABCDEF"
+    run.font.color.theme_color = MSO_THEME_COLOR.ACCENT_1
+    color = run.font.color
+    assert (color.type, color.theme_color, color.rgb) == (
+        MSO_COLOR_TYPE.THEME,
+        MSO_THEME_COLOR.ACCENT_1,
+        RGBColor(0xAB, 0xCD, 0xEF),
+    )
+    assert '<w:color w:val="ABCDEF" w:themeColor="accent1"/>' in _document_xml(
+        document.to_bytes()
+    )
+    run.font.color.rgb = "FF0000"
+    assert (run.font.color.type, run.font.color.theme_color) == (MSO_COLOR_TYPE.RGB, None)
+    run.font.shading = RGBColor(0xFF, 0xFF, 0)
+    table.set_borders("single", size=4, color=RGBColor(0, 0, 0xFF))
+    table.set_border("insideV", "dashed", size=8, color="#00ff00")
+    cell.shading = RGBColor(0xD9, 0xD9, 0xD9)
+    cell.set_border("bottom", "double", size=6, color="#123456")
+    document.add_style("Accent Run", "character", color="#112233")
+    document.set_style("Accent Run", color=RGBColor(0x44, 0x55, 0x66))
+
+    reopened = Document.from_bytes(document.to_bytes())
+    font = reopened.paragraphs[0].runs[0].font
+    assert font.color.rgb == RGBColor(0xFF, 0, 0)
+    assert font.shading == RGBColor(0xFF, 0xFF, 0)
+    table = reopened.tables[0]
+    assert table.border("top") == ("single", 4, RGBColor(0, 0, 0xFF))
+    assert table.border("insideV") == ("dashed", 8, RGBColor(0, 0xFF, 0))
+    assert table.cell(0, 0).shading == RGBColor(0xD9, 0xD9, 0xD9)
+    assert table.cell(0, 0).border("bottom") == ("double", 6, RGBColor(0x12, 0x34, 0x56))
+    assert isinstance(table.cell(0, 0).shading, RGBColor)
+    styles = _part(reopened, "word/styles.xml")
+    assert '<w:color w:val="445566"/>' in styles
+
+    font.color.rgb = None
+    assert (font.color.rgb, font.color.type) == (None, None)
+    font.color.theme_color = MSO_THEME_COLOR.TEXT_1
+    assert '<w:color w:val="000000" w:themeColor="text1"/>' in _document_xml(
+        reopened.to_bytes()
+    )
+    font.color.theme_color = None
+    assert font.color.type is None
+
+    before = reopened.to_bytes()
+    message = r'color must be an RGBColor or a hex string such as "FF0000", got int'
+    with pytest.raises(TypeError, match=message):
+        font.color = 0xFF0000
+    with pytest.raises(TypeError, match=message):
+        table.set_borders("single", size=4, color=0xFF0000)
+    with pytest.raises(TypeError, match=message):
+        reopened.set_style("Accent Run", color=0xFF0000)
+    with pytest.raises(TypeError, match=r"rgb must be an RGBColor .* got list"):
+        font.color.rgb = [1, 2, 3]
+    with pytest.raises(TypeError, match=r"shading must be an RGBColor .* got float"):
+        table.cell(0, 0).shading = 1.5
+    with pytest.raises(ValueError, match=r'color must be six hexadecimal digits .* got "red"'):
+        font.color = "red"
+    with pytest.raises(ValueError, match="theme_color must be an MSO_THEME_COLOR member"):
+        font.color.theme_color = 99
+    assert reopened.to_bytes() == before
 
 
 def test_table_rows_are_cloned_with_their_formatting_and_removed():
@@ -337,7 +417,7 @@ def test_table_rows_are_cloned_with_their_formatting_and_removed():
 
 
 def test_table_borders_margins_and_grid_widths_round_trip():
-    from rdocx import Document, Inches, Pt
+    from rdocx import Document, Inches, Pt, RGBColor
 
     document = Document()
     table = document.add_table(rows=2, cols=3)
@@ -359,9 +439,9 @@ def test_table_borders_margins_and_grid_widths_round_trip():
     assert '<w:gridCol w:w="2160"/>' in xml
 
     table = Document.from_bytes(document.to_bytes()).tables[0]
-    assert table.border("top") == ("single", 4, "000000")
-    assert table.border("insideH") == ("single", 4, "000000")
-    assert table.border("insideV") == ("dashed", 8, "FF0000")
+    assert table.border("top") == ("single", 4, RGBColor(0, 0, 0))
+    assert table.border("insideH") == ("single", 4, RGBColor(0, 0, 0))
+    assert table.border("insideV") == ("dashed", 8, RGBColor(0xFF, 0, 0))
     assert table.cell_margins == (Pt(1), Pt(2), Pt(3), Pt(4))
     assert table.grid_widths == (Inches(1), Inches(2), Inches(1.5))
     assert table.width == Inches(4.5)
@@ -370,6 +450,28 @@ def test_table_borders_margins_and_grid_widths_round_trip():
         Inches(2),
         Inches(1.5),
     ]
+
+
+def test_table_indent_accepts_negative_values_and_none_removes_it():
+    from rdocx import Document, Inches
+
+    document = Document()
+    table = document.add_table(rows=1, cols=2)
+    assert table.indent is None
+    table.indent = Inches(-0.5)
+    assert table.indent == Inches(-0.5)
+
+    xml = _document_xml(document.to_bytes())
+    assert '<w:tblInd w:w="-720" w:type="dxa"/>' in xml
+    reopened = Document.from_bytes(document.to_bytes())
+    table = reopened.tables[0]
+    assert table.indent == Inches(-0.5)
+
+    table.indent = Inches(0.25)
+    assert table.indent == Inches(0.25)
+    table.indent = None
+    assert table.indent is None
+    assert "w:tblInd" not in _document_xml(reopened.to_bytes())
 
 
 def test_row_height_split_and_header_round_trip():
@@ -410,7 +512,7 @@ def test_row_height_split_and_header_round_trip():
 
 
 def test_cell_shading_borders_and_margins_round_trip():
-    from rdocx import Document, Pt
+    from rdocx import Document, Pt, RGBColor
 
     document = Document()
     cell = document.add_table(rows=1, cols=2).cell(0, 1)
@@ -426,8 +528,8 @@ def test_cell_shading_borders_and_margins_round_trip():
     assert '<w:bottom w:val="double" w:sz="6" w:space="0" w:color="auto"/>' in xml
 
     cell = Document.from_bytes(document.to_bytes()).tables[0].cell(0, 1)
-    assert cell.shading == "D9D9D9"
-    assert cell.border("bottom") == ("double", 6, "auto")
+    assert cell.shading == RGBColor(0xD9, 0xD9, 0xD9)
+    assert cell.border("bottom") == ("double", 6, None)
     assert cell.border("top") is None
     assert cell.margins == (0, Pt(5), 0, Pt(5))
 
@@ -447,13 +549,13 @@ def test_invalid_table_formatting_changes_nothing_and_keeps_handles_live():
         cell.set_border("middle", "single", size=4, color="000000")
     with pytest.raises(RdocxError, match="border width"):
         table.set_border("top", "single", size=97, color="000000")
-    with pytest.raises(RdocxError, match="border color"):
+    with pytest.raises(ValueError, match="color must be six hexadecimal digits"):
         cell.set_border("top", "single", size=4, color="red")
     with pytest.raises(RdocxError, match="cannot be negative"):
         table.set_cell_margins(top=-635, right=0, bottom=0, left=0)
     with pytest.raises(RdocxError, match="cannot be negative"):
         cell.set_margins(top=0, right=0, bottom=0, left=-635)
-    with pytest.raises(RdocxError, match="shading color"):
+    with pytest.raises(ValueError, match="shading must be six hexadecimal digits"):
         cell.shading = "yellow"
     with pytest.raises(RdocxError, match="exactly 2 positive column widths"):
         table.grid_widths = [914400]
@@ -474,7 +576,7 @@ def test_invalid_table_formatting_changes_nothing_and_keeps_handles_live():
     table.set_borders("single", size=4, color="auto")
     row.cant_split = True
     cell.shading = "FFFFFF"
-    assert (row.cant_split, cell.shading) == (True, "FFFFFF")
+    assert (row.cant_split, str(cell.shading)) == (True, "FFFFFF")
 
 
 def test_insert_table_at_a_body_index_returns_the_new_table():
@@ -671,11 +773,12 @@ def test_python_paragraph_and_run_formatting_matches_native_facades():
     reopened = Document.from_bytes(document.to_bytes()).paragraphs[0].runs[0]
     assert reopened.style_id == "Strong"
     assert reopened.font.highlight == "yellow"
-    assert reopened.font.shading == "FFFF00"
+    assert str(reopened.font.shading) == "FFFF00"
 
     run.font.shading = "AUTO"
+    assert 'w:fill="auto"' in _document_xml(document.to_bytes())
     reopened = Document.from_bytes(document.to_bytes()).paragraphs[0].runs[0]
-    assert reopened.font.shading == "auto"
+    assert reopened.font.shading is None
 
     with pytest.raises(ValueError, match="highlight"):
         run.font.highlight = "FFFF00"

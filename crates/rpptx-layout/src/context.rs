@@ -2345,6 +2345,16 @@ impl ResolveCtx<'_> {
                             text_directions.push(Vec::new());
                             None
                         };
+                        // PowerPoint anchors cell text by `a:tcPr/@anchor`,
+                        // which wins over the `a:bodyPr` anchor of the body.
+                        if let Some(body) = text.as_mut()
+                            && let Some(anchor) = cell
+                                .properties
+                                .as_ref()
+                                .and_then(|properties| properties.anchor)
+                        {
+                            body.anchor = resolved_anchor(anchor);
+                        }
                         if let Some(body) = text.as_mut()
                             && body.autofit != ResolvedAutofit::None
                         {
@@ -3005,6 +3015,16 @@ fn resolve_standalone_text_body(
     Ok((resolved_text_body(&properties, paragraphs)?, directions))
 }
 
+fn resolved_anchor(anchor: DrawingTextAnchor) -> TextAnchor {
+    match anchor {
+        DrawingTextAnchor::Top => TextAnchor::Top,
+        DrawingTextAnchor::Center => TextAnchor::Center,
+        DrawingTextAnchor::Bottom => TextAnchor::Bottom,
+        DrawingTextAnchor::Justified => TextAnchor::Justified,
+        DrawingTextAnchor::Distributed => TextAnchor::Distributed,
+    }
+}
+
 fn resolved_text_body(
     properties: &CT_TextBodyProperties,
     paragraphs: Vec<ResolvedParagraph>,
@@ -3015,13 +3035,7 @@ fn resolved_text_body(
         right: coordinate_points(properties.right_inset.as_ref())?,
         bottom: coordinate_points(properties.bottom_inset.as_ref())?,
     };
-    let anchor = match properties.anchor.unwrap_or(DrawingTextAnchor::Top) {
-        DrawingTextAnchor::Top => TextAnchor::Top,
-        DrawingTextAnchor::Center => TextAnchor::Center,
-        DrawingTextAnchor::Bottom => TextAnchor::Bottom,
-        DrawingTextAnchor::Justified => TextAnchor::Justified,
-        DrawingTextAnchor::Distributed => TextAnchor::Distributed,
-    };
+    let anchor = resolved_anchor(properties.anchor.unwrap_or(DrawingTextAnchor::Top));
     let vertical = match properties
         .vertical
         .unwrap_or(DrawingTextVertical::Horizontal)
@@ -6543,6 +6557,19 @@ mod tests {
         assert!(resolved.diagnostics.iter().any(|diagnostic| {
             diagnostic.message == "table cell autofit is unsupported and was ignored"
         }));
+    }
+
+    #[test]
+    fn a_table_cell_anchor_on_tc_pr_wins_over_the_body_anchor() {
+        let frame = r#"<p:graphicFrame><p:nvGraphicFramePr/><p:xfrm><a:off x="0" y="0"/><a:ext cx="127000" cy="127000"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl><a:tblGrid><a:gridCol w="127000"/></a:tblGrid><a:tr h="127000"><a:tc><a:txBody><a:bodyPr anchor="b"/><a:lstStyle/><a:p><a:r><a:t>cell</a:t></a:r></a:p></a:txBody><a:tcPr anchor="ctr"/></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#;
+        let fixture = Fixture::new(frame, "", "");
+
+        let resolved = fixture.context().resolve_slide((720.0, 540.0)).unwrap();
+        let ResolvedContent::Table(table) = &resolved.shapes[0].content else {
+            panic!("expected table");
+        };
+        let body = table.rows[0].cells[0].text.as_ref().unwrap();
+        assert_eq!(body.anchor, ResolvedTextAnchor::Center);
     }
 
     #[test]
