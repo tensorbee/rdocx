@@ -1359,6 +1359,60 @@ impl CT_SlideTransition {
         Ok(())
     }
 
+    /// Authors a new transition with one `p:` effect element.
+    ///
+    /// `effect` is the effect element's local name and attributes, such as
+    /// `("push", &[("dir", "l")])`, or `None` for a transition that only
+    /// sets advance timing. A duration is written as PowerPoint 2010 does: an
+    /// `mc:AlternateContent` whose `p14` choice carries `p14:dur` and whose
+    /// fallback carries the nearest `spd`, 0.5 s fast, 0.75 s medium, 1 s
+    /// slow. Callers pass only schema names and values.
+    pub fn authored(
+        effect: Option<(&str, &[(&str, &str)])>,
+        duration_ms: Option<u64>,
+        advance_on_click: Option<bool>,
+        advance_after_ms: Option<u64>,
+    ) -> Result<Self> {
+        let mut attributes = String::new();
+        if let Some(advance_on_click) = advance_on_click {
+            attributes.push_str(&format!(
+                " advClick=\"{}\"",
+                if advance_on_click { 1 } else { 0 }
+            ));
+        }
+        if let Some(advance_after_ms) = advance_after_ms {
+            attributes.push_str(&format!(" advTm=\"{advance_after_ms}\""));
+        }
+        let effect_xml = effect.map_or_else(String::new, |(name, values)| {
+            let values = values
+                .iter()
+                .map(|(name, value)| format!(" {name}=\"{value}\""))
+                .collect::<String>();
+            format!("<p:{name}{values}/>")
+        });
+        let xml = match duration_ms {
+            None => {
+                format!("<p:transition xmlns:p=\"{P_NS}\"{attributes}>{effect_xml}</p:transition>")
+            }
+            Some(duration_ms) => {
+                let speed = match duration_ms {
+                    0..=500 => "fast",
+                    501..=750 => "med",
+                    _ => "slow",
+                };
+                format!(
+                    "<mc:AlternateContent xmlns:mc=\"{MC_NS}\" xmlns:p=\"{P_NS}\">\
+                     <mc:Choice xmlns:p14=\"{P14_NS}\" Requires=\"p14\">\
+                     <p:transition spd=\"{speed}\" p14:dur=\"{duration_ms}\"{attributes}>{effect_xml}</p:transition>\
+                     </mc:Choice><mc:Fallback>\
+                     <p:transition spd=\"{speed}\"{attributes}>{effect_xml}</p:transition>\
+                     </mc:Fallback></mc:AlternateContent>"
+                )
+            }
+        };
+        Self::from_retained_fragment(xml.as_bytes(), &NamespaceBindings::default())
+    }
+
     pub(crate) fn write_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
         writer.get_mut().write_all(&self.raw_xml)?;
         Ok(())

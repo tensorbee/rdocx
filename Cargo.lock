@@ -1726,6 +1726,7 @@ name = "rpptx-cli"
 version = "0.14.0"
 dependencies = [
  "clap",
+ "libc",
  "oxml-cli-support",
  "oxml-layout",
  "oxml-opc",

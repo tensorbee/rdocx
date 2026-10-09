@@ -21,6 +21,16 @@ presentation, notes, handout, PDF, and animation outputs.
   cells and growing or shrinking the frame by the row or column size.
 - Produce PDF, PDF/A, resolved slide frames, notes, handouts, and animations.
 - Import HTML, ODP, and PDF through explicit facade APIs.
+- Number slides and set footers and dates as PowerPoint's Header and Footer
+  dialog does, with slide-owned placeholders that PowerPoint and Google Slides
+  both show, and insert slide-number and date fields.
+- Read each master's theme colours and fonts, and author the common slide
+  transitions with direction, duration and advance timing.
+- Edit slide masters and layouts through `PartRef`: shapes and pictures such as
+  a logo on every slide, solid, gradient and picture backgrounds,
+  `showMasterSp`, master text styles, layout rename, duplicate and removal,
+  theme colours and fonts, and `apply_theme` from a deck, a `.potx` or a
+  `.thmx`.
 - Resolve master, layout, placeholder, theme, chart, SmartArt, media, notes,
   comments, and timing state while preserving unmodelled package content.
 
@@ -28,7 +38,7 @@ presentation, notes, handout, PDF, and animation outputs.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rpptx | 463,749 compressed bytes, 2,402,551 member bytes, 16 members | 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --no-verify` | Tracked `rpptx` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-09 |
+| Crates.io archive: rpptx | 496,102 compressed bytes, 2,553,143 member bytes, 19 members | 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --no-verify` | Tracked `rpptx` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-10 |
 
 ## Use it when
 

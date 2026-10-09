@@ -24,10 +24,13 @@ its cost is recorded in `00-vision.md`.
 |---|---|
 | `Presentation::new / open / from_bytes / save / to_bytes` | `new()` uses a bundled template |
 | Slide collection, iteration, indexing, lookup by id | |
-| `add_slide(layout)` | Synthesises placeholders, does not deep-copy |
+| `add_slide(layout)` | Synthesises placeholders, does not deep-copy. Date, footer and slide-number placeholders follow the layout's or master's `p:hf`, as in PowerPoint |
+| Slide numbers, footer and date | Rust, Python and CLI, as PowerPoint's Header and Footer dialog: slide-owned placeholders copied from the layout, `p:hf` on masters and layouts, "don't show on title slide", `slidenum` and `datetime` fields |
+| Slide transitions | Read any. Author fade, push, wipe, split, cover, uncover, cut and zoom with direction, duration and click or timed advance, per slide or for all |
 | `remove_slide`, `move_slide`, `duplicate_slide` | Beyond python-pptx |
 | Slide size get and set | |
-| Slide masters and layouts, layout lookup by name | Read |
+| Slide masters and layouts, layout lookup by name | Read and write: master and layout shapes and pictures, backgrounds, `showMasterSp`, master text styles, layout rename, duplicate and removal of unused layouts |
+| Themes | Read and write each master's colours and fonts, apply the theme of another deck, `.potx` or `.thmx`, optionally with its master and layouts |
 | Core, app and custom properties | Shared with rdocx via `oxml-core` |
 | Notes slides | Read and write |
 | Notes-master and handout-master header and footer settings | Native Rust read and write |
@@ -97,7 +100,7 @@ causes data loss, only reduced fidelity when rendering.
 
 | Area | v1 behaviour |
 |---|---|
-| Animations, transitions, `p:timing` | Preserved, irrelevant to static rendering |
+| Animations, `p:timing`, transitions outside the common set | Preserved, irrelevant to static rendering |
 | Unsupported SmartArt algorithms and unmodelled `dgm:` content | Preserved. Rendering uses the drawing fallback part, else its cached picture, else its bounding box. The six exact pinned native layouts are handled before this fallback |
 | OLE objects, ActiveX | Preserved, rendered as the stored preview image |
 | Video and audio | Preserved, rendered as the poster frame |
@@ -339,6 +342,7 @@ surfaces remain outside this scope.
 |---|---|---|
 | Charts are a PowerPoint capability | **M15** | `oxml-chart` now owns the format-neutral engine. `rpptx-chart` remains a deprecated compatibility shim |
 | Animations, transitions, and `p:timing` are preserved but never executed | **M21** | The static renderer and corpus now provide the geometry, timing-independent frame state, and output backends needed to add bounded timeline execution without making it a prerequisite for ordinary slide rendering |
+| Transition authoring is out of scope, transitions are only preserved | **Issue 311** | The model and rendering existed, and Google Slides offers fade, push, wipe, split, cover, uncover, cut and zoom on every slide, so that common set is now authorable. Other effects stay preserved and read-only |
 | Video and audio are preservation-only poster content | **M21** | The native package model edits embedded or linked media, and the additive media-aware timeline path returns poster or labelled fallback output with synchronized playback state while static rendering remains poster-only |
 
 These entries are decisions, not corrections. The v1 positions were right when

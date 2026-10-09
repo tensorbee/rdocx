@@ -503,6 +503,91 @@ def exercise_rpptx_text_layout_types(presentation: Presentation) -> None:
         )
 
 
+def exercise_rpptx_header_footer_theme_transition_types(presentation: Presentation) -> None:
+    from rpptx._rpptx import HeaderFooter, SlideMaster, SlideTransition, Theme
+    from rpptx.enum.shapes import PP_PLACEHOLDER
+
+    presentation.set_header_footer(slide_number=True, footer="ACME", date="auto", hide_on_title=True)
+    slide = presentation.slides[0]
+    header_footer: HeaderFooter = slide.header_footer
+    numbered: bool = header_footer.slide_number
+    footer: str | None = header_footer.footer
+    date: str | None = header_footer.date
+    date_format: str | None = header_footer.date_format
+    header_footer.footer = None
+    header_footer.date = "Q3"
+    for shape in slide.shapes:
+        if shape.is_placeholder:
+            kind: PP_PLACEHOLDER = shape.placeholder_format.type
+            idx: int = shape.placeholder_format.idx
+            (kind, idx)
+    transition: SlideTransition = slide.transition
+    transition.type = "push"
+    transition.direction = "left"
+    transition.duration = 1.0
+    transition.advance_after = None
+    transition.advance_on_click = True
+    kind_name: str | None = transition.type
+    transition.apply_to_all()
+    master: SlideMaster = presentation.slide_master
+    theme: Theme = master.theme
+    accent: RGBColor | None = theme.colors["accent1"]
+    heading: str = theme.fonts.major.latin
+    body: str = theme.fonts.minor.east_asian
+    masters: int = len(presentation.slide_masters)
+    layouts: SlideLayoutCollection = master.slide_layouts
+    slide.shapes[0].text_frame.paragraphs[0].add_field("slidenum")
+    (numbered, footer, date, date_format, kind_name, accent, heading, body, masters, layouts)
+
+
+
+def exercise_rpptx_master_layout_theme_types(presentation: Presentation, logo: Path) -> None:
+    from rpptx._rpptx import (
+        GradientStop,
+        MasterTextStyles,
+        TextStyleLevel,
+        ThemeColors,
+    )
+
+    master = presentation.slide_master
+    master.shapes.add_picture(logo, 0, 0)
+    master.background.fill.gradient()
+    master.background.fill.gradient_angle = 90.0
+    stop: GradientStop = master.background.fill.gradient_stops[0]
+    stop.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+    stop.position = 0.0
+    colors: ThemeColors = master.theme.colors
+    colors["accent1"] = RGBColor(0xFF, 0x66, 0x00)
+    colors["accent2"] = "#1A237E"
+    colors["dk2"] = (0x33, 0x33, 0x33)
+    master.theme.fonts.major.latin = "Montserrat"
+    styles: MasterTextStyles = master.text_styles
+    level: TextStyleLevel = styles.body[0]
+    level.bullet = "\u2022"
+    level.bullet_color = "FF6600"
+    level.font.color = "#1A237E"
+    level.font.size = 20 * 12700
+    level.left_indent = 342900
+    layout = presentation.slide_layouts[0]
+    layout.name = "Cover"
+    layout.show_master_shapes = False
+    layout.follow_master_background = True
+    layout.background.fill.picture(logo)
+    used: tuple[Slide, ...] = layout.used_by_slides
+    copy: SlideLayout = presentation.slide_layouts.duplicate(layout)
+    presentation.slide_master.slide_layouts.remove(copy)
+    named: SlideLayout | None = presentation.slide_master.slide_layouts.get_by_name("Title Slide")
+    found: SlideLayout | None = presentation.slide_layouts.get_by_name("Nope", None)
+    (named, found)
+    presentation.slides[0].show_master_shapes = False
+    hidden: bool = presentation.slides[0].show_master_shapes
+    placeholders: list[Shape] = list(master.placeholders)
+    presentation.apply_theme("brand.potx", import_master=True)
+    with open("brand.potx", "rb") as brand:
+        presentation.apply_theme(brand)
+    (used, hidden, placeholders)
+
+
 if TYPE_CHECKING:
     BoundingBox()  # type: ignore[call-arg]
     AdjustmentCollection()  # type: ignore[call-arg]

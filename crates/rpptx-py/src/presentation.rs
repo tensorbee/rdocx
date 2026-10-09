@@ -7,7 +7,9 @@ use smallvec::smallvec;
 
 use crate::layout::PyTextFrameLayout;
 use crate::shape::length;
-use crate::slide::{PySlideCollection, PySlideLayoutCollection};
+use crate::slide::{
+    PySlideCollection, PySlideLayoutCollection, PySlideMaster, PySlideMasterCollection,
+};
 use crate::{replacement_count_to_pyerr, rpptx_to_pyerr, rpptx_value_to_pyerr};
 
 /// The bundled 16:9 slide size, paired with the first dimension set on a deck
@@ -387,5 +389,109 @@ impl PyPresentation {
     fn slides(slf: Py<Self>, py: Python<'_>) -> PyResult<Py<PySlideCollection>> {
         let path = slf.borrow(py).revisions.capture(smallvec![]);
         Py::new(py, PySlideCollection::new(slf, path))
+    }
+
+    // Header and footer, masters (#311).
+
+    /// Sets the date, footer and slide number of every slide, as
+    /// PowerPoint's Header and Footer dialog with Apply to All (rpptx
+    /// extension).
+    ///
+    /// Unlike the opt-in `rpptx footer` flags, the slide number and
+    /// `hide_on_title` default to on, the usual corporate deck. `date` is
+    /// `None`, fixed text, or `"auto"` for a `date_format` field
+    /// PowerPoint refreshes, cached with today's local date. With
+    /// `hide_on_title`, slides on a title layout show none of them and
+    /// `showSpecialPlsOnTitleSld="0"` records it. Each slide owns the
+    /// placeholders it shows, copied from its layout, which is what both
+    /// PowerPoint and Google Slides display, and the masters and layouts get
+    /// matching `p:hf` flags so slides added later follow. New placeholders
+    /// go after the other shapes, so held handles stay valid unless a
+    /// removed placeholder was followed by other shapes, which advances the
+    /// revision.
+    #[pyo3(signature = (slide_number = true, footer = None, date = None, hide_on_title = true, date_format = "datetime1"))]
+    fn set_header_footer(
+        &mut self,
+        py: Python<'_>,
+        slide_number: bool,
+        footer: Option<String>,
+        date: Option<String>,
+        hide_on_title: bool,
+        date_format: &str,
+    ) -> PyResult<()> {
+        let settings =
+            crate::slide::header_footer_settings(py, slide_number, footer, date, date_format)?;
+        let before = crate::slide::all_shape_paths(&self.inner);
+        self.inner
+            .set_header_footer(&settings, hide_on_title)
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        if !crate::slide::paths_kept(&before, &crate::slide::all_shape_paths(&self.inner)) {
+            self.revisions.bump();
+        }
+        Ok(())
+    }
+
+    // Masters, layouts and themes (#312).
+
+    /// Applies the theme of a `.pptx`, `.potx` or `.thmx` file, of its
+    /// bytes or a binary file object, or of another `Presentation` to every
+    /// slide master: colours,
+    /// fonts and effects (rpptx extension).
+    ///
+    /// With `import_master`, the source's first master design comes too:
+    /// its logo and other shapes, background and text styles, and its
+    /// layouts replace the layouts of the same type or name, adding the
+    /// others. Slides keep their content and take the new design. A `.thmx`
+    /// carries a theme only. Every held handle is invalidated.
+    #[pyo3(signature = (source, *, import_master = false))]
+    fn apply_theme(
+        &mut self,
+        py: Python<'_>,
+        source: &Bound<'_, PyAny>,
+        import_master: bool,
+    ) -> PyResult<()> {
+        let result = if let Ok(other) = source.extract::<PyRef<'_, PyPresentation>>() {
+            let other = other.inner.clone();
+            self.inner.apply_theme(&other, import_master)
+        } else if let Ok(bytes) = source.extract::<Vec<u8>>()
+            && !source.is_instance_of::<pyo3::types::PyString>()
+        {
+            self.inner.apply_theme_bytes(&bytes, import_master)
+        } else if source.hasattr("read")? {
+            if source.hasattr("seek")? {
+                source.call_method1("seek", (0,))?;
+            }
+            let bytes = source.call_method0("read")?.extract::<Vec<u8>>()?;
+            self.inner.apply_theme_bytes(&bytes, import_master)
+        } else if let Ok(path) = source.extract::<PathBuf>() {
+            let bytes = std::fs::read(&path)?;
+            self.inner.apply_theme_bytes(&bytes, import_master)
+        } else {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "source must be a path to a .pptx, .potx or .thmx file, its bytes, a binary file object, or a Presentation",
+            ));
+        };
+        result.map_err(|error| rpptx_to_pyerr(py, error))?;
+        self.revisions.bump();
+        Ok(())
+    }
+
+    /// The slide masters, like python-pptx `slide_masters`.
+    #[getter]
+    fn slide_masters(slf: Py<Self>, py: Python<'_>) -> PyResult<Py<PySlideMasterCollection>> {
+        let path = slf.borrow(py).revisions.capture(smallvec![]);
+        Py::new(py, PySlideMasterCollection::new(slf, path))
+    }
+
+    /// The first slide master, like python-pptx `slide_master`.
+    #[getter]
+    fn slide_master(slf: Py<Self>, py: Python<'_>) -> PyResult<Py<PySlideMaster>> {
+        let path = slf.borrow(py).revisions.capture(smallvec![]);
+        if slf.borrow(py).inner.master_count() == 0 {
+            return Err(pyo3::exceptions::PyIndexError::new_err(
+                "the presentation has no slide master",
+            ));
+        }
+        PySlideMasterCollection::new(slf, path).item(py, 0)
     }
 }

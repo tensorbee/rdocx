@@ -75,6 +75,23 @@ with open("review.pdf", "wb") as output:
 - Run hyperlinks, read, added, retargeted, and removed as in python-pptx.
 - Shape click actions, a hyperlink or a slide jump, through `shape.click_action`
   as in python-pptx.
+- `shape.is_placeholder` and `shape.placeholder_format` with `PP_PLACEHOLDER`
+  as in python-pptx.
+- Slide numbers, footer and date on every slide in one call,
+  `prs.set_header_footer(slide_number=True, footer="ACME", hide_on_title=True)`,
+  per slide through `slide.header_footer`, and `paragraph.add_field("slidenum")`.
+- `prs.slide_master.theme` colours and fonts, and `slide.transition` with type,
+  direction, duration, advance timing and `apply_to_all()`.
+- Editable masters and layouts as in python-pptx: `master.shapes` (a logo on
+  every slide), `layout.shapes`, `.placeholders`, `.background` with
+  `fill.solid()`, `fill.gradient()` and `fill.picture(path)`,
+  `layout.show_master_shapes`, `slide.show_master_shapes`, `layout.name`,
+  `layout.used_by_slides`, `slide_layouts.remove(layout)` and
+  `slide_layouts.duplicate(layout)`.
+- Theme writes, `theme.colors["accent1"] = RGBColor(...)` and
+  `theme.fonts.major.latin = "Montserrat"`, master text styles through
+  `master.text_styles.title[0].font` and `.body[0].bullet`, and
+  `prs.apply_theme("brand.potx", import_master=True)`.
 
 ## Use it when
 

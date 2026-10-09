@@ -4689,3 +4689,245 @@ def test_issue_158_deck_fixture_acceptance(tmp_path):
         close = sum(max(errors[offset:offset + 3]) <= 24 for offset in range(0, len(errors), 3))
         assert close / (len(errors) / 3) >= min_close, label
         assert sum(errors) / len(errors) <= max_mean, label
+
+
+def slide_text(prs, index):
+    return "".join(line.text for frame in prs.text_layout() if frame.slide_index == index
+                   for line in frame.lines)
+
+
+def test_header_footer_fields_theme_and_transitions_from_python(tmp_path):
+    from rpptx import Presentation, RpptxError, StaleElementError
+    from rpptx.enum.shapes import PP_PLACEHOLDER
+
+    prs = Presentation()
+    prs.slides.add_slide(prs.slide_layouts[0])
+    for _ in range(2):
+        prs.slides.add_slide(prs.slide_layouts[1])
+    # The default template has no p:hf, so new slides own no footers.
+    assert not any(shape.is_placeholder and shape.placeholder_format.type == PP_PLACEHOLDER.SLIDE_NUMBER
+                   for slide in prs.slides for shape in slide.shapes)
+
+    held = prs.slides[1]
+    prs.set_header_footer(slide_number=True, footer="ACME - Confidential", date="Q3 review")
+    # The placeholders go after the other shapes, so held handles stay valid.
+    assert held.header_footer.footer == "ACME - Confidential"
+    title, first, second = prs.slides
+    assert (title.header_footer.slide_number, title.header_footer.footer) == (False, None)
+    assert (first.header_footer.slide_number, first.header_footer.footer, first.header_footer.date) == (
+        True, "ACME - Confidential", "Q3 review")
+    kinds = [shape.placeholder_format.type for shape in second.shapes if shape.is_placeholder]
+    assert kinds[-3:] == [PP_PLACEHOLDER.DATE, PP_PLACEHOLDER.FOOTER, PP_PLACEHOLDER.SLIDE_NUMBER]
+    assert second.shapes[1].placeholder_format.idx == 1
+    with pytest.raises(ValueError, match="not a placeholder"):
+        title.shapes.add_textbox(0, 0, 914400, 914400).placeholder_format
+
+    # Placeholders are added after the other shapes and rewritten in place,
+    # so held handles stay valid. Removing the footer moves the slide number
+    # that follows it, which advances the revision, and the header-footer
+    # handle follows it.
+    second = prs.slides[2]
+    header_footer = second.header_footer
+    header_footer.date = "auto"
+    assert (header_footer.date, header_footer.date_format) == ("auto", "datetime1")
+    header_footer.date_format = "datetime4"
+    assert header_footer.date_format == "datetime4"
+    assert len(second.shapes) == 5
+    header_footer.footer = None
+    assert header_footer.footer is None
+    with pytest.raises(StaleElementError):
+        second.shapes
+    second = prs.slides[2]
+    second.header_footer.footer = "Back"
+    assert len(second.shapes) == 5
+    with pytest.raises(ValueError, match="use datetime1 to datetime7$"):
+        second.header_footer.date_format = "datetime9"
+    with pytest.raises(ValueError, match="use datetime1 to datetime7$"):
+        prs.set_header_footer(date="auto", date_format="datetime9")
+
+    prs.slides[1].shapes.add_textbox(0, 0, 914400, 914400).text_frame.paragraphs[0].add_run("Page ")
+    paragraph = prs.slides[1].shapes[-1].text_frame.paragraphs[0]
+    paragraph.add_field("slidenum")
+    assert paragraph.text == "Page \u2039#\u203a"
+    assert slide_text(prs, 1).replace(" ", "").endswith("Page2")
+    with pytest.raises(RpptxError, match="slidenum or datetime1 to datetime13"):
+        paragraph.add_field("pagenum")
+
+    theme = prs.slide_master.theme
+    assert theme.name == "Office Theme"
+    assert str(theme.colors["accent1"]) == "4F81BD"
+    assert list(theme.colors)[:2] == ["dk1", "lt1"] and len(theme.colors) == 12
+    assert theme.fonts.major.latin == "Calibri"
+    assert len(prs.slide_masters) == 1 and prs.slide_masters[0] == prs.slide_master
+    assert len(prs.slide_master.slide_layouts) == len(prs.slide_layouts)
+
+    first, second = prs.slides[1], prs.slides[2]
+    transition = first.transition
+    assert transition.type is None and transition.advance_on_click
+    transition.type = "push"
+    transition.direction = "up"
+    transition.duration = 1.5
+    transition.advance_after = 3
+    with pytest.raises(ValueError, match="fade takes no direction"):
+        second.transition.type = "fade"
+        second.transition.direction = "left"
+    with pytest.raises(ValueError, match="unknown transition type"):
+        second.transition.type = "vortex"
+    transition.apply_to_all()
+
+    path = tmp_path / "numbered.pptx"
+    prs.save(path)
+    reopened = Presentation(path)
+    assert [slide.transition.type for slide in reopened.slides] == ["push"] * 3
+    assert (reopened.slides[2].transition.direction, reopened.slides[2].transition.duration,
+            reopened.slides[2].transition.advance_after) == ("up", 1.5, 3.0)
+    # A slide added after the round trip follows the master and layout flags.
+    added = reopened.slides.add_slide(reopened.slide_layouts[1])
+    assert (added.header_footer.slide_number, added.header_footer.footer) == (True, "ACME - Confidential")
+
+
+def test_masters_layouts_and_themes_from_python(tmp_path):
+    from rpptx import Inches, Presentation, RGBColor, Pt
+
+    _write_tiny_png(tmp_path / "logo.png")
+    prs = Presentation()
+    prs.slides.add_slide(prs.slide_layouts[0])
+    prs.slides.add_slide(prs.slide_layouts[1])
+    prs.slides.add_slide(prs.slide_layouts[5])
+
+    # A logo on the master, hidden on the title layout, another on one layout.
+    master = prs.slide_master
+    master.shapes.add_picture(tmp_path / "logo.png", Inches(8.5), Inches(0.1), height=Inches(0.5))
+    prs.slide_layouts[0].show_master_shapes = False
+    prs.slide_layouts[5].shapes.add_picture(tmp_path / "logo.png", Inches(0.2), Inches(6.9))
+    assert [layout.show_master_shapes for layout in prs.slide_layouts][:2] == [False, True]
+    assert prs.slide_master.shapes[len(prs.slide_master.shapes) - 1].shape_type is not None
+    assert [slide == prs.slides[1] for slide in prs.slide_layouts[1].used_by_slides] == [True]
+    assert prs.slide_layouts[1].slide_master == prs.slide_master
+    assert len(prs.slide_master.placeholders) == len(list(prs.slide_master.placeholders)) > 0
+    with pytest.raises(ValueError, match="slide shapes only"):
+        prs.slide_master.shapes[0].click_action.target_slide
+
+    # Backgrounds on master and layout.
+    fill = prs.slide_master.background.fill
+    fill.gradient()
+    fill.gradient_angle = 90
+    assert fill.gradient_angle == 90
+    stops = fill.gradient_stops
+    stops[0].color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+    stops[1].position = 0.8
+    assert (len(stops), str(stops[0].color.rgb), stops[1].position) == (2, "FFFFFF", 0.8)
+    prs.slide_layouts[5].background.fill.picture(tmp_path / "logo.png")
+    assert not prs.slide_layouts[5].follow_master_background
+    with pytest.raises(TypeError, match="backgrounds only"):
+        prs.slides[0].shapes[0].fill.picture(tmp_path / "logo.png")
+
+    # Theme colours and fonts in one place, master text styles.
+    theme = prs.slide_master.theme
+    theme.colors["accent1"] = RGBColor(0xFF, 0x66, 0x00)
+    theme.colors["accent2"] = "#1A237E"
+    theme.colors["dk2"] = (0x33, 0x33, 0x33)
+    theme.fonts.major.latin = "Montserrat"
+    assert [str(theme.colors[slot]) for slot in ("accent1", "accent2", "dk2")] == ["FF6600", "1A237E", "333333"]
+    assert prs.slide_master.theme.fonts.major.latin == "Montserrat"
+    with pytest.raises(KeyError, match="accent9"):
+        theme.colors["accent9"] = "FF0000"
+    with pytest.raises(TypeError, match="theme colour must be an RGBColor"):
+        theme.colors["accent3"] = 0xFF0000
+    with pytest.raises(ValueError, match="six hexadecimal digits"):
+        theme.colors["accent3"] = "#FF00"
+    title = prs.slide_master.text_styles.title[0]
+    title.font.size = Pt(40)
+    title.font.color = "1A237E"
+    body = prs.slide_master.text_styles.body[0]
+    body.bullet = "\u2013"
+    body.bullet_color = RGBColor(0xFF, 0x66, 0x00)
+    assert (title.font.size, title.font.color, body.bullet, str(body.bullet_color)) == (Pt(40), "1A237E", "\u2013", "FF6600")
+
+    # Layout lifecycle and the slide-level hide.
+    count = len(prs.slide_layouts)
+    copy = prs.slide_layouts.duplicate(prs.slide_layouts[1])
+    assert (copy.name, len(prs.slide_layouts)) == ("1_Title and Content", count + 1)
+    copy.name = "Agenda"
+    with pytest.raises(ValueError, match="in use by one or more slides"):
+        prs.slide_layouts.remove(prs.slide_layouts[1])
+    prs.slide_layouts.remove(copy)
+    assert len(prs.slide_layouts) == count
+    prs.slides[2].show_master_shapes = False
+
+    path = tmp_path / "branded.pptx"
+    prs.save(path)
+    reopened = Presentation(path)
+    assert not reopened.validate()
+    assert str(reopened.slide_master.theme.colors["accent1"]) == "FF6600"
+    assert reopened.slide_master.text_styles.title[0].font.size == Pt(40)
+    assert not reopened.slide_layouts[0].show_master_shapes and not reopened.slides[2].show_master_shapes
+    assert len(reopened.slide_master.shapes) == len(prs.slide_master.shapes)
+
+    # Apply that brand to another deck, with and without its master design.
+    deck = Presentation()
+    deck.slides.add_slide(deck.slide_layouts[1]).shapes.title.text_frame.text = "Kept"
+    deck.apply_theme(path)
+    assert str(deck.slide_master.theme.colors["accent1"]) == "FF6600"
+    assert len(deck.slide_master.shapes) == len(Presentation().slide_master.shapes)
+    deck.apply_theme(path.read_bytes(), import_master=True)
+    assert len(deck.slide_master.shapes) == len(reopened.slide_master.shapes)
+    assert deck.slides[0].shapes.title.text_frame.text == "Kept"
+    assert not deck.slide_layouts[0].show_master_shapes
+    deck.apply_theme(reopened)
+    with open(path, "rb") as brand:
+        deck.apply_theme(brand)
+    with pytest.raises(TypeError, match="source must be a path"):
+        deck.apply_theme(42)
+
+
+def test_master_layout_collections_hyperlinks_and_colours_from_python(tmp_path):
+    from rpptx import Inches, Presentation
+
+    _write_tiny_png(tmp_path / "logo.png")
+    prs = Presentation()
+    prs.slides.add_slide(prs.slide_layouts[1])
+    layouts = prs.slide_master.slide_layouts
+    assert len(layouts) == len(prs.slide_layouts) and layouts.index(prs.slide_layouts[2]) == 2
+    assert layouts.get_by_name("Title Only") == prs.slide_layouts.get_by_name("Title Only")
+    assert layouts.get_by_name("Nope") is None and prs.slide_layouts.get_by_name("Nope", 7) == 7
+    copy = prs.slide_master.slide_layouts.duplicate(prs.slide_layouts[1])
+    prs.slide_master.slide_layouts.remove(copy)
+    with pytest.raises(ValueError, match="in use"):
+        prs.slide_master.slide_layouts.remove(prs.slide_layouts[1])
+
+    # A master with one layout keeps it.
+    single = Presentation()
+    while len(single.slide_layouts) > 1:
+        single.slide_layouts.remove(single.slide_layouts[1])
+    assert len(single.slide_layouts) == 1
+    with pytest.raises(ValueError, match="only slide-layout of its slide master"):
+        single.slide_layouts.remove(single.slide_layouts[0])
+
+    # A clickable logo on the master.
+    logo = prs.slide_master.shapes.add_picture(tmp_path / "logo.png", Inches(8.5), Inches(0.1))
+    logo.click_action.hyperlink.address = "https://example.com"
+    logo = prs.slide_master.shapes[len(prs.slide_master.shapes) - 1]
+    assert logo.click_action.hyperlink.address == "https://example.com"
+    with pytest.raises(ValueError, match="slide shapes only"):
+        logo.click_action.target_slide
+    path = tmp_path / "linked.pptx"
+    prs.save(path)
+    reopened = Presentation(path)
+    assert not reopened.validate()
+    master_logo = reopened.slide_master.shapes[len(reopened.slide_master.shapes) - 1]
+    assert master_logo.click_action.hyperlink.address == "https://example.com"
+    master_logo.click_action.hyperlink.address = None
+    assert master_logo.click_action.hyperlink.address is None
+
+    # One colour parser for every colour setter.
+    font = prs.slide_master.text_styles.title[0].font
+    font.color = "#1A237E"
+    assert font.color == "1A237E"
+    run = prs.slides[0].shapes.title.text_frame
+    run.text = "Colour"
+    paragraph_font = prs.slides[0].shapes.title.text_frame.paragraphs[0].runs[0].font
+    paragraph_font.color = (1, 2, 3)
+    assert paragraph_font.color == "010203"
+    with pytest.raises(TypeError, match="font color must be an RGBColor"):
+        paragraph_font.color = 3.5

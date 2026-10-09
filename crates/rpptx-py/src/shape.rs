@@ -38,6 +38,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyPlaceholderCollection>()?;
     module.add_class::<PyImage>()?;
     module.add_class::<PyAdjustmentCollection>()?;
+    module.add_class::<PyPlaceholderFormat>()?;
     Ok(())
 }
 
@@ -55,7 +56,7 @@ pub(crate) fn length(py: Python<'_>, value: Option<rpptx::Emu>) -> PyResult<Opti
 /// Reads the bytes of a path, a bytes-like object, or a binary file-like object.
 ///
 /// A file-like object is rewound first when it can seek, as python-pptx does.
-fn image_bytes(image_file: &Bound<'_, PyAny>) -> PyResult<(Vec<u8>, String)> {
+pub(crate) fn image_bytes(image_file: &Bound<'_, PyAny>) -> PyResult<(Vec<u8>, String)> {
     fn blob(data: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
         match data.cast::<PyBytes>() {
             Ok(bytes) => Ok(bytes.as_bytes().to_vec()),
@@ -105,14 +106,30 @@ fn check_coordinate(name: &str, value: i64, minimum: i64) -> PyResult<()> {
     }
 }
 
-pub(crate) fn slide_index(path: &ContentPath) -> PyResult<usize> {
+/// The slide, layout or master a content path starts in.
+pub(crate) fn part_of(path: &ContentPath) -> PyResult<rpptx::PartRef> {
     path.segs
         .iter()
         .find_map(|segment| match segment {
-            PathSeg::Slide(index) => Some(*index),
+            PathSeg::Slide(index) => Some(rpptx::PartRef::Slide(*index)),
+            PathSeg::Layout(index) => Some(rpptx::PartRef::Layout(*index)),
+            PathSeg::Master(index) => Some(rpptx::PartRef::Master(*index)),
             _ => None,
         })
         .ok_or_else(|| PyIndexError::new_err("slide index is missing"))
+}
+
+/// The slide a content path starts in. Operations that only slides
+/// support, such as `click_action.target_slide`, replacing or cropping a
+/// picture's image, effective geometry and media, raise `ValueError` on
+/// layout and master shapes. `click_action.hyperlink` works on all three.
+pub(crate) fn slide_index(path: &ContentPath) -> PyResult<usize> {
+    match part_of(path)? {
+        rpptx::PartRef::Slide(index) => Ok(index),
+        _ => Err(PyValueError::new_err(
+            "this works on slide shapes only, not on slide layout or slide master shapes",
+        )),
+    }
 }
 
 fn shape_indices(path: &ContentPath) -> impl Iterator<Item = usize> + '_ {
@@ -126,9 +143,9 @@ pub(crate) fn shape_ref_at<'a>(
     presentation: &'a rpptx::Presentation,
     path: &ContentPath,
 ) -> Option<rpptx::ShapeRef<'a>> {
-    let slide = presentation.slide(slide_index(path).ok()?)?;
+    let part = part_of(path).ok()?;
     let mut indices = shape_indices(path);
-    let mut shape = slide.shape(indices.next()?)?;
+    let mut shape = presentation.part_shape(part, indices.next()?)?;
     for index in indices {
         shape = shape.child(index)?;
     }
@@ -139,9 +156,9 @@ pub(crate) fn shape_mut_at<'a>(
     presentation: &'a mut rpptx::Presentation,
     path: &ContentPath,
 ) -> Option<rpptx::ShapeMut<'a>> {
-    let slide = presentation.slide_mut(slide_index(path).ok()?)?;
+    let part = part_of(path).ok()?;
     let mut indices = shape_indices(path);
-    let mut shape = slide.into_shape_mut(indices.next()?)?;
+    let mut shape = presentation.part_shape_mut(part, indices.next()?)?;
     for index in indices {
         shape = shape.into_child_mut(index)?;
     }
@@ -723,6 +740,59 @@ impl PyShape {
             PyTable::new(self.presentation.clone_ref(py), self.path.clone()),
         )
     }
+
+    // Placeholders (#311).
+
+    /// True when the shape is a placeholder, a `p:ph` in its properties.
+    #[getter]
+    fn is_placeholder(&self, py: Python<'_>) -> PyResult<bool> {
+        self.read(py, |shape| shape.placeholder_idx().is_some())
+    }
+
+    /// The placeholder's type and index, like python-pptx `placeholder_format`.
+    ///
+    /// Raises `ValueError` when the shape is not a placeholder.
+    #[getter]
+    fn placeholder_format(&self, py: Python<'_>) -> PyResult<PyPlaceholderFormat> {
+        let (idx, token) = self.read(py, |shape| {
+            (
+                shape.placeholder_idx(),
+                shape.placeholder_type().map(str::to_owned),
+            )
+        })?;
+        let idx = idx.ok_or_else(|| PyValueError::new_err("shape is not a placeholder"))?;
+        // An omitted type is the schema default `obj`, as python-pptx reads it.
+        let token = token.unwrap_or_else(|| "obj".to_owned());
+        let placeholder_type = py
+            .import("rpptx.enum.shapes")?
+            .getattr("PP_PLACEHOLDER")?
+            .call_method1("from_xml", (token,))?
+            .unbind();
+        Ok(PyPlaceholderFormat {
+            idx,
+            placeholder_type,
+        })
+    }
+}
+
+/// A placeholder's index and type, read when `Shape.placeholder_format` is.
+#[pyclass(name = "PlaceholderFormat", frozen)]
+pub struct PyPlaceholderFormat {
+    idx: u32,
+    placeholder_type: Py<PyAny>,
+}
+
+#[pymethods]
+impl PyPlaceholderFormat {
+    #[getter]
+    fn idx(&self) -> u32 {
+        self.idx
+    }
+
+    #[getter]
+    fn r#type(&self, py: Python<'_>) -> Py<PyAny> {
+        self.placeholder_type.clone_ref(py)
+    }
 }
 
 #[pyclass(name = "ShapeClickAction")]
@@ -832,7 +902,7 @@ impl PyShapeHyperlink {
             .ok_or_else(|| PyValueError::new_err("shape has no id"))?;
         presentation
             .inner
-            .shape_hyperlink_address(slide_index(&self.path)?, shape_id)
+            .part_shape_hyperlink_address(part_of(&self.path)?, shape_id)
             .map(|address| address.map(str::to_owned))
             .map_err(|error| rpptx_to_pyerr(py, error))
     }
@@ -852,8 +922,8 @@ impl PyShapeHyperlink {
             .ok_or_else(|| PyValueError::new_err("shape has no id"))?;
         presentation
             .inner
-            .set_shape_hyperlink(
-                slide_index(&self.path)?,
+            .set_part_shape_hyperlink(
+                part_of(&self.path)?,
                 shape_id,
                 value.filter(|value| !value.is_empty()),
             )
@@ -872,14 +942,14 @@ impl PyShapeCollection {
         Self { presentation, path }
     }
 
-    fn validate(&self, py: Python<'_>) -> PyResult<usize> {
+    fn validate(&self, py: Python<'_>) -> PyResult<rpptx::PartRef> {
         let presentation = self.presentation.borrow(py);
         validate_path(py, &presentation, &self.path, "shape collection", ".shapes")?;
-        slide_index(&self.path)
+        part_of(&self.path)
     }
 
     fn len(&self, py: Python<'_>) -> PyResult<usize> {
-        let slide = self.validate(py)?;
+        let part = self.validate(py)?;
         let presentation = self.presentation.borrow(py);
         if self
             .path
@@ -892,8 +962,8 @@ impl PyShapeCollection {
         }
         Ok(presentation
             .inner
-            .slide(slide)
-            .map_or(0, |slide| slide.shapes().len()))
+            .part_shapes(part)
+            .map_or(0, |shapes| shapes.len()))
     }
 
     fn require_slide_root(&self) -> PyResult<()> {
@@ -910,14 +980,14 @@ impl PyShapeCollection {
         Ok(())
     }
 
-    /// Returns the slide index and group path that additions to this
-    /// collection target, or the error an addition raises.
-    fn target(&self, py: Python<'_>) -> PyResult<(usize, Vec<usize>)> {
-        let slide_index = self.validate(py)?;
+    /// Returns the slide, layout or master and the group path that
+    /// additions to this collection target, or the error an addition raises.
+    fn target(&self, py: Python<'_>) -> PyResult<(rpptx::PartRef, Vec<usize>)> {
+        let part = self.validate(py)?;
         let group = shape_indices(&self.path).collect::<Vec<_>>();
         let mut presentation = self.presentation.borrow_mut(py);
-        if presentation.inner.shapes_mut(slide_index, &group).is_some() {
-            return Ok((slide_index, group));
+        if presentation.inner.part_shapes_mut(part, &group).is_some() {
+            return Ok((part, group));
         }
         let fallback_group = shape_ref_at(&presentation.inner, &self.path)
             .is_some_and(|shape| shape.kind() == rpptx::ShapeKind::Group);
@@ -935,13 +1005,13 @@ impl PyShapeCollection {
         py: Python<'_>,
         add: impl FnOnce(&mut rpptx::ShapesMut<'_>) -> rpptx::Result<()>,
     ) -> PyResult<Py<PyShape>> {
-        let (slide_index, group) = self.target(py)?;
+        let (part, group) = self.target(py)?;
         let index = self.len(py)?;
         let mut presentation = self.presentation.borrow_mut(py);
         let mut shapes = presentation
             .inner
-            .shapes_mut(slide_index, &group)
-            .expect("the target is a slide or a group");
+            .part_shapes_mut(part, &group)
+            .expect("the target is a slide, layout, master or group");
         add(&mut shapes).map_err(|error| rpptx_to_pyerr(py, error))?;
         drop(presentation);
         self.capture_added(py, index)
@@ -1008,20 +1078,15 @@ impl PyShapeCollection {
 
     #[getter]
     fn title(&self, py: Python<'_>) -> PyResult<Option<Py<PyShape>>> {
-        let slide_index = self.validate(py)?;
-        let presentation = self.presentation.borrow(py);
-        let Some(slide) = presentation.inner.slide(slide_index) else {
-            return Ok(None);
+        let part = self.validate(py)?;
+        let index = {
+            let presentation = self.presentation.borrow(py);
+            let Ok(mut shapes) = presentation.inner.part_shapes(part) else {
+                return Ok(None);
+            };
+            shapes.position(|shape| matches!(shape.placeholder_type(), Some("title" | "ctrTitle")))
         };
-        let Some(title) = slide.title() else {
-            return Ok(None);
-        };
-        let index = slide
-            .shapes()
-            .position(|shape| shape.placeholder_idx() == title.placeholder_idx())
-            .expect("title is an immediate slide shape");
-        drop(presentation);
-        self.item(py, index).map(Some)
+        index.map(|index| self.item(py, index)).transpose()
     }
 
     #[getter]
@@ -1109,23 +1174,24 @@ impl PyShapeCollection {
         self.add(py, |shapes| shapes.add_group_shape().map(drop))
     }
 
-    /// Removes one shape of this slide and the package parts only it used.
+    /// Removes one shape of this slide, layout or master and the package
+    /// parts only it used.
     fn remove(&mut self, py: Python<'_>, shape: &Bound<'_, PyAny>) -> PyResult<()> {
         self.require_slide_root()?;
-        let slide_index = self.validate(py)?;
+        let part = self.validate(py)?;
         let shape = shape.extract::<PyRef<'_, PyShape>>()?;
         if !shape.presentation.is(&self.presentation) {
             return Err(PyValueError::new_err("shape is not in this collection"));
         }
         shape.validate(py)?;
         let shape_index = match shape.path.segs.as_slice() {
-            [PathSeg::Slide(slide), PathSeg::Shape(index)] if *slide == slide_index => *index,
+            [_, PathSeg::Shape(index)] if part_of(&shape.path)? == part => *index,
             _ => return Err(PyValueError::new_err("shape is not in this collection")),
         };
         let mut presentation = self.presentation.borrow_mut(py);
         presentation
             .inner
-            .remove_shape(slide_index, shape_index)
+            .remove_part_shape(part, shape_index)
             .map_err(|error| rpptx_to_pyerr(py, error))?;
         presentation.revisions.bump();
         Ok(())
@@ -1136,14 +1202,14 @@ impl PyShapeCollection {
     #[pyo3(name = "move")]
     fn move_shape(&mut self, py: Python<'_>, from_: isize, to: isize) -> PyResult<()> {
         self.require_slide_root()?;
-        let slide_index = self.validate(py)?;
+        let part = self.validate(py)?;
         let len = self.len(py)?;
         let from_ = normalize_index(from_, len, "shape")?;
         let to = normalize_index(to, len, "shape")?;
         let mut presentation = self.presentation.borrow_mut(py);
         presentation
             .inner
-            .move_shape(slide_index, from_, to)
+            .move_part_shape(part, from_, to)
             .map_err(|error| rpptx_to_pyerr(py, error))?;
         presentation.revisions.bump();
         Ok(())
@@ -1237,9 +1303,9 @@ impl PyPlaceholderCollection {
     }
 }
 
-#[pymethods]
 impl PyPlaceholderCollection {
-    fn __getitem__(&self, py: Python<'_>, placeholder_idx: u32) -> PyResult<Py<PyShape>> {
+    /// The z-order indices of the placeholders, in z-order.
+    fn positions(&self, py: Python<'_>) -> PyResult<Vec<usize>> {
         let presentation = self.presentation.borrow(py);
         validate_path(
             py,
@@ -1248,21 +1314,57 @@ impl PyPlaceholderCollection {
             "placeholder collection",
             ".placeholders",
         )?;
-        let slide_index = slide_index(&self.path)?;
-        let slide = presentation
+        let shapes = presentation
             .inner
-            .slide(slide_index)
-            .ok_or_else(|| PyIndexError::new_err("slide index out of range"))?;
-        let placeholder = slide
-            .placeholder(placeholder_idx)
+            .part_shapes(part_of(&self.path)?)
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        Ok(shapes
+            .enumerate()
+            .filter(|(_, shape)| shape.placeholder_idx().is_some())
+            .map(|(index, _)| index)
+            .collect())
+    }
+}
+
+#[pymethods]
+impl PyPlaceholderCollection {
+    /// The placeholder whose `idx` is `placeholder_idx`, as python-pptx
+    /// `placeholders[idx]` finds it. A title placeholder has `idx` 0.
+    fn __getitem__(&self, py: Python<'_>, placeholder_idx: u32) -> PyResult<Py<PyShape>> {
+        let positions = self.positions(py)?;
+        let presentation = self.presentation.borrow(py);
+        let part = part_of(&self.path)?;
+        let shape_index = positions
+            .into_iter()
+            .find(|index| {
+                presentation
+                    .inner
+                    .part_shape(part, *index)
+                    .and_then(|shape| shape.placeholder_idx())
+                    == Some(placeholder_idx)
+            })
             .ok_or_else(|| PyIndexError::new_err("placeholder index out of range"))?;
-        let shape_index = slide
-            .shapes()
-            .position(|shape| shape.placeholder_idx() == placeholder.placeholder_idx())
-            .expect("placeholder is an immediate slide shape");
         drop(presentation);
         let collection = PyShapeCollection::new(self.presentation.clone_ref(py), self.path.clone());
         collection.item(py, shape_index)
+    }
+
+    fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
+        Ok(self.positions(py)?.len())
+    }
+
+    /// Iterates the placeholders in z-order.
+    fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let collection = PyShapeCollection::new(self.presentation.clone_ref(py), self.path.clone());
+        let items = self
+            .positions(py)?
+            .into_iter()
+            .map(|index| collection.item(py, index))
+            .collect::<PyResult<Vec<_>>>()?;
+        PyTuple::new(py, items)?
+            .into_any()
+            .try_iter()
+            .map(Bound::into_any)
     }
 }
 

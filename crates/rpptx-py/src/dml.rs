@@ -10,8 +10,8 @@ use pyo3::prelude::*;
 
 use crate::presentation::PyPresentation;
 use crate::shape::{
-    ANGLE_UNITS_PER_DEGREE, ANGLE_UNITS_PER_TURN, MAX_COORDINATE, length, shape_mut_at,
-    shape_ref_at, slide_index,
+    ANGLE_UNITS_PER_DEGREE, ANGLE_UNITS_PER_TURN, MAX_COORDINATE, image_bytes, length, part_of,
+    shape_mut_at, shape_ref_at,
 };
 use crate::table::{cell_mut_at, cell_ref_at};
 use crate::{rpptx_to_pyerr, validate_path};
@@ -24,6 +24,8 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyLineEndFormat>()?;
     module.add_class::<PyColorFormat>()?;
     module.add_class::<PyShadowFormat>()?;
+    module.add_class::<PyGradientStops>()?;
+    module.add_class::<PyGradientStop>()?;
     Ok(())
 }
 
@@ -114,9 +116,8 @@ fn current_fill(
             current_line(presentation, path, target)?.and_then(|line| line.fill)
         }
         FillTarget::Background => presentation
-            .slide(slide_index(path)?)
-            .ok_or_else(|| PyIndexError::new_err("slide index out of range"))?
-            .background_fill()
+            .part_background_fill(part_of(path)?)
+            .map_err(|error| PyIndexError::new_err(error.to_string()))?
             .cloned(),
         FillTarget::TableCell => cell_ref_at(presentation, path)
             .ok_or_else(|| PyIndexError::new_err("cell index out of range"))?
@@ -142,21 +143,7 @@ fn write_fill(
             line.fill = Some(fill);
             return write_line(py, presentation, path, target, line);
         }
-        FillTarget::Background => {
-            let index = slide_index(path)?;
-            let direct = presentation
-                .slide(index)
-                .ok_or_else(|| PyIndexError::new_err("slide index out of range"))?
-                .background_fill()
-                .is_some();
-            let mut slide = presentation
-                .slide_mut(index)
-                .ok_or_else(|| PyIndexError::new_err("slide index out of range"))?;
-            if !direct {
-                slide.remove_background();
-            }
-            slide.set_background(fill)
-        }
+        FillTarget::Background => presentation.set_part_background(part_of(path)?, fill),
         FillTarget::TableCell => {
             cell_mut_at(presentation, path)
                 .ok_or_else(|| PyIndexError::new_err("cell index out of range"))?
@@ -307,6 +294,37 @@ fn with_rgb(color: Option<rpptx::ColorChoice>, rgb: rpptx::RgbColor) -> rpptx::C
     }
 }
 
+/// Reads a colour argument: an `RGBColor` or any `(r, g, b)` triple of 0
+/// to 255 integers, or a six-digit hex string with or without `#`.
+pub(crate) fn color_argument(
+    value: &Bound<'_, PyAny>,
+    parameter: &str,
+) -> PyResult<rpptx::RgbColor> {
+    if let Ok(text) = value.extract::<String>() {
+        let digits = text.strip_prefix('#').unwrap_or(&text);
+        return rpptx::RgbColor::parse(digits).map_err(|_| {
+            PyValueError::new_err(format!(
+                "{parameter} must be six hexadecimal digits such as \"#1A237E\", got {text:?}"
+            ))
+        });
+    }
+    let (red, green, blue) = value.extract::<(i64, i64, i64)>().map_err(|_| {
+        PyTypeError::new_err(format!(
+            "{parameter} must be an RGBColor, a hex string such as \"#1A237E\" or an (r, g, b) triple"
+        ))
+    })?;
+    let channel = |value: i64| {
+        u8::try_from(value).map_err(|_| {
+            PyValueError::new_err(format!("{parameter} channels must be from 0 to 255"))
+        })
+    };
+    Ok(rpptx::RgbColor::new(
+        channel(red)?,
+        channel(green)?,
+        channel(blue)?,
+    ))
+}
+
 /// A live view of one shape fill, line fill, or slide background fill.
 #[pyclass(name = "FillFormat")]
 pub struct PyFillFormat {
@@ -337,6 +355,146 @@ impl PyFillFormat {
     fn set(&self, py: Python<'_>, fill: rpptx::Fill) -> PyResult<()> {
         let mut presentation = self.presentation.borrow_mut(py);
         write_fill(py, &mut presentation.inner, &self.path, self.target, fill)
+    }
+
+    fn gradient_fill(&self, py: Python<'_>) -> PyResult<rpptx::GradientFill> {
+        current_gradient(self.fill(py)?)
+    }
+}
+
+/// python-pptx's default gradient: two `accent1` stops on a linear axis.
+const DEFAULT_GRADIENT: &str = concat!(
+    r#"<a:gradFill xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" rotWithShape="1"><a:gsLst>"#,
+    r#"<a:gs pos="0"><a:schemeClr val="accent1"><a:tint val="100000"/><a:shade val="100000"/><a:satMod val="130000"/></a:schemeClr></a:gs>"#,
+    r#"<a:gs pos="100000"><a:schemeClr val="accent1"><a:tint val="50000"/><a:shade val="100000"/><a:satMod val="350000"/></a:schemeClr></a:gs>"#,
+    r#"</a:gsLst><a:lin ang="0" scaled="0"/></a:gradFill>"#
+);
+
+fn current_gradient(fill: Option<rpptx::Fill>) -> PyResult<rpptx::GradientFill> {
+    match fill {
+        Some(rpptx::Fill::Gradient(gradient)) => Ok(gradient),
+        other => Err(PyTypeError::new_err(format!(
+            "fill type {} is not a gradient, call .gradient() first",
+            fill_type_name(other.as_ref())
+        ))),
+    }
+}
+
+/// The stops of one gradient fill, like python-pptx `GradientStops`.
+#[pyclass(name = "GradientStops")]
+pub struct PyGradientStops {
+    presentation: Py<PyPresentation>,
+    path: ContentPath,
+    target: FillTarget,
+}
+
+#[pymethods]
+impl PyGradientStops {
+    fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
+        let presentation = self.presentation.borrow(py);
+        validate_path(
+            py,
+            &presentation,
+            &self.path,
+            "gradient stops",
+            self.target.suffix(),
+        )?;
+        Ok(
+            current_gradient(current_fill(&presentation.inner, &self.path, self.target)?)?
+                .stops
+                .len(),
+        )
+    }
+
+    fn __getitem__(&self, py: Python<'_>, index: isize) -> PyResult<Py<PyGradientStop>> {
+        let index = crate::normalize_index(index, self.__len__(py)?, "gradient stop")?;
+        Py::new(
+            py,
+            PyGradientStop {
+                presentation: self.presentation.clone_ref(py),
+                path: self.path.clone(),
+                target: self.target,
+                index,
+            },
+        )
+    }
+}
+
+/// One gradient stop, like python-pptx `_GradientStop`.
+#[pyclass(name = "GradientStop")]
+pub struct PyGradientStop {
+    presentation: Py<PyPresentation>,
+    path: ContentPath,
+    target: FillTarget,
+    index: usize,
+}
+
+#[pymethods]
+impl PyGradientStop {
+    /// The stop's place along the gradient, from 0.0 to 1.0.
+    #[getter]
+    fn position(&self, py: Python<'_>) -> PyResult<f64> {
+        let presentation = self.presentation.borrow(py);
+        validate_path(
+            py,
+            &presentation,
+            &self.path,
+            "gradient stop",
+            self.target.suffix(),
+        )?;
+        let gradient =
+            current_gradient(current_fill(&presentation.inner, &self.path, self.target)?)?;
+        gradient
+            .stops
+            .get(self.index)
+            .map(|stop| f64::from(stop.position.0) / 100_000.0)
+            .ok_or_else(|| PyIndexError::new_err("gradient stop index out of range"))
+    }
+
+    #[setter]
+    fn set_position(&self, py: Python<'_>, value: f64) -> PyResult<()> {
+        if !(0.0..=1.0).contains(&value) {
+            return Err(PyValueError::new_err(
+                "gradient stop position must be from 0.0 to 1.0",
+            ));
+        }
+        let mut presentation = self.presentation.borrow_mut(py);
+        validate_path(
+            py,
+            &presentation,
+            &self.path,
+            "gradient stop",
+            self.target.suffix(),
+        )?;
+        let mut gradient =
+            current_gradient(current_fill(&presentation.inner, &self.path, self.target)?)?;
+        let stop = gradient
+            .stops
+            .get_mut(self.index)
+            .ok_or_else(|| PyIndexError::new_err("gradient stop index out of range"))?;
+        stop.position = rpptx::Percent1000((value * 100_000.0).round() as i32);
+        write_fill(
+            py,
+            &mut presentation.inner,
+            &self.path,
+            self.target,
+            rpptx::Fill::Gradient(gradient),
+        )
+    }
+
+    #[getter]
+    fn color(&self, py: Python<'_>) -> PyResult<Py<PyColorFormat>> {
+        Py::new(
+            py,
+            PyColorFormat {
+                presentation: self.presentation.clone_ref(py),
+                path: self.path.clone(),
+                source: ColorSource::GradientStop {
+                    target: self.target,
+                    index: self.index,
+                },
+            },
+        )
     }
 }
 
@@ -369,6 +527,85 @@ impl PyFillFormat {
         self.set(py, rpptx::Fill::NoFill(rpptx::NoFill::default()))
     }
 
+    // Gradient and picture fills (#312).
+
+    /// Sets the python-pptx default two-stop `accent1` linear gradient,
+    /// keeping a gradient the fill already has.
+    fn gradient(&self, py: Python<'_>) -> PyResult<()> {
+        if matches!(self.fill(py)?, Some(rpptx::Fill::Gradient(_))) {
+            return Ok(());
+        }
+        let fill = rpptx::Fill::from_xml(DEFAULT_GRADIENT.as_bytes())
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        self.set(py, fill)
+    }
+
+    /// The linear gradient's angle in degrees, counter-clockwise from left
+    /// to right, as python-pptx reads it.
+    #[getter]
+    fn gradient_angle(&self, py: Python<'_>) -> PyResult<f64> {
+        let gradient = self.gradient_fill(py)?;
+        let Some(rpptx::GradientGeometry::Linear(linear)) = &gradient.geometry else {
+            return Err(PyValueError::new_err("not a linear gradient"));
+        };
+        let clockwise = f64::from(linear.angle.0) / ANGLE_UNITS_PER_DEGREE;
+        Ok(if clockwise == 0.0 {
+            0.0
+        } else {
+            360.0 - clockwise
+        })
+    }
+
+    #[setter]
+    fn set_gradient_angle(&self, py: Python<'_>, value: f64) -> PyResult<()> {
+        if !value.is_finite() {
+            return Err(PyValueError::new_err(
+                "gradient angle must be a finite number",
+            ));
+        }
+        let mut gradient = self.gradient_fill(py)?;
+        let Some(rpptx::GradientGeometry::Linear(linear)) = &mut gradient.geometry else {
+            return Err(PyValueError::new_err("not a linear gradient"));
+        };
+        let clockwise = (360.0 - value).rem_euclid(360.0);
+        linear.angle = rpptx::Angle(
+            ((clockwise * ANGLE_UNITS_PER_DEGREE).round() as i64 % ANGLE_UNITS_PER_TURN) as i32,
+        );
+        self.set(py, rpptx::Fill::Gradient(gradient))
+    }
+
+    /// The gradient stops, like python-pptx `GradientStops`.
+    #[getter]
+    fn gradient_stops(&self, py: Python<'_>) -> PyResult<Py<PyGradientStops>> {
+        self.gradient_fill(py)?;
+        Py::new(
+            py,
+            PyGradientStops {
+                presentation: self.presentation.clone_ref(py),
+                path: self.path.clone(),
+                target: self.target,
+            },
+        )
+    }
+
+    /// Sets a picture fill that stretches an image over a slide, layout or
+    /// master background (rpptx extension). The image part and its
+    /// relationship are added to that part.
+    fn picture(&self, py: Python<'_>, image_file: &Bound<'_, PyAny>) -> PyResult<()> {
+        if self.target != FillTarget::Background {
+            return Err(PyTypeError::new_err(
+                "picture fills are supported on backgrounds only, add a picture shape with shapes.add_picture",
+            ));
+        }
+        self.fill(py)?;
+        let (bytes, filename) = image_bytes(image_file)?;
+        let mut presentation = self.presentation.borrow_mut(py);
+        presentation
+            .inner
+            .set_part_picture_background(part_of(&self.path)?, &bytes, &filename)
+            .map_err(|error| rpptx_to_pyerr(py, error))
+    }
+
     #[getter]
     fn fore_color(&self, py: Python<'_>) -> PyResult<Py<PyColorFormat>> {
         let fill = self.fill(py)?;
@@ -396,12 +633,14 @@ enum ColorSource {
     Fill { target: FillTarget, solidify: bool },
     /// The colour of the outer shadow.
     Shadow,
+    /// The colour of one gradient stop.
+    GradientStop { target: FillTarget, index: usize },
 }
 
 impl ColorSource {
     fn suffix(self) -> &'static str {
         match self {
-            Self::Fill { target, .. } => target.suffix(),
+            Self::Fill { target, .. } | Self::GradientStop { target, .. } => target.suffix(),
             Self::Shadow => ".shadow.color",
         }
     }
@@ -431,6 +670,12 @@ impl PyColorFormat {
             }
             ColorSource::Shadow => {
                 current_shadow(&presentation.inner, &self.path)?.and_then(|shadow| shadow.color)
+            }
+            ColorSource::GradientStop { target, index } => {
+                current_gradient(current_fill(&presentation.inner, &self.path, target)?)?
+                    .stops
+                    .get(index)
+                    .and_then(|stop| stop.color.clone())
             }
         };
         drop(presentation);
@@ -463,6 +708,22 @@ impl PyColorFormat {
                     let color = shadow_rgb(shadow.color.take(), rgb);
                     shadow.replace_color(color);
                 });
+            }
+            ColorSource::GradientStop { target, index } => {
+                let mut gradient =
+                    current_gradient(current_fill(&presentation.inner, &self.path, target)?)?;
+                let stop = gradient
+                    .stops
+                    .get_mut(index)
+                    .ok_or_else(|| PyIndexError::new_err("gradient stop index out of range"))?;
+                stop.color = Some(with_rgb(stop.color.take(), rgb));
+                return write_fill(
+                    py,
+                    &mut presentation.inner,
+                    &self.path,
+                    target,
+                    rpptx::Fill::Gradient(gradient),
+                );
             }
         };
         let fill = match current_fill(&presentation.inner, &self.path, target)? {

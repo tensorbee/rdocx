@@ -156,7 +156,7 @@ impl CT_Background {
 }
 
 #[allow(non_camel_case_types)]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CT_MasterTextStyles {
     pub title_style: CT_TextListStyle,
     pub body_style: CT_TextListStyle,
@@ -178,6 +178,23 @@ pub struct CT_HeaderFooter {
 }
 
 impl CT_HeaderFooter {
+    /// Creates a container with these flags, `None` keeping the enabled default.
+    pub fn new(
+        slide_number: Option<bool>,
+        header: Option<bool>,
+        footer: Option<bool>,
+        date_time: Option<bool>,
+    ) -> Self {
+        Self {
+            slide_number,
+            header,
+            footer,
+            date_time,
+            raw_attributes: RawAttributes::new(),
+            raw_children: OrderedRawChildren::default(),
+        }
+    }
+
     pub fn slide_number_enabled(&self) -> bool {
         self.slide_number.unwrap_or(true)
     }
@@ -269,9 +286,9 @@ impl RootKind {
                 _ => None,
             },
             Self::Layout => match name {
-                b"hf" => Some(2),
+                b"transition" => Some(2),
                 b"timing" => Some(3),
-                b"transition" => Some(4),
+                b"hf" => Some(4),
                 b"extLst" => Some(5),
                 _ => None,
             },
@@ -304,7 +321,6 @@ struct ParsedRoot {
     raw_attributes: RawAttributes,
     raw_children: OrderedRawChildren,
     boundary: usize,
-    empty_layout_transition_before_hf: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -738,6 +754,14 @@ impl CT_SlideLayout {
         })
     }
 
+    /// Returns the `type` attribute, such as `title` for a title slide layout.
+    pub fn layout_type(&self) -> Option<&str> {
+        self.raw_attributes
+            .iter()
+            .find(|(name, _)| name == "type")
+            .map(|(_, value)| value.as_str())
+    }
+
     pub fn to_xml(&self) -> Result<Vec<u8>> {
         write_slide_like(
             RootKind::Layout,
@@ -815,6 +839,126 @@ impl CT_SlideMaster {
     }
 }
 
+/// The raw boundary that holds a master's `p:sldLayoutIdLst`.
+const MASTER_LAYOUT_ID_BOUNDARY: usize = 2;
+
+impl CT_SlideMaster {
+    /// Returns the `p:sldLayoutIdLst` entries as `(id, relationship id)`
+    /// pairs, in document order.
+    pub fn slide_layout_ids(&self) -> Result<Vec<(u32, String)>> {
+        let Some(list) = self
+            .raw_children
+            .at(MASTER_LAYOUT_ID_BOUNDARY)
+            .find(|xml| raw_root_local_name(xml) == b"sldLayoutIdLst")
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(layout_id_entries(list)?
+            .into_iter()
+            .map(|(id, relationship_id, _)| (id, relationship_id))
+            .collect())
+    }
+
+    /// Replaces the `p:sldLayoutIdLst` entries. An entry whose id and
+    /// relationship id were already listed keeps its original XML.
+    pub fn set_slide_layout_ids(&mut self, entries: &[(u32, String)]) -> Result<()> {
+        let existing = self
+            .raw_children
+            .at(MASTER_LAYOUT_ID_BOUNDARY)
+            .find(|xml| raw_root_local_name(xml) == b"sldLayoutIdLst")
+            .map(layout_id_entries)
+            .transpose()?
+            .unwrap_or_default();
+        let mut list = b"<p:sldLayoutIdLst>".to_vec();
+        for (id, relationship_id) in entries {
+            if let Some((_, _, raw)) = existing.iter().find(|(old_id, old_relationship, _)| {
+                old_id == id && old_relationship == relationship_id
+            }) {
+                list.extend_from_slice(raw);
+                continue;
+            }
+            let mut writer = Writer::new(Vec::new());
+            let mut entry = BytesStart::new("p:sldLayoutId");
+            entry.push_attribute(("id", id.to_string().as_str()));
+            entry.push_attribute(("r:id", relationship_id.as_str()));
+            writer.write_event(Event::Empty(entry))?;
+            list.extend_from_slice(&writer.into_inner());
+        }
+        list.extend_from_slice(b"</p:sldLayoutIdLst>");
+        self.raw_children
+            .retain(|xml| raw_root_local_name(xml) != b"sldLayoutIdLst");
+        self.raw_children.push(MASTER_LAYOUT_ID_BOUNDARY, list);
+        Ok(())
+    }
+}
+
+/// The local name of a captured element's root tag.
+fn raw_root_local_name(xml: &[u8]) -> &[u8] {
+    let start = xml
+        .iter()
+        .position(|byte| *byte == b'<')
+        .map_or(0, |at| at + 1);
+    let rest = &xml[start..];
+    let end = rest
+        .iter()
+        .position(|byte| byte.is_ascii_whitespace() || matches!(byte, b'>' | b'/'))
+        .unwrap_or(rest.len());
+    local_name(&rest[..end])
+}
+
+/// Reads each `p:sldLayoutId` of a captured list as its id, relationship id
+/// and original XML.
+fn layout_id_entries(list: &[u8]) -> Result<Vec<(u32, String, Vec<u8>)>> {
+    let mut reader = Reader::from_reader(list);
+    let mut buffer = Vec::new();
+    let mut depth = 0usize;
+    let mut entries = Vec::new();
+    loop {
+        let event = reader.read_event_into(&mut buffer)?.into_owned();
+        match event {
+            Event::Start(start) if depth == 1 => {
+                let attributes = all_attributes(&start)?;
+                let raw = capture_element(&mut reader, &start)?;
+                if local_name(start.name().as_ref()) == b"sldLayoutId" {
+                    entries.push(layout_id_entry(&attributes, raw)?);
+                }
+            }
+            Event::Empty(start) if depth == 1 => {
+                let attributes = all_attributes(&start)?;
+                let raw = capture_empty_element(&start)?;
+                if local_name(start.name().as_ref()) == b"sldLayoutId" {
+                    entries.push(layout_id_entry(&attributes, raw)?);
+                }
+            }
+            Event::Start(_) => depth += 1,
+            Event::End(_) => depth = depth.saturating_sub(1),
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(entries)
+}
+
+fn layout_id_entry(
+    attributes: &[(String, String)],
+    raw: Vec<u8>,
+) -> Result<(u32, String, Vec<u8>)> {
+    let id = attributes
+        .iter()
+        .find(|(name, _)| name == "id")
+        .and_then(|(_, value)| value.parse::<u32>().ok())
+        .ok_or_else(|| {
+            OxmlError::InvalidValue("p:sldLayoutId requires a numeric @id".to_owned())
+        })?;
+    let relationship_id = attributes
+        .iter()
+        .find(|(name, _)| name.ends_with(":id"))
+        .map(|(_, value)| value.clone())
+        .ok_or_else(|| OxmlError::MissingElement("p:sldLayoutId/@r:id".to_owned()))?;
+    Ok((id, relationship_id, raw))
+}
+
 fn parse_root(xml: &[u8], kind: RootKind) -> Result<ParsedRoot> {
     let mut reader = Reader::from_reader(xml);
     let mut buffer = Vec::new();
@@ -877,26 +1021,14 @@ fn parse_root_children(
                 let name = local_name(child.name().as_ref()).to_vec();
                 let namespace_uri = namespaces.element_uri(child.name().as_ref());
                 let raw = capture_element(reader, &child)?;
-                parsed.capture_child(&name, namespace_uri, false, &namespaces, raw, kind)?;
+                parsed.capture_child(&name, namespace_uri, &namespaces, raw, kind)?;
             }
             Event::Empty(child) => {
                 let namespaces = root_namespaces.with_start(&child)?;
                 let name = local_name(child.name().as_ref()).to_vec();
                 let namespace_uri = namespaces.element_uri(child.name().as_ref());
-                let empty_layout_transition_marker = namespace_uri == Some(P_NS)
-                    && name == b"transition"
-                    && all_attributes(&child)?
-                        .iter()
-                        .all(|(name, _)| name == "xmlns" || name.starts_with("xmlns:"));
                 let raw = capture_empty_element(&child)?;
-                parsed.capture_child(
-                    &name,
-                    namespace_uri,
-                    empty_layout_transition_marker,
-                    &namespaces,
-                    raw,
-                    kind,
-                )?;
+                parsed.capture_child(&name, namespace_uri, &namespaces, raw, kind)?;
             }
             Event::End(end) if local_name(end.name().as_ref()) == kind.local_name() => {
                 return Ok(parsed);
@@ -913,13 +1045,10 @@ impl ParsedRoot {
         &mut self,
         name: &[u8],
         namespace_uri: Option<&str>,
-        empty_layout_transition_marker: bool,
         namespaces: &NamespaceBindings,
         raw: Vec<u8>,
         kind: RootKind,
     ) -> Result<()> {
-        let follows_empty_layout_transition = self.empty_layout_transition_before_hf;
-        self.empty_layout_transition_before_hf = false;
         let is_p = namespace_uri == Some(P_NS);
         let is_mc = namespace_uri == Some(MC_NS);
         if is_p && name == b"cSld" {
@@ -966,21 +1095,17 @@ impl ParsedRoot {
                 return Err(duplicate("hf"));
             }
             let (before, after) = match kind {
-                RootKind::Layout => (2, 3),
+                RootKind::Layout => (4, 5),
                 RootKind::Master => (5, 6),
                 RootKind::Slide => unreachable!(),
             };
-            if !matches!(kind, RootKind::Layout) || !follows_empty_layout_transition {
-                self.advance_modelled_child("hf", before, after)?;
-            }
+            self.advance_modelled_child("hf", before, after)?;
             self.header_footer = Some(CT_HeaderFooter::from_fragment(&raw, namespaces)?);
             return Ok(());
         }
         if is_p && name == b"transition" {
             let transition = CT_SlideTransition::from_fragment(&raw, namespaces)?;
             self.capture_transition(transition, kind)?;
-            self.empty_layout_transition_before_hf =
-                matches!(kind, RootKind::Layout) && empty_layout_transition_marker;
             return Ok(());
         }
         if is_mc
@@ -1024,7 +1149,7 @@ impl ParsedRoot {
         }
         let (before, after) = match kind {
             RootKind::Slide => (2, 3),
-            RootKind::Layout => (4, 5),
+            RootKind::Layout => (2, 3),
             RootKind::Master => (3, 4),
         };
         if self.boundary > before {
@@ -1084,16 +1209,16 @@ fn write_slide_like(
         }
         RootKind::Layout => {
             emit_raw(&mut writer, raw.at(2))?;
-            if let Some(header_footer) = header_footer {
-                header_footer.write_xml(&mut writer)?;
+            if let Some(transition) = transition {
+                transition.write_xml(&mut writer)?;
             }
             emit_raw(&mut writer, raw.at(3))?;
             if let Some(timing) = timing {
                 timing.write_xml(&mut writer)?;
             }
             emit_raw(&mut writer, raw.at(4))?;
-            if let Some(transition) = transition {
-                transition.write_xml(&mut writer)?;
+            if let Some(header_footer) = header_footer {
+                header_footer.write_xml(&mut writer)?;
             }
             emit_raw(&mut writer, raw.at(5))?;
             emit_raw(&mut writer, raw.at(6))?;
@@ -1208,6 +1333,19 @@ fn push_optional_bool_attribute(
 }
 
 impl CT_CommonSlideData {
+    /// Sets a direct `p:bgPr` fill. An existing direct-fill background keeps
+    /// its other children and only its fill changes, and any other
+    /// background, such as a `p:bgRef` theme reference, is replaced whole.
+    pub fn set_background_fill(&mut self, fill: Fill) -> Result<()> {
+        if let Some(background) = &mut self.background
+            && background.fill_range.is_some()
+        {
+            return background.replace_fill(fill);
+        }
+        self.background = Some(CT_Background::from_fill(fill)?);
+        Ok(())
+    }
+
     pub fn from_xml(xml: &[u8]) -> Result<Self> {
         let mut reader = Reader::from_reader(xml);
         let mut buffer = Vec::new();

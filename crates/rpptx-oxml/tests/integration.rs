@@ -1255,7 +1255,7 @@ fn slide_like_roots_reject_earlier_modelled_children_after_transition() {
     assert!(CT_Slide::from_xml(slide.as_bytes()).is_err());
 
     let layout = format!(
-        r#"<p:sldLayout xmlns:p="{P_NS}" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/></p:spTree></p:cSld><p:transition><p:fade/></p:transition><p:hf/></p:sldLayout>"#
+        r#"<p:sldLayout xmlns:p="{P_NS}" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/></p:spTree></p:cSld><p:hf/><p:transition><p:fade/></p:transition></p:sldLayout>"#
     );
     assert!(CT_SlideLayout::from_xml(layout.as_bytes()).is_err());
 
@@ -1265,23 +1265,28 @@ fn slide_like_roots_reject_earlier_modelled_children_after_transition() {
         r#"<p:transition/><x:between/>"#,
     ] {
         let layout = format!(
-            r#"<p:sldLayout xmlns:p="{P_NS}" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:x="urn:producer"><p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/></p:spTree></p:cSld>{transition}<p:hf/></p:sldLayout>"#
+            r#"<p:sldLayout xmlns:p="{P_NS}" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:x="urn:producer"><p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/></p:spTree></p:cSld><p:hf/>{transition}</p:sldLayout>"#
         );
         assert!(CT_SlideLayout::from_xml(layout.as_bytes()).is_err());
     }
 }
 
 #[test]
-fn empty_layout_transition_immediately_before_hf_is_typed_and_canonicalized() {
+fn layout_transition_timing_and_hf_keep_the_schema_sequence() {
+    // CT_SlideLayout is cSld, clrMapOvr, transition, timing, hf, extLst.
     let xml = format!(
-        r#"<p:sldLayout xmlns:p="{P_NS}" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/></p:spTree></p:cSld><p:transition/><p:hf hdr="0" dt="0"/></p:sldLayout>"#
+        r#"<p:sldLayout xmlns:p="{P_NS}" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/></p:spTree></p:cSld><p:transition spd="slow"><p:fade/></p:transition><p:timing/><p:hf hdr="0" dt="0"/></p:sldLayout>"#
     );
     let layout = CT_SlideLayout::from_xml(xml.as_bytes()).unwrap();
     assert!(layout.transition.is_some());
+    assert!(layout.timing.is_some());
     assert!(layout.header_footer.is_some());
 
     let written = layout.to_xml().unwrap();
-    assert_order(&written, &["<p:hf", "<p:transition"]);
+    assert_order(
+        &written,
+        &["<p:cSld", "<p:transition", "<p:timing", "<p:hf"],
+    );
     let reparsed = CT_SlideLayout::from_xml(&written).unwrap();
     assert!(reparsed.transition.is_some());
     assert!(reparsed.header_footer.is_some());
@@ -1365,18 +1370,28 @@ fn direct_morph_mutation_ignores_unsupported_nested_morph() {
 #[test]
 fn empty_layout_transition_remains_typed_and_enforces_root_sequence() {
     let prefix = format!(
-        r#"<p:sldLayout xmlns:p="{P_NS}" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/></p:spTree></p:cSld><p:hf/>"#
+        r#"<p:sldLayout xmlns:p="{P_NS}" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/></p:spTree></p:cSld>"#
     );
-    let layout =
-        CT_SlideLayout::from_xml(format!("{prefix}<p:transition/></p:sldLayout>").as_bytes())
-            .unwrap();
+    let layout = CT_SlideLayout::from_xml(
+        format!("{prefix}<p:transition/><p:hf/></p:sldLayout>").as_bytes(),
+    )
+    .unwrap();
     assert!(layout.transition.is_some());
 
     let duplicate = format!("{prefix}<p:transition/><p:transition/></p:sldLayout>");
     assert!(CT_SlideLayout::from_xml(duplicate.as_bytes()).is_err());
 
-    let backward = format!("{prefix}<p:transition/><p:timing/></p:sldLayout>");
-    assert!(CT_SlideLayout::from_xml(backward.as_bytes()).is_err());
+    for backward in [
+        "<p:timing/><p:transition/>",
+        "<p:hf/><p:transition/>",
+        "<p:hf/><p:timing/>",
+    ] {
+        let backward = format!("{prefix}{backward}</p:sldLayout>");
+        assert!(
+            CT_SlideLayout::from_xml(backward.as_bytes()).is_err(),
+            "{backward}"
+        );
+    }
 }
 
 #[test]
@@ -2438,7 +2453,7 @@ fn slide_layout_and_master_write_their_own_schema_order() {
         r#"<p:sld xmlns:p="{P_NS}" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:x="urn:producer"><x:transition/><p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr><p:transition/><p:timing/><p:extLst/></p:sld>"#
     );
     let layout = format!(
-        r#"<p:sldLayout xmlns:p="{P_NS}" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr><p:hf/><p:timing/><p:transition/><p:extLst/></p:sldLayout>"#
+        r#"<p:sldLayout xmlns:p="{P_NS}" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr><p:transition/><p:timing/><p:hf/><p:extLst/></p:sldLayout>"#
     );
     let master = format!(
         r#"<p:sldMaster xmlns:p="{P_NS}" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:x="urn:producer"><p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/></p:spTree></p:cSld><p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/><p:sldLayoutIdLst/><p:transition/><p:timing/><p:hf/><x:beforeTextStyles><x:data/></x:beforeTextStyles><p:txStyles><p:titleStyle/><p:bodyStyle/><p:otherStyle/></p:txStyles><p:extLst/></p:sldMaster>"#
@@ -2472,9 +2487,9 @@ fn slide_layout_and_master_write_their_own_schema_order() {
         &[
             "<p:cSld",
             "<p:clrMapOvr",
-            "<p:hf",
-            "<p:timing",
             "<p:transition",
+            "<p:timing",
+            "<p:hf",
             "<p:extLst",
         ],
     );
@@ -5040,7 +5055,7 @@ fn visibility_and_header_footer_inputs_round_trip_in_schema_order() {
         r#"<q:sld xmlns:q="{P_NS}" xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:x="urn:producer" showMasterSp="false" x:keep="slide"><q:cSld><q:spTree><q:nvGrpSpPr/><q:grpSpPr/></q:spTree></q:cSld><q:clrMapOvr><d:masterClrMapping/></q:clrMapOvr><q:extLst/></q:sld>"#
     );
     let layout_xml = format!(
-        r#"<q:sldLayout xmlns:q="{P_NS}" xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:x="urn:producer" showMasterSp="0" x:keep="layout"><q:cSld><q:spTree><q:nvGrpSpPr/><q:grpSpPr/></q:spTree></q:cSld><q:clrMapOvr><d:masterClrMapping/></q:clrMapOvr><x:beforeHf/><q:hf sldNum="true" hdr="false" ftr="0" dt="1" x:keep="hf"><x:child/></q:hf><q:timing/><q:transition/><q:extLst/></q:sldLayout>"#
+        r#"<q:sldLayout xmlns:q="{P_NS}" xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:x="urn:producer" showMasterSp="0" x:keep="layout"><q:cSld><q:spTree><q:nvGrpSpPr/><q:grpSpPr/></q:spTree></q:cSld><q:clrMapOvr><d:masterClrMapping/></q:clrMapOvr><q:transition/><q:timing/><x:beforeHf/><q:hf sldNum="true" hdr="false" ftr="0" dt="1" x:keep="hf"><x:child/></q:hf><q:extLst/></q:sldLayout>"#
     );
     let master_xml = format!(
         r#"<q:sldMaster xmlns:q="{P_NS}" xmlns:d="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:x="urn:producer"><q:cSld><q:spTree><q:nvGrpSpPr/><q:grpSpPr/></q:spTree></q:cSld><q:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/><q:sldLayoutIdLst/><q:timing/><q:hf sldNum="0" ftr="1" dt="false" x:keep="master"><x:child/></q:hf><x:afterHf/><q:txStyles><q:titleStyle/><q:bodyStyle/><q:otherStyle/></q:txStyles><q:extLst/></q:sldMaster>"#
@@ -5085,10 +5100,10 @@ fn visibility_and_header_footer_inputs_round_trip_in_schema_order() {
         &written_layout,
         &[
             "<p:clrMapOvr",
+            "<q:transition",
+            "<q:timing",
             "<x:beforeHf",
             "<p:hf",
-            "<q:timing",
-            "<q:transition",
             "<q:extLst",
         ],
     );

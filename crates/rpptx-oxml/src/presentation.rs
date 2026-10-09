@@ -353,6 +353,32 @@ impl CT_Presentation {
         Ok(())
     }
 
+    /// Returns the number the first slide shows, `firstSlideNum`, 1 when absent.
+    ///
+    /// A value that is not a non-negative integer reads as the default, as
+    /// PowerPoint does not open such a file.
+    pub fn first_slide_number(&self) -> u32 {
+        self.raw_attributes
+            .iter()
+            .find(|(name, _)| name == "firstSlideNum")
+            .and_then(|(_, value)| value.trim().parse().ok())
+            .unwrap_or(1)
+    }
+
+    /// Sets `showSpecialPlsOnTitleSld`, PowerPoint's record of "Don't show
+    /// on title slide". `Some(false)` writes `"0"`, `None` removes the
+    /// attribute, which reads as the default true.
+    pub fn set_show_special_placeholders_on_title_slide(&mut self, value: Option<bool>) {
+        self.raw_attributes
+            .retain(|(name, _)| name != "showSpecialPlsOnTitleSld");
+        if let Some(value) = value {
+            self.raw_attributes.push((
+                "showSpecialPlsOnTitleSld".to_owned(),
+                if value { "1" } else { "0" }.to_owned(),
+            ));
+        }
+    }
+
     pub fn sections(&self) -> &[Section] {
         &self.sections
     }

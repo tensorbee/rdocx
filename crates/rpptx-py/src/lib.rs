@@ -65,6 +65,8 @@ pub(crate) fn recovery_hint(path: &ContentPath, suffix: &str) -> String {
     for segment in &path.segs {
         match segment {
             PathSeg::Slide(index) => public_path.push_str(&format!(".slides[{index}]")),
+            PathSeg::Layout(index) => public_path.push_str(&format!(".slide_layouts[{index}]")),
+            PathSeg::Master(index) => public_path.push_str(&format!(".slide_masters[{index}]")),
             PathSeg::Shape(index) => public_path.push_str(&format!(".shapes[{index}]")),
             PathSeg::Body(index) => public_path.push_str(&format!(".body[{index}]")),
             PathSeg::Row(index) => pending_row = Some(*index),

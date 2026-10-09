@@ -10,6 +10,10 @@ use oxml_core::Length;
 pub enum PathSeg {
     /// A slide in a presentation.
     Slide(usize),
+    /// A slide layout in a presentation, in the flat layout order.
+    Layout(usize),
+    /// A slide master in a presentation.
+    Master(usize),
     /// A shape in a slide or group shape.
     Shape(usize),
     /// An item in the document body's block content.

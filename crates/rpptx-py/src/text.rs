@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBool, PyFloat, PyList, PySlice, PyString};
 use rpptx::{
     AutofitMode, CT_TextCharacterProperties, CT_TextParagraphProperties, ColorChoice, Emu, Fill,
-    RgbColor, SolidFill, TextAlignment, TextAnchor, TextBulletCharacter, TextBulletChoice,
+    SolidFill, TextAlignment, TextAnchor, TextBulletCharacter, TextBulletChoice, TextBulletColor,
     TextFont, TextNoBullet, TextSpacing, TextStrike, TextUnderline,
 };
 
@@ -98,6 +98,9 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyRunCollection>()?;
     module.add_class::<PyHyperlink>()?;
     module.add_class::<PyFont>()?;
+    module.add_class::<PyMasterTextStyles>()?;
+    module.add_class::<PyTextStyleList>()?;
+    module.add_class::<PyTextStyleLevel>()?;
     Ok(())
 }
 
@@ -599,6 +602,7 @@ impl PyParagraph {
             PyFont {
                 presentation: self.presentation.clone_ref(py),
                 path: self.path.clone(),
+                style: None,
             },
         )
     }
@@ -633,6 +637,35 @@ impl PyParagraph {
             presentation.revisions.capture(segments)
         };
         Py::new(py, PyRun::new(self.presentation.clone_ref(py), path))
+    }
+
+    /// Appends a field, `slidenum` for the slide number or a date field
+    /// `datetime` or `datetime1` to `datetime13`, which PowerPoint refreshes
+    /// when it opens the file (rpptx extension).
+    ///
+    /// `text` is the cached value other readers show. By default a slide
+    /// number caches the placeholder PowerPoint writes, which rpptx renders
+    /// as the number, and a date field caches today's date in its format.
+    /// `paragraph.runs` lists regular runs only, so it does not change.
+    #[pyo3(signature = (field_type, text = None))]
+    fn add_field(&self, py: Python<'_>, field_type: &str, text: Option<String>) -> PyResult<()> {
+        let index = self.validate(py)?;
+        let text = match text {
+            Some(text) => Some(text),
+            None if field_type.starts_with("datetime") => Some(crate::slide::today_field_text(
+                py,
+                field_type,
+                " or pass text= with the cached value",
+            )?),
+            None => None,
+        };
+        let mut presentation = self.presentation.borrow_mut(py);
+        shape_mut_at(&mut presentation.inner, &self.path)
+            .and_then(rpptx::ShapeMut::into_text_frame)
+            .and_then(|frame| frame.into_paragraph_mut(index))
+            .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?
+            .add_field(field_type, text.as_deref())
+            .map_err(|error| crate::rpptx_to_pyerr(py, error))
     }
 
     #[getter]
@@ -725,63 +758,75 @@ impl PyParagraph {
 
     #[getter]
     fn bullet(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
-        let bullet = self.read(py, |properties| {
-            let properties = properties?;
-            let choice = properties
-                .bullet
-                .as_ref()
-                .and_then(|bullet| bullet.choice.as_ref());
-            match choice {
-                Some(TextBulletChoice::Character(character)) => {
-                    Some(Ok(character.character.clone()))
-                }
-                Some(TextBulletChoice::None(_)) => Some(Err(false)),
-                Some(TextBulletChoice::AutoNumber(_)) => Some(Err(true)),
-                None => properties.has_picture_bullet().then_some(Err(true)),
-            }
-        })?;
-        Ok(bullet.map(|bullet| match bullet {
-            Ok(character) => PyString::new(py, &character).into_any().unbind(),
-            Err(shown) => PyBool::new(py, shown).to_owned().into_any().unbind(),
-        }))
+        let bullet = self.read(py, |properties| properties.and_then(read_bullet))?;
+        Ok(bullet_object(py, bullet))
     }
 
     #[setter]
     fn set_bullet(&self, py: Python<'_>, value: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
-        let choice = match value {
-            None => None,
-            Some(value) if value.is_none() => None,
-            Some(value) if value.is_instance_of::<PyBool>() => {
-                if value.extract::<bool>()? {
-                    return Err(PyValueError::new_err(
-                        "assign a bullet character, False for no bullet, or None",
-                    ));
-                }
-                Some(TextBulletChoice::None(TextNoBullet::default()))
-            }
-            Some(value) => {
-                let character = value.extract::<String>()?;
-                let character = TextBulletCharacter::new(character)
-                    .map_err(|_| PyValueError::new_err("bullet character must not be empty"))?;
-                Some(TextBulletChoice::Character(character))
-            }
-        };
-        self.update(py, |properties| {
-            let Some(choice) = choice else {
-                properties.set_bullet(None);
-                return;
-            };
-            let mut bullet = properties.bullet.clone().unwrap_or_default();
-            match (&mut bullet.choice, choice) {
-                (
-                    Some(TextBulletChoice::Character(current)),
-                    TextBulletChoice::Character(character),
-                ) => current.character = character.character,
-                (current, choice) => *current = Some(choice),
-            }
-            properties.set_bullet(Some(bullet));
-        })
+        let choice = bullet_choice(value)?;
+        self.update(py, |properties| apply_bullet(properties, choice))
     }
+}
+
+/// A paragraph's bullet: its character, `Err(false)` for none, or
+/// `Err(true)` for a numbered or picture bullet.
+fn read_bullet(properties: &CT_TextParagraphProperties) -> Option<Result<String, bool>> {
+    let choice = properties
+        .bullet
+        .as_ref()
+        .and_then(|bullet| bullet.choice.as_ref());
+    match choice {
+        Some(TextBulletChoice::Character(character)) => Some(Ok(character.character.clone())),
+        Some(TextBulletChoice::None(_)) => Some(Err(false)),
+        Some(TextBulletChoice::AutoNumber(_)) => Some(Err(true)),
+        None => properties.has_picture_bullet().then_some(Err(true)),
+    }
+}
+
+fn bullet_object(py: Python<'_>, bullet: Option<Result<String, bool>>) -> Option<Py<PyAny>> {
+    bullet.map(|bullet| match bullet {
+        Ok(character) => PyString::new(py, &character).into_any().unbind(),
+        Err(shown) => PyBool::new(py, shown).to_owned().into_any().unbind(),
+    })
+}
+
+/// Reads a bullet assignment: a character, `False` for no bullet, or `None`
+/// to inherit.
+fn bullet_choice(value: Option<&Bound<'_, PyAny>>) -> PyResult<Option<TextBulletChoice>> {
+    Ok(match value {
+        None => None,
+        Some(value) if value.is_none() => None,
+        Some(value) if value.is_instance_of::<PyBool>() => {
+            if value.extract::<bool>()? {
+                return Err(PyValueError::new_err(
+                    "assign a bullet character, False for no bullet, or None",
+                ));
+            }
+            Some(TextBulletChoice::None(TextNoBullet::default()))
+        }
+        Some(value) => {
+            let character = value.extract::<String>()?;
+            let character = TextBulletCharacter::new(character)
+                .map_err(|_| PyValueError::new_err("bullet character must not be empty"))?;
+            Some(TextBulletChoice::Character(character))
+        }
+    })
+}
+
+fn apply_bullet(properties: &mut CT_TextParagraphProperties, choice: Option<TextBulletChoice>) {
+    let Some(choice) = choice else {
+        properties.set_bullet(None);
+        return;
+    };
+    let mut bullet = properties.bullet.clone().unwrap_or_default();
+    match (&mut bullet.choice, choice) {
+        (Some(TextBulletChoice::Character(current)), TextBulletChoice::Character(character)) => {
+            current.character = character.character
+        }
+        (current, choice) => *current = Some(choice),
+    }
+    properties.set_bullet(Some(bullet));
 }
 
 #[pyclass(name = "ParagraphCollection")]
@@ -929,6 +974,7 @@ impl PyRun {
             PyFont {
                 presentation: self.presentation.clone_ref(py),
                 path: self.path.clone(),
+                style: None,
             },
         )
     }
@@ -1110,6 +1156,9 @@ impl PyRunIterator {
 pub struct PyFont {
     presentation: Py<PyPresentation>,
     path: ContentPath,
+    /// A master text style level, whose default run properties this font
+    /// reads and writes instead of a paragraph's or run's (#312).
+    style: Option<(rpptx::MasterTextStyle, usize)>,
 }
 
 impl PyFont {
@@ -1129,6 +1178,11 @@ impl PyFont {
         read: impl FnOnce(Option<&CT_TextCharacterProperties>) -> T,
     ) -> PyResult<T> {
         self.validate(py)?;
+        if let Some((style, level)) = self.style {
+            return text_style_read(py, &self.presentation, &self.path, style, level, |level| {
+                read(level.and_then(|level| level.default_run_properties.as_ref()))
+            });
+        }
         let properties = font_properties(&self.presentation.borrow(py).inner, &self.path);
         Ok(read(properties.as_ref()))
     }
@@ -1142,6 +1196,16 @@ impl PyFont {
         update: impl FnOnce(&mut CT_TextCharacterProperties),
     ) -> PyResult<()> {
         self.validate(py)?;
+        if let Some((style, level)) = self.style {
+            return text_style_update(py, &self.presentation, &self.path, style, level, |level| {
+                let current = level.default_run_properties.clone().unwrap_or_default();
+                let mut properties = current.clone();
+                update(&mut properties);
+                if properties != current {
+                    level.default_run_properties = Some(properties);
+                }
+            });
+        }
         let paragraph = paragraph_index(&self.path)
             .ok_or_else(|| PyIndexError::new_err("paragraph index is missing"))?;
         let mut presentation = self.presentation.borrow_mut(py);
@@ -1223,28 +1287,6 @@ fn underline_value(underline: TextUnderline) -> i32 {
         TextUnderline::WavyHeavy => 16,
         TextUnderline::WavyDouble => 17,
     }
-}
-
-/// Reads a font colour: an `RGBColor` or any triple of 0 to 255 integers,
-/// or a six-digit hexadecimal string such as `3C2F80`.
-fn font_color(value: &Bound<'_, PyAny>) -> PyResult<RgbColor> {
-    if value.is_instance_of::<PyString>() {
-        return RgbColor::parse(&value.extract::<String>()?).map_err(|_| {
-            PyValueError::new_err("font color strings must contain six hexadecimal digits")
-        });
-    }
-    let (red, green, blue) = value.extract::<(i64, i64, i64)>().map_err(|_| {
-        PyTypeError::new_err("font color must be an RGBColor, a six-digit hex string, or None")
-    })?;
-    let channel = |value: i64| {
-        u8::try_from(value)
-            .map_err(|_| PyValueError::new_err("font color channels must be from 0 to 255"))
-    };
-    Ok(RgbColor::new(
-        channel(red)?,
-        channel(green)?,
-        channel(blue)?,
-    ))
 }
 
 #[pymethods]
@@ -1379,7 +1421,7 @@ impl PyFont {
         let color = match value {
             None => None,
             Some(value) if value.is_none() => None,
-            Some(value) => Some(font_color(value)?),
+            Some(value) => Some(crate::dml::color_argument(value, "font color")?),
         };
         self.update(py, |properties| {
             let Some(color) = color else {
@@ -1457,4 +1499,284 @@ where
     Err(PyTypeError::new_err(format!(
         "{kind} indices must be integers or slices"
     )))
+}
+
+// Master text styles (#312).
+
+fn master_index(path: &ContentPath) -> PyResult<usize> {
+    match crate::shape::part_of(path)? {
+        rpptx::PartRef::Master(index) => Ok(index),
+        _ => Err(PyIndexError::new_err("slide master index is missing")),
+    }
+}
+
+fn validate_text_style(
+    py: Python<'_>,
+    presentation: &PyPresentation,
+    path: &ContentPath,
+) -> PyResult<()> {
+    validate_path(py, presentation, path, "text style", ".text_styles")
+}
+
+/// Reads one level of a master text style, `None` when the master sets
+/// nothing for it.
+fn text_style_read<T>(
+    py: Python<'_>,
+    presentation: &Py<PyPresentation>,
+    path: &ContentPath,
+    style: rpptx::MasterTextStyle,
+    level: usize,
+    read: impl FnOnce(Option<&CT_TextParagraphProperties>) -> T,
+) -> PyResult<T> {
+    let presentation = presentation.borrow(py);
+    validate_text_style(py, &presentation, path)?;
+    let level = presentation
+        .inner
+        .master_text_style(master_index(path)?, style, level)
+        .map_err(|error| rpptx_to_pyerr(py, error))?;
+    Ok(read(level))
+}
+
+/// Changes one level of a master text style, creating it when absent.
+fn text_style_update(
+    py: Python<'_>,
+    presentation: &Py<PyPresentation>,
+    path: &ContentPath,
+    style: rpptx::MasterTextStyle,
+    level: usize,
+    update: impl FnOnce(&mut CT_TextParagraphProperties),
+) -> PyResult<()> {
+    let mut presentation = presentation.borrow_mut(py);
+    validate_text_style(py, &presentation, path)?;
+    let level = presentation
+        .inner
+        .master_text_style_mut(master_index(path)?, style, level)
+        .map_err(|error| rpptx_to_pyerr(py, error))?;
+    update(level);
+    Ok(())
+}
+
+/// A slide master's text styles (rpptx extension): `title`, `body` and
+/// `other`, each indexed by paragraph level 0 to 8 as `paragraph.level`
+/// numbers them.
+#[pyclass(name = "MasterTextStyles")]
+pub struct PyMasterTextStyles {
+    presentation: Py<PyPresentation>,
+    path: ContentPath,
+}
+
+impl PyMasterTextStyles {
+    pub(crate) fn new(presentation: Py<PyPresentation>, path: ContentPath) -> Self {
+        Self { presentation, path }
+    }
+
+    fn list(&self, py: Python<'_>, style: rpptx::MasterTextStyle) -> PyResult<Py<PyTextStyleList>> {
+        validate_text_style(py, &self.presentation.borrow(py), &self.path)?;
+        Py::new(
+            py,
+            PyTextStyleList {
+                presentation: self.presentation.clone_ref(py),
+                path: self.path.clone(),
+                style,
+            },
+        )
+    }
+}
+
+#[pymethods]
+impl PyMasterTextStyles {
+    /// The title placeholders' style.
+    #[getter]
+    fn title(&self, py: Python<'_>) -> PyResult<Py<PyTextStyleList>> {
+        self.list(py, rpptx::MasterTextStyle::Title)
+    }
+
+    /// The body, subtitle and content placeholders' style.
+    #[getter]
+    fn body(&self, py: Python<'_>) -> PyResult<Py<PyTextStyleList>> {
+        self.list(py, rpptx::MasterTextStyle::Body)
+    }
+
+    /// The style of text boxes and shapes that are not placeholders.
+    #[getter]
+    fn other(&self, py: Python<'_>) -> PyResult<Py<PyTextStyleList>> {
+        self.list(py, rpptx::MasterTextStyle::Other)
+    }
+}
+
+/// The nine levels of one master text style.
+#[pyclass(name = "TextStyleList")]
+pub struct PyTextStyleList {
+    presentation: Py<PyPresentation>,
+    path: ContentPath,
+    style: rpptx::MasterTextStyle,
+}
+
+#[pymethods]
+impl PyTextStyleList {
+    fn __len__(&self) -> usize {
+        9
+    }
+
+    /// The level that paragraphs with `paragraph.level == level` follow.
+    fn __getitem__(&self, py: Python<'_>, level: isize) -> PyResult<Py<PyTextStyleLevel>> {
+        let level = normalize_index(level, 9, "text style level")?;
+        Py::new(
+            py,
+            PyTextStyleLevel {
+                presentation: self.presentation.clone_ref(py),
+                path: self.path.clone(),
+                style: self.style,
+                level: level + 1,
+            },
+        )
+    }
+}
+
+/// One level of a master text style: the font, bullet and indents of every
+/// paragraph at that level that inherits it.
+#[pyclass(name = "TextStyleLevel")]
+pub struct PyTextStyleLevel {
+    presentation: Py<PyPresentation>,
+    path: ContentPath,
+    style: rpptx::MasterTextStyle,
+    level: usize,
+}
+
+impl PyTextStyleLevel {
+    fn read<T>(
+        &self,
+        py: Python<'_>,
+        read: impl FnOnce(Option<&CT_TextParagraphProperties>) -> T,
+    ) -> PyResult<T> {
+        text_style_read(
+            py,
+            &self.presentation,
+            &self.path,
+            self.style,
+            self.level,
+            read,
+        )
+    }
+
+    fn update(
+        &self,
+        py: Python<'_>,
+        update: impl FnOnce(&mut CT_TextParagraphProperties),
+    ) -> PyResult<()> {
+        text_style_update(
+            py,
+            &self.presentation,
+            &self.path,
+            self.style,
+            self.level,
+            update,
+        )
+    }
+
+    fn margin(
+        &self,
+        py: Python<'_>,
+        value: impl FnOnce(&CT_TextParagraphProperties) -> Option<i32>,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        self.read(py, |properties| properties.and_then(value))?
+            .map(|emu| length_object(py, i64::from(emu)))
+            .transpose()
+    }
+}
+
+#[pymethods]
+impl PyTextStyleLevel {
+    /// The level's font: name, size, bold, italic and colour.
+    #[getter]
+    fn font(&self, py: Python<'_>) -> PyResult<Py<PyFont>> {
+        self.read(py, |_| ())?;
+        Py::new(
+            py,
+            PyFont {
+                presentation: self.presentation.clone_ref(py),
+                path: self.path.clone(),
+                style: Some((self.style, self.level)),
+            },
+        )
+    }
+
+    /// The bullet character, `False` for no bullet, or `None` to inherit,
+    /// as `paragraph.bullet` reads it. PowerPoint draws the character in the
+    /// level's bullet font, Arial in the default template, and drops some
+    /// characters rpptx still draws, such as `▪` on a Mac, so prefer `•` or
+    /// `–`, which both draw alike.
+    #[getter]
+    fn bullet(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let bullet = self.read(py, |properties| properties.and_then(read_bullet))?;
+        Ok(bullet_object(py, bullet))
+    }
+
+    #[setter]
+    fn set_bullet(&self, py: Python<'_>, value: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        let choice = bullet_choice(value)?;
+        self.update(py, |properties| apply_bullet(properties, choice))
+    }
+
+    /// The bullet colour as an `RGBColor`, `None` when the bullet follows
+    /// the text colour or uses a theme colour.
+    #[getter]
+    fn bullet_color(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let color = self.read(py, |properties| {
+            match &properties?.bullet.as_ref()?.color.as_ref()?.color {
+                ColorChoice::Srgb { value, .. } => Some(value.components()),
+                _ => None,
+            }
+        })?;
+        color
+            .map(|[red, green, blue]| {
+                py.import("rpptx.dml.color")?
+                    .getattr("RGBColor")?
+                    .call1((red, green, blue))
+                    .map(Bound::unbind)
+            })
+            .transpose()
+    }
+
+    /// Sets the bullet colour from an `RGBColor`, a hex string or an
+    /// `(r, g, b)` triple, or `None` to follow the text colour.
+    #[setter]
+    fn set_bullet_color(&self, py: Python<'_>, value: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        let color = match value {
+            Some(value) if !value.is_none() => {
+                Some(crate::dml::color_argument(value, "bullet_color")?)
+            }
+            _ => None,
+        };
+        self.update(py, |properties| {
+            let mut bullet = properties.bullet.clone().unwrap_or_default();
+            bullet.color = color.map(|color| TextBulletColor::new(ColorChoice::srgb(color)));
+            properties.set_bullet(Some(bullet));
+        })
+    }
+
+    /// The distance from the text frame's left inset to the text.
+    #[getter]
+    fn left_indent(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.margin(py, |properties| properties.left_margin)
+    }
+
+    #[setter]
+    fn set_left_indent(&self, py: Python<'_>, value: Option<i64>) -> PyResult<()> {
+        let margin = margin_value(value, 0, "left indent")?;
+        self.update(py, |properties| properties.left_margin = margin)
+    }
+
+    /// The first line's offset from the left indent, negative for a
+    /// hanging bullet.
+    #[getter]
+    fn first_line_indent(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.margin(py, |properties| properties.indent)
+    }
+
+    #[setter]
+    fn set_first_line_indent(&self, py: Python<'_>, value: Option<i64>) -> PyResult<()> {
+        let indent = margin_value(value, -MAX_TEXT_MARGIN, "first line indent")?;
+        self.update(py, |properties| properties.indent = indent)
+    }
 }
