@@ -1779,6 +1779,17 @@ impl CT_TcPr {
             pr.cnf_style = get_word_val_attr(e, word_prefixes)?;
         } else if is_word_element(name.as_ref(), b"noWrap", word_prefixes) {
             pr.no_wrap = Some(parse_word_toggle(e, word_prefixes)?);
+        } else if is_word_element(name.as_ref(), b"tcMar", word_prefixes) {
+            // This leaf path handles self-closing containers. Keep genuine
+            // unknown attributes raw rather than hiding them behind a default.
+            for attribute in e.attributes() {
+                let attribute = attribute?;
+                let key = attribute.key.as_ref();
+                if key != b"xmlns" && !key.starts_with(b"xmlns:") {
+                    return Ok(false);
+                }
+            }
+            pr.cell_margin = Some(CT_TblCellMar::default());
         } else if is_word_element(name.as_ref(), b"textDirection", word_prefixes)
             && let Some(val) = get_word_val_attr(e, word_prefixes)?
         {
@@ -3504,6 +3515,55 @@ mod tests {
     }
 
     #[test]
+    fn self_closing_cell_margins_are_the_same_typed_value_as_expanded_empty_margins() {
+        for margins in [
+            r#"<w:tcMar/>"#,
+            r#"<w:tcMar />"#,
+            r#"<w:tcMar></w:tcMar>"#,
+            r#"<q:tcMar xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>"#,
+            r#"<tcMar xmlns="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>"#,
+        ] {
+            let table = parse_table(&format!(
+                "<w:tr><w:tc><w:tcPr>{margins}</w:tcPr><w:p/></w:tc></w:tr>"
+            ));
+            let properties = table.rows[0].cells[0].properties.as_ref().unwrap();
+            assert_eq!(
+                properties.cell_margin,
+                Some(CT_TblCellMar::default()),
+                "{margins}"
+            );
+            assert!(properties.extra_xml.is_empty(), "{margins}");
+
+            let output = table_to_xml(&table);
+            let reparsed = parse_scoped_table(&output).unwrap();
+            assert_eq!(
+                reparsed.rows[0].cells[0].properties,
+                table.rows[0].cells[0].properties
+            );
+        }
+    }
+
+    #[test]
+    fn foreign_or_attributed_empty_cell_margins_remain_preserved_unmodeled_xml() {
+        for margins in [
+            r#"<ext:tcMar xmlns:ext="urn:producer"/>"#,
+            r#"<w:tcMar xmlns:w="urn:producer"/>"#,
+            r#"<w:tcMar w:unknown="retained"/>"#,
+            r#"<w:tcMar xmlns:ext="urn:producer" ext:unknown="retained"/>"#,
+        ] {
+            let table = parse_table(&format!(
+                "<w:tr><w:tc><w:tcPr>{margins}</w:tcPr><w:p/></w:tc></w:tr>"
+            ));
+            let properties = table.rows[0].cells[0].properties.as_ref().unwrap();
+            assert!(properties.cell_margin.is_none(), "{margins}");
+            assert_eq!(properties.extra_xml.len(), 1, "{margins}");
+            let raw = std::str::from_utf8(&properties.extra_xml[0].1).unwrap();
+            assert_eq!(raw, margins);
+            assert!(table_to_xml(&table).contains(raw), "{margins}");
+        }
+    }
+
+    #[test]
     fn unmodelled_standard_cell_properties_keep_absolute_slots_after_typed_mutation() {
         let mut table = parse_table(
             r#"<w:tblGrid><w:gridCol w:w="100"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:hMerge/><w:tcMar/><w:hideMark/><w:headers/><w:cellIns/><w:cellDel/><w:cellMerge/><w:tcPrChange/></w:tcPr><w:p/></w:tc></w:tr>"#,
@@ -3513,10 +3573,10 @@ mod tests {
             .as_ref()
             .expect("cell properties parse");
         assert_eq!(properties.h_merge.as_deref(), Some(""));
+        assert_eq!(properties.cell_margin, Some(CT_TblCellMar::default()));
         assert_eq!(
             properties.extra_xml,
             vec![
-                (8, br#"<w:tcMar/>"#.to_vec()),
                 (12, br#"<w:hideMark/>"#.to_vec()),
                 (13, br#"<w:headers/>"#.to_vec()),
                 (14, br#"<w:cellIns/>"#.to_vec()),

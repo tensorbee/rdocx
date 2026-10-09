@@ -391,6 +391,10 @@ ARCHIVE_REMEASUREMENT_DATES = {
     "rpptx-chart": "2026-10-09",
 }
 MEASUREMENT_PLATFORM = "macOS 26.6.2, Apple M5 Max, arm64"
+ARCHIVE_REMEASUREMENT_PLATFORMS = {
+    "rdocx": "macOS 26.6.2, Apple M3 Max, arm64",
+    "rdocx-oxml": "macOS 26.6.2, Apple M3 Max, arm64",
+}
 ARCHIVE_COMPRESSION_TOLERANCE_BYTES = 64
 ARCHIVE_MEASUREMENTS = {
     "oxml-chart": (102_059, 659_431, 6),
@@ -402,12 +406,12 @@ ARCHIVE_MEASUREMENTS = {
     "oxml-opc": (99_466, 385_350, 12),
     "oxml-pdf": (73_928, 339_612, 14),
     "oxml-sml": (12_509, 49_803, 6),
-    "rdocx": (3_524_430, 50_763_043, 37),
+    "rdocx": (3_524_993, 50_765_013, 37),
     "rdocx-cli": (72_988, 326_487, 8),
     "rdocx-html": (18_558, 72_244, 11),
     "rdocx-layout": (311_019, 1_681_790, 15),
     "rdocx-opc": (3_654, 9_668, 6),
-    "rdocx-oxml": (451_820, 2_806_194, 32),
+    "rdocx-oxml": (452_276, 2_808_868, 32),
     "rdocx-pdf": (8_115, 26_758, 6),
     "rpptx": (463_749, 2_402_551, 16),
     "rpptx-chart": (6_647, 21_136, 6),
@@ -440,7 +444,7 @@ def archive_row(package: str) -> MeasurementRow:
         f"Crates.io archive: {package}",
         f"{compressed:,} compressed bytes, {members:,} member bytes, {count} members",
         PACKAGE_VERSIONS[package],
-        MEASUREMENT_PLATFORM,
+        ARCHIVE_REMEASUREMENT_PLATFORMS.get(package, MEASUREMENT_PLATFORM),
         "`cargo package --locked --no-verify`",
         f"Tracked `{package}` package inventory",
         "`python3 scripts/readme_doctests.py --record-measurements`",

@@ -532,6 +532,47 @@ fn section_lookup_is_total_for_every_index() {
 }
 
 #[test]
+fn empty_cell_margins_do_not_make_ordinary_tables_unmodeled_after_reopening() {
+    for margins in ["<w:tcMar/>", "<w:tcMar />", "<w:tcMar></w:tcMar>"] {
+        let seed = Document::new().to_bytes().unwrap();
+        let mut package = OpcPackage::from_reader(std::io::Cursor::new(seed)).unwrap();
+        let rows = (0..7)
+            .map(|row| {
+                let cells = (0..3)
+                    .map(|column| {
+                        format!("<w:tc><w:tcPr>{margins}</w:tcPr><w:p><w:r><w:t>cell {row}:{column}</w:t></w:r></w:p></w:tc>")
+                    })
+                    .collect::<String>();
+                format!("<w:tr>{cells}</w:tr>")
+            })
+            .collect::<String>();
+        package.set_part(
+            "/word/document.xml",
+            format!("<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:tbl>{rows}</w:tbl><w:sectPr/></w:body></w:document>").into_bytes(),
+        );
+        let mut archive = std::io::Cursor::new(Vec::new());
+        package.write_to(&mut archive).unwrap();
+        let mut document = Document::from_bytes(archive.get_ref()).unwrap();
+        let mut reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+
+        for document in [&mut document, &mut reopened] {
+            let table = document.tables().into_iter().next().unwrap();
+            assert_eq!(table.row_count(), 7, "{margins}");
+            for row in 0..7 {
+                let row_ref = table.row(row).unwrap();
+                assert_eq!(row_ref.cell_count(), 3, "{margins}");
+                for column in 0..3 {
+                    let cell = row_ref.cell(column).unwrap();
+                    assert!(cell.has_cell_margins(), "{margins}");
+                    assert!(!cell.has_unmodeled_properties(), "{margins}");
+                    assert_eq!(cell.text(), format!("cell {row}:{column}"), "{margins}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn section_geometry_round_trips_with_unsupported_children_in_order() {
     let seed = Document::new().to_bytes().unwrap();
     let mut package = OpcPackage::from_reader(std::io::Cursor::new(seed)).unwrap();

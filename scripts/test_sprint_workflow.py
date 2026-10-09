@@ -4851,6 +4851,22 @@ rdocx-layout = "=0.10.1"
                     measurement_id,
                 )
 
+    def test_archive_remeasurements_keep_package_specific_platform_provenance(self) -> None:
+        for package in ("rdocx", "rdocx-oxml"):
+            self.assertEqual(
+                readme_doctests.archive_row(package)[3],
+                "macOS 26.6.2, Apple M3 Max, arm64",
+            )
+        self.assertEqual(
+            readme_doctests.archive_row("rdocx-layout")[3],
+            readme_doctests.MEASUREMENT_PLATFORM,
+        )
+        for measurement_id in readme_doctests.SPEED_MEASUREMENTS:
+            self.assertEqual(
+                readme_doctests.MEASUREMENT_ROWS[measurement_id][3],
+                readme_doctests.MEASUREMENT_PLATFORM,
+            )
+
     def test_measurement_rows_require_complete_dated_provenance(self) -> None:
         metadata = readme_doctests.cargo_metadata()
         self.assertIsNotNone(metadata)
