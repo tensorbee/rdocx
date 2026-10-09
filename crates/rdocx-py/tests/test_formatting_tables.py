@@ -1059,3 +1059,350 @@ def test_word_highlight_keywords_round_trip_and_clear():
     assert reopened.paragraphs[0].runs[0].font.highlight == "yellow"
     reopened.paragraphs[0].runs[0].font.highlight = None
     assert Document.from_bytes(reopened.to_bytes()).paragraphs[0].runs[0].font.highlight is None
+
+
+# Issue 303: run, paragraph, style and list formatting the Rust API covers.
+def test_issue_303_run_effects_languages_and_script_fonts_round_trip_and_clear():
+    from rdocx import Document, Pt
+
+    document = Document()
+    font = document.add_paragraph("").add_run("H2O").font
+    font.superscript = True
+    assert (font.superscript, font.subscript) == (True, False)
+    font.subscript = True
+    assert (font.superscript, font.subscript) == (False, True)
+    # As in python-docx, False removes w:vertAlign only when it holds that value.
+    font.superscript = False
+    assert font.subscript is True
+    font.all_caps = False
+    font.small_caps = True
+    font.double_strike = True
+    font.hidden = False
+    font.character_spacing = Pt(2)
+    font.name = "Arial"
+    font.east_asian_name = "MS Mincho"
+    font.complex_script_name = "Arial Unicode MS"
+    font.language = "fr-FR"
+    font.east_asian_language = "ja-JP"
+    font.complex_script_language = "ar-SA"
+    font.rtl = True
+
+    package = document.to_bytes()
+    xml = _document_xml(package)
+    assert (
+        '<w:rFonts w:ascii="Arial" w:hAnsi="Arial" w:eastAsia="MS Mincho" '
+        'w:cs="Arial Unicode MS"/><w:caps w:val="false"/><w:smallCaps/><w:dstrike/>'
+        '<w:vanish w:val="false"/><w:spacing w:val="40"/><w:vertAlign w:val="subscript"/>'
+        '<w:rtl/><w:lang w:val="fr-FR" w:eastAsia="ja-JP" w:bidi="ar-SA"/>'
+    ) in xml
+    font = Document.from_bytes(package).paragraphs[0].runs[0].font
+    assert (font.superscript, font.subscript) == (False, True)
+    assert (font.all_caps, font.small_caps, font.double_strike, font.hidden) == (
+        False,
+        True,
+        True,
+        False,
+    )
+    assert font.character_spacing == Pt(2)
+    assert (font.name, font.east_asian_name, font.complex_script_name) == (
+        "Arial",
+        "MS Mincho",
+        "Arial Unicode MS",
+    )
+    assert (font.language, font.east_asian_language, font.complex_script_language) == (
+        "fr-FR",
+        "ja-JP",
+        "ar-SA",
+    )
+    assert font.rtl is True
+
+    font = document.paragraphs[0].runs[0].font
+    for name in (
+        "subscript", "all_caps", "small_caps", "double_strike", "hidden", "character_spacing",
+        "name", "language", "east_asian_language", "complex_script_language", "rtl",
+    ):
+        setattr(font, name, None)
+    assert "<w:rPr>" not in _document_xml(document.to_bytes()).replace("<w:rPr/>", "")
+
+
+def test_issue_303_tab_stops_follow_python_docx_and_keep_position_order():
+    from rdocx import Document, Inches, WD_TAB_ALIGNMENT, WD_TAB_LEADER
+
+    document = Document()
+    tab_stops = document.add_paragraph("Name").paragraph_format.tab_stops
+    added = tab_stops.add_tab_stop(Inches(3), WD_TAB_ALIGNMENT.RIGHT, WD_TAB_LEADER.DOTS)
+    assert (added.position, added.alignment, added.leader) == (
+        Inches(3),
+        WD_TAB_ALIGNMENT.RIGHT,
+        WD_TAB_LEADER.DOTS,
+    )
+    tab_stops.add_tab_stop(Inches(1))
+    tab_stops.add_tab_stop(Inches(2), WD_TAB_ALIGNMENT.CENTER)
+    assert '<w:tabs><w:tab w:val="left" w:pos="1440"/><w:tab w:val="center" w:pos="2880"/>' \
+        '<w:tab w:val="right" w:pos="4320" w:leader="dot"/></w:tabs>' in _document_xml(
+            document.to_bytes()
+        )
+
+    reopened = Document.from_bytes(document.to_bytes()).paragraphs[0].paragraph_format
+    assert [(tab.position, tab.alignment, tab.leader) for tab in reopened.tab_stops] == [
+        (Inches(1), WD_TAB_ALIGNMENT.LEFT, WD_TAB_LEADER.SPACES),
+        (Inches(2), WD_TAB_ALIGNMENT.CENTER, WD_TAB_LEADER.SPACES),
+        (Inches(3), WD_TAB_ALIGNMENT.RIGHT, WD_TAB_LEADER.DOTS),
+    ]
+    del tab_stops[-1]
+    assert len(tab_stops) == 2 and tab_stops[1].position == Inches(2)
+    with pytest.raises(ValueError, match="WD_TAB_ALIGNMENT"):
+        tab_stops.add_tab_stop(Inches(4), 4)
+    with pytest.raises(IndexError):
+        tab_stops[2]
+    tab_stops.clear_all()
+    assert len(tab_stops) == 0
+    assert "<w:tabs>" not in _document_xml(document.to_bytes())
+
+
+def test_issue_303_paragraph_borders_shading_outline_level_and_direction():
+    from rdocx import Document
+
+    document = Document()
+    paragraph_format = document.add_paragraph("Callout").paragraph_format
+    paragraph_format.set_border("bottom", size=12, color="4472C4")
+    paragraph_format.set_border("top")
+    paragraph_format.shading = "FFF2CC"
+    paragraph_format.outline_level = 1
+    paragraph_format.right_to_left = True
+
+    xml = _document_xml(document.to_bytes())
+    assert (
+        '<w:pBdr><w:top w:val="single" w:sz="4" w:space="1" w:color="auto"/>'
+        '<w:bottom w:val="single" w:sz="12" w:space="1" w:color="4472C4"/></w:pBdr>'
+        '<w:shd w:val="clear" w:color="auto" w:fill="FFF2CC"/><w:bidi/><w:outlineLvl w:val="1"/>'
+    ) in xml
+    reopened = Document.from_bytes(document.to_bytes()).paragraphs[0].paragraph_format
+    assert reopened.border("bottom") == ("single", 12, "4472C4")
+    assert reopened.border("top") == ("single", 4, "auto")
+    assert reopened.border("left") is None
+    assert (reopened.shading, reopened.outline_level, reopened.right_to_left) == (
+        "FFF2CC",
+        1,
+        True,
+    )
+
+    before = document.to_bytes()
+    with pytest.raises(ValueError, match="border edge"):
+        paragraph_format.set_border("insideH")
+    with pytest.raises(ValueError, match="six hexadecimal digits or auto"):
+        paragraph_format.set_border("left", color="blue")
+    with pytest.raises(ValueError, match="1 to 96"):
+        paragraph_format.set_border("left", size=0)
+    with pytest.raises(ValueError, match="from 0 to 9"):
+        paragraph_format.outline_level = 10
+    assert document.to_bytes() == before
+
+    paragraph_format.remove_border("top")
+    assert paragraph_format.border("top") is None
+    paragraph_format.clear_borders()
+    paragraph_format.shading = None
+    paragraph_format.outline_level = None
+    paragraph_format.right_to_left = None
+    assert "<w:pPr>" not in _document_xml(document.to_bytes())
+
+
+def test_issue_303_style_keywords_cover_paragraph_and_run_formatting():
+    from rdocx import Document, Inches, Pt, RGBColor, WD_ALIGN_PARAGRAPH
+    from rdocx import WD_TAB_ALIGNMENT, WD_TAB_LEADER, WD_UNDERLINE
+
+    document = Document()
+    document.add_style(
+        "Callout",
+        alignment=WD_ALIGN_PARAGRAPH.CENTER,
+        line_spacing=1.5,
+        keep_with_next=True,
+        keep_together=True,
+        page_break_before=False,
+        shading="FFF2CC",
+        borders={"left": ("single", 12, "C00000")},
+        tab_stops=[
+            (Inches(2), WD_TAB_ALIGNMENT.CENTER),
+            (Inches(4), WD_TAB_ALIGNMENT.RIGHT, WD_TAB_LEADER.DASHES),
+        ],
+        underline=WD_UNDERLINE.DOUBLE,
+        color=RGBColor(0x11, 0x22, 0x33),
+    )
+    document.set_style("Callout", line_spacing=Pt(18), underline=True)
+    styles = _part(document, "word/styles.xml")
+    callout = styles[styles.index('w:styleId="Callout"') :]
+    callout = callout[: callout.index("</w:style>")]
+    assert (
+        '<w:keepNext/><w:keepLines/><w:pageBreakBefore w:val="false"/>'
+        '<w:pBdr><w:left w:val="single" w:sz="12" w:space="1" w:color="C00000"/></w:pBdr>'
+        '<w:shd w:val="clear" w:color="auto" w:fill="FFF2CC"/>'
+        '<w:tabs><w:tab w:val="center" w:pos="2880"/>'
+        '<w:tab w:val="right" w:pos="5760" w:leader="hyphen"/></w:tabs>'
+        '<w:spacing w:line="360" w:lineRule="exact"/><w:jc w:val="center"/>'
+    ) in callout
+    assert '<w:color w:val="112233"/><w:u w:val="single"/>' in callout
+
+    with pytest.raises(ValueError, match="no paragraph formatting"):
+        document.add_style("Mark", "character", tab_stops=[(Inches(1), 0)])
+    with pytest.raises(ValueError, match="border edge"):
+        document.set_style("Callout", borders={"middle": ("single", 4, "auto")})
+    with pytest.raises(ValueError, match="six hexadecimal digits or auto"):
+        document.set_style("Callout", shading="yellow")
+    with pytest.raises(TypeError, match="tab stop must be"):
+        document.set_style("Callout", tab_stops=[Inches(1)])
+
+
+def test_issue_303_document_default_font_lives_in_doc_defaults():
+    from rdocx import Document, Pt
+
+    document = Document()
+    document.default_font_name = "Calibri"
+    document.default_font_size = Pt(11)
+    styles = _part(document, "word/styles.xml")
+    assert (
+        '<w:rPrDefault><w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" '
+        'w:eastAsia="Calibri" w:cs="Calibri"/><w:sz w:val="22"/><w:szCs w:val="22"/>'
+    ) in styles
+    reopened = Document.from_bytes(document.to_bytes())
+    assert (reopened.default_font_name, reopened.default_font_size) == ("Calibri", Pt(11))
+    with pytest.raises(Exception, match="positive"):
+        document.default_font_size = 0
+    document.default_font_name = None
+    document.default_font_size = None
+    assert (document.default_font_name, document.default_font_size) == (None, None)
+
+
+def test_issue_303_list_helpers_continue_restart_and_offer_checklists():
+    from rdocx import Document, ListLevel
+
+    document = Document()
+    document.add_numbered_list_item("a")
+    document.add_numbered_list_item("b")
+    document.add_paragraph("between")
+    document.add_numbered_list_item("c", restart=True)
+    document.add_bullet_list_item("bullet", 1)
+    document.add_numbered_list_item("d")
+    numbering = [paragraph.numbering for paragraph in document.paragraphs]
+    first, restarted = numbering[0][0], numbering[3][0]
+    assert numbering == [(first, 0), (first, 0), None, (restarted, 0), numbering[4], (restarted, 0)]
+    assert numbering[4][1] == 1 and numbering[4][0] not in (first, restarted)
+    assert '<w:startOverride w:val="1"/>' in _part(document, "word/numbering.xml")
+
+    moved = document.restart_numbering(document.paragraphs[1], start=5)
+    assert document.paragraphs[1].numbering == (moved, 0)
+    assert document.paragraphs[0].numbering == (first, 0)
+    assert '<w:startOverride w:val="5"/>' in _part(document, "word/numbering.xml")
+    with pytest.raises(ValueError, match="not in a list"):
+        document.restart_numbering(document.paragraphs[2])
+
+    definition = document.add_numbering_definition([ListLevel()])
+    instance = document.add_numbering_instance(definition, start=3, level=0)
+    assert instance not in (first, restarted, moved)
+    with pytest.raises(ValueError, match="level"):
+        document.add_numbering_instance(definition, start=1, level=9)
+
+    unchecked, checked = ListLevel.checklist(), ListLevel.checklist(checked=True)
+    assert (unchecked.format, unchecked.text, checked.text) == ("bullet", "☐", "☑")
+    todo = document.add_numbering_instance(document.add_numbering_definition([unchecked]))
+    document.add_paragraph("todo").numbering = (todo, 0)
+    assert '<w:lvlText w:val="☐"/>' in _part(document, "word/numbering.xml")
+    assert document.to_pdf().startswith(b"%PDF")
+
+
+def test_issue_303_list_helpers_never_continue_checklists_or_numbered_headings():
+    from rdocx import Document, ListLevel
+
+    document = Document()
+    checklist = document.add_numbering_definition([ListLevel.checklist()])
+    document.add_paragraph("todo").numbering = (document.add_numbering_instance(checklist), 0)
+    document.add_paragraph("Next heading")
+    document.add_bullet_list_item("plain bullet")
+    roman = document.add_numbering_definition([ListLevel(format="upperRoman", text="%1.")])
+    heading = document.add_paragraph("Chapter")
+    heading.numbering = (document.add_numbering_instance(roman), 0)
+    document.add_numbered_list_item("first step")
+
+    numbering = [paragraph.numbering for paragraph in document.paragraphs]
+    assert numbering[2][0] != numbering[0][0]
+    assert numbering[4][0] != numbering[3][0]
+    numbering_xml = _part(document, "word/numbering.xml")
+    assert '<w:lvlText w:val="\u2610"/>' in numbering_xml
+    assert (
+        '<w:rPr><w:rFonts w:hint="default" w:ascii="Segoe UI Symbol" w:hAnsi="Segoe UI Symbol" '
+        'w:eastAsia="Segoe UI Symbol" w:cs="Segoe UI Symbol"/></w:rPr>'
+    ) in numbering_xml
+    assert document.to_pdf().startswith(b"%PDF")
+
+
+def test_issue_303_restart_numbering_moves_later_items_in_table_cells():
+    from rdocx import Document
+
+    document = Document()
+    document.add_numbered_list_item("one")
+    document.add_numbered_list_item("two")
+    table = document.add_table(1, 1)
+    cell_paragraph = table.cell(0, 0).paragraphs[0]
+    first = document.paragraphs[0].numbering[0]
+    cell_paragraph.numbering = (first, 0)
+    document.add_numbered_list_item("three")
+
+    restarted = document.restart_numbering(document.paragraphs[1])
+    assert document.paragraphs[0].numbering == (first, 0)
+    assert document.paragraphs[1].numbering == (restarted, 0)
+    assert document.tables[0].cell(0, 0).paragraphs[0].numbering == (restarted, 0)
+    assert document.paragraphs[2].numbering == (restarted, 0)
+
+
+def test_issue_303_tab_stops_are_live_and_reject_a_second_tab_at_one_position():
+    from rdocx import Document, Inches, WD_TAB_ALIGNMENT, WD_TAB_LEADER
+
+    document = Document()
+    tab_stops = document.add_paragraph("x").paragraph_format.tab_stops
+    tab = tab_stops.add_tab_stop(Inches(1))
+    tab_stops.add_tab_stop(Inches(2))
+    assert repr(tab) == (
+        "TabStop(position=Twips(1440), alignment=WD_TAB_ALIGNMENT.LEFT, "
+        "leader=WD_TAB_LEADER.SPACES)"
+    )
+    tab.alignment = WD_TAB_ALIGNMENT.RIGHT
+    tab.leader = WD_TAB_LEADER.DOTS
+    tab.position = Inches(3)
+    assert [(stop.position, stop.alignment, stop.leader) for stop in tab_stops] == [
+        (Inches(2), WD_TAB_ALIGNMENT.LEFT, WD_TAB_LEADER.SPACES),
+        (Inches(3), WD_TAB_ALIGNMENT.RIGHT, WD_TAB_LEADER.DOTS),
+    ]
+    with pytest.raises(ValueError, match="already exists at this position"):
+        tab_stops.add_tab_stop(Inches(2))
+    with pytest.raises(ValueError, match="already exists at this position"):
+        tab.position = Inches(2)
+    del tab_stops[1]
+    with pytest.raises(ValueError, match="re-read paragraph_format.tab_stops"):
+        tab.alignment
+
+
+def test_issue_303_style_and_font_arguments_are_checked_like_their_setters():
+    from rdocx import Document, Inches, Pt
+
+    document = Document()
+    document.add_style("Ordered", tab_stops=[(Inches(2), 1), (Inches(1), 0)])
+    styles = _part(document, "word/styles.xml")
+    assert '<w:tabs><w:tab w:val="left" w:pos="1440"/><w:tab w:val="center" w:pos="2880"/>' in styles
+
+    before = document.to_bytes()
+    with pytest.raises(ValueError, match="one per position"):
+        document.add_style("Twice", tab_stops=[(Inches(1), 0), (Inches(1), 2)])
+    with pytest.raises(ValueError, match="1 to 96"):
+        document.add_style("Thin", borders={"top": ("single", 0, "000000")})
+    with pytest.raises(ValueError, match="positive"):
+        document.add_style("Negative", line_spacing=-1.0)
+    paragraph_format = document.add_paragraph("x").paragraph_format
+    with pytest.raises(ValueError, match="positive"):
+        paragraph_format.line_spacing = -Pt(12)
+    font = document.add_paragraph("y").add_run("z").font
+    with pytest.raises(ValueError, match="language tag"):
+        font.language = "english!!"
+    font.language = "zh-Hant-TW"
+    assert font.language == "zh-Hant-TW"
+    assert [style.style_id for style in Document.from_bytes(before).styles] == [
+        style.style_id for style in document.styles
+    ]

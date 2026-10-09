@@ -88,7 +88,7 @@ fn vertical_to_int(value: rdocx::VerticalAlignment) -> i32 {
     }
 }
 
-fn border_style_from_name(value: &str) -> PyResult<rdocx::BorderStyle> {
+pub(crate) fn border_style_from_name(value: &str) -> PyResult<rdocx::BorderStyle> {
     match value {
         "none" => Ok(rdocx::BorderStyle::None),
         "single" => Ok(rdocx::BorderStyle::Single),

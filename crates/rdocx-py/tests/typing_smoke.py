@@ -371,3 +371,26 @@ def scoped_replacement_signatures_cover_paragraph_cell_and_story_item(document: 
 def whole_story_setter_signatures(document: Document) -> None:
     assert_type(document.set_header(text="header"), None)
     assert_type(document.set_footer(text="footer"), None)
+
+
+def issue_303_formatting_signatures(document: Document, paragraph: Paragraph) -> None:
+    from rdocx import Pt, TabStop, WD_TAB_ALIGNMENT, WD_TAB_LEADER
+
+    font = paragraph.runs[0].font
+    font.superscript = True
+    font.small_caps = None
+    font.character_spacing = Pt(1)
+    font.east_asian_name = "MS Mincho"
+    assert_type(font.subscript, bool | None)
+    assert_type(paragraph.runs[0].font.character_spacing, Length | None)
+    tab_stops = paragraph.paragraph_format.tab_stops
+    assert_type(tab_stops.add_tab_stop(Inches(1), WD_TAB_ALIGNMENT.RIGHT, WD_TAB_LEADER.DOTS), TabStop)
+    assert_type(tab_stops[0].alignment, WD_TAB_ALIGNMENT | None)
+    paragraph.paragraph_format.set_border("bottom", size=6, color="4472C4")
+    assert_type(paragraph.paragraph_format.border("bottom"), tuple[str, int | None, str | None] | None)
+    paragraph.paragraph_format.outline_level = 1
+    document.add_style("Callout", tab_stops=[(Inches(1), WD_TAB_ALIGNMENT.LEFT)], borders={"left": ("single", 4, "auto")})
+    assert_type(document.add_numbered_list_item("item", restart=True), Paragraph)
+    assert_type(document.restart_numbering(paragraph, start=3), int)
+    assert_type(document.default_font_size, Length | None)
+    assert_type(ListLevel.checklist(checked=True), ListLevel)

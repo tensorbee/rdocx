@@ -1,6 +1,6 @@
 import datetime as _datetime
 import os as _os
-from collections.abc import Iterator as _Iterator, Sequence as _Sequence
+from collections.abc import Iterator as _Iterator, Mapping as _Mapping, Sequence as _Sequence
 from typing import Literal as _Literal, NoReturn as _Never, final as _final, overload as _overload
 
 from . import shared as _shared
@@ -13,6 +13,7 @@ _BorderStyle = _Literal[
     "none", "single", "thick", "double", "dotted", "dashed", "dotDash", "wave"
 ]
 _BorderEdge = _Literal["top", "bottom", "left", "right", "insideH", "insideV"]
+_ParagraphBorderEdge = _Literal["top", "bottom", "left", "right", "between", "bar"]
 _Margins = tuple[
     _shared.Length | None, _shared.Length | None, _shared.Length | None, _shared.Length | None
 ]
@@ -22,7 +23,8 @@ __all__ = [
     "HeaderFooterVariant", "Hyperlink", "LayoutBackedFieldUpdateReport", "LayoutFragment", "LayoutPage", "ListLevel", "Paragraph", "ParagraphCollection",
     "ParagraphFormat", "Revision", "Row", "RowCollection", "Run", "RunCollection", "RunPosition",
     "RunRange", "Section", "Story", "StoryItem", "StoryRunPosition", "StoryRunRange", "Style",
-    "SvgDiagnostic", "SvgRenderResult", "Table", "TableCollection", "TocRebuildReport",
+    "SvgDiagnostic", "SvgRenderResult", "Table", "TableCollection", "TabStop", "TabStops",
+    "TocRebuildReport",
 ]
 
 
@@ -511,6 +513,7 @@ class ListLevel:
         start: int | None = None,
         left_indent: int | None = None,
         hanging_indent: int | None = None,
+        font: str | None = None,
     ) -> ListLevel: ...
     @property
     def format(self) -> str: ...
@@ -522,6 +525,17 @@ class ListLevel:
     def left_indent(self) -> int | None: ...
     @property
     def hanging_indent(self) -> int | None: ...
+    @property
+    def font(self) -> str | None:
+        """The marker font, written to every `w:rFonts` slot of the level."""
+    @staticmethod
+    def checklist(
+        checked: bool = False,
+        *,
+        left_indent: int | None = None,
+        hanging_indent: int | None = None,
+    ) -> ListLevel:
+        """A bullet level whose glyph is an empty box, or a checked box, in Segoe UI Symbol."""
 
 
 @_final
@@ -713,6 +727,18 @@ class Document:
         left_indent: int | None = None,
         right_indent: int | None = None,
         first_line_indent: int | None = None,
+        underline: bool | _text.WD_UNDERLINE | None = None,
+        alignment: _text.WD_ALIGN_PARAGRAPH | None = None,
+        line_spacing: int | float | None = None,
+        keep_with_next: bool | None = None,
+        keep_together: bool | None = None,
+        page_break_before: bool | None = None,
+        shading: str | None = None,
+        borders: _Mapping[_ParagraphBorderEdge, tuple[_BorderStyle, int, str]] | None = None,
+        tab_stops: _Sequence[
+            tuple[int, _text.WD_TAB_ALIGNMENT]
+            | tuple[int, _text.WD_TAB_ALIGNMENT, _text.WD_TAB_LEADER]
+        ] | None = None,
     ) -> Style:
         """Create a style as python-docx's `styles.add_style` does.
 
@@ -720,9 +746,13 @@ class Document:
         hyphens of the name, as Word derives one, or is `a`, `a0` and so on
         when none is left.
         `based_on` and `next_style` take an ID or a name. Lengths and the font
-        size are EMU. Raises `KeyError` when a base or next style names no
-        style, and `ValueError` for a duplicate ID or name or any other
-        invalid argument.
+        size are EMU. `line_spacing` is an exact `Length` or a float multiple
+        of single spacing, as `ParagraphFormat.line_spacing` takes it.
+        `shading` is six hex digits or `auto`, `borders` maps an edge to
+        `(style, size in eighths of a point, hex color)`, and `tab_stops`
+        lists `(position, alignment[, leader])`. Raises `KeyError` when a
+        base or next style names no style, and `ValueError` for a duplicate
+        ID or name or any other invalid argument.
         """
     def set_style(
         self,
@@ -740,17 +770,70 @@ class Document:
         left_indent: int | None = None,
         right_indent: int | None = None,
         first_line_indent: int | None = None,
+        underline: bool | _text.WD_UNDERLINE | None = None,
+        alignment: _text.WD_ALIGN_PARAGRAPH | None = None,
+        line_spacing: int | float | None = None,
+        keep_with_next: bool | None = None,
+        keep_together: bool | None = None,
+        page_break_before: bool | None = None,
+        shading: str | None = None,
+        borders: _Mapping[_ParagraphBorderEdge, tuple[_BorderStyle, int, str]] | None = None,
+        tab_stops: _Sequence[
+            tuple[int, _text.WD_TAB_ALIGNMENT]
+            | tuple[int, _text.WD_TAB_ALIGNMENT, _text.WD_TAB_LEADER]
+        ] | None = None,
     ) -> Style:
         """Update the supplied formatting on a style selected by ID or name.
 
-        Unspecified properties keep their existing values. Lengths and font
-        size are EMU. Invalid style references or graph changes leave the
-        document unchanged.
+        Unspecified properties keep their existing values, and `borders` or
+        `tab_stops` replace the style's whole set. Lengths and font size are
+        EMU. Invalid style references or graph changes leave the document
+        unchanged.
         """
     def remove_style(self, style: str) -> bool: ...
     def set_default_style(self, style: str) -> None: ...
     def add_numbering_definition(self, levels: _Sequence[ListLevel]) -> int: ...
-    def add_numbering_instance(self, definition_id: int) -> int: ...
+    def add_numbering_instance(
+        self, definition_id: int, *, start: int | None = None, level: int = 0
+    ) -> int:
+        """Create a list instance of a numbering definition.
+
+        Word continues the count across instances of one definition. `start`
+        restarts this instance at that value with a `w:startOverride` on
+        `level`. `restart_numbering` does this for a paragraph in one call.
+        """
+    def add_bullet_list_item(self, text: str, level: int = 0) -> Paragraph:
+        """Append an item to the document's plain bullet list.
+
+        It continues the last body paragraph on that list's definition, so a
+        checklist or another custom list is never continued.
+        """
+    def add_numbered_list_item(
+        self, text: str, level: int = 0, *, restart: bool = False
+    ) -> Paragraph:
+        """Append an item to the document's plain decimal list.
+
+        It continues the last body paragraph on that list's definition, so a
+        numbered heading or another custom list is never continued.
+        `restart=True` starts a new count at 1 from this item.
+        """
+    def restart_numbering(self, paragraph: Paragraph, start: int = 1) -> int:
+        """Restart the list at a paragraph, as Word's "Restart at 1" does.
+
+        The paragraph and every later paragraph of its list, in the body or a
+        table cell, move to a new list instance whose level starts at `start`.
+        Returns its ID.
+        """
+    @property
+    def default_font_name(self) -> str | None:
+        """The font name in `w:docDefaults`, which styles without one use."""
+    @default_font_name.setter
+    def default_font_name(self, value: str | None) -> None: ...
+    @property
+    def default_font_size(self) -> _shared.Length | None:
+        """The font size in `w:docDefaults`, which styles without one use."""
+    @default_font_size.setter
+    def default_font_size(self, value: int | None) -> None: ...
     def link_style_to_numbering(self, style: str, num_id: int, level: int) -> None: ...
     @property
     def stories(self) -> tuple[Story, ...]: ...
@@ -1016,6 +1099,103 @@ class Font:
     def shading(self) -> str | None: ...
     @shading.setter
     def shading(self, value: str | None) -> None: ...
+    @property
+    def superscript(self) -> bool | None: ...
+    @superscript.setter
+    def superscript(self, value: bool | None) -> None: ...
+    @property
+    def subscript(self) -> bool | None: ...
+    @subscript.setter
+    def subscript(self, value: bool | None) -> None: ...
+    @property
+    def all_caps(self) -> bool | None: ...
+    @all_caps.setter
+    def all_caps(self, value: bool | None) -> None: ...
+    @property
+    def small_caps(self) -> bool | None: ...
+    @small_caps.setter
+    def small_caps(self, value: bool | None) -> None: ...
+    @property
+    def double_strike(self) -> bool | None: ...
+    @double_strike.setter
+    def double_strike(self, value: bool | None) -> None: ...
+    @property
+    def hidden(self) -> bool | None: ...
+    @hidden.setter
+    def hidden(self, value: bool | None) -> None: ...
+    @property
+    def character_spacing(self) -> _shared.Length | None:
+        """Space added between characters, negative to condense them."""
+    @character_spacing.setter
+    def character_spacing(self, value: int | None) -> None: ...
+    @property
+    def language(self) -> str | None: ...
+    @language.setter
+    def language(self, value: str | None) -> None: ...
+    @property
+    def east_asian_language(self) -> str | None: ...
+    @east_asian_language.setter
+    def east_asian_language(self, value: str | None) -> None: ...
+    @property
+    def complex_script_language(self) -> str | None: ...
+    @complex_script_language.setter
+    def complex_script_language(self, value: str | None) -> None: ...
+    @property
+    def east_asian_name(self) -> str | None:
+        """The `w:eastAsia` font, which `name` also sets."""
+    @east_asian_name.setter
+    def east_asian_name(self, value: str | None) -> None: ...
+    @property
+    def complex_script_name(self) -> str | None:
+        """The `w:cs` font, which `name` also sets."""
+    @complex_script_name.setter
+    def complex_script_name(self, value: str | None) -> None: ...
+    @property
+    def rtl(self) -> bool | None: ...
+    @rtl.setter
+    def rtl(self, value: bool | None) -> None: ...
+
+
+@_final
+class TabStop:
+    """A live tab stop, found by its position, as in python-docx."""
+
+    def __new__(cls, *, _private: _Never) -> TabStop: ...
+    @property
+    def position(self) -> _shared.Length: ...
+    @position.setter
+    def position(self, value: int) -> None:
+        """Move the tab stop, keeping position order. A taken position raises."""
+    @property
+    def alignment(self) -> _text.WD_TAB_ALIGNMENT | None:
+        """`None` for a bar, clear or num tab, which rdocx does not model."""
+    @alignment.setter
+    def alignment(self, value: _text.WD_TAB_ALIGNMENT | int) -> None: ...
+    @property
+    def leader(self) -> _text.WD_TAB_LEADER: ...
+    @leader.setter
+    def leader(self, value: _text.WD_TAB_LEADER | int) -> None: ...
+
+
+@_final
+class TabStops:
+    def __new__(cls, *, _private: _Never) -> TabStops: ...
+    def __len__(self) -> int: ...
+    def __getitem__(self, index: int, /) -> TabStop: ...
+    def __delitem__(self, index: int, /) -> None: ...
+    def __iter__(self) -> _Iterator[TabStop]: ...
+    def add_tab_stop(
+        self,
+        position: int,
+        alignment: _text.WD_TAB_ALIGNMENT | int = 0,
+        leader: _text.WD_TAB_LEADER | int = 0,
+    ) -> TabStop:
+        """Add a tab stop in position order, as python-docx does.
+
+        Unlike python-docx, a second tab stop at one position raises
+        `ValueError`: change the existing one through `tab_stops[i]`.
+        """
+    def clear_all(self) -> None: ...
 
 
 @_final
@@ -1065,6 +1245,35 @@ class ParagraphFormat:
     def widow_control(self) -> bool | None: ...
     @widow_control.setter
     def widow_control(self, value: bool | None) -> None: ...
+    @property
+    def tab_stops(self) -> TabStops: ...
+    @property
+    def outline_level(self) -> int | None:
+        """The `w:outlineLvl`, 0 for a top-level heading to 9 for body text."""
+    @outline_level.setter
+    def outline_level(self, value: int | None) -> None: ...
+    @property
+    def right_to_left(self) -> bool | None:
+        """The `w:bidi` paragraph direction."""
+    @right_to_left.setter
+    def right_to_left(self, value: bool | None) -> None: ...
+    @property
+    def shading(self) -> str | None:
+        """The direct shading fill, six hex digits or `auto`."""
+    @shading.setter
+    def shading(self, value: str | None) -> None: ...
+    def border(self, edge: _ParagraphBorderEdge) -> tuple[str, int | None, str | None] | None: ...
+    def set_border(
+        self,
+        edge: _ParagraphBorderEdge,
+        style: _BorderStyle = "single",
+        *,
+        size: int = 4,
+        color: str = "auto",
+    ) -> None:
+        """Set one edge, `size` in eighths of a point, `color` six hex digits or `auto`."""
+    def remove_border(self, edge: _ParagraphBorderEdge) -> None: ...
+    def clear_borders(self) -> None: ...
 
 
 @_final

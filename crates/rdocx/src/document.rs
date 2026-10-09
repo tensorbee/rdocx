@@ -11927,6 +11927,25 @@ fn update_reciprocal_style_link(
     }
 }
 
+/// Whether `definition` is the plain bullet or decimal list the list item
+/// helpers create, judged by the format and text of its first level.
+fn is_default_list_definition(
+    definition: &rdocx_oxml::numbering::CT_AbstractNum,
+    bullet: bool,
+) -> bool {
+    let format = if bullet {
+        rdocx_oxml::numbering::ST_NumberFormat::Bullet
+    } else {
+        rdocx_oxml::numbering::ST_NumberFormat::Decimal
+    };
+    let mut template = rdocx_oxml::numbering::CT_Numbering::new();
+    template.add_list_with_ids(&[(format, Some(1))], 0, 1);
+    let expected = &template.abstract_nums[0].levels[0];
+    definition.levels.first().is_some_and(|level| {
+        level.num_fmt == expected.num_fmt && level.lvl_text == expected.lvl_text
+    })
+}
+
 fn merge_style_update(
     existing: &rdocx_oxml::styles::CT_Style,
     authored: &mut rdocx_oxml::styles::CT_Style,
@@ -20484,6 +20503,17 @@ impl Document {
         relationship_id
     }
 
+    /// Whether `num_id` is an instance of the plain bullet list (`bullet`) or
+    /// decimal list that [`Self::add_bullet_list_item`] and
+    /// [`Self::add_numbered_list_item`] use: its first level has that list's
+    /// format and level text, so a checklist or a roman heading list is not.
+    pub fn is_default_list_instance(&self, num_id: u32, bullet: bool) -> bool {
+        self.numbering
+            .as_ref()
+            .and_then(|numbering| numbering.get_abstract_num_for(num_id))
+            .is_some_and(|definition| is_default_list_definition(definition, bullet))
+    }
+
     /// Whether the given numbering definition renders as bullets (true)
     /// or numbers (false). None if the id is unknown.
     pub fn numbering_is_bullet(&self, num_id: u32) -> Option<bool> {
@@ -21812,16 +21842,12 @@ impl Document {
             .reserve_numbering_bundle()
             .expect("an in-memory document can allocate a numbering part");
         candidate.invalidate_layout();
-        // Find or create a bullet list numId
+        // Find or create a numId of the plain bullet list this helper creates
         let existing = candidate.numbering.as_ref().and_then(|numbering| {
             numbering.nums.iter().find(|n| {
                 numbering
                     .get_abstract_num_for(n.num_id)
-                    .map(|a| {
-                        a.levels.first().and_then(|l| l.num_fmt.as_ref())
-                            == Some(&rdocx_oxml::numbering::ST_NumberFormat::Bullet)
-                    })
-                    .unwrap_or(false)
+                    .is_some_and(|definition| is_default_list_definition(definition, true))
             })
         });
         let num_id = if let Some(existing) = existing {
@@ -21871,16 +21897,12 @@ impl Document {
             .reserve_numbering_bundle()
             .expect("an in-memory document can allocate a numbering part");
         candidate.invalidate_layout();
-        // Find or create a numbered list numId
+        // Find or create a numId of the plain decimal list this helper creates
         let existing = candidate.numbering.as_ref().and_then(|numbering| {
             numbering.nums.iter().find(|n| {
                 numbering
                     .get_abstract_num_for(n.num_id)
-                    .map(|a| {
-                        a.levels.first().and_then(|l| l.num_fmt.as_ref())
-                            == Some(&rdocx_oxml::numbering::ST_NumberFormat::Decimal)
-                    })
-                    .unwrap_or(false)
+                    .is_some_and(|definition| is_default_list_definition(definition, false))
             })
         });
         let num_id = if let Some(existing) = existing {
@@ -23055,6 +23077,87 @@ impl Document {
             new_link.as_deref(),
         );
         style::validate_style_graph_change(&self.styles, &candidate.styles)?;
+        candidate.invalidate_layout();
+        self.commit_staged_mutation(candidate);
+        Ok(())
+    }
+
+    /// Get the document default font name, the `w:ascii` slot of
+    /// `w:docDefaults/w:rPrDefault`.
+    pub fn default_font_name(&self) -> Option<&str> {
+        self.styles
+            .doc_defaults
+            .as_ref()?
+            .rpr
+            .as_ref()?
+            .font_ascii
+            .as_deref()
+    }
+
+    /// Get the document default font size in points, from
+    /// `w:docDefaults/w:rPrDefault`.
+    pub fn default_font_size(&self) -> Option<f64> {
+        self.styles
+            .doc_defaults
+            .as_ref()?
+            .rpr
+            .as_ref()?
+            .sz
+            .map(rdocx_oxml::units::HalfPoint::to_pt)
+    }
+
+    /// Set or clear the document default font name in `w:docDefaults`.
+    ///
+    /// As [`Run::set_font_value`](crate::Run::set_font_value) does, this
+    /// writes all four `w:rFonts` slots and clears the theme fonts, which Word
+    /// would otherwise resolve in preference to the name.
+    pub fn set_default_font_value(&mut self, name: Option<&str>) -> Result<()> {
+        self.edit_default_run_properties(|rpr| {
+            for slot in [
+                &mut rpr.font_ascii,
+                &mut rpr.font_hansi,
+                &mut rpr.font_east_asia,
+                &mut rpr.font_cs,
+            ] {
+                *slot = name.map(str::to_owned);
+            }
+            rpr.font_ascii_theme = None;
+            rpr.font_hansi_theme = None;
+            rpr.font_east_asia_theme = None;
+            rpr.font_cs_theme = None;
+        })
+    }
+
+    /// Set or clear the document default font size in points in
+    /// `w:docDefaults`, writing `w:sz` and `w:szCs`.
+    pub fn set_default_font_size_value(&mut self, pt: Option<f64>) -> Result<()> {
+        if pt.is_some_and(|pt| !pt.is_finite() || pt <= 0.0) {
+            return Err(Error::Other(
+                "a default font size must be a positive number of points".to_owned(),
+            ));
+        }
+        let size = pt.map(rdocx_oxml::units::HalfPoint::from_pt);
+        self.edit_default_run_properties(|rpr| {
+            rpr.sz = size;
+            rpr.sz_cs = size;
+        })
+    }
+
+    fn edit_default_run_properties(&mut self, edit: impl FnOnce(&mut CT_RPr)) -> Result<()> {
+        let mut candidate = self.clone_for_staging();
+        candidate.reserve_styles_bundle()?;
+        let defaults = candidate
+            .styles
+            .doc_defaults
+            .get_or_insert_with(Default::default);
+        edit(defaults.rpr.get_or_insert_with(CT_RPr::default));
+        if defaults
+            .rpr
+            .as_ref()
+            .is_some_and(|rpr| rpr == &CT_RPr::default())
+        {
+            defaults.rpr = None;
+        }
         candidate.invalidate_layout();
         self.commit_staged_mutation(candidate);
         Ok(())
@@ -30975,6 +31078,54 @@ mod tests {
     use std::fs;
     use std::io::Cursor;
     use std::process::Command;
+
+    #[test]
+    fn list_item_helpers_ignore_custom_bullet_and_numbered_definitions() {
+        let mut document = Document::new();
+        let checklist = document.add_list_definition(&[ListLevel::bullet().level_text("\u{2610}")]);
+        let roman = document
+            .add_list_definition(&[ListLevel::new(ListNumberFormat::from_name("upperRoman"))]);
+        assert!(!document.is_default_list_instance(checklist, true));
+        assert!(!document.is_default_list_instance(roman, false));
+
+        document.add_bullet_list_item("plain", 0);
+        document.add_numbered_list_item("step", 0);
+        let count = document.paragraph_count();
+        let bullet = document
+            .paragraph(count - 2)
+            .unwrap()
+            .numbering()
+            .unwrap()
+            .0;
+        let numbered = document
+            .paragraph(count - 1)
+            .unwrap()
+            .numbering()
+            .unwrap()
+            .0;
+        assert!(bullet != checklist && document.is_default_list_instance(bullet, true));
+        assert!(numbered != roman && document.is_default_list_instance(numbered, false));
+    }
+
+    #[test]
+    fn default_font_is_written_to_doc_defaults_and_cleared() {
+        let mut document = Document::new();
+        document.set_default_font_value(Some("Calibri")).unwrap();
+        document.set_default_font_size_value(Some(11.0)).unwrap();
+        assert!(document.set_default_font_size_value(Some(0.0)).is_err());
+        let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.default_font_name(), Some("Calibri"));
+        assert_eq!(reopened.default_font_size(), Some(11.0));
+        let defaults = reopened.styles.doc_defaults.as_ref().unwrap();
+        let rpr = defaults.rpr.as_ref().unwrap();
+        assert_eq!(rpr.font_east_asia.as_deref(), Some("Calibri"));
+        assert_eq!(rpr.font_ascii_theme, None);
+
+        document.set_default_font_value(None).unwrap();
+        document.set_default_font_size_value(None).unwrap();
+        assert_eq!(document.default_font_name(), None);
+        assert_eq!(document.default_font_size(), None);
+    }
 
     const WORD_VERSION: &str = "16.104";
     const WORD_BUILD: &str = "16.104.25121423";

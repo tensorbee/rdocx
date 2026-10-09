@@ -395,6 +395,27 @@ fn raw_is_last_rendered_page_break(raw_xml: &[u8]) -> bool {
     local == NAME
 }
 
+/// Vertical alignment of run text, written to `w:vertAlign`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunVerticalAlignment {
+    /// Text on the baseline, `baseline`.
+    Baseline,
+    /// Raised and smaller text, `superscript`.
+    Superscript,
+    /// Lowered and smaller text, `subscript`.
+    Subscript,
+}
+
+impl RunVerticalAlignment {
+    fn to_str(self) -> &'static str {
+        match self {
+            Self::Baseline => "baseline",
+            Self::Superscript => "superscript",
+            Self::Subscript => "subscript",
+        }
+    }
+}
+
 /// Underline style for runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnderlineStyle {
@@ -855,6 +876,11 @@ impl<'a> Run<'a> {
         self.ensure_rpr().dstrike = Some(val);
     }
 
+    /// Set or clear direct double strikethrough in place.
+    pub fn set_double_strike_value(&mut self, val: Option<bool>) {
+        self.set_toggle(val, |rpr| &mut rpr.dstrike);
+    }
+
     /// Set all caps.
     pub fn all_caps(mut self, val: bool) -> Self {
         self.set_all_caps(val);
@@ -866,6 +892,11 @@ impl<'a> Run<'a> {
         self.ensure_rpr().caps = Some(val);
     }
 
+    /// Set or clear direct all caps in place.
+    pub fn set_all_caps_value(&mut self, val: Option<bool>) {
+        self.set_toggle(val, |rpr| &mut rpr.caps);
+    }
+
     /// Set small caps.
     pub fn small_caps(mut self, val: bool) -> Self {
         self.set_small_caps(val);
@@ -875,6 +906,11 @@ impl<'a> Run<'a> {
     /// Set small caps in place.
     pub fn set_small_caps(&mut self, val: bool) {
         self.ensure_rpr().small_caps = Some(val);
+    }
+
+    /// Set or clear direct small caps in place.
+    pub fn set_small_caps_value(&mut self, val: Option<bool>) {
+        self.set_toggle(val, |rpr| &mut rpr.small_caps);
     }
 
     /// Set superscript.
@@ -899,6 +935,14 @@ impl<'a> Run<'a> {
         self.ensure_rpr().vert_align = Some("subscript".to_string());
     }
 
+    /// Set or clear the direct vertical alignment, `w:vertAlign`, in place.
+    pub fn set_vertical_alignment_value(&mut self, value: Option<RunVerticalAlignment>) {
+        if value.is_none() && self.inner.properties.is_none() {
+            return;
+        }
+        self.ensure_rpr().vert_align = value.map(|value| value.to_str().to_owned());
+    }
+
     /// Set character spacing (positive = expanded, negative = condensed).
     pub fn character_spacing(mut self, spacing: Length) -> Self {
         self.set_character_spacing(spacing);
@@ -908,6 +952,14 @@ impl<'a> Run<'a> {
     /// Set character spacing in place.
     pub fn set_character_spacing(&mut self, spacing: Length) {
         self.ensure_rpr().spacing = Some(spacing.as_twips());
+    }
+
+    /// Set or clear direct character spacing in place.
+    pub fn set_character_spacing_value(&mut self, spacing: Option<Length>) {
+        if spacing.is_none() && self.inner.properties.is_none() {
+            return;
+        }
+        self.ensure_rpr().spacing = spacing.map(Length::as_twips);
     }
 
     /// Set character width scale in percent (100 = normal).
@@ -941,6 +993,11 @@ impl<'a> Run<'a> {
     /// Set hidden/vanish text in place.
     pub fn set_hidden(&mut self, val: bool) {
         self.ensure_rpr().vanish = Some(val);
+    }
+
+    /// Set or clear direct hidden text, `w:vanish`, in place.
+    pub fn set_hidden_value(&mut self, val: Option<bool>) {
+        self.set_toggle(val, |rpr| &mut rpr.vanish);
     }
 
     /// Set the character style by ID.
@@ -1366,6 +1423,29 @@ impl<'a> RunRef<'a> {
             .and_then(|rpr| rpr.vert_align.as_deref())
     }
 
+    /// Get direct double strikethrough without collapsing inheritance.
+    pub fn double_strike_value(&self) -> Option<bool> {
+        self.inner.properties.as_ref().and_then(|rpr| rpr.dstrike)
+    }
+
+    /// Get direct all caps without collapsing inheritance.
+    pub fn all_caps_value(&self) -> Option<bool> {
+        self.inner.properties.as_ref().and_then(|rpr| rpr.caps)
+    }
+
+    /// Get direct small caps without collapsing inheritance.
+    pub fn small_caps_value(&self) -> Option<bool> {
+        self.inner
+            .properties
+            .as_ref()
+            .and_then(|rpr| rpr.small_caps)
+    }
+
+    /// Get direct hidden text, `w:vanish`, without collapsing inheritance.
+    pub fn hidden_value(&self) -> Option<bool> {
+        self.inner.properties.as_ref().and_then(|rpr| rpr.vanish)
+    }
+
     /// Get the character style ID, if set.
     pub fn style_id(&self) -> Option<&str> {
         self.inner
@@ -1531,6 +1611,38 @@ mod tests {
     use super::*;
     use rdocx_oxml::CT_Document;
     use rdocx_oxml::document::BodyContent;
+
+    #[test]
+    fn clearable_effect_setters_write_false_and_remove_only_their_element() {
+        let mut inner = CT_R::new("text");
+        let mut run = Run { inner: &mut inner };
+        run.set_all_caps_value(None);
+        run.set_vertical_alignment_value(None);
+        run.set_character_spacing_value(None);
+        assert!(run.inner.properties.is_none());
+
+        run.set_all_caps_value(Some(false));
+        run.set_small_caps_value(Some(true));
+        run.set_double_strike_value(Some(true));
+        run.set_hidden_value(Some(false));
+        run.set_vertical_alignment_value(Some(RunVerticalAlignment::Superscript));
+        run.set_character_spacing_value(Some(Length::pt(2.0)));
+        let reader = RunRef { inner: run.inner };
+        assert_eq!(reader.all_caps_value(), Some(false));
+        assert_eq!(reader.small_caps_value(), Some(true));
+        assert_eq!(reader.double_strike_value(), Some(true));
+        assert_eq!(reader.hidden_value(), Some(false));
+        assert_eq!(reader.vert_align(), Some("superscript"));
+        assert_eq!(reader.character_spacing(), Some(Twips(40)));
+
+        let mut run = Run { inner: &mut inner };
+        run.set_small_caps_value(None);
+        run.set_vertical_alignment_value(Some(RunVerticalAlignment::Baseline));
+        let reader = RunRef { inner: &inner };
+        assert_eq!(reader.small_caps_value(), None);
+        assert_eq!(reader.double_strike_value(), Some(true));
+        assert_eq!(reader.vert_align(), Some("baseline"));
+    }
 
     #[test]
     fn ct_r_public_struct_literal_keeps_its_existing_shape() {

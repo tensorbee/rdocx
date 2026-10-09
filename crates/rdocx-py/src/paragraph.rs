@@ -8,7 +8,7 @@ use crate::document::PyDocument;
 use crate::run::{PyRun, PyRunCollection};
 use crate::{normalize_index, stale_to_pyerr};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ParagraphLocation {
     Body(usize),
     Cell {

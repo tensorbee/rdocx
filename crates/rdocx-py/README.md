@@ -54,11 +54,19 @@ with open("report.pdf", "wb") as output:
   the document defines.
 - New documents with Word's usual styles, such as `Heading 2`, `Title`,
   `List Paragraph`, `Caption`, and `Table Grid`.
-- Style creation with a font, spacing, and indentation through
-  `Document.add_style`, checked updates through `Document.set_style`, plus
-  style removal and default selection.
-- Numbering definitions and instances built from `ListLevel` values, and
-  paragraph styles linked to a numbering level.
+- Run effects under python-docx's names, such as `font.superscript`,
+  `font.small_caps` and `font.hidden`, plus character spacing, languages and
+  the East Asian and complex-script font slots.
+- Paragraph tab stops through python-docx's `paragraph_format.tab_stops`, and
+  borders, shading, outline level and right-to-left direction.
+- Style creation with a font, underline, alignment, spacing, indentation,
+  keeps, borders, shading and tab stops through `Document.add_style`, checked
+  updates through `Document.set_style`, the document default font in
+  `w:docDefaults`, plus style removal and default selection.
+- One-call bullet and numbered list items that continue the current list,
+  restarts with `w:startOverride` through `Document.restart_numbering`,
+  numbering definitions and instances built from `ListLevel` values, checklist
+  glyphs, and paragraph styles linked to a numbering level.
 - Core document properties such as title, author, and revision, read and
   written through `Document.core_properties` under python-docx's names.
 - Picture replacement and resizing by image relationship.

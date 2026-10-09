@@ -2102,6 +2102,42 @@ impl<'a> Paragraph<'a> {
         true
     }
 
+    /// Insert one tab stop at `index`, keeping the order of the rest.
+    ///
+    /// Returns `false` without mutation when `index` is past the last tab
+    /// stop. Index zero on a paragraph without tab stops creates `w:tabs`.
+    pub fn insert_tab_stop(
+        &mut self,
+        index: usize,
+        alignment: TabAlignment,
+        position: Length,
+        leader: Option<TabLeader>,
+    ) -> bool {
+        let count = self
+            .inner
+            .properties
+            .as_ref()
+            .and_then(|ppr| ppr.tabs.as_ref())
+            .map_or(0, |tabs| tabs.tabs.len());
+        if index > count {
+            return false;
+        }
+        let tabs = self
+            .ensure_ppr()
+            .tabs
+            .get_or_insert_with(|| CT_Tabs { tabs: Vec::new() });
+        tabs.tabs.insert(
+            index,
+            CT_TabStop {
+                val: alignment.to_st(),
+                pos: position.as_twips(),
+                leader: leader.map(TabLeader::to_st),
+                source_occurrence: None,
+            },
+        );
+        true
+    }
+
     /// Remove one tab stop by index, keeping the order of the rest.
     ///
     /// Returns `false` without mutation when the index is out of range.
@@ -3239,6 +3275,35 @@ impl<'a> ParagraphRef<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn insert_tab_stop_keeps_order_and_rejects_a_gap() {
+        let mut inner = CT_P::new();
+        let mut paragraph = Paragraph { inner: &mut inner };
+        assert!(!paragraph.insert_tab_stop(1, TabAlignment::Left, Length::twips(720), None));
+        assert!(paragraph.insert_tab_stop(0, TabAlignment::Right, Length::twips(2880), None));
+        assert!(paragraph.insert_tab_stop(
+            0,
+            TabAlignment::Center,
+            Length::twips(1440),
+            Some(TabLeader::Dot)
+        ));
+        let reader = ParagraphRef { inner: &inner };
+        assert_eq!(reader.tab_stop_count(), 2);
+        let first = reader.tab_stop(0).unwrap();
+        assert_eq!(
+            (first.alignment(), first.position(), first.leader()),
+            (
+                Some(TabAlignment::Center),
+                Length::twips(1440),
+                Some(TabLeader::Dot)
+            )
+        );
+        assert_eq!(
+            reader.tab_stop(1).unwrap().alignment(),
+            Some(TabAlignment::Right)
+        );
+    }
 
     #[test]
     fn hyperlink_reader_exposes_modeled_and_unmodeled_attributes() {

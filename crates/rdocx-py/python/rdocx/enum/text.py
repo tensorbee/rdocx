@@ -27,4 +27,22 @@ class WD_UNDERLINE(IntEnum):
     WAVY = 11
 
 
-__all__ = ["WD_ALIGN_PARAGRAPH", "WD_UNDERLINE"]
+class WD_TAB_ALIGNMENT(IntEnum):
+    """Tab stop alignments supported by the rdocx paragraph facade."""
+
+    LEFT = 0
+    CENTER = 1
+    RIGHT = 2
+    DECIMAL = 3
+
+
+class WD_TAB_LEADER(IntEnum):
+    """Tab leader characters supported by the rdocx paragraph facade."""
+
+    SPACES = 0
+    DOTS = 1
+    DASHES = 2
+    LINES = 3
+
+
+__all__ = ["WD_ALIGN_PARAGRAPH", "WD_TAB_ALIGNMENT", "WD_TAB_LEADER", "WD_UNDERLINE"]
