@@ -602,6 +602,53 @@ fn pdf_import_differential_rejects_geometry_text_link_and_pixel_perturbations() 
     ));
 }
 
+/// A deck set in Aptos, which has no metric-compatible open face, is drawn
+/// with Carlito and says so in its layout diagnostics.
+#[test]
+#[cfg(feature = "render")]
+fn aptos_text_reports_its_fallback_face_in_the_render_diagnostics() {
+    let mut source = Presentation::new().unwrap();
+    source.add_slide(0).unwrap();
+    source
+        .slide_mut(0)
+        .unwrap()
+        .add_textbox(Emu(457_200), Emu(914_400), Emu(8_229_600), Emu(914_400))
+        .unwrap()
+        .set_text("Aptos body")
+        .unwrap();
+    let message = "font `Aptos` has no metric-compatible substitute and is drawn with `Carlito`, so its lines can break differently from Office";
+    let (_, calibri) = source.render_deterministic().unwrap();
+    assert!(
+        calibri
+            .diagnostics
+            .iter()
+            .all(|diagnostic| !diagnostic.message.contains("Aptos"))
+    );
+
+    let mut package = open_opc(&source.to_bytes().unwrap(), "Aptos deck");
+    let theme = "/ppt/theme/theme1.xml";
+    let xml = String::from_utf8(package.get_part(theme).unwrap().to_vec()).unwrap();
+    assert!(xml.contains(r#"<a:latin typeface="Calibri""#));
+    package.set_part(
+        theme,
+        xml.replace(
+            r#"<a:latin typeface="Calibri""#,
+            r#"<a:latin typeface="Aptos""#,
+        )
+        .into_bytes(),
+    );
+    let presentation = Presentation::from_bytes(&package_bytes(package)).unwrap();
+    let (_, layout) = presentation.render_deterministic().unwrap();
+    assert!(
+        layout
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == message),
+        "{:?}",
+        layout.diagnostics
+    );
+}
+
 /// GitHub issue #171. Without an inherited `rtl` a paragraph draws its Latin
 /// text as plain runs, which carry no shaping clusters, so a Carlito ligature
 /// reaches the PDF text layer only through the ToUnicode map.

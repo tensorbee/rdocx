@@ -585,6 +585,17 @@ its own rule, at-least spacing takes the greater of the value and this single
 height, and a paragraph re-broken around a floating object is measured again
 the same way.
 
+A family that is not installed resolves through `map_font_name` to a bundled
+metric-compatible face: Carlito for Calibri, Caladea for Cambria, Liberation
+Sans, Serif and Mono for Arial, Times New Roman and Courier New, Gelasio for
+Georgia and Selawik for Segoe UI. Gelasio and Selawik match every printable
+ASCII advance of the face they replace to within one unit in 2048, and the
+bundled Gelasio carries Georgia's line metrics. Selawik has no italic, so an
+italic Segoe UI run falls through to Carlito Italic. Aptos, Office's default
+since 2024, has no open face with its widths. It falls back to Carlito, about
+5% narrower, and every layout that draws it so carries a diagnostic naming the
+requested and the drawn family.
+
 Producer-written fractional paragraph line spacing enters layout only after
 exact normalization to its nearest integer twip, so it produces the same
 geometry and raster bytes as that canonical integer input.
@@ -667,6 +678,18 @@ uses a visible `arabicPeriod` marker.
 The Wingdings trap is handled before font resolution. `a:buChar` U+F0B7 maps
 to the visible Unicode bullet U+2022 instead of passing through the Wingdings
 to Symbol alias as a private-use codepoint.
+
+Symbol and Wingdings bullets go through `FontManager::symbol_font_text` before
+resolution, in both renderers: an `a:buChar` whose `a:buFont` is one of them,
+a Word numbering marker whose run font is one of them, and a `w:sym` naming
+one. Word writes the font's code in the U+F020 to U+F0FF private-use block and
+PowerPoint as the Latin-1 character. When the resolved face maps the
+private-use character, in a Unicode cmap or in the Windows Symbol (3, 0)
+subtable that the real Symbol and Wingdings use, that form is kept and the
+shaper draws the font's own glyph. Otherwise the common bullet codes take their Unicode equivalents, such as
+Symbol B7 to U+2022, Wingdings A7 to U+25AA, D8 to U+27A2, FC to U+2713 and 76
+to U+2756, which the bundled Latin faces or the bundled Noto Sans Symbols 2
+subset draw. A code outside that table keeps its character.
 
 A Word `w:sym` carries the symbol font's own code point, usually in the F020 to
 F0FF private-use block. The renderer resolves the font named on the element

@@ -81,7 +81,16 @@ impl NumberingState {
                 size,
             }) => {
                 self.levels[level] = None;
-                (map_bullet_characters(character), font, color, size)
+                // A Symbol or Wingdings bullet becomes its Unicode equivalent
+                // when that font is absent.
+                let style = first_run_style(paragraph);
+                let character = font_manager.symbol_font_text(
+                    font.as_deref(),
+                    style.bold,
+                    style.italic,
+                    character,
+                );
+                (map_bullet_characters(&character), font, color, size)
             }
             Some(ResolvedBullet::AutoNumber {
                 scheme,
@@ -3069,6 +3078,38 @@ mod tests {
 
         assert_eq!(runs[0].text, "\u{2022}");
         assert!(runs[0].glyph_ids.iter().all(|glyph| *glyph != 0));
+    }
+
+    #[test]
+    fn powerpoint_wingdings_bullets_render_their_unicode_glyphs() {
+        // PowerPoint stores a Wingdings bullet as the Latin-1 character.
+        for (character, expected) in [
+            ("\u{a7}", "\u{25aa}"),
+            ("\u{d8}", "\u{27a2}"),
+            ("\u{fc}", "\u{2713}"),
+            ("v", "\u{2756}"),
+        ] {
+            let body = ResolvedTextBody {
+                paragraphs: vec![bullet_paragraph(
+                    0,
+                    Some(ResolvedBullet::Character {
+                        character: character.to_owned(),
+                        font: Some("Wingdings".to_owned()),
+                        color: None,
+                        size: None,
+                    }),
+                    "visible",
+                )],
+                ..text_body(TextInsets::default())
+            };
+            let mut fonts = FontManager::new_deterministic().expect("deterministic fonts");
+            let stacked = stack_text(&mut fonts, test_content_box(120.0), &body)
+                .expect("stack character bullet");
+            let runs = glyph_runs(&stacked.elements);
+
+            assert_eq!(runs[0].text, expected);
+            assert!(runs[0].glyph_ids.iter().all(|glyph| *glyph != 0));
+        }
     }
 
     #[test]

@@ -3,7 +3,8 @@ Font License 1.1 in LICENSE-Noto.
 
 Upstream project: https://github.com/google/fonts
 Upstream revision: main, retrieved 2026-08-26, and retrieved 2026-09-19 for the
-three F-266a subsets
+three F-266a subsets, and main at 51303ca9e8ac9dcea7b12d307ba568fd0e6fcfca,
+retrieved 2026-10-09, for the Noto Sans Symbols 2 bullet subset
 
 Source file SHA-256 values:
 
@@ -14,8 +15,10 @@ Source file SHA-256 values:
 - NotoSansHebrew[wdth,wght].ttf: 7ef36a2c3593758cdb622e1bdef4f84523e92fbc3ccc667438dd80ff54c2de88
 - NotoSansKR[wght].ttf: 194018e6b2b293a7964f037b25c0249ce1418bc9ab3c971060a03aa57861e252
 - NotoSansJP[wght].ttf: c2f3b4d463500a2ddcd3849cded1fceeb9fd6d1c32e6cbecd568453ba50fc68f
+- NotoSansSymbols2-Regular.ttf: 7d5fb73b7ca67a6798101741f5d280a3d016a56a197afcd4199dbb57b4b82a21
 
-The Noto Sans SC, Noto Sans Hebrew, Noto Sans KR and Noto Sans JP files in this
-package are deterministic subsets. Their exact reproduction commands and
-repertoires are recorded in SUBSET-NotoSansSC.md, SUBSET-NotoSansHebrew.md,
-SUBSET-NotoSansKR.md and SUBSET-NotoSansJP.md.
+The Noto Sans SC, Noto Sans Hebrew, Noto Sans KR, Noto Sans JP and Noto Sans
+Symbols 2 files in this package are deterministic subsets. Their exact
+reproduction commands and repertoires are recorded in SUBSET-NotoSansSC.md,
+SUBSET-NotoSansHebrew.md, SUBSET-NotoSansKR.md, SUBSET-NotoSansJP.md and
+SUBSET-NotoSansSymbols2.md.

@@ -1,0 +1,38 @@
+Gelasio font family
+Copyright 2022 The Gelasio Project Authors (https://github.com/SorkinType/Gelasio)
+
+Licensed under the SIL Open Font License, Version 1.1. See LICENSE-Gelasio.
+Gelasio declares no Reserved Font Name.
+
+Upstream project: https://github.com/SorkinType/Gelasio, the upstream of
+ofl/gelasio in https://github.com/google/fonts
+Upstream revision: main at 7ab20e7e5c42791e603b9ee3201a0b49849cfdb2, retrieved
+2026-10-09, files fonts/ttf/Gelasio-{Regular,Bold,Italic,BoldItalic}.ttf
+(Version 1.008)
+
+Source file SHA-256 values:
+
+- Gelasio-Regular.ttf: 48c797fbe0e07c48a18cb962e7bdfa23f19618327dddf54093265328dc9eb39d
+- Gelasio-Bold.ttf: e0ef3addf1acf35f5c6aef2be00d0a2c01363bf70a5950e16650976051a0c462
+- Gelasio-Italic.ttf: 1d8bda4ff258bb8251eae4f7d7500c8d97d084136192bb264bc2305168765d1b
+- Gelasio-BoldItalic.ttf: aa87e21b46aef3dcb50a68dc6e1946f0c0a9819d067e4be6a98a6daa8f5b3c16
+
+Modification: Gelasio matches the advance widths of Georgia but not its line
+metrics, so each bundled face carries Georgia's vertical metrics instead of its
+own. Outlines, advances, kerning and names are unchanged. With FontTools
+4.66.1, for each face:
+
+    font = TTFont(source, recalcBBoxes=False, recalcTimestamp=False)
+    os2, hhea = font["OS/2"], font["hhea"]
+    os2.usWinAscent, os2.usWinDescent = 1878, 449
+    os2.sTypoAscender, os2.sTypoDescender, os2.sTypoLineGap = 1549, -444, 198
+    os2.fsSelection &= ~(1 << 7)
+    hhea.ascent, hhea.descent, hhea.lineGap = 1878, -449, 0
+    font.save(output)
+
+Output file SHA-256 values:
+
+- Gelasio-Regular.ttf: eb6a99b7c936704cd1f99b0174ed1fa0a8ed03d3ce0d8eca69e81d53c109dc72
+- Gelasio-Bold.ttf: 8e26a6be5875e917a0cb34cae6629686f955418a6e7e333ddc224a117cf308fe
+- Gelasio-Italic.ttf: 030178ec1418966cf4edcd8eff948315b8fe7507e79f60e9c3120b7af7ea75f3
+- Gelasio-BoldItalic.ttf: ae23aa0e0ff13cd630d1fe78ed40211d02516cbbc6cd8bc4d3dee98cb8f1bf3a

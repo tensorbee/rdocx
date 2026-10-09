@@ -1,0 +1,19 @@
+Selawik font family
+Copyright 2015, Microsoft Corporation (www.microsoft.com), with Reserved Font
+Name Selawik. Selawik is a trademark of Microsoft Corporation.
+
+Licensed under the SIL Open Font License, Version 1.1. See LICENSE-Selawik.
+The two faces are shipped unmodified, only renamed.
+
+Upstream project: https://github.com/microsoft/Selawik
+Upstream release: 1.01, asset Selawik_Release.zip, retrieved 2026-10-09
+Release archive SHA-256:
+3f62c51e05e3b5a1e6241cf92a371f0be2ea1183aa87b30718bbd40832a8d423
+
+- selawk.ttf, shipped as Selawik-Regular.ttf:
+  e9d98518d8ac2817782a9a382430463a2e0793ea68350b695bb727d9a830ee1c
+- selawkb.ttf, shipped as Selawik-Bold.ttf:
+  f0db5e174a90e0956ad7d2844bdca1d5e6da92ec65b2c04e57ba9b180668c904
+
+Selawik has no italic face, so an italic Segoe UI run falls back to Carlito
+Italic.

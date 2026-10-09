@@ -7,7 +7,12 @@ raster rendering.
 
 - Page frames with positioned text, images, lines, rectangles, and paths.
 - Transforms, paints, effects, links, outlines, and logical structure.
-- Font discovery, shaping, metrics, and deterministic bundled fonts.
+- Font discovery, shaping, metrics, and deterministic bundled fonts:
+  metric-compatible faces for Calibri, Cambria, Arial, Times New Roman,
+  Courier New, Georgia (Gelasio) and Segoe UI (Selawik), Noto complex-script
+  fallbacks, and the Unicode equivalents of Symbol and Wingdings bullets.
+  Aptos has no open clone and falls back to Carlito, which layout
+  diagnostics report.
 - Multilingual line breaking, bidirectional text, tabs, and inline items.
 - Recursive groups, marked content, transforms, source ranges, and logical
   structure give downstream backends one complete positioned-page contract.
@@ -18,7 +23,7 @@ The archive row is regenerated from the complete published package that carries 
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: oxml-layout | 4,634,513 compressed bytes, 9,271,100 member bytes, 51 members | 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --no-verify` | Tracked `oxml-layout` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-09 |
+| Crates.io archive: oxml-layout | 5,009,157 compressed bytes, 10,018,817 member bytes, 63 members | 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --no-verify` | Tracked `oxml-layout` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-09 |
 
 ## Use it when
 

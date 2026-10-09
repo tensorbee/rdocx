@@ -290,11 +290,11 @@ include = [
 ```
 
 The dedicated package CI job compares `cargo package -p oxml-layout --list`
-against all 27 TTFs, the four family licence files, the Caladea and Noto
-notices. The manifest also includes the Simplified Chinese, Hebrew, Korean and
-Japanese subset records. The job then runs verified packaging without
-`--no-verify` and rejects a missing archive or one larger than the crates.io
-10 MiB limit. `oxml-layout` is a published 0.1.2 package, while the release
+against all 34 TTFs, the six family licence files, the Caladea, Gelasio, Noto
+and Selawik notices. The manifest also includes the Simplified Chinese,
+Hebrew, Korean, Japanese and Symbols 2 subset records. The job then runs
+verified packaging without `--no-verify` and rejects a missing archive or one
+larger than the crates.io 10 MiB limit. `oxml-layout` is a published 0.1.2 package, while the release
 workflow remains the authority for every later publication.
 
 The external PowerPoint and Word corpora remain outside every published crate
@@ -305,7 +305,7 @@ licence URL.
 
 Oracle-only fonts under `scripts/oracle-fonts/` are test infrastructure. They
 are absent from every crate include list and generated archive. The static CJK
-fixture therefore changes neither the 24-font `oxml-layout` package inventory
+fixture therefore changes neither the 34-font `oxml-layout` package inventory
 nor its archive size contract.
 
 Caller-authorized embedded fonts are runtime document parts, not workspace
@@ -490,7 +490,7 @@ All third-party actions are pinned to reviewed full commit SHAs. The CLI
 manifest cargo-binstall URLs point to these same family tags and archives.
 
 The generated archives remain subject to the crates.io 10 MiB ceiling.
-`oxml-layout` contains all 27 bundled fonts and their required legal files, and
+`oxml-layout` contains all 34 bundled fonts and their required legal files, and
 `rpptx` contains `assets/default.pptx`. No binding or WASM package is in either
 crates.io allowlist.
 
@@ -727,7 +727,7 @@ disposable pull requests are closed and unmerged. Their verified remote head
 refs were deleted and are absent. Their disposable worktrees and local branches
 were removed cleanly.
 
-**A dedicated `oxml-layout` package job.** It checks the exact 24-font and six
+**A dedicated `oxml-layout` package job.** It checks the exact 34-font and ten
 licence-and-notice-file inventory, builds and verifies the generated archive,
 and enforces the crates.io 10 MiB limit.
 

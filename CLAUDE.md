@@ -41,7 +41,7 @@ Read `docs/hld/00-vision.md` first, then `03-architecture.md`.
 | `crates/oxml-*` | Format-neutral infrastructure. **Must not depend on `rdocx-*` or `rpptx-*`.** No exceptions: the `Theme` adapter lives in `rdocx-oxml`, so that edge runs `rdocx-oxml -> oxml-drawing` |
 | `crates/rdocx-*` | WordprocessingML. `rdocx-oxml` holds the `w:` types, `rdocx-layout` the flow engine and paginator, `rdocx` the facade |
 | `crates/rpptx-*` | PresentationML. `rpptx-oxml` the `p:` types, `rpptx-layout` the inheritance resolver, `rpptx-render` the slide renderer, `rpptx` the facade |
-| `crates/oxml-layout/fonts/` | 27 bundled TTFs compiled unconditionally. The optional `system-fonts` feature adds host discovery. Every family needs a licence file |
+| `crates/oxml-layout/fonts/` | 34 bundled TTFs compiled unconditionally. The optional `system-fonts` feature adds host discovery. Every family needs a licence file |
 | `crates/rpptx/assets/` | The bundled `default.pptx`. **Must live under the crate directory** or it is not in the published tarball |
 | `docs/hld/` | The spec set, 00 to 15. Precedence rule in `docs/hld/README.md` |
 | `docs/sprints/` | BACKLOG, SPRINT_PLAN, CURRENT_SPRINT, SPRINT_TRACKER, AS_BUILT |

@@ -572,6 +572,10 @@ jobs:
             fonts/Carlito-BoldItalic.ttf \
             fonts/Carlito-Italic.ttf \
             fonts/Carlito-Regular.ttf \
+            fonts/Gelasio-Bold.ttf \
+            fonts/Gelasio-BoldItalic.ttf \
+            fonts/Gelasio-Italic.ttf \
+            fonts/Gelasio-Regular.ttf \
             fonts/LiberationMono-Bold.ttf \
             fonts/LiberationMono-BoldItalic.ttf \
             fonts/LiberationMono-Italic.ttf \
@@ -590,7 +594,10 @@ jobs:
             fonts/NotoSansJP-F266a-subset.ttf \
             fonts/NotoSansKR-F266a-subset.ttf \
             fonts/NotoSansSC-FX058-subset.ttf \
-            fonts/NotoSansThai.ttf)"
+            fonts/NotoSansSymbols2-bullets-subset.ttf \
+            fonts/NotoSansThai.ttf \
+            fonts/Selawik-Bold.ttf \
+            fonts/Selawik-Regular.ttf)"
           diff -u \
             <(printf '%s\n' "$expected_fonts") \
             <(printf '%s\n' "$packaged_fonts")
@@ -603,10 +610,14 @@ jobs:
           expected_legal="$(printf '%s\n' \
             fonts/LICENSE-Caladea \
             fonts/LICENSE-Carlito \
+            fonts/LICENSE-Gelasio \
             fonts/LICENSE-Liberation \
             fonts/LICENSE-Noto \
+            fonts/LICENSE-Selawik \
             fonts/NOTICE-Caladea \
-            fonts/NOTICE-Noto)"
+            fonts/NOTICE-Gelasio \
+            fonts/NOTICE-Noto \
+            fonts/NOTICE-Selawik)"
           diff -u \
             <(printf '%s\n' "$expected_legal") \
             <(printf '%s\n' "$packaged_legal")

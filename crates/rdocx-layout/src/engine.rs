@@ -5048,6 +5048,12 @@ impl Engine {
             self.last_restart_identity_memo_peak_bytes = restart_identity_memo.peak_retained_bytes;
         }
         drop(restart_identity_memo);
+        diagnostics.extend(
+            self.font_manager
+                .substitution_diagnostics()
+                .into_iter()
+                .map(|message| Diagnostic { message }),
+        );
         let mut result = LayoutResult::new(pages, fonts, metadata, outlines);
         result.diagnostics = diagnostics;
         result.structure = Some(structure);
@@ -8796,14 +8802,21 @@ fn layout_paragraph_with_source_and_table(
             let marker_italic = marker_rpr.italic.unwrap_or(false);
             let marker_font_family = marker_rpr.font_ascii.as_deref();
 
-            // Bullet glyphs are not in every font either, so the marker gets
-            // the same coverage check as body text.
-            if let Ok(font_id) = fm.resolve_font_for_text(
+            // A Symbol or Wingdings bullet becomes its Unicode equivalent when
+            // that font is absent. Bullet glyphs are not in every font either,
+            // so the marker gets the same coverage check as body text.
+            let marker_text = fm.symbol_font_text(
                 marker_font_family,
                 marker_bold,
                 marker_italic,
                 &marker.marker_text,
-            ) && let Ok(shaped) = fm.shape_text(font_id, &marker.marker_text, marker_font_size)
+            );
+            if let Ok(font_id) = fm.resolve_font_for_text(
+                marker_font_family,
+                marker_bold,
+                marker_italic,
+                &marker_text,
+            ) && let Ok(shaped) = fm.shape_text(font_id, &marker_text, marker_font_size)
             {
                 let metrics = fm.metrics(font_id, marker_font_size)?;
                 let color = marker_rpr
@@ -8813,7 +8826,7 @@ fn layout_paragraph_with_source_and_table(
                     .unwrap_or(Color::BLACK);
 
                 inline_items.push(InlineItem::Marker(TextSegment {
-                    text: marker.marker_text,
+                    text: marker_text,
                     direction: TextDirection::Auto,
                     source: None,
                     font_id,
@@ -9652,7 +9665,8 @@ fn layout_paragraph_with_source_and_table(
                     let Some(symbol) = char::from_u32(u32::from(*char_code)) else {
                         continue;
                     };
-                    let text = symbol.to_string();
+                    let text =
+                        fm.symbol_font_text(Some(font.as_str()), bold, italic, &symbol.to_string());
                     let symbol_font_id =
                         fm.resolve_font_for_text(Some(font.as_str()), bold, italic, &text)?;
                     let symbol_metrics = fm.metrics(symbol_font_id, font_size)?;
@@ -15306,6 +15320,112 @@ mod tests {
             abc_x < digits_x,
             "resolved even-level spans stay LTR: {positions:?}"
         );
+    }
+
+    #[test]
+    fn aptos_text_reports_its_fallback_face_in_the_layout_diagnostics() {
+        let mut input = make_input_with_text("Aptos body");
+        let BodyContent::Paragraph(paragraph) = &mut input.document.body.content[0] else {
+            panic!("expected paragraph")
+        };
+        paragraph.runs[0].properties = Some(CT_RPr {
+            font_ascii: Some("Aptos".to_owned()),
+            font_hansi: Some("Aptos".to_owned()),
+            ..Default::default()
+        });
+        let mut engine = Engine::new_deterministic().unwrap();
+        let result = engine.layout(&input).unwrap();
+        let messages = result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            messages.contains(
+                &"font `Aptos` has no metric-compatible substitute and is drawn with `Carlito`, so its lines can break differently from Office"
+            ),
+            "{messages:?}"
+        );
+        // A reused engine reports it again, and only for the current layout.
+        assert_eq!(
+            engine.layout(&input).unwrap().diagnostics.len(),
+            result.diagnostics.len()
+        );
+        let plain = make_input_with_text("Calibri body");
+        assert!(engine.layout(&plain).unwrap().diagnostics.is_empty());
+    }
+
+    #[test]
+    fn wingdings_markers_and_symbols_render_their_unicode_glyphs() {
+        let mut input = make_input_with_text("item");
+        let BodyContent::Paragraph(paragraph) = &mut input.document.body.content[0] else {
+            panic!("expected paragraph")
+        };
+        paragraph.properties = Some(CT_PPr {
+            num_id: Some(1),
+            num_ilvl: Some(0),
+            ..Default::default()
+        });
+        paragraph.add_run("").content = vec![RunContent::Symbol {
+            font: "Wingdings".to_owned(),
+            char_code: 0xF0FC,
+        }];
+        let mut level = rdocx_oxml::numbering::CT_Lvl::new(0);
+        level.num_fmt = Some(rdocx_oxml::numbering::ST_NumberFormat::Bullet);
+        level.lvl_text = Some("\u{F0A7}".to_owned());
+        level.rpr = Some(CT_RPr {
+            font_ascii: Some("Wingdings".to_owned()),
+            font_hansi: Some("Wingdings".to_owned()),
+            ..Default::default()
+        });
+        let mut abstract_num = rdocx_oxml::numbering::CT_AbstractNum::new(1);
+        abstract_num.levels.push(level);
+        input.numbering = Some(rdocx_oxml::numbering::CT_Numbering {
+            abstract_nums: vec![abstract_num],
+            nums: vec![rdocx_oxml::numbering::CT_Num {
+                num_id: 1,
+                abstract_num_id: 1,
+                abstract_num_id_raw: None,
+                level_overrides: Vec::new(),
+                extra_xml: Vec::new(),
+                extra_attributes: Vec::new(),
+            }],
+            root_attributes: Vec::new(),
+            extra_xml: Vec::new(),
+        });
+        let paragraph = paragraph.clone();
+
+        let media = MediaRegistry::new(&input.images);
+        let mut fonts = FontManager::new_deterministic().expect("bundled fonts load");
+        let mut numbering = NumberingState::new();
+        let mut diagnostics = Vec::new();
+        let block = layout_paragraph(
+            &paragraph,
+            468.0,
+            &input.styles,
+            &input,
+            &media,
+            &mut fonts,
+            &mut numbering,
+            &mut diagnostics,
+        )
+        .expect("bulleted paragraph lays out");
+
+        let segments = block.lines[0]
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                LineItem::Text(segment) | LineItem::Marker(segment) => Some(segment),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for expected in ["\u{25AA}", "\u{2713}"] {
+            let segment = segments
+                .iter()
+                .find(|segment| segment.text == expected)
+                .unwrap_or_else(|| panic!("{expected} is not drawn: {segments:?}"));
+            assert!(segment.glyph_ids.iter().all(|glyph| *glyph != 0));
+        }
     }
 
     #[test]

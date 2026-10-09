@@ -4,11 +4,11 @@
     "command": "pdftoppm",
     "version": "pdftoppm version 26.01.0"
   },
-  "reason": "F-X183 DELTA pass1 reviewed zero side padding and wider cell content changes invoice and quote only; five other page-one RGBA arrays remain exact",
+  "reason": "Georgia now resolves to the bundled metric-compatible Gelasio instead of Caladea (contract, proposal, report samples)",
   "samples": {
     "contract": {
       "height": 1650,
-      "rgba_sha256": "0e2f5b2c863ed5dbe7c014b7fbf85cd8c34e4d1945a3c47ed5c0d281e0c1841d",
+      "rgba_sha256": "dce98a09d5d864446413cfab209413d1cd939d499c883ba33a9689b85aafe5b9",
       "width": 1275
     },
     "feature_showcase": {
@@ -28,7 +28,7 @@
     },
     "proposal": {
       "height": 1650,
-      "rgba_sha256": "dedd3cef621b5ac64170a8e59509c3e1552c653c49f1e4f3cacabcb25d61beb8",
+      "rgba_sha256": "2e6ffd5383697a842267b8f3b4760b0da6c40a235ffb8e06f18a793495b05daf",
       "width": 1275
     },
     "quote": {
@@ -38,7 +38,7 @@
     },
     "report": {
       "height": 1650,
-      "rgba_sha256": "dc6f5606a90af78ae6c222f0be826d62a3d02c841f0a5d806301075547b33a83",
+      "rgba_sha256": "43d02b8fa579cfcdf3ea68d32c5654d212ef84116a2780442f57461334adf9a1",
       "width": 1275
     }
   }

@@ -1,9 +1,9 @@
 {
   "entries": {
-    "contract:page1.png": "0f4cd1549a6a64dc6465837b339f7c101357b356ff283ced610c89c0d7d3a3a5",
-    "contract:pdf/bytes": "00cc834acffac326b8e3fb7af05c433ca1ff38dd0e3a712761ae957c4ea602f7",
-    "contract:pdf/pages": "61e7cf02fc8060d202123311baa86d5fcb8cff04aadea4066767ae2e935e7120",
-    "contract:pdf/resources": "1d23fd81e7aaa8ef154223e1574675613bcb428234ef1ded21ffc29ac2aedaf5",
+    "contract:page1.png": "b65164d94469c16936506bcba87e9f70d7fc71c607b5e5bf34c61924f5fcb3d3",
+    "contract:pdf/bytes": "42c71bfef8bd0c0521933f802d3bb2570ceb0be03762f43c5f960a3642ae0f50",
+    "contract:pdf/pages": "150ce5b26977230a5b34f18e4923d7dbf4e286bfdd2c55d67e8f005710867935",
+    "contract:pdf/resources": "fa396cfb6da99f37331799ec5c2878ccb75db86f26dae32089fa534f722ec853",
     "contract:word/document.xml": "3cb3cf43d2c3ad2f7ba3403c8451c09a066b2c34ce2335f42d4f01fd35154e0b",
     "contract:word/numbering.xml": "831dc1977beaa48b4f2999f50751dc3b075418daabe1307cc7b3242267b7f1b4",
     "contract:word/styles.xml": "49687b10d19688bf634d4967a488eca42eec85ee54c4730af334e5fb1107a7f4",
@@ -28,10 +28,10 @@
     "letter:word/document.xml": "b63aa85486da1f46991fc8327790f9e15f5011140442dca56f3021c32e343754",
     "letter:word/numbering.xml": "7b1d7268c595b24ecd1ba22f9f48ed10266219a32f32058dfd45c0fcb204bb92",
     "letter:word/styles.xml": "49687b10d19688bf634d4967a488eca42eec85ee54c4730af334e5fb1107a7f4",
-    "proposal:page1.png": "6ffdc5e5f5adbc61b67623bf9caae5f2efe7861e6513105202347474c253f409",
-    "proposal:pdf/bytes": "3f063f4ce2217eae6636b707b956f200e29b4f8857d4b436e11b74bbd4275a11",
-    "proposal:pdf/pages": "5f4741772e5f9a8ac301e7ddd65b45df0cbe28a575d2530cee0f0a602eb69198",
-    "proposal:pdf/resources": "775e228634aad44a60949777692e6381bdd3f5d754764c3dae276e241ea81569",
+    "proposal:page1.png": "0b84745e558c2f2f62c31baecb8ef15e7ff14d898f0ca9355c11d1e8d875f910",
+    "proposal:pdf/bytes": "0e55183749f7e92bc32e5dcdc412c4d4b5e6b2a78e0806cf2542946a1f74151c",
+    "proposal:pdf/pages": "db6454bc22d572c47883542db021183cf8680b9751ec8c6bc8d4d501d8080a7a",
+    "proposal:pdf/resources": "ba19925d08fd6ce673744bd4e9d72523caf01d4d11b8d6bbf22cb248c676f031",
     "proposal:word/document.xml": "9aa3714870271b3ab54aba520a86207c9509c514894812244c9d2b8bd848b61e",
     "proposal:word/numbering.xml": "1ec13ec49ac3cc11e53bfdf30d2e3c837190ef17d1094bb4a9ed116d8ba00b1d",
     "proposal:word/styles.xml": "c7e6e22b5bd3820ba828b1a78927f115d1583cc8e53017dcdbe708d23ad0a90d",
@@ -42,13 +42,13 @@
     "quote:word/document.xml": "382207c4225018c30e97419f6c515f3548d484a48ecb359339e91aeb765e9778",
     "quote:word/numbering.xml": "7b1d7268c595b24ecd1ba22f9f48ed10266219a32f32058dfd45c0fcb204bb92",
     "quote:word/styles.xml": "49687b10d19688bf634d4967a488eca42eec85ee54c4730af334e5fb1107a7f4",
-    "report:page1.png": "9c7d5aebb00f904f96aea20dac36ee1568bed2ddd09a3f72dd47382add9aed75",
-    "report:pdf/bytes": "a33820a173fb03a3a6b84377a3f8a2ec5d34d2cc72c83220b7bc12e83e8a2288",
-    "report:pdf/pages": "387bc9e804a7f8d0de71ec0b2d4549e487508a9931f1e46c87fa096a494936e1",
-    "report:pdf/resources": "33cd91323ff09d9d7fad4cc4d83fc51954214304439eba29fb2a415752e1a669",
+    "report:page1.png": "1e25440e563bc8ff5c806be12499903d44e2757f68af87a6d7232d6da98e048c",
+    "report:pdf/bytes": "0e578bc72678511b799b508c6f5d6206e3deffcb25af7a24c9499f5b703b6a1b",
+    "report:pdf/pages": "305c22a24bfc682700ddc3b3cf2418d41b8d29b618fdf2491244a9da4acb137f",
+    "report:pdf/resources": "0a04f40758eaf4d92be23d50383a3a77f9b8917862c0cdcb30fb331eb99bdbc0",
     "report:word/document.xml": "bc7d4995931e61ff1fc1c0f004349e64b483428b8c0a5b652a47c46ccb50915e",
     "report:word/numbering.xml": "59283ab7d3fbd70ab110b2c9aa4b9f7f41443ef7c24bc6db3c248ee908e44232",
     "report:word/styles.xml": "49687b10d19688bf634d4967a488eca42eec85ee54c4730af334e5fb1107a7f4"
   },
-  "reason": "F-X183 reviewed zero table side padding: exact14 keys are six samples PDF bytes/pages plus invoice and quote PNG;35 entries including source XML and PDF resources unchanged"
+  "reason": "Georgia now resolves to the bundled metric-compatible Gelasio instead of Caladea: contract, proposal and report page-one PNG and PDF entries move, 12 keys, every other key unchanged"
 }

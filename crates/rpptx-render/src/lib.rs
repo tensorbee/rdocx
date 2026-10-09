@@ -322,11 +322,17 @@ fn layout_presentation_with_font_manager_inner(
             .map(Arc::new)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let diagnostics = input
+    let mut diagnostics = input
         .slides
         .iter()
         .flat_map(|slide| slide.diagnostics.iter().cloned())
-        .collect();
+        .collect::<Vec<_>>();
+    diagnostics.extend(
+        font_manager
+            .substitution_diagnostics()
+            .into_iter()
+            .map(|message| oxml_layout::Diagnostic { message }),
+    );
     let mut layout = LayoutResult::new(
         pages,
         font_manager.all_font_data(),

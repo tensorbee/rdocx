@@ -629,8 +629,8 @@ class SprintWorkflowTests(unittest.TestCase):
             f"fonts/{path.name}"
             for path in sorted((*fonts.glob("LICENSE-*"), *fonts.glob("NOTICE-*")))
         )
-        self.assertEqual(len(expected_fonts), 27)
-        self.assertEqual(len(expected_legal), 6)
+        self.assertEqual(len(expected_fonts), 34)
+        self.assertEqual(len(expected_legal), 10)
         self.assertEqual(listed_fonts, expected_fonts)
         self.assertEqual(listed_legal, expected_legal)
         self.assertIn("diff -u", script)
@@ -7535,17 +7535,22 @@ Pedro Assumpcao and the rdocx maintainers.
         self.assertIn("system-fonts", features)
         self.assertNotIn("bundled-fonts", features)
         claimed_font_count = re.findall(r"([0-9]+) bundled TTFs", claude)
-        self.assertEqual(claimed_font_count, ["27"])
+        self.assertEqual(claimed_font_count, ["34"])
         fonts = font_path / "fonts"
         self.assertEqual(len(tuple(fonts.glob("*.ttf"))), int(claimed_font_count[0]))
         for legal_file in (
             "LICENSE-Caladea",
             "NOTICE-Caladea",
             "LICENSE-Carlito",
+            "LICENSE-Gelasio",
+            "NOTICE-Gelasio",
             "LICENSE-Liberation",
             "LICENSE-Noto",
             "NOTICE-Noto",
+            "LICENSE-Selawik",
+            "NOTICE-Selawik",
             "SUBSET-NotoSansSC.md",
+            "SUBSET-NotoSansSymbols2.md",
         ):
             self.assertTrue((fonts / legal_file).is_file(), legal_file)
 
