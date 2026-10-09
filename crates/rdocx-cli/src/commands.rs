@@ -9,12 +9,6 @@ use oxml_cli_support::{
     StagedOutputSet, default_output_path, ensure_output_paths_allowed,
     ensure_output_paths_available, json_envelope, parse_range,
 };
-use oxml_opc::relationship::rel_types;
-use quick_xml::XmlVersion;
-use quick_xml::escape::escape;
-use quick_xml::events::{BytesStart, Event};
-use quick_xml::name::{Namespace, ResolveResult};
-use quick_xml::reader::NsReader;
 use rdocx::{
     BodyItemRef, ComparisonGranularity, ComparisonOptions, ComparisonStoryKind, Document,
     HdrFtrType, HeaderFooterKind, RasterFormat, RasterOptions, RasterOutput, RevisionKind,
@@ -22,7 +16,6 @@ use rdocx::{
 };
 use rdocx_oxml::content_control::{CT_Sdt, SdtContent};
 use rdocx_oxml::document::{BodyContent, CT_Document};
-use rdocx_oxml::namespace::{MC_NS, W_NS};
 use rdocx_oxml::table::{CT_Row, CT_Tbl, CT_Tc, CellContent};
 use rdocx_oxml::text::{CT_P, CT_R};
 use serde_json::{Value, json};
@@ -167,7 +160,7 @@ pub fn text(file: &Path, json_output: bool) -> Result<()> {
                 BodyContent::RawXml(_) => {}
             }
         }
-        let stories = readable_stories(file, &doc);
+        let stories = readable_stories(&doc);
         // Without the other stories the record covers the main story only.
         let scope = if stories.is_some() {
             "all-supported-stories"
@@ -181,12 +174,16 @@ pub fn text(file: &Path, json_output: bool) -> Result<()> {
                 let items = story
                     .items
                     .iter()
-                    .map(|(index_path, kind, text)| {
-                        json!({ "index_path": index_path, "kind": kind, "text": text })
+                    .map(|item| {
+                        let kind = match item.kind {
+                            StoryItemKind::ContentControl => "content_control",
+                            _ => "paragraph",
+                        };
+                        json!({ "index_path": item.index_path, "kind": kind, "text": item.text })
                     })
                     .collect::<Vec<_>>();
                 json!({
-                    "kind": story_kind_name(story.story.kind()),
+                    "kind": story.story.kind().name(),
                     "part_name": story.story.part_name(),
                     "owner_index": story.story.owner_index(),
                     "items": items,
@@ -200,209 +197,30 @@ pub fn text(file: &Path, json_output: bool) -> Result<()> {
             "stories": stories,
         }))?;
     } else {
-        let mut stdout = io::stdout().lock();
-        write!(stdout, "{}", doc.text())?;
-        let stories = readable_stories(file, &doc).unwrap_or_default();
-        for (kind, part_name, texts) in story_parts(&stories) {
-            writeln!(stdout, "--- {} ({part_name}) ---", story_kind_name(kind))?;
-            for text in texts {
-                writeln!(stdout, "{text}")?;
-            }
-        }
+        let export = doc.text_with_stories();
+        warn_omitted_stories(&export);
+        write!(io::stdout().lock(), "{}", export.text)?;
     }
     Ok(())
 }
 
-/// One story that the body view leaves out, with the index path, kind, and
-/// accepted-view text of each of its direct paragraphs and block content
-/// controls.
-struct StoryText {
-    story: StoryId,
-    items: Vec<(Vec<usize>, &'static str, String)>,
-}
-
-/// Read the other stories for a text view that already has its body.
-///
-/// A story part that cannot be read, such as a truncated header or a header
-/// relationship to a missing part, does not cost the body. The view prints
-/// one warning on stderr, naming the part when it can, and lists no other
-/// story. `validate` reports the same part as an error.
-fn readable_stories(file: &Path, doc: &Document) -> Option<Vec<StoryText>> {
-    let error = match other_stories(doc) {
-        Ok(stories) => return Some(stories),
-        Err(error) => error,
-    };
-    let malformed = oxml_opc::OpcPackage::open(file)
-        .ok()
-        .and_then(|package| malformed_story_part(&package));
-    eprintln!(
-        "Warning: other stories left out: {}",
-        malformed.unwrap_or_else(|| error.to_string())
-    );
-    None
-}
-
-/// Name the first story part of the main document that is not well-formed
-/// XML, with the reason.
-fn malformed_story_part(package: &oxml_opc::OpcPackage) -> Option<String> {
-    let doc_part = package.main_document_part()?;
-    let rels = package.get_part_rels(&doc_part)?;
-    rels.items
-        .iter()
-        .filter(|rel| {
-            rel.target_mode.as_deref() != Some("External")
-                && STORY_RELATIONSHIPS.contains(&rel.rel_type.as_str())
-        })
-        .find_map(|rel| {
-            let part_name = oxml_opc::OpcPackage::resolve_rel_target(&doc_part, &rel.target);
-            let detail = xml_style_references(package.get_part(&part_name)?).err()?;
-            Some(format!("part {part_name} is not well-formed XML: {detail}"))
-        })
-}
-
-/// The relationships from the main document to its other story parts.
-const STORY_RELATIONSHIPS: [&str; 5] = [
-    rel_types::HEADER,
-    rel_types::FOOTER,
-    rel_types::FOOTNOTES,
-    rel_types::ENDNOTES,
-    rel_types::COMMENTS,
-];
-
-/// Read every story but the main body and its table cells, which the body
-/// view already covers, in [`Document::stories`] order.
-///
-/// Only the direct items of a story are read, so the text of an inline
-/// control or a field is not repeated after its paragraph. A table is left
-/// out because each of its cells is a table-cell story of its own.
-fn other_stories(doc: &Document) -> Result<Vec<StoryText>> {
-    let mut main_part = None;
-    let mut stories: Vec<StoryText> = Vec::new();
-    for item in doc.story_item_snapshots()? {
-        let story = item.location().story();
-        if story.kind() == StoryKind::Body {
-            main_part = Some(story.part_name().to_owned());
-            continue;
-        }
-        if story.kind() == StoryKind::TableCell && main_part.as_deref() == Some(story.part_name()) {
-            continue;
-        }
-        if stories.last().is_none_or(|last| &last.story != story) {
-            stories.push(StoryText {
-                story: story.clone(),
-                items: Vec::new(),
-            });
-        }
-        let kind = match item.location().item_kind() {
-            StoryItemKind::Paragraph => "paragraph",
-            StoryItemKind::ContentControl => "content_control",
-            _ => continue,
-        };
-        if item.is_direct_child()
-            && let Some(last) = stories.last_mut()
-        {
-            last.items.push((
-                item.location().index_path().to_vec(),
-                kind,
-                item.text().unwrap_or_default().to_owned(),
-            ));
-        }
-    }
-    Ok(stories)
-}
-
-/// Group the texts of the stories by package part, each part labelled with
-/// the kind of its first story, such as a header part holding table cells.
-/// A part without any text, such as an empty header variant, is left out.
-fn story_parts(stories: &[StoryText]) -> Vec<(StoryKind, &str, Vec<&str>)> {
-    let mut parts: Vec<(StoryKind, &str, Vec<&str>)> = Vec::new();
-    for story in stories {
-        let part_name = story.story.part_name();
-        if parts.last().is_none_or(|(_, last, _)| *last != part_name) {
-            parts.push((story.story.kind(), part_name, Vec::new()));
-        }
-        if let Some((_, _, texts)) = parts.last_mut() {
-            texts.extend(story.items.iter().map(|(_, _, text)| text.as_str()));
-        }
-    }
-    parts.retain(|(_, _, texts)| texts.iter().any(|text| !text.trim().is_empty()));
-    parts
-}
-
-/// Name a story kind as Python `Story.kind` does.
-fn story_kind_name(kind: StoryKind) -> &'static str {
-    match kind {
-        StoryKind::Body => "body",
-        StoryKind::TableCell => "table_cell",
-        StoryKind::Header => "header",
-        StoryKind::Footer => "footer",
-        StoryKind::Footnote => "footnote",
-        StoryKind::Endnote => "endnote",
-        StoryKind::Comment => "comment",
-        StoryKind::TextBox => "text_box",
-        _ => "unknown",
-    }
-}
-
-/// The story parts a converted document carries after its body. Comments are
-/// review annotations rather than document content, so they are left out.
-fn converted_story_parts(stories: &[StoryText]) -> Vec<(StoryKind, &str, Vec<&str>)> {
-    story_parts(stories)
-        .into_iter()
-        .filter(|(kind, _, _)| *kind != StoryKind::Comment)
-        .collect()
-}
-
-/// Append the stories after the Markdown body, each part under a bold label.
-fn push_markdown_stories(markdown: &mut String, stories: &[StoryText]) {
-    let parts = converted_story_parts(stories);
-    if parts.is_empty() {
-        return;
-    }
-    if !markdown.is_empty() {
-        if !markdown.ends_with("\n\n") {
-            markdown.push_str(if markdown.ends_with('\n') {
-                "\n"
-            } else {
-                "\n\n"
-            });
-        }
-        markdown.push_str("---\n\n");
-    }
-    for (kind, part_name, texts) in parts {
-        markdown.push_str(&format!("**{}** ({part_name})\n\n", story_kind_name(kind)));
-        for text in texts.iter().map(|text| text.trim()) {
-            if !text.is_empty() {
-                markdown.push_str(text);
-                markdown.push_str("\n\n");
-            }
+/// The other stories of a JSON text view, or `None` with one warning on
+/// stderr when a story part cannot be read. `validate` reports the same part
+/// as an error.
+fn readable_stories(doc: &Document) -> Option<Vec<rdocx::StoryText>> {
+    match doc.other_story_texts() {
+        Ok(stories) => Some(stories),
+        Err(reason) => {
+            eprintln!("Warning: other stories left out: {reason}");
+            None
         }
     }
 }
 
-/// Insert the stories before the end of the HTML body, one section per part.
-fn push_html_stories(html: &mut String, stories: &[StoryText]) {
-    let parts = converted_story_parts(stories);
-    if parts.is_empty() {
-        return;
-    }
-    let mut sections = String::from("<hr>\n");
-    for (kind, part_name, texts) in parts {
-        sections.push_str(&format!(
-            "<section>\n<p><strong>{}</strong> ({})</p>\n",
-            story_kind_name(kind),
-            escape(part_name)
-        ));
-        for text in texts.iter().map(|text| text.trim()) {
-            if !text.is_empty() {
-                sections.push_str(&format!("<p>{}</p>\n", escape(text)));
-            }
-        }
-        sections.push_str("</section>\n");
-    }
-    match html.rfind("</body>") {
-        Some(end) => html.insert_str(end, &sections),
-        None => html.push_str(&sections),
+/// Print the warning of a text view whose other stories could not be read.
+fn warn_omitted_stories(export: &rdocx::StoryTextExport) {
+    if let Some(reason) = &export.omitted_stories {
+        eprintln!("Warning: other stories left out: {reason}");
     }
 }
 
@@ -724,18 +542,14 @@ pub fn convert(
             stage_and_publish(&[(output_path.clone(), bytes)], force)?;
         }
         "html" => {
-            let mut html = doc.to_html();
-            if let Some(stories) = readable_stories(file, &doc) {
-                push_html_stories(&mut html, &stories);
-            }
-            stage_and_publish(&[(output_path.clone(), html.into_bytes())], force)?;
+            let html = doc.to_html_with_stories();
+            warn_omitted_stories(&html);
+            stage_and_publish(&[(output_path.clone(), html.text.into_bytes())], force)?;
         }
         "md" | "markdown" => {
-            let mut md = doc.to_markdown();
-            if let Some(stories) = readable_stories(file, &doc) {
-                push_markdown_stories(&mut md, &stories);
-            }
-            stage_and_publish(&[(output_path.clone(), md.into_bytes())], force)?;
+            let md = doc.to_markdown_with_stories();
+            warn_omitted_stories(&md);
+            stage_and_publish(&[(output_path.clone(), md.text.into_bytes())], force)?;
         }
         "png" | "jpg" | "jpeg" | "tif" | "tiff" => {
             let (format, extension) = parse_image_format(to, image.quality, image.transparent)?;
@@ -1363,7 +1177,7 @@ fn comment_position_json(
     let snapshot = &items[&position.location];
     let location = snapshot.location();
     Ok(json!({
-        "story_kind": story_kind_name(location.story().kind()),
+        "story_kind": location.story().kind().name(),
         "part_name": location.story().part_name(),
         "owner_index": location.story().owner_index(),
         "item_kind": "paragraph",
@@ -2170,186 +1984,24 @@ fn validate_dpi(dpi: f64) -> Result<()> {
     Ok(())
 }
 
-/// Validate a DOCX file's structure.
+/// Validate a DOCX file's structure and print the findings.
 ///
 /// Returns `Ok(false)` when a structural error was found, so the caller can
 /// exit non-zero — a validator that always succeeds cannot gate anything in CI.
-/// A related part that is not well-formed XML and a paragraph, character, or
-/// table style id that no style defines are structural errors too.
-/// Advisory findings (empty paragraphs, missing metadata) are reported but do
-/// not affect the exit status.
+/// [`Document::validate_file`] lists the checks. Advisory findings (empty
+/// paragraphs, missing metadata) are reported but do not affect the exit
+/// status.
 pub fn validate(file: &Path) -> Result<bool> {
-    let mut errors: Vec<String> = Vec::new();
-    let mut warnings: Vec<String> = Vec::new();
-
-    // --- Structural errors ---
-
-    // Every relationship must point at a part that is actually in the package.
-    let package = oxml_opc::OpcPackage::open(file)?;
-    if let Some(doc_part) = package.main_document_part() {
-        if package.get_part(&doc_part).is_none() {
-            errors.push(format!("main document part {doc_part} is missing"));
-        }
-        if let Some(rels) = package.get_part_rels(&doc_part) {
-            for rel in &rels.items {
-                // External targets live outside the package by definition.
-                if rel.target_mode.as_deref() == Some("External") {
-                    continue;
-                }
-                let target = oxml_opc::OpcPackage::resolve_rel_target(&doc_part, &rel.target);
-                if package.get_part(&target).is_none() {
-                    errors.push(format!(
-                        "relationship {} points at missing part {target}",
-                        rel.id
-                    ));
-                }
-            }
-        }
-    } else {
-        errors.push("package declares no main document relationship".to_string());
-    }
-
-    // Every part needs a declared content type.
-    for part_name in package.parts.keys() {
-        if package.content_types.content_type_for(part_name).is_none() {
-            errors.push(format!("part {part_name} has no declared content type"));
-        }
-    }
-
-    // Markup Compatibility requires every prefix that `mc:Ignorable` or
-    // `mc:MustUnderstand` lists to be declared, and a consumer may reject a
-    // part that breaks the rule. A part that does not parse as XML is
-    // outside this check.
-    let mut xml_parts = package
-        .parts
-        .iter()
-        .filter(|(part_name, _)| {
-            package
-                .content_types
-                .content_type_for(part_name)
-                .is_some_and(|content_type| content_type.ends_with("xml"))
-        })
-        .collect::<Vec<_>>();
-    xml_parts.sort();
-    for (part_name, xml) in xml_parts {
-        let Ok(findings) = rdocx_oxml::namespace::undeclared_compatibility_prefixes(xml) else {
-            continue;
-        };
-        for (attribute, prefix) in findings {
-            errors.push(format!(
-                "part {part_name} lists undeclared prefix `{prefix}` in mc:{attribute}"
-            ));
-        }
-    }
-
-    // Every XML part the main document relates to must be well formed. The
-    // style ids that its story parts name are checked once the document opens.
-    let mut style_references = Vec::new();
-    if let Some(doc_part) = package.main_document_part() {
-        let mut parts = vec![(doc_part.clone(), true)];
-        for rel in package
-            .get_part_rels(&doc_part)
-            .iter()
-            .flat_map(|rels| &rels.items)
-        {
-            if rel.target_mode.as_deref() == Some("External") {
-                continue;
-            }
-            let target = oxml_opc::OpcPackage::resolve_rel_target(&doc_part, &rel.target);
-            let story = STORY_RELATIONSHIPS.contains(&rel.rel_type.as_str());
-            if !parts.iter().any(|(known, _)| *known == target) {
-                parts.push((target, story));
-            }
-        }
-        for (part_name, story) in parts {
-            let is_xml = package
-                .content_types
-                .content_type_for(&part_name)
-                .is_some_and(|content_type| {
-                    content_type.ends_with("+xml") || content_type.ends_with("/xml")
-                });
-            let Some(xml) = package.get_part(&part_name).filter(|_| is_xml) else {
-                continue;
-            };
-            match xml_style_references(xml) {
-                Err(detail) => {
-                    errors.push(format!("part {part_name} is not well-formed XML: {detail}"));
-                }
-                Ok(references) if story => style_references.extend(
-                    references
-                        .into_iter()
-                        .map(|(kind, style_id)| (kind, style_id, part_name.clone())),
-                ),
-                Ok(_) => {}
-            }
-        }
-    }
-
-    // A malformed part can keep the document from opening. The errors found
-    // so far explain why, so they are reported together with the failure.
-    let doc = match Document::open(file) {
-        Ok(doc) => doc,
-        Err(error) if !errors.is_empty() => {
-            errors.push(format!("the document does not open: {error}"));
-            return report_validation(file, &errors, &warnings);
-        }
+    let report = match Document::validate_file(file) {
+        Ok(report) => report,
+        // An unreadable package keeps the package error's own message, such
+        // as `ZIP error: ...`, as before the checks moved to the library.
+        Err(rdocx::Error::Opc(error)) => return Err(error.into()),
         Err(error) => return Err(error.into()),
     };
-
-    // Word falls back to the default style for a style id that no style
-    // defines, so the style that the document names is silently lost.
-    for (kind, style_id, part_name) in style_references {
-        let issue = format!("{kind} style {style_id:?} used in {part_name} is not defined");
-        if doc.style(&style_id).is_none() && !errors.contains(&issue) {
-            errors.push(issue);
-        }
-    }
-
-    if let Err(error) = doc.validate_comment_ownership() {
-        errors.push(format!("invalid comment ownership: {error}"));
-    }
-
-    // --- Advisory findings ---
-
-    if doc.content_count() == 0 {
-        warnings.push("Document has no content (no paragraphs or tables)".to_string());
-    }
-
-    let empty_count = doc
-        .paragraphs()
-        .iter()
-        .filter(|p| p.text().trim().is_empty())
-        .count();
-    if empty_count > 0 {
-        warnings.push(format!("{empty_count} empty paragraph(s) found"));
-    }
-
-    let mut prev_level: Option<u32> = None;
-    for (level, _) in doc.headings() {
-        if let Some(prev) = prev_level
-            && level > prev + 1
-        {
-            warnings.push(format!(
-                "Heading level gap: Heading{prev} -> Heading{level} (skipped level(s))"
-            ));
-        }
-        prev_level = Some(level);
-    }
-
-    if doc.title().is_none() {
-        warnings.push("Missing document title".to_string());
-    }
-    if doc.author().is_none() {
-        warnings.push("Missing document author".to_string());
-    }
-
-    report_validation(file, &errors, &warnings)
-}
-
-fn report_validation(file: &Path, errors: &[String], warnings: &[String]) -> Result<bool> {
-    match print_validation_report(file, errors, warnings) {
+    match print_validation_report(file, &report.errors, &report.warnings) {
         Err(error) if error.kind() != io::ErrorKind::BrokenPipe => Err(error.into()),
-        _ => Ok(errors.is_empty()),
+        _ => Ok(report.is_valid()),
     }
 }
 
@@ -2377,98 +2029,6 @@ fn print_validation_report(file: &Path, errors: &[String], warnings: &[String]) 
         }
     }
     Ok(())
-}
-
-/// Read `xml` as one well-formed element tree and return the paragraph,
-/// character, and table style ids it names. The ids inside a tracked property
-/// change are left out, because they record the formatting before the change,
-/// and so are those inside `mc:Fallback`, which Word does not read. An empty
-/// id names no style.
-fn xml_style_references(xml: &[u8]) -> std::result::Result<Vec<(&'static str, String)>, String> {
-    let mut reader = NsReader::from_reader(xml);
-    // One entry per open element: whether its style ids are left out.
-    let mut open = Vec::new();
-    let mut roots = 0usize;
-    let mut references = Vec::new();
-    let mut buffer = Vec::new();
-    loop {
-        let (namespace, event) = match reader.read_resolved_event_into(&mut buffer) {
-            Ok(read) => read,
-            Err(error) => return Err(format!("{error} at byte {}", reader.error_position())),
-        };
-        let is_word =
-            matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == W_NS.as_bytes());
-        let is_compatibility =
-            matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == MC_NS.as_bytes());
-        match event {
-            Event::Start(ref element) | Event::Empty(ref element) => {
-                if open.is_empty() {
-                    roots += 1;
-                    if roots > 1 {
-                        return Err("the part has more than one root element".to_owned());
-                    }
-                }
-                let local_name = element.local_name();
-                let kind = match local_name.as_ref() {
-                    b"pStyle" => Some("paragraph"),
-                    b"rStyle" => Some("character"),
-                    b"tblStyle" => Some("table"),
-                    _ => None,
-                };
-                if let Some(kind) = kind.filter(|_| is_word && !open.contains(&true))
-                    && let Some(style_id) = word_value(&reader, element)?
-                    && !style_id.is_empty()
-                {
-                    references.push((kind, style_id));
-                }
-                if matches!(event, Event::Start(_)) {
-                    open.push(
-                        (is_word && local_name.as_ref().ends_with(b"PrChange"))
-                            || (is_compatibility && local_name.as_ref() == b"Fallback"),
-                    );
-                }
-            }
-            Event::End(_) => {
-                open.pop();
-            }
-            Event::Text(text) if open.is_empty() && !text.iter().all(u8::is_ascii_whitespace) => {
-                return Err("the part has text outside its root element".to_owned());
-            }
-            Event::CData(_) if open.is_empty() => {
-                return Err("the part has CDATA outside its root element".to_owned());
-            }
-            Event::Eof if roots == 0 => return Err("the part has no root element".to_owned()),
-            Event::Eof if !open.is_empty() => {
-                return Err(format!(
-                    "the part ends inside {} unclosed element(s)",
-                    open.len()
-                ));
-            }
-            Event::Eof => return Ok(references),
-            _ => {}
-        }
-        buffer.clear();
-    }
-}
-
-/// Return the `w:val` attribute of a WordprocessingML element.
-fn word_value(
-    reader: &NsReader<&[u8]>,
-    element: &BytesStart<'_>,
-) -> std::result::Result<Option<String>, String> {
-    for attribute in element.attributes() {
-        let attribute = attribute.map_err(|error| error.to_string())?;
-        let (namespace, local_name) = reader.resolver().resolve_attribute(attribute.key);
-        if matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == W_NS.as_bytes())
-            && local_name.as_ref() == b"val"
-        {
-            let value = attribute
-                .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
-                .map_err(|error| error.to_string())?;
-            return Ok(Some(value.into_owned()));
-        }
-    }
-    Ok(None)
 }
 
 #[cfg(test)]

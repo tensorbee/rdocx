@@ -45,6 +45,5 @@ oxml-layout = { workspace = true }
 oxml-pdf = { workspace = true }
 oxml-opc = { workspace = true }
 oxml-cli-support = { workspace = true }
-quick-xml = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }

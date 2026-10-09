@@ -1,7 +1,7 @@
 use oxml_py_support::{ContentPath, PathSeg};
 use pyo3::exceptions::{PyIndexError, PyKeyError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyList, PySlice};
+use pyo3::types::{PyAny, PyList, PySlice, PyTuple};
 use smallvec::smallvec;
 
 use crate::document::PyDocument;
@@ -484,6 +484,167 @@ impl PyParagraph {
             &self.document,
             location,
             crate::formatting::ParagraphUpdate::Numbering(value),
+        )
+    }
+
+    // ---- Equations: written from LaTeX or MathML, read back as both.
+
+    /// Append an equation after the last run, from LaTeX or from MathML.
+    #[pyo3(signature = (latex = None, *, mathml = None, display = false))]
+    fn add_equation(
+        &self,
+        py: Python<'_>,
+        latex: Option<&str>,
+        mathml: Option<&str>,
+        display: bool,
+    ) -> PyResult<()> {
+        if latex
+            .or(mathml)
+            .is_some_and(|source| source.trim().is_empty())
+        {
+            return Err(PyValueError::new_err(
+                "add_equation needs a non-empty equation, such as r\"\\frac{a}{b}\"",
+            ));
+        }
+        let converted = match (latex, mathml) {
+            (Some(latex), None) => rdocx::equation_from_latex(latex),
+            (None, Some(mathml)) => rdocx::equation_from_mathml(mathml),
+            _ => {
+                return Err(PyTypeError::new_err(
+                    "add_equation takes exactly one of latex or mathml=",
+                ));
+            }
+        }
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        if !converted.diagnostics.is_empty() {
+            return Err(PyValueError::new_err(format!(
+                "the equation would lose content: {}; rewrite those parts",
+                equation_diagnostics(&converted.diagnostics).join("; ")
+            )));
+        }
+        let expressions = converted.value.expressions;
+        let equation = if display {
+            rdocx::OfficeMath::display(vec![rdocx::CT_OMath::new(expressions)])
+        } else {
+            rdocx::OfficeMath::inline(expressions)
+        };
+        let location = self.validate(py)?;
+        let mut document = self.document.borrow_mut(py);
+        let result = match location {
+            ParagraphLocation::Body(index) => document
+                .inner
+                .paragraph_mut(index)
+                .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?
+                .add_equation(equation),
+            ParagraphLocation::Cell {
+                table,
+                row,
+                cell,
+                paragraph,
+            } => {
+                let mut table = document
+                    .inner
+                    .table_mut(table)
+                    .ok_or_else(|| PyIndexError::new_err("table index out of range"))?;
+                let mut cell = table
+                    .cell(row, cell)
+                    .ok_or_else(|| PyIndexError::new_err("cell index out of range"))?;
+                cell.paragraph_mut(paragraph)
+                    .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?
+                    .add_equation(equation)
+            }
+        };
+        // The equation follows every run, so no run or paragraph handle moves.
+        result.map_err(|error| crate::rdocx_to_pyerr(py, error))
+    }
+
+    /// The equations of the paragraph in source order. A display equation
+    /// block holding several equations gives one record for each.
+    #[getter]
+    fn equations<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let location = self.validate(py)?;
+        let document = self.document.borrow(py);
+        let records = |equations: &mut dyn Iterator<Item = &rdocx::OfficeMath>| {
+            equations
+                .flat_map(|equation| match equation {
+                    rdocx::OfficeMath::Inline(math) => vec![(math, false)],
+                    rdocx::OfficeMath::Display(block) => {
+                        block.equations.iter().map(|math| (math, true)).collect()
+                    }
+                })
+                .map(|(math, display)| PyEquation::read(math, display))
+                .collect::<Vec<_>>()
+        };
+        let equations = match location {
+            ParagraphLocation::Body(index) => document
+                .inner
+                .paragraph(index)
+                .map(|paragraph| records(&mut paragraph.equations())),
+            ParagraphLocation::Cell {
+                table,
+                row,
+                cell,
+                paragraph,
+            } => document.inner.table(table).and_then(|table| {
+                let cell = table.cell(row, cell)?;
+                cell.paragraph(paragraph)
+                    .map(|paragraph| records(&mut paragraph.equations()))
+            }),
+        }
+        .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?;
+        PyTuple::new(py, equations)
+    }
+}
+
+fn equation_diagnostics(diagnostics: &[rdocx::MathConversionDiagnostic]) -> Vec<String> {
+    diagnostics
+        .iter()
+        .map(|diagnostic| format!("{}: {}", diagnostic.path, diagnostic.message))
+        .collect()
+}
+
+/// One equation of a paragraph, as LaTeX and as Presentation MathML.
+#[pyclass(name = "Equation", frozen, eq, skip_from_py_object)]
+#[derive(Clone, PartialEq, Eq)]
+pub struct PyEquation {
+    #[pyo3(get)]
+    latex: String,
+    #[pyo3(get)]
+    mathml: String,
+    #[pyo3(get)]
+    display: bool,
+    diagnostics: Vec<String>,
+}
+
+impl PyEquation {
+    fn read(math: &rdocx::CT_OMath, display: bool) -> Self {
+        let argument = rdocx::MathArgument::new(math.expressions.clone());
+        let latex = rdocx::equation_to_latex(&argument);
+        let mathml = rdocx::equation_to_mathml(&argument);
+        let mut diagnostics = equation_diagnostics(&latex.diagnostics);
+        diagnostics.extend(equation_diagnostics(&mathml.diagnostics));
+        Self {
+            latex: latex.value,
+            mathml: mathml.value,
+            display,
+            diagnostics,
+        }
+    }
+}
+
+#[pymethods]
+impl PyEquation {
+    /// What the LaTeX or MathML form could not represent.
+    #[getter]
+    fn diagnostics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, &self.diagnostics)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Equation(latex={:?}, display={})",
+            self.latex,
+            if self.display { "True" } else { "False" }
         )
     }
 }

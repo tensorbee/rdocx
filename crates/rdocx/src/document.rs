@@ -407,6 +407,23 @@ pub enum StoryKind {
     TextBox,
 }
 
+impl StoryKind {
+    /// The snake-case name of the kind, as the CLI JSON and Python
+    /// `Story.kind` spell it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Body => "body",
+            Self::TableCell => "table_cell",
+            Self::Header => "header",
+            Self::Footer => "footer",
+            Self::Footnote => "footnote",
+            Self::Endnote => "endnote",
+            Self::Comment => "comment",
+            Self::TextBox => "text_box",
+        }
+    }
+}
+
 /// Whether a section story is a header or a footer.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -27196,8 +27213,9 @@ impl Document {
     /// Conditions use JSON truthiness, where false, null, zero, and empty
     /// strings or collections are false.
     ///
-    /// This additive API is native-only. Python, WASM, and CLI binding surfaces
-    /// remain unchanged and continue to preserve documents rendered here.
+    /// An error message names the tag or marker at fault and the line, the
+    /// paragraph or row text, that holds it. Python exposes this method as
+    /// `Document.render_template`. The WASM and CLI surfaces do not.
     pub fn render_template(&mut self, data: &serde_json::Value) -> Result<usize> {
         crate::template::render(self, data)
     }
@@ -29026,6 +29044,21 @@ impl Document {
         let mut count = 0;
         visit_body_paragraphs(&self.document.body.content, true, &mut |paragraph| {
             count += paragraph.text().split_whitespace().count();
+        });
+        count
+    }
+
+    /// Count the characters of the paragraphs [`Self::word_count`] reads,
+    /// as Word's statistics do: with or without the whitespace characters.
+    /// Paragraph marks are not characters.
+    pub fn character_count(&self, include_spaces: bool) -> usize {
+        let mut count = 0;
+        visit_body_paragraphs(&self.document.body.content, true, &mut |paragraph| {
+            count += paragraph
+                .text()
+                .chars()
+                .filter(|character| include_spaces || !character.is_whitespace())
+                .count();
         });
         count
     }

@@ -371,3 +371,62 @@ def scoped_replacement_signatures_cover_paragraph_cell_and_story_item(document: 
 def whole_story_setter_signatures(document: Document) -> None:
     assert_type(document.set_header(text="header"), None)
     assert_type(document.set_footer(text="footer"), None)
+
+
+def document_level_signatures(document: Document, other: Document, paragraph: Paragraph, item: StoryItem) -> None:
+    from rdocx import (
+        AppProperties,
+        ContentControl,
+        ConversionWarning,
+        CustomProperties,
+        DocumentFragment,
+        Equation,
+        Settings,
+        ValidationReport,
+    )
+
+    assert_type(document.text(), str)
+    assert_type(document.to_markdown(), str)
+    assert_type(document.to_html(), str)
+    assert_type(document.to_odt(), bytes)
+    assert_type(document.to_rtf(), bytes)
+    assert_type(document.to_epub(), bytes)
+    assert_type(document.word_count(), int)
+    assert_type(document.character_count(include_spaces=False), int)
+    assert_type(document.page_count(), int)
+    report = document.validate()
+    assert_type(report, ValidationReport)
+    assert_type(report.errors, tuple[str, ...])
+    assert_type(report.ok, bool)
+    assert_type(Document.validate_file("in.docx"), ValidationReport)
+    assert_type(document.render_template({"name": "Ada", "items": [1, 2]}), int)
+    assert_type(document.insert_document(other, at=0, conflict="rename"), None)
+    fragment = other.copy_fragment(0, item)
+    assert_type(fragment, DocumentFragment)
+    assert_type(document.import_fragment(fragment, item.story), None)
+    properties = document.custom_properties
+    assert_type(properties, CustomProperties)
+    properties["When"] = datetime(2026, 1, 2, tzinfo=timezone.utc)
+    properties["Count"] = 3
+    del properties["Count"]
+    assert_type(list(properties), list[str])
+    app = document.app_properties
+    assert_type(app, AppProperties)
+    app.company = "BeLiver"
+    assert_type(app.words, int | None)
+    settings = document.settings
+    assert_type(settings, Settings)
+    settings.track_revisions = True
+    controls = document.content_controls
+    assert_type(controls, tuple[ContentControl, ...])
+    control_type: str = controls[0].type
+    assert_type(document.set_content_control_value("v", tag="t"), int)
+    assert_type(paragraph.add_equation(r"\frac{a}{b}", display=True), None)
+    equations = paragraph.equations
+    assert_type(equations, tuple[Equation, ...])
+    assert_type(equations[0].mathml, str)
+    assert issubclass(ConversionWarning, UserWarning), control_type
+
+
+if TYPE_CHECKING:
+    Document().insert_document(Document(), conflict="merge")  # type: ignore[arg-type]

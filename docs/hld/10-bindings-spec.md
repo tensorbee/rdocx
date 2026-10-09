@@ -797,6 +797,38 @@ collaboration operation advances the global revision once. Constructor or
 native validation failure publishes no candidate and leaves existing handles
 valid.
 
+The Word binding gives Python every document-level view of the CLI through
+the same native calls. `Document.text()`, `to_markdown()`, and `to_html()`
+return `Document::text_with_stories`, `to_markdown_with_stories`, and
+`to_html_with_stories`, which `rdocx text` and `rdocx convert --to md|html`
+print. `Document.validate()` validates the package the document would save
+now and `Document.validate_file(path)` validates a file as `rdocx validate`
+does, both through the native `Document::validate_bytes` and
+`validate_file`, returning a frozen `ValidationReport` of errors and warnings.
+A story part that cannot be read leaves the body view and emits one
+`rdocx.ConversionWarning`, where the CLI prints a warning line. `to_odt`,
+`to_rtf`, and `to_epub` return bytes and summarize the export diagnostics in
+one `ConversionWarning`. `word_count`, `character_count`, and `page_count`
+count the body and the deterministic layout.
+
+`Document.render_template(data)` converts a dict of str, int, float, bool,
+None, dict, and list values to JSON and runs the native template engine. A
+template error names the tag or marker and the line that holds it, and leaves
+the document unchanged. `insert_document(other, at=...)`, `copy_fragment`, and
+`import_fragment` go through `DocumentFragment::from_range` and
+`Document::import_fragment`, with a `conflict` policy of `reuse_equivalent` or
+`rename`. `custom_properties` is a mapping of typed values (str, 32-bit int,
+float, bool, and UTC datetime), `app_properties` exposes company, manager,
+template, application, and the read-only counts Word writes, and
+`settings.track_revisions` reads and writes the Track Changes flag. Content
+controls of the body are listed as frozen `ContentControl` snapshots, and
+`set_content_control_value` fills them by tag or alias, refusing a control
+type that holds no text. `Paragraph.add_equation` writes an equation from
+LaTeX or MathML and refuses a lossy conversion, and `Paragraph.equations`
+reads each one back as LaTeX and MathML with any loss diagnostics. Template
+rendering, fragment import, and content-control values advance the global
+revision. Properties, settings, and equations leave handles valid.
+
 ## Native Word facade stability
 Native Rust exposes `BibliographySourceKind`, `BibliographyContributorRole`,
 `BibliographySourceField`, `BibliographyStyle`, source/person/contributor/property
@@ -1118,8 +1150,9 @@ parts. The import closes note, comment, binding-store and reachable OPC
 companions and remaps conflicting identities in one package-authoritative
 transaction. The candidate serializes and reopens before publication, and a
 failed import leaves the destination unchanged. These are additive pre-1.0
-APIs in the published `rdocx` crate. Python, WASM and CLI gain no fragment-import
-surface here.
+APIs in the published `rdocx` crate. Python imports fragments through
+`Document.import_fragment` and `insert_document`. WASM and CLI gain no
+fragment-import surface here.
 
 Native Rust also exposes fallible story-scoped relationship operations on the
 same pre-1.0 `Document` facade. `add_picture_to_story` and
@@ -1381,8 +1414,8 @@ returns the same diagnostics after a successful save. The reader and writer
 cover text, formatting, tables, lists, and PNG or JPEG images. Unsupported
 destinations, visible formatting drops, and lossy writer inputs are reported
 instead of hidden. Malformed RTF returns the facade `Error::Rtf` variant
-without exposing a second document model. Python, WASM, and CLI surfaces do
-not gain RTF entry points implicitly.
+without exposing a second document model. Python exports RTF through
+`Document.to_rtf`. WASM and CLI surfaces do not gain RTF entry points.
 
 Native Rust callers can import HTML5 documents and fragments through
 `Document::from_html` and `Document::open_html`. Both return an
@@ -1436,8 +1469,9 @@ Native Rust callers can export OpenDocument Text through
 `OdtDiagnostic` values with stable document paths. The path method serializes
 completely, stages and syncs a sibling file, then publishes through the shared
 portable replacement primitive. A failure cannot truncate an existing
-destination. Export does not mutate the source document. Python, WASM, and CLI
-surfaces gain no ODT export entry point and retain their existing contracts.
+destination. Export does not mutate the source document. Python exports ODT
+through `Document.to_odt`. WASM and CLI surfaces gain no ODT export entry point
+and retain their existing contracts.
 
 Native Rust callers can import and export OpenDocument Presentation through
 `Presentation::from_odp_bytes`, `from_odp_bytes_with_limits`, `open_odp`,
@@ -1502,9 +1536,9 @@ an ordered source-location diagnostic. This includes dropped named paragraph
 style effects, reduced heading levels, and unconsumed document metadata. Typed
 and raw views of one revision wrapper produce one diagnostic even when Word and
 foreign namespace aliases share a paragraph boundary. Paragraph-local namespace
-shadows override document-root bindings during that correlation. Python,
-WASM, and CLI surfaces gain no EPUB entry point and retain their existing error
-contracts.
+shadows override document-root bindings during that correlation. Python
+exports EPUB through `Document.to_epub`. WASM and CLI surfaces gain no EPUB
+entry point and retain their existing error contracts.
 
 The native Word facade provides additive `Document::try_replace_text` beside
 the legacy infallible `replace_text` method. The fallible method stages the
@@ -1956,8 +1990,8 @@ several adjacent template rows. Each iteration retains table banding, grid and
 merge properties, and preserved row and cell XML. Repeated list items retain
 one source numbering identity and level, so their sequence continues across
 iterations. The existing method remains additive on the pre-1.0 native facade.
-Python, WASM, and CLI surfaces gain no template method and continue to preserve
-a document rendered by native code.
+Python exposes it as `Document.render_template`. WASM and CLI surfaces gain no
+template method and continue to preserve a document rendered by native code.
 
 Native Word callers can also inspect content controls through
 `Document::content_controls` and the tag or alias lookup methods.
@@ -1965,8 +1999,8 @@ Native Word callers can also inspect content controls through
 update every matching tag or alias, while `bind_content_controls` applies a
 string map with tag precedence and alias fallback. Bound values update their
 custom XML datastore and displayed text atomically through the
-package-preserving facade. These methods are additive native APIs. They do not
-implicitly add Python, WASM, or CLI methods, and the existing binding surfaces
+package-preserving facade. These methods are additive native APIs. Python
+lists the controls and sets a value by tag or alias. WASM and CLI surfaces
 remain unchanged.
 
 Native Word callers inspect direct body order through

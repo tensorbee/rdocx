@@ -869,6 +869,84 @@ fn text_views_keep_the_body_when_a_story_part_cannot_be_read() {
     }
 }
 
+/// The CLI views and `validate` are the library calls the Python binding
+/// makes, so `Document.text()`, `to_markdown()`, `to_html()` and
+/// `validate()` print what the CLI prints.
+#[test]
+fn text_views_and_validate_print_what_the_library_returns() {
+    let temp = TempWorkspace::new("text-views-library");
+    let every_story = temp.path.join("every-story.docx");
+    write_every_story_fixture(&every_story);
+    let truncated = temp.path.join("truncated.docx");
+    let mut document = fixture_document(&["Body text", ""]);
+    document.set_header("Head");
+    document.save(&truncated).unwrap();
+    let header = header_part_name(&truncated);
+    let mut package = OpcPackage::open(&truncated).unwrap();
+    let xml = package.get_part(&header).unwrap().to_vec();
+    package.set_part(&header, xml[..xml.len() / 2].to_vec());
+    package.save(&truncated).unwrap();
+
+    for input in [&every_story, &truncated] {
+        let document = Document::open(input).unwrap();
+        let text = document.text_with_stories();
+        // The CLI prints the reason the other stories are left out as a
+        // warning, as Python emits a `ConversionWarning`.
+        let warning = match &text.omitted_stories {
+            Some(reason) => format!("Warning: other stories left out: {reason}\n"),
+            None => String::new(),
+        };
+        assert_eq!(text.omitted_stories.is_some(), input == &truncated);
+        let output = cli(&["text", path_text(input)]);
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stderr).unwrap(), warning);
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), text.text);
+
+        for (format, view) in [
+            ("md", document.to_markdown_with_stories()),
+            ("html", document.to_html_with_stories()),
+        ] {
+            let output_path = input.with_extension(format);
+            let output = cli(&[
+                "convert",
+                path_text(input),
+                "--to",
+                format,
+                "-o",
+                path_text(&output_path),
+            ]);
+            assert!(output.status.success());
+            assert_eq!(String::from_utf8(output.stderr).unwrap(), warning);
+            assert_eq!(fs::read_to_string(&output_path).unwrap(), view.text);
+        }
+
+        let report = Document::validate_file(input).unwrap();
+        let output = cli(&["validate", path_text(input)]);
+        let printed = String::from_utf8(output.stdout).unwrap();
+        let findings = printed
+            .lines()
+            .filter_map(|line| line.trim_start().split_once(". "))
+            .map(|(_, finding)| finding)
+            .collect::<Vec<_>>();
+        let expected = report
+            .errors
+            .iter()
+            .chain(&report.warnings)
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(findings, expected, "{printed}");
+        assert_eq!(output.status.success(), report.is_valid());
+    }
+
+    // A file that is not a package keeps the message of the package error.
+    let text_file = temp.path.join("not-a-package.docx");
+    fs::write(&text_file, "plain text").unwrap();
+    let output = cli(&["validate", path_text(&text_file)]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.starts_with("Error: ZIP error: "), "{stderr}");
+}
+
 #[test]
 fn convert_writes_valid_formats_and_uses_the_shared_default_output() {
     let temp = TempWorkspace::new("convert");
