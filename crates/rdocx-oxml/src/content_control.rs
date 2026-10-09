@@ -162,7 +162,177 @@ struct TypeElement {
     children: Vec<u8>,
 }
 
+/// One `w:listItem` of a drop-down list or combo box control.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SdtListItem {
+    /// `w:displayText`, the text the control shows.
+    pub display_text: Option<String>,
+    /// `w:value`, the value a data binding stores.
+    pub value: Option<String>,
+}
+
 impl CT_SdtPr {
+    /// Whether the control shows its placeholder text (`w:showingPlcHdr`).
+    pub fn showing_placeholder(&self) -> bool {
+        self.slots.iter().any(|slot| {
+            matches!(slot, PropertySlot::Raw(raw) if raw_local_name(raw).as_deref() == Some(b"showingPlcHdr".as_slice()))
+        })
+    }
+
+    /// Remove `w:showingPlcHdr`, so the control shows its content as a value.
+    pub fn clear_showing_placeholder(&mut self) {
+        self.slots.retain(|slot| {
+            !matches!(slot, PropertySlot::Raw(raw) if raw_local_name(raw).as_deref() == Some(b"showingPlcHdr".as_slice()))
+        });
+    }
+
+    /// The `w:listItem` children of a drop-down list or combo box type.
+    pub fn list_items(&self) -> Result<Vec<SdtListItem>> {
+        let mut items = Vec::new();
+        for (local, attributes) in self.type_children()? {
+            if local == b"listItem" {
+                items.push(SdtListItem {
+                    display_text: attribute_value(&attributes, b"displayText"),
+                    value: attribute_value(&attributes, b"value"),
+                });
+            }
+        }
+        Ok(items)
+    }
+
+    /// The `w:val` of a direct child of the type element, such as the
+    /// `dateFormat`, `lid` or `storeMappedDataAs` of a date control.
+    pub fn type_child_value(&self, child: &str) -> Result<Option<String>> {
+        Ok(self
+            .type_children()?
+            .into_iter()
+            .find(|(local, _)| local == child.as_bytes())
+            .and_then(|(_, attributes)| attribute_value(&attributes, b"val")))
+    }
+
+    /// Set an attribute of the type element, such as `fullDate` or
+    /// `lastValue`, keeping its prefix when it is already present.
+    pub fn set_type_attribute(&mut self, local: &str, value: &str) {
+        let Some(control_type) = self.control_type else {
+            return;
+        };
+        let element = self.type_element.get_or_insert_with(|| TypeElement {
+            control_type,
+            attributes: Vec::new(),
+            children: Vec::new(),
+        });
+        let existing = element
+            .attributes
+            .iter_mut()
+            .find(|(key, _)| key.rsplit(':').next() == Some(local) && !key.starts_with("xmlns"));
+        match existing {
+            Some((_, current)) => *current = value.to_owned(),
+            None => element
+                .attributes
+                .push((format!("w:{local}"), value.to_owned())),
+        }
+    }
+
+    /// Set the `w14:checked` state of a check box control.
+    ///
+    /// The `checked` child is written first, as the Word 2010 schema orders
+    /// the children of `w14:checkbox`, with the prefix the type element's
+    /// children already use. Its other children, such as `checkedState` and
+    /// `uncheckedState`, are kept as they are.
+    pub fn set_checkbox_checked(&mut self, checked: bool) -> Result<()> {
+        if self.control_type != Some(SdtType::CheckBox) {
+            return Err(OxmlError::InvalidValue(
+                "only a check box content control has a checked state".to_owned(),
+            ));
+        }
+        let element = self.type_element.get_or_insert_with(|| TypeElement {
+            control_type: SdtType::CheckBox,
+            attributes: Vec::new(),
+            children: Vec::new(),
+        });
+        let mut reader = Reader::from_reader(element.children.as_slice());
+        let mut kept = Vec::with_capacity(element.children.len());
+        let mut prefix: Option<String> = None;
+        let mut copied_to = 0usize;
+        loop {
+            let before = reader.buffer_position() as usize;
+            let event = reader.read_event()?;
+            let (start, empty) = match &event {
+                Event::Start(start) => (start.to_owned(), false),
+                Event::Empty(start) => (start.to_owned(), true),
+                Event::Eof => break,
+                _ => continue,
+            };
+            let name = start.name();
+            if prefix.is_none() {
+                prefix = name
+                    .prefix()
+                    .map(|prefix| String::from_utf8_lossy(prefix.as_ref()).into_owned());
+            }
+            if !empty {
+                reader.read_to_end(name)?;
+            }
+            if oxml_core::xml::local_name(name.as_ref()) == b"checked" {
+                kept.extend_from_slice(&element.children[copied_to..before]);
+                copied_to = reader.buffer_position() as usize;
+            }
+        }
+        kept.extend_from_slice(&element.children[copied_to..]);
+        let prefix = prefix.unwrap_or_else(|| "w14".to_owned());
+        let mut children = format!(
+            r#"<{prefix}:checked {prefix}:val="{}"/>"#,
+            u8::from(checked)
+        )
+        .into_bytes();
+        children.extend(kept);
+        element.children = children;
+        Ok(())
+    }
+
+    /// The local name and attributes of every direct child of the type element.
+    #[allow(clippy::type_complexity)]
+    fn type_children(&self) -> Result<Vec<(Vec<u8>, Vec<(Vec<u8>, String)>)>> {
+        let Some(element) = &self.type_element else {
+            return Ok(Vec::new());
+        };
+        let mut reader = Reader::from_reader(element.children.as_slice());
+        let mut children = Vec::new();
+        let mut depth = 0usize;
+        loop {
+            let event = reader.read_event()?;
+            let (start, empty) = match &event {
+                Event::Start(start) => (start, false),
+                Event::Empty(start) => (start, true),
+                Event::End(_) => {
+                    depth = depth.saturating_sub(1);
+                    continue;
+                }
+                Event::Eof => return Ok(children),
+                _ => continue,
+            };
+            if depth == 0 {
+                let mut attributes = Vec::new();
+                for attribute in start.attributes() {
+                    let attribute = attribute.map_err(quick_xml::Error::from)?;
+                    let value = attribute
+                        .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())?
+                        .into_owned();
+                    attributes.push((
+                        oxml_core::xml::local_name(attribute.key.as_ref()).to_vec(),
+                        value,
+                    ));
+                }
+                children.push((
+                    oxml_core::xml::local_name(start.name().as_ref()).to_vec(),
+                    attributes,
+                ));
+            }
+            if !empty {
+                depth += 1;
+            }
+        }
+    }
+
     fn from_xml_with_prefixes(
         reader: &mut Reader<&[u8]>,
         start: &BytesStart<'_>,
@@ -1635,6 +1805,27 @@ fn raw_fragment_has_child_content(raw: &[u8]) -> bool {
         }
         buffer.clear();
     }
+}
+
+/// The local name of the root element of a raw XML fragment.
+fn raw_local_name(raw: &[u8]) -> Option<Vec<u8>> {
+    let mut reader = Reader::from_reader(raw);
+    loop {
+        match reader.read_event().ok()? {
+            Event::Start(start) | Event::Empty(start) => {
+                return Some(oxml_core::xml::local_name(start.name().as_ref()).to_vec());
+            }
+            Event::Eof => return None,
+            _ => {}
+        }
+    }
+}
+
+fn attribute_value(attributes: &[(Vec<u8>, String)], local: &[u8]) -> Option<String> {
+    attributes
+        .iter()
+        .find(|(key, _)| key == local)
+        .map(|(_, value)| value.clone())
 }
 
 #[cfg(test)]

@@ -13,6 +13,10 @@ replaces text, and produces deterministic fixed output.
 - PDF, PNG, JPEG, and multi-page TIFF conversion.
 - Selected-slide rendering, thumbnails, text diff, replacement, and validation.
 - Modern comment thread listing, addition, replies, resolution, and removal.
+- One-shot edits: batch replacement from a JSON map, slide add, duplicate,
+  remove, move, hide and show, speaker notes, and core properties.
+- A `fit` check that lists every overflowing text frame with the font scale it
+  needs and exits 1 when one overflows.
 - Scriptable output covers slide order, notes, comments, recursive group
   content, relationship-backed media, and deterministic rendering diagnostics.
 
@@ -20,7 +24,7 @@ replaces text, and produces deterministic fixed output.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rpptx-cli | 40,886 compressed bytes, 179,264 member bytes, 8 members | 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --no-verify` | Tracked `rpptx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-09 |
+| Crates.io archive: rpptx-cli | 48,380 compressed bytes, 216,922 member bytes, 8 members | 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --no-verify` | Tracked `rpptx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-09 |
 
 ## Use it when
 
@@ -42,7 +46,53 @@ rpptx comment add deck.pptx --slide 2 --author Reviewer \
 rpptx comment list reviewed.pptx --json
 rpptx convert deck.pptx --to pdf -o deck.pdf
 rpptx thumbnail deck.pptx -o thumbnail.png
+rpptx replace deck.pptx --map pairs.json -o filled.pptx --json
+rpptx slide add deck.pptx --layout "Title and Content" --at 2 -o added.pptx
+rpptx slide duplicate deck.pptx 3 -o copied.pptx
+rpptx slide move deck.pptx 4 --to 1 -o moved.pptx
+rpptx slide hide deck.pptx 5 -o hidden.pptx
+rpptx notes set deck.pptx 2 --from-file notes.txt -o noted.pptx
+rpptx fit deck.pptx --json
+rpptx meta set deck.pptx --title "Quarterly review" --author Ada -o titled.pptx
 ```
+
+Every editing command takes `-o`, refuses an output that already exists, the
+input included, and writes nothing when the edit is refused. Slide numbers are
+one-based. With `--json`, each prints a schema-1 record with its `action`, the
+one-based `slide` it produced and the `output`. A slide edit also reports
+`changed`, false when the deck stays as it was, such as a slide moved to its
+own position or a hidden slide hidden again.
+
+`replace --map PAIRS_JSON` reads a JSON array of
+`{"placeholder", "value", "expect"}` objects and applies the pairs in order, so
+a later pair sees the text an earlier one wrote. A pair that gives `expect`
+must replace exactly that count, and one without must replace at least one
+occurrence, or nothing is written and the error names the zero-based pair.
+`--json` reports the count of each pair and the total.
+
+`slide add --layout` takes a layout name, matched exactly and then without
+case, or its one-based number in master order, and `--at` the one-based
+position of the new slide. An unknown layout lists the available ones.
+`slide duplicate N` inserts the copy right after slide N. `slide remove N`
+removes the slide with its notes and comments. `slide move N --to M` makes
+slide N the M-th slide. `slide hide N` and `slide show N` set whether the slide
+show skips it.
+
+`notes set N --text TEXT` or `--from-file PATH` replaces the speaker notes of
+slide N, one paragraph per line, and creates its notes slide when it has none.
+
+`fit` lays out the text of every slide shape as rendering does and lists each
+frame whose text overflows it, with its slide, shape id, name, autofit mode,
+the font scale it renders at, and `needed_font_scale`: the largest scale, in
+steps of 2.5% down to 25%, at which the text fits, as PowerPoint's shrink text
+on overflow computes it, or `null` when even 25% overflows. Measures are
+rounded to four decimals. It exits 1 when a frame overflows and 2 on an error,
+so it can gate a script. Tables and SmartArt are not checked. It wraps
+`Presentation::text_fit_report`.
+
+`meta get` prints the core properties, with the creator as `author`, and
+`meta set` writes the title, author, subject, keywords, description and
+category it is given, keeping the others.
 
 `inspect --json` keeps its existing keys and adds `shape_details` beside each
 slide's shape count. Each shape reports its z-order index, id, name, kind,

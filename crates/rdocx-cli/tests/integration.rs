@@ -307,6 +307,12 @@ fn inspect_json_uses_the_shared_schema() {
             "paragraphs": 2,
             "tables": 1,
             "content_elements": 3,
+            "words": 4,
+            "characters": 20,
+            "characters_no_spaces": 20,
+            "pages": 1,
+            "pictures": [],
+            "content_controls": [],
             "metadata": {
                 "title": "CLI fixture",
                 "author": "rdocx tests",
@@ -867,6 +873,84 @@ fn text_views_keep_the_body_when_a_story_part_cannot_be_read() {
             assert!(!converted.contains("Head"), "{converted}");
         }
     }
+}
+
+/// The CLI views and `validate` are the library calls the Python binding
+/// makes, so `Document.text()`, `to_markdown()`, `to_html()` and
+/// `validate()` print what the CLI prints.
+#[test]
+fn text_views_and_validate_print_what_the_library_returns() {
+    let temp = TempWorkspace::new("text-views-library");
+    let every_story = temp.path.join("every-story.docx");
+    write_every_story_fixture(&every_story);
+    let truncated = temp.path.join("truncated.docx");
+    let mut document = fixture_document(&["Body text", ""]);
+    document.set_header("Head");
+    document.save(&truncated).unwrap();
+    let header = header_part_name(&truncated);
+    let mut package = OpcPackage::open(&truncated).unwrap();
+    let xml = package.get_part(&header).unwrap().to_vec();
+    package.set_part(&header, xml[..xml.len() / 2].to_vec());
+    package.save(&truncated).unwrap();
+
+    for input in [&every_story, &truncated] {
+        let document = Document::open(input).unwrap();
+        let text = document.text_with_stories();
+        // The CLI prints the reason the other stories are left out as a
+        // warning, as Python emits a `ConversionWarning`.
+        let warning = match &text.omitted_stories {
+            Some(reason) => format!("Warning: other stories left out: {reason}\n"),
+            None => String::new(),
+        };
+        assert_eq!(text.omitted_stories.is_some(), input == &truncated);
+        let output = cli(&["text", path_text(input)]);
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stderr).unwrap(), warning);
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), text.text);
+
+        for (format, view) in [
+            ("md", document.to_markdown_with_stories()),
+            ("html", document.to_html_with_stories()),
+        ] {
+            let output_path = input.with_extension(format);
+            let output = cli(&[
+                "convert",
+                path_text(input),
+                "--to",
+                format,
+                "-o",
+                path_text(&output_path),
+            ]);
+            assert!(output.status.success());
+            assert_eq!(String::from_utf8(output.stderr).unwrap(), warning);
+            assert_eq!(fs::read_to_string(&output_path).unwrap(), view.text);
+        }
+
+        let report = Document::validate_file(input).unwrap();
+        let output = cli(&["validate", path_text(input)]);
+        let printed = String::from_utf8(output.stdout).unwrap();
+        let findings = printed
+            .lines()
+            .filter_map(|line| line.trim_start().split_once(". "))
+            .map(|(_, finding)| finding)
+            .collect::<Vec<_>>();
+        let expected = report
+            .errors
+            .iter()
+            .chain(&report.warnings)
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(findings, expected, "{printed}");
+        assert_eq!(output.status.success(), report.is_valid());
+    }
+
+    // A file that is not a package keeps the message of the package error.
+    let text_file = temp.path.join("not-a-package.docx");
+    fs::write(&text_file, "plain text").unwrap();
+    let output = cli(&["validate", path_text(&text_file)]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.starts_with("Error: ZIP error: "), "{stderr}");
 }
 
 #[test]
@@ -4265,4 +4349,630 @@ fn whole_story_outputs_validate_without_comment_orphans() {
     document.save(&refused).unwrap();
     let result = cli(&["validate", path_text(&refused)]);
     assert!(!result.status.success());
+}
+
+fn pixel_png() -> Vec<u8> {
+    vec![
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
+        0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 8, 29, 99, 96, 96, 96, 248, 15, 0,
+        1, 4, 1, 0, 30, 115, 156, 64, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ]
+}
+
+fn json_stdout(output: &Output) -> Value {
+    serde_json::from_slice(&output.stdout).expect("JSON standard output")
+}
+
+#[test]
+fn replace_map_and_regex_report_each_count_and_write_all_or_nothing() {
+    let temp = TempWorkspace::new("replace-map");
+    let input = temp.path.join("template.docx");
+    write_document(&input, &["Dear {{name}}, see {{name}} on 2026-10-09"]);
+    let map = temp.path.join("pairs.json");
+    fs::write(
+        &map,
+        r#"[{"placeholder": "{{name}}", "value": "Ada", "expect": 2},
+            {"placeholder": "Ada,", "value": "Ada Lovelace,"}]"#,
+    )
+    .unwrap();
+    let output = temp.path.join("map.docx");
+    let result = cli(&[
+        "replace",
+        path_text(&input),
+        "--map",
+        path_text(&map),
+        "-o",
+        path_text(&output),
+        "--json",
+    ]);
+    assert_success(&result, "replace --map");
+    let record = json_stdout(&result);
+    assert_eq!(record["total"], 3);
+    assert_eq!(record["pairs"][0]["count"], 2);
+    assert_eq!(record["pairs"][1]["count"], 1);
+    assert_eq!(
+        Document::open(&output)
+            .unwrap()
+            .paragraph(0)
+            .unwrap()
+            .text(),
+        "Dear Ada Lovelace, see Ada on 2026-10-09"
+    );
+
+    let regex = temp.path.join("regex.docx");
+    let result = cli(&[
+        "replace",
+        path_text(&input),
+        "--regex",
+        "-p",
+        r"(\d{4})-(\d{2})-(\d{2})",
+        "-v",
+        "$3/$2/$1",
+        "--expect",
+        "1",
+        "-o",
+        path_text(&regex),
+    ]);
+    assert_success(&result, "replace --regex");
+    assert_eq!(
+        Document::open(&regex).unwrap().paragraph(0).unwrap().text(),
+        "Dear {{name}}, see {{name}} on 09/10/2026"
+    );
+
+    fs::write(
+        &map,
+        r#"[{"placeholder": "{{name}}", "value": "Ada", "expect": 2},
+            {"placeholder": "{{missing}}", "value": "x", "expect": 1}]"#,
+    )
+    .unwrap();
+    let refused = temp.path.join("refused.docx");
+    let result = cli(&[
+        "replace",
+        path_text(&input),
+        "--map",
+        path_text(&map),
+        "-o",
+        path_text(&refused),
+    ]);
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&result.stderr),
+        "Error: pair 1: expected 1 replacement(s) of \"{{missing}}\", found 0, nothing written\n"
+    );
+    assert!(!refused.exists());
+
+    for (pairs, message) in [
+        (
+            r#"[{"placeholder": "{{name}}", "value": "Ada"}, {"placeholder": "{{nobody}}", "value": "x"}]"#,
+            "Error: pair 1: no replacements found for \"{{nobody}}\", nothing written",
+        ),
+        (
+            r#"[{"placeholder": "Dear", "value": "Hi"}, {"placeholder": "(", "value": "x"}]"#,
+            "Error: pair 1: invalid regex",
+        ),
+    ] {
+        fs::write(&map, pairs).unwrap();
+        let regex = message.contains("regex");
+        let args = [
+            &["replace", path_text(&input), "--map", path_text(&map)][..],
+            if regex { &["--regex"][..] } else { &[][..] },
+            &["-o", path_text(&refused)],
+        ]
+        .concat();
+        let result = cli(&args);
+        assert_eq!(result.status.code(), Some(1), "{pairs}");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.starts_with(message), "{stderr}");
+        assert!(!refused.exists());
+    }
+}
+
+/// Without `--now`, DATE takes the local wall-clock time, as Word does.
+#[cfg(unix)]
+#[test]
+fn fields_update_reads_the_local_time_zone() {
+    let temp = TempWorkspace::new("fields-local");
+    let input = temp.path.join("fields.docx");
+    let mut document = fixture_document(&[]);
+    document
+        .add_paragraph("")
+        .add_run("")
+        .add_field(r#"DATE \@ "yyyy-MM-dd""#, "x")
+        .unwrap();
+    document.save(&input).unwrap();
+    let now_in = |zone: &str, name: &str| {
+        let output = temp.path.join(name);
+        let result = Command::new(env!("CARGO_BIN_EXE_rdocx"))
+            .args(["fields", "update", path_text(&input), "--json", "-o"])
+            .arg(&output)
+            .env("TZ", zone)
+            .output()
+            .unwrap();
+        assert_success(&result, zone);
+        let now = json_stdout(&result)["now"].as_str().unwrap().to_owned();
+        let date = |text: &str| {
+            let number = |range: std::ops::Range<usize>| text[range].parse::<i64>().unwrap();
+            let days = oxml_cli_support::days_from_civil(
+                number(0..4),
+                number(5..7) as u8,
+                number(8..10) as u8,
+            );
+            days * 86_400 + number(11..13) * 3_600 + number(14..16) * 60 + number(17..19)
+        };
+        date(&now)
+    };
+    // Etc/GMT-14 is UTC+14 and Etc/GMT+12 is UTC-12, 26 hours apart.
+    let ahead = now_in("Etc/GMT-14", "ahead.docx");
+    let behind = now_in("Etc/GMT+12", "behind.docx");
+    let difference = ahead - behind - 26 * 3_600;
+    assert!(difference.abs() < 60, "{ahead} {behind}");
+}
+
+#[test]
+fn fields_update_writes_page_and_date_results() {
+    let temp = TempWorkspace::new("fields-update");
+    let input = temp.path.join("fields.docx");
+    let mut document = fixture_document(&[]);
+    {
+        let mut paragraph = document.add_paragraph("Page ");
+        let mut run = paragraph.add_run("");
+        run.add_field("PAGE", "9").unwrap();
+        run.add_field("NUMPAGES", "9").unwrap();
+        run.add_field(r#"DATE \@ "yyyy-MM-dd""#, "1999-01-01")
+            .unwrap();
+    }
+    for _ in 0..2 {
+        document
+            .add_paragraph("Figure ")
+            .add_run("")
+            .add_field("SEQ Figure", "9")
+            .unwrap();
+    }
+    document.save(&input).unwrap();
+
+    let output = temp.path.join("updated.docx");
+    let result = cli(&[
+        "fields",
+        "update",
+        path_text(&input),
+        "--now",
+        "2026-10-10T08:30:00",
+        "-o",
+        path_text(&output),
+        "--json",
+    ]);
+    assert_success(&result, "fields update");
+    let record = json_stdout(&result);
+    assert_eq!(record["now"], "2026-10-10T08:30:00");
+    assert_eq!(record["page_fields"], 1);
+    assert_eq!(record["num_pages_fields"], 1);
+    assert_eq!(
+        Document::open(&output)
+            .unwrap()
+            .paragraph(0)
+            .unwrap()
+            .text(),
+        "Page 112026-10-10"
+    );
+
+    let updated = Document::open(&output).unwrap();
+    assert_eq!(updated.paragraph(1).unwrap().text(), "Figure 1");
+    assert_eq!(updated.paragraph(2).unwrap().text(), "Figure 2");
+
+    let clock = temp.path.join("clock.docx");
+    let result = cli(&[
+        "fields",
+        "update",
+        path_text(&input),
+        "-o",
+        path_text(&clock),
+        "--json",
+    ]);
+    assert_success(&result, "fields update with the clock");
+    let now = json_stdout(&result)["now"].as_str().unwrap().to_owned();
+    assert!(
+        now.len() == 19 && now.as_bytes()[10] == b'T' && now.as_str() > "2026-01-01",
+        "{now}"
+    );
+    assert!(
+        Document::open(&clock)
+            .unwrap()
+            .paragraph(0)
+            .unwrap()
+            .text()
+            .ends_with(&now[..10])
+    );
+
+    let invalid = cli(&[
+        "fields",
+        "update",
+        path_text(&input),
+        "--now",
+        "2026-02-30",
+        "-o",
+        path_text(&temp.path.join("invalid.docx")),
+    ]);
+    assert_eq!(invalid.status.code(), Some(2));
+}
+
+#[test]
+fn images_extract_writes_each_picture_once_with_a_listing() {
+    let temp = TempWorkspace::new("images-extract");
+    let input = temp.path.join("pictures.docx");
+    let mut document = fixture_document(&["Before"]);
+    let body = document.stories().unwrap()[0].clone();
+    document
+        .add_picture_with_options(
+            &body,
+            &pixel_png(),
+            "pixel.png",
+            rdocx::PictureOptions {
+                width: rdocx::Length::emu(914_400),
+                height: rdocx::Length::emu(457_200),
+                crop: None,
+                anchor: None,
+                name: Some("Logo".to_owned()),
+                description: Some("Company logo".to_owned()),
+            },
+        )
+        .unwrap();
+    document.save(&input).unwrap();
+
+    let inspect = cli(&["inspect", path_text(&input), "--json"]);
+    assert_success(&inspect, "inspect");
+    let pictures = &json_stdout(&inspect)["pictures"];
+    assert_eq!(pictures[0]["alt_text"], "Company logo");
+    assert_eq!(pictures[0]["width_emu"], 914_400);
+
+    let dir = temp.path.join("images");
+    let result = cli(&[
+        "images",
+        "extract",
+        path_text(&input),
+        path_text(&dir),
+        "--json",
+    ]);
+    assert_success(&result, "images extract");
+    let listing = json_stdout(&result);
+    assert_eq!(listing["files"], 1);
+    let image = &listing["images"][0];
+    assert_eq!(image["story"], "body");
+    assert_eq!(image["name"], "Logo");
+    assert_eq!(image["alt_text"], "Company logo");
+    assert_eq!(image["format"], "png");
+    let part = image["part"].as_str().unwrap();
+    assert!(part.starts_with("/word/media/"), "{part}");
+    assert_eq!(image["width_px"], 1);
+    assert_eq!(image["height_emu"], 457_200);
+    let file = PathBuf::from(image["file"].as_str().unwrap());
+    assert_eq!(file, dir.join(part.rsplit('/').next().unwrap()));
+    assert_eq!(fs::read(&file).unwrap(), pixel_png());
+
+    // A part whose name would hide or escape the file falls back to a
+    // numbered name inside the directory.
+    let crafted = temp.path.join("crafted.docx");
+    let mut package =
+        OpcPackage::from_reader(std::io::Cursor::new(fs::read(&input).unwrap())).unwrap();
+    let bytes = package.get_part(part).unwrap().to_vec();
+    package.set_part("/word/media/.evil.png", bytes);
+    for rel in &mut package.get_or_create_part_rels("/word/document.xml").items {
+        if rel.rel_type == rel_types::IMAGE {
+            rel.target = "media/.evil.png".to_owned();
+        }
+    }
+    package.save(&crafted).unwrap();
+    let crafted_dir = temp.path.join("crafted");
+    let result = cli(&[
+        "images",
+        "extract",
+        path_text(&crafted),
+        path_text(&crafted_dir),
+        "--json",
+    ]);
+    assert_success(&result, "images extract of a crafted part");
+    let listing = json_stdout(&result);
+    assert_eq!(listing["images"][0]["part"], "/word/media/.evil.png");
+    assert_eq!(
+        PathBuf::from(listing["images"][0]["file"].as_str().unwrap()),
+        crafted_dir.join("image1.png")
+    );
+    assert_eq!(
+        fs::read_dir(&crafted_dir).unwrap().count(),
+        1,
+        "only the numbered file is written"
+    );
+
+    let again = cli(&["images", "extract", path_text(&input), path_text(&dir)]);
+    assert_eq!(again.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&again.stderr).contains("output already exists"));
+    let forced = cli(&[
+        "images",
+        "extract",
+        path_text(&input),
+        path_text(&dir),
+        "--force",
+    ]);
+    assert_success(&forced, "images extract --force");
+}
+
+#[test]
+fn meta_set_writes_core_and_typed_custom_properties() {
+    let temp = TempWorkspace::new("meta");
+    let input = temp.path.join("meta.docx");
+    let mut document = fixture_document(&["Body"]);
+    document
+        .set_custom_property(rdocx::CustomProperty {
+            fmtid: "{D5CDD505-2E9C-101B-9397-08002B2CF9AE}".to_owned(),
+            pid: 2,
+            name: Some("Revision".to_owned()),
+            value: rdocx::CustomPropertyValue::I4(1),
+        })
+        .unwrap();
+    document
+        .set_custom_property(rdocx::CustomProperty {
+            fmtid: "{D5CDD505-2E9C-101B-9397-08002B2CF9AE}".to_owned(),
+            pid: 3,
+            name: Some("When".to_owned()),
+            value: rdocx::CustomPropertyValue::FileTime("2020-01-01T00:00:00Z".to_owned()),
+        })
+        .unwrap();
+    document.save(&input).unwrap();
+
+    for (date, stored) in [
+        ("2024-05-06Z", "2024-05-06T00:00:00Z"),
+        ("2024-05-06", "2024-05-06T00:00:00Z"),
+        ("2024-05-06T08:30Z", "2024-05-06T08:30:00Z"),
+        ("2024-05-06T01:30:00+02:00", "2024-05-05T23:30:00Z"),
+        ("2024-12-31T22:00:00-0500", "2025-01-01T03:00:00Z"),
+    ] {
+        let dated = temp.path.join("dated.docx");
+        let _ = fs::remove_file(&dated);
+        let result = cli(&[
+            "meta",
+            "set",
+            path_text(&input),
+            "--custom",
+            &format!("When={date}"),
+            "-o",
+            path_text(&dated),
+        ]);
+        assert_success(&result, date);
+        let reopened = Document::open(&dated).unwrap();
+        assert_eq!(
+            reopened.custom_property("When").unwrap().value,
+            rdocx::CustomPropertyValue::FileTime(stored.to_owned()),
+            "{date}"
+        );
+    }
+
+    let output = temp.path.join("out.docx");
+    let result = cli(&[
+        "meta",
+        "set",
+        path_text(&input),
+        "--title",
+        "Final report",
+        "--author",
+        "Ada",
+        "--custom",
+        "Client=Acme",
+        "--custom",
+        "Revision=3",
+        "-o",
+        path_text(&output),
+    ]);
+    assert_success(&result, "meta set");
+    let result = cli(&["meta", "get", path_text(&output), "--json"]);
+    assert_success(&result, "meta get");
+    let record = json_stdout(&result);
+    assert_eq!(record["core"]["title"], "Final report");
+    assert_eq!(record["core"]["author"], "Ada");
+    assert_eq!(record["core"]["subject"], "command integration");
+    assert_eq!(
+        record["custom"],
+        json!([
+            { "name": "Revision", "type": "integer", "value": 3 },
+            { "name": "When", "type": "date", "value": "2020-01-01T00:00:00Z" },
+            { "name": "Client", "type": "string", "value": "Acme" },
+        ])
+    );
+
+    for (args, message) in [
+        (&["--custom", "When=2024-05-06T25:00"][..], "is a date"),
+        (
+            &["--custom", "Client=A", "--remove-custom", "Client"][..],
+            "is named twice",
+        ),
+        (&["--custom", "Revision=three"][..], "is a 32-bit integer"),
+        (
+            &["--remove-custom", "Missing"][..],
+            "no custom property is named",
+        ),
+        (&[][..], "meta set needs at least one property"),
+    ] {
+        let refused = temp.path.join("refused.docx");
+        let result = cli(&[
+            &["meta", "set", path_text(&input)][..],
+            args,
+            &["-o", path_text(&refused)],
+        ]
+        .concat());
+        assert_eq!(result.status.code(), Some(1), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(message),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(!refused.exists());
+    }
+}
+
+#[test]
+fn fill_sets_content_controls_by_tag_and_alias_or_writes_nothing() {
+    let temp = TempWorkspace::new("fill");
+    let input = temp.path.join("form.docx");
+    write_document(&input, &["seed"]);
+    let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let control = |properties: &str, text: &str| {
+        format!(
+            r#"<w:sdt><w:sdtPr>{properties}</w:sdtPr><w:sdtContent><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:sdtContent></w:sdt>"#
+        )
+    };
+    let body = [
+        control(r#"<w:tag w:val="client"/>"#, "Client name"),
+        control(r#"<w:alias w:val="Due date"/>"#, "Pick a date"),
+    ]
+    .concat();
+    let mut package =
+        OpcPackage::from_reader(std::io::Cursor::new(fs::read(&input).unwrap())).unwrap();
+    package.set_part(
+        "/word/document.xml",
+        format!(r#"<w:document xmlns:w="{word}"><w:body>{body}<w:sectPr/></w:body></w:document>"#)
+            .into_bytes(),
+    );
+    package.save(&input).unwrap();
+
+    let output = temp.path.join("filled.docx");
+    let result = cli(&[
+        "fill",
+        path_text(&input),
+        "--tag",
+        "client=Acme",
+        "--alias",
+        "Due date=2026-10-31",
+        "-o",
+        path_text(&output),
+        "--json",
+    ]);
+    assert_success(&result, "fill");
+    let record = json_stdout(&result);
+    assert_eq!(record["controls"][0]["count"], 1);
+    assert_eq!(record["controls"][1]["alias"], "Due date");
+    let filled = Document::open(&output).unwrap();
+    let texts = filled
+        .content_controls()
+        .iter()
+        .map(|control| control.text())
+        .collect::<Vec<_>>();
+    assert_eq!(texts, ["Acme", "2026-10-31"]);
+
+    let refused = temp.path.join("refused.docx");
+    let result = cli(&[
+        "fill",
+        path_text(&input),
+        "--tag",
+        "client=Acme",
+        "--tag",
+        "missing=x",
+        "-o",
+        path_text(&refused),
+    ]);
+    assert_eq!(result.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&result.stderr),
+        "Error: no content control has tag \"missing\", nothing written (known: \"client\")\n"
+    );
+    assert!(!refused.exists());
+}
+
+/// Write a body of content controls, with the Word 2010 namespace declared.
+fn write_controls_document(path: &Path, controls: &[(&str, &str, &str)]) {
+    write_document(path, &["seed"]);
+    let body = controls
+        .iter()
+        .map(|(tag, properties, text)| {
+            format!(
+                r#"<w:sdt><w:sdtPr><w:tag w:val="{tag}"/>{properties}</w:sdtPr><w:sdtContent><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:sdtContent></w:sdt>"#
+            )
+        })
+        .collect::<String>();
+    let mut package =
+        OpcPackage::from_reader(std::io::Cursor::new(fs::read(path).unwrap())).unwrap();
+    package.set_part(
+        "/word/document.xml",
+        format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>{body}<w:sectPr/></w:body></w:document>"#
+        )
+        .into_bytes(),
+    );
+    package.save(path).unwrap();
+}
+
+#[test]
+fn fill_writes_each_control_type_as_word_does() {
+    let temp = TempWorkspace::new("fill-types");
+    let input = temp.path.join("form.docx");
+    write_controls_document(
+        &input,
+        &[
+            (
+                "agree",
+                r#"<w14:checkbox><w14:checked w14:val="0"/><w14:checkedState w14:val="2612" w14:font="MS Gothic"/><w14:uncheckedState w14:val="2610" w14:font="MS Gothic"/></w14:checkbox>"#,
+                "\u{2610}",
+            ),
+            (
+                "colour",
+                r#"<w:showingPlcHdr/><w:dropDownList><w:listItem w:displayText="Red" w:value="red"/><w:listItem w:displayText="Blue" w:value="blue"/></w:dropDownList>"#,
+                "Choose an item.",
+            ),
+            (
+                "due",
+                r#"<w:date><w:dateFormat w:val="yyyy-MM-dd"/><w:lid w:val="en-US"/></w:date>"#,
+                "Pick a date",
+            ),
+            ("logo", "<w:picture/>", ""),
+        ],
+    );
+    let output = temp.path.join("filled.docx");
+    let result = cli(&[
+        "fill",
+        path_text(&input),
+        "--tag",
+        "agree=yes",
+        "--tag",
+        "colour=blue",
+        "--tag",
+        "due=2026-10-31",
+        "-o",
+        path_text(&output),
+    ]);
+    assert_success(&result, "fill");
+    let xml = package_part_text(&output, "/word/document.xml");
+    assert!(
+        xml.contains(r#"<w14:checkbox><w14:checked w14:val="1"/><w14:checkedState"#),
+        "{xml}"
+    );
+    assert!(xml.contains("<w:t>\u{2612}</w:t>"), "{xml}");
+    assert!(!xml.contains("showingPlcHdr"), "{xml}");
+    assert!(
+        xml.contains(r#"<w:dropDownList w:lastValue="blue">"#),
+        "{xml}"
+    );
+    assert!(xml.contains("<w:t>Blue</w:t>"), "{xml}");
+    assert!(
+        xml.contains(r#"w:fullDate="2026-10-31T00:00:00Z""#),
+        "{xml}"
+    );
+    assert!(xml.contains("<w:t>2026-10-31</w:t>"), "{xml}");
+
+    for (assignment, message) in [
+        ("agree=maybe", "is a check box"),
+        ("colour=green", "is not one of its items"),
+        ("due=31/10/2026", "is not an ISO date"),
+        ("logo=x", "is a picture control"),
+    ] {
+        let refused = temp.path.join("refused.docx");
+        let result = cli(&[
+            "fill",
+            path_text(&input),
+            "--tag",
+            assignment,
+            "-o",
+            path_text(&refused),
+        ]);
+        assert_eq!(result.status.code(), Some(1), "{assignment}");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.contains(message), "{assignment}: {stderr}");
+        assert!(!refused.exists());
+    }
 }

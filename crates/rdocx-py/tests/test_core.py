@@ -4127,3 +4127,514 @@ def test_whole_story_comment_refusals_preserve_bytes_and_revision(kind):
             getattr(document, f"set_{kind}")(text)
         assert document.to_bytes() == before
         assert held.text == "main retained"
+
+
+# ---- Document-level views, templates, assembly, properties, content
+# controls and validation.
+
+
+def _cli_binary():
+    """The rdocx CLI to compare with: `RDOCX_CLI`, else a debug build of this
+    checkout, else `rdocx` on the PATH. A configured path that does not
+    exist fails the test rather than skipping it."""
+    import os
+    import pathlib
+    import shutil
+
+    configured = os.environ.get("RDOCX_CLI")
+    if configured:
+        if not pathlib.Path(configured).is_file():
+            pytest.fail(f"RDOCX_CLI={configured} is not a file; build it with cargo build -p rdocx-cli")
+        return configured
+    root = pathlib.Path(__file__).resolve().parents[3]
+    for target in (os.environ.get("CARGO_TARGET_DIR"), root / "target"):
+        if target and (pathlib.Path(target) / "debug" / "rdocx").exists():
+            return str(pathlib.Path(target) / "debug" / "rdocx")
+    found = shutil.which("rdocx")
+    if found is None:
+        pytest.skip(
+            "no rdocx CLI to compare with: set RDOCX_CLI or run cargo build -p rdocx-cli"
+        )
+    return found
+
+
+def _parity_inputs():
+    """The generated story fixture, then every sample of `samples/` when the
+    samples were generated (`cargo run -p rdocx --example generate_all_samples`)."""
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[3]
+    return ["stories", *sorted(str(path) for path in (root / "samples").glob("*.docx"))]
+
+
+def _story_document():
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("Intro")
+    table = document.add_table(1, 2)
+    table.rows[0].cells[1].paragraphs[0].text = "Cell"
+    document.set_header("Head")
+    document.set_footer("Foot")
+    return document
+
+
+def test_text_views_read_every_story_as_the_cli_does():
+    document = _story_document()
+
+    assert document.text() == (
+        "Intro\n\tCell\t\n"
+        "--- header (/word/header1.xml) ---\nHead\n"
+        "--- footer (/word/footer1.xml) ---\nFoot\n"
+    )
+    assert document.to_markdown() == (
+        "Intro\n\n|  | Cell |\n| --- | --- |\n\n---\n\n"
+        "**header** (/word/header1.xml)\n\nHead\n\n"
+        "**footer** (/word/footer1.xml)\n\nFoot\n\n"
+    )
+    html = document.to_html()
+    assert html.startswith("<!DOCTYPE html>")
+    assert html.endswith(
+        "<hr>\n<section>\n<p><strong>header</strong> (/word/header1.xml)</p>\n<p>Head</p>\n"
+        "</section>\n<section>\n<p><strong>footer</strong> (/word/footer1.xml)</p>\n"
+        "<p>Foot</p>\n</section>\n</body>\n</html>"
+    )
+
+
+@pytest.mark.parametrize("source", _parity_inputs())
+def test_text_views_and_validate_equal_the_cli(tmp_path, source):
+    import warnings
+
+    import rdocx
+
+    cli = _cli_binary()
+    if source == "stories":
+        path = tmp_path / "stories.docx"
+        _story_document().save(path)
+    else:
+        path = source
+    document = rdocx.Document(path)
+
+    def run(*args):
+        return subprocess.run([cli, *args], capture_output=True, text=True)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", rdocx.ConversionWarning)
+        text, markdown, html = document.text(), document.to_markdown(), document.to_html()
+    assert run("text", str(path)).stdout == text
+    for fmt, view in (("md", markdown), ("html", html)):
+        out = tmp_path / f"out.{fmt}"
+        run("convert", str(path), "--to", fmt, "-o", str(out))
+        assert out.read_text() == view
+    printed = run("validate", str(path)).stdout
+    report = rdocx.Document.validate_file(path)
+    findings = [line.split(". ", 1)[1] for line in printed.splitlines() if line.startswith("  ")]
+    assert findings == [*report.errors, *report.warnings]
+    assert document.validate() == report
+
+
+def test_unreadable_story_part_warns_and_keeps_the_body():
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("Body text")
+    document.set_header("Head")
+    source = io.BytesIO(document.to_bytes())
+    output = io.BytesIO()
+    with zipfile.ZipFile(source) as reader, zipfile.ZipFile(output, "w") as writer:
+        for info in reader.infolist():
+            data = reader.read(info.filename)
+            if info.filename == "word/header1.xml":
+                data = data[: len(data) // 2]
+            writer.writestr(info, data)
+    broken = rdocx.Document.from_bytes(output.getvalue())
+
+    with pytest.warns(rdocx.ConversionWarning, match="header1.xml is not well-formed"):
+        assert broken.text() == "Body text\n"
+    report = broken.validate()
+    assert not report.ok
+    assert any("header1.xml is not well-formed XML" in error for error in report.errors)
+
+
+def test_validate_reports_errors_and_warnings():
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("")
+    report = document.validate()
+    assert report.ok
+    assert report.errors == ()
+    assert report.warnings == (
+        "1 empty paragraph(s) found",
+        "Missing document title",
+        "Missing document author",
+    )
+    document.core_properties.title = "T"
+    document.core_properties.author = "A"
+    document.paragraphs[0].text = "x"
+    assert document.validate().warnings == ()
+
+
+def test_exports_return_bytes_and_warn_about_losses():
+    import rdocx
+
+    document = _story_document()
+    with pytest.warns(rdocx.ConversionWarning, match="to_odt could not represent"):
+        odt = document.to_odt()
+    assert odt[:2] == b"PK"
+    with zipfile.ZipFile(io.BytesIO(odt)) as archive:
+        assert archive.read("mimetype") == b"application/vnd.oasis.opendocument.text"
+    plain = rdocx.Document()
+    plain.add_paragraph("Hello")
+    assert plain.to_rtf().startswith(b"{\\rtf1")
+    with pytest.warns(rdocx.ConversionWarning, match="to_epub could not represent"):
+        epub = plain.to_epub()
+    with zipfile.ZipFile(io.BytesIO(epub)) as archive:
+        assert archive.read("mimetype") == b"application/epub+zip"
+
+
+def test_counts():
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("one two  three")
+    table = document.add_table(1, 1)
+    table.rows[0].cells[0].paragraphs[0].text = "four"
+    assert document.word_count() == 4
+    assert document.character_count() == 18
+    assert document.character_count(include_spaces=False) == 15
+    assert document.page_count() == 1
+    for _ in range(80):
+        document.add_paragraph("line")
+    pages = document.page_count()
+    assert pages > 1
+    assert document.layout_page(pages - 1) is not None
+    assert document.layout_page(pages) is None
+
+
+def test_render_template_fills_tags_loops_and_conditions():
+    import rdocx
+
+    document = rdocx.Document()
+    for text in (
+        "Dear {{ customer.name }},",
+        "{% for item in items %}",
+        "{{ item.label }}: {{ item.qty }}",
+        "{% endfor %}",
+        "{% if vip %}",
+        "VIP",
+        "{% endif %}",
+    ):
+        document.add_paragraph(text)
+    document.set_header("For {{ customer.name }}")
+    held = document.paragraphs[0]
+
+    count = document.render_template(
+        {"customer": {"name": "Ada"}, "items": [{"label": "a", "qty": 1}, {"label": "b", "qty": 2.5}], "vip": False}
+    )
+
+    assert count == 6
+    assert [p.text for p in document.paragraphs] == ["Dear Ada,", "a: 1", "b: 2.5"]
+    assert "For Ada" in document.text()
+    with pytest.raises(rdocx.StaleElementError):
+        held.text
+
+
+def test_render_template_errors_name_the_tag_and_line():
+    import datetime
+
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("Dear {{ customer.name }}, welcome")
+    before = document.to_bytes()
+    with pytest.raises(
+        rdocx.RdocxError,
+        match=r"missing path `customer.name` in `\{\{ customer.name \}\}` "
+        r"in the line \"Dear \{\{ customer.name \}\}, welcome\"",
+    ):
+        document.render_template({"customer": {}})
+    assert document.to_bytes() == before
+    with pytest.raises(TypeError, match=r'data\["when"\] is a date.*strftime'):
+        document.render_template({"when": datetime.date(2026, 1, 2)})
+    with pytest.raises(TypeError, match="must be a dict"):
+        document.render_template([1, 2])
+    with pytest.raises(TypeError, match="str keys"):
+        document.render_template({1: "x"})
+
+
+def test_insert_document_and_fragments_keep_their_styles():
+    import rdocx
+
+    destination = rdocx.Document()
+    destination.add_paragraph("First")
+    destination.add_paragraph("Last")
+    source = rdocx.Document()
+    source.add_style("Callout", font_size=rdocx.Pt(14))
+    source.add_paragraph("Imported").style = "Callout"
+    source.add_paragraph("Second")
+    source.add_paragraph("pic")
+
+    destination.insert_document(source, at=1)
+
+    assert [p.text for p in destination.paragraphs] == ["First", "Imported", "Second", "pic", "Last"]
+    assert destination.paragraphs[1].style == "Callout"
+    assert destination.validate().ok
+    destination.insert_document(rdocx.Document())
+    assert len(destination.paragraphs) == 5
+
+    fragment = source.copy_fragment(1, 2)
+    destination.import_fragment(fragment, conflict="rename")
+    assert destination.paragraphs[-1].text == "Second"
+    with pytest.raises(ValueError, match="reuse_equivalent"):
+        destination.import_fragment(fragment, conflict="merge")
+
+
+def test_custom_properties_are_typed():
+    import datetime
+
+    import rdocx
+
+    document = rdocx.Document()
+    properties = document.custom_properties
+    stamp = datetime.datetime(2026, 1, 2, 3, 4, 5, tzinfo=datetime.timezone.utc)
+    properties["Client"] = "ACME"
+    properties["Count"] = 3
+    properties["Ratio"] = 0.5
+    properties["Approved"] = True
+    properties["Due"] = stamp
+    properties["Count"] = 4
+
+    reopened = rdocx.Document.from_bytes(document.to_bytes()).custom_properties
+    assert reopened.items() == [
+        ("Client", "ACME"),
+        ("Count", 4),
+        ("Ratio", 0.5),
+        ("Approved", True),
+        ("Due", stamp),
+    ]
+    assert isinstance(reopened["Approved"], bool)
+    assert list(reopened) == reopened.keys()
+    assert "Client" in reopened and len(reopened) == 5
+    assert reopened.get("Missing") is None
+    del properties["Ratio"]
+    assert "Ratio" not in properties
+    with pytest.raises(KeyError):
+        properties["Missing"]
+    with pytest.raises(KeyError):
+        del properties["Missing"]
+    with pytest.raises(OverflowError, match="float or a str"):
+        properties["Big"] = 2**40
+    with pytest.raises(TypeError, match="del doc.custom_properties"):
+        properties["None"] = None
+    with pytest.raises(TypeError, match="datetime.datetime"):
+        properties["Day"] = datetime.date(2026, 1, 2)
+
+
+def test_app_properties_and_track_revisions():
+    import rdocx
+
+    document = rdocx.Document()
+    document.app_properties.company = "BeLiver"
+    document.app_properties.manager = "Hadrien"
+    assert document.settings.track_revisions is False
+    document.settings.track_revisions = True
+
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert reopened.app_properties.company == "BeLiver"
+    assert reopened.app_properties.manager == "Hadrien"
+    assert reopened.settings.track_revisions is True
+    reopened.app_properties.manager = None
+    assert reopened.app_properties.manager == ""
+    with pytest.raises(TypeError, match="True or False"):
+        reopened.settings.track_revisions = None
+
+
+def test_equations_from_latex_and_mathml():
+    import rdocx
+
+    document = rdocx.Document()
+    paragraph = document.add_paragraph("Area: ")
+    paragraph.add_equation(r"\frac{a}{b}")
+    paragraph.add_equation(
+        mathml='<math xmlns="http://www.w3.org/1998/Math/MathML"><mi>y</mi></math>',
+        display=True,
+    )
+    cell = document.add_table(1, 1).rows[0].cells[0].paragraphs[0]
+    cell.add_equation("x^2")
+
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    inline, display = reopened.paragraphs[0].equations
+    assert (inline.latex, inline.display, inline.diagnostics) == (r"\frac{a}{b}", False, ())
+    assert inline.mathml.startswith('<math xmlns="http://www.w3.org/1998/Math/MathML"><mfrac>')
+    assert (display.latex, display.display) == ("y", True)
+    assert reopened.tables[0].rows[0].cells[0].paragraphs[0].equations[0].latex == "{x}^{2}"
+    with pytest.raises(TypeError, match="exactly one"):
+        paragraph.add_equation()
+    with pytest.raises(ValueError):
+        paragraph.add_equation(r"\frac{a}")
+
+
+def test_content_controls_list_and_set_by_tag_or_alias():
+    import rdocx
+
+    body = (
+        '<w:sdt><w:sdtPr><w:alias w:val="Client"/><w:tag w:val="client"/><w:id w:val="1"/>'
+        "<w:text/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Name</w:t></w:r></w:p>"
+        "</w:sdtContent></w:sdt>"
+        '<w:sdt><w:sdtPr><w:tag w:val="agree"/>'
+        '<w14:checkbox xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"/>'
+        "</w:sdtPr><w:sdtContent><w:p><w:r><w:t>X</w:t></w:r></w:p></w:sdtContent></w:sdt>"
+        "<w:sectPr/>"
+    )
+    document = _replace_document_body(rdocx.Document(), body)
+
+    controls = document.content_controls
+    assert [(c.tag, c.alias, c.type, c.text) for c in controls] == [
+        ("client", "Client", "plain_text", "Name"),
+        ("agree", None, "checkbox", "X"),
+    ]
+    assert document.set_content_control_value("ACME", tag="client") == 1
+    assert document.content_controls[0].text == "ACME"
+    assert document.set_content_control_value("Initech", alias="Client") == 1
+    assert rdocx.Document.from_bytes(document.to_bytes()).content_controls[0].text == "Initech"
+    with pytest.raises(KeyError, match="client"):
+        document.set_content_control_value("x", tag="missing")
+    with pytest.raises(TypeError, match="exactly one"):
+        document.set_content_control_value("x")
+    with pytest.raises(ValueError, match="is a check box"):
+        document.set_content_control_value("x", tag="agree")
+    assert document.content_controls[1].text == "X"
+    assert document.set_content_control_value("yes", tag="agree") == 1
+    assert document.content_controls[1].text == "\u2612"
+
+
+def test_render_template_refuses_cyclic_and_too_deep_data():
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("{{ user.name }}")
+    cyclic = {}
+    cyclic["user"] = cyclic
+    with pytest.raises(ValueError, match=r'data\["user"\] contains itself'):
+        document.render_template(cyclic)
+    deep = {}
+    node = deep
+    for _ in range(20_000):
+        node["next"] = {}
+        node = node["next"]
+    with pytest.raises(ValueError, match="nests deeper than 256"):
+        document.render_template(deep)
+    shared = {"name": "Ada"}
+    assert document.render_template({"user": shared, "other": [shared, shared]}) == 1
+    nested = rdocx.Document()
+    for _ in range(2_000):
+        nested.add_paragraph("{% if shown %}")
+    with pytest.raises(rdocx.RdocxError, match="nests more than 64 blocks"):
+        nested.render_template({"shown": True})
+
+
+def test_negative_indexes_count_from_the_end():
+    import rdocx
+
+    source = rdocx.Document()
+    for text in ("a", "b", "c"):
+        source.add_paragraph(text)
+    destination = rdocx.Document()
+    destination.add_paragraph("first")
+    destination.add_paragraph("last")
+
+    destination.insert_document(source, at=-1)
+    assert [p.text for p in destination.paragraphs] == ["first", "a", "b", "c", "last"]
+    destination.import_fragment(source.copy_fragment(-2, -1), at=0)
+    assert destination.paragraphs[0].text == "b"
+    with pytest.raises(IndexError):
+        destination.insert_document(source, at=-99)
+    with pytest.raises(IndexError):
+        source.copy_fragment(3)
+
+
+def test_custom_properties_are_a_mutable_mapping():
+    import collections.abc
+
+    import rdocx
+
+    properties = rdocx.Document().custom_properties
+    assert isinstance(properties, collections.abc.MutableMapping)
+    properties["A"] = "x"
+    properties["B"] = 2
+    assert properties.values() == ["x", 2]
+    assert 1 not in properties and None not in properties and "A" in properties
+    assert properties.get(1, "default") == "default"
+    with pytest.raises(KeyError):
+        properties[1]
+    with pytest.raises(TypeError, match="names are str"):
+        properties[1] = "x"
+
+
+def test_add_equation_refuses_an_empty_equation():
+    import rdocx
+
+    paragraph = rdocx.Document().add_paragraph("x")
+    for empty in ("", "   "):
+        with pytest.raises(ValueError, match="non-empty equation"):
+            paragraph.add_equation(empty)
+    assert paragraph.equations == ()
+
+
+def test_content_control_values_follow_the_control_type():
+    import rdocx
+
+    def control(tag, properties, text, run_properties=""):
+        return (
+            f'<w:sdt><w:sdtPr><w:tag w:val="{tag}"/>{properties}</w:sdtPr><w:sdtContent>'
+            f"<w:p><w:r>{run_properties}<w:t>{text}</w:t></w:r></w:p></w:sdtContent></w:sdt>"
+        )
+
+    body = "".join(
+        [
+            control(
+                "name",
+                "<w:showingPlcHdr/><w:text/>",
+                "Click here",
+                '<w:rPr><w:rStyle w:val="PlaceholderText"/></w:rPr>',
+            ),
+            control(
+                "colour",
+                '<w:dropDownList><w:listItem w:displayText="Red" w:value="red"/>'
+                '<w:listItem w:displayText="Blue" w:value="blue"/></w:dropDownList>',
+                "Red",
+            ),
+            control(
+                "size",
+                '<w:comboBox><w:listItem w:displayText="Small" w:value="s"/></w:comboBox>',
+                "Small",
+            ),
+            control(
+                "when",
+                '<w:date w:fullDate="2024-01-02T00:00:00Z"><w:dateFormat w:val="M/d/yyyy"/>'
+                '<w:lid w:val="en-US"/></w:date>',
+                "1/2/2024",
+            ),
+        ]
+    ) + "<w:sectPr/>"
+    document = _replace_document_body(rdocx.Document(), body)
+    before = document.to_bytes()
+
+    with pytest.raises(ValueError, match=r'not one of its items \["Red", "Blue"\]'):
+        document.set_content_control_value("Green", tag="colour")
+    with pytest.raises(ValueError, match="not an ISO date"):
+        document.set_content_control_value("next Tuesday", tag="when")
+    assert document.to_bytes() == before
+
+    document.set_content_control_value("Ada", tag="name")
+    document.set_content_control_value("blue", tag="colour")
+    document.set_content_control_value("Huge", tag="size")
+    document.set_content_control_value("2026-03-05", tag="when")
+
+    assert [c.text for c in document.content_controls] == ["Ada", "Blue", "Huge", "3/5/2026"]
+    xml = _document_xml(document).decode()
+    assert "showingPlcHdr" not in xml and "PlaceholderText" not in xml
+    assert '<w:dropDownList w:lastValue="blue">' in xml
+    assert '<w:comboBox w:lastValue="Huge">' in xml
+    assert 'w:fullDate="2026-03-05T00:00:00Z"' in xml

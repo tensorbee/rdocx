@@ -105,6 +105,17 @@ enum Control {
     End(EndKind),
 }
 
+impl Control {
+    /// The marker as a template author writes it, for error messages.
+    fn marker(&self) -> String {
+        match self {
+            Self::For { name, path } => format!("{{% for {name} in {} %}}", path.join(".")),
+            Self::If { path } => format!("{{% if {} %}}", path.join(".")),
+            Self::End(kind) => format!("{{% {} %}}", kind.name()),
+        }
+    }
+}
+
 #[derive(Debug)]
 enum Block<T> {
     Item {
@@ -347,9 +358,12 @@ fn validate_paragraph_numbering(
         (None, None) => return Ok(()),
     };
     if !document.template_numbering_reference_exists(num_id, level) {
-        return Err(template_error(&format!(
-            "a repeated paragraph references missing numbering numId {num_id} level {level}"
-        )));
+        return Err(located(
+            template_error(&format!(
+                "a repeated paragraph references missing numbering numId {num_id} level {level}"
+            )),
+            &line_context(&placeholder::replaceable_texts(paragraph).concat()),
+        ));
     }
     Ok(())
 }
@@ -664,7 +678,7 @@ fn drop_copied_control_identities(control: &mut CT_Sdt) -> Result<()> {
     Ok(())
 }
 
-fn body_marker(content: &BodyContent) -> Result<Option<Control>> {
+fn body_marker(content: &BodyContent) -> Result<Marker> {
     match content {
         BodyContent::Paragraph(paragraph) => {
             marker_from_sources(&placeholder::replaceable_texts(paragraph))
@@ -677,7 +691,7 @@ fn body_marker(content: &BodyContent) -> Result<Option<Control>> {
     }
 }
 
-fn row_marker(row: &CT_Row) -> Result<Option<Control>> {
+fn row_marker(row: &CT_Row) -> Result<Marker> {
     let mut direct_sources = Vec::new();
     collect_row_marker_sources(row, &mut direct_sources);
     if !direct_sources
@@ -692,7 +706,14 @@ fn row_marker(row: &CT_Row) -> Result<Option<Control>> {
     marker_from_sources(&all_sources)
 }
 
-fn marker_from_sources(sources: &[String]) -> Result<Option<Control>> {
+/// A control marker and the line, the paragraph or row text, that holds it.
+type Marker = Option<(Control, String)>;
+
+/// The deepest nesting of `{% for %}` and `{% if %}` blocks a template may
+/// use. Deeper templates are refused rather than recursing without bound.
+const MAX_BLOCK_DEPTH: usize = 64;
+
+fn marker_from_sources(sources: &[String]) -> Result<Marker> {
     let with_controls = sources
         .iter()
         .filter(|source| source.contains("{%") || source.contains("%}"))
@@ -705,20 +726,26 @@ fn marker_from_sources(sources: &[String]) -> Result<Option<Control>> {
         .filter(|source| !source.trim().is_empty())
         .collect::<Vec<_>>();
     if nonempty.len() != 1 || with_controls.len() != 1 {
-        return Err(template_error(
-            "a control marker must occupy its own paragraph or table row",
+        return Err(located(
+            template_error("a control marker must occupy its own paragraph or table row"),
+            &line_context(with_controls[0]),
         ));
     }
-    parse_control(nonempty[0]).map(Some)
+    parse_control(nonempty[0])
+        .map(|control| Some((control, nonempty[0].trim().to_owned())))
+        .map_err(|error| located(error, &line_context(nonempty[0])))
 }
 
 fn reject_unsupported_control_sources(sources: &[String]) -> Result<()> {
-    if sources
+    if let Some(source) = sources
         .iter()
-        .any(|source| source.contains("{%") || source.contains("%}"))
+        .find(|source| source.contains("{%") || source.contains("%}"))
     {
-        return Err(template_error(
-            "structural controls are supported only in main-body paragraphs and table rows",
+        return Err(located(
+            template_error(
+                "structural controls are supported only in main-body paragraphs and table rows",
+            ),
+            &line_context(source),
         ));
     }
     Ok(())
@@ -772,64 +799,97 @@ fn validate_scope_name(name: &str) -> Result<()> {
 
 fn parse_blocks<T: Clone>(
     items: &[T],
-    marker: impl Fn(&T) -> Result<Option<Control>>,
+    marker: impl Fn(&T) -> Result<Marker>,
 ) -> Result<Vec<Block<T>>> {
-    let (blocks, next) = parse_block_level(items, 0, None, &marker)?;
+    let (blocks, next) = parse_block_level(items, 0, &mut Vec::new(), &marker)?;
     if next != items.len() {
         return Err(template_error("unexpected control marker"));
     }
     Ok(blocks)
 }
 
-fn parse_block_level<T: Clone, F: Fn(&T) -> Result<Option<Control>>>(
+/// One open block: the kind of its end marker, its opening marker and the
+/// line that holds it.
+struct OpenBlock {
+    end: EndKind,
+    marker: String,
+    line: String,
+}
+
+/// Parse the blocks up to the end marker of the innermost `open` block, or to
+/// the end of `items` when no block is open.
+fn parse_block_level<T: Clone, F: Fn(&T) -> Result<Marker>>(
     items: &[T],
     mut index: usize,
-    expected: Option<EndKind>,
+    open: &mut Vec<OpenBlock>,
     marker: &F,
 ) -> Result<(Vec<Block<T>>, usize)> {
     let mut blocks = Vec::new();
     while index < items.len() {
-        match marker(&items[index])? {
-            None => {
-                blocks.push(Block::Item {
-                    source_index: index,
-                    value: items[index].clone(),
-                });
-                index += 1;
-            }
-            Some(Control::For { name, path }) => {
-                let (body, next) = parse_block_level(items, index + 1, Some(EndKind::For), marker)?;
-                blocks.push(Block::For { name, path, body });
-                index = next;
-            }
-            Some(Control::If { path }) => {
-                let (body, next) = parse_block_level(items, index + 1, Some(EndKind::If), marker)?;
-                blocks.push(Block::If { path, body });
-                index = next;
-            }
-            Some(Control::End(actual)) => {
-                let Some(expected) = expected else {
-                    return Err(template_error(&format!(
-                        "unexpected {} marker",
-                        actual.name()
-                    )));
+        let Some((control, line)) = marker(&items[index])? else {
+            blocks.push(Block::Item {
+                source_index: index,
+                value: items[index].clone(),
+            });
+            index += 1;
+            continue;
+        };
+        let text = control.marker();
+        let end = match &control {
+            Control::For { .. } => EndKind::For,
+            Control::If { .. } => EndKind::If,
+            Control::End(actual) => {
+                let actual = *actual;
+                let Some(innermost) = open.last() else {
+                    return Err(located(
+                        template_error(&format!("unexpected `{text}` without an opening marker")),
+                        &line_context(&line),
+                    ));
                 };
-                if actual != expected {
-                    return Err(template_error(&format!(
-                        "expected {} before {}",
-                        expected.name(),
-                        actual.name()
-                    )));
+                if actual != innermost.end {
+                    return Err(located(
+                        template_error(&format!(
+                            "expected {} before `{text}` to close `{}`",
+                            innermost.end.name(),
+                            innermost.marker
+                        )),
+                        &line_context(&line),
+                    ));
                 }
                 return Ok((blocks, index + 1));
             }
+        };
+        if open.len() == MAX_BLOCK_DEPTH {
+            return Err(located(
+                template_error(&format!(
+                    "`{text}` nests more than {MAX_BLOCK_DEPTH} blocks"
+                )),
+                &line_context(&line),
+            ));
         }
+        open.push(OpenBlock {
+            end,
+            marker: text,
+            line,
+        });
+        let (body, next) = parse_block_level(items, index + 1, open, marker)?;
+        open.pop();
+        blocks.push(match control {
+            Control::For { name, path } => Block::For { name, path, body },
+            Control::If { path } => Block::If { path, body },
+            Control::End(_) => unreachable!("end markers return above"),
+        });
+        index = next;
     }
-    if let Some(expected) = expected {
-        return Err(template_error(&format!(
-            "missing {} marker",
-            expected.name()
-        )));
+    if let Some(innermost) = open.last() {
+        return Err(located(
+            template_error(&format!(
+                "missing {} marker to close `{}`",
+                innermost.end.name(),
+                innermost.marker
+            )),
+            &line_context(&innermost.line),
+        ));
     }
     Ok((blocks, index))
 }
@@ -869,13 +929,23 @@ where
                 });
             }
             Block::For { name, path, body } => {
-                let values = match resolve_value(root, scopes, path)? {
+                let marker = || {
+                    Control::For {
+                        name: name.clone(),
+                        path: path.clone(),
+                    }
+                    .marker()
+                };
+                let resolved = resolve_value(root, scopes, path)
+                    .map_err(|error| located(error, &format!("in `{}`", marker())))?;
+                let values = match resolved {
                     ResolvedValue::Value(Value::Array(values)) => values.clone(),
                     ResolvedValue::Deferred => Vec::new(),
                     _ => {
                         return Err(template_error(&format!(
-                            "loop path `{}` does not resolve to an array",
-                            path.join(".")
+                            "loop path `{}` does not resolve to an array in `{}`",
+                            path.join("."),
+                            marker()
                         )));
                     }
                 };
@@ -909,25 +979,32 @@ where
                     count += evaluated.1;
                 }
             }
-            Block::If { path, body } => match resolve_value(root, scopes, path)? {
-                ResolvedValue::Value(value) if is_truthy(value) => {
-                    let evaluated =
-                        evaluate_blocks(body, root, scopes, sentinels, repeated, render_item)?;
-                    output.extend(evaluated.0);
-                    count += evaluated.1;
+            Block::If { path, body } => {
+                match resolve_value(root, scopes, path).map_err(|error| {
+                    located(
+                        error,
+                        &format!("in `{}`", Control::If { path: path.clone() }.marker()),
+                    )
+                })? {
+                    ResolvedValue::Value(value) if is_truthy(value) => {
+                        let evaluated =
+                            evaluate_blocks(body, root, scopes, sentinels, repeated, render_item)?;
+                        output.extend(evaluated.0);
+                        count += evaluated.1;
+                    }
+                    ResolvedValue::Value(_) | ResolvedValue::Deferred => {
+                        let mut validation_sentinels = SentinelPool::new(&[]);
+                        evaluate_blocks(
+                            body,
+                            root,
+                            scopes,
+                            &mut validation_sentinels,
+                            repeated,
+                            render_item,
+                        )?;
+                    }
                 }
-                ResolvedValue::Value(_) | ResolvedValue::Deferred => {
-                    let mut validation_sentinels = SentinelPool::new(&[]);
-                    evaluate_blocks(
-                        body,
-                        root,
-                        scopes,
-                        &mut validation_sentinels,
-                        repeated,
-                        render_item,
-                    )?;
-                }
-            },
+            }
         }
     }
     Ok((output, count))
@@ -951,7 +1028,8 @@ fn resolve_replacements(
 ) -> Result<Vec<Replacement>> {
     let mut resolved = BTreeMap::<String, (String, usize)>::new();
     for source in sources {
-        scan_source(source, data, scopes, &mut resolved)?;
+        scan_source(source, data, scopes, &mut resolved)
+            .map_err(|error| located(error, &line_context(source)))?;
     }
     Ok(resolved
         .into_iter()
@@ -980,19 +1058,25 @@ fn scan_source(
             "{{" => {
                 let content_start = start + 2;
                 let Some(relative_end) = source[content_start..].find("}}") else {
-                    return Err(template_error("unclosed scalar tag"));
+                    return Err(template_error(&format!(
+                        "unclosed scalar tag `{}`",
+                        excerpt(&source[start..])
+                    )));
                 };
                 let end = content_start + relative_end;
+                let tag = &source[start..end + 2];
+                let in_tag = |error| located(error, &format!("in `{tag}`"));
                 let inner = &source[content_start..end];
                 if inner.contains("{{") || inner.contains("{%") || inner.contains("%}") {
-                    return Err(template_error("nested or mismatched scalar tag"));
+                    return Err(in_tag(template_error("nested or mismatched scalar tag")));
                 }
-                let path = parse_path(inner)?
+                let path = parse_path(inner)
+                    .map_err(in_tag)?
                     .into_iter()
                     .map(str::to_owned)
                     .collect::<Vec<_>>();
-                let value = match resolve_value(data, scopes, &path)? {
-                    ResolvedValue::Value(value) => scalar_text(value, &path)?,
+                let value = match resolve_value(data, scopes, &path).map_err(in_tag)? {
+                    ResolvedValue::Value(value) => scalar_text(value, &path).map_err(in_tag)?,
                     ResolvedValue::Deferred => {
                         cursor = end + 2;
                         continue;
@@ -1003,9 +1087,9 @@ fn scan_source(
                     .entry(literal)
                     .or_insert_with(|| (value.clone(), 0));
                 if entry.0 != value {
-                    return Err(template_error(
+                    return Err(in_tag(template_error(
                         "one scalar literal resolved to different values in one scope",
-                    ));
+                    )));
                 }
                 entry.1 += 1;
                 cursor = end + 2;
@@ -1013,7 +1097,10 @@ fn scan_source(
             "{%" => {
                 let content_start = start + 2;
                 let Some(relative_end) = source[content_start..].find("%}") else {
-                    return Err(template_error("unclosed control tag"));
+                    return Err(template_error(&format!(
+                        "unclosed control tag `{}`",
+                        excerpt(&source[start..])
+                    )));
                 };
                 let end = content_start + relative_end;
                 let inner = source[content_start..end].trim();
@@ -1022,11 +1109,18 @@ fn scan_source(
                     || inner.contains("{%")
                     || inner.contains("}}")
                 {
-                    return Err(template_error("malformed control tag"));
+                    return Err(template_error(&format!(
+                        "malformed control tag `{}`",
+                        &source[start..end + 2]
+                    )));
                 }
                 cursor = end + 2;
             }
-            "}}" | "%}" => return Err(template_error("closing template delimiter without opener")),
+            "}}" | "%}" => {
+                return Err(template_error(&format!(
+                    "closing template delimiter `{marker}` without opener"
+                )));
+            }
             _ => unreachable!("next_marker returns known markers"),
         }
     }
@@ -1241,6 +1335,31 @@ fn parse_path(inner: &str) -> Result<Vec<&str>> {
 
 fn template_error(message: &str) -> Error {
     Error::Other(format!("invalid template: {message}"))
+}
+
+/// Add where a template error happened to its message: the tag, then the
+/// line (the paragraph or row text) that holds it. Other errors pass through.
+fn located(error: Error, context: &str) -> Error {
+    match error {
+        Error::Other(message) if message.starts_with("invalid template:") => {
+            Error::Other(format!("{message} {context}"))
+        }
+        error => error,
+    }
+}
+
+/// Name the line, the text of one paragraph or table row, that holds a tag.
+fn line_context(source: &str) -> String {
+    format!("in the line \"{}\"", excerpt(source.trim()))
+}
+
+/// The start of a long text, so that an error message stays readable.
+fn excerpt(text: &str) -> String {
+    const LIMIT: usize = 80;
+    match text.char_indices().nth(LIMIT) {
+        Some((end, _)) => format!("{}...", &text[..end]),
+        None => text.to_owned(),
+    }
 }
 
 pub(crate) fn body_sources(document: &CT_Document) -> Vec<String> {

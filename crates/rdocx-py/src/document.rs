@@ -4,11 +4,11 @@ use std::path::PathBuf;
 
 use oxml_py_support::{PathSeg, RevisionCounter, StaleElementError};
 use pyo3::exceptions::{
-    PyFileNotFoundError, PyIndexError, PyNotADirectoryError, PyOverflowError, PyTypeError,
-    PyValueError,
+    PyFileNotFoundError, PyIndexError, PyKeyError, PyNotADirectoryError, PyOverflowError,
+    PyTypeError, PyValueError,
 };
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes, PyList, PyTuple};
+use pyo3::types::{PyAny, PyBool, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 use smallvec::smallvec;
 
 use rdocx_oxml::{ST_PageOrientation, ST_SectionType};
@@ -2115,6 +2115,266 @@ impl PyDocument {
             .map_err(|error| rdocx_to_pyerr(py, error))
     }
 
+    // ---- Document-level views, templates, assembly, properties, content
+    // controls and validation. The views share their code with the CLI, so
+    // `text()`, `to_markdown()`, `to_html()` and `validate()` give what
+    // `rdocx text`, `rdocx convert --to md|html` and `rdocx validate` give.
+
+    /// The plain text of every story, as `rdocx text` prints it.
+    fn text(&self, py: Python<'_>) -> PyResult<String> {
+        let export = py.detach(|| self.inner.text_with_stories());
+        story_export_text(py, export)
+    }
+
+    /// The Markdown that `rdocx convert --to md` writes.
+    fn to_markdown(&self, py: Python<'_>) -> PyResult<String> {
+        let export = py.detach(|| self.inner.to_markdown_with_stories());
+        story_export_text(py, export)
+    }
+
+    /// The HTML document that `rdocx convert --to html` writes.
+    fn to_html(&self, py: Python<'_>) -> PyResult<String> {
+        let export = py.detach(|| self.inner.to_html_with_stories());
+        story_export_text(py, export)
+    }
+
+    fn to_odt<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let result = py
+            .detach(|| self.inner.to_odt_bytes())
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        let diagnostics = result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.path, diagnostic.message));
+        warn_conversion_losses(py, "to_odt", diagnostics)?;
+        Ok(PyBytes::new(py, &result.bytes))
+    }
+
+    fn to_rtf<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let result = py
+            .detach(|| self.inner.to_rtf_bytes())
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        // An export diagnostic names its location as the destination.
+        let diagnostics =
+            result
+                .diagnostics
+                .iter()
+                .map(|diagnostic| match &diagnostic.destination {
+                    Some(location) => format!("{location}: {}", diagnostic.message),
+                    None => diagnostic.message.clone(),
+                });
+        warn_conversion_losses(py, "to_rtf", diagnostics)?;
+        Ok(PyBytes::new(py, &result.bytes))
+    }
+
+    fn to_epub<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let result = py
+            .detach(|| self.inner.to_epub_bytes())
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        let diagnostics = result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.path, diagnostic.message));
+        warn_conversion_losses(py, "to_epub", diagnostics)?;
+        Ok(PyBytes::new(py, &result.bytes))
+    }
+
+    fn word_count(&self) -> usize {
+        self.inner.word_count()
+    }
+
+    #[pyo3(signature = (*, include_spaces = true))]
+    fn character_count(&self, include_spaces: bool) -> usize {
+        self.inner.character_count(include_spaces)
+    }
+
+    fn page_count(&self, py: Python<'_>) -> PyResult<usize> {
+        py.detach(|| {
+            self.inner
+                .layout_deterministic()
+                .map(|layout| layout.layout.pages.len())
+        })
+        .map_err(|error| rdocx_to_pyerr(py, error))
+    }
+
+    /// Validate the document as it would be saved now.
+    fn validate(&mut self, py: Python<'_>) -> PyResult<PyValidationReport> {
+        py.detach(|| {
+            let bytes = self.inner.to_bytes()?;
+            rdocx::Document::validate_bytes(&bytes)
+        })
+        .map(PyValidationReport::from)
+        .map_err(|error| rdocx_to_pyerr(py, error))
+    }
+
+    /// Validate a file as `rdocx validate` does, even one that does not open.
+    #[staticmethod]
+    fn validate_file(path: PathBuf, py: Python<'_>) -> PyResult<PyValidationReport> {
+        py.detach(|| rdocx::Document::validate_file(path))
+            .map(PyValidationReport::from)
+            .map_err(|error| rdocx_to_pyerr(py, error))
+    }
+
+    fn render_template(&mut self, py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<usize> {
+        if !is_mapping(data)? {
+            return Err(PyTypeError::new_err(format!(
+                "render_template data must be a dict of tag paths to values, got {}",
+                type_name(data)
+            )));
+        }
+        let data = template_value(data, "data", &mut Vec::new())?;
+        let count = py
+            .detach(|| self.inner.render_template(&data))
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        // A loop or a condition can change the content without one scalar tag.
+        self.revisions.bump();
+        Ok(count)
+    }
+
+    #[pyo3(signature = (other, at = None, *, conflict = "reuse_equivalent"))]
+    fn insert_document(
+        slf: Py<Self>,
+        py: Python<'_>,
+        other: Py<PyDocument>,
+        at: Option<&Bound<'_, PyAny>>,
+        conflict: &str,
+    ) -> PyResult<()> {
+        let policy = fragment_conflict_policy(conflict)?;
+        let fragment = {
+            let other = other.borrow(py);
+            if other.inner.content_count() == 0 {
+                return Ok(());
+            }
+            let start = other.body_location(py, 0)?;
+            let end = rdocx::ContentLocation::end(other.body_story(py)?);
+            rdocx::DocumentFragment::from_range(&other.inner, &start, &end, false)
+                .map_err(|error| rdocx_to_pyerr(py, error))?
+        };
+        Self::import_document_fragment(&slf, py, &fragment, at, policy)
+    }
+
+    #[pyo3(signature = (start, end = None))]
+    fn copy_fragment(
+        &self,
+        py: Python<'_>,
+        start: &Bound<'_, PyAny>,
+        end: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<PyDocumentFragment> {
+        let start = if let Ok(item) = start.cast::<PyStoryItem>() {
+            self.native_location(py, &item.borrow())?
+        } else {
+            let index = start
+                .extract::<isize>()
+                .map_err(|_| PyTypeError::new_err("start must be an int or a StoryItem"))?;
+            let index = crate::normalize_index(index, self.inner.content_count(), "content")?;
+            self.body_location(py, index)?
+        };
+        let end = match end {
+            None => rdocx::ContentLocation::end(start.story().clone()),
+            Some(end) => self.content_destination(py, end, "end")?,
+        };
+        rdocx::DocumentFragment::from_range(&self.inner, &start, &end, false)
+            .map(|inner| PyDocumentFragment { inner })
+            .map_err(|error| rdocx_to_pyerr(py, error))
+    }
+
+    #[pyo3(signature = (fragment, at = None, *, conflict = "reuse_equivalent"))]
+    fn import_fragment(
+        slf: Py<Self>,
+        py: Python<'_>,
+        fragment: PyRef<'_, PyDocumentFragment>,
+        at: Option<&Bound<'_, PyAny>>,
+        conflict: &str,
+    ) -> PyResult<()> {
+        let policy = fragment_conflict_policy(conflict)?;
+        Self::import_document_fragment(&slf, py, &fragment.inner, at, policy)
+    }
+
+    #[getter]
+    fn custom_properties(slf: Py<Self>, py: Python<'_>) -> PyResult<Py<PyCustomProperties>> {
+        Py::new(py, PyCustomProperties { document: slf })
+    }
+
+    #[getter]
+    fn app_properties(slf: Py<Self>, py: Python<'_>) -> PyResult<Py<PyAppProperties>> {
+        Py::new(py, PyAppProperties { document: slf })
+    }
+
+    #[getter]
+    fn settings(slf: Py<Self>, py: Python<'_>) -> PyResult<Py<PySettings>> {
+        Py::new(py, PySettings { document: slf })
+    }
+
+    #[getter]
+    fn content_controls<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(
+            py,
+            self.inner
+                .content_controls()
+                .into_iter()
+                .map(PyContentControl::from),
+        )
+    }
+
+    #[pyo3(signature = (value, *, tag = None, alias = None))]
+    fn set_content_control_value(
+        &mut self,
+        py: Python<'_>,
+        value: &str,
+        tag: Option<&str>,
+        alias: Option<&str>,
+    ) -> PyResult<usize> {
+        let (key, name, matches) = match (tag, alias) {
+            (Some(tag), None) => ("tag", tag, self.inner.content_controls_by_tag(tag)),
+            (None, Some(alias)) => ("alias", alias, self.inner.content_controls_by_alias(alias)),
+            _ => {
+                return Err(PyTypeError::new_err(
+                    "set_content_control_value takes exactly one of tag= or alias=",
+                ));
+            }
+        };
+        if matches.is_empty() {
+            let mut known = self
+                .inner
+                .content_controls()
+                .iter()
+                .filter_map(|control| match key {
+                    "tag" => control.tag().map(str::to_owned),
+                    _ => control.alias().map(str::to_owned),
+                })
+                .collect::<Vec<_>>();
+            known.sort();
+            known.dedup();
+            return Err(PyKeyError::new_err(format!(
+                "no content control with {key} {name:?} in the document body; the {key}s are {known:?}"
+            )));
+        }
+        if let Some(control) = matches
+            .iter()
+            .find(|control| !content_control_takes_text(control.control_type()))
+        {
+            return Err(PyValueError::new_err(format!(
+                "content control with {key} {name:?} is a {} control, which holds no text value; \
+                 only rich_text, plain_text, combo_box, dropdown_list, date and checkbox controls take one",
+                content_control_type_name(control.control_type())
+            )));
+        }
+        for control in &matches {
+            control
+                .check_value(value)
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        }
+        let count = match key {
+            "tag" => self.inner.set_content_control_value_by_tag(name, value),
+            _ => self.inner.set_content_control_value_by_alias(name, value),
+        }
+        .map_err(|error| rdocx_to_pyerr(py, error))?;
+        self.revisions.bump();
+        Ok(count)
+    }
+
+    // ---- End of the document-level block.
+
     fn image_data<'py>(
         &self,
         py: Python<'py>,
@@ -3996,5 +4256,746 @@ fn parse_comparison_story(name: &str) -> rdocx::Result<rdocx::ComparisonStoryKin
             "unknown comparison story {other:?}, expected body, header, footer, comment, \
              text_box, footnote, or endnote"
         ))),
+    }
+}
+
+// ---- Document-level views, templates, assembly, properties, content
+// controls and validation: the records and helpers of the methods above.
+
+impl PyDocument {
+    /// The boundary that an `at=` or `end=` argument names: before a body
+    /// index or a story item, at the end of a story, or at the end of the
+    /// body when it is `None`.
+    fn content_destination(
+        &self,
+        py: Python<'_>,
+        value: &Bound<'_, PyAny>,
+        name: &str,
+    ) -> PyResult<rdocx::ContentLocation> {
+        if let Ok(item) = value.cast::<PyStoryItem>() {
+            self.native_location(py, &item.borrow())
+        } else if let Ok(story) = value.cast::<PyStory>() {
+            Ok(rdocx::ContentLocation::end(
+                self.native_story(py, &story.borrow())?,
+            ))
+        } else {
+            let message = format!("{name} must be an int, a StoryItem or a Story");
+            let index = value
+                .extract::<isize>()
+                .map_err(|_| PyTypeError::new_err(message))?;
+            // A boundary runs from 0 to the item count, and a negative index
+            // counts from the end, so -1 is the boundary before the last item.
+            let count = self.inner.content_count() as isize;
+            let boundary = if index < 0 { count + index } else { index };
+            if !(0..=count).contains(&boundary) {
+                return Err(PyIndexError::new_err(format!(
+                    "{name} index {index} is out of range for {count} body items"
+                )));
+            }
+            self.body_location(py, boundary as usize)
+        }
+    }
+
+    fn import_document_fragment(
+        slf: &Py<Self>,
+        py: Python<'_>,
+        fragment: &rdocx::DocumentFragment,
+        at: Option<&Bound<'_, PyAny>>,
+        policy: rdocx::FragmentConflictPolicy,
+    ) -> PyResult<()> {
+        let destination = {
+            let document = slf.borrow(py);
+            match at {
+                Some(at) => document.content_destination(py, at, "at")?,
+                None => rdocx::ContentLocation::end(document.body_story(py)?),
+            }
+        };
+        let mut document = slf.borrow_mut(py);
+        let inner = &mut document.inner;
+        py.detach(|| inner.import_fragment(&destination, fragment, policy))
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        document.revisions.bump();
+        Ok(())
+    }
+}
+
+/// Return the text of a whole-document view, warning when the stories other
+/// than the body had to be left out.
+fn story_export_text(py: Python<'_>, export: rdocx::StoryTextExport) -> PyResult<String> {
+    if let Some(reason) = &export.omitted_stories {
+        warn_conversion(py, &format!("other stories left out: {reason}"))?;
+    }
+    Ok(export.text)
+}
+
+/// Warn once about the content an export could not represent.
+fn warn_conversion_losses(
+    py: Python<'_>,
+    method: &str,
+    diagnostics: impl Iterator<Item = String>,
+) -> PyResult<()> {
+    const SHOWN: usize = 5;
+    let diagnostics = diagnostics.collect::<Vec<_>>();
+    if diagnostics.is_empty() {
+        return Ok(());
+    }
+    let mut message = format!(
+        "{method} could not represent {} item(s): {}",
+        diagnostics.len(),
+        diagnostics[..diagnostics.len().min(SHOWN)].join("; ")
+    );
+    if diagnostics.len() > SHOWN {
+        message.push_str(&format!("; and {} more", diagnostics.len() - SHOWN));
+    }
+    warn_conversion(py, &message)
+}
+
+/// Emit an `rdocx.ConversionWarning`, or a `UserWarning` without the package.
+fn warn_conversion(py: Python<'_>, message: &str) -> PyResult<()> {
+    let category = match py
+        .import("rdocx")
+        .and_then(|module| module.getattr("ConversionWarning"))
+    {
+        Ok(category) => category,
+        Err(_) => py.get_type::<pyo3::exceptions::PyUserWarning>().into_any(),
+    };
+    let message = std::ffi::CString::new(message.replace('\0', " "))
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+    PyErr::warn(py, &category, &message, 1)
+}
+
+fn fragment_conflict_policy(name: &str) -> PyResult<rdocx::FragmentConflictPolicy> {
+    match name {
+        "reuse_equivalent" => Ok(rdocx::FragmentConflictPolicy::reuse_equivalent()),
+        "rename" => Ok(rdocx::FragmentConflictPolicy::rename_all()),
+        other => Err(PyValueError::new_err(format!(
+            "unknown conflict policy {other:?}, expected \"reuse_equivalent\" (reuse identical \
+             styles, lists and media, rename the others) or \"rename\" (rename every one)"
+        ))),
+    }
+}
+
+fn type_name(value: &Bound<'_, PyAny>) -> String {
+    value
+        .get_type()
+        .name()
+        .map(|name| name.to_string())
+        .unwrap_or_else(|_| "object".to_owned())
+}
+
+fn is_mapping(value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if value.is_instance_of::<PyDict>() {
+        return Ok(true);
+    }
+    let mapping = value.py().import("collections.abc")?.getattr("Mapping")?;
+    value.is_instance(&mapping)
+}
+
+/// The deepest nesting of dicts and lists template data may use.
+const MAX_TEMPLATE_DATA_DEPTH: usize = 256;
+
+/// Convert template data to JSON. `path` names the value in error messages,
+/// and `open` holds the containers being converted, to refuse a cycle and
+/// bound the depth.
+fn template_value(
+    value: &Bound<'_, PyAny>,
+    path: &str,
+    open: &mut Vec<usize>,
+) -> PyResult<serde_json::Value> {
+    use serde_json::Value;
+
+    if value.is_none() {
+        return Ok(Value::Null);
+    }
+    if let Ok(flag) = value.cast::<PyBool>() {
+        return Ok(Value::Bool(flag.is_true()));
+    }
+    if value.is_instance_of::<PyInt>() {
+        if let Ok(number) = value.extract::<i64>() {
+            return Ok(Value::from(number));
+        }
+        if let Ok(number) = value.extract::<u64>() {
+            return Ok(Value::from(number));
+        }
+        return Err(PyValueError::new_err(format!(
+            "template data {path} is an integer outside the 64-bit range; pass it as a str"
+        )));
+    }
+    if let Ok(number) = value.cast::<PyFloat>() {
+        return serde_json::Number::from_f64(number.value())
+            .map(Value::Number)
+            .ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "template data {path} is {}, which has no text form; pass a str instead",
+                    number.value()
+                ))
+            });
+    }
+    if let Ok(text) = value.cast::<PyString>() {
+        return Ok(Value::String(text.to_cow()?.into_owned()));
+    }
+    let container =
+        is_mapping(value)? || value.is_instance_of::<PyList>() || value.is_instance_of::<PyTuple>();
+    if container {
+        let identity = value.as_ptr() as usize;
+        if open.contains(&identity) {
+            return Err(PyValueError::new_err(format!(
+                "template data {path} contains itself; template data must be a tree"
+            )));
+        }
+        if open.len() == MAX_TEMPLATE_DATA_DEPTH {
+            return Err(PyValueError::new_err(format!(
+                "template data {path} nests deeper than {MAX_TEMPLATE_DATA_DEPTH} dicts and lists"
+            )));
+        }
+        open.push(identity);
+        let converted = template_container(value, path, open);
+        open.pop();
+        return converted;
+    }
+    let datetime = value.py().import("datetime")?;
+    let hint = if value.is_instance(&datetime.getattr("date")?)?
+        || value.is_instance(&datetime.getattr("time")?)?
+    {
+        "format it first, for example with value.strftime(\"%d %B %Y\") or value.isoformat()"
+    } else {
+        "convert it to a str, int, float, bool, None, dict or list first"
+    };
+    Err(PyTypeError::new_err(format!(
+        "template data {path} is a {}, which a template cannot render; {hint}",
+        type_name(value)
+    )))
+}
+
+/// Convert one dict or list of template data.
+fn template_container(
+    value: &Bound<'_, PyAny>,
+    path: &str,
+    open: &mut Vec<usize>,
+) -> PyResult<serde_json::Value> {
+    use serde_json::Value;
+
+    if is_mapping(value)? {
+        let mut object = serde_json::Map::new();
+        for item in value.call_method0("items")?.try_iter()? {
+            let (key, item) = item?.extract::<(Bound<'_, PyAny>, Bound<'_, PyAny>)>()?;
+            let Ok(key) = key.extract::<String>() else {
+                return Err(PyTypeError::new_err(format!(
+                    "template data {path} has a {} key; tag paths need str keys",
+                    type_name(&key)
+                )));
+            };
+            let value = template_value(&item, &format!("{path}[{key:?}]"), open)?;
+            object.insert(key, value);
+        }
+        return Ok(Value::Object(object));
+    }
+    let mut array = Vec::new();
+    for (index, item) in value.try_iter()?.enumerate() {
+        array.push(template_value(&item?, &format!("{path}[{index}]"), open)?);
+    }
+    Ok(Value::Array(array))
+}
+
+/// The findings of `Document.validate()` and `rdocx validate`.
+#[pyclass(name = "ValidationReport", frozen, eq, skip_from_py_object)]
+#[derive(Clone, PartialEq, Eq)]
+pub struct PyValidationReport {
+    errors: Vec<String>,
+    warnings: Vec<String>,
+}
+
+impl From<rdocx::ValidationReport> for PyValidationReport {
+    fn from(report: rdocx::ValidationReport) -> Self {
+        Self {
+            errors: report.errors,
+            warnings: report.warnings,
+        }
+    }
+}
+
+#[pymethods]
+impl PyValidationReport {
+    #[getter]
+    fn errors<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, &self.errors)
+    }
+
+    #[getter]
+    fn warnings<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        PyTuple::new(py, &self.warnings)
+    }
+
+    #[getter]
+    fn ok(&self) -> bool {
+        self.errors.is_empty()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "ValidationReport(errors={:?}, warnings={:?})",
+            self.errors, self.warnings
+        )
+    }
+}
+
+/// A range of story items copied out of a document, with its styles,
+/// lists, pictures and other dependencies, for `Document.import_fragment`.
+#[pyclass(name = "DocumentFragment", frozen, skip_from_py_object)]
+pub struct PyDocumentFragment {
+    inner: rdocx::DocumentFragment,
+}
+
+/// One content control of the document body.
+#[pyclass(name = "ContentControl", frozen, eq, skip_from_py_object)]
+#[derive(Clone, PartialEq, Eq)]
+pub struct PyContentControl {
+    #[pyo3(get)]
+    tag: Option<String>,
+    #[pyo3(get)]
+    alias: Option<String>,
+    #[pyo3(get)]
+    id: Option<i32>,
+    #[pyo3(get, name = "type")]
+    control_type: &'static str,
+    #[pyo3(get)]
+    text: String,
+}
+
+impl From<rdocx::ContentControlRef<'_>> for PyContentControl {
+    fn from(control: rdocx::ContentControlRef<'_>) -> Self {
+        Self {
+            tag: control.tag().map(str::to_owned),
+            alias: control.alias().map(str::to_owned),
+            id: control.id(),
+            control_type: content_control_type_name(control.control_type()),
+            text: control.text(),
+        }
+    }
+}
+
+#[pymethods]
+impl PyContentControl {
+    fn __repr__(&self) -> String {
+        let optional = |value: &Option<String>| match value {
+            Some(value) => format!("{value:?}"),
+            None => "None".to_owned(),
+        };
+        format!(
+            "ContentControl(tag={}, alias={}, type={:?}, text={:?})",
+            optional(&self.tag),
+            optional(&self.alias),
+            self.control_type,
+            self.text
+        )
+    }
+}
+
+/// A control without a type element is a rich text control.
+fn content_control_type_name(
+    control_type: Option<rdocx_oxml::content_control::SdtType>,
+) -> &'static str {
+    use rdocx_oxml::content_control::SdtType;
+    match control_type {
+        None | Some(SdtType::RichText) => "rich_text",
+        Some(SdtType::PlainText) => "plain_text",
+        Some(SdtType::Picture) => "picture",
+        Some(SdtType::CheckBox) => "checkbox",
+        Some(SdtType::ComboBox) => "combo_box",
+        Some(SdtType::DropDownList) => "dropdown_list",
+        Some(SdtType::Date) => "date",
+        Some(SdtType::DocumentPartList) => "document_part_list",
+        Some(SdtType::DocumentPartObject) => "document_part_object",
+        Some(SdtType::Group) => "group",
+        Some(SdtType::RepeatingSection) => "repeating_section",
+        Some(SdtType::RepeatingSectionItem) => "repeating_section_item",
+        Some(SdtType::Citation) => "citation",
+        Some(SdtType::Equation) => "equation",
+        Some(SdtType::Bibliography) => "bibliography",
+    }
+}
+
+fn content_control_takes_text(control_type: Option<rdocx_oxml::content_control::SdtType>) -> bool {
+    matches!(
+        content_control_type_name(control_type),
+        "rich_text" | "plain_text" | "combo_box" | "dropdown_list" | "date" | "checkbox"
+    )
+}
+
+/// The document settings (`word/settings.xml`) under python-docx's name.
+#[pyclass(name = "Settings")]
+pub struct PySettings {
+    document: Py<PyDocument>,
+}
+
+#[pymethods]
+impl PySettings {
+    /// Whether Word records edits as tracked changes.
+    #[getter]
+    fn track_revisions(&self, py: Python<'_>) -> bool {
+        self.document
+            .borrow(py)
+            .inner
+            .track_revisions()
+            .unwrap_or(false)
+    }
+
+    #[setter]
+    fn set_track_revisions(&self, py: Python<'_>, value: Option<bool>) -> PyResult<()> {
+        let Some(value) = value else {
+            return Err(PyTypeError::new_err(
+                "track_revisions takes True or False, not None",
+            ));
+        };
+        self.document
+            .borrow_mut(py)
+            .inner
+            .set_track_revisions(value)
+            .map_err(|error| rdocx_to_pyerr(py, error))
+    }
+}
+
+/// The custom document properties (`docProps/custom.xml`) as a mapping of
+/// names to typed values.
+#[pyclass(name = "CustomProperties", mapping)]
+pub struct PyCustomProperties {
+    document: Py<PyDocument>,
+}
+
+/// The format id Word gives every user-defined custom property.
+const CUSTOM_PROPERTY_FMTID: &str = "{D5CDD505-2E9C-101B-9397-08002B2CF9AE}";
+
+impl PyCustomProperties {
+    fn names(&self, py: Python<'_>) -> Vec<String> {
+        self.document
+            .borrow(py)
+            .inner
+            .custom_properties()
+            .iter()
+            .filter_map(|property| property.name.clone())
+            .collect()
+    }
+}
+
+fn custom_value_to_python(
+    py: Python<'_>,
+    value: &rdocx::CustomPropertyValue,
+) -> PyResult<Py<PyAny>> {
+    use rdocx::CustomPropertyValue as Value;
+    Ok(match value {
+        Value::Lpstr(text) | Value::Lpwstr(text) => text.into_pyobject(py)?.into_any().unbind(),
+        Value::I4(number) => number.into_pyobject(py)?.into_any().unbind(),
+        Value::R8(number) => number.into_pyobject(py)?.into_any().unbind(),
+        Value::Bool(flag) => flag.into_pyobject(py)?.to_owned().into_any().unbind(),
+        Value::FileTime(stamp) => match w3cdtf_to_datetime(py, stamp)? {
+            Some(datetime) => datetime,
+            None => stamp.into_pyobject(py)?.into_any().unbind(),
+        },
+        Value::Empty => py.None(),
+        Value::Raw(xml) => PyBytes::new(py, xml).into_any().unbind(),
+    })
+}
+
+fn custom_value_from_python(
+    name: &str,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<rdocx::CustomPropertyValue> {
+    use rdocx::CustomPropertyValue as Value;
+    if let Ok(flag) = value.cast::<PyBool>() {
+        return Ok(Value::Bool(flag.is_true()));
+    }
+    if value.is_instance_of::<PyInt>() {
+        return value.extract::<i32>().map(Value::I4).map_err(|_| {
+            PyOverflowError::new_err(format!(
+                "custom property {name:?} stores integers as 32 bits (vt:i4); \
+                 store a larger number as a float or a str"
+            ))
+        });
+    }
+    if let Ok(number) = value.cast::<PyFloat>() {
+        let number = number.value();
+        if !number.is_finite() {
+            return Err(PyValueError::new_err(format!(
+                "custom property {name:?} cannot store {number}; store it as a str"
+            )));
+        }
+        return Ok(Value::R8(number));
+    }
+    if let Ok(text) = value.cast::<PyString>() {
+        return Ok(Value::Lpwstr(text.to_cow()?.into_owned()));
+    }
+    let datetime = value.py().import("datetime")?;
+    if value.is_instance(&datetime.getattr("datetime")?)? {
+        return Ok(Value::FileTime(datetime_to_w3cdtf(value)?));
+    }
+    if value.is_none() {
+        return Err(PyTypeError::new_err(format!(
+            "custom property {name:?} cannot be None; remove it with del doc.custom_properties[{name:?}]"
+        )));
+    }
+    let hint = if value.is_instance(&datetime.getattr("date")?)? {
+        "; pass a datetime.datetime, such as datetime.datetime.combine(value, datetime.time())"
+    } else {
+        ""
+    };
+    Err(PyTypeError::new_err(format!(
+        "custom property {name:?} takes a str, int, float, bool or datetime, not {}{hint}",
+        type_name(value)
+    )))
+}
+
+#[pymethods]
+impl PyCustomProperties {
+    fn __len__(&self, py: Python<'_>) -> usize {
+        self.names(py).len()
+    }
+
+    fn __contains__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> bool {
+        key.extract::<String>().is_ok_and(|name| {
+            self.document
+                .borrow(py)
+                .inner
+                .custom_property(&name)
+                .is_some()
+        })
+    }
+
+    fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        PyList::new(py, self.names(py))?
+            .into_any()
+            .try_iter()
+            .map(Bound::into_any)
+    }
+
+    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let missing = || PyKeyError::new_err(key.clone().unbind());
+        let name = key.extract::<String>().map_err(|_| missing())?;
+        let document = self.document.borrow(py);
+        let property = document.inner.custom_property(&name).ok_or_else(missing)?;
+        custom_value_to_python(py, &property.value)
+    }
+
+    #[pyo3(signature = (key, default = None))]
+    fn get(
+        &self,
+        py: Python<'_>,
+        key: &Bound<'_, PyAny>,
+        default: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let document = self.document.borrow(py);
+        let property = key
+            .extract::<String>()
+            .ok()
+            .and_then(|name| document.inner.custom_property(&name).cloned());
+        match property {
+            Some(property) => custom_value_to_python(py, &property.value),
+            None => Ok(default.unwrap_or_else(|| py.None())),
+        }
+    }
+
+    fn __setitem__(
+        &self,
+        py: Python<'_>,
+        key: &Bound<'_, PyAny>,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let name = key.extract::<String>().map_err(|_| {
+            PyTypeError::new_err(format!(
+                "custom property names are str, not {}",
+                type_name(key)
+            ))
+        })?;
+        let name = name.as_str();
+        if name.is_empty() {
+            return Err(PyValueError::new_err(
+                "a custom property needs a non-empty name",
+            ));
+        }
+        let value = custom_value_from_python(name, value)?;
+        let mut document = self.document.borrow_mut(py);
+        let property = match document.inner.custom_property(name) {
+            Some(existing) => rdocx::CustomProperty {
+                value,
+                ..existing.clone()
+            },
+            None => rdocx::CustomProperty {
+                fmtid: CUSTOM_PROPERTY_FMTID.to_owned(),
+                pid: document
+                    .inner
+                    .custom_properties()
+                    .iter()
+                    .map(|property| property.pid)
+                    .max()
+                    .unwrap_or(1)
+                    .max(1)
+                    + 1,
+                name: Some(name.to_owned()),
+                value,
+            },
+        };
+        document
+            .inner
+            .set_custom_property(property)
+            .map_err(|error| rdocx_to_pyerr(py, error))
+    }
+
+    fn __delitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<()> {
+        let missing = || PyKeyError::new_err(key.clone().unbind());
+        let name = key.extract::<String>().map_err(|_| missing())?;
+        let removed = self
+            .document
+            .borrow_mut(py)
+            .inner
+            .remove_custom_property(&name)
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        match removed {
+            Some(_) => Ok(()),
+            None => Err(missing()),
+        }
+    }
+
+    fn values<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let document = self.document.borrow(py);
+        let mut values = Vec::new();
+        for property in document.inner.custom_properties() {
+            if property.name.is_some() {
+                values.push(custom_value_to_python(py, &property.value)?);
+            }
+        }
+        PyList::new(py, values)
+    }
+
+    fn keys<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        PyList::new(py, self.names(py))
+    }
+
+    fn items<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let document = self.document.borrow(py);
+        let mut items = Vec::new();
+        for property in document.inner.custom_properties() {
+            if let Some(name) = &property.name {
+                items.push((name.clone(), custom_value_to_python(py, &property.value)?));
+            }
+        }
+        PyList::new(py, items)
+    }
+}
+
+/// One text field of the native application-properties model.
+type AppTextField = fn(&mut rdocx::AppProperties) -> &mut Option<String>;
+
+/// The application properties (`docProps/app.xml`). Word writes the counts
+/// when it saves, so they are read-only here and may be stale; the
+/// `word_count()`, `character_count()` and `page_count()` methods of the
+/// document compute them.
+#[pyclass(name = "AppProperties")]
+pub struct PyAppProperties {
+    document: Py<PyDocument>,
+}
+
+impl PyAppProperties {
+    fn read<T>(&self, py: Python<'_>, field: fn(&rdocx::AppProperties) -> Option<T>) -> Option<T> {
+        self.document
+            .borrow(py)
+            .inner
+            .application_properties()
+            .and_then(field)
+    }
+
+    fn text(&self, py: Python<'_>, field: AppTextField) -> String {
+        let document = self.document.borrow(py);
+        let mut properties = document
+            .inner
+            .application_properties()
+            .cloned()
+            .unwrap_or_default();
+        field(&mut properties).clone().unwrap_or_default()
+    }
+
+    fn set_text(&self, py: Python<'_>, field: AppTextField, value: Option<String>) -> PyResult<()> {
+        let mut document = self.document.borrow_mut(py);
+        let mut properties = document
+            .inner
+            .application_properties()
+            .cloned()
+            .unwrap_or_default();
+        *field(&mut properties) = value.filter(|value| !value.is_empty());
+        document
+            .inner
+            .set_application_properties(properties)
+            .map_err(|error| rdocx_to_pyerr(py, error))
+    }
+}
+
+#[pymethods]
+impl PyAppProperties {
+    #[getter]
+    fn company(&self, py: Python<'_>) -> String {
+        self.text(py, |properties| &mut properties.company)
+    }
+
+    #[setter]
+    fn set_company(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        self.set_text(py, |properties| &mut properties.company, value)
+    }
+
+    #[getter]
+    fn manager(&self, py: Python<'_>) -> String {
+        self.text(py, |properties| &mut properties.manager)
+    }
+
+    #[setter]
+    fn set_manager(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        self.set_text(py, |properties| &mut properties.manager, value)
+    }
+
+    #[getter]
+    fn template(&self, py: Python<'_>) -> String {
+        self.text(py, |properties| &mut properties.template)
+    }
+
+    #[setter]
+    fn set_template(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        self.set_text(py, |properties| &mut properties.template, value)
+    }
+
+    #[getter]
+    fn application(&self, py: Python<'_>) -> String {
+        self.text(py, |properties| &mut properties.application)
+    }
+
+    #[setter]
+    fn set_application(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+        self.set_text(py, |properties| &mut properties.application, value)
+    }
+
+    #[getter]
+    fn pages(&self, py: Python<'_>) -> Option<i32> {
+        self.read(py, |properties| properties.pages)
+    }
+
+    #[getter]
+    fn words(&self, py: Python<'_>) -> Option<i32> {
+        self.read(py, |properties| properties.words)
+    }
+
+    #[getter]
+    fn characters(&self, py: Python<'_>) -> Option<i32> {
+        self.read(py, |properties| properties.characters)
+    }
+
+    #[getter]
+    fn characters_with_spaces(&self, py: Python<'_>) -> Option<i32> {
+        self.read(py, |properties| properties.characters_with_spaces)
+    }
+
+    #[getter]
+    fn lines(&self, py: Python<'_>) -> Option<i32> {
+        self.read(py, |properties| properties.lines)
+    }
+
+    #[getter]
+    fn paragraphs(&self, py: Python<'_>) -> Option<i32> {
+        self.read(py, |properties| properties.paragraphs)
     }
 }

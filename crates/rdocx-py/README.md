@@ -73,6 +73,17 @@ with open("report.pdf", "wb") as output:
   `revision_view="tracked"` to show tracked changes.
 - Python collections with negative indexes, slices, iteration, and explicit
   stale-handle errors after structural changes.
+- The CLI views in Python: `Document.text()`, `to_markdown()` and `to_html()`
+  return what `rdocx text` and `rdocx convert --to md|html` write, and
+  `Document.validate()` gives the findings of `rdocx validate`. ODT, RTF, and
+  EPUB export, and word, character, and page counts.
+- Templates with `{{ }}` tags and `{% for %}` / `{% if %}` blocks through
+  `Document.render_template`, document assembly through
+  `Document.insert_document`, and fragments copied between documents with a
+  style conflict policy.
+- Typed custom properties, application properties, the Track Changes setting,
+  content controls listed and filled by tag or alias, and equations from LaTeX
+  or MathML.
 
 ## Measured footprint and speed
 

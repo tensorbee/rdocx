@@ -220,6 +220,40 @@ pub struct TextFrameLayout {
     pub autofit: AutofitMode,
     pub layout: rpptx_render::ShapeTextLayout,
 }
+/// One slide text frame whose laid-out text overflows it.
+#[cfg(feature = "render")]
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextOverflow {
+    /// The frame as [`Presentation::text_layout_deterministic`] lays it out.
+    pub frame: TextFrameLayout,
+    /// The largest font scale, in normal autofit's 2.5% steps down to 25%,
+    /// at which the text fits its frame, or `None` when even 25% overflows
+    /// or the frame has no shape id to search with.
+    pub needed_font_scale: Option<f64>,
+}
+
+/// Which slide text frames overflow, out of how many were laid out.
+#[cfg(feature = "render")]
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextFitReport {
+    pub frames_checked: usize,
+    pub overflowing: Vec<TextOverflow>,
+}
+/// The z-order path, through groups, of the shape with non-visual id `id`.
+#[cfg(feature = "render")]
+fn shape_path_by_id<'a>(shapes: impl Iterator<Item = ShapeRef<'a>>, id: u32) -> Option<Vec<usize>> {
+    for (index, shape) in shapes.enumerate() {
+        if shape.non_visual_id() == Some(id) {
+            return Some(vec![index]);
+        }
+        if let Some(mut path) = shape_path_by_id(shape.children(), id) {
+            path.insert(0, index);
+            return Some(path);
+        }
+    }
+    None
+}
+
 const DEFAULT_POWERPOINT_AUTHORS_PART: &str = "/ppt/authors.xml";
 const DEFAULT_POWERPOINT_COMMENTS_PART: &str = "/ppt/comments/comment1.xml";
 const MAX_SMARTART_TRANSFER_DIAGRAM_PARTS: usize = 128;
@@ -1285,6 +1319,73 @@ impl Presentation {
             }
         }
         Ok(frames)
+    }
+
+    /// Lay out the text of every slide shape and report each frame that
+    /// overflows, with the font scale that would make it fit.
+    ///
+    /// The scale comes from a second layout of a copy in which each
+    /// overflowing frame has normal autofit without a stored scale, so the
+    /// renderer searches it as PowerPoint's "shrink text on overflow" does.
+    /// The presentation itself is not changed. Tables and SmartArt are left
+    /// out, as [`Self::text_layout_deterministic`] leaves them out.
+    #[cfg(feature = "render")]
+    pub fn text_fit_report(&self) -> Result<TextFitReport> {
+        let frames = self.text_layout_deterministic(1.0)?;
+        let frames_checked = frames.len();
+        let overflowing = frames
+            .into_iter()
+            .filter(|frame| frame.layout.overflow)
+            .collect::<Vec<_>>();
+        if overflowing.is_empty() {
+            return Ok(TextFitReport {
+                frames_checked,
+                overflowing: Vec::new(),
+            });
+        }
+        let mut shrunk = self.clone();
+        for frame in &overflowing {
+            let Some(path) = frame.shape_id.and_then(|id| {
+                self.slide(frame.slide_index)
+                    .and_then(|slide| shape_path_by_id(slide.shapes(), id))
+            }) else {
+                continue;
+            };
+            let mut shape = shrunk
+                .slide_mut(frame.slide_index)
+                .and_then(|slide| slide.into_shape_mut(path[0]));
+            for index in &path[1..] {
+                shape = shape.and_then(|shape| shape.into_child_mut(*index));
+            }
+            if let Some(mut text_frame) = shape.and_then(ShapeMut::into_text_frame) {
+                // Clear a stored scale first: choosing normal autofit again keeps it.
+                text_frame.set_autofit_mode(None);
+                text_frame.set_autofit_mode(Some(AutofitMode::Normal));
+            }
+        }
+        let shrunk_frames = shrunk.text_layout_deterministic(1.0)?;
+        let overflowing = overflowing
+            .into_iter()
+            .map(|frame| {
+                let needed_font_scale = frame.shape_id.and_then(|id| {
+                    shrunk_frames
+                        .iter()
+                        .find(|shrunk| {
+                            shrunk.slide_index == frame.slide_index && shrunk.shape_id == Some(id)
+                        })
+                        .filter(|shrunk| !shrunk.layout.overflow)
+                        .map(|shrunk| shrunk.layout.font_scale)
+                });
+                TextOverflow {
+                    frame,
+                    needed_font_scale,
+                }
+            })
+            .collect();
+        Ok(TextFitReport {
+            frames_checked,
+            overflowing,
+        })
     }
 
     /// Render the presentation to the selected archival PDF profile.

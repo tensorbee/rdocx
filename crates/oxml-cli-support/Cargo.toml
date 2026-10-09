@@ -20,3 +20,7 @@ tag-name = "rpptx-v{{version}}"
 [dependencies]
 serde_json.workspace = true
 thiserror.workspace = true
+
+# The local wall-clock time, which std does not expose.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

@@ -2093,3 +2093,431 @@ fn comment_mutations_fail_without_creating_output() {
     assert!(String::from_utf8_lossy(&result.stderr).contains("output already exists"));
     assert_eq!(fs::read(&output).unwrap(), b"keep me");
 }
+
+fn assert_ok(output: &Output, command: &str) {
+    assert!(
+        output.status.success(),
+        "{command} failed with {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn json_stdout(output: &Output) -> serde_json::Value {
+    serde_json::from_slice(&output.stdout).expect("JSON standard output")
+}
+
+fn slide_texts(path: &Path) -> Vec<String> {
+    Presentation::open(path)
+        .unwrap()
+        .slides()
+        .map(|slide| slide.text())
+        .collect()
+}
+
+#[test]
+fn replace_map_applies_counted_pairs_in_order_all_or_nothing() {
+    let temp = TempWorkspace::new("replace-map");
+    let source = temp.path.join("source.pptx");
+    write_deck(&source, &["Hello {{name}}", "{{name}} at {{place}}"]);
+    let map = temp.path.join("pairs.json");
+    fs::write(
+        &map,
+        r#"[{"placeholder": "{{name}}", "value": "Ada", "expect": 2},
+            {"placeholder": "{{place}}", "value": "home"}]"#,
+    )
+    .unwrap();
+    let output = temp.path.join("out.pptx");
+    let args = [
+        "replace",
+        path_str(&source),
+        "--map",
+        path_str(&map),
+        "-o",
+        path_str(&output),
+        "--json",
+    ];
+    let result = cli(&args);
+    assert_ok(&result, "replace --map");
+    let record = json_stdout(&result);
+    assert_eq!(record["total"], 3);
+    assert_eq!(record["pairs"][0]["count"], 2);
+    assert_eq!(record["pairs"][1]["count"], 1);
+    assert_eq!(slide_texts(&output), ["Hello Ada", "Ada at home"]);
+
+    fs::write(
+        &map,
+        r#"[{"placeholder": "{{name}}", "value": "Ada", "expect": 2},
+            {"placeholder": "{{place}}", "value": "home", "expect": 2}]"#,
+    )
+    .unwrap();
+    let refused = temp.path.join("refused.pptx");
+    let result = cli(&[
+        "replace",
+        path_str(&source),
+        "--map",
+        path_str(&map),
+        "-o",
+        path_str(&refused),
+    ]);
+    assert_eq!(result.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&result.stderr)
+            .contains("pair 1: expected 2 replacement(s) of \"{{place}}\", found 1")
+    );
+    assert!(!refused.exists());
+}
+
+fn path_str(path: &Path) -> &str {
+    path.to_str().unwrap()
+}
+
+#[test]
+fn slide_add_takes_a_layout_name_or_number_and_a_position() {
+    let temp = TempWorkspace::new("slide-add");
+    let source = temp.path.join("source.pptx");
+    write_deck(&source, &["One", "Two"]);
+    let layout_name = Presentation::open(&source)
+        .unwrap()
+        .layout_name(0)
+        .unwrap()
+        .to_owned();
+    let output = temp.path.join("added.pptx");
+    let result = cli(&[
+        "slide",
+        "add",
+        path_str(&source),
+        "--layout",
+        &layout_name.to_lowercase(),
+        "--at",
+        "1",
+        "-o",
+        path_str(&output),
+        "--json",
+    ]);
+    assert_ok(&result, "slide add");
+    let record = json_stdout(&result);
+    assert_eq!(record["slide"], 1);
+    assert_eq!(record["slides"], 3);
+    assert_eq!(record["layout"], 1);
+    let added = Presentation::open(&output).unwrap();
+    assert_eq!(added.slide_layout_index(0), Some(0));
+    assert_eq!(slide_texts(&output)[1..], ["One", "Two"]);
+
+    let by_number = temp.path.join("by-number.pptx");
+    let result = cli(&[
+        "slide",
+        "add",
+        path_str(&source),
+        "--layout",
+        "7",
+        "-o",
+        path_str(&by_number),
+    ]);
+    assert_ok(&result, "slide add by number");
+    assert_eq!(
+        Presentation::open(&by_number)
+            .unwrap()
+            .slide_layout_index(2),
+        Some(6)
+    );
+
+    let unknown = temp.path.join("unknown.pptx");
+    let result = cli(&[
+        "slide",
+        "add",
+        path_str(&source),
+        "--layout",
+        "No Such Layout",
+        "-o",
+        path_str(&unknown),
+    ]);
+    assert_eq!(result.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        stderr.contains("no layout is named or numbered"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(&format!("1 \"{layout_name}\"")), "{stderr}");
+    assert!(!unknown.exists());
+}
+
+#[test]
+fn slide_duplicate_inserts_the_copy_after_its_source() {
+    let temp = TempWorkspace::new("slide-duplicate");
+    let source = temp.path.join("source.pptx");
+    write_deck(&source, &["One", "Two"]);
+    let output = temp.path.join("out.pptx");
+    let result = cli(&[
+        "slide",
+        "duplicate",
+        path_str(&source),
+        "1",
+        "-o",
+        path_str(&output),
+        "--json",
+    ]);
+    assert_ok(&result, "slide duplicate");
+    assert_eq!(json_stdout(&result)["slide"], 2);
+    assert_eq!(slide_texts(&output), ["One", "One", "Two"]);
+}
+
+#[test]
+fn slide_remove_drops_one_slide_and_refuses_an_unknown_number() {
+    let temp = TempWorkspace::new("slide-remove");
+    let source = temp.path.join("source.pptx");
+    write_deck(&source, &["One", "Two", "Three"]);
+    let output = temp.path.join("out.pptx");
+    let result = cli(&[
+        "slide",
+        "remove",
+        path_str(&source),
+        "2",
+        "-o",
+        path_str(&output),
+    ]);
+    assert_ok(&result, "slide remove");
+    assert_eq!(slide_texts(&output), ["One", "Three"]);
+
+    let refused = temp.path.join("refused.pptx");
+    let result = cli(&[
+        "slide",
+        "remove",
+        path_str(&source),
+        "4",
+        "-o",
+        path_str(&refused),
+    ]);
+    assert_eq!(result.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("slide 4 is out of range for 3 slides")
+    );
+    assert!(!refused.exists());
+    let before = fs::read(&source).unwrap();
+    let result = cli(&[
+        "slide",
+        "remove",
+        path_str(&source),
+        "1",
+        "-o",
+        path_str(&source),
+    ]);
+    assert_eq!(result.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("output already exists"));
+    assert_eq!(fs::read(&source).unwrap(), before);
+}
+
+#[test]
+fn slide_move_puts_a_slide_at_its_final_position() {
+    let temp = TempWorkspace::new("slide-move");
+    let source = temp.path.join("source.pptx");
+    write_deck(&source, &["One", "Two", "Three"]);
+    let output = temp.path.join("out.pptx");
+    let result = cli(&[
+        "slide",
+        "move",
+        path_str(&source),
+        "1",
+        "--to",
+        "3",
+        "-o",
+        path_str(&output),
+    ]);
+    assert_ok(&result, "slide move");
+    assert_eq!(slide_texts(&output), ["Two", "Three", "One"]);
+
+    let same = temp.path.join("same.pptx");
+    let result = cli(&[
+        "slide",
+        "move",
+        path_str(&source),
+        "2",
+        "--to",
+        "2",
+        "-o",
+        path_str(&same),
+        "--json",
+    ]);
+    assert_ok(&result, "slide move to itself");
+    assert_eq!(json_stdout(&result)["changed"], false);
+}
+
+#[test]
+fn slide_hide_and_show_toggle_the_slide_show_flag() {
+    let temp = TempWorkspace::new("slide-hide");
+    let source = temp.path.join("source.pptx");
+    write_deck(&source, &["One", "Two"]);
+    let hidden = temp.path.join("hidden.pptx");
+    let result = cli(&[
+        "slide",
+        "hide",
+        path_str(&source),
+        "2",
+        "-o",
+        path_str(&hidden),
+    ]);
+    assert_ok(&result, "slide hide");
+    let again = temp.path.join("again.pptx");
+    let result = cli(&[
+        "slide",
+        "hide",
+        path_str(&hidden),
+        "2",
+        "-o",
+        path_str(&again),
+        "--json",
+    ]);
+    assert_ok(&result, "slide hide on a hidden slide");
+    assert_eq!(json_stdout(&result)["changed"], false);
+    let deck = Presentation::open(&hidden).unwrap();
+    assert!(!deck.slide(0).unwrap().hidden());
+    assert!(deck.slide(1).unwrap().hidden());
+
+    let shown = temp.path.join("shown.pptx");
+    let result = cli(&[
+        "slide",
+        "show",
+        path_str(&hidden),
+        "2",
+        "-o",
+        path_str(&shown),
+        "--json",
+    ]);
+    assert_ok(&result, "slide show");
+    assert_eq!(json_stdout(&result)["action"], "show");
+    assert!(
+        !Presentation::open(&shown)
+            .unwrap()
+            .slide(1)
+            .unwrap()
+            .hidden()
+    );
+}
+
+#[test]
+fn notes_set_writes_text_or_a_file_and_creates_missing_notes() {
+    let temp = TempWorkspace::new("notes-set");
+    let source = temp.path.join("source.pptx");
+    write_deck(&source, &["One", "Two"]);
+    let output = temp.path.join("out.pptx");
+    let result = cli(&[
+        "notes",
+        "set",
+        path_str(&source),
+        "2",
+        "--text",
+        "First point\nSecond point",
+        "-o",
+        path_str(&output),
+    ]);
+    assert_ok(&result, "notes set --text");
+    let deck = Presentation::open(&output).unwrap();
+    assert_eq!(
+        deck.slide(1).unwrap().notes_text().as_deref(),
+        Some("First point\nSecond point")
+    );
+    assert_eq!(deck.slide(0).unwrap().notes_text(), None);
+
+    let notes = temp.path.join("notes.txt");
+    fs::write(&notes, "From a file\n").unwrap();
+    let from_file = temp.path.join("from-file.pptx");
+    let result = cli(&[
+        "notes",
+        "set",
+        path_str(&output),
+        "2",
+        "--from-file",
+        path_str(&notes),
+        "-o",
+        path_str(&from_file),
+    ]);
+    assert_ok(&result, "notes set --from-file");
+    assert_eq!(
+        Presentation::open(&from_file)
+            .unwrap()
+            .slide(1)
+            .unwrap()
+            .notes_text()
+            .as_deref(),
+        Some("From a file")
+    );
+}
+
+#[test]
+fn fit_lists_each_overflowing_frame_with_the_scale_it_needs() {
+    let temp = TempWorkspace::new("fit");
+    let fitting = temp.path.join("fitting.pptx");
+    write_deck(&fitting, &["Short"]);
+    let result = cli(&["fit", path_str(&fitting), "--json"]);
+    assert_ok(&result, "fit");
+    let report = json_stdout(&result);
+    assert_eq!(report["fits"], true);
+    assert_eq!(report["overflowing"], json!([]));
+
+    let crowded = temp.path.join("crowded.pptx");
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    let mut slide = presentation.slide_mut(0).unwrap();
+    let mut shape = slide
+        .add_textbox(Emu(100_000), Emu(100_000), Emu(3_000_000), Emu(1_100_000))
+        .unwrap();
+    shape.set_text("one\ntwo\nthree\nfour\nfive\nsix").unwrap();
+    shape
+        .text_frame()
+        .unwrap()
+        .set_autofit_mode(Some(rpptx::AutofitMode::None));
+    presentation.save(&crowded).unwrap();
+
+    let result = cli(&["fit", path_str(&crowded), "--json"]);
+    assert_eq!(result.status.code(), Some(1));
+    let report = json_stdout(&result);
+    assert_eq!(report["fits"], false);
+    let frame = &report["overflowing"][0];
+    assert_eq!(frame["slide"], 1);
+    assert_eq!(frame["autofit"], "none");
+    let needed = frame["needed_font_scale"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("a fitting scale: {report}"));
+    assert!(needed > 0.2 && needed < 1.0, "{needed}");
+    assert_eq!((needed * 10_000.0).round() / 10_000.0, needed);
+
+    let missing = cli(&["fit", path_str(&temp.path.join("missing.pptx"))]);
+    assert_eq!(missing.status.code(), Some(2));
+
+    let plain = cli(&["fit", path_str(&crowded)]);
+    assert_eq!(plain.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&plain.stdout).contains("1 of 1 text frame(s) overflow"));
+}
+
+#[test]
+fn meta_set_writes_core_properties_that_meta_get_reads() {
+    let temp = TempWorkspace::new("meta");
+    let source = temp.path.join("source.pptx");
+    write_deck(&source, &["One"]);
+    let output = temp.path.join("out.pptx");
+    let result = cli(&[
+        "meta",
+        "set",
+        path_str(&source),
+        "--title",
+        "Quarterly review",
+        "--author",
+        "Ada",
+        "--keywords",
+        "q3, review",
+        "-o",
+        path_str(&output),
+    ]);
+    assert_ok(&result, "meta set");
+    let result = cli(&["meta", "get", path_str(&output), "--json"]);
+    assert_ok(&result, "meta get");
+    let core = &json_stdout(&result)["core"];
+    assert_eq!(core["title"], "Quarterly review");
+    assert_eq!(core["author"], "Ada");
+    assert_eq!(core["keywords"], "q3, review");
+
+    let empty = temp.path.join("empty.pptx");
+    let result = cli(&["meta", "set", path_str(&source), "-o", path_str(&empty)]);
+    assert_eq!(result.status.code(), Some(1));
+    assert!(!empty.exists());
+}

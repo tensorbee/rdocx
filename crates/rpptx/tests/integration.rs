@@ -27925,3 +27925,43 @@ fn names_and_chart_text_xml_cannot_carry_are_refused() {
         "{error}"
     );
 }
+
+#[cfg(feature = "render")]
+#[test]
+fn text_fit_report_finds_the_scale_an_overflowing_frame_needs() {
+    let mut presentation = rpptx::Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    let mut slide = presentation.slide_mut(0).unwrap();
+    for (top, height, text) in [
+        (100_000, 1_100_000, "one\ntwo\nthree\nfour\nfive\nsix"),
+        (1_500_000, 400_000, "short"),
+        (2_000_000, 200_000, "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl"),
+    ] {
+        let mut shape = slide
+            .add_textbox(
+                rpptx::Emu(100_000),
+                rpptx::Emu(top),
+                rpptx::Emu(3_000_000),
+                rpptx::Emu(height),
+            )
+            .unwrap();
+        shape.set_text(text).unwrap();
+        shape
+            .text_frame()
+            .unwrap()
+            .set_autofit_mode(Some(rpptx::AutofitMode::None));
+    }
+    let before = presentation.to_bytes().unwrap();
+    let report = presentation.text_fit_report().unwrap();
+    assert_eq!(report.frames_checked, 3);
+    assert_eq!(report.overflowing.len(), 2);
+    let needed = report.overflowing[0].needed_font_scale.unwrap();
+    assert!(needed > 0.25 && needed < 1.0, "{needed}");
+    assert_eq!(
+        report.overflowing[0].frame.autofit,
+        rpptx::AutofitMode::None
+    );
+    // Twelve lines in a 16-point box overflow even at a quarter of the size.
+    assert_eq!(report.overflowing[1].needed_font_scale, None);
+    assert_eq!(presentation.to_bytes().unwrap(), before);
+}

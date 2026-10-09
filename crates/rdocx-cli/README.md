@@ -18,6 +18,9 @@ and produces fixed or flow output without an Office host.
 - Tracked revision inspection, filtered resolution, table-of-contents rebuilds,
   and document comparison at run, word, or character granularity with ignore
   options.
+- One-shot edits: batch and regular-expression replacement, field updates,
+  picture extraction, core and custom properties, and content-control values,
+  with word, character, and page counts in `inspect`.
 - Package-preserving edits cover the final S74 paragraph, run, typography,
   table, section, settings, field, form, equation, and drawing surface.
 
@@ -25,7 +28,7 @@ and produces fixed or flow output without an Office host.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rdocx-cli | 72,988 compressed bytes, 326,487 member bytes, 8 members | 0.16.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --no-verify` | Tracked `rdocx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-09 |
+| Crates.io archive: rdocx-cli | 85,274 compressed bytes, 377,827 member bytes, 8 members | 0.16.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --no-verify` | Tracked `rdocx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-09 |
 
 ## Use it when
 
@@ -67,7 +70,72 @@ rdocx compare original.docx edited.docx --author Reviewer \
   --timestamp 2026-09-13T12:00:00Z --granularity word --ignore-comments \
   --ignore-story header -o redline.docx
 rdocx toc rebuild report.docx -o refreshed.docx
+rdocx replace template.docx --map pairs.json -o report.docx --json
+rdocx replace report.docx --regex -p '(\d{4})-(\d{2})-(\d{2})' -v '$3/$2/$1' -o dated.docx
+rdocx fields update report.docx --now 2026-10-10 -o refreshed.docx
+rdocx images extract report.docx pictures --json
+rdocx meta set report.docx --title 'Final report' --custom Client=Acme -o titled.docx
+rdocx fill form.docx --tag client=Acme --alias 'Due date=2026-10-31' -o filled.docx
 ```
+
+`inspect` reports the word count, the character count with and without spaces, the page
+count from rdocx's pagination, the pictures of the main story with their
+relationship id, name, alt text, size in EMU and anchoring, and the content
+controls of the body with their tag, alias, id and text. When the document
+cannot be laid out, the page count is `null` with a warning on stderr.
+
+`replace --map PAIRS_JSON` reads a JSON array of
+`{"placeholder", "value", "expect"}` objects and applies the pairs in order
+over the whole document, so a later pair sees the text an earlier one wrote.
+When a pair that gives `expect` finds another count, or a pair without
+`expect` finds nothing, nothing is written and the error names the zero-based
+pair. Give `"expect": 0` to allow a pair to find nothing. `--regex` reads each placeholder as a regular
+expression whose value may name capture groups as `$1`, and searches what the
+literal replacement searches except chart labels. `--json` reports the count
+of each pair and the total. An invalid regular expression names its pair.
+
+`fields update` evaluates every supported field result, SEQ, REF, DATE, TIME,
+FILENAME and the others, then writes PAGE, NUMPAGES, PAGEREF, SECTION and
+SECTIONPAGES results from rdocx's own pagination. DATE and TIME use `--now`
+(`YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SS`, a wall-clock time without a zone), or
+the current local time as Word reads it (the `TZ` time zone on Unix, UTC on
+other systems), and FILENAME the output file name. A field that needs a value the document does not hold,
+such as a mail-merge field, keeps its cached result. PAGE and NUMPAGES in
+headers and footers keep their caches, which Word recomputes on every page.
+
+`images extract FILE DIR` writes each media part that the pictures of the main
+story show once into `DIR`, under the part's own name such as `image1.png`,
+and lists every picture with its `story`, relationship id, source `part`,
+name, alt text, size in EMU and pixels, detected format, byte length and file.
+A linked picture has a `null` part and file. Pictures in headers, footers,
+notes and text boxes are not listed yet. An existing image file is refused
+unless `--force` is given, and `DIR` is created only once those checks pass.
+A file name keeps only the ASCII letters, digits, dots, underscores and hyphens
+of the part name's last segment, so a crafted part name cannot leave `DIR`. A
+name that would be empty, hidden or a Windows device name becomes
+`image1.png`, numbered in order with its detected extension, and an existing
+symbolic link is never written through.
+
+`meta get` prints the core and custom properties. `meta set` writes the
+`--title`, `--author`, `--subject`, `--keywords`, `--description` and
+`--category` it is given, adds or replaces `--custom NAME=VALUE` properties and
+removes `--remove-custom NAME` ones. A new custom property is a string, and an
+existing integer, number, Boolean or date property keeps its type, so a value
+of another type is refused. A date takes `YYYY-MM-DD`, optionally with a time,
+and with `Z` or an offset such as `+02:00`, and is stored in UTC. A date and
+time without a zone is read as UTC. Removing a property that does not exist,
+and naming one property twice, are refused.
+
+`fill` sets the value of every body content control whose tag matches
+`--tag NAME=VALUE` or whose alias (title) matches `--alias NAME=VALUE`, and
+writes a control bound to custom XML into its bound part too. It writes what
+Word writes: the placeholder flag and style go, a drop-down list takes one of
+its items (by text or value), a date control takes an ISO date that it shows
+in its own format and stores as `w:fullDate`, and a check box takes `true` or
+`false` (also `1`/`0`, `yes`/`no`), stored as `w14:checked` and shown with its
+checked or unchecked glyph. A picture or group control, and a value the control
+does not take, are refused. A name that no
+control has is refused, naming the known ones, and nothing is written.
 
 Comment `add` ranges use zero-based body paragraph and run boundaries. The
 start is inclusive and the end is exclusive. Run boundaries count the runs that

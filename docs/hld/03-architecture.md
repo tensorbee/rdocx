@@ -1696,7 +1696,9 @@ lookup. Mutable handles also expose indexed mutable lookup and one
 equation order among runs, controls, revisions, and unsupported XML.
 `Document::math_properties` and `Document::set_math_properties` use the
 relationship-resolved settings part. These are additive pre-1.0 Rust APIs.
-Python, WASM, and CLI surfaces do not gain OfficeMath entry points implicitly.
+Python writes an equation from LaTeX or MathML through
+`Paragraph.add_equation` and reads `Paragraph.equations` back as both. WASM and
+CLI surfaces do not gain OfficeMath entry points.
 
 The native facade re-exports four free equation conversion functions because
 the normalized tree is owned by `rdocx-oxml`. The functions return the same

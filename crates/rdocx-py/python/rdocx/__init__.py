@@ -44,7 +44,12 @@ class ReplacementCountError(RdocxError):
         return str(self.args[0])
 
 
+class ConversionWarning(UserWarning):
+    """An export or a text view left out content it could not represent."""
+
+
 from ._rdocx import (
+    AppProperties,
     Bookmark,
     BoundingBox,
     Cell,
@@ -52,9 +57,13 @@ from ._rdocx import (
     CellParagraphCollection,
     Comment,
     ComparisonDiagnostic,
+    ContentControl,
     ContentFragment,
     CoreProperties,
+    CustomProperties,
     Document,
+    DocumentFragment,
+    Equation,
     Font,
     HeaderFooterVariant,
     Hyperlink,
@@ -73,6 +82,7 @@ from ._rdocx import (
     RunPosition,
     RunRange,
     Section,
+    Settings,
     Story,
     StoryItem,
     StoryRunPosition,
@@ -83,9 +93,16 @@ from ._rdocx import (
     Table,
     TableCollection,
     TocRebuildReport,
+    ValidationReport,
 )
 
+# The custom properties behave as a mutable mapping of names to typed values.
+import collections.abc as _abc
+
+_abc.MutableMapping.register(CustomProperties)
+
 __all__ = [
+    "AppProperties",
     "Bookmark",
     "BoundingBox",
     "Cm",
@@ -94,10 +111,15 @@ __all__ = [
     "CellParagraphCollection",
     "Comment",
     "ComparisonDiagnostic",
+    "ContentControl",
     "ContentFragment",
+    "ConversionWarning",
     "CoreProperties",
+    "CustomProperties",
     "Document",
+    "DocumentFragment",
     "Emu",
+    "Equation",
     "Font",
     "HeaderFooterVariant",
     "Hyperlink",
@@ -125,6 +147,7 @@ __all__ = [
     "RunPosition",
     "RunRange",
     "Section",
+    "Settings",
     "StaleElementError",
     "Story",
     "StoryItem",
@@ -136,6 +159,7 @@ __all__ = [
     "Table",
     "TableCollection",
     "TocRebuildReport",
+    "ValidationReport",
     "WD_ALIGN_PARAGRAPH",
     "WD_CELL_VERTICAL_ALIGNMENT",
     "WD_ROW_HEIGHT_RULE",

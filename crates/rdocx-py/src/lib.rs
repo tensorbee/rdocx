@@ -13,6 +13,10 @@ use pyo3::types::{PyAny, PyType};
 use oxml_py_support::StaleElementError;
 
 use document::{
+    PyAppProperties, PyContentControl, PyCustomProperties, PyDocumentFragment, PySettings,
+    PyValidationReport,
+};
+use document::{
     PyBookmark, PyBoundingBox, PyComment, PyComparisonDiagnostic, PyContentFragment,
     PyCoreProperties, PyDocument, PyHeaderFooterVariant, PyHyperlink,
     PyLayoutBackedFieldUpdateReport, PyLayoutFragment, PyLayoutPage, PyListLevel, PyRevision,
@@ -154,6 +158,14 @@ fn _rdocx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyCell>()?;
     module.add_class::<PyCellCollection>()?;
     module.add_class::<PyCellParagraphCollection>()?;
+    // Document-level views, templates, properties and validation.
+    module.add_class::<PyValidationReport>()?;
+    module.add_class::<PyDocumentFragment>()?;
+    module.add_class::<PyContentControl>()?;
+    module.add_class::<PySettings>()?;
+    module.add_class::<PyCustomProperties>()?;
+    module.add_class::<PyAppProperties>()?;
+    module.add_class::<paragraph::PyEquation>()?;
     Ok(())
 }
 

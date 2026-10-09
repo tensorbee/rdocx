@@ -1100,6 +1100,7 @@ dependencies = [
 name = "oxml-cli-support"
 version = "0.14.0"
 dependencies = [
+ "libc",
  "serde_json",
  "thiserror",
 ]
@@ -1498,9 +1499,9 @@ dependencies = [
  "clap",
  "oxml-cli-support",
  "oxml-layout",
+ "oxml-media",
  "oxml-opc",
  "oxml-pdf",
- "quick-xml",
  "rdocx",
  "rdocx-oxml",
  "serde_json",
@@ -1558,6 +1559,7 @@ dependencies = [
  "pyo3",
  "rdocx",
  "rdocx-oxml",
+ "serde_json",
  "smallvec",
 ]
 

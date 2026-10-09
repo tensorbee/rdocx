@@ -14,6 +14,9 @@ publication, and JSON contracts.
   set keeps the files it has already swapped in when a later one fails, since
   the files they replaced cannot be restored.
 - Versioned JSON object envelopes shared by Word and Presentation CLIs.
+- Replacement maps, a JSON array of ordered pairs with optional expected
+  counts, read the same way by both CLIs.
+- The local wall-clock time and civil date arithmetic for date arguments.
 - Bounded expansion and staged multi-output publication without replacement
   keep large or failed requests from leaving partial command results.
 
@@ -23,7 +26,7 @@ The archive row is regenerated from the package that carries this README.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: oxml-cli-support | 8,612 compressed bytes, 30,840 member bytes, 6 members | 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --no-verify` | Tracked `oxml-cli-support` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-09 |
+| Crates.io archive: oxml-cli-support | 11,281 compressed bytes, 40,193 member bytes, 6 members | 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --no-verify` | Tracked `oxml-cli-support` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-09 |
 
 ## Use it when
 

@@ -7,7 +7,7 @@ use quick_xml::XmlVersion;
 use quick_xml::events::Event;
 use quick_xml::name::{Namespace, ResolveResult};
 use quick_xml::reader::NsReader;
-use rdocx_oxml::content_control::{CT_DataBinding, CT_Sdt, SdtContent, SdtType};
+use rdocx_oxml::content_control::{CT_DataBinding, CT_Sdt, SdtContent, SdtListItem, SdtType};
 use rdocx_oxml::document::{BodyContent, CT_Body};
 use rdocx_oxml::namespace::matches_local_name;
 use rdocx_oxml::table::{CT_Row, CT_Tbl, CT_Tc, CellContent};
@@ -61,6 +61,305 @@ impl ContentControlRef<'_> {
         let mut text = String::new();
         collect_sdt_text(self.inner, &mut text);
         text
+    }
+
+    /// The `w:listItem` entries of a drop-down list or combo box control.
+    pub fn list_items(&self) -> Vec<SdtListItem> {
+        self.inner
+            .properties
+            .as_ref()
+            .and_then(|properties| properties.list_items().ok())
+            .unwrap_or_default()
+    }
+
+    /// Check that `value` suits the control as the value setters write it:
+    /// an item of a drop-down list, an ISO date (`YYYY-MM-DD`, with an
+    /// optional time) for a date control, or true or false (also 1/0, yes/no)
+    /// for a check box. A picture or group control takes no text value.
+    pub fn check_value(&self, value: &str) -> Result<()> {
+        prepare_control_value(self.inner, value).map(|_| ())
+    }
+}
+
+/// What a value setter writes into one control.
+#[derive(Debug, Clone)]
+struct ControlValue {
+    /// The text the control shows.
+    display: String,
+    /// The text a data binding stores.
+    bound: String,
+    /// The `w:fullDate` of a date control.
+    full_date: Option<String>,
+    /// The `w:lastValue` of a drop-down list or combo box.
+    last_value: Option<String>,
+    /// The `w14:checked` state of a check box.
+    checked: Option<bool>,
+}
+
+/// Turn a caller value into what one control shows and stores, refusing a
+/// drop-down list value outside its items and a date that does not parse. A
+/// combo box also accepts free text, as Word lets its user type one.
+fn prepare_control_value(control: &CT_Sdt, value: &str) -> Result<ControlValue> {
+    let plain = ControlValue {
+        display: value.to_owned(),
+        bound: value.to_owned(),
+        full_date: None,
+        last_value: None,
+        checked: None,
+    };
+    let Some(properties) = &control.properties else {
+        return Ok(plain);
+    };
+    let name = properties
+        .tag
+        .as_deref()
+        .or(properties.alias.as_deref())
+        .unwrap_or("without a tag");
+    match properties.control_type {
+        Some(control_type @ (SdtType::DropDownList | SdtType::ComboBox)) => {
+            let items = properties.list_items()?;
+            let found = items.iter().find(|item| {
+                item.display_text.as_deref() == Some(value) || item.value.as_deref() == Some(value)
+            });
+            match found {
+                Some(item) => {
+                    let display = item.display_text.clone().or_else(|| item.value.clone());
+                    let stored = item.value.clone().or_else(|| item.display_text.clone());
+                    Ok(ControlValue {
+                        display: display.unwrap_or_default(),
+                        bound: stored.clone().unwrap_or_default(),
+                        full_date: None,
+                        last_value: stored,
+                        checked: None,
+                    })
+                }
+                None if control_type == SdtType::ComboBox => Ok(ControlValue {
+                    last_value: Some(value.to_owned()),
+                    ..plain
+                }),
+                None => {
+                    let allowed = items
+                        .iter()
+                        .filter_map(|item| item.display_text.clone().or_else(|| item.value.clone()))
+                        .collect::<Vec<_>>();
+                    Err(Error::Other(format!(
+                        "content control {name:?} is a drop-down list, and {value:?} is not one of its items {allowed:?}"
+                    )))
+                }
+            }
+        }
+        Some(SdtType::Date) => {
+            let Some((year, month, day)) = parse_iso_date(value) else {
+                return Err(Error::Other(format!(
+                    "content control {name:?} is a date control, and {value:?} is not an ISO date such as 2026-01-31"
+                )));
+            };
+            let iso = format!("{year:04}-{month:02}-{day:02}");
+            let full_date = format!("{iso}T00:00:00Z");
+            let format = properties.type_child_value("dateFormat")?;
+            let language = properties.type_child_value("lid")?;
+            let display = format
+                .as_deref()
+                .and_then(|format| format_date(format, language.as_deref(), year, month, day))
+                .unwrap_or_else(|| iso.clone());
+            let bound = match properties.type_child_value("storeMappedDataAs")?.as_deref() {
+                Some("date") => iso,
+                Some("dateTime") => full_date.clone(),
+                _ => display.clone(),
+            };
+            Ok(ControlValue {
+                display,
+                bound,
+                full_date: Some(full_date),
+                last_value: None,
+                checked: None,
+            })
+        }
+        Some(SdtType::CheckBox) => {
+            let checked = match value.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" => true,
+                "false" | "0" | "no" => false,
+                _ => {
+                    return Err(Error::Other(format!(
+                        "content control {name:?} is a check box, and {value:?} is not true or false (also 1/0, yes/no)"
+                    )));
+                }
+            };
+            // Word's default glyphs are U+2612 and U+2610, in MS Gothic.
+            let state = if checked {
+                "checkedState"
+            } else {
+                "uncheckedState"
+            };
+            let code = properties
+                .type_child_value(state)?
+                .unwrap_or_else(|| if checked { "2612" } else { "2610" }.to_owned());
+            let glyph = u32::from_str_radix(&code, 16)
+                .ok()
+                .and_then(char::from_u32)
+                .ok_or_else(|| {
+                    Error::Other(format!(
+                        "content control {name:?} has a {state} glyph {code:?} that is not a hexadecimal character code"
+                    ))
+                })?;
+            Ok(ControlValue {
+                display: glyph.to_string(),
+                bound: checked.to_string(),
+                full_date: None,
+                last_value: None,
+                checked: Some(checked),
+            })
+        }
+        Some(SdtType::Picture) => Err(Error::Other(format!(
+            "content control {name:?} is a picture control, which takes an image rather than text: replace its picture with replace_image"
+        ))),
+        Some(SdtType::Group) => Err(Error::Other(format!(
+            "content control {name:?} is a group control, which holds other content: set the controls inside it instead"
+        ))),
+        _ => Ok(plain),
+    }
+}
+
+/// Read `YYYY-MM-DD`, optionally followed by `T` and a time, as a valid
+/// calendar date.
+fn parse_iso_date(value: &str) -> Option<(u32, u32, u32)> {
+    let value = value.trim();
+    let date = value.split_once('T').map_or(value, |(date, _)| date);
+    let bytes = date.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return None;
+    }
+    let number = |range: std::ops::Range<usize>| -> Option<u32> {
+        let digits = &date[range];
+        digits
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+            .then(|| digits.parse().ok())?
+    };
+    let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    };
+    (year >= 1 && (1..=days).contains(&day)).then_some((year, month, day))
+}
+
+/// Format a date with a Word date picture such as `M/d/yyyy` or
+/// `dd MMMM yyyy`. Month and day names are English, so a picture that
+/// names them in another language, or one with a time field, gives `None`.
+fn format_date(
+    picture: &str,
+    language: Option<&str>,
+    year: u32,
+    month: u32,
+    day: u32,
+) -> Option<String> {
+    const MONTHS: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    const DAYS: [&str; 7] = [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ];
+    let english = language.is_none_or(|language| language.to_ascii_lowercase().starts_with("en"));
+    // Sakamoto's day of the week, Sunday first.
+    let weekday = {
+        const OFFSETS: [u32; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+        let year = if month < 3 { year - 1 } else { year };
+        ((year + year / 4 - year / 100 + year / 400 + OFFSETS[month as usize - 1] + day) % 7)
+            as usize
+    };
+    let mut output = String::new();
+    let characters = picture.chars().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < characters.len() {
+        let character = characters[index];
+        if character == '\'' {
+            let end = characters[index + 1..].iter().position(|c| *c == '\'')?;
+            output.extend(&characters[index + 1..index + 1 + end]);
+            index += end + 2;
+            continue;
+        }
+        let run = characters[index..]
+            .iter()
+            .take_while(|c| **c == character)
+            .count();
+        match (character, run) {
+            ('d', 1) => output.push_str(&day.to_string()),
+            ('d', 2) => output.push_str(&format!("{day:02}")),
+            ('d', 3) if english => output.push_str(&DAYS[weekday][..3]),
+            ('d', 4) if english => output.push_str(DAYS[weekday]),
+            ('M', 1) => output.push_str(&month.to_string()),
+            ('M', 2) => output.push_str(&format!("{month:02}")),
+            ('M', 3) if english => output.push_str(&MONTHS[month as usize - 1][..3]),
+            ('M', 4) if english => output.push_str(MONTHS[month as usize - 1]),
+            ('y', 2) => output.push_str(&format!("{:02}", year % 100)),
+            ('y', 4) => output.push_str(&format!("{year:04}")),
+            _ if character.is_ascii_alphabetic() => return None,
+            _ => output.extend(&characters[index..index + run]),
+        }
+        index += run;
+    }
+    Some(output)
+}
+
+/// Drop the `PlaceholderText` character style Word gives the placeholder of
+/// an empty control, so a value does not keep its grey placeholder look.
+fn clear_placeholder_style(control: &mut CT_Sdt) {
+    fn clear_run(run: &mut CT_R) {
+        if let Some(properties) = run.properties.as_mut()
+            && properties.style_id.as_deref() == Some("PlaceholderText")
+        {
+            properties.style_id = None;
+        }
+    }
+    fn clear_paragraph(paragraph: &mut CT_P) {
+        paragraph.runs.iter_mut().for_each(clear_run);
+    }
+    fn clear_table(table: &mut CT_Tbl) {
+        table.rows.iter_mut().for_each(clear_row);
+    }
+    fn clear_row(row: &mut CT_Row) {
+        row.cells.iter_mut().for_each(clear_cell);
+    }
+    fn clear_cell(cell: &mut CT_Tc) {
+        for content in &mut cell.content {
+            match content {
+                CellContent::Paragraph(paragraph) => clear_paragraph(paragraph),
+                CellContent::Table(table) => clear_table(table),
+                CellContent::ContentControl(_) => {}
+            }
+        }
+    }
+    for content in &mut control.content {
+        match content {
+            SdtContent::Paragraph(paragraph) => clear_paragraph(paragraph),
+            SdtContent::Table(table) => clear_table(table),
+            SdtContent::Row(row) => clear_row(row),
+            SdtContent::Cell(cell) => clear_cell(cell),
+            SdtContent::Run(run) => clear_run(run),
+            SdtContent::ContentControl(_) | SdtContent::RawXml(_) => {}
+        }
     }
 }
 
@@ -132,13 +431,13 @@ impl Document {
             .enumerate()
             .filter_map(|(index, inner)| {
                 let value = select(ContentControlRef { inner })?;
-                Some((
-                    index,
-                    value,
-                    inner.properties.as_ref()?.data_binding.clone(),
-                ))
+                let binding = inner
+                    .properties
+                    .as_ref()
+                    .and_then(|properties| properties.data_binding.clone());
+                Some(prepare_control_value(inner, &value).map(|value| (index, value, binding)))
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         if selected.is_empty() {
             return Ok(0);
         }
@@ -158,7 +457,7 @@ impl Document {
                 continue;
             };
             let (part_name, edit) =
-                resolve_binding_edit(&staged_package, &self.doc_part_name, binding, value)?;
+                resolve_binding_edit(&staged_package, &self.doc_part_name, binding, &value.bound)?;
             edits_by_part.entry(part_name).or_default().push(edit);
         }
         for (part_name, edits) in edits_by_part {
@@ -219,7 +518,7 @@ fn collect_cell_text(cell: &CT_Tc, output: &mut String) {
 
 fn replace_document_controls(
     body: &mut CT_Body,
-    replacements: &HashMap<usize, String>,
+    replacements: &HashMap<usize, ControlValue>,
 ) -> Result<()> {
     let expected_count = body.content_controls().len();
     let mut index = 0usize;
@@ -245,11 +544,24 @@ fn replace_document_controls(
 
 fn replace_one_control(
     control: &mut CT_Sdt,
-    replacements: &HashMap<usize, String>,
+    replacements: &HashMap<usize, ControlValue>,
     index: &mut usize,
 ) -> Result<()> {
     if let Some(value) = replacements.get(index) {
-        replace_display_text(control, value)?;
+        replace_display_text(control, &value.display)?;
+        clear_placeholder_style(control);
+        if let Some(properties) = control.properties.as_mut() {
+            properties.clear_showing_placeholder();
+            if let Some(full_date) = &value.full_date {
+                properties.set_type_attribute("fullDate", full_date);
+            }
+            if let Some(last_value) = &value.last_value {
+                properties.set_type_attribute("lastValue", last_value);
+            }
+            if let Some(checked) = value.checked {
+                properties.set_checkbox_checked(checked)?;
+            }
+        }
     }
     *index = index
         .checked_add(1)
@@ -259,7 +571,7 @@ fn replace_one_control(
 
 fn replace_nested_controls(
     control: &mut CT_Sdt,
-    replacements: &HashMap<usize, String>,
+    replacements: &HashMap<usize, ControlValue>,
     index: &mut usize,
 ) -> Result<()> {
     for content in &mut control.content {
@@ -279,7 +591,7 @@ fn replace_nested_controls(
 
 fn replace_paragraph_controls(
     paragraph: &mut CT_P,
-    replacements: &HashMap<usize, String>,
+    replacements: &HashMap<usize, ControlValue>,
     index: &mut usize,
 ) -> Result<()> {
     for position in 0..=paragraph.runs.len() {
@@ -296,7 +608,7 @@ fn replace_paragraph_controls(
 
 fn replace_table_controls(
     table: &mut CT_Tbl,
-    replacements: &HashMap<usize, String>,
+    replacements: &HashMap<usize, ControlValue>,
     index: &mut usize,
 ) -> Result<()> {
     for position in 0..=table.rows.len() {
@@ -316,7 +628,7 @@ fn replace_table_controls(
 
 fn replace_row_controls(
     row: &mut CT_Row,
-    replacements: &HashMap<usize, String>,
+    replacements: &HashMap<usize, ControlValue>,
     index: &mut usize,
 ) -> Result<()> {
     for position in 0..=row.cells.len() {
@@ -336,7 +648,7 @@ fn replace_row_controls(
 
 fn replace_cell_controls(
     cell: &mut CT_Tc,
-    replacements: &HashMap<usize, String>,
+    replacements: &HashMap<usize, ControlValue>,
     index: &mut usize,
 ) -> Result<()> {
     for content in &mut cell.content {

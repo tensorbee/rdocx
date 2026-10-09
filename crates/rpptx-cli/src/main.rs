@@ -58,17 +58,34 @@ enum Command {
     /// Compare slide text using a longest-common-subsequence diff
     Diff { file_a: PathBuf, file_b: PathBuf },
     /// Replace literal presentation text while retaining run formatting
+    ///
+    /// Give one pair with -p and -v, or many with --map. Nothing is written
+    /// unless every pair replaced its expected count, or at least one
+    /// occurrence when it gives no count.
     Replace {
         file: PathBuf,
-        #[arg(long, short = 'p')]
-        placeholder: String,
-        #[arg(long, short = 'v')]
-        value: String,
+        #[arg(
+            long,
+            short = 'p',
+            required_unless_present = "map",
+            requires = "value",
+            conflicts_with = "map"
+        )]
+        placeholder: Option<String>,
+        #[arg(long, short = 'v', requires = "placeholder")]
+        value: Option<String>,
+        /// JSON file holding an array of pairs, applied in order, such as
+        /// [{"placeholder": "{{name}}", "value": "Ada", "expect": 2}]
+        #[arg(long, value_name = "PAIRS_JSON")]
+        map: Option<PathBuf>,
         /// Require exactly this many slide and speaker-note replacements
-        #[arg(long)]
+        #[arg(long, conflicts_with = "map")]
         expect: Option<usize>,
         #[arg(long, short = 'o')]
         output: PathBuf,
+        /// Output the count of each pair as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Validate package and PresentationML invariants
     Validate { file: PathBuf },
@@ -117,6 +134,171 @@ enum Command {
     Comment {
         #[command(subcommand)]
         command: CommentCommand,
+    },
+    /// Add, duplicate, remove, move, hide and show slides
+    Slide {
+        #[command(subcommand)]
+        command: SlideCommand,
+    },
+    /// Write speaker notes
+    Notes {
+        #[command(subcommand)]
+        command: NotesCommand,
+    },
+    /// Report every text frame whose text overflows it, exit 1 when one does
+    /// and 2 on an error
+    ///
+    /// Lays out the text of the slide shapes with rpptx's renderer. Each
+    /// overflowing frame is listed with the largest font scale, in steps of
+    /// 2.5% down to 25%, at which its text fits, as PowerPoint's "shrink text
+    /// on overflow" computes it, or none when even 25% overflows. Tables and
+    /// SmartArt are not checked.
+    Fit {
+        file: PathBuf,
+        /// Output the report as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read and write the core document properties
+    Meta {
+        #[command(subcommand)]
+        command: MetaCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SlideCommand {
+    /// Add a slide from a layout, at the end or at a one-based position
+    Add {
+        file: PathBuf,
+        /// Layout name, or its one-based number in master order
+        #[arg(long)]
+        layout: String,
+        /// One-based position of the new slide, the end when absent
+        #[arg(long)]
+        at: Option<usize>,
+        #[arg(long, short = 'o')]
+        output: PathBuf,
+        /// Output the operation record as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Duplicate one slide, inserting the copy right after it
+    Duplicate {
+        file: PathBuf,
+        /// One-based slide number
+        slide: usize,
+        #[arg(long, short = 'o')]
+        output: PathBuf,
+        /// Output the operation record as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove one slide with its notes and comments
+    Remove {
+        file: PathBuf,
+        /// One-based slide number
+        slide: usize,
+        #[arg(long, short = 'o')]
+        output: PathBuf,
+        /// Output the operation record as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Move one slide to another one-based position
+    Move {
+        file: PathBuf,
+        /// One-based slide number
+        slide: usize,
+        /// One-based final position
+        #[arg(long)]
+        to: usize,
+        #[arg(long, short = 'o')]
+        output: PathBuf,
+        /// Output the operation record as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Hide one slide from the slide show
+    Hide {
+        file: PathBuf,
+        /// One-based slide number
+        slide: usize,
+        #[arg(long, short = 'o')]
+        output: PathBuf,
+        /// Output the operation record as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one hidden slide in the slide show again
+    Show {
+        file: PathBuf,
+        /// One-based slide number
+        slide: usize,
+        #[arg(long, short = 'o')]
+        output: PathBuf,
+        /// Output the operation record as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum NotesCommand {
+    /// Replace the speaker notes of one slide, creating them when absent
+    Set {
+        file: PathBuf,
+        /// One-based slide number
+        slide: usize,
+        /// Notes text, one paragraph per line
+        #[arg(
+            long,
+            required_unless_present = "from_file",
+            conflicts_with = "from_file"
+        )]
+        text: Option<String>,
+        /// Read the notes text from a UTF-8 file
+        #[arg(long, value_name = "PATH")]
+        from_file: Option<PathBuf>,
+        #[arg(long, short = 'o')]
+        output: PathBuf,
+        /// Output the operation record as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum MetaCommand {
+    /// Print the core properties
+    Get {
+        file: PathBuf,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Set core properties
+    Set {
+        file: PathBuf,
+        #[arg(long)]
+        title: Option<String>,
+        /// Author (dc:creator)
+        #[arg(long)]
+        author: Option<String>,
+        #[arg(long)]
+        subject: Option<String>,
+        #[arg(long)]
+        keywords: Option<String>,
+        /// Description (comments)
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        category: Option<String>,
+        #[arg(long, short = 'o')]
+        output: PathBuf,
+        /// Output the properties written as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -214,13 +396,25 @@ fn main() {
 
 fn run_cli() {
     let cli = Cli::parse();
-    if let Command::Validate { file } = &cli.command {
-        match commands::validate(file) {
+    // `validate` and `fit` carry a verdict in their exit status. `fit` exits
+    // 2 on an error, so that 1 always means an overflow.
+    let error_status = if matches!(cli.command, Command::Fit { .. }) {
+        2
+    } else {
+        1
+    };
+    let verdict = match &cli.command {
+        Command::Validate { file } => Some(commands::validate(file)),
+        Command::Fit { file, json } => Some(commands::fit(file, *json)),
+        _ => None,
+    };
+    if let Some(verdict) = verdict {
+        match verdict {
             Ok(true) => return,
             Ok(false) => process::exit(1),
             Err(error) => {
                 eprintln!("Error: {error}");
-                process::exit(1);
+                process::exit(error_status);
             }
         }
     }
@@ -254,10 +448,21 @@ fn run_cli() {
             file,
             placeholder,
             value,
+            map,
             expect,
             output,
-        } => commands::replace(&file, &placeholder, &value, expect, &output),
-        Command::Validate { .. } => unreachable!("validate is dispatched above"),
+            json,
+        } => commands::replace(
+            &file,
+            placeholder.zip(value),
+            map.as_deref(),
+            expect,
+            &output,
+            json,
+        ),
+        Command::Validate { .. } | Command::Fit { .. } => {
+            unreachable!("verdict commands are dispatched above")
+        }
         Command::Render {
             file,
             output,
@@ -340,6 +545,92 @@ fn run_cli() {
                 output,
                 json,
             } => commands::comment_remove(&file, &id, &output, json),
+        },
+        Command::Slide { command } => match command {
+            SlideCommand::Add {
+                file,
+                layout,
+                at,
+                output,
+                json,
+            } => commands::slide_add(&file, &layout, at, &output, json),
+            SlideCommand::Duplicate {
+                file,
+                slide,
+                output,
+                json,
+            } => commands::slide_edit(&file, commands::SlideEdit::Duplicate(slide), &output, json),
+            SlideCommand::Remove {
+                file,
+                slide,
+                output,
+                json,
+            } => commands::slide_edit(&file, commands::SlideEdit::Remove(slide), &output, json),
+            SlideCommand::Move {
+                file,
+                slide,
+                to,
+                output,
+                json,
+            } => commands::slide_edit(&file, commands::SlideEdit::Move(slide, to), &output, json),
+            SlideCommand::Hide {
+                file,
+                slide,
+                output,
+                json,
+            } => commands::slide_edit(
+                &file,
+                commands::SlideEdit::Hidden(slide, true),
+                &output,
+                json,
+            ),
+            SlideCommand::Show {
+                file,
+                slide,
+                output,
+                json,
+            } => commands::slide_edit(
+                &file,
+                commands::SlideEdit::Hidden(slide, false),
+                &output,
+                json,
+            ),
+        },
+        Command::Notes { command } => match command {
+            NotesCommand::Set {
+                file,
+                slide,
+                text,
+                from_file,
+                output,
+                json,
+            } => commands::notes_set(
+                &file,
+                slide,
+                text.as_deref(),
+                from_file.as_deref(),
+                &output,
+                json,
+            ),
+        },
+        Command::Meta { command } => match command {
+            MetaCommand::Get { file, json } => commands::meta_get(&file, json),
+            MetaCommand::Set {
+                file,
+                title,
+                author,
+                subject,
+                keywords,
+                description,
+                category,
+                output,
+                json,
+            } => commands::meta_set(
+                &file,
+                [title, author, subject, keywords, description, category],
+                &output,
+                json,
+            ),
         },
     };
     // Standard output is line buffered, so a last line without a newline is

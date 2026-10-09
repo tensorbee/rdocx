@@ -1,7 +1,12 @@
 import datetime as _datetime
 import os as _os
-from collections.abc import Iterator as _Iterator, Sequence as _Sequence
-from typing import Literal as _Literal, NoReturn as _Never, final as _final, overload as _overload
+from collections.abc import (
+    Iterator as _Iterator,
+    Mapping as _Mapping,
+    MutableMapping as _MutableMapping,
+    Sequence as _Sequence,
+)
+from typing import Any as _Any, Literal as _Literal, NoReturn as _Never, final as _final, overload as _overload
 
 from . import shared as _shared
 from .enum import table as _table
@@ -23,6 +28,15 @@ __all__ = [
     "ParagraphFormat", "Revision", "Row", "RowCollection", "Run", "RunCollection", "RunPosition",
     "RunRange", "Section", "Story", "StoryItem", "StoryRunPosition", "StoryRunRange", "Style",
     "SvgDiagnostic", "SvgRenderResult", "Table", "TableCollection", "TocRebuildReport",
+    "AppProperties", "ContentControl", "CustomProperties", "DocumentFragment", "Equation",
+    "Settings", "ValidationReport",
+]
+_CustomPropertyValue = str | int | float | bool | _datetime.datetime
+_ConflictPolicy = _Literal["reuse_equivalent", "rename"]
+_ContentControlType = _Literal[
+    "rich_text", "plain_text", "picture", "checkbox", "combo_box", "dropdown_list", "date",
+    "document_part_list", "document_part_object", "group", "repeating_section",
+    "repeating_section_item", "citation", "equation", "bibliography",
 ]
 
 
@@ -589,6 +603,158 @@ class CoreProperties:
     def version(self, value: str | None) -> None: ...
 
 
+# ---- Document-level views, templates, assembly, properties, content
+# controls and validation.
+
+
+@_final
+class ValidationReport:
+    """The findings of `Document.validate()`, the same as `rdocx validate`."""
+
+    def __new__(cls, *, _private: _Never) -> ValidationReport: ...
+    @property
+    def errors(self) -> tuple[str, ...]:
+        """Structural errors: Word may refuse or repair the file."""
+    @property
+    def warnings(self) -> tuple[str, ...]:
+        """Advisory findings, such as empty paragraphs or a missing title."""
+    @property
+    def ok(self) -> bool:
+        """`True` when there is no error. Warnings do not count."""
+
+
+@_final
+class DocumentFragment:
+    """Story items copied out of a document with their styles, lists,
+    pictures and other dependencies, from `Document.copy_fragment`."""
+
+    def __new__(cls, *, _private: _Never) -> DocumentFragment: ...
+
+
+@_final
+class ContentControl:
+    """One content control of the document body (headers and footers are
+    not listed)."""
+
+    def __new__(cls, *, _private: _Never) -> ContentControl: ...
+    @property
+    def tag(self) -> str | None: ...
+    @property
+    def alias(self) -> str | None:
+        """The title Word shows on the control."""
+    @property
+    def id(self) -> int | None: ...
+    @property
+    def type(self) -> _ContentControlType:
+        """A control without a type element is a rich text control."""
+    @property
+    def text(self) -> str: ...
+
+
+@_final
+class Settings:
+    """The document settings, `word/settings.xml`."""
+
+    def __new__(cls, *, _private: _Never) -> Settings: ...
+    @property
+    def track_revisions(self) -> bool:
+        """Whether Word records edits as tracked changes ("Track Changes").
+
+        Turning it on does not make rdocx edits tracked: rdocx does not author
+        tracked insertions or deletions.
+        """
+    @track_revisions.setter
+    def track_revisions(self, value: bool) -> None: ...
+
+
+@_final
+class CustomProperties(_MutableMapping[str, _CustomPropertyValue | bytes | None]):
+    """The custom document properties, `docProps/custom.xml`, as a mapping.
+
+    Values are typed: `str`, `int` (32 bits), `float`, `bool` and
+    `datetime.datetime` (stored in UTC, a naive value is taken as UTC). A
+    value of a type rdocx does not model reads as its XML `bytes`. Google
+    Docs drops custom properties when it imports a file.
+    """
+
+    def __new__(cls, *, _private: _Never) -> CustomProperties: ...
+    def __len__(self) -> int: ...
+    def __contains__(self, key: object, /) -> bool: ...
+    def __iter__(self) -> _Iterator[str]: ...
+    def __getitem__(self, key: str, /) -> _CustomPropertyValue | bytes | None: ...
+    def __setitem__(  # type: ignore[override]
+        self, key: str, value: _CustomPropertyValue, /
+    ) -> None: ...
+    def __delitem__(self, key: str, /) -> None: ...
+    def get(  # type: ignore[override]
+        self, key: object, default: object = None
+    ) -> _CustomPropertyValue | bytes | object | None: ...
+    def keys(self) -> list[str]: ...  # type: ignore[override]
+    def values(self) -> list[_CustomPropertyValue | bytes | None]: ...  # type: ignore[override]
+    def items(  # type: ignore[override]
+        self,
+    ) -> list[tuple[str, _CustomPropertyValue | bytes | None]]: ...
+
+
+@_final
+class AppProperties:
+    """The application properties, `docProps/app.xml`.
+
+    Text properties read as an empty string when absent. Word writes the
+    counts when it saves, so they are read-only and can be stale or `None`:
+    `Document.word_count()`, `character_count()` and `page_count()` compute
+    them.
+    """
+
+    def __new__(cls, *, _private: _Never) -> AppProperties: ...
+    @property
+    def company(self) -> str: ...
+    @company.setter
+    def company(self, value: str | None) -> None: ...
+    @property
+    def manager(self) -> str: ...
+    @manager.setter
+    def manager(self, value: str | None) -> None: ...
+    @property
+    def template(self) -> str: ...
+    @template.setter
+    def template(self, value: str | None) -> None: ...
+    @property
+    def application(self) -> str: ...
+    @application.setter
+    def application(self, value: str | None) -> None: ...
+    @property
+    def pages(self) -> int | None: ...
+    @property
+    def words(self) -> int | None: ...
+    @property
+    def characters(self) -> int | None: ...
+    @property
+    def characters_with_spaces(self) -> int | None: ...
+    @property
+    def lines(self) -> int | None: ...
+    @property
+    def paragraphs(self) -> int | None: ...
+
+
+@_final
+class Equation:
+    """One equation of a paragraph, from `Paragraph.equations`."""
+
+    def __new__(cls, *, _private: _Never) -> Equation: ...
+    @property
+    def latex(self) -> str: ...
+    @property
+    def mathml(self) -> str:
+        """Presentation MathML, a `<math>` element."""
+    @property
+    def display(self) -> bool:
+        """`True` for a display equation, on its own line."""
+    @property
+    def diagnostics(self) -> tuple[str, ...]:
+        """What the LaTeX or MathML form could not represent."""
+
+
 @_final
 class Document:
     def __new__(cls, path: _Path | None = None) -> Document: ...
@@ -785,6 +951,115 @@ class Document:
     def update_fields_on_open(self) -> bool | None: ...
     @update_fields_on_open.setter
     def update_fields_on_open(self, value: bool | None) -> None: ...
+    # ---- Document-level views, templates, assembly, properties, content
+    # controls and validation.
+    def text(self) -> str:
+        """The plain text of every story, as `rdocx text` prints it.
+
+        The body comes first, then each text box, header, footer, footnote,
+        endnote and comment part with text under a `--- kind (part) ---`
+        line. Warns with `ConversionWarning` and returns the body only when a
+        story part cannot be read.
+        """
+    def to_markdown(self) -> str:
+        """The Markdown that `rdocx convert --to md` writes.
+
+        Headings, lists, tables, links, bold and italic in a CommonMark
+        subset, then the text boxes, headers, footers and notes after a `---`
+        rule. Comments are left out.
+        """
+    def to_html(self) -> str:
+        """The HTML document that `rdocx convert --to html` writes."""
+    def to_odt(self) -> bytes:
+        """An OpenDocument text file. Content ODT cannot hold emits a
+        `ConversionWarning`."""
+    def to_rtf(self) -> bytes:
+        """An RTF file. Content RTF cannot hold emits a `ConversionWarning`."""
+    def to_epub(self) -> bytes:
+        """An EPUB 3 publication. Content EPUB cannot hold emits a
+        `ConversionWarning`."""
+    def word_count(self) -> int:
+        """Whitespace-separated words of the body and its tables, tracked
+        deletions left out."""
+    def character_count(self, *, include_spaces: bool = True) -> int:
+        """Characters of the paragraphs `word_count()` reads, as Word counts
+        them with or without spaces."""
+    def page_count(self) -> int:
+        """The number of pages of the rdocx layout."""
+    def validate(self) -> ValidationReport:
+        """Validate the document as it would be saved now, with the checks
+        of `rdocx validate`."""
+    @staticmethod
+    def validate_file(path: _Path) -> ValidationReport:
+        """Validate a file exactly as `rdocx validate` does, even a file
+        that does not open."""
+    def render_template(self, data: _Mapping[str, _Any]) -> int:
+        """Render `{{ path.to.value }}` tags and `{% for item in path %}` /
+        `{% if path %}` blocks from `data` and return the number of tags.
+
+        A tag may cross run boundaries and keeps the formatting of its first
+        run. Values are `str`, `int`, `float`, `bool`, `None` (empty text),
+        `dict` and `list`, rendered as JSON writes them: `True` gives `true`
+        and `2.0` gives `2.0`, so pass a formatted `str` for any other form.
+        Data deeper than 256 levels or containing itself raises `ValueError`. A `{% ... %}` marker must be alone in its body
+        paragraph or table row, closed by `{% endfor %}` or `{% endif %}`.
+        A missing path or a malformed tag raises `RdocxError` naming the tag
+        and its line, and leaves the document unchanged.
+        """
+    def insert_document(
+        self,
+        other: Document,
+        at: int | StoryItem | Story | None = None,
+        *,
+        conflict: _ConflictPolicy = "reuse_equivalent",
+    ) -> None:
+        """Insert the body of `other` before body index `at` (the end of the
+        body by default, a negative index counts from the end), with its
+        styles, lists, pictures and links.
+
+        `conflict="reuse_equivalent"` reuses a style, list or media part
+        identical to one already here and renames the others,
+        `conflict="rename"` renames every one. The page setup of this
+        document is kept, and the headers and footers of `other` are not
+        copied.
+        """
+    def copy_fragment(
+        self,
+        start: int | StoryItem,
+        end: int | StoryItem | Story | None = None,
+    ) -> DocumentFragment:
+        """Copy the story items from `start` up to `end` excluded (the end of
+        the story by default) with their dependencies. Negative body indexes
+        count from the end."""
+    def import_fragment(
+        self,
+        fragment: DocumentFragment,
+        at: int | StoryItem | Story | None = None,
+        *,
+        conflict: _ConflictPolicy = "reuse_equivalent",
+    ) -> None:
+        """Insert a fragment of another document, as `insert_document` does."""
+    @property
+    def custom_properties(self) -> CustomProperties: ...
+    @property
+    def app_properties(self) -> AppProperties: ...
+    @property
+    def settings(self) -> Settings: ...
+    @property
+    def content_controls(self) -> tuple[ContentControl, ...]: ...
+    def set_content_control_value(
+        self, value: str, *, tag: str | None = None, alias: str | None = None
+    ) -> int:
+        """Set the text of every body content control with this tag, or this
+        alias, and of the custom XML it is bound to. Returns the count.
+
+        A checkbox takes ``"true"`` or ``"false"`` (also ``"1"``/``"0"``,
+        ``"yes"``/``"no"``) and shows its checked or unchecked glyph.
+
+        Raises `KeyError` when no control matches and `ValueError` for a
+        picture or group control, which holds no text value, or for a value
+        the control does not take.
+        """
     def add_comment(
         self,
         range: RunRange | StoryRunRange,
@@ -927,6 +1202,18 @@ class Paragraph:
     def numbering(self) -> tuple[int, int] | None: ...
     @numbering.setter
     def numbering(self, value: tuple[int, int] | None) -> None: ...
+    # ---- Equations.
+    def add_equation(
+        self, latex: str | None = None, *, mathml: str | None = None, display: bool = False
+    ) -> None:
+        """Append an equation after the last run, from LaTeX or from MathML
+        (a `<math>` element). `display=True` writes a display equation.
+
+        Raises `ValueError` when the source does not parse or when the
+        equation would lose part of it.
+        """
+    @property
+    def equations(self) -> tuple[Equation, ...]: ...
 
 
 @_final

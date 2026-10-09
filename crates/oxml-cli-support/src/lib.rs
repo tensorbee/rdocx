@@ -24,6 +24,172 @@ pub enum Error {
     /// A JSON envelope payload tried to define the reserved schema field.
     #[error("JSON payload must not define reserved field \"schema\"")]
     ReservedSchemaField,
+    /// A replacement map is not a JSON array of replacement pairs.
+    #[error("invalid replacement map: {0}")]
+    InvalidReplacementMap(String),
+}
+
+/// A civil date and time on the wall clock.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LocalDateTime {
+    pub year: i32,
+    pub month: u8,
+    pub day: u8,
+    pub hour: u8,
+    pub minute: u8,
+    pub second: u8,
+}
+
+/// The current local date and time, as Word reads it for a DATE field.
+///
+/// Unix asks the C library, which applies the `TZ` time zone. Elsewhere it
+/// is the UTC time.
+pub fn local_date_time() -> io::Result<LocalDateTime> {
+    let invalid = |message: &str| io::Error::other(message.to_owned());
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| invalid("the system clock is before 1970"))?
+        .as_secs();
+    #[cfg(unix)]
+    {
+        let time = libc::time_t::try_from(seconds).map_err(|_| invalid("the clock overflows"))?;
+        // SAFETY: `localtime_r` writes only the `tm` it is given, which is
+        // fully owned here and zero-initialisable plain data.
+        let mut local: libc::tm = unsafe { std::mem::zeroed() };
+        if unsafe { libc::localtime_r(&time, &mut local) }.is_null() {
+            return Err(invalid("could not read the local time"));
+        }
+        let field = |value: libc::c_int| u8::try_from(value).map_err(|_| invalid("bad local time"));
+        Ok(LocalDateTime {
+            year: local.tm_year + 1900,
+            month: field(local.tm_mon + 1)?,
+            day: field(local.tm_mday)?,
+            hour: field(local.tm_hour)?,
+            minute: field(local.tm_min)?,
+            // A leap second reads as the last second of its minute.
+            second: field(local.tm_sec.min(59))?,
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let days = i64::try_from(seconds / 86_400).map_err(|_| invalid("the clock overflows"))?;
+        let (year, month, day) = civil_from_days(days);
+        let second_of_day = seconds % 86_400;
+        Ok(LocalDateTime {
+            year: i32::try_from(year).map_err(|_| invalid("the clock overflows"))?,
+            month,
+            day,
+            hour: (second_of_day / 3_600) as u8,
+            minute: (second_of_day / 60 % 60) as u8,
+            second: (second_of_day % 60) as u8,
+        })
+    }
+}
+
+/// The proleptic Gregorian date of a count of days since 1970-01-01.
+pub fn civil_from_days(days: i64) -> (i64, u8, u8) {
+    // Howard Hinnant's days-to-civil conversion.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    (year, month as u8, day as u8)
+}
+
+/// The count of days since 1970-01-01 of a proleptic Gregorian date.
+pub fn days_from_civil(year: i64, month: u8, day: u8) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let year_of_era = year.rem_euclid(400);
+    let month = i64::from(month);
+    let day_of_year =
+        (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// One pair of a replacement map: the text to find, its replacement, and
+/// the count the caller expects, when it gives one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReplacementPair {
+    pub placeholder: String,
+    pub value: String,
+    pub expect: Option<usize>,
+}
+
+/// Parses a replacement map, a JSON array of objects such as
+/// `{"placeholder": "{{name}}", "value": "Ada", "expect": 2}`.
+///
+/// `expect` is optional. The pairs keep their order, because a later pair
+/// sees the text an earlier one wrote. An empty array, a missing or
+/// non-string `placeholder` or `value`, an empty `placeholder`, a negative or
+/// fractional `expect`, and any other key are refused, naming the
+/// zero-based pair.
+pub fn parse_replacement_map(json: &str) -> Result<Vec<ReplacementPair>, Error> {
+    let invalid = |message: String| Error::InvalidReplacementMap(message);
+    let value: Value =
+        serde_json::from_str(json).map_err(|error| invalid(format!("not JSON: {error}")))?;
+    let Value::Array(entries) = value else {
+        return Err(invalid(
+            "expected an array of {\"placeholder\", \"value\", \"expect\"} objects".to_owned(),
+        ));
+    };
+    if entries.is_empty() {
+        return Err(invalid("the array holds no pair".to_owned()));
+    }
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let Value::Object(fields) = entry else {
+                return Err(invalid(format!("pair {index} is not an object")));
+            };
+            if let Some(key) = fields
+                .keys()
+                .find(|key| !matches!(key.as_str(), "placeholder" | "value" | "expect"))
+            {
+                return Err(invalid(format!(
+                    "pair {index} has unknown key \"{key}\" (use placeholder, value, expect)"
+                )));
+            }
+            let text = |key: &str| match fields.get(key) {
+                Some(Value::String(text)) => Ok(text.clone()),
+                _ => Err(invalid(format!("pair {index} needs a string \"{key}\""))),
+            };
+            let placeholder = text("placeholder")?;
+            if placeholder.is_empty() {
+                return Err(invalid(format!("pair {index} has an empty placeholder")));
+            }
+            let expect = match fields.get("expect") {
+                None | Some(Value::Null) => None,
+                Some(count) => Some(
+                    count
+                        .as_u64()
+                        .and_then(|count| usize::try_from(count).ok())
+                        .ok_or_else(|| {
+                            invalid(format!(
+                                "pair {index} needs a non-negative integer \"expect\""
+                            ))
+                        })?,
+                ),
+            };
+            Ok(ReplacementPair {
+                placeholder,
+                value: text("value")?,
+                expect,
+            })
+        })
+        .collect()
 }
 
 /// Parses positive one-based values and inclusive ranges.
@@ -371,6 +537,65 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn civil_dates_round_trip_through_day_counts() {
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(days_from_civil(2024, 2, 29), 19_782);
+        for days in [-719_468, -1, 0, 59, 19_782, 2_932_896] {
+            let (year, month, day) = civil_from_days(days);
+            assert_eq!(days_from_civil(year, month, day), days);
+        }
+        let now = local_date_time().unwrap();
+        assert!(now.year >= 2026 && (1..=12).contains(&now.month), "{now:?}");
+    }
+
+    #[test]
+    fn replacement_maps_keep_pair_order_and_refuse_ambiguous_entries() {
+        assert_eq!(
+            parse_replacement_map(
+                r#"[{"placeholder": "b", "value": "c", "expect": 2}, {"placeholder": "a", "value": "b"}]"#
+            )
+            .unwrap(),
+            vec![
+                ReplacementPair {
+                    placeholder: "b".to_owned(),
+                    value: "c".to_owned(),
+                    expect: Some(2),
+                },
+                ReplacementPair {
+                    placeholder: "a".to_owned(),
+                    value: "b".to_owned(),
+                    expect: None,
+                },
+            ]
+        );
+        for (json, message) in [
+            ("{}", "expected an array"),
+            ("[]", "holds no pair"),
+            (
+                r#"[{"placeholder": "a"}]"#,
+                "pair 0 needs a string \"value\"",
+            ),
+            (
+                r#"[{"placeholder": "", "value": "b"}]"#,
+                "empty placeholder",
+            ),
+            (
+                r#"[{"placeholder": "a", "value": "b", "expect": -1}]"#,
+                "non-negative integer",
+            ),
+            (
+                r#"[{"placeholder": "a", "value": "b", "count": 1}]"#,
+                "unknown key \"count\"",
+            ),
+            ("[1]", "pair 0 is not an object"),
+        ] {
+            let error = parse_replacement_map(json).unwrap_err().to_string();
+            assert!(error.contains(message), "{json}: {error}");
+        }
+    }
 
     fn temp_dir(label: &str) -> PathBuf {
         let temp = std::env::temp_dir().join(format!("oxml-cli-{label}-{}", std::process::id()));
