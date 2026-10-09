@@ -78,6 +78,18 @@ struct NonVisualConnectorProperties {
     raw_children: OrderedRawChildren,
 }
 
+impl CT_Connection {
+    /// Creates an endpoint glued to connection site `idx` of shape `id`.
+    pub fn new(id: u32, idx: u32) -> Self {
+        Self {
+            id,
+            idx,
+            raw_attributes: Vec::new(),
+            raw_content: Vec::new(),
+        }
+    }
+}
+
 impl CT_ConnectionShape {
     /// Creates a free-standing connector with canonical non-visual shells.
     pub fn new_free_standing(
@@ -195,6 +207,24 @@ impl CT_ConnectionShape {
             .iter()
             .find(|(name, _)| name == "name")
             .map(|(_, value)| value.as_str())
+    }
+
+    /// The `p:cNvPr` element, serialised on its own.
+    pub(crate) fn drawing_properties_xml(&self) -> Vec<u8> {
+        let mut writer = Writer::new(Vec::new());
+        self.raw
+            .non_visual
+            .drawing_properties
+            .write_xml(&mut writer, "p:cNvPr")
+            .expect("writing to a vector does not fail");
+        writer.into_inner()
+    }
+
+    /// Replaces the `p:cNvPr` element with an edited copy of
+    /// [`Self::drawing_properties_xml`].
+    pub(crate) fn set_drawing_properties_xml(&mut self, xml: &[u8]) -> Result<()> {
+        self.raw.non_visual.drawing_properties = RawElement::from_fragment(xml)?;
+        Ok(())
     }
 
     /// Changes the producer-facing non-visual connector name.

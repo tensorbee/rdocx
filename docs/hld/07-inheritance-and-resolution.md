@@ -216,7 +216,10 @@ slide, layout, or master.
 
 Each flattened leaf carries an accumulated `group_transform`. Nested group
 transforms map child coordinates through `chOff`, `chExt`, `off`, and `ext`,
-then apply rotation and centre flips in DrawingML order. A leaf outside a group
+then apply the centre flips and then the rotation, as PowerPoint does. A
+shape's own transform flips before it rotates in the same way, and the
+renderer mirrors a flipped shape's text back so that a horizontal flip keeps
+it readable and a vertical flip turns it a half turn. A leaf outside a group
 carries `Transform::IDENTITY`.
 
 Unrepresentable content remains visible as a bounds fallback with a stable

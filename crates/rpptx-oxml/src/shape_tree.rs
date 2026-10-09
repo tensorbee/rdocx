@@ -22,7 +22,9 @@ use crate::connector::CT_ConnectionShape;
 use crate::graphic_frame::CT_GraphicFrame;
 use crate::namespace::{
     FIXED_SHAPE_TREE_PREFIXES, MC_NS, NamespaceBindings, P_NS, R_NS, all_attributes,
-    non_visual_drawing_id, non_visual_drawing_name, root_attributes, self_contained_attributes,
+    non_visual_drawing_attribute, non_visual_drawing_decorative, non_visual_drawing_id,
+    non_visual_drawing_name, root_attributes, self_contained_attributes,
+    set_non_visual_drawing_attribute, set_non_visual_drawing_decorative,
     set_non_visual_drawing_name,
 };
 use crate::picture::CT_Picture;
@@ -75,6 +77,85 @@ impl ShapeTreeChild {
                 .and_then(CT_GraphicFrame::non_visual_name),
         }
         .map(str::to_owned)
+    }
+
+    /// Returns the alternative text, `p:cNvPr/@descr`, that screen readers
+    /// announce for the child.
+    pub fn alt_text(&self) -> Option<String> {
+        self.drawing_properties()
+            .and_then(|xml| non_visual_drawing_attribute(&xml, "descr"))
+    }
+
+    /// Returns the alternative-text title, `p:cNvPr/@title`.
+    pub fn alt_title(&self) -> Option<String> {
+        self.drawing_properties()
+            .and_then(|xml| non_visual_drawing_attribute(&xml, "title"))
+    }
+
+    /// Returns whether the child is marked decorative, the Office extension
+    /// that tells screen readers to skip it.
+    pub fn decorative(&self) -> bool {
+        self.drawing_properties()
+            .is_some_and(|xml| non_visual_drawing_decorative(&xml))
+    }
+
+    /// Sets the alternative text, `p:cNvPr/@descr`, or removes it for `None`.
+    pub fn set_alt_text(&mut self, text: Option<&str>) -> Result<()> {
+        if let Some(text) = text {
+            oxml_core::xml::reject_non_xml_characters("alt text", text)?;
+        }
+        self.edit_drawing_properties(|xml| set_non_visual_drawing_attribute(xml, "descr", text))
+    }
+
+    /// Sets the alternative-text title, `p:cNvPr/@title`, or removes it for
+    /// `None`.
+    pub fn set_alt_title(&mut self, title: Option<&str>) -> Result<()> {
+        if let Some(title) = title {
+            oxml_core::xml::reject_non_xml_characters("alt text title", title)?;
+        }
+        self.edit_drawing_properties(|xml| set_non_visual_drawing_attribute(xml, "title", title))
+    }
+
+    /// Marks the child decorative, or removes the mark.
+    pub fn set_decorative(&mut self, decorative: bool) -> Result<()> {
+        self.edit_drawing_properties(|xml| set_non_visual_drawing_decorative(xml, decorative))
+    }
+
+    fn drawing_properties(&self) -> Option<std::borrow::Cow<'_, [u8]>> {
+        use std::borrow::Cow;
+        match self {
+            Self::Shape(shape) => Some(Cow::Borrowed(&shape.raw.non_visual_drawing_properties)),
+            Self::Picture(picture) => Some(Cow::Borrowed(picture.drawing_properties())),
+            Self::GraphicFrame(frame) => frame.drawing_properties().map(Cow::Borrowed),
+            Self::GroupShape(group) => group.drawing_properties().map(Cow::Borrowed),
+            Self::Connector(connector) => Some(Cow::Owned(connector.drawing_properties_xml())),
+            Self::AlternateContent(alternate) => alternate
+                .chart_choice()
+                .and_then(CT_GraphicFrame::drawing_properties)
+                .map(Cow::Borrowed),
+        }
+    }
+
+    fn edit_drawing_properties(
+        &mut self,
+        edit: impl FnOnce(&mut Vec<u8>) -> Result<()>,
+    ) -> Result<()> {
+        let missing = || OxmlError::MissingElement("p:cNvPr".to_owned());
+        match self {
+            Self::Shape(shape) => edit(shape.drawing_properties_mut()),
+            Self::Picture(picture) => edit(picture.drawing_properties_mut()),
+            Self::GraphicFrame(frame) => edit(frame.drawing_properties_mut().ok_or_else(missing)?),
+            Self::GroupShape(group) => edit(group.drawing_properties_mut().ok_or_else(missing)?),
+            Self::Connector(connector) => {
+                let mut xml = connector.drawing_properties_xml();
+                edit(&mut xml)?;
+                connector.set_drawing_properties_xml(&xml)
+            }
+            Self::AlternateContent(_) => Err(OxmlError::InvalidValue(
+                "an mc:AlternateContent member keeps its non-visual properties read-only"
+                    .to_owned(),
+            )),
+        }
     }
 
     fn write_xml<W: Write>(&self, writer: &mut Writer<W>) -> Result<()> {
@@ -976,6 +1057,10 @@ impl CT_Shape {
         self.raw.non_visual_name.as_deref()
     }
 
+    pub(crate) fn drawing_properties_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.raw.non_visual_drawing_properties
+    }
+
     /// Changes the producer-facing non-visual shape name.
     pub fn set_name(&mut self, name: &str) -> Result<()> {
         set_non_visual_drawing_name(&mut self.raw.non_visual_drawing_properties, name)?;
@@ -1504,6 +1589,22 @@ impl CT_ShapeTree {
             .expect("shape-tree child was appended")
     }
 
+    /// Removes the members at `indices`, which must be ascending, distinct,
+    /// and in range, and returns them in that order.
+    ///
+    /// Unmodelled members, such as `p:contentPart`, and schema-final content
+    /// keep their place among the remaining members.
+    pub fn take_children(&mut self, indices: &[usize]) -> Vec<ShapeTreeChild> {
+        take_members(&mut self.children, &mut self.raw_children, indices)
+    }
+
+    /// Inserts `members` in order before the member at `index`, or after the
+    /// last member for `index` equal to the member count, as
+    /// [`Self::append_child`] places one.
+    pub fn insert_children(&mut self, index: usize, members: Vec<ShapeTreeChild>) {
+        insert_members(&mut self.children, &mut self.raw_children, index, members);
+    }
+
     /// Removes one immediate child identified by `p:cNvPr/@id`.
     pub fn remove_child_by_id(&mut self, id: u32) -> Result<Option<ShapeTreeChild>> {
         let Some(index) = self
@@ -1716,6 +1817,18 @@ impl CT_GroupShape {
         self.children.last_mut().expect("group child was appended")
     }
 
+    /// Removes the members at `indices`, as [`CT_ShapeTree::take_children`]
+    /// does.
+    pub fn take_children(&mut self, indices: &[usize]) -> Vec<ShapeTreeChild> {
+        take_members(&mut self.children, &mut self.raw_children, indices)
+    }
+
+    /// Inserts `members` before the member at `index`, as
+    /// [`CT_ShapeTree::insert_children`] does.
+    pub fn insert_children(&mut self, index: usize, members: Vec<ShapeTreeChild>) {
+        insert_members(&mut self.children, &mut self.raw_children, index, members);
+    }
+
     /// Parses a complete recursive `p:grpSp` element.
     pub fn from_xml(xml: &[u8]) -> Result<Self> {
         let parsed = parse_group(xml, &[], GroupKind::GroupShape)?;
@@ -1771,6 +1884,19 @@ impl CT_GroupShape {
         Ok(())
     }
 
+    fn drawing_properties_mut(&mut self) -> Option<&mut Vec<u8>> {
+        let index = self.non_visual_group_properties.drawing_properties_index?;
+        self.non_visual_group_properties.raw_children.get_mut(index)
+    }
+
+    fn drawing_properties(&self) -> Option<&[u8]> {
+        let index = self.non_visual_group_properties.drawing_properties_index?;
+        self.non_visual_group_properties
+            .raw_children
+            .get(index)
+            .map(Vec::as_slice)
+    }
+
     /// Changes the producer-facing non-visual group name.
     pub fn set_name(&mut self, name: &str) -> Result<()> {
         let drawing_properties = self
@@ -1809,6 +1935,35 @@ impl CT_GroupShape {
             &self.raw_children,
             declare_namespaces,
         )
+    }
+}
+
+/// Removes typed members by ascending index. A raw child is recorded at the
+/// index of the typed member it precedes, so each removal folds the boundary
+/// after the member into the one before it.
+fn take_members(
+    children: &mut Vec<ShapeTreeChild>,
+    raw_children: &mut OrderedRawChildren,
+    indices: &[usize],
+) -> Vec<ShapeTreeChild> {
+    let mut taken = Vec::with_capacity(indices.len());
+    for index in indices.iter().rev() {
+        raw_children.close_boundary(index + 1);
+        taken.push(children.remove(*index));
+    }
+    taken.reverse();
+    taken
+}
+
+fn insert_members(
+    children: &mut Vec<ShapeTreeChild>,
+    raw_children: &mut OrderedRawChildren,
+    index: usize,
+    members: Vec<ShapeTreeChild>,
+) {
+    for (offset, member) in members.into_iter().enumerate() {
+        raw_children.shift_boundaries_from(index + offset);
+        children.insert(index + offset, member);
     }
 }
 

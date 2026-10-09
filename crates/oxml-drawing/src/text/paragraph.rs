@@ -8,6 +8,7 @@ use oxml_core::xml_text::{decode_plain, resolve_entity};
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer, XmlVersion};
 
+use crate::color::ColorChoice;
 use crate::fill::Fill;
 use crate::namespace::reject_conflicting_a_prefix;
 use crate::order::OrderedRawChildren;
@@ -612,11 +613,17 @@ pub struct CT_TextCharacterProperties {
     pub bold: Option<bool>,
     pub italic: Option<bool>,
     pub all_caps: Option<bool>,
+    /// `cap="small"` as `Some(true)`. `cap` is one attribute, so `all_caps`
+    /// set to `Some(true)` wins over it, and either flag at `Some(false)`
+    /// without the other at `Some(true)` writes `cap="none"`.
+    pub small_caps: Option<bool>,
     pub underline: Option<TextUnderline>,
     pub strike: Option<TextStrike>,
     pub spacing: Option<TextPointValue>,
     pub baseline: Option<String>,
     pub fill: Option<Fill>,
+    /// The colour of `a:highlight`, drawn behind the text.
+    pub highlight: Option<ColorChoice>,
     pub latin: Option<TextFont>,
     pub east_asian: Option<TextFont>,
     pub complex_script: Option<TextFont>,
@@ -652,16 +659,17 @@ impl CT_TextCharacterProperties {
         if let Some(value) = baseline.as_deref() {
             validate_baseline(value)?;
         }
-        let all_caps = match text_attr(start, b"cap")?.as_deref() {
-            Some("all") => Some(true),
-            Some("none") => Some(false),
-            _ => None,
+        let (all_caps, small_caps) = match text_attr(start, b"cap")?.as_deref() {
+            Some("all") => (Some(true), None),
+            Some("none") => (Some(false), None),
+            Some("small") => (None, Some(true)),
+            _ => (None, None),
         };
         let mut raw_attributes = capture_raw_attributes(
             start,
             &[b"sz", b"b", b"i", b"u", b"strike", b"spc", b"baseline"],
         )?;
-        if all_caps.is_some() {
+        if all_caps.is_some() || small_caps.is_some() {
             raw_attributes.retain(|(name, _)| name != "cap");
         }
         Ok(Self {
@@ -669,6 +677,7 @@ impl CT_TextCharacterProperties {
             bold: parse_optional_bool(start, b"b")?,
             italic: parse_optional_bool(start, b"i")?,
             all_caps,
+            small_caps,
             underline: parse_optional_enum(start, b"u", TextUnderline::parse)?,
             strike: parse_optional_enum(start, b"strike", TextStrike::parse)?,
             spacing,
@@ -725,6 +734,9 @@ impl CT_TextCharacterProperties {
         }
         match name {
             name if is_fill(name) => self.fill = Some(Fill::from_xml(&raw)?),
+            // A colour this model does not read, such as `a:scrgbClr`,
+            // keeps its highlight verbatim.
+            b"highlight" if let Ok(color) = parse_highlight(&raw) => self.highlight = Some(color),
             b"latin" => self.latin = Some(TextFont::from_xml(&raw, b"latin")?),
             b"ea" => self.east_asian = Some(TextFont::from_xml(&raw, b"ea")?),
             b"cs" => self.complex_script = Some(TextFont::from_xml(&raw, b"cs")?),
@@ -755,8 +767,8 @@ impl CT_TextCharacterProperties {
         }
         push_optional_bool(&mut start, "b", self.bold);
         push_optional_bool(&mut start, "i", self.italic);
-        if let Some(value) = self.all_caps {
-            start.push_attribute(("cap", if value { "all" } else { "none" }));
+        if let Some(value) = self.cap_value() {
+            start.push_attribute(("cap", value));
         }
         if let Some(value) = self.underline {
             start.push_attribute(("u", value.as_str()));
@@ -773,13 +785,14 @@ impl CT_TextCharacterProperties {
         }
         for (name, value) in &self.raw_attributes {
             // A typed capitalisation replaces a preserved `cap="small"`.
-            if name == "cap" && self.all_caps.is_some() {
+            if name == "cap" && self.cap_value().is_some() {
                 continue;
             }
             start.push_attribute((name.as_str(), value.as_str()));
         }
 
         let has_modelled_children = self.fill.is_some()
+            || self.highlight.is_some()
             || self.latin.is_some()
             || self.east_asian.is_some()
             || self.complex_script.is_some()
@@ -795,7 +808,21 @@ impl CT_TextCharacterProperties {
         if let Some(fill) = &self.fill {
             fill.write_xml(writer)?;
         }
-        for boundary in 2..=6 {
+        emit_raw(writer, self.raw_children.at(2))?;
+        // A typed highlight replaces one kept verbatim.
+        emit_raw(
+            writer,
+            self.raw_children.at(3).filter(|raw| {
+                self.highlight.is_none()
+                    || root_local_name(raw).ok().as_deref() != Some(b"highlight".as_slice())
+            }),
+        )?;
+        if let Some(color) = &self.highlight {
+            write_start(writer, BytesStart::new("a:highlight"))?;
+            color.to_xml(writer)?;
+            write_end(writer, "a:highlight")?;
+        }
+        for boundary in 4..=6 {
             emit_raw(writer, self.raw_children.at(boundary))?;
         }
         if let Some(font) = &self.latin {
@@ -831,12 +858,52 @@ impl CT_TextCharacterProperties {
         &self.raw_children
     }
 
+    /// The single `cap` value the two capitalisation flags write.
+    fn cap_value(&self) -> Option<&'static str> {
+        match (self.all_caps, self.small_caps) {
+            (Some(true), _) => Some("all"),
+            (_, Some(true)) => Some("small"),
+            (Some(false), _) | (_, Some(false)) => Some("none"),
+            (None, None) => None,
+        }
+    }
+
     /// Returns these properties as formatting for new text, without the click
     /// and mouse-over hyperlinks, which name relationships rather than format.
     pub(crate) fn without_hyperlinks(mut self) -> Self {
         self.hyperlink_click = None;
         self.hyperlink_mouse_over = None;
         self
+    }
+}
+
+/// Reads the one colour of an `a:highlight` element.
+fn parse_highlight(xml: &[u8]) -> Result<ColorChoice> {
+    let mut reader = Reader::from_reader(xml);
+    let mut buffer = Vec::new();
+    let mut depth = 0usize;
+    loop {
+        match reader
+            .read_event_into(&mut buffer)
+            .map_err(OxmlError::from)?
+        {
+            Event::Start(element) if depth == 0 => {
+                reject_conflicting_a_prefix(&element)?;
+                depth = 1;
+            }
+            Event::Start(element) => return Ok(ColorChoice::from_xml(&mut reader, &element)?),
+            Event::Empty(element) if depth == 1 => {
+                return Ok(ColorChoice::from_empty_xml(&element)?);
+            }
+            Event::Empty(_) | Event::End(_) | Event::Eof => {
+                return Err(TextError::MissingAttribute {
+                    element: "a:highlight".to_owned(),
+                    attribute: "colour child".to_owned(),
+                });
+            }
+            _ => {}
+        }
+        buffer.clear();
     }
 }
 
@@ -2089,7 +2156,7 @@ mod tests {
         CT_TextCharacterProperties, CT_TextParagraph, CT_TextParagraphProperties, TextAlignment,
         TextRun, TextSpace, TextSpacing,
     };
-    use crate::color::ColorChoice;
+    use crate::color::{ColorChoice, RgbColor};
     use crate::text::CT_TextBody;
     use crate::text::{
         TextAutoNumberScheme, TextBullet, TextBulletCharacter, TextBulletChoice,
@@ -2282,7 +2349,7 @@ mod tests {
     }
 
     #[test]
-    fn character_all_caps_round_trips_while_small_caps_stays_unmodelled() {
+    fn character_all_caps_and_small_caps_round_trip_as_one_cap_attribute() {
         let all = CT_TextCharacterProperties::from_xml(
             br#"<q:rPr cap="all" sz="1800" x:producer="kept"/>"#,
         )
@@ -2302,9 +2369,52 @@ mod tests {
 
         let small = CT_TextCharacterProperties::from_xml(br#"<q:rPr cap="small"/>"#).unwrap();
         assert_eq!(small.all_caps, None);
+        assert_eq!(small.small_caps, Some(true));
         let mut writer = quick_xml::Writer::new(Vec::new());
         small.write_xml(&mut writer, "a:rPr").unwrap();
         assert_eq!(writer.into_inner(), br#"<a:rPr cap="small"/>"#);
+
+        let properties = CT_TextCharacterProperties {
+            small_caps: Some(false),
+            ..CT_TextCharacterProperties::default()
+        };
+        let mut writer = quick_xml::Writer::new(Vec::new());
+        properties.write_xml(&mut writer, "a:rPr").unwrap();
+        assert_eq!(writer.into_inner(), br#"<a:rPr cap="none"/>"#);
+    }
+
+    #[test]
+    fn character_highlight_round_trips_in_schema_order_and_replaces_a_kept_one() {
+        let xml = br#"<q:rPr><q:solidFill><q:srgbClr val="000000"/></q:solidFill><q:highlight><q:srgbClr val="FFFF00"/></q:highlight><q:latin typeface="Arial"/></q:rPr>"#;
+        let mut properties = CT_TextCharacterProperties::from_xml(xml).unwrap();
+        assert_eq!(
+            properties.highlight,
+            Some(ColorChoice::srgb(RgbColor::parse("FFFF00").unwrap()))
+        );
+        properties.highlight = Some(ColorChoice::srgb(RgbColor::parse("00FF00").unwrap()));
+        let mut writer = quick_xml::Writer::new(Vec::new());
+        properties.write_xml(&mut writer, "a:rPr").unwrap();
+        assert_eq!(
+            writer.into_inner(),
+            br#"<a:rPr><a:solidFill><a:srgbClr val="000000"/></a:solidFill><a:highlight><a:srgbClr val="00FF00"/></a:highlight><a:latin typeface="Arial"/></a:rPr>"#
+        );
+
+        let kept = br#"<q:rPr><q:highlight><q:scrgbClr r="0" g="0" b="0"/></q:highlight></q:rPr>"#;
+        let mut properties = CT_TextCharacterProperties::from_xml(kept).unwrap();
+        assert_eq!(properties.highlight, None);
+        let mut writer = quick_xml::Writer::new(Vec::new());
+        properties.write_xml(&mut writer, "a:rPr").unwrap();
+        assert_eq!(
+            writer.into_inner(),
+            br#"<a:rPr><q:highlight><q:scrgbClr r="0" g="0" b="0"/></q:highlight></a:rPr>"#
+        );
+        properties.highlight = Some(ColorChoice::srgb(RgbColor::parse("FFFF00").unwrap()));
+        let mut writer = quick_xml::Writer::new(Vec::new());
+        properties.write_xml(&mut writer, "a:rPr").unwrap();
+        assert_eq!(
+            writer.into_inner(),
+            br#"<a:rPr><a:highlight><a:srgbClr val="FFFF00"/></a:highlight></a:rPr>"#
+        );
     }
 
     #[test]

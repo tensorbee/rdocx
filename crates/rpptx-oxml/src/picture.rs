@@ -137,6 +137,52 @@ impl CT_Picture {
         )
     }
 
+    /// Creates the picture that fills a picture placeholder, as python-pptx
+    /// `insert_picture` writes it.
+    ///
+    /// The picture keeps the placeholder's `p:ph`, so it inherits its
+    /// position and size from the layout through an empty `p:spPr`. `crop`
+    /// holds the left, top, right, and bottom `a:srcRect` insets in
+    /// thousandths of a percent, and four zeros write none.
+    pub fn new_placeholder(
+        id: u32,
+        name: &str,
+        relationship_id: &str,
+        placeholder: &CT_Placeholder,
+        crop: [i32; 4],
+    ) -> Result<Self> {
+        let name = quick_xml::escape::escape(name);
+        let relationship_id = quick_xml::escape::escape(relationship_id);
+        let mut placeholder_xml = Vec::new();
+        placeholder.write_xml(&mut Writer::new(&mut placeholder_xml), false)?;
+        let placeholder_xml = std::str::from_utf8(&placeholder_xml)?;
+        let source_rect = if crop == [0; 4] {
+            String::new()
+        } else {
+            let [left, top, right, bottom] = crop;
+            let edge = |name: &str, value: i32| {
+                if value == 0 {
+                    String::new()
+                } else {
+                    format!(r#" {name}="{value}""#)
+                }
+            };
+            format!(
+                "<a:srcRect{}{}{}{}/>",
+                edge("l", left),
+                edge("t", top),
+                edge("r", right),
+                edge("b", bottom)
+            )
+        };
+        Self::from_xml(
+            format!(
+                r#"<p:pic xmlns:p="{P_NS}" xmlns:a="{A_NS}" xmlns:r="{R_NS}"><p:nvPicPr><p:cNvPr id="{id}" name="{name}"/><p:cNvPicPr><a:picLocks noGrp="1" noChangeAspect="1"/></p:cNvPicPr><p:nvPr>{placeholder_xml}</p:nvPr></p:nvPicPr><p:blipFill><a:blip r:embed="{relationship_id}"/>{source_rect}<a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr/></p:pic>"#
+            )
+            .as_bytes(),
+        )
+    }
+
     /// Creates a media picture with standard and Office 2010 relationships.
     ///
     /// Its poster frame carries the same rectangle preset geometry as a
@@ -229,6 +275,14 @@ impl CT_Picture {
         };
         *self = Self::from_xml(&rewritten)?;
         Ok(())
+    }
+
+    pub(crate) fn drawing_properties_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.raw.non_visual_drawing_properties
+    }
+
+    pub(crate) fn drawing_properties(&self) -> &[u8] {
+        &self.raw.non_visual_drawing_properties
     }
 
     /// Changes the producer-facing non-visual picture name.

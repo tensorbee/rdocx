@@ -258,6 +258,20 @@ impl CT_GraphicFrame {
         self.graphic_data.chart_relationship_id.as_deref()
     }
 
+    /// The raw `p:cNvPr` fragment, when the frame has one.
+    pub(crate) fn drawing_properties_mut(&mut self) -> Option<&mut Vec<u8>> {
+        let index = self.non_visual_properties.drawing_properties_index?;
+        self.non_visual_properties.children.get_mut(index)
+    }
+
+    pub(crate) fn drawing_properties(&self) -> Option<&[u8]> {
+        let index = self.non_visual_properties.drawing_properties_index?;
+        self.non_visual_properties
+            .children
+            .get(index)
+            .map(Vec::as_slice)
+    }
+
     /// Changes the producer-facing non-visual frame name.
     pub fn set_name(&mut self, name: &str) -> Result<()> {
         let drawing_properties = self

@@ -205,6 +205,13 @@ impl CT_Placeholder {
         })
     }
 
+    /// Returns the `orient` token, such as `vert`, when the placeholder has one.
+    pub fn orientation(&self) -> Option<&str> {
+        self.raw_attributes
+            .iter()
+            .find_map(|(name, value)| (name == "orient").then_some(value.as_str()))
+    }
+
     /// Returns the explicit type or the PowerPoint body default.
     pub fn effective_type(&self) -> PhType {
         self.ph_type.clone().unwrap_or(PhType::Body)

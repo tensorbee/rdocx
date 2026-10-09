@@ -47,6 +47,16 @@ impl OrderedRawChildren {
         }
     }
 
+    /// Folds one boundary into the one before it after the modelled child
+    /// between them was removed, so later raw children keep their place.
+    pub fn close_boundary(&mut self, boundary: usize) {
+        for child in &mut self.children {
+            if child.boundary >= boundary && child.boundary > 0 {
+                child.boundary -= 1;
+            }
+        }
+    }
+
     /// Returns raw children at their effective boundary after edits to a
     /// public collection. Each original boundary is anchored to the next
     /// surviving original item, or to the trailing boundary when none remains.

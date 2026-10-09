@@ -8108,7 +8108,7 @@ const F124_ARTIFACT_SHA256: &str =
 const F116_ARTIFACT_SHA256: &str =
     "d36da6e8849eabd4487d2572baea19c3716ee7d0fe03aaa4714a28ce3c41de4f";
 const F116_CURRENT_ARTIFACT_SHA256: &str =
-    "f85098f013b90871a343d2da9b13d5bb3ab125788a7075cf2d423ac865efce08";
+    "a0e0a968d1d756d93aece110723906a7f4ea2390565c4197d437e176ec50fbcd";
 const F116_FINAL_TITLES: [&str; 10] = [
     "F-116 slide 10",
     "F-116 slide 02",
@@ -11185,7 +11185,7 @@ struct M21RecordedMovieSample {
 
 #[cfg(all(feature = "digital-signatures", feature = "render"))]
 const M21_CURRENT_MINIMAL_SOURCE_SHA256: &str =
-    "2a47b59d92718712a134e51a7ebc08a705505b4d7dd0cc39abd4febb53ea000b";
+    "ed3a427b42f96946c2fdbb47803b415fd7105979a2cf92aedc4d516294e55ccd";
 
 #[cfg(all(feature = "digital-signatures", feature = "render"))]
 const M21_LEGACY_UNSIGNED_SOURCE_SHA256: &str =
@@ -27291,18 +27291,16 @@ fn adding_to_a_rotated_or_flipped_group_keeps_its_members_in_place() {
                 "{attributes}: {corners:?} became {moved:?}"
             );
         }
-        // The renderer rotates a group before it flips it, which agrees with
-        // PowerPoint unless the group is both rotated and flipped.
-        if !(attributes.contains("rot") && attributes.contains("flip")) {
-            assert_eq!(
-                presentation
-                    .slide_png_deterministic(0, 72.0)
-                    .unwrap()
-                    .unwrap(),
-                png,
-                "{attributes}"
-            );
-        }
+        // The renderer flips a group before it rotates it, as PowerPoint
+        // does, so the drawn members stay put under every combination. The
+        // refit rounds `a:off` to whole EMU, which may shade a diagonal
+        // edge differently.
+        let after = presentation
+            .slide_png_deterministic(0, 72.0)
+            .unwrap()
+            .unwrap();
+        let similarity = smartart_png_ssim(&png, &after);
+        assert!(similarity >= 0.999, "{attributes}: SSIM {similarity}");
     }
 }
 
@@ -27924,4 +27922,871 @@ fn names_and_chart_text_xml_cannot_carry_are_refused() {
         error.contains("/docProps/core.xml holds U+000C at line"),
         "{error}"
     );
+}
+
+// Shape authoring gaps of tensorbee/rdocx#309: alt text, flips, grouping
+// existing shapes, connector glue, picture placeholders, run slide jumps,
+// arranging, and PowerPoint placeholder names.
+
+fn slide_xml(presentation: &Presentation, slide: usize) -> String {
+    let package = open_opc(&presentation.to_bytes().unwrap(), "shape authoring");
+    String::from_utf8(
+        package
+            .get_part(&format!("/ppt/slides/slide{}.xml", slide + 1))
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap()
+}
+
+fn blank_with_shapes(boxes: &[(i64, i64, i64, i64)]) -> Presentation {
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    let mut slide = presentation.slide_mut(0).unwrap();
+    for (left, top, width, height) in boxes {
+        slide
+            .add_shape("rect", Emu(*left), Emu(*top), Emu(*width), Emu(*height))
+            .unwrap();
+    }
+    presentation
+}
+
+#[test]
+fn alt_text_title_and_decorative_round_trip_on_every_shape_kind() {
+    let mut presentation = blank_with_shapes(&[(0, 0, 100, 100)]);
+    let mut slide = presentation.slide_mut(0).unwrap();
+    slide
+        .add_connector(ConnectorType::Straight, Emu(0), Emu(0), Emu(500), Emu(500))
+        .unwrap();
+    slide.add_group_shape().unwrap();
+    slide
+        .add_table(1, 1, Emu(0), Emu(0), Emu(1_000), Emu(1_000))
+        .unwrap();
+    presentation
+        .add_picture(
+            0,
+            &valid_one_pixel_png(),
+            "dot.png",
+            Emu(0),
+            Emu(0),
+            None,
+            None,
+        )
+        .unwrap();
+    for index in 0..5 {
+        let mut slide = presentation.slide_mut(0).unwrap();
+        let mut shape = slide.shape_mut(index).unwrap();
+        shape.set_alt_text(Some("A \"chart\" & <more>")).unwrap();
+        shape.set_alt_title(Some("Title")).unwrap();
+        shape.set_decorative(true).unwrap();
+    }
+    let reopened = Presentation::from_bytes(&presentation.to_bytes().unwrap()).unwrap();
+    assert!(reopened.validate().is_empty(), "{:?}", reopened.validate());
+    for shape in reopened.slide(0).unwrap().shapes() {
+        assert_eq!(shape.alt_text().as_deref(), Some("A \"chart\" & <more>"));
+        assert_eq!(shape.alt_title().as_deref(), Some("Title"));
+        assert!(shape.decorative(), "{:?}", shape.kind());
+    }
+    let xml = slide_xml(&reopened, 0);
+    assert_eq!(
+        xml.matches(r#"<a:extLst><a:ext uri="{C183D7F6-B498-43B3-948B-1728B52AA6E4}"><adec:decorative xmlns:adec="http://schemas.microsoft.com/office/drawing/2017/decorative" val="1"/></a:ext></a:extLst></p:cNvPr>"#).count(),
+        5,
+        "{xml}"
+    );
+
+    let mut presentation = reopened;
+    for index in 0..5 {
+        let mut slide = presentation.slide_mut(0).unwrap();
+        let mut shape = slide.shape_mut(index).unwrap();
+        shape.set_alt_text(None).unwrap();
+        shape.set_alt_title(None).unwrap();
+        shape.set_decorative(false).unwrap();
+    }
+    let xml = slide_xml(&presentation, 0);
+    assert!(!xml.contains("descr=") && !xml.contains("title=") && !xml.contains("decorative"));
+    assert!(!xml.contains("<a:extLst></a:extLst>"), "{xml}");
+    let error = presentation
+        .slide_mut(0)
+        .unwrap()
+        .shape_mut(0)
+        .unwrap()
+        .set_alt_text(Some("bell\u{7}"))
+        .unwrap_err();
+    assert!(error.to_string().contains("alt text"), "{error}");
+}
+
+#[test]
+fn decorative_flag_joins_an_existing_extension_list_and_keeps_its_siblings() {
+    let mut presentation = blank_with_shapes(&[(0, 0, 100, 100)]);
+    presentation
+        .set_shape_hyperlink(0, 2, Some("https://example.com"))
+        .unwrap();
+    let mut slide = presentation.slide_mut(0).unwrap();
+    let mut shape = slide.shape_mut(0).unwrap();
+    shape.set_decorative(true).unwrap();
+    shape.set_decorative(true).unwrap();
+    let xml = slide_xml(&presentation, 0);
+    let start = xml.find("<p:cNvPr").unwrap();
+    let element = &xml[start..xml[start..].find("</p:cNvPr>").unwrap() + start];
+    assert!(element.find("<a:hlinkClick").unwrap() < element.find("<a:extLst>").unwrap());
+    assert_eq!(element.matches("adec:decorative").count(), 1, "{element}");
+    assert!(
+        presentation
+            .slide(0)
+            .unwrap()
+            .shape(0)
+            .unwrap()
+            .decorative()
+    );
+}
+
+#[test]
+fn flips_round_trip_render_mirrored_and_refuse_graphic_frames() {
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    let mut slide = presentation.slide_mut(0).unwrap();
+    slide
+        .add_shape(
+            "rtTriangle",
+            Emu(914_400),
+            Emu(914_400),
+            Emu(1_828_800),
+            Emu(1_828_800),
+        )
+        .unwrap();
+    slide
+        .add_table(1, 1, Emu(0), Emu(0), Emu(914_400), Emu(914_400))
+        .unwrap();
+    let plain = presentation
+        .slide_png_deterministic(0, 36.0)
+        .unwrap()
+        .unwrap();
+    let mut slide = presentation.slide_mut(0).unwrap();
+    let mut shape = slide.shape_mut(0).unwrap();
+    shape.set_flip_horizontal(true).unwrap();
+    shape.set_flip_vertical(true).unwrap();
+    let error = slide
+        .shape_mut(1)
+        .unwrap()
+        .set_flip_horizontal(true)
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::UnsupportedShapeMutation { .. }),
+        "{error}"
+    );
+    let flipped = presentation
+        .slide_png_deterministic(0, 36.0)
+        .unwrap()
+        .unwrap();
+    assert_ne!(plain, flipped);
+    let reopened = Presentation::from_bytes(&presentation.to_bytes().unwrap()).unwrap();
+    let shape = reopened.slide(0).unwrap().shape(0).unwrap();
+    assert!(shape.flip_horizontal() && shape.flip_vertical());
+    assert!(slide_xml(&reopened, 0).contains(r#"<a:xfrm flipH="1" flipV="1">"#));
+}
+
+#[test]
+fn grouping_existing_shapes_keeps_slide_positions_order_and_rendering() {
+    let mut presentation = blank_with_shapes(&[
+        (100, 100, 400, 300),
+        (900, 50, 200, 200),
+        (300, 600, 500, 100),
+    ]);
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .shape_mut(1)
+        .unwrap()
+        .set_rotation(Angle(30 * 60_000))
+        .unwrap();
+    let before = presentation
+        .slide_png_deterministic(0, 36.0)
+        .unwrap()
+        .unwrap();
+    let mut shapes = presentation.shapes_mut(0, &[]).unwrap();
+    for bad in [&[][..], &[0, 0][..], &[0, 7][..]] {
+        assert!(shapes.group(bad).is_err());
+    }
+    let group = shapes.group(&[2, 0]).unwrap();
+    assert_eq!(group.kind(), ShapeKind::Group);
+
+    let slide = presentation.slide(0).unwrap();
+    let kinds = slide.shapes().map(|shape| shape.kind()).collect::<Vec<_>>();
+    // The group takes the place of its topmost member, above shape 1.
+    assert_eq!(kinds, [ShapeKind::Shape, ShapeKind::Group]);
+    let group = slide.shape(1).unwrap();
+    assert_eq!(group.non_visual_id(), Some(5));
+    assert_eq!(group.non_visual_name().as_deref(), Some("Group 5"));
+    assert_eq!(
+        group
+            .children()
+            .map(|shape| shape.non_visual_id())
+            .collect::<Vec<_>>(),
+        [Some(2), Some(4)]
+    );
+    assert_eq!(
+        group_frame(
+            &saved_first_slide(&presentation)
+                .common_slide_data
+                .shape_tree
+                .children[1]
+        ),
+        [100, 100, 700, 600, 100, 100, 700, 600]
+    );
+    assert!(
+        presentation.validate().is_empty(),
+        "{:?}",
+        presentation.validate()
+    );
+    assert_eq!(
+        presentation
+            .slide_png_deterministic(0, 36.0)
+            .unwrap()
+            .unwrap(),
+        before
+    );
+
+    let range = presentation.shapes_mut(0, &[]).unwrap().ungroup(1).unwrap();
+    assert_eq!(range, 1..3);
+    let slide = presentation.slide(0).unwrap();
+    assert_eq!(
+        slide
+            .shapes()
+            .map(|shape| shape.non_visual_id())
+            .collect::<Vec<_>>(),
+        [Some(3), Some(2), Some(4)]
+    );
+    assert_eq!(
+        slide.shape(1).unwrap().position(),
+        Some((Emu(100), Emu(100)))
+    );
+    assert_eq!(
+        presentation
+            .slide_png_deterministic(0, 36.0)
+            .unwrap()
+            .unwrap(),
+        before
+    );
+}
+
+#[test]
+fn grouping_refuses_placeholders_and_nests_inside_a_group() {
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(1).unwrap();
+    let mut slide = presentation.slide_mut(0).unwrap();
+    slide
+        .add_shape("rect", Emu(0), Emu(0), Emu(10), Emu(10))
+        .unwrap();
+    let error = presentation
+        .shapes_mut(0, &[])
+        .unwrap()
+        .group(&[0, 2])
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("placeholder"), "{error}");
+    assert_eq!(presentation.slide(0).unwrap().shapes().len(), 3);
+
+    let mut presentation = blank_with_shapes(&[(0, 0, 100, 100), (200, 0, 100, 100)]);
+    presentation
+        .shapes_mut(0, &[])
+        .unwrap()
+        .group(&[0, 1])
+        .unwrap();
+    presentation
+        .shapes_mut(0, &[0])
+        .unwrap()
+        .group(&[1])
+        .unwrap();
+    let outer = presentation.slide(0).unwrap().shape(0).unwrap();
+    assert_eq!(outer.child_count(), 2);
+    assert_eq!(outer.child(1).unwrap().kind(), ShapeKind::Group);
+    assert_eq!(
+        outer.child(1).unwrap().child(0).unwrap().position(),
+        Some((Emu(200), Emu(0)))
+    );
+    let reopened = Presentation::from_bytes(&presentation.to_bytes().unwrap()).unwrap();
+    assert!(reopened.validate().is_empty(), "{:?}", reopened.validate());
+}
+
+#[test]
+fn ungrouping_moves_the_group_transform_into_each_member() {
+    let mut presentation = blank_with_shapes(&[(0, 0, 400, 200), (600, 0, 200, 200)]);
+    presentation
+        .shapes_mut(0, &[])
+        .unwrap()
+        .group(&[0, 1])
+        .unwrap();
+    {
+        let mut slide = presentation.slide_mut(0).unwrap();
+        let mut group = slide.shape_mut(0).unwrap();
+        group.set_rotation(Angle(90 * 60_000)).unwrap();
+        group.set_position(Emu(1_000), Emu(2_000)).unwrap();
+        group.set_size(Emu(1_600), Emu(200)).unwrap();
+    }
+    let before = presentation
+        .slide_png_deterministic(0, 72.0)
+        .unwrap()
+        .unwrap();
+    presentation.shapes_mut(0, &[]).unwrap().ungroup(0).unwrap();
+    let slide = presentation.slide(0).unwrap();
+    // Members scale by two across, turn a quarter about the group centre
+    // (1_800, 2_100), and take the group's rotation.
+    let first = slide.shape(0).unwrap();
+    assert_eq!(first.rotation(), Some(Angle(90 * 60_000)));
+    assert_eq!(first.size(), Some((Emu(800), Emu(200))));
+    assert_eq!(first.position(), Some((Emu(1_400), Emu(1_600))));
+    let second = slide.shape(1).unwrap();
+    assert_eq!(second.size(), Some((Emu(400), Emu(200))));
+    assert_eq!(second.position(), Some((Emu(1_600), Emu(2_600))));
+    assert_eq!(
+        presentation
+            .slide_png_deterministic(0, 72.0)
+            .unwrap()
+            .unwrap(),
+        before
+    );
+
+    let mut presentation = blank_with_shapes(&[(0, 0, 100, 100)]);
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .add_table(1, 1, Emu(200), Emu(0), Emu(100), Emu(100))
+        .unwrap();
+    presentation
+        .shapes_mut(0, &[])
+        .unwrap()
+        .group(&[0, 1])
+        .unwrap();
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .shape_mut(0)
+        .unwrap()
+        .set_flip_horizontal(true)
+        .unwrap();
+    let error = presentation
+        .shapes_mut(0, &[])
+        .unwrap()
+        .ungroup(0)
+        .unwrap_err();
+    assert!(error.to_string().contains("graphic frame"), "{error}");
+    assert_eq!(
+        presentation.slide(0).unwrap().shape(0).unwrap().kind(),
+        ShapeKind::Group
+    );
+}
+
+#[test]
+fn connectors_glue_to_preset_connection_sites_and_follow_rotation() {
+    let mut presentation =
+        blank_with_shapes(&[(1_000, 1_000, 2_000, 1_000), (6_000, 4_000, 1_000, 1_000)]);
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .add_connector(ConnectorType::Straight, Emu(0), Emu(0), Emu(10), Emu(10))
+        .unwrap();
+    // Site 3 of a rectangle is the middle of its right edge, site 1 the
+    // middle of its left edge.
+    presentation
+        .connect_connector(0, &[2], rpptx::ConnectorEnd::Begin, 2, 3)
+        .unwrap();
+    presentation
+        .connect_connector(0, &[2], rpptx::ConnectorEnd::End, 3, 1)
+        .unwrap();
+    let connector = presentation.slide(0).unwrap().shape(2).unwrap();
+    assert_eq!(
+        connector.connector_endpoints(),
+        Some([(Emu(3_000), Emu(1_500)), (Emu(6_000), Emu(4_500))])
+    );
+    assert_eq!(
+        connector.connector_connection(rpptx::ConnectorEnd::Begin),
+        Some((2, 3))
+    );
+    assert_eq!(
+        connector.connector_connection(rpptx::ConnectorEnd::End),
+        Some((3, 1))
+    );
+    let xml = slide_xml(&presentation, 0);
+    assert!(
+        xml.contains(r#"<a:stCxn id="2" idx="3"/><a:endCxn id="3" idx="1"/>"#),
+        "{xml}"
+    );
+
+    // A target rotated a quarter turn puts its right-edge site below its centre.
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .shape_mut(0)
+        .unwrap()
+        .set_rotation(Angle(90 * 60_000))
+        .unwrap();
+    presentation
+        .connect_connector(0, &[2], rpptx::ConnectorEnd::Begin, 2, 3)
+        .unwrap();
+    assert_eq!(
+        presentation
+            .slide(0)
+            .unwrap()
+            .shape(2)
+            .unwrap()
+            .connector_endpoints(),
+        Some([(Emu(2_000), Emu(2_500)), (Emu(6_000), Emu(4_500))])
+    );
+
+    // An adjusted preset moves its sites: a triangle's apex follows `adj`.
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .shape_mut(1)
+        .unwrap()
+        .set_auto_shape_type("triangle")
+        .unwrap();
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .shape_mut(1)
+        .unwrap()
+        .set_adjust_value("adj", 0.0)
+        .unwrap();
+    presentation
+        .connect_connector(0, &[2], rpptx::ConnectorEnd::End, 3, 0)
+        .unwrap();
+    assert_eq!(
+        presentation
+            .slide(0)
+            .unwrap()
+            .shape(2)
+            .unwrap()
+            .connector_endpoints()
+            .unwrap()[1],
+        (Emu(6_000), Emu(4_000))
+    );
+    let error = presentation
+        .connect_connector(0, &[2], rpptx::ConnectorEnd::End, 3, 6)
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("6 connection sites, 0 to 5, not 6"),
+        "{error}"
+    );
+    assert!(
+        presentation
+            .connect_connector(0, &[0], rpptx::ConnectorEnd::End, 3, 0)
+            .is_err()
+    );
+    assert!(
+        presentation
+            .connect_connector(0, &[2], rpptx::ConnectorEnd::End, 99, 0)
+            .is_err()
+    );
+    let reopened = Presentation::from_bytes(&presentation.to_bytes().unwrap()).unwrap();
+    assert!(reopened.validate().is_empty(), "{:?}", reopened.validate());
+}
+
+#[test]
+fn connectors_glue_across_groups_in_slide_coordinates() {
+    let mut presentation = blank_with_shapes(&[(1_000, 1_000, 1_000, 1_000)]);
+    presentation
+        .shapes_mut(0, &[])
+        .unwrap()
+        .group(&[0])
+        .unwrap();
+    {
+        let mut slide = presentation.slide_mut(0).unwrap();
+        let mut group = slide.shape_mut(0).unwrap();
+        group.set_position(Emu(5_000), Emu(5_000)).unwrap();
+        group.set_size(Emu(2_000), Emu(2_000)).unwrap();
+    }
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .add_connector(ConnectorType::Elbow, Emu(0), Emu(0), Emu(10), Emu(10))
+        .unwrap();
+    presentation
+        .connect_connector(0, &[1], rpptx::ConnectorEnd::End, 2, 2)
+        .unwrap();
+    // The group doubles its member and moves it to (5_000, 5_000), so the
+    // bottom-centre site lands at (6_000, 7_000).
+    assert_eq!(
+        presentation
+            .slide(0)
+            .unwrap()
+            .shape(1)
+            .unwrap()
+            .connector_endpoints()
+            .unwrap()[1],
+        (Emu(6_000), Emu(7_000))
+    );
+}
+
+#[test]
+fn picture_placeholders_take_a_cropped_picture_that_inherits_the_frame() {
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(8).unwrap();
+    let slide = presentation.slide(0).unwrap();
+    let index = slide
+        .shapes()
+        .position(|shape| shape.placeholder_type() == Some("pic"))
+        .unwrap();
+    let (_, _, width, height) = presentation
+        .effective_geometry(0, &[index])
+        .unwrap()
+        .unwrap();
+    let id = slide.shape(index).unwrap().non_visual_id();
+    let name = slide.shape(index).unwrap().non_visual_name();
+    let wide = solid_rgba_png(40, 10, [200, 30, 30, 255]);
+    let picture = presentation
+        .insert_picture(0, &[index], &wide, "wide.png")
+        .unwrap();
+    assert_eq!(picture.kind(), ShapeKind::Picture);
+    assert_eq!(picture.non_visual_id(), id);
+    assert_eq!(picture.non_visual_name(), name);
+    assert_eq!(picture.placeholder_type(), Some("pic"));
+    assert_eq!(picture.position(), None);
+    let image_ratio = 4.0;
+    let frame_ratio = width.0 as f64 / height.0 as f64;
+    let side = ((1.0 - frame_ratio / image_ratio) / 2.0 * 100_000.0).round() as i32;
+    assert_eq!(
+        picture.crop(),
+        Some((
+            Percent1000(side),
+            Percent1000(0),
+            Percent1000(side),
+            Percent1000(0)
+        ))
+    );
+    assert_eq!(
+        presentation
+            .effective_geometry(0, &[index])
+            .unwrap()
+            .map(|g| (g.2, g.3)),
+        Some((width, height))
+    );
+    let xml = slide_xml(&presentation, 0);
+    assert!(
+        xml.contains(r#"<a:picLocks noGrp="1" noChangeAspect="1"/>"#),
+        "{xml}"
+    );
+    assert!(xml.contains(r#"<p:ph type="pic" idx="1"/>"#), "{xml}");
+    assert!(xml.contains("<p:spPr/>"), "{xml}");
+    let reopened = Presentation::from_bytes(&presentation.to_bytes().unwrap()).unwrap();
+    assert!(reopened.validate().is_empty(), "{:?}", reopened.validate());
+    let png = reopened.slide_png_deterministic(0, 36.0).unwrap().unwrap();
+    assert!(!png.is_empty());
+
+    let error = presentation
+        .insert_picture(0, &[0], &wide, "wide.png")
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("title placeholder"), "{error}");
+    let error = presentation
+        .insert_picture(0, &[index], &wide, "wide.png")
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("add_picture"), "{error}");
+}
+
+#[test]
+fn run_hyperlinks_jump_to_slides_and_release_their_relationships() {
+    let mut presentation = Presentation::new().unwrap();
+    for _ in 0..3 {
+        presentation.add_slide(6).unwrap();
+    }
+    let mut slide = presentation.slide_mut(0).unwrap();
+    let mut textbox = slide
+        .add_textbox(Emu(0), Emu(0), Emu(1_000), Emu(1_000))
+        .unwrap();
+    textbox.set_text("Go there").unwrap();
+    let id = presentation
+        .slide(0)
+        .unwrap()
+        .shape(0)
+        .unwrap()
+        .non_visual_id()
+        .unwrap();
+    assert_eq!(presentation.run_target_slide(0, id, 0, 0).unwrap(), None);
+    presentation
+        .set_run_target_slide(0, id, 0, 0, Some(2))
+        .unwrap();
+    assert_eq!(presentation.run_target_slide(0, id, 0, 0).unwrap(), Some(2));
+    let xml = slide_xml(&presentation, 0);
+    assert!(xml.contains(r#"action="ppaction://hlinksldjump""#), "{xml}");
+    presentation
+        .set_run_target_slide(0, id, 0, 0, Some(2))
+        .unwrap();
+    presentation
+        .set_run_target_slide(0, id, 0, 0, Some(1))
+        .unwrap();
+    assert_eq!(presentation.run_target_slide(0, id, 0, 0).unwrap(), Some(1));
+    let slide_relationships = |presentation: &Presentation| {
+        let package = open_opc(&presentation.to_bytes().unwrap(), "run jump");
+        package
+            .get_part_rels("/ppt/slides/slide1.xml")
+            .unwrap()
+            .items
+            .iter()
+            .filter(|relationship| relationship.rel_type == rel_types::SLIDE)
+            .count()
+    };
+    assert_eq!(slide_relationships(&presentation), 1);
+    presentation
+        .set_run_hyperlink(0, id, 0, 0, Some("https://example.com"))
+        .unwrap();
+    assert_eq!(presentation.run_target_slide(0, id, 0, 0).unwrap(), None);
+    assert_eq!(slide_relationships(&presentation), 0);
+    presentation
+        .set_run_target_slide(0, id, 0, 0, Some(1))
+        .unwrap();
+    presentation
+        .set_run_target_slide(0, id, 0, 0, None)
+        .unwrap();
+    assert_eq!(slide_relationships(&presentation), 0);
+    assert!(
+        presentation
+            .set_run_target_slide(0, id, 0, 0, Some(9))
+            .is_err()
+    );
+    let reopened = Presentation::from_bytes(&presentation.to_bytes().unwrap()).unwrap();
+    assert!(reopened.validate().is_empty(), "{:?}", reopened.validate());
+}
+
+#[test]
+fn align_and_distribute_line_shapes_up_by_their_drawn_boxes() {
+    use rpptx::{ArrangeReference, DistributeDirection, ShapeAlignment};
+
+    let mut presentation = blank_with_shapes(&[
+        (100, 500, 200, 100),
+        (700, 0, 100, 300),
+        (400, 200, 300, 100),
+    ]);
+    let mut shapes = presentation.shapes_mut(0, &[]).unwrap();
+    shapes
+        .align(
+            &[0, 1, 2],
+            ShapeAlignment::Left,
+            ArrangeReference::Selection,
+        )
+        .unwrap();
+    let left = |presentation: &Presentation| {
+        presentation
+            .slide(0)
+            .unwrap()
+            .shapes()
+            .map(|shape| shape.position().unwrap().0.0)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(left(&presentation), [100, 100, 100]);
+    let mut shapes = presentation.shapes_mut(0, &[]).unwrap();
+    shapes
+        .align(
+            &[0, 1, 2],
+            ShapeAlignment::Center,
+            ArrangeReference::Selection,
+        )
+        .unwrap();
+    assert_eq!(left(&presentation), [150, 200, 100]);
+    let mut shapes = presentation.shapes_mut(0, &[]).unwrap();
+    shapes
+        .align(&[1], ShapeAlignment::Right, ArrangeReference::Slide)
+        .unwrap();
+    let width = presentation.slide_size().unwrap().0.0;
+    assert_eq!(left(&presentation)[1], width - 100);
+
+    let mut presentation =
+        blank_with_shapes(&[(0, 0, 100, 100), (1_000, 0, 300, 100), (150, 0, 100, 100)]);
+    let mut shapes = presentation.shapes_mut(0, &[]).unwrap();
+    shapes
+        .distribute(
+            &[0, 1, 2],
+            DistributeDirection::Horizontal,
+            ArrangeReference::Selection,
+        )
+        .unwrap();
+    // The span 0 to 1_300 holds 500 of shapes, so each of the two gaps is 400.
+    let lefts = presentation
+        .slide(0)
+        .unwrap()
+        .shapes()
+        .map(|shape| shape.position().unwrap().0.0)
+        .collect::<Vec<_>>();
+    assert_eq!(lefts, [0, 1_000, 500]);
+
+    // A shape rotated a quarter turn aligns by its drawn, upright box.
+    let mut presentation = blank_with_shapes(&[(1_000, 1_000, 400, 100), (0, 0, 100, 100)]);
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .shape_mut(0)
+        .unwrap()
+        .set_rotation(Angle(90 * 60_000))
+        .unwrap();
+    presentation
+        .shapes_mut(0, &[])
+        .unwrap()
+        .align(&[0, 1], ShapeAlignment::Top, ArrangeReference::Selection)
+        .unwrap();
+    // The drawn box spans 850 to 1_250 vertically, so its top moves to 0.
+    assert_eq!(
+        presentation.slide(0).unwrap().shape(0).unwrap().position(),
+        Some((Emu(1_000), Emu(150)))
+    );
+    let error = presentation
+        .shapes_mut(0, &[])
+        .unwrap()
+        .align(&[], ShapeAlignment::Top, ArrangeReference::Selection)
+        .unwrap_err();
+    assert!(error.to_string().contains("no shapes"), "{error}");
+}
+
+#[test]
+fn new_slide_placeholders_take_powerpoint_names() {
+    let mut presentation = Presentation::new().unwrap();
+    for layout in [0, 1, 8, 10] {
+        presentation.add_slide(layout).unwrap();
+    }
+    let names = |slide: usize| {
+        presentation
+            .slide(slide)
+            .unwrap()
+            .shapes()
+            .map(|shape| shape.non_visual_name().unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(0), ["Title 1", "Subtitle 2"]);
+    assert_eq!(names(1), ["Title 1", "Content Placeholder 2"]);
+    assert_eq!(
+        names(2),
+        ["Title 1", "Picture Placeholder 2", "Text Placeholder 3"]
+    );
+    assert_eq!(
+        names(3),
+        ["Vertical Title 1", "Vertical Text Placeholder 2"]
+    );
+}
+
+#[test]
+fn connector_endpoints_move_release_their_glue_and_presets_without_sites_use_edges() {
+    let mut presentation = blank_with_shapes(&[(1_000, 1_000, 2_000, 1_000)]);
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .add_shape("chartPlus", Emu(5_000), Emu(5_000), Emu(1_000), Emu(2_000))
+        .unwrap();
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .add_connector(ConnectorType::Straight, Emu(0), Emu(0), Emu(10), Emu(10))
+        .unwrap();
+    // `chartPlus` defines no `a:cxnLst`, so its sites are the four edge
+    // midpoints, and site 3 is the middle of its right edge.
+    presentation
+        .connect_connector(0, &[2], rpptx::ConnectorEnd::End, 3, 3)
+        .unwrap();
+    presentation
+        .connect_connector(0, &[2], rpptx::ConnectorEnd::Begin, 2, 0)
+        .unwrap();
+    assert_eq!(
+        presentation
+            .slide(0)
+            .unwrap()
+            .shape(2)
+            .unwrap()
+            .connector_endpoints(),
+        Some([(Emu(2_000), Emu(1_000)), (Emu(6_000), Emu(6_000))])
+    );
+    let error = presentation
+        .connect_connector(0, &[2], rpptx::ConnectorEnd::End, 3, 4)
+        .unwrap_err();
+    assert!(error.to_string().contains("4 connection sites"), "{error}");
+
+    let mut slide = presentation.slide_mut(0).unwrap();
+    let mut connector = slide.shape_mut(2).unwrap();
+    connector
+        .set_connector_endpoint(rpptx::ConnectorEnd::Begin, Emu(7_000), Emu(500))
+        .unwrap();
+    let error = slide
+        .shape_mut(0)
+        .unwrap()
+        .set_connector_endpoint(rpptx::ConnectorEnd::Begin, Emu(0), Emu(0))
+        .unwrap_err();
+    assert!(
+        matches!(error, Error::UnsupportedShapeMutation { .. }),
+        "{error}"
+    );
+    let connector = presentation.slide(0).unwrap().shape(2).unwrap();
+    assert_eq!(
+        connector.connector_endpoints(),
+        Some([(Emu(7_000), Emu(500)), (Emu(6_000), Emu(6_000))])
+    );
+    assert_eq!(
+        connector.connector_connection(rpptx::ConnectorEnd::Begin),
+        None
+    );
+    assert_eq!(
+        connector.connector_connection(rpptx::ConnectorEnd::End),
+        Some((3, 3))
+    );
+    let xml = slide_xml(&presentation, 0);
+    assert!(
+        xml.contains(r#"<a:xfrm flipH="1"><a:off x="6000" y="500"/><a:ext cx="1000" cy="5500"/>"#),
+        "{xml}"
+    );
+}
+
+#[test]
+fn a_rotated_mirrored_arrow_renders_as_powerpoint_draws_it() {
+    // PowerPoint mirrors a shape, then rotates it: a right arrow turned a
+    // quarter clockwise and mirrored left to right points up, where
+    // rotating first would point it down.
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    let mut slide = presentation.slide_mut(0).unwrap();
+    let mut arrow = slide
+        .add_shape(
+            "rightArrow",
+            Emu(4_000_000),
+            Emu(2_000_000),
+            Emu(2_000_000),
+            Emu(1_000_000),
+        )
+        .unwrap();
+    arrow.set_rotation(Angle(90 * 60_000)).unwrap();
+    arrow.set_flip_horizontal(true).unwrap();
+    let (_, layout) = presentation.render_deterministic().unwrap();
+    let page = &layout.pages[0];
+    let mut points = Vec::new();
+    walk(&page.elements, &mut |element, transform| {
+        if let PositionedElement::Path(path) = element
+            && path.fill.is_some()
+        {
+            for command in &path.path.commands {
+                if let oxml_layout::PathCommand::MoveTo(point)
+                | oxml_layout::PathCommand::LineTo(point) = command
+                {
+                    points.push(transform.apply(*point));
+                }
+            }
+        }
+    });
+    assert!(!points.is_empty());
+    let top = points
+        .iter()
+        .map(|point| point.y)
+        .fold(f64::INFINITY, f64::min);
+    let bottom = points
+        .iter()
+        .map(|point| point.y)
+        .fold(f64::NEG_INFINITY, f64::max);
+    // The tip is the single outline point at one end, and the tail has
+    // two.
+    let at_top = points
+        .iter()
+        .filter(|point| (point.y - top).abs() < 0.5)
+        .count();
+    let at_bottom = points
+        .iter()
+        .filter(|point| (point.y - bottom).abs() < 0.5)
+        .count();
+    assert!(at_top < at_bottom, "tip must point up: {points:?}");
 }

@@ -16,7 +16,11 @@ presentation, notes, handout, PDF, and animation outputs.
 - Author and edit text, pictures, shapes, groups, tables, charts, comments,
   SmartArt text, and media.
 - Populate groups, nested to any depth, with text boxes, preset shapes,
-  connectors, groups, tables, and pictures.
+  connectors, groups, tables, and pictures, group and ungroup existing shapes
+  in place, align and distribute shapes, and glue connectors to connection
+  sites.
+- Set alternative text, decorative flags, and flips, and fill picture
+  placeholders with a cropped picture.
 - Insert and remove table rows and columns, extending or shrinking merged
   cells and growing or shrinking the frame by the row or column size.
 - Produce PDF, PDF/A, resolved slide frames, notes, handouts, and animations.
@@ -28,7 +32,7 @@ presentation, notes, handout, PDF, and animation outputs.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rpptx | 463,749 compressed bytes, 2,402,551 member bytes, 16 members | 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --no-verify` | Tracked `rpptx` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-09 |
+| Crates.io archive: rpptx | 481,344 compressed bytes, 2,488,129 member bytes, 17 members | 0.14.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --no-verify` | Tracked `rpptx` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-09 |
 
 ## Use it when
 

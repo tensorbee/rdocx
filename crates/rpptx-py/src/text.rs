@@ -9,11 +9,13 @@ use rpptx::{
     TextFont, TextNoBullet, TextSpacing, TextStrike, TextUnderline,
 };
 
+use crate::Scope;
 use crate::normalize_index;
 use crate::presentation::PyPresentation;
 use crate::replacement_count_to_pyerr;
 use crate::rpptx_to_pyerr;
 use crate::shape::{shape_mut_at, shape_ref_at, slide_index};
+use crate::slide::PySlide;
 use crate::validate_path;
 
 const EMU_PER_CENTIPOINT: i64 = 127;
@@ -227,7 +229,9 @@ impl PyTextFrame {
             .and_then(rpptx::ShapeMut::into_text_frame)
             .map(|mut frame| frame.set_text(value))
             .ok_or_else(|| PyValueError::new_err("shape has no text frame"))?;
-        presentation.revisions.bump();
+        presentation
+            .revisions
+            .invalidate(Scope::Paragraphs, "TextFrame.text");
         Ok(())
     }
 
@@ -245,7 +249,7 @@ impl PyTextFrame {
     /// The contract is `Presentation.try_replace_text` restricted to this
     /// frame: with `expect`, the replacement runs on a copy of the text body,
     /// a count that differs raises and leaves the presentation and its
-    /// revision as they were, and the revision advances once only when
+    /// revisions as they were, and run handles are invalidated only when
     /// something was replaced.
     #[pyo3(signature = (placeholder, replacement, *, expect = None))]
     fn try_replace_text(
@@ -266,7 +270,9 @@ impl PyTextFrame {
             return Err(replacement_count_to_pyerr(py, placeholder, expected, count));
         }
         if count > 0 {
-            presentation.revisions.bump();
+            presentation
+                .revisions
+                .invalidate(Scope::Runs, "TextFrame.try_replace_text()");
         }
         Ok(count)
     }
@@ -284,8 +290,7 @@ impl PyTextFrame {
             index
         };
         let path = {
-            let mut presentation = self.presentation.borrow_mut(py);
-            presentation.revisions.bump();
+            let presentation = self.presentation.borrow(py);
             let mut segments = original_path.segs.clone();
             segments.push(PathSeg::Para(index));
             presentation.revisions.capture(segments)
@@ -561,7 +566,9 @@ impl PyParagraph {
             .and_then(|frame| frame.into_paragraph_mut(index))
             .map(|mut paragraph| paragraph.set_text(value))
             .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?;
-        presentation.revisions.bump();
+        presentation
+            .revisions
+            .invalidate(Scope::Runs, "Paragraph.text");
         Ok(())
     }
 
@@ -627,7 +634,6 @@ impl PyParagraph {
                 .and_then(|frame| frame.into_paragraph_mut(index))
                 .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?
                 .add_run(text);
-            presentation.revisions.bump();
             let mut segments = self.path.segs.clone();
             segments.push(PathSeg::Run(run));
             presentation.revisions.capture(segments)
@@ -1021,6 +1027,63 @@ impl PyHyperlink {
             )
             .map_err(|error| rpptx_to_pyerr(py, error))
     }
+
+    // Shape authoring: a run hyperlink that jumps to a slide.
+
+    /// The slide the run's click hyperlink jumps to, or `None` for any other
+    /// hyperlink or none, as `shape.click_action.target_slide` reads a
+    /// shape's. Assigning a slide makes the run jump there, and `None`
+    /// removes the hyperlink.
+    #[getter]
+    fn target_slide(&self, py: Python<'_>) -> PyResult<Option<Py<PySlide>>> {
+        let presentation = self.presentation.borrow(py);
+        self.run_properties(py, &presentation)?;
+        let (slide, shape_id, paragraph, run) = self.run_location(&presentation)?;
+        let Some(target) = presentation
+            .inner
+            .run_target_slide(slide, shape_id, paragraph, run)
+            .map_err(|error| rpptx_to_pyerr(py, error))?
+        else {
+            return Ok(None);
+        };
+        let path = presentation
+            .revisions
+            .capture(smallvec::smallvec![PathSeg::Slide(target)]);
+        drop(presentation);
+        Py::new(py, PySlide::new(self.presentation.clone_ref(py), path)).map(Some)
+    }
+
+    #[setter]
+    fn set_target_slide(&self, py: Python<'_>, slide: Option<PyRef<'_, PySlide>>) -> PyResult<()> {
+        let target = match slide {
+            Some(slide) if !slide.presentation.is(&self.presentation) => {
+                return Err(PyValueError::new_err("slide is not in this presentation"));
+            }
+            Some(slide) => Some(slide.validate(py)?),
+            None => None,
+        };
+        let mut presentation = self.presentation.borrow_mut(py);
+        self.run_properties(py, &presentation)?;
+        let (slide, shape_id, paragraph, run) = self.run_location(&presentation)?;
+        presentation
+            .inner
+            .set_run_target_slide(slide, shape_id, paragraph, run, target)
+            .map_err(|error| rpptx_to_pyerr(py, error))
+    }
+}
+
+impl PyHyperlink {
+    /// The slide index, shape id, paragraph index, and run index of the run.
+    fn run_location(&self, presentation: &PyPresentation) -> PyResult<(usize, u32, usize, usize)> {
+        let paragraph = paragraph_index(&self.path)
+            .ok_or_else(|| PyIndexError::new_err("paragraph index is missing"))?;
+        let run =
+            run_index(&self.path).ok_or_else(|| PyIndexError::new_err("run index is missing"))?;
+        let shape_id = shape_ref_at(&presentation.inner, &self.path)
+            .and_then(|shape| shape.non_visual_id())
+            .ok_or_else(|| PyValueError::new_err("shape has no id"))?;
+        Ok((slide_index(&self.path)?, shape_id, paragraph, run))
+    }
 }
 
 #[pyclass(name = "RunCollection")]
@@ -1335,7 +1398,12 @@ impl PyFont {
 
     #[setter]
     fn set_all_caps(&self, py: Python<'_>, value: Option<bool>) -> PyResult<()> {
-        self.update(py, |properties| properties.all_caps = value)
+        self.update(py, |properties| {
+            properties.all_caps = value;
+            if value == Some(true) {
+                properties.small_caps = None;
+            }
+        })
     }
 
     #[getter]
@@ -1427,6 +1495,104 @@ impl PyFont {
             .transpose()?;
         self.update(py, |properties| properties.font_size = centipoints)
     }
+
+    // Shape authoring: highlight and small capitals.
+
+    /// The colour drawn behind the text, `a:highlight`, as an `RGBColor`, or
+    /// `None` without one or for a theme or preset highlight colour.
+    /// Assigning takes an `RGBColor`, a hex string with or without `#`, or a
+    /// `(red, green, blue)` tuple, and `None` removes the highlight.
+    #[getter]
+    fn highlight_color(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let color = self.read(py, |properties| match properties?.highlight.as_ref()? {
+            ColorChoice::Srgb { value, .. } => Some(value.components()),
+            _ => None,
+        })?;
+        color
+            .map(|[red, green, blue]| {
+                py.import("rpptx.dml.color")?
+                    .getattr("RGBColor")?
+                    .call1((red, green, blue))
+                    .map(Bound::unbind)
+            })
+            .transpose()
+    }
+
+    #[setter]
+    fn set_highlight_color(
+        &self,
+        py: Python<'_>,
+        value: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        let color = match value {
+            Some(value) if !value.is_none() => Some(rgb_argument(value, "highlight_color")?),
+            _ => None,
+        };
+        self.update(py, |properties| {
+            properties.highlight = color.map(ColorChoice::srgb);
+        })
+    }
+
+    /// Whether the text shows in small capitals, `cap="small"`: `True`,
+    /// `False` for an explicit other capitalisation, or `None` to inherit.
+    /// `all_caps` and `small_caps` share one attribute, so setting one to
+    /// `True` clears the other.
+    #[getter]
+    fn small_caps(&self, py: Python<'_>) -> PyResult<Option<bool>> {
+        self.read(py, |properties| {
+            let properties = properties?;
+            match (properties.small_caps, properties.all_caps) {
+                (Some(true), _) => Some(true),
+                (Some(false), _) | (None, Some(_)) => Some(false),
+                (None, None) => None,
+            }
+        })
+    }
+
+    #[setter]
+    fn set_small_caps(&self, py: Python<'_>, value: Option<bool>) -> PyResult<()> {
+        self.update(py, |properties| {
+            properties.small_caps = value;
+            if value == Some(true) {
+                properties.all_caps = None;
+            }
+        })
+    }
+}
+
+/// Reads a colour argument: an `RGBColor` or any `(red, green, blue)` triple
+/// of 0 to 255 integers, or a six-digit hex string with or without `#`. Any
+/// other type raises `TypeError` naming `parameter`.
+fn rgb_argument(value: &Bound<'_, PyAny>, parameter: &str) -> PyResult<RgbColor> {
+    if value.is_instance_of::<PyString>() {
+        let text = value.extract::<String>()?;
+        return RgbColor::parse(text.strip_prefix('#').unwrap_or(&text)).map_err(|_| {
+            PyValueError::new_err(format!(
+                "{parameter} must be six hexadecimal digits, such as 'FFFF00' or '#FFFF00', \
+                 got {text:?}"
+            ))
+        });
+    }
+    let (red, green, blue) = value.extract::<(i64, i64, i64)>().map_err(|_| {
+        PyTypeError::new_err(format!(
+            "{parameter} must be an RGBColor, a hex string such as 'FFFF00', or a \
+             (red, green, blue) tuple, got {}",
+            value
+                .get_type()
+                .name()
+                .map_or_else(|_| "?".to_owned(), |name| name.to_string())
+        ))
+    })?;
+    let channel = |value: i64| {
+        u8::try_from(value).map_err(|_| {
+            PyValueError::new_err(format!("{parameter} channels must be from 0 to 255"))
+        })
+    };
+    Ok(RgbColor::new(
+        channel(red)?,
+        channel(green)?,
+        channel(blue)?,
+    ))
 }
 
 fn sequence_item<T, F>(

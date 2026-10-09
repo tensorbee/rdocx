@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use oxml_py_support::RevisionCounter;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyList, PyTuple};
 use smallvec::smallvec;
@@ -8,7 +7,9 @@ use smallvec::smallvec;
 use crate::layout::PyTextFrameLayout;
 use crate::shape::length;
 use crate::slide::{PySlideCollection, PySlideLayoutCollection};
-use crate::{replacement_count_to_pyerr, rpptx_to_pyerr, rpptx_value_to_pyerr};
+use crate::{
+    HandleRevisions, Scope, replacement_count_to_pyerr, rpptx_to_pyerr, rpptx_value_to_pyerr,
+};
 
 /// The bundled 16:9 slide size, paired with the first dimension set on a deck
 /// that has no `p:sldSz`.
@@ -151,14 +152,14 @@ impl From<&rpptx::ValidationIssue> for PyValidationIssue {
 #[pyclass(name = "Presentation")]
 pub struct PyPresentation {
     pub(crate) inner: rpptx::Presentation,
-    pub(crate) revisions: RevisionCounter,
+    pub(crate) revisions: HandleRevisions,
 }
 
 impl PyPresentation {
     fn from_presentation(inner: rpptx::Presentation) -> Self {
         Self {
             inner,
-            revisions: RevisionCounter::new(),
+            revisions: HandleRevisions::new(),
         }
     }
 
@@ -273,8 +274,8 @@ impl PyPresentation {
     ///
     /// With `expect`, the replacement runs on a clone, so a count that
     /// differs raises and leaves the presentation and its revision as they
-    /// were. Without it, the staged facade call runs in place. The revision
-    /// advances once only when something was replaced.
+    /// were. Without it, the staged facade call runs in place. Run handles
+    /// are invalidated only when something was replaced.
     #[pyo3(signature = (placeholder, replacement, *, expect = None))]
     fn try_replace_text(
         &mut self,
@@ -304,7 +305,8 @@ impl PyPresentation {
             }
         };
         if count > 0 {
-            self.revisions.bump();
+            self.revisions
+                .invalidate(Scope::Runs, "Presentation.replace_text()");
         }
         Ok(count)
     }
@@ -373,7 +375,6 @@ impl PyPresentation {
         self.inner
             .add_comment_author(author)
             .map_err(|error| rpptx_to_pyerr(py, error))?;
-        self.revisions.bump();
         Ok(())
     }
 

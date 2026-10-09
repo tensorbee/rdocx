@@ -625,6 +625,22 @@ fn lower_shape(
             } else {
                 stacked.elements
             };
+            // PowerPoint never mirrors text: a horizontal flip leaves it
+            // readable and a vertical flip turns it upside down, which is
+            // the shape's mirror undone left to right.
+            if shape.flip_h != shape.flip_v {
+                text_children = vec![PositionedElement::Group(GroupElement {
+                    transform: Transform {
+                        a: -1.0,
+                        e: shape.bounds.width,
+                        ..Transform::IDENTITY
+                    },
+                    clip: None,
+                    opacity: 1.0,
+                    effects: Vec::new(),
+                    children: text_children,
+                })];
+            }
         }
         ResolvedContent::Table(table) => {
             children.extend(lower_table(
@@ -1145,11 +1161,7 @@ fn lower_tiled_picture(
         tiles
     } else {
         vec![PositionedElement::Group(GroupElement {
-            transform: Transform::rotate_about(
-                -shape.rotation_deg,
-                shape.bounds.width / 2.0,
-                shape.bounds.height / 2.0,
-            ),
+            transform: unrotated_fill_transform(shape),
             clip: None,
             opacity: 1.0,
             effects: Vec::new(),
@@ -1190,6 +1202,18 @@ fn local_shape_rect(shape: &ResolvedShape) -> Rect {
         width: shape.bounds.width,
         height: shape.bounds.height,
     }
+}
+
+/// Undoes the shape's rotation for a fill that does not rotate with the
+/// shape. The shape mirrors before it rotates, so under exactly one flip the
+/// rotation to undo runs the other way in the shape's own space.
+fn unrotated_fill_transform(shape: &ResolvedShape) -> Transform {
+    let degrees = if shape.flip_h != shape.flip_v {
+        shape.rotation_deg
+    } else {
+        -shape.rotation_deg
+    };
+    Transform::rotate_about(degrees, shape.bounds.width / 2.0, shape.bounds.height / 2.0)
 }
 
 fn picture_coverage_rect(shape: &ResolvedShape, rotate_with_shape: bool) -> Rect {
@@ -1251,11 +1275,7 @@ fn counter_rotate_image(
         return image;
     }
     PositionedElement::Group(GroupElement {
-        transform: Transform::rotate_about(
-            -shape.rotation_deg,
-            shape.bounds.width / 2.0,
-            shape.bounds.height / 2.0,
-        ),
+        transform: unrotated_fill_transform(shape),
         clip: None,
         opacity: 1.0,
         effects: Vec::new(),
@@ -1695,8 +1715,8 @@ fn shape_transform(shape: &ResolvedShape) -> Transform {
         f: shape.bounds.y,
         ..Transform::IDENTITY
     };
-    rotation
-        .then(flip)
+    // PowerPoint mirrors a shape about its centre, then rotates it.
+    flip.then(rotation)
         .then(translation)
         .then(shape.group_transform)
 }
@@ -2420,6 +2440,70 @@ mod tests {
     }
 
     #[test]
+    fn a_rotated_mirrored_shape_mirrors_before_it_rotates() {
+        let mut arrow = shape(
+            Rect {
+                x: 10.0,
+                y: 20.0,
+                width: 8.0,
+                height: 4.0,
+            },
+            ResolvedGeometry::Rectangle,
+            Some(Paint::Solid(Color::BLACK)),
+            None,
+        );
+        arrow.rotation_deg = 90.0;
+        arrow.flip_h = true;
+        let page = layout_slide(&render_input(vec![slide((40.0, 40.0), vec![arrow])]), 0)
+            .expect("lower a rotated mirrored shape");
+        let transform = only_group(&page.elements[0]).transform;
+        // The tip (8, 2) of a right arrow mirrors to (0, 2), the left
+        // middle, then turns a quarter clockwise about the centre (4, 2) to
+        // (4, -2), so the arrow points up, as PowerPoint draws it.
+        assert_point_close(
+            transform.apply(Point { x: 8.0, y: 2.0 }),
+            Point { x: 14.0, y: 18.0 },
+        );
+        assert_point_close(
+            transform.apply(Point { x: 0.0, y: 2.0 }),
+            Point { x: 14.0, y: 26.0 },
+        );
+    }
+
+    #[test]
+    fn text_of_a_flipped_shape_is_never_mirrored() {
+        let bounds = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 40.0,
+            height: 10.0,
+        };
+        let mut cases = Vec::new();
+        for (flip_h, flip_v) in [(false, false), (true, false), (false, true), (true, true)] {
+            let mut flipped = shape(bounds, ResolvedGeometry::Rectangle, None, None);
+            flipped.flip_h = flip_h;
+            flipped.flip_v = flip_v;
+            flipped.content = ResolvedContent::Text(table_text("caption"));
+            cases.push(flipped);
+        }
+        let page = layout_slide(&render_input(vec![slide((40.0, 40.0), cases)]), 0)
+            .expect("lower flipped text");
+        for (index, mirrored_once) in [false, true, true, false].into_iter().enumerate() {
+            let group = only_group(&page.elements[index]);
+            let undone = group.children.iter().any(
+                |child| matches!(child, PositionedElement::Group(text) if text.transform.a == -1.0),
+            );
+            assert_eq!(undone, mirrored_once, "shape {index}");
+            // The text's own mirror cancels the shape's, so the text draws
+            // without a reflection: a vertical flip turns it a half turn.
+            let shape = group.transform;
+            let determinant = shape.a * shape.d - shape.b * shape.c;
+            let text_determinant = if undone { -determinant } else { determinant };
+            assert!(text_determinant > 0.0, "shape {index}");
+        }
+    }
+
+    #[test]
     fn horizontal_and_vertical_flips_are_about_the_shape_centre() {
         let bounds = Rect {
             x: 10.0,
@@ -2498,13 +2582,15 @@ mod tests {
             .expect("lower nested shape");
         let transform = only_group(&page.elements[0]).transform;
 
+        // The shape mirrors about its centre, then turns a quarter, then
+        // the group maps it.
         assert_point_close(
             transform.apply(Point { x: 0.0, y: 0.0 }),
-            Point { x: 29.0, y: 61.0 },
+            Point { x: 37.0, y: 85.0 },
         );
         assert_point_close(
             transform.apply(Point { x: 8.0, y: 4.0 }),
-            Point { x: 37.0, y: 85.0 },
+            Point { x: 29.0, y: 61.0 },
         );
     }
 

@@ -134,6 +134,35 @@ pub(crate) fn non_visual_drawing_name(start: &BytesStart<'_>) -> Result<Option<S
 
 pub(crate) fn set_non_visual_drawing_name(xml: &mut Vec<u8>, name: &str) -> Result<(), OxmlError> {
     oxml_core::xml::reject_non_xml_characters("shape name", name)?;
+    set_non_visual_drawing_attribute(xml, "name", Some(name))
+}
+
+/// Returns one unqualified attribute of a `p:cNvPr` fragment, decoded.
+pub(crate) fn non_visual_drawing_attribute(xml: &[u8], name: &str) -> Option<String> {
+    let mut reader = Reader::from_reader(xml);
+    let mut buffer = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buffer).ok()? {
+            Event::Start(start) | Event::Empty(start) => {
+                return all_attributes(&start)
+                    .ok()?
+                    .into_iter()
+                    .find_map(|(key, value)| (key == name).then_some(value));
+            }
+            Event::Eof => return None,
+            _ => {}
+        }
+        buffer.clear();
+    }
+}
+
+/// Sets one unqualified attribute of a `p:cNvPr` fragment in place, appends
+/// it when absent, or removes it for `None`, keeping every child as written.
+pub(crate) fn set_non_visual_drawing_attribute(
+    xml: &mut Vec<u8>,
+    name: &str,
+    value: Option<&str>,
+) -> Result<(), OxmlError> {
     let mut reader = Reader::from_reader(xml.as_slice());
     let mut buffer = Vec::new();
     loop {
@@ -147,15 +176,17 @@ pub(crate) fn set_non_visual_drawing_name(xml: &mut Vec<u8>, name: &str) -> Resu
                 let mut replaced = false;
                 for attribute in start.attributes().with_checks(false) {
                     let attribute = attribute?;
-                    if attribute.key.as_ref() == b"name" {
-                        replacement.push_attribute(("name", name));
+                    if attribute.key.as_ref() == name.as_bytes() {
+                        if let Some(value) = value {
+                            replacement.push_attribute((name, value));
+                        }
                         replaced = true;
                     } else {
                         replacement.push_attribute(attribute);
                     }
                 }
-                if !replaced {
-                    replacement.push_attribute(("name", name));
+                if let (false, Some(value)) = (replaced, value) {
+                    replacement.push_attribute((name, value));
                 }
                 let mut writer = Writer::new(Vec::new());
                 if is_empty {
@@ -175,6 +206,168 @@ pub(crate) fn set_non_visual_drawing_name(xml: &mut Vec<u8>, name: &str) -> Resu
             _ => {}
         }
         buffer.clear();
+    }
+}
+
+/// The `a:ext` URI of the Office 2019 decorative flag on `p:cNvPr`.
+const DECORATIVE_EXTENSION_URI: &str = "{C183D7F6-B498-43B3-948B-1728B52AA6E4}";
+
+/// The extension PowerPoint writes for a shape marked decorative, which
+/// screen readers then skip.
+const DECORATIVE_EXTENSION: &str = r#"<a:ext uri="{C183D7F6-B498-43B3-948B-1728B52AA6E4}"><adec:decorative xmlns:adec="http://schemas.microsoft.com/office/drawing/2017/decorative" val="1"/></a:ext>"#;
+
+/// Returns whether a `p:cNvPr` fragment carries the decorative extension with
+/// a true `val`.
+pub(crate) fn non_visual_drawing_decorative(xml: &[u8]) -> bool {
+    let Some((_, children, _)) = split_element(xml) else {
+        return false;
+    };
+    children
+        .iter()
+        .filter(|child| element_local_name(child).as_deref() == Some(b"extLst".as_slice()))
+        .filter_map(|list| split_element(list))
+        .flat_map(|(_, extensions, _)| extensions)
+        .filter(|extension| {
+            element_attribute(extension, "uri").as_deref() == Some(DECORATIVE_EXTENSION_URI)
+        })
+        .filter_map(|extension| split_element(&extension).map(|(_, flags, _)| flags))
+        .flatten()
+        .any(|flag| {
+            element_local_name(&flag).as_deref() == Some(b"decorative".as_slice())
+                && matches!(
+                    element_attribute(&flag, "val").as_deref(),
+                    Some("1" | "true")
+                )
+        })
+}
+
+/// Marks a `p:cNvPr` fragment decorative, or removes the mark, keeping its
+/// other children and extensions in place.
+///
+/// The extension goes into the existing `a:extLst`, or into a new one after
+/// the hyperlinks, where the schema places it. Removing the last extension
+/// removes the list.
+pub(crate) fn set_non_visual_drawing_decorative(
+    xml: &mut Vec<u8>,
+    decorative: bool,
+) -> Result<(), OxmlError> {
+    let (start, mut children, end) = split_element(xml)
+        .ok_or_else(|| OxmlError::MissingElement("non-visual drawing properties".to_owned()))?;
+    let list_index = children
+        .iter()
+        .position(|child| element_local_name(child).as_deref() == Some(b"extLst".as_slice()));
+    let is_decorative = |extension: &Vec<u8>| {
+        element_attribute(extension, "uri").as_deref() == Some(DECORATIVE_EXTENSION_URI)
+    };
+    match (list_index, decorative) {
+        (Some(index), _) => {
+            let (list_start, mut extensions, list_end) = split_element(&children[index])
+                .ok_or_else(|| OxmlError::MissingElement("a:extLst".to_owned()))?;
+            extensions.retain(|extension| !is_decorative(extension));
+            if decorative {
+                extensions.push(DECORATIVE_EXTENSION.as_bytes().to_vec());
+            }
+            if extensions
+                .iter()
+                .any(|extension| element_local_name(extension).is_some())
+            {
+                children[index] = join_element(&list_start, &extensions, &list_end);
+            } else {
+                children.remove(index);
+            }
+        }
+        (None, true) => {
+            children.push(format!("<a:extLst>{DECORATIVE_EXTENSION}</a:extLst>").into_bytes())
+        }
+        (None, false) => return Ok(()),
+    }
+    *xml = join_element(&start, &children, &end);
+    Ok(())
+}
+
+/// One element split into its start tag, its immediate children and text as
+/// written, and its end tag.
+type ElementParts = (Vec<u8>, Vec<Vec<u8>>, Vec<u8>);
+
+/// Splits one element into its parts. An empty element gets a start tag and
+/// an end tag, so children can be added.
+fn split_element(xml: &[u8]) -> Option<ElementParts> {
+    let mut reader = Reader::from_reader(xml);
+    let mut buffer = Vec::new();
+    let (start, name, is_empty) = loop {
+        let before = reader.buffer_position() as usize;
+        match reader.read_event_into(&mut buffer).ok()? {
+            Event::Start(start) => {
+                break (
+                    xml[before..reader.buffer_position() as usize].to_vec(),
+                    start.name().as_ref().to_vec(),
+                    false,
+                );
+            }
+            Event::Empty(start) => {
+                let mut writer = Writer::new(Vec::new());
+                writer.write_event(Event::Start(start.to_owned())).ok()?;
+                break (writer.into_inner(), start.name().as_ref().to_vec(), true);
+            }
+            Event::Eof => return None,
+            _ => {}
+        }
+        buffer.clear();
+    };
+    let end = [b"</".as_slice(), &name, b">"].concat();
+    if is_empty {
+        return Some((start, Vec::new(), end));
+    }
+    let mut children = Vec::new();
+    loop {
+        buffer.clear();
+        let before = reader.buffer_position() as usize;
+        match reader.read_event_into(&mut buffer).ok()? {
+            Event::Start(child) => {
+                let child_name = child.name().as_ref().to_vec();
+                reader
+                    .read_to_end_into(quick_xml::name::QName(&child_name), &mut Vec::new())
+                    .ok()?;
+            }
+            Event::End(_) => return Some((start, children, end)),
+            Event::Eof => return None,
+            _ => {}
+        }
+        children.push(xml[before..reader.buffer_position() as usize].to_vec());
+    }
+}
+
+fn join_element(start: &[u8], children: &[Vec<u8>], end: &[u8]) -> Vec<u8> {
+    let mut xml = start.to_vec();
+    for child in children {
+        xml.extend_from_slice(child);
+    }
+    xml.extend_from_slice(end);
+    xml
+}
+
+/// The local name of a raw child that is an element, or `None` for text,
+/// comments, and other nodes.
+fn element_local_name(xml: &[u8]) -> Option<Vec<u8>> {
+    let mut reader = Reader::from_reader(xml);
+    let mut buffer = Vec::new();
+    match reader.read_event_into(&mut buffer).ok()? {
+        Event::Start(start) | Event::Empty(start) => {
+            Some(oxml_core::xml::local_name(start.name().as_ref()).to_vec())
+        }
+        _ => None,
+    }
+}
+
+fn element_attribute(xml: &[u8], name: &str) -> Option<String> {
+    let mut reader = Reader::from_reader(xml);
+    let mut buffer = Vec::new();
+    match reader.read_event_into(&mut buffer).ok()? {
+        Event::Start(start) | Event::Empty(start) => all_attributes(&start)
+            .ok()?
+            .into_iter()
+            .find_map(|(key, value)| (key == name).then_some(value)),
+        _ => None,
     }
 }
 

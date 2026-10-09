@@ -6,6 +6,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyByteArray, PyBytes, PyIterator, PyList, PySlice, PyString, PyTuple};
 use smallvec::smallvec;
 
+use crate::Scope;
 use crate::dml::{FillTarget, PyFillFormat, PyLineFormat, PyShadowFormat};
 use crate::normalize_index;
 use crate::presentation::PyPresentation;
@@ -668,7 +669,9 @@ impl PyShape {
             .ok_or_else(|| PyIndexError::new_err("shape index out of range"))?
             .set_text(text)
             .map_err(|error| rpptx_to_pyerr(py, error))?;
-        presentation.revisions.bump();
+        presentation
+            .revisions
+            .invalidate(Scope::Paragraphs, "Shape.text");
         Ok(())
     }
 
@@ -722,6 +725,278 @@ impl PyShape {
             py,
             PyTable::new(self.presentation.clone_ref(py), self.path.clone()),
         )
+    }
+
+    // Shape authoring: alternative text, flips, ungrouping, picture
+    // placeholders, and connector glue.
+
+    /// The alternative text screen readers announce, `p:cNvPr/@descr`, or
+    /// `None` without one. Assigning `None` or `""` removes it.
+    #[getter]
+    fn alt_text(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        self.read(py, |shape| shape.alt_text())
+    }
+
+    #[setter]
+    fn set_alt_text(&self, py: Python<'_>, value: Option<&str>) -> PyResult<()> {
+        self.edit(py, |shape| {
+            shape.set_alt_text(value.filter(|value| !value.is_empty()))
+        })
+    }
+
+    /// The alternative-text title, `p:cNvPr/@title`, or `None` without one.
+    /// Google Slides keeps only `alt_text`.
+    #[getter]
+    fn alt_title(&self, py: Python<'_>) -> PyResult<Option<String>> {
+        self.read(py, |shape| shape.alt_title())
+    }
+
+    #[setter]
+    fn set_alt_title(&self, py: Python<'_>, value: Option<&str>) -> PyResult<()> {
+        self.edit(py, |shape| {
+            shape.set_alt_title(value.filter(|value| !value.is_empty()))
+        })
+    }
+
+    /// Whether the shape is marked decorative, so that screen readers skip it.
+    #[getter]
+    fn decorative(&self, py: Python<'_>) -> PyResult<bool> {
+        self.read(py, |shape| shape.decorative())
+    }
+
+    #[setter]
+    fn set_decorative(&self, py: Python<'_>, value: bool) -> PyResult<()> {
+        self.edit(py, |shape| shape.set_decorative(value))
+    }
+
+    /// Whether the shape is mirrored left to right, `a:xfrm/@flipH`.
+    #[getter]
+    fn flip_h(&self, py: Python<'_>) -> PyResult<bool> {
+        self.read(py, |shape| shape.flip_horizontal())
+    }
+
+    #[setter]
+    fn set_flip_h(&self, py: Python<'_>, value: bool) -> PyResult<()> {
+        self.materialize_geometry(py)?;
+        self.edit(py, |shape| shape.set_flip_horizontal(value))
+    }
+
+    /// Whether the shape is mirrored top to bottom, `a:xfrm/@flipV`.
+    #[getter]
+    fn flip_v(&self, py: Python<'_>) -> PyResult<bool> {
+        self.read(py, |shape| shape.flip_vertical())
+    }
+
+    #[setter]
+    fn set_flip_v(&self, py: Python<'_>, value: bool) -> PyResult<()> {
+        self.materialize_geometry(py)?;
+        self.edit(py, |shape| shape.set_flip_vertical(value))
+    }
+
+    /// Replaces this group by its members, which keep their place on the
+    /// slide, and returns them. The group's scale, flips, and rotation move
+    /// into each member, as PowerPoint's Ungroup does.
+    fn ungroup<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        self.validate(py)?;
+        let slide = slide_index(&self.path)?;
+        let mut indices = shape_indices(&self.path).collect::<Vec<_>>();
+        let index = indices.pop().expect("a shape path names a shape");
+        let range = {
+            let mut presentation = self.presentation.borrow_mut(py);
+            let range = presentation
+                .inner
+                .shapes_mut(slide, &indices)
+                .ok_or_else(|| PyValueError::new_err("the shape's collection is not editable"))?
+                .ungroup(index)
+                .map_err(|error| rpptx_to_pyerr(py, error))?;
+            presentation
+                .revisions
+                .invalidate(Scope::Shapes, "Shape.ungroup()");
+            range
+        };
+        let mut parent = self.path.segs.clone();
+        parent.pop();
+        let members = range
+            .map(|index| {
+                let mut segments = parent.clone();
+                segments.push(PathSeg::Shape(index));
+                let path = self.presentation.borrow(py).revisions.capture(segments);
+                Py::new(py, PyShape::new(self.presentation.clone_ref(py), path))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        PyList::new(py, members)
+    }
+
+    /// Fills this picture or content placeholder with an image and returns
+    /// the new picture, as python-pptx `insert_picture` does. The image is
+    /// cropped to the placeholder's aspect ratio, so it fills the frame
+    /// without distortion, and the picture keeps the placeholder's frame.
+    fn insert_picture(
+        &self,
+        py: Python<'_>,
+        image_file: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyShape>> {
+        self.validate(py)?;
+        let (bytes, filename) = image_bytes(image_file)?;
+        let slide = slide_index(&self.path)?;
+        let indices = shape_indices(&self.path).collect::<Vec<_>>();
+        let path = {
+            let mut presentation = self.presentation.borrow_mut(py);
+            presentation
+                .inner
+                .insert_picture(slide, &indices, &bytes, &filename)
+                .map_err(|error| rpptx_to_pyerr(py, error))?;
+            presentation
+                .revisions
+                .invalidate(Scope::Shapes, "Shape.insert_picture()");
+            presentation.revisions.capture(self.path.segs.clone())
+        };
+        Py::new(py, PyShape::new(self.presentation.clone_ref(py), path))
+    }
+
+    /// Glues this connector's begin point to connection site `cxn_pt_idx` of
+    /// `shape` and moves it there, as python-pptx `begin_connect` does.
+    fn begin_connect(
+        &self,
+        py: Python<'_>,
+        shape: &Bound<'_, PyAny>,
+        cxn_pt_idx: u32,
+    ) -> PyResult<()> {
+        self.connect(py, rpptx::ConnectorEnd::Begin, shape, cxn_pt_idx)
+    }
+
+    /// Glues this connector's end point to connection site `cxn_pt_idx` of
+    /// `shape` and moves it there, as python-pptx `end_connect` does.
+    fn end_connect(
+        &self,
+        py: Python<'_>,
+        shape: &Bound<'_, PyAny>,
+        cxn_pt_idx: u32,
+    ) -> PyResult<()> {
+        self.connect(py, rpptx::ConnectorEnd::End, shape, cxn_pt_idx)
+    }
+
+    /// The x coordinate of a connector's begin point.
+    #[getter]
+    fn begin_x(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let points = self.connector_points(py)?;
+        length(py, points.map(|points| points[0].0))
+    }
+
+    /// Moves that end and releases its glue, as python-pptx assigns it.
+    #[setter]
+    fn set_begin_x(&self, py: Python<'_>, value: i64) -> PyResult<()> {
+        self.move_connector_end(py, rpptx::ConnectorEnd::Begin, 0, value)
+    }
+
+    /// The y coordinate of a connector's begin point.
+    #[getter]
+    fn begin_y(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let points = self.connector_points(py)?;
+        length(py, points.map(|points| points[0].1))
+    }
+
+    /// Moves that end and releases its glue, as python-pptx assigns it.
+    #[setter]
+    fn set_begin_y(&self, py: Python<'_>, value: i64) -> PyResult<()> {
+        self.move_connector_end(py, rpptx::ConnectorEnd::Begin, 1, value)
+    }
+
+    /// The x coordinate of a connector's end point.
+    #[getter]
+    fn end_x(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let points = self.connector_points(py)?;
+        length(py, points.map(|points| points[1].0))
+    }
+
+    /// Moves that end and releases its glue, as python-pptx assigns it.
+    #[setter]
+    fn set_end_x(&self, py: Python<'_>, value: i64) -> PyResult<()> {
+        self.move_connector_end(py, rpptx::ConnectorEnd::End, 0, value)
+    }
+
+    /// The y coordinate of a connector's end point.
+    #[getter]
+    fn end_y(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let points = self.connector_points(py)?;
+        length(py, points.map(|points| points[1].1))
+    }
+
+    /// Moves that end and releases its glue, as python-pptx assigns it.
+    #[setter]
+    fn set_end_y(&self, py: Python<'_>, value: i64) -> PyResult<()> {
+        self.move_connector_end(py, rpptx::ConnectorEnd::End, 1, value)
+    }
+}
+
+/// Connector helpers of the shape authoring members above.
+impl PyShape {
+    fn require_connector(&self, py: Python<'_>) -> PyResult<()> {
+        if self.read(py, |shape| shape.kind())? == rpptx::ShapeKind::Connector {
+            Ok(())
+        } else {
+            Err(PyValueError::new_err(
+                "shape is not a connector; add one with shapes.add_connector(...)",
+            ))
+        }
+    }
+
+    fn connector_points(&self, py: Python<'_>) -> PyResult<Option<[(rpptx::Emu, rpptx::Emu); 2]>> {
+        self.require_connector(py)?;
+        self.read(py, |shape| shape.connector_endpoints())
+    }
+
+    /// Sets one coordinate, `axis` 0 for x and 1 for y, of one connector end
+    /// and keeps the other coordinate.
+    fn move_connector_end(
+        &self,
+        py: Python<'_>,
+        end: rpptx::ConnectorEnd,
+        axis: usize,
+        value: i64,
+    ) -> PyResult<()> {
+        check_coordinate(if axis == 0 { "x" } else { "y" }, value, MIN_COORDINATE)?;
+        let points = self.connector_points(py)?.unwrap_or_default();
+        let (mut x, mut y) = match end {
+            rpptx::ConnectorEnd::Begin => points[0],
+            rpptx::ConnectorEnd::End => points[1],
+        };
+        if axis == 0 {
+            x = rpptx::Emu(value);
+        } else {
+            y = rpptx::Emu(value);
+        }
+        self.edit(py, |shape| shape.set_connector_endpoint(end, x, y))
+    }
+
+    fn connect(
+        &self,
+        py: Python<'_>,
+        end: rpptx::ConnectorEnd,
+        shape: &Bound<'_, PyAny>,
+        site: u32,
+    ) -> PyResult<()> {
+        self.require_connector(py)?;
+        let target = shape.extract::<PyRef<'_, PyShape>>()?;
+        if !target.presentation.is(&self.presentation) {
+            return Err(PyValueError::new_err("shape is not in this presentation"));
+        }
+        target.validate(py)?;
+        let slide = slide_index(&self.path)?;
+        if slide_index(&target.path)? != slide {
+            return Err(PyValueError::new_err(
+                "a connector connects only to a shape of its own slide",
+            ));
+        }
+        let shape_id = target
+            .read(py, |shape| shape.non_visual_id())?
+            .ok_or_else(|| PyValueError::new_err("shape has no id"))?;
+        let indices = shape_indices(&self.path).collect::<Vec<_>>();
+        self.presentation
+            .borrow_mut(py)
+            .inner
+            .connect_connector(slide, &indices, end, shape_id, site)
+            .map_err(|error| rpptx_to_pyerr(py, error))
     }
 }
 
@@ -928,8 +1203,8 @@ impl PyShapeCollection {
         }))
     }
 
-    /// Adds one shape to the slide or group this collection holds, advances
-    /// the revision once, and returns the new shape captured at it.
+    /// Adds one shape to the slide or group this collection holds and
+    /// returns it.
     fn add(
         &self,
         py: Python<'_>,
@@ -954,9 +1229,10 @@ impl PyShapeCollection {
         Py::new(py, PyShape::new(self.presentation.clone_ref(py), path))
     }
 
+    /// Returns the shape just appended at `index`. An append renumbers no
+    /// shape, so every handle stays valid.
     fn capture_added(&self, py: Python<'_>, index: usize) -> PyResult<Py<PyShape>> {
-        let mut presentation = self.presentation.borrow_mut(py);
-        presentation.revisions.bump();
+        let presentation = self.presentation.borrow(py);
         let mut segments = self.path.segs.clone();
         segments.push(PathSeg::Shape(index));
         let path = presentation.revisions.capture(segments);
@@ -1104,9 +1380,24 @@ impl PyShapeCollection {
         })
     }
 
-    /// Appends an empty group, which its own `shapes` collection populates.
-    fn add_group_shape(&mut self, py: Python<'_>) -> PyResult<Py<PyShape>> {
-        self.add(py, |shapes| shapes.add_group_shape().map(drop))
+    /// Appends an empty group, which its own `shapes` collection populates,
+    /// or, given `shapes` of this collection, moves them into a new group as
+    /// [`Self::group`] does, as python-pptx `add_group_shape(shapes)` does.
+    #[pyo3(signature = (shapes = None))]
+    fn add_group_shape(
+        &mut self,
+        py: Python<'_>,
+        shapes: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyShape>> {
+        let members = match shapes {
+            Some(shapes) => shapes.try_iter()?.collect::<PyResult<Vec<_>>>()?,
+            None => Vec::new(),
+        };
+        if members.is_empty() {
+            self.add(py, |shapes| shapes.add_group_shape().map(drop))
+        } else {
+            self.group(py, PyList::new(py, members)?.as_any())
+        }
     }
 
     /// Removes one shape of this slide and the package parts only it used.
@@ -1127,7 +1418,9 @@ impl PyShapeCollection {
             .inner
             .remove_shape(slide_index, shape_index)
             .map_err(|error| rpptx_to_pyerr(py, error))?;
-        presentation.revisions.bump();
+        presentation
+            .revisions
+            .invalidate(Scope::Shapes, "ShapeCollection.remove()");
         Ok(())
     }
 
@@ -1145,7 +1438,9 @@ impl PyShapeCollection {
             .inner
             .move_shape(slide_index, from_, to)
             .map_err(|error| rpptx_to_pyerr(py, error))?;
-        presentation.revisions.bump();
+        presentation
+            .revisions
+            .invalidate(Scope::Shapes, "ShapeCollection.move()");
         Ok(())
     }
 
@@ -1174,6 +1469,89 @@ impl PyShapeCollection {
         })
     }
 
+    /// Moves `shapes`, members of this collection, into a new group and
+    /// returns it. The shapes keep their place on the slide and their order,
+    /// and the group takes the z-order place of the topmost one. Shape
+    /// handles of the collection are invalidated, so re-read them through
+    /// the returned group's `shapes`.
+    fn group(&mut self, py: Python<'_>, shapes: &Bound<'_, PyAny>) -> PyResult<Py<PyShape>> {
+        let indices = self.member_indices(py, shapes)?;
+        let (slide_index, group) = self.target(py)?;
+        let index = {
+            let mut presentation = self.presentation.borrow_mut(py);
+            presentation
+                .inner
+                .shapes_mut(slide_index, &group)
+                .expect("the target is a slide or a group")
+                .group(&indices)
+                .map_err(|error| rpptx_to_pyerr(py, error))?;
+            presentation
+                .revisions
+                .invalidate(Scope::Shapes, "ShapeCollection.group()");
+            indices.iter().max().expect("a group has members") + 1 - indices.len()
+        };
+        self.item(py, index)
+    }
+
+    /// Lines `shapes` up on one edge or centre line, as PowerPoint's Align
+    /// does: `"left"`, `"center"`, `"right"`, `"top"`, `"middle"`, or
+    /// `"bottom"`, of their bounding box (`relative_to="selection"`) or of
+    /// the slide (`relative_to="slide"`). Boxes include flips and rotation.
+    #[pyo3(signature = (shapes, alignment, *, relative_to = "selection"))]
+    fn align(
+        &self,
+        py: Python<'_>,
+        shapes: &Bound<'_, PyAny>,
+        alignment: &str,
+        relative_to: &str,
+    ) -> PyResult<()> {
+        let alignment = match alignment {
+            "left" => rpptx::ShapeAlignment::Left,
+            "center" => rpptx::ShapeAlignment::Center,
+            "right" => rpptx::ShapeAlignment::Right,
+            "top" => rpptx::ShapeAlignment::Top,
+            "middle" => rpptx::ShapeAlignment::Middle,
+            "bottom" => rpptx::ShapeAlignment::Bottom,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "alignment must be 'left', 'center', 'right', 'top', 'middle', or \
+                     'bottom', got {other:?}"
+                )));
+            }
+        };
+        let reference = arrange_reference(relative_to)?;
+        self.arrange(py, shapes, |collection, indices| {
+            collection.align(indices, alignment, reference)
+        })
+    }
+
+    /// Spaces `shapes` evenly, `"horizontal"` or `"vertical"`, as
+    /// PowerPoint's Distribute does: between the outermost two of them
+    /// (`relative_to="selection"`, which needs three shapes to move any) or
+    /// across the slide (`relative_to="slide"`).
+    #[pyo3(signature = (shapes, direction, *, relative_to = "selection"))]
+    fn distribute(
+        &self,
+        py: Python<'_>,
+        shapes: &Bound<'_, PyAny>,
+        direction: &str,
+        relative_to: &str,
+    ) -> PyResult<()> {
+        let direction = match direction {
+            "horizontal" => rpptx::DistributeDirection::Horizontal,
+            "vertical" => rpptx::DistributeDirection::Vertical,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "direction must be 'horizontal' or 'vertical', got {other:?}"
+                )));
+            }
+        };
+        let reference = arrange_reference(relative_to)?;
+        self.arrange(py, shapes, |collection, indices| {
+            collection.distribute(indices, direction, reference)
+        })
+    }
+
     #[pyo3(signature = (image_file, left, top, width = None, height = None))]
     fn add_picture(
         &mut self,
@@ -1198,6 +1576,69 @@ impl PyShapeCollection {
                 )
                 .map(drop)
         })
+    }
+}
+
+/// Arrangement helpers of the shape authoring members of
+/// `ShapeCollection`.
+impl PyShapeCollection {
+    /// Returns the z-order index in this collection of each shape handle in
+    /// `shapes`, raising for a handle of another collection.
+    fn member_indices(&self, py: Python<'_>, shapes: &Bound<'_, PyAny>) -> PyResult<Vec<usize>> {
+        self.target(py)?;
+        let mut indices = Vec::new();
+        for (position, shape) in shapes.try_iter()?.enumerate() {
+            let shape = shape?;
+            let shape = shape.extract::<PyRef<'_, PyShape>>().map_err(|_| {
+                PyTypeError::new_err(format!(
+                    "shapes[{position}] must be a Shape of this collection"
+                ))
+            })?;
+            if !shape.presentation.is(&self.presentation) {
+                return Err(PyValueError::new_err(format!(
+                    "shapes[{position}] is not in this presentation"
+                )));
+            }
+            shape.validate(py)?;
+            match shape.path.segs.split_last() {
+                Some((PathSeg::Shape(index), parent)) if parent == self.path.segs.as_slice() => {
+                    indices.push(*index);
+                }
+                _ => {
+                    return Err(PyValueError::new_err(format!(
+                        "shapes[{position}] is not a member of this collection; arrange \
+                         shapes of one slide, or of one group, through its own shapes"
+                    )));
+                }
+            }
+        }
+        Ok(indices)
+    }
+
+    fn arrange(
+        &self,
+        py: Python<'_>,
+        shapes: &Bound<'_, PyAny>,
+        arrange: impl FnOnce(&mut rpptx::ShapesMut<'_>, &[usize]) -> rpptx::Result<()>,
+    ) -> PyResult<()> {
+        let indices = self.member_indices(py, shapes)?;
+        let (slide_index, group) = self.target(py)?;
+        let mut presentation = self.presentation.borrow_mut(py);
+        let mut collection = presentation
+            .inner
+            .shapes_mut(slide_index, &group)
+            .expect("the target is a slide or a group");
+        arrange(&mut collection, &indices).map_err(|error| rpptx_to_pyerr(py, error))
+    }
+}
+
+fn arrange_reference(relative_to: &str) -> PyResult<rpptx::ArrangeReference> {
+    match relative_to {
+        "selection" => Ok(rpptx::ArrangeReference::Selection),
+        "slide" => Ok(rpptx::ArrangeReference::Slide),
+        other => Err(PyValueError::new_err(format!(
+            "relative_to must be 'selection' or 'slide', got {other:?}"
+        ))),
     }
 }
 

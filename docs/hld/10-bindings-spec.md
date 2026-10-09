@@ -448,21 +448,38 @@ document revision. A rejected image, filename, dimension pair, or stale path
 leaves package bytes and binding revisions unchanged.
 
 `rpptx` mirrors python-pptx through an unpublished mixed-layout `rpptx-py`
-crate. `Presentation` owns the Rust facade and one revision counter.
+crate. `Presentation` owns the Rust facade and one revision counter per
+handle scope.
 `Presentation(path)` opens a file and the static `Presentation.from_bytes`
 opens in-memory package bytes, as the rdocx `Document` does. Lazy layouts,
 slides, shapes, placeholders, text frames, paragraphs, runs, columns and cells
 store only a presentation reference and `ContentPath`. The bounded
 source-compatibility surface is the seven python-pptx 1.0.2 Getting Started
-workflows. They change the import namespace and re-fetch through the public
-path after each structural write, because strict global revision invalidation
-intentionally stales every pre-write handle and collection. Pure-Python
+workflows. They change only the import namespace. Pure-Python
 `Length`, `Inches`, `Pt`, `RGBColor`, and the `MSO_SHAPE`, `MSO_SHAPE_TYPE`,
 `MSO_CONNECTOR_TYPE`, and `MSO_FILL_TYPE` enumerations keep native inheritance
 outside the limited ABI. `MSO_SHAPE` carries the 181 python-pptx
 `MSO_AUTO_SHAPE_TYPE` members whose preset rpptx can author, each with its
 preset name as `xml_value`. `UP_ARROW` is absent because the generated preset
 table has no `upArrow`.
+
+Handles go stale by scope, so the handles python-pptx scripts hold across an
+edit keep working. A handle belongs to the scope of the last step of its
+path: slide, shape, table row or cell, paragraph, or run. An edit that
+renumbers the members of one scope advances the revision of that scope and of
+every narrower one. Removing, moving, or duplicating a slide, and importing
+one before the end, invalidates every handle. Removing, moving, grouping, or
+ungrouping shapes and `insert_picture` invalidate shape, table, paragraph, and
+run handles. A row or column edit invalidates table, paragraph, and run
+handles. Replacing the whole text of a shape or text frame invalidates
+paragraph and run handles, and replacing a paragraph's text or a counted
+replacement invalidates run handles. Appends renumber nothing, so
+`add_slide`, every shape addition, `add_paragraph`, and `add_run` keep every
+handle, and so do notes, comment, layout, geometry, and formatting writes.
+`prs.slides`, `prs.slide_layouts`, and layout handles read the presentation
+live and never go stale. A `StaleElementError` names the handle, its scope
+and that scope's revisions, the call that last advanced them, such as
+`SlideCollection.remove()`, and the public path that re-fetches it.
 
 Presentation `Shape` handles expose optional `Length` values for left, top,
 width, and height plus optional non-visual id and name. Those values are the
@@ -477,13 +494,13 @@ pairs the assigned value with the bundled 16:9 size. `Slide.slide_layout`
 returns the layout the slide relates to, equal to the same entry of
 `slide_layouts`, and `SlideLayoutCollection.index` returns its position.
 Assigning a layout of the same presentation to `slide_layout` uses the native
-staged layout change and advances the revision once. A placeholder the new
+staged layout change and keeps every handle valid. A placeholder the new
 layout does not place keeps the transform it inherited.
 `Slide.hidden` reads and writes `p:sld/@show`. `Slide.background.fill` is a
 live `FillFormat` over the direct background fill that never changes the slide
 when read, and `follow_master_background` reports and sets whether the slide
 has no `p:bg`. `SlideCollection.remove` and `SlideCollection.move(from_, to)`
-use the native staged slide operations and advance the revision once.
+use the native staged slide operations and invalidate every handle.
 `SlideCollection.import_slide(slide, layout=None, index=None)` wraps the native
 import. `layout` must be a layout of the destination. `index` is an insertion
 position counted from the end when negative, and one outside the collection is
@@ -491,8 +508,8 @@ an `IndexError`. A slide of the same presentation is imported from a snapshot
 and keeps its own layout unless `layout` is given.
 `SlideCollection.duplicate(slide)` copies a slide of the same presentation,
 with its speaker notes, to the position right after it through the native
-staged `duplicate_slide`, advances the revision once, and returns the new slide
-captured at that revision. As in the facade, a slide that owns a modern
+staged `duplicate_slide`, invalidates every handle, and returns the new slide.
+As in the facade, a slide that owns a modern
 comments part is refused, even when removing its last comment left that part
 empty, and the refusal leaves the package and the revision unchanged.
 
@@ -564,6 +581,26 @@ PowerPoint honours it. Two current `Slide` handles compare equal when they name
 the same slide, so `target_slide == prs.slides[2]` holds, and like python-pptx a
 `Slide` is not hashable. No click action write advances the revision.
 
+`Shape.alt_text` and `alt_title` read and write `p:cNvPr/@descr` and `@title`,
+where `None` or an empty string removes the attribute, and `decorative` writes
+the `adec:decorative` extension PowerPoint writes in `p:cNvPr/a:extLst`, so
+screen readers skip the shape. Google Slides imports only `descr`. `flip_h`
+and `flip_v` read and write `a:xfrm/@flipH` and `@flipV`, copying a
+placeholder's inherited transform first as a coordinate write does, and a
+graphic frame, which PowerPoint does not flip, raises `RpptxError`.
+`Shape.insert_picture(image_file)` fills a picture or content placeholder as
+python-pptx does: the `p:sp` becomes a `p:pic` with the same id, name, and
+`p:ph`, so it keeps its frame, and the image is cropped evenly on its longer
+sides to the frame's aspect ratio. Another kind of placeholder or shape
+raises. A connector's `begin_connect(shape, cxn_pt_idx)` and `end_connect`
+record `a:stCxn` or `a:endCxn` and move that end to the connection site, which
+is the preset geometry's own `a:cxnLst` site with its adjustments, flips, and
+rotation, or one of python-pptx's four edge midpoints for a shape without a
+preset or whose preset defines none. `begin_x`, `begin_y`, `end_x`, and
+`end_y` read and write the endpoints in the parent's coordinates, as in
+python-pptx, and an assignment releases that end's glue. A new slide names its placeholders as PowerPoint and
+python-pptx do, such as `Title 1` and `Content Placeholder 2`.
+
 `shadow` returns a live `ShadowFormat` for ordinary shapes, pictures,
 connectors, and groups, and raises `NotImplementedError` for a graphic frame
 as python-pptx does. `inherit` is python-pptx's: it reads whether the shape
@@ -590,25 +627,37 @@ EMU.
 member. `add_connector` follows the python-pptx signature, `add_group_shape`
 appends an empty group, and `add_picture` accepts a path, bytes, or a binary
 file-like object, which is rewound first when it can seek. `remove` deletes one
-shape of a slide with the relationships and parts only it used and advances the
-revision once. `move(from_, to)` changes the z-order like
-`SlideCollection.move`, so the shape ends up at index `to` and draws above the
-shapes before it, and advances the revision once. python-pptx has no z-order
-API.
+shape of a slide with the relationships and parts only it used. `move(from_,
+to)` changes the z-order like `SlideCollection.move`, so the shape ends up at
+index `to` and draws above the shapes before it. python-pptx has no z-order
+API. Both invalidate shape handles.
 
 A group's `shapes` collection has the same `add_textbox`, `add_shape`,
 `add_connector`, `add_group_shape`, `add_table`, and `add_picture` through the
 native `ShapesMut`, so groups nest to any depth. A member takes a `p:cNvPr` id
 unused across the slide, and the group, then every group enclosing it, is refit
 to the union of its members as python-pptx does, so members of a new group keep
-their slide coordinates. An addition to a group advances the revision once,
-like any addition, so the group handle and its collection go stale and the
-returned member is captured at the new revision. The next addition re-fetches
-the group, for example through `prs.slides[0].shapes[0].shapes`.
+their slide coordinates. An addition to a group renumbers nothing, so the group
+handle, its collection, and its earlier members stay valid.
 A group added inside a group has the zero `a:xfrm` python-pptx writes, so its
 `left`, `top`, `width`, and `height` read zero until its first member arrives,
-while a group added to a slide's own shapes reads `None`. `add_group_shape` has
-no python-pptx `shapes` argument for moving existing shapes into the new group.
+while a group added to a slide's own shapes reads `None`.
+`add_group_shape(shapes)` moves existing members of the collection into the new
+group, as python-pptx does, and `group(shapes)` is the same call without the
+empty form. The native `ShapesMut::group` keeps each member's slide position,
+its order, and its id: the group's `a:chOff` and `a:chExt` equal its `a:off`
+and `a:ext`, the union of the members' boxes, and the group takes the z-order
+place of the topmost member. A placeholder, which PowerPoint does not group,
+and a shape of another collection raise. `Shape.ungroup()` replaces a group by
+its members and returns them, with the group's scale, flips, and rotation
+moved into each member's own transform in PowerPoint's flip-then-rotate order.
+A table or chart cannot rotate or flip, so ungrouping a rotated, flipped, or
+scaled group that holds one raises, as does a group that slide animations
+target. `ShapeCollection.align(shapes, alignment, *, relative_to="selection")`
+and `distribute(shapes, direction, *, relative_to="selection")` run the
+native `ShapesMut::align` and `distribute` on the drawn boxes, flips and
+rotation included, against the shapes' bounding box or the slide. python-pptx
+has neither.
 Adding to the collection of a shape that is not a group raises `ValueError`
 before any image is read, and so does adding to a group inside an
 `mc:AlternateContent` fallback, which stays read-only. `remove` and `move` on a
@@ -649,8 +698,8 @@ so a frame PowerPoint measured taller than its stored rows keeps that excess.
 A negative index counts from the end, as in `list.insert`, and an index outside
 `-len..=len` raises `IndexError`. A row or column of another table raises
 `ValueError`, and removing the only row or column raises `RpptxError`. Each of
-these edits advances the revision once, because row, column, and cell handles
-name indices, and the returned handle is captured after the change.
+these edits invalidates row, column, cell, paragraph, and run handles, because
+they name indices, and the returned handle is captured after the change.
 
 The Presentation Python `Table` handle has no built-in table style selector.
 For a style GUID not exposed by the binding, the supported fallback is to save
@@ -671,7 +720,10 @@ slide's relationship to the same address and removes the old relationship
 once nothing on the slide names it, so retargeting does not grow the part.
 `None` or an empty string removes the hyperlink, as in python-pptx, an address
 with a control character raises `RpptxError`, and the write does not advance
-the revision.
+the revision. `Hyperlink.target_slide` reads and writes a run's jump to a slide
+through the native `run_target_slide` and `set_run_target_slide`, as
+`click_action.target_slide` does for a shape, which python-pptx offers only for
+shapes.
 
 Text formatting follows python-pptx names and value types. Every property
 reads the direct value only, `None` when the element or attribute is absent,
@@ -706,17 +758,23 @@ place and do not advance the revision. `rpptx` and `rpptx.enum.text` export
   a preserved picture bullet. `False` writes `a:buNone`, `None` removes the
   direct bullet, and `True` raises because automatic numbering is not
   writable yet.
-- `Paragraph.add_run(text="")` appends a run, advances the revision once, and
-  returns the new run captured at that revision. The paragraph handle it was
-  called on becomes stale, like the text frame after `add_paragraph`.
+- `Paragraph.add_run(text="")` appends a run and returns it. An append
+  renumbers nothing, so the paragraph and its other runs stay valid, as after
+  `add_paragraph`.
 - `Font` reads and writes the same properties for a run and for a
   paragraph's default run properties: `name` (`a:latin` typeface, keeping its
   other attributes), `size` (1 to 4000 points, as python-pptx validates),
-  `bold`, `italic`, `underline`, `strike`, `all_caps`, and `color`.
+  `bold`, `italic`, `underline`, `strike`, `all_caps`, `small_caps`,
+  `highlight_color`, and `color`.
   `underline` reads `True` for `sng`, `False` for `none`, and an
   `MSO_UNDERLINE` member otherwise. `strike` reads `True` for a single or
-  double strike, and assigning `True` keeps a double strike. `all_caps` does
-  not name `cap="small"`, which is preserved until `all_caps` is assigned.
+  double strike, and assigning `True` keeps a double strike. `all_caps` and
+  `small_caps` share the one `cap` attribute, so assigning `True` to one
+  clears the other, and `small_caps` reads `False` for an explicit `all` or
+  `none`. `highlight_color` reads the sRGB `a:highlight` as `RGBColor`, or
+  `None`, and takes an `RGBColor`, a hex string with or without `#`, or a
+  `(red, green, blue)` tuple. Another type raises `TypeError` naming the
+  property.
   `color` still reads the direct sRGB solid fill as an `RRGGBB` string for
   compatibility, and the setter takes an `RGBColor`, any triple of 0 to 255
   integers, or a six-digit hexadecimal string. It changes an existing sRGB
@@ -732,6 +790,7 @@ replacement runs on a clone, and a count that differs raises
 and its revision then stay unchanged. Otherwise the replacement is kept, and
 the revision advances once when the count is nonzero. Without `expect`, zero
 matches return zero rather than raise, as the rdocx `try_replace_text` does.
+A nonzero count invalidates run handles only.
 Only the CLI refuses zero matches, because it would write an unchanged copy.
 `Presentation.replace_text` is an alias with the same count and optional
 `expect` contract.
@@ -751,7 +810,7 @@ false, and leaves every other slide untouched. The text frame form covers that
 frame only. The count, the error and its message, the unchanged presentation
 and revision after a mismatch, and the single revision advance are those of
 the presentation form, so a replacement that changes something invalidates
-every held handle, including the slide or frame it was called on. Neither
+held run handles, while the slide or frame it was called on stays valid. Neither
 form clones the presentation. The slide form works on a copy of that slide
 and its notes and checks that they serialize. The frame form works on a copy
 of the text body when `expect` is given, in place otherwise, and serializes
@@ -781,8 +840,8 @@ A `Slide` exposes optional speaker-note text as a readable and writable
 property. Assigning it on a slide without notes creates the notes slide, and
 the notes master when the deck has none, through
 `Presentation::set_notes_text`. A successful notes assignment publishes the
-native staged mutation, advances the global revision once, and makes pre-write
-handles stale. A rejected assignment leaves package bytes and revisions
+native staged mutation and keeps every handle valid, as python-pptx does. A
+rejected assignment leaves package bytes and revisions
 unchanged. A `Slide` also exposes an ordered tuple of frozen `Comment`
 snapshots. Each comment contains an ordered tuple of frozen `CommentReply`
 snapshots, and the presentation exposes an ordered tuple of frozen
@@ -792,8 +851,8 @@ Comment and reply moves retain native final-position semantics.
 `Slide.resolve_comment(comment_id)` marks a thread resolved and treats a reply
 id as unknown. `Slide.remove_comment(comment_id)` removes a thread with its
 replies, or one reply. Both use the native staged operations of
-`rpptx comment resolve` and `remove`. A successful
-collaboration operation advances the global revision once. Constructor or
+`rpptx comment resolve` and `remove`. A collaboration operation renumbers no
+handle path, so every handle stays valid. Constructor or
 native validation failure publishes no candidate and leaves existing handles
 valid.
 

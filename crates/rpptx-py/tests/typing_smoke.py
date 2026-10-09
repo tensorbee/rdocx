@@ -463,6 +463,45 @@ def exercise_rpptx_click_action_types(shape: Shape, slide: Slide) -> None:
     (same,)
 
 
+def exercise_rpptx_shape_authoring_types(slide: Slide, run: Run) -> None:
+    shapes: ShapeCollection = slide.shapes
+    first: Shape = shapes[0]
+    first.alt_text = "A chart"
+    first.alt_title = None
+    first.decorative = True
+    first.flip_h = True
+    first.flip_v = False
+    described: tuple[str | None, str | None, bool, bool, bool] = (
+        first.alt_text,
+        first.alt_title,
+        first.decorative,
+        first.flip_h,
+        first.flip_v,
+    )
+    group: Shape = shapes.group([first, shapes[1]])
+    grouped: Shape = shapes.add_group_shape([shapes[1]])
+    members: list[Shape] = group.ungroup()
+    shapes.align(members, "left", relative_to="slide")
+    shapes.distribute(members, "horizontal")
+    picture: Shape = slide.placeholders[1].insert_picture(io.BytesIO(b""))
+    connector: Shape = shapes.add_connector(MSO_CONNECTOR.STRAIGHT, 0, 0, 1, 1)
+    connector.begin_connect(first, 0)
+    connector.end_connect(picture, 2)
+    begin: tuple[Length | None, Length | None] = (connector.begin_x, connector.begin_y)
+    end: tuple[Length | None, Length | None] = (connector.end_x, connector.end_y)
+    run.hyperlink.target_slide = slide
+    target: Slide | None = run.hyperlink.target_slide
+    font: Font = run.font
+    font.highlight_color = RGBColor(0xFF, 0xFF, 0x00)
+    font.highlight_color = "#FFFF00"
+    font.highlight_color = (255, 255, 0)
+    font.highlight_color = None
+    highlight: RGBColor | None = font.highlight_color
+    font.small_caps = True
+    small_caps: bool | None = font.small_caps
+    (described, grouped, begin, end, target, highlight, small_caps)
+
+
 def exercise_rpptx_text_layout_types(presentation: Presentation) -> None:
     frames: tuple[TextFrameLayout, ...] = presentation.text_layout()
     narrower: tuple[TextFrameLayout, ...] = presentation.text_layout(width_factor=0.95)

@@ -5,6 +5,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyList, PySlice, PyTuple};
 use smallvec::smallvec;
 
+use crate::Scope;
 use crate::dml::{FillTarget, PyFillFormat};
 use crate::normalize_index;
 use crate::presentation::{PyComment, PyPresentation};
@@ -233,7 +234,6 @@ impl PySlide {
             .inner
             .set_notes_text(index, text)
             .map_err(|error| crate::rpptx_to_pyerr(py, error))?;
-        presentation.revisions.bump();
         Ok(())
     }
 
@@ -242,9 +242,9 @@ impl PySlide {
     ///
     /// The contract is `Presentation.try_replace_text` restricted to this
     /// slide: with `expect`, a count that differs raises and leaves the
-    /// presentation and its revision as they were, and the revision advances
-    /// once only when something was replaced. The native call works on a
-    /// copy of this slide alone.
+    /// presentation and its revisions as they were, and run handles are
+    /// invalidated only when something was replaced. The native call works on
+    /// a copy of this slide alone.
     #[pyo3(signature = (placeholder, replacement, *, expect = None, notes = true))]
     fn try_replace_text(
         &self,
@@ -264,7 +264,9 @@ impl PySlide {
             return Err(replacement_count_to_pyerr(py, placeholder, expected, count));
         }
         if count > 0 {
-            presentation.revisions.bump();
+            presentation
+                .revisions
+                .invalidate(Scope::Runs, "Slide.try_replace_text()");
         }
         Ok(count)
     }
@@ -297,7 +299,7 @@ impl PySlide {
     /// Moves the slide to another layout of this presentation.
     ///
     /// Placeholders the new layout does not place keep the geometry they
-    /// inherited, and the revision advances once.
+    /// inherited, and every handle stays valid.
     #[setter]
     fn set_slide_layout(&self, py: Python<'_>, layout: &Bound<'_, PyAny>) -> PyResult<()> {
         let index = self.validate(py)?;
@@ -313,7 +315,6 @@ impl PySlide {
             .inner
             .set_slide_layout(index, layout.index)
             .map_err(|error| crate::rpptx_to_pyerr(py, error))?;
-        presentation.revisions.bump();
         Ok(())
     }
 
@@ -437,7 +438,6 @@ impl PySlide {
             None => presentation.inner.add_comment(index, comment),
         }
         .map_err(|error| crate::rpptx_to_pyerr(py, error))?;
-        presentation.revisions.bump();
         Ok(())
     }
 
@@ -459,7 +459,6 @@ impl PySlide {
             .inner
             .reply_to_comment(index, comment_id, reply)
             .map_err(|error| crate::rpptx_to_pyerr(py, error))?;
-        presentation.revisions.bump();
         Ok(())
     }
 
@@ -471,7 +470,6 @@ impl PySlide {
             .inner
             .resolve_comment(index, comment_id)
             .map_err(|error| crate::rpptx_to_pyerr(py, error))?;
-        presentation.revisions.bump();
         Ok(())
     }
 
@@ -483,7 +481,6 @@ impl PySlide {
             .inner
             .remove_comment(index, comment_id)
             .map_err(|error| crate::rpptx_to_pyerr(py, error))?;
-        presentation.revisions.bump();
         Ok(())
     }
 
@@ -494,7 +491,6 @@ impl PySlide {
             .inner
             .move_comment(index, from_, to)
             .map_err(|error| crate::rpptx_to_pyerr(py, error))?;
-        presentation.revisions.bump();
         Ok(())
     }
 
@@ -511,7 +507,6 @@ impl PySlide {
             .inner
             .move_reply(index, comment_id, from_, to)
             .map_err(|error| crate::rpptx_to_pyerr(py, error))?;
-        presentation.revisions.bump();
         Ok(())
     }
 }
@@ -583,7 +578,6 @@ impl PySlideCollection {
                 .inner
                 .add_slide(layout.index)
                 .map_err(|error| crate::rpptx_to_pyerr(py, error))?;
-            presentation.revisions.bump();
             let path = presentation
                 .revisions
                 .capture(smallvec![PathSeg::Slide(index)]);
@@ -658,7 +652,11 @@ impl PySlideCollection {
                     .map(|_| ())
             };
             result.map_err(|error| crate::rpptx_to_pyerr(py, error))?;
-            presentation.revisions.bump();
+            if inserted < len {
+                presentation
+                    .revisions
+                    .invalidate(Scope::Slides, "SlideCollection.import_slide()");
+            }
             presentation
                 .revisions
                 .capture(smallvec![PathSeg::Slide(inserted)])
@@ -679,7 +677,9 @@ impl PySlideCollection {
             .inner
             .remove_slide(index)
             .map_err(|error| crate::rpptx_to_pyerr(py, error))?;
-        presentation.revisions.bump();
+        presentation
+            .revisions
+            .invalidate(Scope::Slides, "SlideCollection.remove()");
         Ok(())
     }
 
@@ -698,7 +698,9 @@ impl PySlideCollection {
                 .inner
                 .duplicate_slide(index)
                 .map_err(|error| crate::rpptx_to_pyerr(py, error))?;
-            presentation.revisions.bump();
+            presentation
+                .revisions
+                .invalidate(Scope::Slides, "SlideCollection.duplicate()");
             presentation
                 .revisions
                 .capture(smallvec![PathSeg::Slide(index + 1)])
@@ -717,7 +719,9 @@ impl PySlideCollection {
             .inner
             .move_slide(from_, to)
             .map_err(|error| crate::rpptx_to_pyerr(py, error))?;
-        presentation.revisions.bump();
+        presentation
+            .revisions
+            .invalidate(Scope::Slides, "SlideCollection.move()");
         Ok(())
     }
 }

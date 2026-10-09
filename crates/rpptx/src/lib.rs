@@ -5,8 +5,10 @@
 //! changed to 12,192,000 by 6,858,000 EMU, the size kind was changed to
 //! `screen16x9`, and python-pptx generated the notes-master infrastructure.
 
+mod arrange;
 mod embedded;
 
+pub use arrange::{ArrangeReference, ConnectorEnd, DistributeDirection, ShapeAlignment};
 pub use embedded::{
     EmbeddedContentInfo, EmbeddedContentKind, EmbeddedMutationPolicy, EmbeddedSignatureState,
 };
@@ -3270,18 +3272,26 @@ impl Presentation {
                 _ => None,
             })
             .filter(|placeholder| !is_latent_placeholder(placeholder))
-            .map(|placeholder| (placeholder.ph_type.clone(), placeholder.idx))
+            .map(|placeholder| {
+                (
+                    placeholder.ph_type.clone(),
+                    placeholder.idx,
+                    placeholder.orientation() == Some("vert"),
+                )
+            })
             .collect::<Vec<_>>();
 
         let mut shape_tree = CT_ShapeTree::new();
         let mut shape_ids = ShapeIdAllocator::scan(&shape_tree);
-        for (ph_type, idx) in placeholders {
-            let shape =
-                CT_Shape::new_placeholder(shape_ids.allocate(), CT_Placeholder::new(ph_type, idx))
-                    .map_err(|error| Error::MalformedPart {
-                        part_name: "new slide".to_owned(),
-                        message: error.to_string(),
-                    })?;
+        for (ph_type, idx, vertical) in placeholders {
+            let id = shape_ids.allocate();
+            let name = placeholder_name(ph_type.as_ref(), vertical, id);
+            let shape = CT_Shape::new_placeholder(id, CT_Placeholder::new(ph_type, idx))
+                .and_then(|mut shape| shape.set_name(&name).map(|()| shape))
+                .map_err(|error| Error::MalformedPart {
+                    part_name: "new slide".to_owned(),
+                    message: error.to_string(),
+                })?;
             shape_tree.children.push(ShapeTreeChild::Shape(shape));
         }
 
@@ -3404,29 +3414,8 @@ impl Presentation {
         let (width, height) = picture_dimensions(image_data, image_filename, width, height)?;
         let id = ShapeIdAllocator::scan(&slide.slide.common_slide_data.shape_tree).allocate();
 
-        let mut package = self.package.clone();
-        let mut media_store = self.media_store.clone();
-        let media_part = media_store.insert(&mut package, image_data, image_filename);
-        let mut relationships = package
-            .get_part_rels(&slide_part)
-            .cloned()
-            .unwrap_or_default();
-        let relationship_id = relationships
-            .items
-            .iter()
-            .find(|relationship| {
-                relationship.rel_type == rel_types::IMAGE
-                    && !relationship_is_external(relationship)
-                    && OpcPackage::resolve_rel_target(&slide_part, &relationship.target)
-                        == media_part
-            })
-            .map(|relationship| relationship.id.clone())
-            .unwrap_or_else(|| {
-                relationships.add(
-                    rel_types::IMAGE,
-                    &relative_part_target(&slide_part, &media_part),
-                )
-            });
+        let (package, media_store, relationship_id) =
+            self.stage_slide_image(&slide_part, image_data, image_filename);
         let picture = CT_Picture::new(
             id,
             &format!("Picture {id}"),
@@ -3435,11 +3424,149 @@ impl Presentation {
         )
         .map_err(|error| invalid_shape_construction("add picture", error))?;
 
-        package.set_part_rels(&slide_part, relationships);
         self.package = package;
         self.media_store = media_store;
         let tree = &mut self.slides[slide_index].slide.common_slide_data.shape_tree;
         Ok(append_member(tree, group, ShapeTreeChild::Picture(picture)))
+    }
+
+    /// Stages one image part and a slide's relationship to it on copies of
+    /// the package and media store, and returns them with the relationship
+    /// id. A relationship the slide already has to the same part is reused.
+    fn stage_slide_image(
+        &self,
+        slide_part: &str,
+        image_data: &[u8],
+        image_filename: &str,
+    ) -> (OpcPackage, MediaStore, String) {
+        let mut package = self.package.clone();
+        let mut media_store = self.media_store.clone();
+        let media_part = media_store.insert(&mut package, image_data, image_filename);
+        let mut relationships = package
+            .get_part_rels(slide_part)
+            .cloned()
+            .unwrap_or_default();
+        let relationship_id = relationships
+            .items
+            .iter()
+            .find(|relationship| {
+                relationship.rel_type == rel_types::IMAGE
+                    && !relationship_is_external(relationship)
+                    && OpcPackage::resolve_rel_target(slide_part, &relationship.target)
+                        == media_part
+            })
+            .map(|relationship| relationship.id.clone())
+            .unwrap_or_else(|| {
+                relationships.add(
+                    rel_types::IMAGE,
+                    &relative_part_target(slide_part, &media_part),
+                )
+            });
+        package.set_part_rels(slide_part, relationships);
+        (package, media_store, relationship_id)
+    }
+
+    /// Fills the placeholder at `shape_path` with a picture, as python-pptx
+    /// `insert_picture` does, and returns the picture.
+    ///
+    /// `shape_path` is read as in [`Self::effective_geometry`]. The
+    /// placeholder's `p:sp` becomes a `p:pic` with the same id, name, and
+    /// `p:ph`, so it keeps the position and size it inherits from its layout,
+    /// or its own when it has one. The image is cropped evenly on its two
+    /// longer sides to the placeholder's aspect ratio, so it fills the frame
+    /// without distortion. A picture placeholder and a content placeholder,
+    /// one of type `obj` or without a type, take a picture. Any other shape,
+    /// a placeholder without a size, and an image without pixel dimensions
+    /// are rejected without change.
+    #[cfg(feature = "render")]
+    pub fn insert_picture(
+        &mut self,
+        slide_index: usize,
+        shape_path: &[usize],
+        image_data: &[u8],
+        image_filename: &str,
+    ) -> Result<ShapeRef<'_>> {
+        const OPERATION: &str = "insert picture";
+        let child = self.shape_at(slide_index, shape_path, OPERATION)?.child;
+        let ShapeTreeChild::Shape(shape) = child else {
+            return Err(invalid_shape_mutation(
+                OPERATION,
+                "only a picture or content placeholder takes a picture; use add_picture for \
+                 a free-standing one",
+            ));
+        };
+        let placeholder = match &shape.placeholder {
+            Some(placeholder)
+                if matches!(
+                    placeholder.ph_type,
+                    None | Some(PhType::Object | PhType::Picture)
+                ) =>
+            {
+                placeholder.clone()
+            }
+            Some(placeholder) => {
+                return Err(invalid_shape_mutation(
+                    OPERATION,
+                    format!(
+                        "a {} placeholder does not take a picture; use a picture or content \
+                         placeholder, or add_picture",
+                        placeholder.effective_type().as_str()
+                    ),
+                ));
+            }
+            None => {
+                return Err(invalid_shape_mutation(
+                    OPERATION,
+                    "the shape is not a placeholder; use add_picture",
+                ));
+            }
+        };
+        let own_transform = shape.shape_properties.transform.clone();
+        let id = child.non_visual_id().ok_or_else(|| {
+            invalid_shape_mutation(OPERATION, "the placeholder has no p:cNvPr id")
+        })?;
+        let name = child
+            .non_visual_name()
+            .unwrap_or_else(|| format!("Picture Placeholder {id}"));
+        let (_, _, width, height) = self
+            .effective_geometry(slide_index, shape_path)?
+            .filter(|(_, _, width, height)| width.0 > 0 && height.0 > 0)
+            .ok_or_else(|| {
+                invalid_shape_mutation(OPERATION, "the placeholder has no size to fill")
+            })?;
+        if ImageFormat::sniff(image_data).is_none() {
+            return Err(Error::UnsupportedPicture {
+                filename: image_filename.to_owned(),
+            });
+        }
+        let info = probe(image_data)
+            .filter(|info| info.width_px > 0 && info.height_px > 0)
+            .ok_or_else(|| Error::UnavailablePictureDimensions {
+                filename: image_filename.to_owned(),
+            })?;
+        let crop = fill_crop(
+            (f64::from(info.width_px), f64::from(info.height_px)),
+            (width.0 as f64, height.0 as f64),
+        );
+        let slide_part = self.slides[slide_index].part_name.clone();
+        let (package, media_store, relationship_id) =
+            self.stage_slide_image(&slide_part, image_data, image_filename);
+        let mut picture =
+            CT_Picture::new_placeholder(id, &name, &relationship_id, &placeholder, crop)
+                .map_err(|error| invalid_shape_construction(OPERATION, error))?;
+        picture.shape_properties.transform = own_transform;
+        self.package = package;
+        self.media_store = media_store;
+        let mut indices = shape_path.iter();
+        let mut target = indices
+            .next()
+            .and_then(|index| slide_mut(&mut self.slides[slide_index]).into_shape_mut(*index));
+        for index in indices {
+            target = target.and_then(|shape| shape.into_child_mut(*index));
+        }
+        let target = target.expect("the placeholder was found above");
+        *target.child = ShapeTreeChild::Picture(picture);
+        Ok(shape_ref(target.child))
     }
 
     /// Returns the embedded image one picture shows, found by shape id.
@@ -3741,16 +3868,27 @@ impl Presentation {
     /// python-pptx raises `ValueError`.
     pub fn shape_target_slide(&self, slide_index: usize, shape_id: u32) -> Result<Option<usize>> {
         let (_, location) = self.locate_shape_click("shape target slide", slide_index, shape_id)?;
-        let Some(action) = location.action.as_deref() else {
-            return Ok(None);
-        };
+        Ok(self.click_target_slide(
+            slide_index,
+            location.action.as_deref(),
+            location.relationship_id.as_deref(),
+        ))
+    }
+
+    /// Returns the slide a click action of slide `slide_index` jumps to, from
+    /// its `action` and `r:id`, as [`Self::shape_target_slide`] reads them.
+    fn click_target_slide(
+        &self,
+        slide_index: usize,
+        action: Option<&str>,
+        relationship_id: Option<&str>,
+    ) -> Option<usize> {
+        let action = action?;
         let (verb, query) = action.split_once('?').unwrap_or((action, ""));
-        Ok(match verb {
+        match verb {
             SLIDE_JUMP_ACTION => {
                 let part_name = &self.slides[slide_index].part_name;
-                location
-                    .relationship_id
-                    .as_deref()
+                relationship_id
                     .and_then(|id| self.package.get_part_rels(part_name)?.get_by_id(id))
                     .filter(|relationship| !relationship_is_external(relationship))
                     .and_then(|relationship| {
@@ -3776,7 +3914,7 @@ impl Presentation {
                 }
             }
             _ => None,
-        })
+        }
     }
 
     /// Sets or clears the external click hyperlink of one slide shape atomically.
@@ -3985,6 +4123,95 @@ impl Presentation {
                 "a hyperlink address must be non-empty text without control characters",
             ));
         }
+        self.set_run_click(
+            OPERATION,
+            slide_index,
+            (shape_id, paragraph_index, run_index),
+            address.map(ShapeClickTarget::Address),
+        )
+    }
+
+    /// Makes one text run's click hyperlink jump to the slide at
+    /// `target_slide_index`, or removes it with `None`, as
+    /// [`Self::set_shape_target_slide`] does for a shape.
+    ///
+    /// The run is found as for [`Self::set_run_hyperlink`]. Its
+    /// `a:hlinkClick` gets the action `ppaction://hlinksldjump` and names the
+    /// slide's relationship to the target slide, which is reused when the
+    /// slide has one. Jumping to the current target changes nothing, and a
+    /// relationship that only the old hyperlink named is removed.
+    pub fn set_run_target_slide(
+        &mut self,
+        slide_index: usize,
+        shape_id: u32,
+        paragraph_index: usize,
+        run_index: usize,
+        target_slide_index: Option<usize>,
+    ) -> Result<()> {
+        self.require_slide_index(slide_index)?;
+        if let Some(target) = target_slide_index {
+            self.require_slide_index(target)?;
+        }
+        self.set_run_click(
+            "set run target slide",
+            slide_index,
+            (shape_id, paragraph_index, run_index),
+            target_slide_index.map(ShapeClickTarget::Slide),
+        )
+    }
+
+    /// Returns the zero-based index of the slide one text run's click
+    /// hyperlink jumps to, read as [`Self::shape_target_slide`] reads a
+    /// shape's. The run is found as for [`Self::set_run_hyperlink`], and a
+    /// run without a slide jump returns `None`.
+    pub fn run_target_slide(
+        &self,
+        slide_index: usize,
+        shape_id: u32,
+        paragraph_index: usize,
+        run_index: usize,
+    ) -> Result<Option<usize>> {
+        self.require_slide_index(slide_index)?;
+        let missing = || {
+            invalid_shape_mutation(
+                "read run target slide",
+                format!(
+                    "shape id {shape_id} has no ordinary shape run {run_index} in paragraph {paragraph_index}"
+                ),
+            )
+        };
+        let body = find_shape(
+            &self.slides[slide_index]
+                .slide
+                .common_slide_data
+                .shape_tree
+                .children,
+            shape_id,
+        )
+        .and_then(|shape| shape.text_body.as_ref())
+        .ok_or_else(missing)?;
+        let hyperlink = TextFrameRef { body }
+            .paragraph(paragraph_index)
+            .and_then(|paragraph| paragraph.run(run_index))
+            .ok_or_else(missing)?
+            .properties()
+            .and_then(|properties| properties.hyperlink_click.clone());
+        Ok(hyperlink.and_then(|hyperlink| {
+            self.click_target_slide(
+                slide_index,
+                hyperlink.action.as_deref(),
+                hyperlink.relationship_id.as_deref(),
+            )
+        }))
+    }
+
+    fn set_run_click(
+        &mut self,
+        operation: &'static str,
+        slide_index: usize,
+        (shape_id, paragraph_index, run_index): (u32, usize, usize),
+        target: Option<ShapeClickTarget<'_>>,
+    ) -> Result<()> {
         let record = &self.slides[slide_index];
         let part_name = record.part_name.clone();
         if shape_id_count(
@@ -3993,10 +4220,14 @@ impl Presentation {
         ) > 1
         {
             return Err(invalid_shape_mutation(
-                OPERATION,
+                operation,
                 format!("shape id {shape_id} is not unique on the slide"),
             ));
         }
+        let target_part = match target {
+            Some(ShapeClickTarget::Slide(index)) => Some(self.slides[index].part_name.clone()),
+            _ => None,
+        };
         let mut slide = record.slide.clone();
         let mut relationships = self
             .package
@@ -4006,7 +4237,7 @@ impl Presentation {
         let (old, new) = {
             let missing = || {
                 invalid_shape_mutation(
-                    OPERATION,
+                    operation,
                     format!(
                         "shape id {shape_id} has no ordinary shape run {run_index} in paragraph {paragraph_index}"
                     ),
@@ -4025,40 +4256,73 @@ impl Presentation {
                 .as_ref()
                 .and_then(|hyperlink| hyperlink.relationship_id.clone())
                 .filter(|id| !id.is_empty());
-            let current = old
-                .as_deref()
-                .and_then(|id| relationships.get_by_id(id))
-                .filter(|relationship| {
-                    relationship.rel_type == rel_types::HYPERLINK
-                        && relationship_is_external(relationship)
-                })
-                .map(|relationship| relationship.target.as_str());
-            let unchanged = match address {
-                None => properties.hyperlink_click.is_none(),
-                Some(address) => current == Some(address),
+            let action = properties
+                .hyperlink_click
+                .as_ref()
+                .and_then(|hyperlink| hyperlink.action.as_deref());
+            let current = old.as_deref().and_then(|id| relationships.get_by_id(id));
+            let is_address = |relationship: &Relationship, address: &str| {
+                relationship.rel_type == rel_types::HYPERLINK
+                    && relationship_is_external(relationship)
+                    && relationship.target == address
+            };
+            let is_slide = |relationship: &Relationship, target_part: &str| {
+                relationship.rel_type == rel_types::SLIDE
+                    && !relationship_is_external(relationship)
+                    && OpcPackage::resolve_rel_target(&part_name, &relationship.target)
+                        == target_part
+            };
+            let unchanged = match (target, target_part.as_deref()) {
+                (None, _) => properties.hyperlink_click.is_none(),
+                (Some(ShapeClickTarget::Address(address)), _) => {
+                    current.is_some_and(|relationship| is_address(relationship, address))
+                }
+                (Some(ShapeClickTarget::Slide(_)), Some(target_part)) => {
+                    action == Some(SLIDE_JUMP_ACTION)
+                        && current.is_some_and(|relationship| is_slide(relationship, target_part))
+                }
+                (Some(ShapeClickTarget::Slide(_)), None) => unreachable!("the part was read"),
             };
             if unchanged {
                 return Ok(());
             }
-            let new = address.map(|address| {
-                relationships
-                    .items
-                    .iter()
-                    .find(|relationship| {
-                        relationship.rel_type == rel_types::HYPERLINK
-                            && relationship_is_external(relationship)
-                            && relationship.target == address
-                    })
-                    .map(|relationship| relationship.id.clone())
-                    .unwrap_or_else(|| relationships.add_external(rel_types::HYPERLINK, address))
-            });
-            properties.hyperlink_click = new.clone().map(|id| {
+            let new = match (target, target_part.as_deref()) {
+                (None, _) => None,
+                (Some(ShapeClickTarget::Address(address)), _) => Some((
+                    relationships
+                        .items
+                        .iter()
+                        .find(|relationship| is_address(relationship, address))
+                        .map(|relationship| relationship.id.clone())
+                        .unwrap_or_else(|| {
+                            relationships.add_external(rel_types::HYPERLINK, address)
+                        }),
+                    None,
+                )),
+                (Some(ShapeClickTarget::Slide(_)), Some(target_part)) => Some((
+                    relationships
+                        .items
+                        .iter()
+                        .find(|relationship| is_slide(relationship, target_part))
+                        .map(|relationship| relationship.id.clone())
+                        .unwrap_or_else(|| {
+                            relationships.add(
+                                rel_types::SLIDE,
+                                &relative_part_target(&part_name, target_part),
+                            )
+                        }),
+                    Some(SLIDE_JUMP_ACTION),
+                )),
+                (Some(ShapeClickTarget::Slide(_)), None) => unreachable!("the part was read"),
+            };
+            properties.hyperlink_click = new.clone().map(|(id, action)| {
                 let mut hyperlink = TextHyperlink::default();
                 hyperlink.relationship_id = Some(id);
+                hyperlink.action = action.map(str::to_owned);
                 hyperlink
             });
             run.set_properties(properties);
-            (old, new)
+            (old, new.map(|(id, _)| id))
         };
         if old.is_some_and(|old| Some(&old) != new.as_ref()) {
             // The old a:hlinkClick can carry more than its r:id, such as an
@@ -5264,6 +5528,14 @@ fn comment_text_context_count(children: &[ShapeTreeChild], text: &str) -> usize 
         .sum()
 }
 
+fn find_shape(children: &[ShapeTreeChild], shape_id: u32) -> Option<&CT_Shape> {
+    children.iter().find_map(|child| match child {
+        ShapeTreeChild::Shape(shape) if child.non_visual_id() == Some(shape_id) => Some(shape),
+        ShapeTreeChild::GroupShape(group) => find_shape(&group.children, shape_id),
+        _ => None,
+    })
+}
+
 fn find_shape_mut(children: &mut [ShapeTreeChild], shape_id: u32) -> Option<&mut CT_Shape> {
     for child in children {
         let id = child.non_visual_id();
@@ -6407,6 +6679,26 @@ fn prune_unreachable_parts(package: &mut OpcPackage, candidates: &HashSet<String
     }
 }
 
+/// The left, top, right, and bottom `a:srcRect` insets, in thousandths of a
+/// percent, that crop an image of `image` pixels to the aspect ratio of a
+/// `frame`, evenly on the image's longer sides, as python-pptx crops a
+/// picture placeholder.
+#[cfg(feature = "render")]
+fn fill_crop(image: (f64, f64), frame: (f64, f64)) -> [i32; 4] {
+    let image_ratio = image.0 / image.1;
+    let frame_ratio = frame.0 / frame.1;
+    let inset = |share: f64| (share / 2.0 * 100_000.0).round() as i32;
+    if frame_ratio < image_ratio {
+        let side = inset(1.0 - frame_ratio / image_ratio);
+        [side, 0, side, 0]
+    } else if frame_ratio > image_ratio {
+        let side = inset(1.0 - image_ratio / frame_ratio);
+        [0, side, 0, side]
+    } else {
+        [0; 4]
+    }
+}
+
 fn picture_dimensions(
     image_data: &[u8],
     image_filename: &str,
@@ -6696,6 +6988,40 @@ fn keep_unplaced_placeholder_transforms(
             *transform = inherited_xfrm(placeholder, old.0, old.1).cloned();
         }
     }
+}
+
+/// The name PowerPoint and python-pptx give a placeholder a new slide copies
+/// from its layout, such as `Title 1` or `Content Placeholder 2`: the kind's
+/// base name, prefixed `Vertical` for vertical text, then the shape id less
+/// one.
+fn placeholder_name(ph_type: Option<&PhType>, vertical: bool, id: u32) -> String {
+    let base = match ph_type.unwrap_or(&PhType::Object) {
+        PhType::Title | PhType::CenteredTitle => "Title",
+        PhType::Subtitle => "Subtitle",
+        PhType::Body => "Text Placeholder",
+        PhType::Object => "Content Placeholder",
+        PhType::Picture => "Picture Placeholder",
+        PhType::Chart => "Chart Placeholder",
+        PhType::Table => "Table Placeholder",
+        PhType::Diagram => "SmartArt Placeholder",
+        PhType::Media => "Media Placeholder",
+        PhType::ClipArt => "ClipArt Placeholder",
+        PhType::DateTime => "Date Placeholder",
+        PhType::Footer => "Footer Placeholder",
+        PhType::SlideNumber => "Slide Number Placeholder",
+        PhType::Header => "Header Placeholder",
+        PhType::SlideImage => "Slide Image Placeholder",
+        PhType::VerticalTitle => "Vertical Title",
+        PhType::VerticalBody => "Vertical Text Placeholder",
+        PhType::VerticalObject => "Vertical Content Placeholder",
+        PhType::Other(_) => "Placeholder",
+    };
+    let vertical = vertical && !base.starts_with("Vertical");
+    format!(
+        "{}{base} {}",
+        if vertical { "Vertical " } else { "" },
+        id.saturating_sub(1)
+    )
 }
 
 fn is_latent_placeholder(placeholder: &CT_Placeholder) -> bool {
@@ -7559,10 +7885,9 @@ fn fit_group_to_members(group: &mut CT_GroupShape, occupied: bool) {
 /// rotation, which apply about the centre of `a:off` and `a:ext`, place its
 /// members as before after that centre moved by `(dx, dy)`.
 ///
-/// PowerPoint flips, then rotates, so for that linear part `L` the shift is
-/// `(L - I)(dx, dy)`, which is zero without rotation and flips. The rpptx
-/// renderer rotates a group before it flips it, which agrees with
-/// PowerPoint unless a group is both rotated and flipped.
+/// PowerPoint flips, then rotates, as the rpptx renderer does, so for that
+/// linear part `L` the shift is `(L - I)(dx, dy)`, which is zero without
+/// rotation and flips.
 fn pivot_shift(transform: &CT_Transform2D, dx: f64, dy: f64) -> (i64, i64) {
     let (sin, cos) = (f64::from(transform.rotation.0) / 60_000.0)
         .to_radians()
@@ -7888,6 +8213,56 @@ impl<'a> ShapeMut<'a> {
             operation: "set name",
             message: error.to_string(),
         })
+    }
+
+    /// Sets the alternative text screen readers announce, `p:cNvPr/@descr`,
+    /// or removes it for `None`.
+    pub fn set_alt_text(&mut self, text: Option<&str>) -> Result<()> {
+        self.child
+            .set_alt_text(text)
+            .map_err(|error| invalid_shape_mutation("set alt text", error.to_string()))
+    }
+
+    /// Sets the alternative-text title, `p:cNvPr/@title`, or removes it for
+    /// `None`.
+    pub fn set_alt_title(&mut self, title: Option<&str>) -> Result<()> {
+        self.child
+            .set_alt_title(title)
+            .map_err(|error| invalid_shape_mutation("set alt title", error.to_string()))
+    }
+
+    /// Marks the shape decorative, so that screen readers skip it, or removes
+    /// the mark. PowerPoint writes the flag as an `adec:decorative` extension
+    /// of `p:cNvPr`.
+    pub fn set_decorative(&mut self, decorative: bool) -> Result<()> {
+        self.child
+            .set_decorative(decorative)
+            .map_err(|error| invalid_shape_mutation("set decorative", error.to_string()))
+    }
+
+    /// Mirrors the shape left to right about its centre, `a:xfrm/@flipH`.
+    ///
+    /// A connector flipped this way swaps the horizontal place of its two
+    /// ends. A table, chart, or other graphic frame does not flip in
+    /// PowerPoint and is rejected.
+    pub fn set_flip_horizontal(&mut self, flipped: bool) -> Result<()> {
+        self.flip_transform_mut("set flip horizontal")?
+            .flip_horizontal = flipped;
+        Ok(())
+    }
+
+    /// Mirrors the shape top to bottom about its centre, `a:xfrm/@flipV`, as
+    /// [`Self::set_flip_horizontal`] does left to right.
+    pub fn set_flip_vertical(&mut self, flipped: bool) -> Result<()> {
+        self.flip_transform_mut("set flip vertical")?.flip_vertical = flipped;
+        Ok(())
+    }
+
+    fn flip_transform_mut(&mut self, operation: &'static str) -> Result<&mut CT_Transform2D> {
+        if matches!(self.child, ShapeTreeChild::GraphicFrame(_)) {
+            return Err(self.unsupported(operation));
+        }
+        self.transform_mut(operation)
     }
 
     /// Replaces the direct fill on a shape with typed shape properties.
@@ -9630,6 +10005,56 @@ impl<'a> ShapeRef<'a> {
     pub fn size(&self) -> Option<(Emu, Emu)> {
         let extent = shape_transform(self.child)?.extent?;
         Some((extent.cx, extent.cy))
+    }
+
+    /// Returns the alternative text, `p:cNvPr/@descr`.
+    pub fn alt_text(&self) -> Option<String> {
+        self.child.alt_text()
+    }
+
+    /// Returns the alternative-text title, `p:cNvPr/@title`.
+    pub fn alt_title(&self) -> Option<String> {
+        self.child.alt_title()
+    }
+
+    /// Returns whether the shape is marked decorative.
+    pub fn decorative(&self) -> bool {
+        self.child.decorative()
+    }
+
+    /// Returns whether the shape is mirrored left to right.
+    pub fn flip_horizontal(&self) -> bool {
+        shape_transform(self.child).is_some_and(|transform| transform.flip_horizontal)
+    }
+
+    /// Returns whether the shape is mirrored top to bottom.
+    pub fn flip_vertical(&self) -> bool {
+        shape_transform(self.child).is_some_and(|transform| transform.flip_vertical)
+    }
+
+    /// Returns a connector's begin and end points in its parent's
+    /// coordinates, flips and rotation applied, as python-pptx `begin_x`,
+    /// `begin_y`, `end_x`, and `end_y` read them. Other shapes and a
+    /// connector without a position and size return `None`.
+    pub fn connector_endpoints(&self) -> Option<[(Emu, Emu); 2]> {
+        let ShapeTreeChild::Connector(connector) = self.child else {
+            return None;
+        };
+        let points = arrange::connector_endpoints(connector.shape_properties.transform.as_ref()?)?;
+        Some(points.map(|(x, y)| (Emu(x.round() as i64), Emu(y.round() as i64))))
+    }
+
+    /// Returns the shape id and connection site one end of a connector is
+    /// glued to, `a:stCxn` or `a:endCxn`.
+    pub fn connector_connection(&self, end: ConnectorEnd) -> Option<(u32, u32)> {
+        let ShapeTreeChild::Connector(connector) = self.child else {
+            return None;
+        };
+        match end {
+            ConnectorEnd::Begin => connector.start_connection.as_ref(),
+            ConnectorEnd::End => connector.end_connection.as_ref(),
+        }
+        .map(|connection| (connection.id, connection.idx))
     }
 
     /// Returns the producer-facing non-visual shape id.

@@ -61,8 +61,9 @@ with open("review.pdf", "wb") as output:
 - Master, layout, placeholder, theme, shape, chart, media, and relationship
   state remains inside the native presentation engine during package edits.
 - Read speaker-note text and inspect or mutate modern comment threads.
-- Python collections with negative indexes, slices, iteration, and explicit
-  stale-handle errors after structural changes.
+- Python collections with negative indexes, slices, iteration, and handles
+  that survive appends and text edits, with an explicit stale-handle error,
+  naming the call, once an edit renumbers what a handle points to.
 - Table cell merge and split, cell fills, margins, and borders, and row
   heights.
 - Table rows and columns added with `table.rows.add_row()` and
@@ -74,7 +75,14 @@ with open("review.pdf", "wb") as output:
   members as in python-pptx.
 - Run hyperlinks, read, added, retargeted, and removed as in python-pptx.
 - Shape click actions, a hyperlink or a slide jump, through `shape.click_action`
-  as in python-pptx.
+  as in python-pptx, and run hyperlinks that jump to a slide.
+- Alternative text, title, and the decorative flag, and horizontal and
+  vertical flips, on every shape.
+- Existing shapes grouped and ungrouped in place, connectors glued to
+  connection sites, and shapes aligned and distributed.
+- Picture placeholders filled with a cropped picture through
+  `placeholder.insert_picture`, as in python-pptx.
+- Text highlight colour and small capitals.
 
 ## Use it when
 

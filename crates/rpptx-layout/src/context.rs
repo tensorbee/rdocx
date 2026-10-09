@@ -3371,12 +3371,8 @@ fn group_extent_geometry(transform: &CT_Transform2D) -> Option<Transform> {
         e: x,
         f: y,
         ..Transform::IDENTITY
-    }
-    .then(Transform::rotate_about(
-        f64::from(transform.rotation.0) / 60_000.0,
-        center_x,
-        center_y,
-    ));
+    };
+    // PowerPoint mirrors a group about its centre, then rotates it.
     if transform.flip_horizontal || transform.flip_vertical {
         geometry = geometry.then(Transform {
             a: if transform.flip_horizontal { -1.0 } else { 1.0 },
@@ -3394,6 +3390,11 @@ fn group_extent_geometry(transform: &CT_Transform2D) -> Option<Transform> {
             ..Transform::IDENTITY
         });
     }
+    geometry = geometry.then(Transform::rotate_about(
+        f64::from(transform.rotation.0) / 60_000.0,
+        center_x,
+        center_y,
+    ));
     [
         geometry.a, geometry.b, geometry.c, geometry.d, geometry.e, geometry.f,
     ]
@@ -3449,10 +3450,14 @@ fn resolved_shape_page_transform(shape: &ResolvedShape) -> Transform {
         },
         ..Transform::IDENTITY
     };
-    Transform::rotate_about(shape.rotation_deg, center_x, center_y)
-        .then(flip)
-        .then(timeline_translation(shape.bounds.x, shape.bounds.y))
-        .then(shape.group_transform)
+    // PowerPoint mirrors a shape about its centre, then rotates it.
+    flip.then(Transform::rotate_about(
+        shape.rotation_deg,
+        center_x,
+        center_y,
+    ))
+    .then(timeline_translation(shape.bounds.x, shape.bounds.y))
+    .then(shape.group_transform)
 }
 
 fn group_clip_page_points(
@@ -3778,11 +3783,7 @@ fn group_affine(transform: &CT_Transform2D) -> Option<(Transform, u8)> {
     };
     let center_x = x + width / 2.0;
     let center_y = y + height / 2.0;
-    affine = affine.then(Transform::rotate_about(
-        f64::from(transform.rotation.0) / 60_000.0,
-        center_x,
-        center_y,
-    ));
+    // PowerPoint mirrors a group about its centre, then rotates it.
     if transform.flip_horizontal || transform.flip_vertical {
         affine = affine.then(Transform {
             a: if transform.flip_horizontal { -1.0 } else { 1.0 },
@@ -3801,6 +3802,11 @@ fn group_affine(transform: &CT_Transform2D) -> Option<(Transform, u8)> {
             },
         });
     }
+    affine = affine.then(Transform::rotate_about(
+        f64::from(transform.rotation.0) / 60_000.0,
+        center_x,
+        center_y,
+    ));
     Some((affine, issues))
 }
 
@@ -5695,6 +5701,29 @@ mod tests {
                 .message
                 .contains("external picture relationship `https://example.invalid/image.png`")
         }));
+    }
+
+    #[test]
+    fn a_rotated_mirrored_group_mirrors_its_members_before_it_rotates_them() {
+        let transform = oxml_drawing::xfrm::CT_Transform2D::from_xml(
+            br#"<a:xfrm xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" rot="5400000" flipH="1"><a:off x="0" y="0"/><a:ext cx="254000" cy="127000"/><a:chOff x="0" y="0"/><a:chExt cx="254000" cy="127000"/></a:xfrm>"#,
+        )
+        .unwrap();
+        let (affine, issues) = super::group_affine(&transform).unwrap();
+        assert_eq!(issues, 0);
+        // The member point (2, 1) mirrors about the centre (10, 5) to
+        // (18, 1), then turns a quarter clockwise to (14, 13).
+        let point = affine.apply(oxml_layout::Point { x: 2.0, y: 1.0 });
+        assert!(
+            (point.x - 14.0).abs() < 1e-9 && (point.y - 13.0).abs() < 1e-9,
+            "{point:?}"
+        );
+        let extent = super::group_extent_geometry(&transform).unwrap();
+        let corner = extent.apply(oxml_layout::Point { x: 0.0, y: 0.0 });
+        assert!(
+            (corner.x - 15.0).abs() < 1e-9 && (corner.y - 15.0).abs() < 1e-9,
+            "{corner:?}"
+        );
     }
 
     #[test]
