@@ -27291,18 +27291,16 @@ fn adding_to_a_rotated_or_flipped_group_keeps_its_members_in_place() {
                 "{attributes}: {corners:?} became {moved:?}"
             );
         }
-        // The renderer rotates a group before it flips it, which agrees with
-        // PowerPoint unless the group is both rotated and flipped.
-        if !(attributes.contains("rot") && attributes.contains("flip")) {
-            assert_eq!(
-                presentation
-                    .slide_png_deterministic(0, 72.0)
-                    .unwrap()
-                    .unwrap(),
-                png,
-                "{attributes}"
-            );
-        }
+        // The renderer flips a group before it rotates it, as PowerPoint
+        // does, so the drawn members stay put under every combination. The
+        // refit rounds `a:off` to whole EMU, which may shade a diagonal
+        // edge differently.
+        let after = presentation
+            .slide_png_deterministic(0, 72.0)
+            .unwrap()
+            .unwrap();
+        let similarity = smartart_png_ssim(&png, &after);
+        assert!(similarity >= 0.999, "{attributes}: SSIM {similarity}");
     }
 }
 
@@ -27924,4 +27922,233 @@ fn names_and_chart_text_xml_cannot_carry_are_refused() {
         error.contains("/docProps/core.xml holds U+000C at line"),
         "{error}"
     );
+}
+
+/// The member-space centres of the red and blue squares and the midpoint
+/// of the connector [`rotated_flipped_scaled_group_with_connector`] adds.
+const ROTATED_GROUP_PROBES: [(f64, f64); 3] = [
+    (457_200.0, 228_600.0),
+    (1_828_800.0, 1_143_000.0),
+    (2_743_200.0, 1_485_900.0),
+];
+
+/// Returns a slide with a group of a red and a blue rectangle, rotated 30
+/// degrees, mirrored left to right, and drawing its members at twice their
+/// size, as `a:chExt` is half of `a:ext`. The facade has no flip setter, so
+/// the transform is written into the saved XML. With `connector`, a thick
+/// green connector is then added inside the group, from the red
+/// rectangle's right edge to a point beyond both members, so the group
+/// refits. `unresolvable_blue` gives the blue rectangle a line style index
+/// the theme does not define.
+fn rotated_flipped_scaled_group_with_connector(
+    connector: bool,
+    unresolvable_blue: bool,
+) -> Presentation {
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .add_group_shape()
+        .unwrap();
+    for (left, top, colour) in [(0, 0, "FF0000"), (1_371_600, 914_400, "0000FF")] {
+        presentation
+            .shapes_mut(0, &[0])
+            .unwrap()
+            .add_shape("rect", Emu(left), Emu(top), Emu(914_400), Emu(457_200))
+            .unwrap()
+            .set_fill(
+                Fill::from_xml(
+                    format!(r#"<a:solidFill><a:srgbClr val="{colour}"/></a:solidFill>"#).as_bytes(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    let mut package = open_opc(&presentation.to_bytes().unwrap(), "rotated group");
+    let mut xml =
+        String::from_utf8(package.get_part("/ppt/slides/slide1.xml").unwrap().to_vec()).unwrap();
+    let start = xml.find("<p:grpSpPr><a:xfrm>").unwrap();
+    let end = start + xml[start..].find("</a:xfrm>").unwrap() + "</a:xfrm>".len();
+    xml.replace_range(
+        start..end,
+        r#"<p:grpSpPr><a:xfrm rot="1800000" flipH="1"><a:off x="3000000" y="2000000"/><a:ext cx="4572000" cy="2743200"/><a:chOff x="0" y="0"/><a:chExt cx="2286000" cy="1371600"/></a:xfrm>"#,
+    );
+    if unresolvable_blue {
+        let blue = xml.find(r#"name="Shape 4""#).unwrap();
+        let line = blue + xml[blue..].find(r#"<a:lnRef idx="1">"#).unwrap();
+        xml.replace_range(
+            line..line + r#"<a:lnRef idx="1">"#.len(),
+            r#"<a:lnRef idx="99">"#,
+        );
+    }
+    package.set_part("/ppt/slides/slide1.xml", xml.into_bytes());
+    let mut presentation = Presentation::from_bytes(&package_bytes(package)).unwrap();
+    if connector {
+        presentation
+            .shapes_mut(0, &[0])
+            .unwrap()
+            .add_connector(
+                ConnectorType::Straight,
+                Emu(914_400),
+                Emu(228_600),
+                Emu(4_572_000),
+                Emu(2_743_200),
+            )
+            .unwrap()
+            .set_line(
+                CT_LineProperties::from_xml(
+                    br#"<a:ln xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" w="76200"><a:solidFill><a:srgbClr val="00B050"/></a:solidFill></a:ln>"#,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+    }
+    presentation
+}
+
+/// Returns the 72 DPI pixel where PowerPoint draws each member-space point
+/// of the first group: member space scales into `a:off` and `a:ext`, then
+/// flips, then rotates about their centre.
+fn powerpoint_group_pixels(presentation: &Presentation, points: &[(f64, f64)]) -> Vec<(u32, u32)> {
+    let slide = saved_first_slide(presentation);
+    let ShapeTreeChild::GroupShape(group) = &slide.common_slide_data.shape_tree.children[0] else {
+        panic!("expected a group");
+    };
+    let transform = group.group_transform().unwrap();
+    let [x, y, cx, cy, child_x, child_y, child_cx, child_cy] =
+        group_frame(&slide.common_slide_data.shape_tree.children[0]).map(|value| value as f64);
+    let (sin, cos) = (f64::from(transform.rotation.0) / 60_000.0)
+        .to_radians()
+        .sin_cos();
+    let (centre_x, centre_y) = (x + cx / 2.0, y + cy / 2.0);
+    points
+        .iter()
+        .map(|(point_x, point_y)| {
+            let mut dx = x + (point_x - child_x) * cx / child_cx - centre_x;
+            let mut dy = y + (point_y - child_y) * cy / child_cy - centre_y;
+            if transform.flip_horizontal {
+                dx = -dx;
+            }
+            if transform.flip_vertical {
+                dy = -dy;
+            }
+            let page_x = centre_x + cos * dx - sin * dy;
+            let page_y = centre_y + sin * dx + cos * dy;
+            (
+                (page_x / 12_700.0).round() as u32,
+                (page_y / 12_700.0).round() as u32,
+            )
+        })
+        .collect()
+}
+
+/// Names the dominant primary of one PNG pixel, or `None` for anything
+/// else, such as the white page.
+fn primary_at(png: &[u8], (x, y): (u32, u32)) -> Option<char> {
+    let pixmap = tiny_skia::Pixmap::decode_png(png).unwrap();
+    let pixel = pixmap.pixel(x, y).unwrap();
+    match (pixel.red() > 150, pixel.green() > 100, pixel.blue() > 150) {
+        (true, false, false) => Some('r'),
+        (false, true, false) => Some('g'),
+        (false, false, true) => Some('b'),
+        _ => None,
+    }
+}
+
+#[test]
+fn connector_added_inside_a_rotated_flipped_scaled_group_draws_every_member_in_place() {
+    let before = rotated_flipped_scaled_group_with_connector(false, false);
+    let presentation = rotated_flipped_scaled_group_with_connector(true, false);
+    let pixels = powerpoint_group_pixels(&presentation, &ROTATED_GROUP_PROBES);
+    // The connector refits the group, which keeps its members where
+    // PowerPoint drew them before.
+    assert_eq!(
+        powerpoint_group_pixels(&before, &ROTATED_GROUP_PROBES[..2]),
+        pixels[..2]
+    );
+    let (input, layout) = presentation.render_deterministic().unwrap();
+    assert_eq!(input.slides[0].shapes.len(), 3);
+    assert!(
+        input.slides[0].diagnostics.is_empty(),
+        "{:?}",
+        input.slides[0].diagnostics
+    );
+    let png = oxml_pdf::render_page_to_png(&layout, 0, 72.0).unwrap();
+    let colours = pixels
+        .iter()
+        .map(|pixel| primary_at(&png, *pixel))
+        .collect::<Vec<_>>();
+    assert_eq!(colours, [Some('r'), Some('b'), Some('g')], "{pixels:?}");
+}
+
+#[test]
+#[ignore = "requires pinned LibreOffice 26.2.5.2 and Poppler"]
+fn connector_added_inside_a_rotated_flipped_scaled_group_matches_libreoffice() {
+    connector_added_inside_a_rotated_flipped_scaled_group_draws_every_member_in_place();
+    let presentation = rotated_flipped_scaled_group_with_connector(true, false);
+    let pixels = powerpoint_group_pixels(&presentation, &ROTATED_GROUP_PROBES);
+    let root = f222_temp_directory("issue-323-rotated-group");
+    fs::create_dir_all(&root).unwrap();
+    let source_path = root.join("rotated-group-connector.pptx");
+    fs::write(&source_path, presentation.to_bytes().unwrap()).unwrap();
+    f222_libreoffice_convert(&source_path, "pdf", &root);
+    let oracle_pages = m21_pdf_page_pngs(
+        &root.join("rotated-group-connector.pdf"),
+        &root.join("oracle"),
+        72,
+    );
+    assert_eq!(oracle_pages.len(), 1);
+    let rust_png = presentation
+        .slide_png_deterministic(0, 72.0)
+        .unwrap()
+        .unwrap();
+    for (renderer, png) in [("Rust", &rust_png), ("LibreOffice", &oracle_pages[0])] {
+        let colours = pixels
+            .iter()
+            .map(|pixel| primary_at(png, *pixel))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            colours,
+            [Some('r'), Some('b'), Some('g')],
+            "{renderer}: {pixels:?}"
+        );
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn an_unresolvable_group_member_is_named_and_its_siblings_still_draw() {
+    let presentation = rotated_flipped_scaled_group_with_connector(true, true);
+    let pixels = powerpoint_group_pixels(&presentation, &ROTATED_GROUP_PROBES);
+    let (input, layout) = presentation.render_deterministic().unwrap();
+    let slide = &input.slides[0];
+    let unsupported = slide
+        .shapes
+        .iter()
+        .map(|shape| shape.unsupported)
+        .collect::<Vec<_>>();
+    assert_eq!(unsupported, [None, Some("unresolved shape"), None]);
+    let messages = slide
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(
+        messages[0].starts_with(r#"unresolved slide shape 4 "Shape 4" retained as bounds: "#)
+            && messages[0].contains("99"),
+        "{messages:?}"
+    );
+    let png = oxml_pdf::render_page_to_png(&layout, 0, 72.0).unwrap();
+    let colours = pixels
+        .iter()
+        .map(|pixel| primary_at(&png, *pixel))
+        .collect::<Vec<_>>();
+    // The blue rectangle keeps only its outline, so its centre is white.
+    assert_eq!(colours, [Some('r'), None, Some('g')], "{pixels:?}");
+    // The deck saves unchanged and the same failure is reported again.
+    let reopened = Presentation::from_bytes(&presentation.to_bytes().unwrap()).unwrap();
+    let (input, _) = reopened.render_deterministic().unwrap();
+    assert_eq!(input.slides[0].diagnostics, slide.diagnostics);
 }

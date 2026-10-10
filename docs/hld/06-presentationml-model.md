@@ -619,11 +619,11 @@ space to its parent. A group's flips and rotation apply about the centre of
 counted member `a:off` also moves by `(L - I)` times the centre's shift, where
 `L` flips, then rotates, as PowerPoint does. A member drawn before the addition
 therefore stays where PowerPoint drew it, and PowerPoint renders such decks
-unchanged before and after an addition. The rpptx renderer rotates a group
-before it flips it, which agrees with PowerPoint unless a group is both
-rotated and flipped. A group without all four values maps members unchanged,
-so a new group ends with four equal values, as python-pptx writes them, and
-its members keep their slide coordinates. python-pptx instead sets `a:off` to
+unchanged before and after an addition. The rpptx renderer also flips a group
+before it rotates it, so it agrees with PowerPoint when both apply. A group
+without all four values maps members unchanged, so a new group ends with four
+equal values, as python-pptx writes them, and its members keep their slide
+coordinates. python-pptx instead sets `a:off` to
 `a:chOff` and ignores flips and rotation, which moves the members of a group
 that was moved, resized, rotated, or flipped after it was built. Member
 rotation does not widen the union, as in python-pptx. A member without an

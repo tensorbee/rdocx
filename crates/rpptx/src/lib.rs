@@ -7559,10 +7559,9 @@ fn fit_group_to_members(group: &mut CT_GroupShape, occupied: bool) {
 /// rotation, which apply about the centre of `a:off` and `a:ext`, place its
 /// members as before after that centre moved by `(dx, dy)`.
 ///
-/// PowerPoint flips, then rotates, so for that linear part `L` the shift is
-/// `(L - I)(dx, dy)`, which is zero without rotation and flips. The rpptx
-/// renderer rotates a group before it flips it, which agrees with
-/// PowerPoint unless a group is both rotated and flipped.
+/// PowerPoint flips, then rotates, as the rpptx renderer does, so for that
+/// linear part `L` the shift is `(L - I)(dx, dy)`, which is zero without
+/// rotation and flips.
 fn pivot_shift(transform: &CT_Transform2D, dx: f64, dy: f64) -> (i64, i64) {
     let (sin, cos) = (f64::from(transform.rotation.0) / 60_000.0)
         .to_radians()
