@@ -14318,6 +14318,28 @@ impl Document {
             .ok_or(Error::NoDocumentPart)?;
         let namespace_scopes = document_namespace_scopes(doc_xml)?;
         let document = CT_Document::from_xml(doc_xml)?;
+        // Headers, footers and notes are parsed lazily or leniently, but
+        // later passes walk their raw XML recursively, so their content
+        // control nesting is bounded before any of them runs.
+        if let Some(rels) = package.get_part_rels(&doc_part_name) {
+            for relationship in rels.items.iter().filter(|relationship| {
+                relationship_is_internal(relationship)
+                    && matches!(
+                        relationship.rel_type.as_str(),
+                        rel_types::HEADER
+                            | rel_types::FOOTER
+                            | rel_types::FOOTNOTES
+                            | rel_types::ENDNOTES
+                            | rel_types::COMMENTS
+                            | rel_types::GLOSSARY_DOCUMENT
+                    )
+            }) {
+                let part = OpcPackage::resolve_rel_target(&doc_part_name, &relationship.target);
+                if let Some(xml) = package.get_part(&part) {
+                    rdocx_oxml::content_control::validate_story_part_nesting(xml)?;
+                }
+            }
+        }
 
         // Resolve the part a relationship of the given type points at.
         let resolve_part = |rel_type: &str| -> Option<String> {

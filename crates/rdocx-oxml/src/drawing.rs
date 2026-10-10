@@ -330,7 +330,12 @@ pub struct CT_Shape {
     /// outline. `None` covers both `a:noFill` and a fill we cannot resolve,
     /// such as a theme colour.
     pub solid_fill: Option<String>,
-    /// Paragraphs of the shape's text box, from `wps:txbx/w:txbxContent`.
+    /// Paragraphs of a text box built in code. Empty for a parsed shape,
+    /// whose text box content is in [`Self::text_body`].
+    ///
+    /// The parser used to copy the body's paragraphs here as well. Every
+    /// nested text box was then held twice per level, so nested text boxes
+    /// took time and memory exponential in their depth.
     pub text: Vec<crate::text::CT_P>,
     /// Authoritative parsed block body, including tables and modeled controls.
     /// The paragraph-only projection is used for authored legacy shapes when absent.
@@ -338,6 +343,17 @@ pub struct CT_Shape {
     /// Physical selected text-box owner ordinal in the source OPC part.
     /// Assigned by the document projection, never by renderer traversal order.
     pub source_text_box_owner: Option<usize>,
+}
+
+impl CT_Shape {
+    /// The paragraphs of the shape's text box: those of
+    /// [`Self::text_body`] when the shape has one, [`Self::text`] otherwise.
+    pub fn paragraphs(&self) -> Box<dyn Iterator<Item = &crate::text::CT_P> + '_> {
+        match &self.text_body {
+            Some(body) => Box::new(body.paragraphs()),
+            None => Box::new(self.text.iter()),
+        }
+    }
 }
 
 /// Parse the DrawingML held inside a captured `mc:AlternateContent` block.
@@ -702,9 +718,7 @@ impl CT_Anchor {
                         s.solid_fill = solid_fill;
                     } else if is_word_text_box {
                         let body = text_box_body(reader, e)?;
-                        let shape = shape.get_or_insert_with(CT_Shape::default);
-                        shape.text = body.paragraphs().cloned().collect();
-                        shape.text_body = Some(body);
+                        shape.get_or_insert_with(CT_Shape::default).text_body = Some(body);
                     } else if matches_local_name(ename.as_ref(), b"blip") {
                         reader.read_to_end_into(ename, &mut Vec::new())?;
                     } else if canonical_wp_element(reader, e, b"docPr") {
@@ -1371,8 +1385,12 @@ fn text_box_body(
             .map_err(quick_xml::Error::from)?;
         bindings.push((prefix.to_owned(), namespace.into_owned()));
     }
-    let raw =
-        crate::text::raw_with_external_bindings(&capture_ns_element(reader, start)?, &bindings)?;
+    let raw = capture_ns_element(reader, start)?;
+    // Each nested text box is parsed by a recursive call, so a fragment parsed
+    // on its own is bounded here, counting only the nesting inside this text
+    // box. Document::open checks whole parts first, ancestors included.
+    crate::content_control::validate_story_part_nesting(&raw)?;
+    let raw = crate::text::raw_with_external_bindings(&raw, &bindings)?;
     let mut body_reader = Reader::from_reader(raw.as_slice());
     let mut buffer = Vec::new();
     let Event::Start(root) = body_reader.read_event_into(&mut buffer)? else {
@@ -2152,7 +2170,7 @@ mod tests {
                     assert_eq!((anchor.extent_cx, anchor.extent_cy), (Emu(10), Emu(20)));
                     let shape = anchor.shape.unwrap();
                     assert_eq!(shape.preset.as_deref(), Some("rect"));
-                    let paragraph = &shape.text[0];
+                    let paragraph = shape.paragraphs().next().unwrap();
                     assert_eq!(
                         paragraph.text(),
                         "  leading  internal  trailing    cached  result  "
@@ -2513,6 +2531,70 @@ mod tests {
                 .expect("nested chart lookalike")
                 .chart_rel_id,
             None
+        );
+    }
+
+    /// `depth` anchored text boxes nested inside each other.
+    fn nested_text_boxes(depth: usize) -> String {
+        let mut content = r#"<w:p><w:r><w:t>leaf</w:t></w:r></w:p>"#.to_owned();
+        for level in (1..=depth).rev() {
+            let drawing = format!(
+                r#"<w:drawing><wp:anchor><wp:extent cx="10" cy="20"/><wp:docPr id="{level}" name="Box"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:spPr><a:prstGeom prst="rect"/></wps:spPr><wps:txbx><w:txbxContent>{content}</w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing>"#
+            );
+            if level == 1 {
+                return drawing.replacen(
+                    "<w:drawing>",
+                    &format!(
+                        r#"<w:drawing xmlns:w="{}" xmlns:wp="{}" xmlns:a="{}" xmlns:wps="{}">"#,
+                        crate::namespace::W_NS,
+                        drawing_ns::WP,
+                        drawing_ns::A,
+                        "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+                    ),
+                    1,
+                );
+            }
+            content = format!("<w:p><w:r><w:t>L{level}</w:t></w:r><w:r>{drawing}</w:r></w:p>");
+        }
+        content
+    }
+
+    /// Issue 337: the paragraphs of a parsed text box used to be held twice,
+    /// so every nested level doubled the work.
+    #[test]
+    fn nested_text_boxes_are_held_once_and_bounded() {
+        let drawing = parse_drawing(&nested_text_boxes(4));
+        let mut shape = drawing.anchor.unwrap().shape.unwrap();
+        for level in 2..=4 {
+            assert!(shape.text.is_empty());
+            let paragraphs: Vec<_> = shape.paragraphs().collect();
+            assert_eq!(paragraphs.len(), 1);
+            assert_eq!(paragraphs[0].text(), format!("L{level}"));
+            let inner = paragraphs[0].runs()[1]
+                .content
+                .iter()
+                .find_map(|content| match content {
+                    crate::text::RunContent::Drawing(drawing) => Some(drawing.clone()),
+                    _ => None,
+                })
+                .unwrap();
+            shape = inner.anchor.unwrap().shape.unwrap();
+        }
+        assert_eq!(shape.paragraphs().next().unwrap().text(), "leaf");
+
+        let xml = nested_text_boxes(2000);
+        let mut reader = Reader::from_str(&xml);
+        let mut buffer = Vec::new();
+        let Event::Start(start) = reader.read_event_into(&mut buffer).unwrap() else {
+            panic!("drawing start not found");
+        };
+        let prefixes = crate::numbering::word_prefixes_at(&start, &[]).unwrap();
+        let error = CT_Drawing::from_xml_with_prefixes(&mut reader, &prefixes).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("text box nesting exceeds 16 levels"),
+            "{error}"
         );
     }
 }

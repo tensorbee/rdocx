@@ -59,9 +59,13 @@ pub struct ResolvedNumbering {
     /// Contextual number suffixes beginning at each level, using source delimiters.
     #[doc(hidden)]
     pub number_suffixes_without_text: Vec<String>,
-    /// Concrete numbering instance that owns this counter sequence.
+    /// Concrete numbering instance of the paragraph.
     #[doc(hidden)]
     pub num_id: u32,
+    /// Abstract definition that owns this counter sequence, shared by every
+    /// instance of it.
+    #[doc(hidden)]
+    pub abstract_num_id: u32,
     /// Run properties for the marker.
     pub marker_rpr: CT_RPr,
     /// Item that follows the marker before paragraph content begins.
@@ -148,7 +152,7 @@ impl ResolvedNumbering {
     #[doc(hidden)]
     pub fn relative_to(&self, source: Option<&Self>, omit_text: bool) -> String {
         let mut start = source
-            .filter(|source| source.num_id == self.num_id)
+            .filter(|source| source.abstract_num_id == self.abstract_num_id)
             .map(|source| {
                 self.number_context
                     .iter()
@@ -183,12 +187,20 @@ impl ResolvedNumbering {
 
 /// Tracks numbering counters across paragraphs.
 ///
+/// As in Word, the counters belong to the abstract numbering definition, so
+/// every `w:num` instance of one definition continues the same sequence. An
+/// instance's `w:startOverride` restarts its level at the instance's first
+/// paragraph.
+///
 /// `Clone` exists so a note laid out at more than one section width consumes
 /// its list numbers once rather than once per width.
 #[derive(Clone)]
 pub struct NumberingState {
-    /// (numId, ilvl) → current count
+    /// (abstractNumId, ilvl) → current count
     counters: HashMap<(u32, u32), u32>,
+    /// Instances that have numbered a paragraph, so their start overrides
+    /// apply once.
+    started_instances: HashSet<u32>,
     resolved_by_source: HashMap<SourceNodeId, ResolvedNumbering>,
     bookmark_sources: HashMap<String, SourceNodeId>,
     resolved_by_bookmark: HashMap<String, (SourceNodeId, ResolvedNumbering)>,
@@ -206,6 +218,7 @@ impl NumberingState {
     pub fn new() -> Self {
         NumberingState {
             counters: HashMap::new(),
+            started_instances: HashSet::new(),
             resolved_by_source: HashMap::new(),
             bookmark_sources: HashMap::new(),
             resolved_by_bookmark: HashMap::new(),
@@ -214,9 +227,10 @@ impl NumberingState {
         }
     }
 
-    /// Advance the counter for the given numId/ilvl and return the new value.
-    pub fn advance(&mut self, num_id: u32, ilvl: u32, start: u32) -> u32 {
-        let key = (num_id, ilvl);
+    /// Advance the counter of an abstract definition's level and return the
+    /// new value.
+    pub fn advance(&mut self, abstract_num_id: u32, ilvl: u32, start: u32) -> u32 {
+        let key = (abstract_num_id, ilvl);
         match self.counters.entry(key) {
             std::collections::hash_map::Entry::Vacant(entry) => {
                 entry.insert(start);
@@ -230,12 +244,39 @@ impl NumberingState {
         }
     }
 
-    /// Get the current count for a level (without advancing).
-    pub fn current(&self, num_id: u32, ilvl: u32) -> u32 {
-        self.counters.get(&(num_id, ilvl)).copied().unwrap_or(0)
+    /// Get the current count of an abstract definition's level (without
+    /// advancing).
+    pub fn current(&self, abstract_num_id: u32, ilvl: u32) -> u32 {
+        self.counters
+            .get(&(abstract_num_id, ilvl))
+            .copied()
+            .unwrap_or(0)
     }
 
-    fn restart_deeper_levels(&mut self, num_id: u32, current_level: u32, numbering: &CT_Numbering) {
+    /// Restart the levels an instance overrides with `w:startOverride` when
+    /// the instance numbers its first paragraph.
+    fn start_instance(&mut self, num_id: u32, abstract_num_id: u32, numbering: &CT_Numbering) {
+        if !self.started_instances.insert(num_id) {
+            return;
+        }
+        let Some(instance) = numbering.nums.iter().find(|item| item.num_id == num_id) else {
+            return;
+        };
+        for level_override in &instance.level_overrides {
+            if level_override.start_override.is_some() {
+                self.counters
+                    .remove(&(abstract_num_id, level_override.ilvl));
+            }
+        }
+    }
+
+    fn restart_deeper_levels(
+        &mut self,
+        num_id: u32,
+        abstract_num_id: u32,
+        current_level: u32,
+        numbering: &CT_Numbering,
+    ) {
         for deeper in (current_level + 1)..=8 {
             let restart = resolved_numbering_level(num_id, deeper, numbering)
                 .and_then(|(base, _, _)| base.restart);
@@ -245,16 +286,20 @@ impl NumberingState {
                 Some(owner) => current_level < owner,
             };
             if should_restart {
-                self.counters.remove(&(num_id, deeper));
+                self.counters.remove(&(abstract_num_id, deeper));
             }
         }
     }
 
-    /// Restart only concrete instances whose abstract definition opts in at a
-    /// section boundary.
+    /// Restart only the abstract definitions that opt in at a section
+    /// boundary.
     pub fn restart_after_section_break(&mut self, numbering: &CT_Numbering) {
-        self.counters
-            .retain(|(num_id, _), _| !numbering.restarts_after_section_break(*num_id));
+        self.counters.retain(|(abstract_num_id, _), _| {
+            !numbering.nums.iter().any(|instance| {
+                instance.abstract_num_id == *abstract_num_id
+                    && numbering.restarts_after_section_break(instance.num_id)
+            })
+        });
     }
 
     pub(crate) fn record(&mut self, source: SourceNodeId, numbering: &ResolvedNumbering) {
@@ -300,6 +345,7 @@ impl NumberingState {
     pub(crate) fn references_only(&self) -> Self {
         Self {
             counters: HashMap::new(),
+            started_instances: HashSet::new(),
             resolved_by_source: HashMap::new(),
             bookmark_sources: self.bookmark_sources.clone(),
             resolved_by_bookmark: self.resolved_by_bookmark.clone(),
@@ -508,6 +554,15 @@ pub fn level_paragraph_properties(
     level.ppr.as_ref()
 }
 
+/// The abstract definition whose counters a numbering instance advances.
+fn instance_definition(num_id: u32, numbering: &CT_Numbering) -> Option<u32> {
+    numbering
+        .nums
+        .iter()
+        .find(|item| item.num_id == num_id)
+        .map(|item| item.abstract_num_id)
+}
+
 fn resolved_numbering_level(
     num_id: u32,
     ilvl: u32,
@@ -544,13 +599,15 @@ pub fn generate_marker(
     state: &mut NumberingState,
 ) -> Option<ResolvedNumbering> {
     let (base_lvl, lvl, start_override) = resolved_numbering_level(num_id, ilvl, numbering)?;
+    let definition = instance_definition(num_id, numbering)?;
     let num_fmt = lvl.num_fmt.clone().unwrap_or(ST_NumberFormat::Decimal);
     let start = start_override.or(base_lvl.start).unwrap_or(1);
     let lvl_text = lvl.lvl_text.as_deref().unwrap_or("%1.");
     let legal = lvl.legal == Some(true);
 
-    state.restart_deeper_levels(num_id, ilvl, numbering);
-    let count = state.advance(num_id, ilvl, start);
+    state.start_instance(num_id, definition, numbering);
+    state.restart_deeper_levels(num_id, definition, ilvl, numbering);
+    let count = state.advance(definition, ilvl, start);
     if matches!(num_fmt, ST_NumberFormat::None | ST_NumberFormat::Other(_)) {
         return None;
     }
@@ -598,7 +655,7 @@ pub fn generate_marker(
                 let configured_start = resolved_numbering_level(num_id, level, numbering)
                     .map(|(base, _, start_override)| start_override.or(base.start).unwrap_or(1))
                     .unwrap_or(0);
-                let current = state.current(num_id, level);
+                let current = state.current(definition, level);
                 if current == 0 {
                     configured_start
                 } else {
@@ -674,6 +731,7 @@ pub fn generate_marker(
         number_context,
         number_suffixes_without_text,
         num_id,
+        abstract_num_id: definition,
         marker_rpr,
         suffix: lvl.suffix.unwrap_or(ST_LvlSuffix::Tab),
     })
@@ -788,7 +846,8 @@ fn format_lvl_text(
                 let configured_start = resolved_numbering_level(num_id, lvl_idx, numbering)
                     .map(|(base, _, start_override)| start_override.or(base.start).unwrap_or(1))
                     .unwrap_or(0);
-                let current = state.current(num_id, lvl_idx);
+                let current = instance_definition(num_id, numbering)
+                    .map_or(0, |definition| state.current(definition, lvl_idx));
                 if current == 0 {
                     configured_start
                 } else {
@@ -1159,6 +1218,7 @@ mod tests {
                 "2".to_owned(),
             ],
             num_id: 7,
+            abstract_num_id: 3,
             marker_rpr: CT_RPr::default(),
             suffix: ST_LvlSuffix::Tab,
         };
@@ -1191,40 +1251,127 @@ mod tests {
         source.number_context = vec!["4".to_owned(), "3".to_owned(), "1".to_owned()];
         assert_eq!(embedded.relative_to(Some(&source), false), "5.2");
 
+        // Another instance of the same definition shares its counters, so
+        // its paragraphs give relative context too.
         source.num_id = 8;
+        assert_eq!(embedded.relative_to(Some(&source), false), "5.2");
+        source.abstract_num_id = 4;
         assert_eq!(target.relative_to(Some(&source), false), "4.5.Clause 2");
         assert_eq!(target.relative_to(None, true), "4.5.2");
     }
 
-    /// Two numbering instances that share one abstract definition still own
-    /// independent counters.
-    #[test]
-    fn shared_abstract_definition_starts_concrete_instances_independently() {
-        let mut numbering = CT_Numbering::new();
-        let first = numbering.add_numbered_list();
-        let abstract_id = numbering
+    /// A second instance of the abstract definition behind `first`, with
+    /// `start_overrides` as `(level, start)` pairs.
+    fn add_instance(
+        numbering: &mut CT_Numbering,
+        first: u32,
+        start_overrides: &[(u32, u32)],
+    ) -> u32 {
+        let abstract_num_id = numbering
             .nums
             .iter()
             .find(|n| n.num_id == first)
             .unwrap()
             .abstract_num_id;
-
-        // A second instance pointing at the same abstract definition.
-        let second = numbering.nums.iter().map(|n| n.num_id).max().unwrap() + 1;
+        let num_id = numbering.nums.iter().map(|n| n.num_id).max().unwrap() + 1;
         numbering.nums.push(rdocx_oxml::numbering::CT_Num {
-            num_id: second,
-            abstract_num_id: abstract_id,
+            num_id,
+            abstract_num_id,
             abstract_num_id_raw: None,
-            level_overrides: Vec::new(),
+            level_overrides: start_overrides
+                .iter()
+                .map(|&(level, start)| {
+                    let mut level_override = rdocx_oxml::numbering::CT_NumLvl::new(level);
+                    level_override.start_override = Some(start);
+                    level_override
+                })
+                .collect(),
             extra_xml: Vec::new(),
             extra_attributes: Vec::new(),
         });
+        num_id
+    }
 
+    fn markers(numbering: &CT_Numbering, paragraphs: &[(u32, u32)]) -> Vec<String> {
         let mut state = NumberingState::new();
-        let a = generate_marker(first, 0, &numbering, &mut state).unwrap();
-        let b = generate_marker(second, 0, &numbering, &mut state).unwrap();
-        assert_eq!(a.marker_text, "1.");
-        assert_eq!(b.marker_text, "1.");
+        paragraphs
+            .iter()
+            .map(|&(num_id, ilvl)| {
+                generate_marker(num_id, ilvl, numbering, &mut state)
+                    .unwrap()
+                    .marker_text
+            })
+            .collect()
+    }
+
+    /// Instances that share an abstract definition share its counters.
+    /// Word for Mac numbers two paragraphs on one instance and two on a
+    /// second, plain instance of the same definition 1, 2, 3, 4 (checked for
+    /// issue 321).
+    #[test]
+    fn instances_of_one_abstract_definition_share_its_counters() {
+        let mut numbering = CT_Numbering::new();
+        let first = numbering.add_numbered_list();
+        let second = add_instance(&mut numbering, first, &[]);
+
+        assert_eq!(
+            markers(
+                &numbering,
+                &[(first, 0), (first, 0), (second, 0), (second, 0)]
+            ),
+            ["1.", "2.", "3.", "4."]
+        );
+    }
+
+    /// An instance's `w:startOverride` restarts its level at the instance's
+    /// first paragraph, as in Word, and later paragraphs of either instance
+    /// continue the shared count.
+    #[test]
+    fn start_override_restarts_the_shared_count_at_the_instance_first_paragraph() {
+        let mut numbering = CT_Numbering::new();
+        let first = numbering.add_numbered_list();
+        let restarted = add_instance(&mut numbering, first, &[(0, 1)]);
+
+        assert_eq!(
+            markers(
+                &numbering,
+                &[
+                    (first, 0),
+                    (first, 0),
+                    (first, 0),
+                    (restarted, 0),
+                    (first, 0),
+                ]
+            ),
+            // Per-instance counters would number the last paragraph "4.".
+            ["1.", "2.", "3.", "1.", "2."]
+        );
+    }
+
+    /// Restarting a sub-level through a new instance leaves level 0 alone:
+    /// the level-0 items after it continue with "3.", as in Word and
+    /// LibreOffice.
+    #[test]
+    fn sub_level_restart_does_not_reset_level_zero() {
+        let mut numbering = CT_Numbering::new();
+        let first = numbering.add_numbered_list();
+        numbering.abstract_nums[0].levels[1].num_fmt = Some(ST_NumberFormat::Decimal);
+        let restarted = add_instance(&mut numbering, first, &[(1, 1)]);
+
+        assert_eq!(
+            markers(
+                &numbering,
+                &[
+                    (first, 0),
+                    (first, 1),
+                    (first, 0),
+                    (restarted, 1),
+                    (restarted, 1),
+                    (restarted, 0),
+                ]
+            ),
+            ["1.", "1.", "2.", "1.", "2.", "3."]
+        );
     }
 
     #[test]
@@ -1265,8 +1412,8 @@ mod tests {
             generate_marker(second, 0, &numbering, &mut state)
                 .unwrap()
                 .marker_text,
-            "1.",
-            "suppression must not merge independent concrete instances"
+            "3.",
+            "suppression must not consume the shared definition count"
         );
     }
 
@@ -1499,9 +1646,10 @@ mod tests {
         numbering.abstract_nums[0].levels[0].num_fmt = Some(ST_NumberFormat::CardinalText);
         let mut state = NumberingState::new();
 
+        let definition = numbering.abstract_nums[0].abstract_num_id;
         assert!(generate_marker(num_id, 0, &numbering, &mut state).is_none());
-        assert_eq!(state.current(num_id, 0), 1);
+        assert_eq!(state.current(definition, 0), 1);
         assert!(generate_marker(num_id, 0, &numbering, &mut state).is_none());
-        assert_eq!(state.current(num_id, 0), 2);
+        assert_eq!(state.current(definition, 0), 2);
     }
 }

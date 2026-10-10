@@ -4127,3 +4127,36 @@ def test_whole_story_comment_refusals_preserve_bytes_and_revision(kind):
             getattr(document, f"set_{kind}")(text)
         assert document.to_bytes() == before
         assert held.text == "main retained"
+
+
+def test_deeply_nested_content_controls_raise_instead_of_crashing():
+    import rdocx
+
+    depth = 5000
+    body = (
+        "<w:p>"
+        + "<w:sdt><w:sdtContent>" * depth
+        + "<w:r><w:t>x</w:t></w:r>"
+        + "</w:sdtContent></w:sdt>" * depth
+        + "</w:p>"
+    )
+    with pytest.raises(
+        rdocx.RdocxError, match="content control nesting exceeds 64 levels"
+    ):
+        _replace_document_body(rdocx.Document(), body)
+
+
+def test_deeply_nested_text_boxes_raise_instead_of_crashing():
+    import rdocx
+
+    depth = 2000
+    body = (
+        '<w:p><w:r><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml">'
+        "<v:textbox><w:txbxContent>"
+        + "<w:p><w:r><w:pict><v:shape><v:textbox><w:txbxContent>" * depth
+        + "<w:p/>"
+        + "</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>" * depth
+        + "</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>"
+    )
+    with pytest.raises(rdocx.RdocxError, match="text box nesting exceeds 16 levels"):
+        _replace_document_body(rdocx.Document(), body)

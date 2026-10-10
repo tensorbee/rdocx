@@ -96,6 +96,7 @@ impl CT_Footnotes {
 
     /// Parse from XML bytes (the content of footnotes.xml).
     pub fn from_xml(xml: &[u8]) -> Result<Self> {
+        crate::content_control::validate_story_part_nesting(xml)?;
         let mut reader = Reader::from_reader(xml);
         reader.config_mut().trim_text(true);
 

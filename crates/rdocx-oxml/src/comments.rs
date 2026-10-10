@@ -47,6 +47,7 @@ impl CT_Comments {
 
     /// Parse a complete comments part.
     pub fn from_xml(xml: &[u8]) -> Result<Self> {
+        crate::content_control::validate_story_part_nesting(xml)?;
         let mut reader = Reader::from_reader(xml);
         reader.config_mut().trim_text(true);
         let mut comments = Vec::new();

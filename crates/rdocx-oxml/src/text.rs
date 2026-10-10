@@ -13,7 +13,7 @@ use crate::content_control::{CT_Sdt, SdtContent, SdtOwner};
 use crate::drawing::CT_Drawing;
 use crate::error::{OxmlError, Result};
 use crate::math::OfficeMath;
-use crate::namespace::{R_NS, matches_local_name};
+use crate::namespace::{R_NS, matches_local_name, nesting_exceeds};
 use crate::numbering::{namespace_bindings, parse_scoped_ppr, word_prefixes_at};
 use crate::properties::{CT_PPr, CT_RPr, is_word_attribute, is_word_element};
 use crate::raw_xml::{capture_element, capture_empty_element};
@@ -3146,7 +3146,27 @@ pub(crate) fn parse_run_raw(raw: &[u8], word_prefixes: &[String]) -> Result<CT_R
     }
 }
 
+/// Deepest nesting of simple fields, smart tags and inline custom XML that
+/// the readers accept.
+///
+/// A simple field's cached result and a wrapper's content are each read as a
+/// paragraph of their own, so every level adds a paragraph parser to the
+/// stack. Producers nest these a few levels deep.
+const MAX_RUN_WRAPPER_NESTING: usize = 64;
+
+const RUN_WRAPPERS: [&[u8]; 3] = [b"fldSimple", b"smartTag", b"customXml"];
+
+fn validate_run_wrapper_nesting(raw: &[u8]) -> Result<()> {
+    if nesting_exceeds(raw, &RUN_WRAPPERS, MAX_RUN_WRAPPER_NESTING) {
+        return Err(OxmlError::InvalidValue(format!(
+            "simple field, smart tag and custom XML nesting exceeds {MAX_RUN_WRAPPER_NESTING} levels"
+        )));
+    }
+    Ok(())
+}
+
 fn parse_simple_field(raw: &[u8], word_prefixes: &[String]) -> Result<Option<Field>> {
+    validate_run_wrapper_nesting(raw)?;
     let mut reader = Reader::from_reader(raw);
     reader.config_mut().trim_text(false);
     let mut buffer = Vec::new();
@@ -5395,8 +5415,13 @@ fn is_run_wrapper(raw: &[u8]) -> bool {
 /// of the Word prefixes `inherited`. Its runs are the text a reader sees
 /// inside the wrapper. None for any other element, and for a wrapper whose
 /// content [`with_run_wrapper_content`] could not write back, because `w`
-/// does not name WordprocessingML there.
+/// does not name WordprocessingML there. None too for wrappers nested more
+/// than [`MAX_RUN_WRAPPER_NESTING`] levels deep, whose reading would recurse
+/// once per level.
 pub(crate) fn run_wrapper_paragraph(raw: &[u8], inherited: &[String]) -> Option<CT_P> {
+    if nesting_exceeds(raw, &RUN_WRAPPERS, MAX_RUN_WRAPPER_NESTING) {
+        return None;
+    }
     let mut reader = Reader::from_reader(raw);
     let mut buffer = Vec::new();
     let Ok(Event::Start(start)) = reader.read_event_into(&mut buffer) else {
@@ -8112,7 +8137,7 @@ impl CT_P {
                         tracked_run_count += 1;
                     } else if is_word_element(name.as_ref(), b"sdt", &prefixes) {
                         let raw = capture_element(reader, e)?;
-                        if let Some(sdt) = CT_Sdt::from_inline_raw(&raw, &prefixes) {
+                        if let Some(sdt) = CT_Sdt::from_inline_raw(&raw, &prefixes)? {
                             let raw_before = raw_xml_count_at(&extra_xml, runs.len());
                             let markers_before = comment_ranges
                                 .iter()
@@ -8278,6 +8303,14 @@ impl CT_P {
                             );
                             revisions.push((runs.len(), raw_before, revision));
                         }
+                        extra_xml.push((runs.len(), raw));
+                    } else if is_word_element(name.as_ref(), b"smartTag", &prefixes)
+                        || is_word_element(name.as_ref(), b"customXml", &prefixes)
+                    {
+                        // Text and edits read the wrapper's content as a
+                        // paragraph, once per nested level.
+                        let raw = capture_element(reader, e)?;
+                        validate_run_wrapper_nesting(&raw)?;
                         extra_xml.push((runs.len(), raw));
                     } else {
                         // Capture unknown elements (bookmarks, comments, etc.) as raw XML
@@ -12687,6 +12720,15 @@ fn record_external_prefix_used(
     external_bindings: &[(String, String)],
     required: &mut Vec<String>,
 ) {
+    // The scope walk is linear in the element's depth, so it runs last, only
+    // for a prefix that could still be required.
+    if !external_bindings
+        .iter()
+        .any(|(candidate, _)| candidate == prefix)
+        || required.iter().any(|candidate| candidate == prefix)
+    {
+        return;
+    }
     let internally_bound = declarations
         .iter()
         .rev()
@@ -12695,12 +12737,7 @@ fn record_external_prefix_used(
             .iter()
             .rev()
             .any(|scope| scope.iter().rev().any(|(candidate, _)| candidate == prefix));
-    if !internally_bound
-        && external_bindings
-            .iter()
-            .any(|(candidate, _)| candidate == prefix)
-        && !required.iter().any(|candidate| candidate == prefix)
-    {
+    if !internally_bound {
         required.push(prefix.to_owned());
     }
 }
@@ -14131,8 +14168,10 @@ mod tests {
             Some("729FCF"),
             "the fill colour must win over the outline colour"
         );
-        assert_eq!(shape.text.len(), 1);
-        assert_eq!(shape.text[0].text(), "boxed");
+        assert!(shape.text.is_empty(), "a parsed shape keeps one copy");
+        let paragraphs: Vec<_> = shape.paragraphs().collect();
+        assert_eq!(paragraphs.len(), 1);
+        assert_eq!(paragraphs[0].text(), "boxed");
 
         // The fragment API supplies canonical w, but explicit foreign rebinding
         // must override that fallback at either the owner or paragraph boundary.
@@ -14155,7 +14194,7 @@ mod tests {
                 .as_ref()
                 .unwrap();
             assert!(
-                shape.text.is_empty(),
+                shape.paragraphs().next().is_none(),
                 "explicit foreign Word prefix is not admitted"
             );
             assert!(shape.text_body.as_ref().is_none_or(|body| {

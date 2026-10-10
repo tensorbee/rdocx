@@ -781,7 +781,7 @@ fn edit_raw_block(
         }
         count
     } else if is_word_element(start.name().as_ref(), b"sdt", &prefixes) {
-        let Some(mut control) = CT_Sdt::from_body_raw(raw, word_prefixes) else {
+        let Ok(Some(mut control)) = CT_Sdt::from_body_raw(raw, word_prefixes) else {
             return 0;
         };
         let count = edit_control(&mut control, edit);
@@ -904,7 +904,7 @@ pub fn try_replace_in_block(
         }
         count
     } else if is_word_element(start.name().as_ref(), b"sdt", &prefixes) && paragraph.is_none() {
-        let mut value = CT_Sdt::from_body_raw(raw, &prefixes)
+        let mut value = CT_Sdt::from_body_raw(raw, &prefixes)?
             .ok_or_else(|| OxmlError::InvalidValue("unsupported scoped content control".into()))?;
         let count = edit_control(&mut value, &mut edit);
         if count > 0 {

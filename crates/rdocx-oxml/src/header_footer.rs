@@ -240,6 +240,7 @@ impl CT_HdrFtr {
 
     /// Parse from XML bytes (the content of header*.xml or footer*.xml).
     pub fn from_xml(xml: &[u8]) -> Result<Self> {
+        crate::content_control::validate_story_part_nesting(xml)?;
         let watermarks = parse_vml_watermarks(xml);
         let mut reader = Reader::from_reader(xml);
         // A raw child is captured with the text events of this reader, so

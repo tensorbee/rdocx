@@ -24511,6 +24511,7 @@ mod tests {
                 "2".to_owned(),
             ],
             num_id: 7,
+            abstract_num_id: 3,
             marker_rpr: CT_RPr::default(),
             suffix: ST_LvlSuffix::Tab,
         };
