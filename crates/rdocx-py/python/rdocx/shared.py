@@ -1,5 +1,8 @@
 """Unit and color values shared by the public rdocx API."""
 
+from collections.abc import Callable
+from typing import Any, SupportsIndex, overload
+
 
 def _truncating_division(value: int, divisor: int) -> int:
     """Divide integers with truncation toward zero."""
@@ -92,6 +95,8 @@ class Emu(Length):
 class RGBColor(tuple[int, int, int]):
     """An immutable red, green, blue color triple."""
 
+    __slots__ = ()
+
     def __new__(cls, r: int, g: int, b: int) -> "RGBColor":
         channels = (r, g, b)
         if any(not isinstance(channel, int) or not 0 <= channel <= 255 for channel in channels):
@@ -111,6 +116,54 @@ class RGBColor(tuple[int, int, int]):
 
     def __str__(self) -> str:
         return "%02X%02X%02X" % self
+
+    def __setattr__(self, name: str, value: object) -> None:
+        # Without this, `font.color.rgb = RGBColor(...)` on a run that already
+        # has a color would set an attribute on a copy and change nothing.
+        raise AttributeError(
+            f"RGBColor is immutable, so setting {name} would change nothing: "
+            "assign a new color instead, for example font.color = RGBColor(0xC0, 0x00, 0x00)"
+        )
+
+
+class _Styles(tuple[Any, ...]):
+    """``Document.styles``: the style snapshots in a tuple that is also
+    indexed by style name or ID, as python-docx's ``styles['Normal']``."""
+
+    __slots__ = ()
+
+    def _find(self, key: str) -> Any:
+        lowered = key.lower()
+        checks: tuple[Callable[[Any], bool], ...] = (
+            lambda style: style.style_id == key,
+            lambda style: style.name == key,
+            lambda style: (style.name or "").lower() == lowered,
+        )
+        for matches in checks:
+            for style in self:
+                if matches(style):
+                    return style
+        raise KeyError(f"no style with name or ID '{key}'")
+
+    @overload
+    def __getitem__(self, key: SupportsIndex) -> Any: ...
+    @overload
+    def __getitem__(self, key: slice) -> tuple[Any, ...]: ...
+    @overload
+    def __getitem__(self, key: str) -> Any: ...
+    def __getitem__(self, key: "SupportsIndex | slice | str") -> Any:
+        if isinstance(key, str):
+            return self._find(key)
+        return super().__getitem__(key)
+
+    def __contains__(self, key: object) -> bool:
+        if isinstance(key, str):
+            try:
+                self._find(key)
+            except KeyError:
+                return False
+            return True
+        return super().__contains__(key)
 
 
 __all__ = ["Length", "Inches", "Cm", "Mm", "Pt", "Emu", "RGBColor"]

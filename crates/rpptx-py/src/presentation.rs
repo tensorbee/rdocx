@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
 use oxml_py_support::RevisionCounter;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyList, PyTuple};
+use pyo3::types::{PyAny, PyBytes, PyList, PyTuple};
 use smallvec::smallvec;
 
 use crate::layout::PyTextFrameLayout;
@@ -168,6 +169,19 @@ impl PyPresentation {
         width: Option<i64>,
         height: Option<i64>,
     ) -> PyResult<()> {
+        // PowerPoint repairs a slide side outside 1 to 56 inches. The facade
+        // refuses a side that is not positive.
+        for (name, value) in [("slide_width", width), ("slide_height", height)] {
+            if let Some(value) = value
+                && value > 0
+                && !(MIN_SLIDE_SIDE..=MAX_SLIDE_SIDE).contains(&value)
+            {
+                return Err(PyValueError::new_err(format!(
+                    "{name} must be from {MIN_SLIDE_SIDE} EMU (1 inch) to {MAX_SLIDE_SIDE} EMU \
+                     (56 inches), got {value}: give a Length such as Inches(13.333)"
+                )));
+            }
+        }
         let (current_width, current_height) = self
             .inner
             .slide_size()
@@ -181,13 +195,55 @@ impl PyPresentation {
     }
 }
 
+/// The smallest and largest slide side PowerPoint accepts, in EMU.
+const MIN_SLIDE_SIDE: i64 = 914_400;
+const MAX_SLIDE_SIDE: i64 = 51_206_400;
+
+/// Refuse a save path whose extension names another format: the file would
+/// hold a .pptx package whatever its name says.
+fn check_save_extension(path: &std::path::Path) -> PyResult<()> {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+    let instead = match extension.as_deref() {
+        Some("pdf") => "write the bytes of prs.to_pdf()",
+        Some("png") => "write the bytes of prs.render_slide_to_png(slide_index)",
+        Some("ppt" | "odp" | "key" | "html" | "txt") => {
+            "save as .pptx, rpptx writes PresentationML packages only"
+        }
+        _ => return Ok(()),
+    };
+    Err(PyValueError::new_err(format!(
+        "save writes a .pptx package, not .{}: {instead}",
+        extension.unwrap_or_default()
+    )))
+}
+
 #[pymethods]
 impl PyPresentation {
+    fn __getattr__(&self, name: &str) -> PyResult<Py<PyAny>> {
+        Err(crate::missing_attribute("Presentation", name))
+    }
+
+    fn __setattr__(slf: &Bound<'_, Self>, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        crate::set_attribute(slf.as_any(), "Presentation", name, value)
+    }
+
+    /// Open a path or a binary file-like object, as python-pptx's
+    /// `Presentation(pptx)` does, or start from the default template.
     #[new]
     #[pyo3(signature = (path = None))]
-    fn new(path: Option<PathBuf>, py: Python<'_>) -> PyResult<Self> {
+    fn new(path: Option<&Bound<'_, PyAny>>, py: Python<'_>) -> PyResult<Self> {
         match path {
-            Some(path) => rpptx::Presentation::open(path)
+            Some(stream) if stream.hasattr("read")? => {
+                if stream.hasattr("seek")? {
+                    stream.call_method1("seek", (0,))?;
+                }
+                let bytes = stream.call_method0("read")?.extract::<Vec<u8>>()?;
+                Self::from_bytes(&bytes, py)
+            }
+            Some(path) => rpptx::Presentation::open(path.extract::<PathBuf>()?)
                 .map(Self::from_presentation)
                 .map_err(|error| rpptx_to_pyerr(py, error)),
             None => rpptx::Presentation::new()
@@ -203,7 +259,19 @@ impl PyPresentation {
             .map_err(|error| rpptx_to_pyerr(py, error))
     }
 
-    fn save(&self, path: PathBuf, py: Python<'_>) -> PyResult<()> {
+    /// Save to a path or write to a binary file-like object, as python-pptx
+    /// does.
+    fn save(&self, path: &Bound<'_, PyAny>, py: Python<'_>) -> PyResult<()> {
+        if path.hasattr("write")? {
+            let bytes = self
+                .inner
+                .to_bytes()
+                .map_err(|error| rpptx_to_pyerr(py, error))?;
+            path.call_method1("write", (PyBytes::new(py, &bytes),))?;
+            return Ok(());
+        }
+        let path = path.extract::<PathBuf>()?;
+        check_save_extension(&path)?;
         self.inner
             .save(path)
             .map_err(|error| rpptx_to_pyerr(py, error))

@@ -27925,3 +27925,61 @@ fn names_and_chart_text_xml_cannot_carry_are_refused() {
         "{error}"
     );
 }
+
+#[test]
+fn raw_xml_replaces_slides_layouts_shapes_and_text_bodies_and_refuses_bad_xml() {
+    let mut presentation = rpptx::Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    presentation
+        .shapes_mut(0, &[])
+        .unwrap()
+        .add_textbox(
+            rpptx::Emu(0),
+            rpptx::Emu(0),
+            rpptx::Emu(914_400),
+            rpptx::Emu(914_400),
+        )
+        .unwrap();
+    let shape = presentation
+        .slide(0)
+        .unwrap()
+        .shape(0)
+        .unwrap()
+        .xml()
+        .unwrap();
+    presentation.replace_shape_xml(0, &[0], &shape).unwrap();
+    presentation
+        .replace_text_body_xml(
+            0,
+            &[0],
+            b"<p:txBody><a:bodyPr/><a:p><a:r><a:t>Body</a:t></a:r></a:p></p:txBody>",
+        )
+        .unwrap();
+    let body = presentation.text_body_xml(0, &[0]).unwrap().unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("Body"));
+    let slide = presentation.slide_xml(0).unwrap();
+    presentation.replace_slide_xml(0, &slide).unwrap();
+    let layout = presentation.layout_xml(0).unwrap();
+    presentation.replace_layout_xml(0, &layout).unwrap();
+
+    let before = presentation.to_bytes().unwrap();
+    for (xml, message) in [
+        (&b"<p:pic/>"[..], "got p:pic"),
+        (b"<p:sp><p:nvSpPr>", "not closed"),
+        (
+            b"<p:sp><p:bogus/></p:sp>",
+            "p:bogus cannot sit directly in p:sp",
+        ),
+    ] {
+        let error = presentation.replace_shape_xml(0, &[0], xml).unwrap_err();
+        assert!(error.to_string().contains(message), "{error}");
+    }
+    let error = presentation
+        .replace_slide_xml(0, b"<p:sldLayout/>")
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("expected one sld element"),
+        "{error}"
+    );
+    assert_eq!(presentation.to_bytes().unwrap(), before);
+}

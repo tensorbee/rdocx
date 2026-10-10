@@ -1056,10 +1056,12 @@ def test_python_indexed_content_mutation_is_counted_and_atomic():
     assert document.find_content_index(table) == 1
 
     held = document.paragraphs[0]
+    later = document.paragraphs[1]
     inserted = document.insert_paragraph(1, "middle")
     assert inserted.text == "middle"
-    with pytest.raises(rdocx.StaleElementError):
-        _ = held.text
+    # As in python-docx, the paragraphs around an insertion keep their handles.
+    assert held.text == "alpha {{TOKEN}}"
+    assert later.text == "omega"
 
     fragment = document.pop_content(document.find_content_index(inserted))
     assert fragment.kind == "paragraph"
@@ -2950,10 +2952,9 @@ def test_run_remove_keeps_markers_and_drops_emptied_wrappers():
     assert [run.text for run in runs] == ["Keep ", "drop", "link", "inserted"]
     kept = runs[0]
     runs[1].remove()
-    with pytest.raises(rdocx.StaleElementError):
+    with pytest.raises(rdocx.StaleElementError, match="Run.remove invalidated it"):
         kept.text
-    with pytest.raises(rdocx.StaleElementError):
-        paragraph.text
+    assert paragraph.text == "Keep linkinserted"
     assert [run.text for run in document.paragraphs[0].runs] == [
         "Keep ",
         "link",
@@ -3332,9 +3333,9 @@ def test_paragraph_text_setter_replaces_runs_and_keeps_format_and_comments():
 
     paragraph.text = "Omega\tone\ntwo"
 
-    for stale in (lambda: paragraph.text, lambda: run.text):
-        with pytest.raises(rdocx.StaleElementError):
-            stale()
+    assert paragraph.text == "Omega\tone\ntwo"
+    with pytest.raises(rdocx.StaleElementError, match="Paragraph.text invalidated it"):
+        run.text
     paragraph = document.paragraphs[0]
     assert paragraph.text == "Omega\tone\ntwo"
     assert paragraph.style == "Heading1"
@@ -3892,6 +3893,9 @@ def test_comment_anchor_block_control_paragraph_endpoints_are_real_typed_ranges(
         assert position.item.xml
         assert current.to_bytes() == original
         current.add_paragraph("Revision changes")
+        position = rdocx.StoryRunPosition(paragraph=held, run_index=0)
+        assert position.item.text == ("A" if multi else "AB")
+        current.insert_table(0, 1, 1)
         with pytest.raises(rdocx.StaleElementError, match="document revision"):
             rdocx.StoryRunPosition(paragraph=held, run_index=0)
 
@@ -4127,3 +4131,357 @@ def test_whole_story_comment_refusals_preserve_bytes_and_revision(kind):
             getattr(document, f"set_{kind}")(text)
         assert document.to_bytes() == before
         assert held.text == "main retained"
+
+
+def _saved_part(data, name="word/document.xml"):
+    with zipfile.ZipFile(io.BytesIO(data)) as package:
+        return package.read(name).decode("utf-8")
+
+
+def test_raw_xml_reads_and_replaces_paragraphs_runs_tables_cells_and_sections():
+    import rdocx
+
+    document = rdocx.Document()
+    paragraph = document.add_paragraph("Hello ")
+    run = paragraph.add_run("world")
+    table = document.add_table(rows=1, cols=2)
+    assert paragraph.xml.startswith(b"<w:p ") and b"Hello " in paragraph.xml
+    assert run.xml.startswith(b"<w:r ") and b"world" in run.xml
+    assert table.xml.startswith(b"<w:tbl ")
+    assert document.tables[0].cell(0, 1).xml.startswith(b"<w:tc ")
+    assert document.section_xml(0).startswith(b"<w:sectPr ")
+
+    # Prefixes the document root declares need no declaration.
+    paragraph.replace_xml(
+        '<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>Centered</w:t></w:r></w:p>'
+    )
+    assert paragraph.text == "Centered"
+    assert paragraph.alignment == rdocx.WD_ALIGN_PARAGRAPH.CENTER
+    paragraph.runs[0].replace_xml(b"<w:r><w:rPr><w:i/></w:rPr><w:t>Italic</w:t></w:r>")
+    assert paragraph.runs[0].italic is True
+    cell = document.tables[0].cell(0, 1)
+    cell.replace_xml("<w:tc><w:p><w:r><w:t>In cell</w:t></w:r></w:p></w:tc>")
+    assert cell.text == "In cell"
+    table.replace_xml(table.xml.replace(b"In cell", b"Edited"))
+    assert table.cell(0, 1).text == "Edited"
+    section = document.section_xml(0)
+    assert b'w:w="12240" w:h="15840"' in section
+    document.replace_section_xml(
+        0,
+        section.replace(
+            b'w:w="12240" w:h="15840"', b'w:w="15840" w:h="12240" w:orient="landscape"'
+        ),
+    )
+    assert document.sections[0].orientation == "landscape"
+
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert reopened.paragraphs[0].text == "Italic"
+    assert reopened.tables[0].cell(0, 1).text == "Edited"
+
+
+def test_raw_xml_refuses_what_it_cannot_write_faithfully():
+    import rdocx
+
+    document = rdocx.Document()
+    paragraph = document.add_paragraph("keep")
+    before = document.to_bytes()
+    for xml, message in [
+        ("<w:tbl/>", "got w:tbl"),
+        ("<w:p><w:r>", "not closed"),
+        ("<w:p/><w:p/>", "more than one root"),
+        ("text", "outside its root"),
+        (
+            '<w:p><w:hyperlink r:id="rId99"><w:r><w:t>x</w:t></w:r></w:hyperlink></w:p>',
+            'r:id="rId99" names no relationship',
+        ),
+        (
+            '<w:p><w:pPr><w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr></w:pPr></w:p>',
+            "section break",
+        ),
+        ("<w:p><w:r><w:rPr><w:b/><w:b/></w:rPr><w:t>x</w:t></w:r></w:p>", "would not keep b"),
+        ("<w:p><w:r><w:tbl/></w:r></w:p>", "w:tbl cannot sit directly in w:r"),
+        (
+            "<w:p><w:sdt><w:sdtContent><w:p/></w:sdtContent></w:sdt></w:p>",
+            "only inside a text box",
+        ),
+    ]:
+        with pytest.raises(ValueError, match=message):
+            paragraph.replace_xml(xml)
+    with pytest.raises(ValueError, match="one w:r element"):
+        paragraph.runs[0].replace_xml("<w:p/>")
+    with pytest.raises(ValueError, match="one w:tc element"):
+        document.add_table(rows=1, cols=1).cell(0, 0).replace_xml("<w:tc/><w:tc/>")
+    with pytest.raises(TypeError, match="str or bytes"):
+        paragraph.replace_xml(3)
+    assert paragraph.text == "keep"
+    document.remove_content(1)
+    assert document.to_bytes() == before
+
+
+def test_paragraph_and_run_handles_survive_edits_that_do_not_move_them():
+    import rdocx
+
+    document = rdocx.Document()
+    first = document.add_paragraph("one")
+    run = first.add_run(" two")
+    table = document.add_table(rows=1, cols=1)
+    second = document.add_paragraph("three")
+    run.bold = True
+    first.add_run(" four")
+    assert run.text == " two" and run.bold is True
+    assert first.text == "one two four" and table.rows[0].cells[0].text == ""
+
+    # Rewriting a paragraph keeps it and every other handle, and retires its
+    # runs with an error that names the call.
+    first.text = "replaced"
+    assert first.text == "replaced" and second.text == "three"
+    with pytest.raises(rdocx.StaleElementError, match="Paragraph.text invalidated it"):
+        run.text
+
+    # An insertion moves the handles after it, as python-docx elements stay put.
+    zero = second.insert_paragraph_before("before three", style="Quote")
+    assert [paragraph.text for paragraph in document.paragraphs] == [
+        "replaced",
+        "before three",
+        "three",
+    ]
+    assert second.text == "three" and zero.style == "Quote" and first.text == "replaced"
+
+    tail = second.add_run(" tail")
+    tail.remove()
+    with pytest.raises(rdocx.StaleElementError, match="Run.remove invalidated it"):
+        tail.text
+    assert second.text == "three"
+
+    for paragraph in document.paragraphs:
+        paragraph.text = paragraph.text.upper()
+    assert [paragraph.text for paragraph in document.paragraphs] == [
+        "REPLACED",
+        "BEFORE THREE",
+        "THREE",
+    ]
+
+    # An edit that moves content in ways the handles cannot follow still
+    # retires them.
+    document.remove_content(0)
+    with pytest.raises(rdocx.StaleElementError):
+        second.text
+
+
+def test_python_docx_first_draft_names_write_what_python_docx_writes():
+    import rdocx
+    from rdocx.enum.section import WD_SECTION
+    from rdocx.enum.table import WD_ALIGN_VERTICAL
+    from rdocx.enum.text import WD_COLOR_INDEX
+
+    document = rdocx.Document()
+    document.add_heading("Report", 0)
+    document.add_heading("Part", level=2)
+    with pytest.raises(ValueError, match="range 0-9"):
+        document.add_heading("Too deep", level=10)
+    document.add_paragraph("item", style="List Bullet")
+    document.add_paragraph("nested", style="List Bullet 2")
+    numbered = document.add_paragraph()
+    numbered.style = "List Number"
+    document.add_page_break()
+    run = document.add_paragraph().add_run("marked")
+    run.bold = True
+    run.italic = True
+    run.underline = True
+    run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+    assert (run.bold, run.italic, run.underline) == (True, True, True)
+    assert run.font.highlight_color == WD_COLOR_INDEX.YELLOW
+    assert run.font.highlight == "yellow"
+    styles = document.styles
+    assert styles["Normal"].style_id == "Normal"
+    assert styles["heading 1"].style_id == "Heading1"
+    assert "List Bullet" in styles and styles[0] is not None
+    with pytest.raises(KeyError):
+        styles["Missing"]
+    table = document.add_table(rows=1, cols=1)
+    table.cell(0, 0).vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+    section = document.add_section(WD_SECTION.CONTINUOUS)
+    assert section.break_type == "continuous" and len(document.sections) == 2
+
+    stream = io.BytesIO()
+    document.save(stream)
+    data = stream.getvalue()
+    reopened = rdocx.Document(io.BytesIO(data))
+    assert [paragraph.text for paragraph in reopened.paragraphs][:3] == ["Report", "Part", "item"]
+    xml = _saved_part(data)
+    assert 'w:pStyle w:val="Title"' in xml and 'w:pStyle w:val="Heading2"' in xml
+    assert '<w:br w:type="page"/>' in xml and '<w:highlight w:val="yellow"/>' in xml
+    # List Bullet and List Bullet 2 share one bulleted list at levels 0 and 1,
+    # and List Number has a numbered list of its own.
+    styles_xml = _saved_part(data, "word/styles.xml")
+    numbering = _saved_part(data, "word/numbering.xml")
+
+    def style_numbering(style_id):
+        block = styles_xml[styles_xml.index(f'w:styleId="{style_id}"') :]
+        block = block[: block.index("</w:style>")]
+        return re.search(r'w:ilvl w:val="(\d)"', block), re.search(r'w:numId w:val="(\d+)"', block)
+
+    (level0, bullet), (level1, nested) = style_numbering("ListBullet"), style_numbering("ListBullet2")
+    (_, number) = style_numbering("ListNumber")
+    assert bullet.group(1) == nested.group(1) != number.group(1)
+    assert level1.group(1) == "1" and (level0 is None or level0.group(1) == "0")
+    assert 'w:numFmt w:val="bullet"' in numbering and 'w:numFmt w:val="decimal"' in numbering
+
+
+def test_python_docx_values_that_would_write_a_wrong_file_raise():
+    import rdocx
+    from rdocx import Inches, Pt
+
+    document = rdocx.Document()
+    paragraph = document.add_paragraph("x")
+    run = paragraph.runs[0]
+    before = document.to_bytes()
+    # A bare int is EMU: one meant as points or twips rounds to zero.
+    for target, name, value in [
+        (run.font, "size", 12),
+        (paragraph.paragraph_format, "space_after", 6),
+        (paragraph.paragraph_format, "left_indent", 100),
+        (paragraph.paragraph_format, "line_spacing", Pt(0.01)),
+    ]:
+        with pytest.raises(ValueError, match="would hold 0"):
+            setattr(target, name, value)
+    for value in (0, 0.0, -1.5):
+        with pytest.raises(ValueError, match="positive"):
+            paragraph.paragraph_format.line_spacing = value
+    with pytest.raises(ValueError, match="cannot be empty"):
+        run.font.name = ""
+    table = document.add_table(rows=1, cols=1)
+    for setter in (
+        lambda: setattr(table, "width", 50),
+        lambda: setattr(table.rows[0], "height", 10),
+        lambda: setattr(table.cell(0, 0), "width", 100),
+        lambda: table.set_column_width(0, 300),
+    ):
+        with pytest.raises(ValueError, match="would hold 0"):
+            setter()
+    document.remove_content(1)
+    assert document.to_bytes() == before
+    paragraph = document.paragraphs[0]
+    paragraph.runs[0].font.size = Pt(12)
+    paragraph.paragraph_format.left_indent = Inches(0.5)
+
+    with pytest.raises(ValueError, match="at least one column"):
+        document.add_table(rows=1, cols=0)
+    document.add_table(rows=0, cols=2)
+    with pytest.raises(ValueError, match="has no rows"):
+        document.to_bytes()
+    document.remove_content(1)
+
+    # The name says another format, but save writes a .docx package.
+    with pytest.raises(ValueError, match="to_pdf"):
+        document.save("report.pdf")
+    # Setting a channel on an immutable color changed nothing before.
+    color = rdocx.RGBColor(1, 2, 3)
+    with pytest.raises(AttributeError, match="font.color = RGBColor"):
+        color.rgb = rdocx.RGBColor(4, 5, 6)
+
+
+def test_python_docx_names_rdocx_spells_differently_raise_with_the_rdocx_way():
+    import rdocx
+
+    document = rdocx.Document()
+    paragraph = document.add_paragraph("x")
+    run = paragraph.runs[0]
+    for action, hint in [
+        (lambda: paragraph._element, "paragraph.replace_xml(xml), and delete it with document.remove_content"),
+        (lambda: setattr(run, "style", "Emphasis"), "run.style_id = 'Emphasis'"),
+        (lambda: run.add_break(), "document.add_page_break()"),
+        (lambda: document.sections[0].footer, "document.set_footer(text)"),
+        (lambda: document.sections[0].left_margin, "margin_left"),
+        (lambda: document.styles["Normal"].font, "document.set_style"),
+        (lambda: document.add_table(rows=1, cols=2).cell(0, 0).merge, "set_cell_grid_span"),
+    ]:
+        with pytest.raises(AttributeError, match=re.escape(hint)):
+            action()
+    with pytest.raises(AttributeError, match="has no attribute 'nonsense'$"):
+        paragraph.nonsense
+    with pytest.raises(AttributeError, match="not writable"):
+        paragraph.runs = []
+
+
+def test_raw_xml_refuses_xml_word_refuses_or_repairs():
+    import rdocx
+
+    document = rdocx.Document()
+    paragraph = document.add_paragraph("keep")
+    table = document.add_table(rows=1, cols=1)
+    styles_id = re.search(
+        r'Id="(rId\d+)"[^>]*relationships/styles"|relationships/styles"[^>]*Id="(rId\d+)"',
+        _saved_part(document.to_bytes(), "word/_rels/document.xml.rels"),
+    )
+    styles_id = styles_id.group(1) or styles_id.group(2)
+    before = document.to_bytes()
+    for target, xml, message in [
+        (paragraph, "<w:p><w:r><w:b/><w:t>x</w:t></w:r></w:p>", "w:b cannot sit directly in w:r"),
+        (paragraph, '<w:p><w:jc w:val="center"/></w:p>', "w:jc cannot sit directly in w:p"),
+        (paragraph, "<w:p><w:pPr><w:jcc/></w:pPr></w:p>", "w:jcc cannot sit directly in w:pPr"),
+        (paragraph, '<w:p><x:foo xmlns:x="urn:x"/></w:p>', "x:foo cannot sit directly in w:p"),
+        (
+            paragraph,
+            '<!DOCTYPE w:p [<!ENTITY a "AAA">]><w:p><w:r><w:t>&a;</w:t></w:r></w:p>',
+            "DOCTYPE is not allowed",
+        ),
+        (
+            paragraph,
+            f'<w:p><w:hyperlink r:id="{styles_id}"><w:r><w:t>x</w:t></w:r></w:hyperlink></w:p>',
+            "names a styles relationship where Word expects hyperlink",
+        ),
+        (table.cell(0, 0), "<w:tc><w:tcPr/></w:tc>", "a w:tc must hold a w:p"),
+        (table, "<w:tbl><w:tblGrid><w:gridCol/></w:tblGrid><w:tr/></w:tbl>", "a w:tr must hold a w:tc"),
+    ]:
+        with pytest.raises(ValueError, match=re.escape(message)):
+            target.replace_xml(xml)
+    with pytest.raises(ValueError, match="w:pgSz with w:w and w:h"):
+        document.replace_section_xml(0, '<w:sectPr><w:pgSz w:w="12240"/></w:sectPr>')
+    assert document.to_bytes() == before
+
+    # CDATA is the text it holds, not literal markers.
+    paragraph.replace_xml("<w:p><w:r><w:t><![CDATA[<a> & b]]></w:t></w:r></w:p>")
+    assert paragraph.text == "<a> & b"
+    assert "CDATA" not in _saved_part(document.to_bytes())
+
+
+def test_every_handle_retiring_call_names_itself():
+    import rdocx
+
+    for call, change in [
+        ("Document.remove_content", lambda document: document.remove_content(0)),
+        ("Document.insert_table", lambda document: document.insert_table(0, 1, 1)),
+        ("Document.add_section", lambda document: document.add_section()),
+        ("Document.insert_section", lambda document: document.insert_section(0)),
+        ("Cell.text", lambda document: setattr(document.tables[0].cell(0, 0), "text", "x")),
+        ("Document.accept_all", lambda document: document.accept_all() or document.remove_content(0)),
+    ]:
+        document = rdocx.Document()
+        document.add_paragraph("one")
+        document.add_paragraph("two")
+        document.add_table(rows=1, cols=1)
+        held = document.paragraphs[1]
+        change(document)
+        if call == "Document.accept_all":
+            call = "Document.remove_content"
+        with pytest.raises(rdocx.StaleElementError, match=re.escape(f"{call} invalidated it")):
+            held.text
+
+
+def test_line_spacing_numbers_are_multiples_and_lengths_are_exact():
+    import rdocx
+    from rdocx import Pt
+
+    document = rdocx.Document()
+    paragraph = document.add_paragraph("x")
+    paragraph.paragraph_format.line_spacing = 2
+    assert paragraph.paragraph_format.line_spacing == 2.0
+    assert re.search(r'w:line="480" w:lineRule="auto"', _saved_part(document.to_bytes()))
+    paragraph.paragraph_format.line_spacing = Pt(18)
+    assert paragraph.paragraph_format.line_spacing == Pt(18)
+    assert 'w:line="360" w:lineRule="exact"' in _saved_part(document.to_bytes())
+    with pytest.raises(TypeError, match="multiple"):
+        paragraph.paragraph_format.line_spacing = True
+    with pytest.raises(ValueError, match=re.escape("at least Pt(0.5)")):
+        paragraph.runs[0].font.size = Pt(0.25)

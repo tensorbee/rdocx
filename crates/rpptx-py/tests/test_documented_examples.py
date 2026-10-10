@@ -4689,3 +4689,243 @@ def test_issue_158_deck_fixture_acceptance(tmp_path):
         close = sum(max(errors[offset:offset + 3]) <= 24 for offset in range(0, len(errors), 3))
         assert close / (len(errors) / 3) >= min_close, label
         assert sum(errors) / len(errors) <= max_mean, label
+
+
+def _deck_part(data, name="ppt/slides/slide1.xml"):
+    with zipfile.ZipFile(io.BytesIO(data)) as package:
+        return package.read(name).decode("utf-8")
+
+
+def test_raw_xml_reads_and_replaces_shapes_text_bodies_slides_and_layouts():
+    import rpptx
+
+    prs = rpptx.Presentation()
+    prs.slides.add_slide(prs.slide_layouts[6])
+    prs.slides[0].shapes.add_textbox(0, 0, 914400, 914400)
+    prs.slides[0].shapes[0].text_frame.text = "hello"
+
+    shape = prs.slides[0].shapes[0]
+    shape.replace_xml(shape.xml.replace(b"hello", b"HELLO"))
+    frame = prs.slides[0].shapes[0].text_frame
+    assert frame.text == "HELLO" and frame.xml.startswith(b"<p:txBody ")
+    # Prefixes are declared when the XML leaves them out.
+    frame.replace_xml("<p:txBody><a:bodyPr/><a:p><a:r><a:t>body</a:t></a:r></a:p></p:txBody>")
+    assert prs.slides[0].shapes[0].text_frame.text == "body"
+
+    slide = prs.slides[0]
+    slide.replace_xml(slide.xml.replace(b">body<", b">slide<"))
+    assert prs.slides[0].shapes[0].text_frame.text == "slide"
+    layout = prs.slide_layouts[0]
+    layout.replace_xml(layout.xml.replace(b'name="Title Slide"', b'name="Opening"'))
+    assert prs.slide_layouts[0].name == "Opening"
+
+    data = prs.to_bytes()
+    assert "slide" in _deck_part(data)
+    assert rpptx.Presentation.from_bytes(data).slide_layouts[0].name == "Opening"
+
+
+def test_raw_xml_refuses_what_it_cannot_write_faithfully():
+    import rpptx
+
+    prs = rpptx.Presentation()
+    prs.slides.add_slide(prs.slide_layouts[6])
+    prs.slides[0].shapes.add_textbox(0, 0, 914400, 914400)
+    prs.slides[0].shapes[0].text_frame.text = "keep"
+    before = prs.to_bytes()
+    shape = prs.slides[0].shapes[0]
+    xml = shape.xml.decode()
+    for replacement, message in [
+        ("<p:pic/>", "expected one sp element, got p:pic"),
+        ("<p:sp><p:nvSpPr>", "not closed"),
+        (xml + xml, "more than one root"),
+        (xml.replace("<a:bodyPr", "<a:bodyPr/><a:bodyPr", 1), "does not parse"),
+        (
+            re.sub(r"(<p:cNvPr [^>]*?)/>", r'\1><a:hlinkClick r:id="rId42"/></p:cNvPr>', xml, count=1),
+            'r:id="rId42"',
+        ),
+    ]:
+        with pytest.raises(ValueError, match=message):
+            shape.replace_xml(replacement)
+    with pytest.raises(ValueError, match="expected one txBody element"):
+        shape.text_frame.replace_xml("<p:sp/>")
+    with pytest.raises(ValueError, match="expected one sld element"):
+        prs.slides[0].replace_xml("<p:sldLayout/>")
+    assert prs.to_bytes() == before
+
+
+def test_notes_slide_and_row_cells_follow_python_pptx():
+    import rpptx
+    from rpptx.util import Inches
+
+    prs = rpptx.Presentation()
+    prs.slides.add_slide(prs.slide_layouts[6])
+    slide = prs.slides[0]
+    assert slide.has_notes_slide is False
+    assert slide.notes_slide.notes_text_frame.text == ""
+    prs.slides[0].notes_slide.notes_text_frame.text = "Remember to smile."
+    assert prs.slides[0].has_notes_slide is True
+    assert prs.slides[0].notes_text == "Remember to smile."
+    with pytest.raises(AttributeError, match="notes_text_frame.text or slide.notes_text"):
+        prs.slides[0].notes_slide.notes_text_frame.paragraphs
+
+    table = prs.slides[0].shapes.add_table(2, 3, 0, 0, Inches(3), Inches(1)).table
+    cells = table.rows[1].cells
+    assert len(cells) == 3
+    cells[2].text = "last"
+    assert prs.slides[0].shapes[0].table.cell(1, 2).text == "last"
+
+
+def test_python_pptx_values_that_would_write_a_wrong_file_raise():
+    import rpptx
+    from rpptx.util import Inches, Pt
+
+    prs = rpptx.Presentation()
+    before = prs.to_bytes()
+    for name, value in [("slide_width", 1000), ("slide_height", Inches(60))]:
+        with pytest.raises(ValueError, match="1 inch"):
+            setattr(prs, name, value)
+    assert prs.to_bytes() == before
+    prs.slides.add_slide(prs.slide_layouts[6])
+    prs.slides[0].shapes.add_textbox(0, 0, Inches(1), Inches(1))
+    prs.slides[0].shapes[0].text_frame.text = "x"
+    paragraph = prs.slides[0].shapes[0].text_frame.paragraphs[0]
+    with pytest.raises(ValueError, match="would hold 0"):
+        paragraph.space_after = 6
+    paragraph.space_after = Pt(6)
+    paragraph.line_spacing = 1.5
+    for interline in [0, 0.0, -1, -0.5, Pt(0), Pt(-1), float("nan")]:
+        with pytest.raises(ValueError, match=re.escape("line_spacing must be a positive multiple such as 1.5 or a length such as Pt(18)")):
+            paragraph.line_spacing = interline
+    with pytest.raises(TypeError, match="line_spacing takes a multiple"):
+        paragraph.line_spacing = True
+    assert paragraph.line_spacing == 1.5
+    with pytest.raises(ValueError, match="to_pdf"):
+        prs.save("deck.pdf")
+    with pytest.raises(AttributeError, match="font.color = RGBColor"):
+        rpptx.RGBColor(1, 2, 3).rgb = rpptx.RGBColor(4, 5, 6)
+
+
+def test_python_pptx_names_rpptx_spells_differently_raise_with_the_rpptx_way():
+    import rpptx
+
+    prs = rpptx.Presentation()
+    prs.slides.add_slide(prs.slide_layouts[8])
+    for action, hint in [
+        (lambda: prs.slides._sldIdLst, "prs.slides.remove(slide)"),
+        (lambda: prs.slides[0].placeholders[1].insert_picture, "slide.shapes.add_picture"),
+        (lambda: prs.slides[0].shapes[0].placeholder_format, "slide.placeholders[idx]"),
+        (lambda: prs.slides[0].shapes[0]._element, "shape.replace_xml(xml)"),
+    ]:
+        with pytest.raises(AttributeError, match=re.escape(hint)):
+            action()
+    table = prs.slides[0].shapes.add_table(1, 1, 0, 0, 914400, 914400).table
+    with pytest.raises(AttributeError, match=re.escape("shape.replace_xml(xml)")):
+        table.cell(0, 0).text_frame
+    with pytest.raises(AttributeError, match="has no attribute 'nonsense'$"):
+        prs.slides[0].nonsense
+
+
+def test_raw_xml_refuses_xml_powerpoint_refuses_or_repairs():
+    import rpptx
+
+    prs = rpptx.Presentation()
+    prs.slides.add_slide(prs.slide_layouts[6])
+    prs.slides[0].shapes.add_textbox(0, 0, 914400, 914400)
+    prs.slides[0].shapes[0].text_frame.text = "keep"
+    before = prs.to_bytes()
+    shape = prs.slides[0].shapes[0]
+    xml = shape.xml.decode()
+    rels = _deck_part(before, "ppt/slides/_rels/slide1.xml.rels")
+    layout_id = re.search(r'Id="(rId\d+)"', rels).group(1)
+    for replacement, message in [
+        (xml.replace("</p:sp>", "<p:bogus/></p:sp>"), "p:bogus cannot sit directly in p:sp"),
+        (xml.replace("<a:t>", "<a:b/><a:t>", 1), "a:b cannot sit directly in a:r"),
+        (
+            re.sub(r"(<p:cNvPr [^>]*?)/>", rf'\1><a:hlinkClick r:id="{layout_id}"/></p:cNvPr>', xml, count=1),
+            "names a slideLayout relationship",
+        ),
+        ('<!DOCTYPE p:sp [<!ENTITY a "AAA">]>' + xml, "DOCTYPE is not allowed"),
+    ]:
+        with pytest.raises(ValueError, match=re.escape(message)):
+            shape.replace_xml(replacement)
+    assert prs.to_bytes() == before
+    shape.text_frame.replace_xml(
+        "<p:txBody><a:bodyPr/><a:p><a:r><a:t><![CDATA[<a> & b]]></a:t></a:r></a:p></p:txBody>"
+    )
+    assert prs.slides[0].shapes[0].text_frame.text == "<a> & b"
+
+
+def test_raw_xml_refuses_unknown_elements_at_any_depth():
+    import rpptx
+
+    prs = rpptx.Presentation()
+    prs.slides.add_slide(prs.slide_layouts[6])
+    prs.slides[0].shapes.add_textbox(0, 0, 914400, 914400)
+    prs.slides[0].shapes[0].text_frame.text = "keep"
+    before = prs.to_bytes()
+    shape = prs.slides[0].shapes[0]
+    xml = shape.xml.decode()
+    body = shape.text_frame.xml.decode()
+    slide = prs.slides[0].xml.decode()
+    layout = prs.slide_layouts[0].xml.decode()
+    bogus = "<a:bogusElement/>"
+    for target, replacement, parent in [
+        (shape, xml.replace("<a:p>", "<a:p>" + bogus, 1), "a:p"),
+        (shape, xml.replace("<a:p>", "<a:p><a:pPr>" + bogus + "</a:pPr>", 1), "a:pPr"),
+        (
+            shape,
+            xml.replace("<a:p>", '<a:p><a:pPr><a:lnSpc><a:spcPct val="90000"/>' + bogus + "</a:lnSpc></a:pPr>", 1),
+            "a:lnSpc",
+        ),
+        (shape, xml.replace("<a:bodyPr/>", "<a:bodyPr>" + bogus + "</a:bodyPr>", 1), "a:bodyPr"),
+        (shape, xml.replace("<a:lstStyle/>", "<a:lstStyle>" + bogus + "</a:lstStyle>", 1), "a:lstStyle"),
+        (shape, xml.replace("<a:t>keep</a:t>", "<a:t>keep" + bogus + "</a:t>", 1), "a:t"),
+        (shape, xml.replace("<a:t>", '<a:rPr lang="en-US"><a:solidFill><a:srgbClr val="FF0000">' + bogus + "</a:srgbClr></a:solidFill></a:rPr><a:t>", 1), "a:srgbClr"),
+        (shape, xml.replace("<a:off ", bogus + "<a:off ", 1), "a:xfrm"),
+        (shape, xml.replace("<a:avLst/>", "<a:avLst>" + bogus + "</a:avLst>", 1), "a:avLst"),
+        (shape, xml.replace("<p:spPr>", "<p:spPr>" + bogus, 1), "p:spPr"),
+        (shape, xml.replace("<p:nvPr/>", "<p:nvPr><p:bogusElement/></p:nvPr>", 1), "p:nvPr"),
+        (shape.text_frame, body.replace("<a:p>", "<a:p><a:pPr>" + bogus + "</a:pPr>", 1), "a:pPr"),
+        (prs.slides[0], slide.replace("<a:bodyPr/>", "<a:bodyPr>" + bogus + "</a:bodyPr>", 1), "a:bodyPr"),
+        (
+            prs.slides[0],
+            slide.replace("<p:cSld>", '<p:cSld><p:bg><p:bgPr><a:noFill/>' + bogus + "</p:bgPr></p:bg>", 1),
+            "p:bgPr",
+        ),
+        (prs.slide_layouts[0], re.sub(r"(<a:off [^>]*/>)", r"\1" + bogus, layout, count=1), "a:xfrm"),
+    ]:
+        with pytest.raises(ValueError, match=re.escape(f"cannot sit directly in {parent}")):
+            target.replace_xml(replacement)
+    assert prs.to_bytes() == before
+    # Alternate content and elements mc:Ignorable covers stay allowed at any
+    # depth, and so does schema-valid nesting.
+    accepted = xml.replace("<p:sp ", '<p:sp xmlns:x14="urn:example:x14" mc:Ignorable="x14" ', 1).replace(
+        "<a:p>",
+        "<a:p><a:pPr><x14:future/>"
+        '<mc:AlternateContent><mc:Choice Requires="x14"><x14:other/></mc:Choice></mc:AlternateContent>'
+        '<a:lnSpc><a:spcPct val="90000"/></a:lnSpc><a:buFont typeface="Arial"/><a:buChar char="-"/></a:pPr>',
+        1,
+    )
+    accepted = accepted.replace(
+        "<a:noFill/></p:spPr>",
+        '<a:solidFill><a:schemeClr val="accent1"><a:lumMod val="75000"/></a:schemeClr></a:solidFill>'
+        '<a:ln w="12700"><a:solidFill><a:srgbClr val="000000"/></a:solidFill><a:prstDash val="dash"/></a:ln>'
+        "</p:spPr>",
+        1,
+    )
+    prs.slides[0].shapes[0].replace_xml(accepted)
+    assert prs.slides[0].shapes[0].text_frame.text == "keep"
+
+
+def test_notes_slide_creates_notes_and_presentations_use_streams():
+    import rpptx
+
+    prs = rpptx.Presentation()
+    prs.slides.add_slide(prs.slide_layouts[6])
+    assert prs.slides[0].has_notes_slide is False
+    prs.slides[0].notes_slide
+    assert prs.slides[0].has_notes_slide is True
+    stream = io.BytesIO()
+    prs.save(stream)
+    reopened = rpptx.Presentation(io.BytesIO(stream.getvalue()))
+    assert len(reopened.slides) == 1 and reopened.slides[0].has_notes_slide is True

@@ -71,8 +71,24 @@ with open("report.pdf", "wb") as output:
   JPEG, and TIFF output through the native document engine, with caller fonts
   or a font directory for PDF. PDF and raster methods accept keyword-only
   `revision_view="tracked"` to show tracked changes.
-- Python collections with negative indexes, slices, iteration, and explicit
-  stale-handle errors after structural changes.
+- The python-docx calls a first draft reaches for: `add_heading`,
+  `add_page_break`, `add_paragraph(text, style=...)` with python-docx's list
+  styles such as `'List Bullet'` added on demand, `add_table(..., style=...)`,
+  `insert_paragraph_before`, `add_section`, `run.bold`, `run.italic`,
+  `run.underline`, `font.highlight_color`, `styles['Normal']`, and
+  `Document(stream)` and `save(stream)`.
+- Raw XML for a missing feature: `xml` and `replace_xml` on paragraphs, runs,
+  tables and cells, and `section_xml` and `replace_section_xml` for section
+  properties. A replacement that holds another element, would lose an element,
+  misplaces an element Word checks, or references an unknown relationship id
+  or one of the wrong type raises `ValueError`.
+- Python collections with negative indexes, slices, and iteration. Paragraph,
+  run and table handles survive appends and in-place edits, and a handle a
+  structural change moved raises a stale-handle error naming that change.
+- An `AttributeError` that names the rdocx call when a python-docx name is
+  spelled differently, and a `ValueError` instead of a silently wrong file for
+  a bare int length that rounds to zero, an empty font name, a table without
+  rows or columns, or a `.pdf` save path.
 
 ## Measured footprint and speed
 

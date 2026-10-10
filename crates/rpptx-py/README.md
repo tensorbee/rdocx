@@ -63,6 +63,16 @@ with open("review.pdf", "wb") as output:
 - Read speaker-note text and inspect or mutate modern comment threads.
 - Python collections with negative indexes, slices, iteration, and explicit
   stale-handle errors after structural changes.
+- python-pptx's `slide.notes_slide.notes_text_frame.text`,
+  `slide.has_notes_slide` and `row.cells`.
+- Raw XML for a missing feature: `xml` and `replace_xml` on slides, layouts,
+  shapes and text frames. A replacement with another root element, an element
+  rpptx would lose or PowerPoint would refuse there, or an unknown relationship
+  id or one of the wrong type raises `ValueError`.
+- An `AttributeError` that names the rpptx call when a python-pptx name is
+  spelled differently, and a `ValueError` instead of a silently wrong file for
+  a slide side outside 1 to 56 inches, a spacing that rounds to zero, or a
+  `.pdf` save path.
 - Table cell merge and split, cell fills, margins, and borders, and row
   heights.
 - Table rows and columns added with `table.rows.add_row()` and

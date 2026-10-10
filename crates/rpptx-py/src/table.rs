@@ -504,6 +504,37 @@ pub struct PyRow {
 
 #[pymethods]
 impl PyRow {
+    /// The row's cells, as python-pptx's `row.cells`.
+    #[getter]
+    fn cells(&self, py: Python<'_>) -> PyResult<Vec<Py<PyCell>>> {
+        validate_path(py, &self.presentation.borrow(py), &self.path, "row", "")?;
+        let columns = shape_ref_at(&self.presentation.borrow(py).inner, &self.path)
+            .and_then(|shape| shape.table())
+            .map(|table| table.column_count())
+            .ok_or_else(|| PyValueError::new_err("shape has no table"))?;
+        (0..columns)
+            .map(|column| {
+                let mut segments = self.path.segs.clone();
+                segments.push(PathSeg::Cell(column));
+                Py::new(
+                    py,
+                    PyCell {
+                        presentation: self.presentation.clone_ref(py),
+                        path: ContentPath::new(segments, self.path.revision),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn __getattr__(&self, name: &str) -> PyResult<Py<PyAny>> {
+        Err(crate::missing_attribute("Row", name))
+    }
+
+    fn __setattr__(slf: &Bound<'_, Self>, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        crate::set_attribute(slf.as_any(), "Row", name, value)
+    }
+
     /// The stored row height, a minimum that PowerPoint grows to fit text.
     #[getter]
     fn height(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
@@ -610,6 +641,14 @@ impl PyCell {
 
 #[pymethods]
 impl PyCell {
+    fn __getattr__(&self, name: &str) -> PyResult<Py<PyAny>> {
+        Err(crate::missing_attribute("Cell", name))
+    }
+
+    fn __setattr__(slf: &Bound<'_, Self>, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        crate::set_attribute(slf.as_any(), "Cell", name, value)
+    }
+
     #[getter]
     fn text(&self, py: Python<'_>) -> PyResult<String> {
         validate_path(py, &self.presentation.borrow(py), &self.path, "cell", "")?;

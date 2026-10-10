@@ -1,12 +1,12 @@
 use oxml_py_support::{ContentPath, PathSeg};
 use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyList, PySlice, PyTuple};
+use pyo3::types::{PyAny, PyBytes, PyList, PySlice, PyTuple};
 use smallvec::smallvec;
 
-use crate::document::PyDocument;
+use crate::document::{EditScope, PyDocument, raw_xml_argument, raw_xml_error};
 use crate::paragraph::PyParagraph;
-use crate::{enum_object, length_object, normalize_index, rdocx_to_pyerr, stale_to_pyerr};
+use crate::{TWIP_EMU, enum_object, length_object, normalize_index, rdocx_to_pyerr, stored_length};
 
 fn path_index(
     path: &ContentPath,
@@ -299,15 +299,13 @@ impl PyTable {
     }
 
     pub(crate) fn validate(&self, py: Python<'_>) -> PyResult<usize> {
-        let document = self.document.borrow(py);
-        self.path
-            .validate_revision(
-                document.revisions.current(),
-                "table",
-                "Re-fetch it with doc.tables[i].",
-            )
-            .map_err(|error| stale_to_pyerr(py, error))?;
-        table_index(&self.path)
+        let path = self.document.borrow(py).resolve_path(
+            py,
+            &self.path,
+            "table",
+            "Re-fetch it with doc.tables[i].",
+        )?;
+        table_index(&path)
     }
 
     pub(crate) fn belongs_to(&self, py: Python<'_>, document: &Py<PyDocument>) -> bool {
@@ -349,6 +347,14 @@ impl PyTable {
 
 #[pymethods]
 impl PyTable {
+    fn __getattr__(&self, name: &str) -> PyResult<Py<PyAny>> {
+        Err(crate::missing_attribute("Table", name))
+    }
+
+    fn __setattr__(slf: &Bound<'_, Self>, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        crate::set_attribute(slf.as_any(), "Table", name, value)
+    }
+
     #[getter]
     fn rows(&self, py: Python<'_>) -> PyResult<Py<PyRowCollection>> {
         self.validate(py)?;
@@ -380,8 +386,38 @@ impl PyTable {
             .and_then(|table| table.style_id().map(str::to_owned)))
     }
 
+    /// This table's `w:tbl` element as standalone XML bytes.
+    #[getter]
+    fn xml<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let target = rdocx::XmlTarget::Table(self.validate(py)?);
+        let xml = self
+            .document
+            .borrow(py)
+            .inner
+            .element_xml(&target)
+            .map_err(|error| raw_xml_error(py, error))?;
+        Ok(PyBytes::new(py, &xml))
+    }
+
+    /// Replace this table with one `w:tbl` element given as XML. The table
+    /// handle stays valid and the handles inside it retire.
+    fn replace_xml(&self, py: Python<'_>, xml: &Bound<'_, PyAny>) -> PyResult<()> {
+        let xml = raw_xml_argument(xml)?;
+        let target = rdocx::XmlTarget::Table(self.validate(py)?);
+        let mut document = self.document.borrow_mut(py);
+        document
+            .inner
+            .replace_element_xml(&target, &xml)
+            .map_err(|error| raw_xml_error(py, error))?;
+        document.bump_edit(
+            "Table.replace_xml",
+            EditScope::Below(self.path.segs.clone()),
+        );
+        Ok(())
+    }
+
     #[setter]
-    fn set_style(&self, py: Python<'_>, value: &str) -> PyResult<()> {
+    pub(crate) fn set_style(&self, py: Python<'_>, value: &str) -> PyResult<()> {
         let index = self.validate(py)?;
         self.document
             .borrow_mut(py)
@@ -432,13 +468,14 @@ impl PyTable {
 
     #[setter]
     fn set_width(&self, py: Python<'_>, value: i64) -> PyResult<()> {
+        let width = stored_length("table.width", value, TWIP_EMU)?;
         let index = self.validate(py)?;
         self.document
             .borrow_mut(py)
             .inner
             .table_mut(index)
             .ok_or_else(|| PyIndexError::new_err("table index out of range"))?
-            .set_width(rdocx::Length::emu(value));
+            .set_width(width);
         Ok(())
     }
 
@@ -547,9 +584,8 @@ impl PyTable {
             .grid_widths()
             .len();
         let column = normalize_index(column, columns, "column")?;
-        let applied = self.edit(py, |table| {
-            Ok(table.set_column_width(column, rdocx::Length::emu(width)))
-        })?;
+        let width = stored_length("column width", width, TWIP_EMU)?;
+        let applied = self.edit(py, |table| Ok(table.set_column_width(column, width)))?;
         if !applied {
             return Err(PyValueError::new_err(
                 "column width must be nonnegative and every row must fit the table grid",
@@ -575,7 +611,9 @@ impl PyTable {
         })?;
         // Absorbed or restored cells shift the indexes after this one.
         if changed {
-            self.document.borrow_mut(py).revisions.bump();
+            self.document
+                .borrow_mut(py)
+                .bump_edit("Table.set_cell_grid_span", EditScope::Moved);
         }
         Ok(())
     }
@@ -612,7 +650,7 @@ impl PyTable {
                 .inner
                 .clone_table_row(table_index, source, insert_at)
                 .map_err(|error| rdocx_to_pyerr(py, error))?;
-            document.revisions.bump();
+            document.bump_edit("Table.clone_row", EditScope::Moved);
             let mut segments = self.path.segs.clone();
             segments.push(PathSeg::Row(inserted));
             document.revisions.capture(segments)
@@ -633,7 +671,7 @@ impl PyTable {
             .inner
             .remove_table_row(table_index, row_index)
             .map_err(|error| rdocx_to_pyerr(py, error))?;
-        document.revisions.bump();
+        document.bump_edit("Table.remove_row", EditScope::Moved);
         Ok(())
     }
 }
@@ -652,15 +690,13 @@ impl PyRowCollection {
         }
     }
     fn validate(&self, py: Python<'_>) -> PyResult<usize> {
-        let document = self.document.borrow(py);
-        self.table_path
-            .validate_revision(
-                document.revisions.current(),
-                "row collection",
-                "Re-fetch it with table.rows.",
-            )
-            .map_err(|error| stale_to_pyerr(py, error))?;
-        table_index(&self.table_path)
+        let path = self.document.borrow(py).resolve_path(
+            py,
+            &self.table_path,
+            "row collection",
+            "Re-fetch it with table.rows.",
+        )?;
+        table_index(&path)
     }
     fn len(&self, py: Python<'_>) -> PyResult<usize> {
         let index = self.validate(py)?;
@@ -755,15 +791,13 @@ impl PyRow {
         Self { document, path }
     }
     fn validate(&self, py: Python<'_>) -> PyResult<(usize, usize)> {
-        let document = self.document.borrow(py);
-        self.path
-            .validate_revision(
-                document.revisions.current(),
-                "row",
-                "Re-fetch it with table.rows[i].",
-            )
-            .map_err(|error| stale_to_pyerr(py, error))?;
-        Ok((table_index(&self.path)?, row_index(&self.path)?))
+        let path = self.document.borrow(py).resolve_path(
+            py,
+            &self.path,
+            "row",
+            "Re-fetch it with table.rows[i].",
+        )?;
+        Ok((table_index(&path)?, row_index(&path)?))
     }
 
     fn read<T>(&self, py: Python<'_>, read: impl FnOnce(rdocx::RowRef<'_>) -> T) -> PyResult<T> {
@@ -801,6 +835,14 @@ impl PyRow {
 
 #[pymethods]
 impl PyRow {
+    fn __getattr__(&self, name: &str) -> PyResult<Py<PyAny>> {
+        Err(crate::missing_attribute("Row", name))
+    }
+
+    fn __setattr__(slf: &Bound<'_, Self>, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        crate::set_attribute(slf.as_any(), "Row", name, value)
+    }
+
     #[getter]
     fn cells(&self, py: Python<'_>) -> PyResult<Py<PyCellCollection>> {
         self.validate(py)?;
@@ -825,7 +867,7 @@ impl PyRow {
         let exact = self
             .read(py, |row| row.height())?
             .is_some_and(|height| row_height_parts(height).1);
-        let height = row_height(rdocx::Length::emu(value), exact);
+        let height = row_height(stored_length("row.height", value, TWIP_EMU)?, exact);
         self.edit(py, |row| row.set_height_checked(height))
     }
 
@@ -891,15 +933,13 @@ impl PyCellCollection {
         Self { document, row_path }
     }
     fn validate(&self, py: Python<'_>) -> PyResult<(usize, usize)> {
-        let document = self.document.borrow(py);
-        self.row_path
-            .validate_revision(
-                document.revisions.current(),
-                "cell collection",
-                "Re-fetch it with row.cells.",
-            )
-            .map_err(|error| stale_to_pyerr(py, error))?;
-        Ok((table_index(&self.row_path)?, row_index(&self.row_path)?))
+        let path = self.document.borrow(py).resolve_path(
+            py,
+            &self.row_path,
+            "cell collection",
+            "Re-fetch it with row.cells.",
+        )?;
+        Ok((table_index(&path)?, row_index(&path)?))
     }
     fn len(&self, py: Python<'_>) -> PyResult<usize> {
         let (table, row) = self.validate(py)?;
@@ -994,19 +1034,13 @@ impl PyCell {
         Self { document, path }
     }
     fn validate(&self, py: Python<'_>) -> PyResult<(usize, usize, usize)> {
-        let document = self.document.borrow(py);
-        self.path
-            .validate_revision(
-                document.revisions.current(),
-                "cell",
-                "Re-fetch it with row.cells[i].",
-            )
-            .map_err(|error| stale_to_pyerr(py, error))?;
-        Ok((
-            table_index(&self.path)?,
-            row_index(&self.path)?,
-            cell_index(&self.path)?,
-        ))
+        let path = self.document.borrow(py).resolve_path(
+            py,
+            &self.path,
+            "cell",
+            "Re-fetch it with row.cells[i].",
+        )?;
+        Ok((table_index(&path)?, row_index(&path)?, cell_index(&path)?))
     }
 
     fn read<T>(&self, py: Python<'_>, read: impl FnOnce(rdocx::CellRef<'_>) -> T) -> PyResult<T> {
@@ -1044,6 +1078,14 @@ impl PyCell {
 
 #[pymethods]
 impl PyCell {
+    fn __getattr__(&self, name: &str) -> PyResult<Py<PyAny>> {
+        Err(crate::missing_attribute("Cell", name))
+    }
+
+    fn __setattr__(slf: &Bound<'_, Self>, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        crate::set_attribute(slf.as_any(), "Cell", name, value)
+    }
+
     /// Replace literal text in this cell and its supported nested descendants.
     #[pyo3(signature = (old, new, *, expect = None))]
     fn replace_text(
@@ -1056,7 +1098,7 @@ impl PyCell {
         let cell = self.validate(py)?;
         self.document
             .borrow_mut(py)
-            .scoped_replacement(py, |document| {
+            .scoped_replacement(py, "Cell.replace_text", |document| {
                 document.try_replace_text_in_cell(cell, None, old, new, expect)
             })
     }
@@ -1071,6 +1113,35 @@ impl PyCell {
             .and_then(|table| table.cell(row, cell).map(|cell| cell.text()))
             .ok_or_else(|| PyIndexError::new_err("cell index out of range"))
     }
+    /// This cell's `w:tc` element as standalone XML bytes.
+    #[getter]
+    fn xml<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let (table, row, cell) = self.validate(py)?;
+        let target = rdocx::XmlTarget::Cell { table, row, cell };
+        let xml = self
+            .document
+            .borrow(py)
+            .inner
+            .element_xml(&target)
+            .map_err(|error| raw_xml_error(py, error))?;
+        Ok(PyBytes::new(py, &xml))
+    }
+
+    /// Replace this cell with one `w:tc` element given as XML. The cell
+    /// handle stays valid and the handles inside it retire.
+    fn replace_xml(&self, py: Python<'_>, xml: &Bound<'_, PyAny>) -> PyResult<()> {
+        let xml = raw_xml_argument(xml)?;
+        let (table, row, cell) = self.validate(py)?;
+        let target = rdocx::XmlTarget::Cell { table, row, cell };
+        let mut document = self.document.borrow_mut(py);
+        document
+            .inner
+            .replace_element_xml(&target, &xml)
+            .map_err(|error| raw_xml_error(py, error))?;
+        document.bump_edit("Cell.replace_xml", EditScope::Below(self.path.segs.clone()));
+        Ok(())
+    }
+
     #[setter]
     fn set_text(&self, py: Python<'_>, value: &str) -> PyResult<()> {
         let (table, row, cell) = self.validate(py)?;
@@ -1078,7 +1149,7 @@ impl PyCell {
         let inner = &mut document.inner;
         py.detach(|| inner.try_set_cell_text(table, row, cell, value))
             .map_err(|error| rdocx_to_pyerr(py, error))?;
-        document.revisions.bump();
+        document.bump_edit("Cell.text", EditScope::Moved);
         Ok(())
     }
     #[getter]
@@ -1105,7 +1176,7 @@ impl PyCell {
                 cell.add_paragraph(text);
                 paragraph
             };
-            document.revisions.bump();
+            document.bump_edit("Cell.add_paragraph", EditScope::Moved);
             document.revisions.capture(smallvec![
                 PathSeg::Body(table),
                 PathSeg::Row(row),
@@ -1128,6 +1199,7 @@ impl PyCell {
     }
     #[setter]
     fn set_width(&self, py: Python<'_>, value: i64) -> PyResult<()> {
+        let width = stored_length("cell.width", value, TWIP_EMU)?;
         let (table, row, cell) = self.validate(py)?;
         let mut document = self.document.borrow_mut(py);
         let mut table = document
@@ -1137,7 +1209,7 @@ impl PyCell {
         table
             .cell(row, cell)
             .ok_or_else(|| PyIndexError::new_err("cell index out of range"))?
-            .set_width(rdocx::Length::emu(value));
+            .set_width(width);
         Ok(())
     }
     #[getter]
@@ -1251,19 +1323,13 @@ impl PyCellParagraphCollection {
         }
     }
     fn validate(&self, py: Python<'_>) -> PyResult<(usize, usize, usize)> {
-        let document = self.document.borrow(py);
-        self.cell_path
-            .validate_revision(
-                document.revisions.current(),
-                "cell paragraph collection",
-                "Re-fetch it with cell.paragraphs.",
-            )
-            .map_err(|error| stale_to_pyerr(py, error))?;
-        Ok((
-            table_index(&self.cell_path)?,
-            row_index(&self.cell_path)?,
-            cell_index(&self.cell_path)?,
-        ))
+        let path = self.document.borrow(py).resolve_path(
+            py,
+            &self.cell_path,
+            "cell paragraph collection",
+            "Re-fetch it with cell.paragraphs.",
+        )?;
+        Ok((table_index(&path)?, row_index(&path)?, cell_index(&path)?))
     }
     fn len(&self, py: Python<'_>) -> PyResult<usize> {
         let (table, row, cell) = self.validate(py)?;

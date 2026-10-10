@@ -6,6 +6,7 @@
 //! `screen16x9`, and python-pptx generated the notes-master infrastructure.
 
 mod embedded;
+mod raw_xml;
 
 pub use embedded::{
     EmbeddedContentInfo, EmbeddedContentKind, EmbeddedMutationPolicy, EmbeddedSignatureState,

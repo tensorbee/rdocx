@@ -169,7 +169,7 @@ def test_stale_handles_raise_the_public_stale_element_error_class():
     live = Document()
     live.add_paragraph("zero")
     held = live.paragraphs[0]
-    live.add_paragraph("one")
+    live.insert_table(0, 1, 1)
     with pytest.raises(StaleElementError) as raised:
         _ = held.text
     assert isinstance(raised.value, RdocxError)

@@ -156,7 +156,9 @@ def test_format_subhandles_become_stale_after_structure_change():
     font = paragraph.add_run("held").font
     paragraph_format = document.paragraphs[0].paragraph_format
 
-    document.add_paragraph("invalidates both")
+    document.add_paragraph("appending keeps both")
+    assert font.bold is None and paragraph_format.space_after is None
+    document.insert_table(0, 1, 1)
 
     with pytest.raises(StaleElementError):
         _ = font.bold
@@ -171,7 +173,9 @@ def test_nested_paragraph_stale_error_names_complete_recovery_path():
     cell = document.add_table(rows=1, cols=1).rows[0].cells[0]
     nested = cell.add_paragraph("held")
 
-    document.add_paragraph("invalidates nested paragraph")
+    document.add_paragraph("appending keeps the nested paragraph")
+    assert nested.text == "held"
+    document.tables[0].clone_row(0)
 
     with pytest.raises(
         StaleElementError,

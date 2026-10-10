@@ -541,3 +541,15 @@ if TYPE_CHECKING:
     TextFrameLayout()  # type: ignore[call-arg]
     TextLineLayout()  # type: ignore[call-arg]
     ValidationIssue()  # type: ignore[call-arg]
+
+
+def exercise_rpptx_first_draft_and_raw_xml_types(slide: Slide, table: Table) -> None:
+    slide.notes_slide.notes_text_frame.text = "notes"
+    has_notes: bool = slide.has_notes_slide
+    xml: bytes = slide.xml
+    slide.replace_xml(xml)
+    shape = slide.shapes[0]
+    shape.replace_xml(shape.xml)
+    shape.text_frame.replace_xml(shape.text_frame.xml)
+    cells: list[Cell] = table.rows[0].cells
+    del has_notes, cells

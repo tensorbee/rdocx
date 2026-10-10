@@ -129,10 +129,16 @@ is bounded to the completed public binding surface. The rdocx gate pins the
 seventeen executable python-docx 1.2.0 documentation examples that fit the S33
 API to stable tagged sources. Sixteen change only their import namespace. The
 Quickstart held-row example re-fetches the row through the public document path
-before its second cell assignment because the first structural text replacement
-intentionally stales every pre-write handle under strict global revision.
-Touching a private lxml-shaped attribute raises a clear error naming the
-equivalent, rather than failing five frames away.
+before its second cell assignment because a cell text replacement still stales
+the handles inside its table. Paragraph and run handles survive appends and the
+edits that leave them in place, as python-docx elements do. A first-draft corpus
+of scripts written the way an agent writes them from memory of python-docx and
+python-pptx runs in CI and prints its success rate per area. Touching a private
+lxml-shaped attribute, or a python-docx or python-pptx name the bindings spell
+differently, raises a clear error naming the equivalent, rather than failing
+five frames away. `xml` and `replace_xml` read and replace the raw XML of a
+paragraph, run, table, cell, section, slide, layout, shape or text body when the
+typed API has no call for a feature.
 
 **Not a PowerPoint clone.** The renderer targets business decks built from
 stock or corporate templates. Decks that lean on 3-D, heavy effects or WordArt

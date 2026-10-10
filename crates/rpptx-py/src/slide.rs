@@ -16,9 +16,60 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PySlideLayout>()?;
     module.add_class::<PySlideLayoutCollection>()?;
     module.add_class::<PySlide>()?;
+    module.add_class::<PyNotesSlide>()?;
+    module.add_class::<PyNotesTextFrame>()?;
     module.add_class::<PySlideCollection>()?;
     module.add_class::<PyBackground>()?;
     Ok(())
+}
+
+/// python-pptx's notes slide, reduced to its notes text.
+#[pyclass(name = "NotesSlide")]
+pub struct PyNotesSlide {
+    slide: Py<PySlide>,
+}
+
+#[pymethods]
+impl PyNotesSlide {
+    fn __getattr__(&self, name: &str) -> PyResult<Py<PyAny>> {
+        Err(crate::missing_attribute("NotesSlide", name))
+    }
+
+    /// The notes placeholder's text, as `slide.notes_text`.
+    #[getter]
+    fn notes_text_frame(&self, py: Python<'_>) -> PyNotesTextFrame {
+        PyNotesTextFrame {
+            slide: self.slide.clone_ref(py),
+        }
+    }
+}
+
+/// python-pptx's `notes_slide.notes_text_frame`, reduced to `text`.
+#[pyclass(name = "NotesTextFrame")]
+pub struct PyNotesTextFrame {
+    slide: Py<PySlide>,
+}
+
+#[pymethods]
+impl PyNotesTextFrame {
+    fn __getattr__(&self, name: &str) -> PyResult<Py<PyAny>> {
+        Err(crate::missing_attribute("NotesTextFrame", name))
+    }
+
+    fn __setattr__(slf: &Bound<'_, Self>, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        crate::set_attribute(slf.as_any(), "NotesTextFrame", name, value)
+    }
+
+    /// The speaker notes, empty when the slide has none.
+    #[getter]
+    fn text(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(self.slide.borrow(py).notes_text(py)?.unwrap_or_default())
+    }
+
+    #[setter]
+    fn set_text(&self, py: Python<'_>, text: &str) -> PyResult<()> {
+        self.slide.borrow(py).set_notes_text(py, text)
+    }
 }
 
 #[pyclass(name = "SlideLayout")]
@@ -42,6 +93,41 @@ impl PySlideLayout {
 
 #[pymethods]
 impl PySlideLayout {
+    fn __getattr__(&self, name: &str) -> PyResult<Py<PyAny>> {
+        Err(crate::missing_attribute("SlideLayout", name))
+    }
+
+    fn __setattr__(slf: &Bound<'_, Self>, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        crate::set_attribute(slf.as_any(), "SlideLayout", name, value)
+    }
+
+    /// This layout's `p:sldLayout` part XML as bytes.
+    #[getter]
+    fn xml<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+        self.validate(py)?;
+        let xml = self
+            .presentation
+            .borrow(py)
+            .inner
+            .layout_xml(self.index)
+            .map_err(|error| crate::raw_xml_error(py, error))?;
+        Ok(pyo3::types::PyBytes::new(py, &xml))
+    }
+
+    /// Replace this layout with one `p:sldLayout` element given as XML,
+    /// checked as `Slide.replace_xml` checks a slide.
+    fn replace_xml(&self, py: Python<'_>, xml: &Bound<'_, PyAny>) -> PyResult<()> {
+        let xml = crate::raw_xml_argument(xml)?;
+        self.validate(py)?;
+        let mut presentation = self.presentation.borrow_mut(py);
+        presentation
+            .inner
+            .replace_layout_xml(self.index, &xml)
+            .map_err(|error| crate::raw_xml_error(py, error))?;
+        presentation.revisions.bump();
+        Ok(())
+    }
+
     #[getter]
     fn name(&self, py: Python<'_>) -> PyResult<Option<String>> {
         self.validate(py)?;
@@ -187,6 +273,14 @@ impl PySlide {
 
 #[pymethods]
 impl PySlide {
+    fn __getattr__(&self, name: &str) -> PyResult<Py<PyAny>> {
+        Err(crate::missing_attribute("Slide", name))
+    }
+
+    fn __setattr__(slf: &Bound<'_, Self>, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        crate::set_attribute(slf.as_any(), "Slide", name, value)
+    }
+
     /// Two current handles are equal when they name the same slide of one
     /// presentation. Like python-pptx `Slide`, a handle is not hashable.
     fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
@@ -222,6 +316,61 @@ impl PySlide {
             .inner
             .slide(index)
             .and_then(|slide| slide.notes_text()))
+    }
+
+    /// Whether the slide has a notes slide, as in python-pptx.
+    #[getter]
+    fn has_notes_slide(&self, py: Python<'_>) -> PyResult<bool> {
+        Ok(self.notes_text(py)?.is_some())
+    }
+
+    /// python-pptx's `slide.notes_slide`, whose `notes_text_frame.text`
+    /// reads and writes the same speaker notes as `notes_text`. As in
+    /// python-pptx, it creates the notes slide when the slide has none.
+    #[getter]
+    fn notes_slide(&self, py: Python<'_>) -> PyResult<PyNotesSlide> {
+        self.validate(py)?;
+        if self.notes_text(py)?.is_none() {
+            self.set_notes_text(py, "")?;
+        }
+        let path = self
+            .presentation
+            .borrow(py)
+            .revisions
+            .capture(self.path.segs.clone());
+        Ok(PyNotesSlide {
+            slide: Py::new(py, PySlide::new(self.presentation.clone_ref(py), path))?,
+        })
+    }
+
+    /// This slide's `p:sld` part XML as bytes.
+    #[getter]
+    fn xml<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+        let index = self.validate(py)?;
+        let xml = self
+            .presentation
+            .borrow(py)
+            .inner
+            .slide_xml(index)
+            .map_err(|error| crate::raw_xml_error(py, error))?;
+        Ok(pyo3::types::PyBytes::new(py, &xml))
+    }
+
+    /// Replace this slide with one `p:sld` element given as XML.
+    ///
+    /// The XML must parse, keep every element it names and reference only
+    /// relationships the slide has, or `ValueError` says why and nothing
+    /// changes. Like any structural edit it retires the handles held so far.
+    fn replace_xml(&self, py: Python<'_>, xml: &Bound<'_, PyAny>) -> PyResult<()> {
+        let xml = crate::raw_xml_argument(xml)?;
+        let index = self.validate(py)?;
+        let mut presentation = self.presentation.borrow_mut(py);
+        presentation
+            .inner
+            .replace_slide_xml(index, &xml)
+            .map_err(|error| crate::raw_xml_error(py, error))?;
+        presentation.revisions.bump();
+        Ok(())
     }
 
     /// Replaces the speaker notes, creating the notes slide when absent.
@@ -550,6 +699,14 @@ impl PySlideCollection {
 
 #[pymethods]
 impl PySlideCollection {
+    fn __getattr__(&self, name: &str) -> PyResult<Py<PyAny>> {
+        Err(crate::missing_attribute("SlideCollection", name))
+    }
+
+    fn __setattr__(slf: &Bound<'_, Self>, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        crate::set_attribute(slf.as_any(), "SlideCollection", name, value)
+    }
+
     fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
         self.len(py)
     }

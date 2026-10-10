@@ -71,6 +71,16 @@ Re-fetch it with doc.paragraphs[i].
 **Loud failure beats silently wrong data.** There are no snapshot accessors that
 keep working after invalidation.
 
+rdocx records what each common structural edit did to older handles, keyed by
+the revision it created: an append moves no path, a paragraph text or raw XML
+replacement retires only the paths below that paragraph, and a body paragraph
+insertion moves the later body paragraphs one place down. A paragraph, run or
+table handle resolves its path through every edit recorded since its capture,
+so it survives appends and in-place edits as a python-docx element does. A
+removal, a move or any other edit whose effect paths cannot follow retires
+every older handle. Every edit records its call, so a retired handle's error
+names the call that retired it.
+
 v0.2 upgrades to lazily-assigned stable ids backed by `w14:paraId`, which OOXML
 already defines for exactly this purpose, so they round-trip to disk and improve
 DOCX fidelity as a side effect. Then a handle survives unrelated removals and
@@ -169,9 +179,10 @@ substitution. The Quickstart held-row example additionally re-fetches
 `document.tables[0].rows[1]` before its second cell assignment because the
 first cell text replacement advances the global revision and stales the held
 row. This is the minimal public compatibility adaptation and does not weaken
-strict revision validation. A touch of `._p` raises a clear
-`NotImplementedError` naming the attribute and its equivalent rather than an
-`AttributeError` five frames away.
+strict revision validation. A touch of `._p` raises an `AttributeError` that
+names the attribute and its rdocx equivalent, `paragraph.xml` and
+`paragraph.replace_xml`, rather than a bare one five frames away, so `hasattr`
+still reads it as absent.
 
 ```python
 from rdocx import Document, Inches, Pt, RGBColor, WD_ALIGN_PARAGRAPH
@@ -190,7 +201,7 @@ doc.save_pdf("out.pdf")                        # documented as an rdocx extensio
 - `font` and `paragraph_format` are themselves handles, so `r.font.bold = True`
   writes through the chain. They store only a document reference and content
   path, re-resolve on every operation, and become stale after a structural
-  mutation.
+  mutation that moves them.
 - **Tri-state properties return `None` for inherit**, `True` or `False` when
   explicit. rdocx's `Option<bool>` already matches. Never collapse `None` to
   `False`. This applies to row header and split policy plus cell no-wrap state,
@@ -695,7 +706,7 @@ place and do not advance the revision. `rpptx` and `rpptx.enum.text` export
 - `Paragraph.alignment` takes `PP_ALIGN`. `line_spacing` reads a float number
   of lines from `a:spcPct` and a `Length` from `a:spcPts`. Assigning a
   `Length` writes exact points and any other number writes lines, as in
-  python-pptx. `space_before` and `space_after` write points for an integer or
+  python-pptx. Zero or less raises, as in rdocx. `space_before` and `space_after` write points for an integer or
   `Length` and lines for a float, and read lines back as a float where
   python-pptx reports `None`. `left_indent`, `right_indent`, and
   `first_line_indent` use the python-docx names for `marL`, `marR`, and

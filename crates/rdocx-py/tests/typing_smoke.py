@@ -371,3 +371,18 @@ def scoped_replacement_signatures_cover_paragraph_cell_and_story_item(document: 
 def whole_story_setter_signatures(document: Document) -> None:
     assert_type(document.set_header(text="header"), None)
     assert_type(document.set_footer(text="footer"), None)
+
+
+def first_draft_and_raw_xml_signatures(document: Document, paragraph: Paragraph, cell: Cell) -> None:
+    assert_type(document.add_heading("Title", 0), Paragraph)
+    assert_type(document.add_paragraph(style="List Bullet"), Paragraph)
+    assert_type(document.add_page_break(), Paragraph)
+    assert_type(paragraph.insert_paragraph_before("before", style="Quote"), Paragraph)
+    assert_type(paragraph.xml, bytes)
+    assert_type(paragraph.replace_xml(paragraph.xml), None)
+    assert_type(cell.replace_xml("<w:tc><w:p/></w:tc>"), None)
+    assert_type(document.replace_section_xml(0, document.section_xml(0)), None)
+    run = paragraph.runs[0]
+    run.bold = True
+    assert_type(run.italic, bool | None)
+    assert "Normal" in document.styles

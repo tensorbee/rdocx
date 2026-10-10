@@ -1,12 +1,14 @@
 use oxml_py_support::{ContentPath, PathSeg};
-use pyo3::exceptions::{PyIndexError, PyKeyError, PyRuntimeError, PyTypeError, PyValueError};
+use pyo3::exceptions::{
+    PyIndexError, PyKeyError, PyNotImplementedError, PyRuntimeError, PyTypeError, PyValueError,
+};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyList, PySlice};
+use pyo3::types::{PyAny, PyBytes, PyList, PySlice};
 use smallvec::smallvec;
 
-use crate::document::PyDocument;
+use crate::document::{EditScope, PyDocument, raw_xml_argument, raw_xml_error};
+use crate::normalize_index;
 use crate::run::{PyRun, PyRunCollection};
-use crate::{normalize_index, stale_to_pyerr};
 
 #[derive(Clone, Copy)]
 pub(crate) enum ParagraphLocation {
@@ -50,6 +52,24 @@ pub(crate) fn paragraph_location(path: &ContentPath) -> PyResult<ParagraphLocati
         }),
         (_, None, None) => Ok(ParagraphLocation::Body(paragraph)),
         _ => Err(PyRuntimeError::new_err("paragraph path is incomplete")),
+    }
+}
+
+/// The raw XML address of the paragraph at `location`.
+pub(crate) fn xml_paragraph(location: ParagraphLocation) -> rdocx::XmlParagraph {
+    match location {
+        ParagraphLocation::Body(index) => rdocx::XmlParagraph::Body(index),
+        ParagraphLocation::Cell {
+            table,
+            row,
+            cell,
+            paragraph,
+        } => rdocx::XmlParagraph::Cell {
+            table,
+            row,
+            cell,
+            paragraph,
+        },
     }
 }
 
@@ -125,6 +145,67 @@ pub(crate) fn defined_style(
         .ok_or_else(|| no_style_error(value))
 }
 
+/// The list styles of python-docx's default template, by name, style ID,
+/// whether they are bulleted, and list level.
+const BUILTIN_LIST_STYLES: [(&str, &str, bool, u32); 6] = [
+    ("List Bullet", "ListBullet", true, 0),
+    ("List Bullet 2", "ListBullet2", true, 1),
+    ("List Bullet 3", "ListBullet3", true, 2),
+    ("List Number", "ListNumber", false, 0),
+    ("List Number 2", "ListNumber2", false, 1),
+    ("List Number 3", "ListNumber3", false, 2),
+];
+
+/// Add the python-docx list style `value` names when the document lacks it.
+///
+/// A first draft writes `add_paragraph(text, style='List Bullet')`, and
+/// python-docx's template defines that style. A document without it gets
+/// the style, linked to the list definition its siblings share (one for the
+/// bulleted styles, one for the numbered ones), so the paragraph is a list
+/// item in Word, LibreOffice and Google Docs. Any other value is left to
+/// the style lookup.
+pub(crate) fn ensure_builtin_style(
+    py: Python<'_>,
+    document: &mut rdocx::Document,
+    value: &str,
+) -> PyResult<()> {
+    let Some(&(name, style_id, bullet, level)) = BUILTIN_LIST_STYLES
+        .iter()
+        .find(|(name, id, ..)| name.eq_ignore_ascii_case(value) || *id == value)
+    else {
+        return Ok(());
+    };
+    if find_style(&document.styles(), value, None).is_some() {
+        return Ok(());
+    }
+    let shared = BUILTIN_LIST_STYLES
+        .iter()
+        .filter(|(.., sibling_bullet, _)| *sibling_bullet == bullet)
+        .find_map(|(_, sibling, ..)| {
+            document
+                .style(sibling)?
+                .paragraph_properties()?
+                .num_id
+                .filter(|num_id| *num_id != 0)
+        });
+    let num_id = match shared {
+        Some(num_id) => num_id,
+        None => document.add_list_definition(&[if bullet {
+            rdocx::ListLevel::bullet()
+        } else {
+            rdocx::ListLevel::decimal()
+        }]),
+    };
+    let mut builder = rdocx::StyleBuilder::paragraph(style_id, name);
+    if document.style("Normal").is_some() {
+        builder = builder.based_on("Normal");
+    }
+    document
+        .add_style(builder)
+        .and_then(|()| document.link_style_to_numbering(style_id, num_id, level))
+        .map_err(|error| crate::rdocx_to_pyerr(py, error))
+}
+
 #[pyclass(name = "Paragraph")]
 pub struct PyParagraph {
     pub(crate) document: Py<PyDocument>,
@@ -137,6 +218,12 @@ impl PyParagraph {
     }
 
     pub(crate) fn validate(&self, py: Python<'_>) -> PyResult<ParagraphLocation> {
+        paragraph_location(&self.resolved(py)?)
+    }
+
+    /// This handle's path at the current revision, moved by the edits made
+    /// since it was created.
+    pub(crate) fn resolved(&self, py: Python<'_>) -> PyResult<ContentPath> {
         let location = paragraph_location(&self.path)?;
         let recovery_hint = match location {
             ParagraphLocation::Body(_) => "Re-fetch it with doc.paragraphs[i].".to_owned(),
@@ -149,11 +236,9 @@ impl PyParagraph {
                 "Re-fetch it with doc.tables[{table}].rows[{row}].cells[{cell}].paragraphs[{paragraph}]."
             ),
         };
-        let document = self.document.borrow(py);
-        self.path
-            .validate_revision(document.revisions.current(), "paragraph", &recovery_hint)
-            .map_err(|error| stale_to_pyerr(py, error))?;
-        Ok(location)
+        self.document
+            .borrow(py)
+            .resolve_path(py, &self.path, "paragraph", &recovery_hint)
     }
 
     pub(crate) fn belongs_to(&self, py: Python<'_>, document: &Py<PyDocument>) -> bool {
@@ -163,7 +248,8 @@ impl PyParagraph {
     /// Append one run, or one external hyperlink run when `url` is given, and
     /// return its handle.
     fn append_run(&self, py: Python<'_>, text: &str, url: Option<&str>) -> PyResult<Py<PyRun>> {
-        let location = self.validate(py)?;
+        let resolved = self.resolved(py)?;
+        let location = paragraph_location(&resolved)?;
         let (path, run_path) = {
             let mut document = self.document.borrow_mut(py);
             let relationship_id = match url {
@@ -232,8 +318,12 @@ impl PyParagraph {
                     )
                 }
             };
-            document.revisions.bump();
-            let mut segments = self.path.segs.clone();
+            let call = match url {
+                Some(_) => "Paragraph.add_hyperlink",
+                None => "Paragraph.add_run",
+            };
+            document.bump_edit(call, EditScope::Appended);
+            let mut segments = resolved.segs;
             segments.push(PathSeg::Run(run_index));
             (document.revisions.capture(segments), run_path)
         };
@@ -243,6 +333,14 @@ impl PyParagraph {
 
 #[pymethods]
 impl PyParagraph {
+    fn __getattr__(&self, name: &str) -> PyResult<Py<PyAny>> {
+        Err(crate::missing_attribute("Paragraph", name))
+    }
+
+    fn __setattr__(slf: &Bound<'_, Self>, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        crate::set_attribute(slf.as_any(), "Paragraph", name, value)
+    }
+
     /// Replace literal text within this paragraph, retaining run formatting.
     #[pyo3(signature = (old, new, *, expect = None))]
     fn replace_text(
@@ -261,7 +359,7 @@ impl PyParagraph {
                     .paragraph_story_location(index)
                     .map_err(|error| crate::rdocx_to_pyerr(py, error))?
                     .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?;
-                document.scoped_replacement(py, |document| {
+                document.scoped_replacement(py, "Paragraph.replace_text", |document| {
                     document.try_replace_text_at(&location, old, new, expect)
                 })
             }
@@ -270,7 +368,7 @@ impl PyParagraph {
                 row,
                 cell,
                 paragraph,
-            } => document.scoped_replacement(py, |document| {
+            } => document.scoped_replacement(py, "Paragraph.replace_text", |document| {
                 document.try_replace_text_in_cell(
                     (table, row, cell),
                     Some(paragraph),
@@ -306,11 +404,11 @@ impl PyParagraph {
 
     // Replace the content with one run holding `text`, keeping the paragraph
     // properties, comments and bookmarks. `None` is empty text. A success
-    // advances the revision, so every earlier handle, this one included, is
-    // stale.
+    // retires the run handles of this paragraph, and keeps every other handle.
     #[setter]
     fn set_text(&self, py: Python<'_>, text: Option<&str>) -> PyResult<()> {
-        let location = self.validate(py)?;
+        let resolved = self.resolved(py)?;
+        let location = paragraph_location(&resolved)?;
         let text = text.unwrap_or_default();
         let mut document = self.document.borrow_mut(py);
         let result = match location {
@@ -338,16 +436,16 @@ impl PyParagraph {
             }
         };
         result.map_err(|error| crate::rdocx_to_pyerr(py, error))?;
-        document.revisions.bump();
+        document.bump_edit("Paragraph.text", EditScope::Below(resolved.segs));
         Ok(())
     }
 
     #[getter]
     fn runs(&self, py: Python<'_>) -> PyResult<Py<PyRunCollection>> {
-        self.validate(py)?;
+        let resolved = self.resolved(py)?;
         Py::new(
             py,
-            PyRunCollection::new(self.document.clone_ref(py), self.path.clone()),
+            PyRunCollection::new(self.document.clone_ref(py), resolved),
         )
     }
 
@@ -416,6 +514,66 @@ impl PyParagraph {
         Ok(())
     }
 
+    /// This paragraph's `w:p` element as standalone XML bytes.
+    #[getter]
+    fn xml<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let target = rdocx::XmlTarget::Paragraph(xml_paragraph(self.validate(py)?));
+        let xml = self
+            .document
+            .borrow(py)
+            .inner
+            .element_xml(&target)
+            .map_err(|error| raw_xml_error(py, error))?;
+        Ok(PyBytes::new(py, &xml))
+    }
+
+    /// Replace this paragraph with one `w:p` element given as XML. The
+    /// handle stays valid and its run handles retire.
+    fn replace_xml(&self, py: Python<'_>, xml: &Bound<'_, PyAny>) -> PyResult<()> {
+        let xml = raw_xml_argument(xml)?;
+        let resolved = self.resolved(py)?;
+        let target = rdocx::XmlTarget::Paragraph(xml_paragraph(paragraph_location(&resolved)?));
+        let mut document = self.document.borrow_mut(py);
+        document
+            .inner
+            .replace_element_xml(&target, &xml)
+            .map_err(|error| raw_xml_error(py, error))?;
+        document.bump_edit("Paragraph.replace_xml", EditScope::Below(resolved.segs));
+        Ok(())
+    }
+
+    /// Insert a paragraph before this body paragraph and return it, as
+    /// python-docx does. This handle and every other one stay valid.
+    #[pyo3(signature = (text = "", style = None))]
+    fn insert_paragraph_before(
+        &self,
+        py: Python<'_>,
+        text: &str,
+        style: Option<String>,
+    ) -> PyResult<Py<PyParagraph>> {
+        let ParagraphLocation::Body(index) = self.validate(py)? else {
+            return Err(PyNotImplementedError::new_err(
+                "insert_paragraph_before works on body paragraphs, use cell.add_paragraph(text) in a table cell",
+            ));
+        };
+        let content = self
+            .document
+            .borrow(py)
+            .inner
+            .content_index_of_paragraph(index)
+            .ok_or_else(|| {
+                PyValueError::new_err(
+                    "this paragraph sits inside a content control, insert next to the control with document.insert_paragraph(index, text)",
+                )
+            })?;
+        let paragraph =
+            PyDocument::insert_paragraph(self.document.clone_ref(py), py, content, text)?;
+        if style.is_some() {
+            paragraph.borrow(py).set_style(py, style)?;
+        }
+        Ok(paragraph)
+    }
+
     fn add_run(&self, py: Python<'_>, text: &str) -> PyResult<Py<PyRun>> {
         self.append_run(py, text, None)
     }
@@ -429,13 +587,10 @@ impl PyParagraph {
         &self,
         py: Python<'_>,
     ) -> PyResult<Py<crate::formatting::PyParagraphFormat>> {
-        self.validate(py)?;
+        let resolved = self.resolved(py)?;
         Py::new(
             py,
-            crate::formatting::PyParagraphFormat::new(
-                self.document.clone_ref(py),
-                self.path.clone(),
-            ),
+            crate::formatting::PyParagraphFormat::new(self.document.clone_ref(py), resolved),
         )
     }
 
@@ -446,8 +601,11 @@ impl PyParagraph {
     }
 
     #[setter]
-    fn set_style(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
+    pub(crate) fn set_style(&self, py: Python<'_>, value: Option<String>) -> PyResult<()> {
         let location = self.validate(py)?;
+        if let Some(value) = &value {
+            ensure_builtin_style(py, &mut self.document.borrow_mut(py).inner, value)?;
+        }
         let value = value
             .map(|value| {
                 style_id_of_type(

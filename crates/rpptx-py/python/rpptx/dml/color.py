@@ -4,6 +4,8 @@
 class RGBColor(tuple[int, int, int]):
     """An immutable red, green, blue colour triple."""
 
+    __slots__ = ()
+
     def __new__(cls, r: int, g: int, b: int) -> "RGBColor":
         channels = (r, g, b)
         if any(not isinstance(channel, int) or not 0 <= channel <= 255 for channel in channels):
@@ -23,6 +25,14 @@ class RGBColor(tuple[int, int, int]):
 
     def __str__(self) -> str:
         return "%02X%02X%02X" % self
+
+    def __setattr__(self, name: str, value: object) -> None:
+        # Without this, `font.color.rgb = RGBColor(...)` on a run that already
+        # has a colour would set an attribute on a copy and change nothing.
+        raise AttributeError(
+            f"RGBColor is immutable, so setting {name} would change nothing: "
+            "assign a new colour instead, for example font.color = RGBColor(0xC0, 0x00, 0x00)"
+        )
 
 
 __all__ = ["RGBColor"]

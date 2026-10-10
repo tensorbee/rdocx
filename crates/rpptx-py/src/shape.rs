@@ -115,7 +115,7 @@ pub(crate) fn slide_index(path: &ContentPath) -> PyResult<usize> {
         .ok_or_else(|| PyIndexError::new_err("slide index is missing"))
 }
 
-fn shape_indices(path: &ContentPath) -> impl Iterator<Item = usize> + '_ {
+pub(crate) fn shape_indices(path: &ContentPath) -> impl Iterator<Item = usize> + '_ {
     path.segs.iter().filter_map(|segment| match segment {
         PathSeg::Shape(index) => Some(*index),
         _ => None,
@@ -256,6 +256,14 @@ impl PyShape {
 
 #[pymethods]
 impl PyShape {
+    fn __getattr__(&self, name: &str) -> PyResult<Py<PyAny>> {
+        Err(crate::missing_attribute("Shape", name))
+    }
+
+    fn __setattr__(slf: &Bound<'_, Self>, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        crate::set_attribute(slf.as_any(), "Shape", name, value)
+    }
+
     #[getter]
     fn click_action(&self, py: Python<'_>) -> PyResult<Py<PyShapeClickAction>> {
         self.validate(py)?;
@@ -570,6 +578,24 @@ impl PyShape {
             .read(py, |shape| shape.xml())?
             .map_err(|error| rpptx_to_pyerr(py, error))?;
         Ok(PyBytes::new(py, &xml))
+    }
+
+    /// Replace this shape with one element of the same kind given as XML.
+    ///
+    /// The XML must parse, keep every element it names and reference only
+    /// relationships the slide has, or `ValueError` says why and nothing
+    /// changes. Like any structural edit it retires the handles held so far.
+    fn replace_xml(&self, py: Python<'_>, xml: &Bound<'_, PyAny>) -> PyResult<()> {
+        let xml = crate::raw_xml_argument(xml)?;
+        self.validate(py)?;
+        let shape_path = shape_indices(&self.path).collect::<Vec<_>>();
+        let mut presentation = self.presentation.borrow_mut(py);
+        presentation
+            .inner
+            .replace_shape_xml(slide_index(&self.path)?, &shape_path, &xml)
+            .map_err(|error| crate::raw_xml_error(py, error))?;
+        presentation.revisions.bump();
+        Ok(())
     }
 
     #[getter]

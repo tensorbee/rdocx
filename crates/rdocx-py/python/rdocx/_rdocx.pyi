@@ -1,7 +1,7 @@
 import datetime as _datetime
 import os as _os
 from collections.abc import Iterator as _Iterator, Sequence as _Sequence
-from typing import Literal as _Literal, NoReturn as _Never, final as _final, overload as _overload
+from typing import IO as _IO, Literal as _Literal, NoReturn as _Never, final as _final, overload as _overload
 
 from . import shared as _shared
 from .enum import table as _table
@@ -9,6 +9,7 @@ from .enum import text as _text
 
 _Path = str | _os.PathLike[str]
 _RevisionView = _Literal["accepted", "tracked"]
+_Xml = str | bytes | bytearray
 _BorderStyle = _Literal[
     "none", "single", "thick", "double", "dotted", "dashed", "dotDash", "wave"
 ]
@@ -591,12 +592,19 @@ class CoreProperties:
 
 @_final
 class Document:
-    def __new__(cls, path: _Path | None = None) -> Document: ...
+    def __new__(cls, path: _Path | _IO[bytes] | None = None) -> Document:
+        """Open a path or a binary file-like object, or start from the default template."""
     @staticmethod
     def open(path: _Path) -> Document: ...
     @staticmethod
     def from_bytes(bytes: bytes) -> Document: ...
-    def save(self, path: _Path) -> None: ...
+    def save(self, path: _Path | _IO[bytes]) -> None:
+        """Save to a path or write to a binary file-like object.
+
+        A path whose extension names another format, such as ``.pdf``, raises
+        ``ValueError`` naming the call that writes it, and so does a table
+        without rows, which Word cannot open.
+        """
     def to_bytes(self) -> bytes: ...
     def image_data(self, relationship_id: str) -> bytes | None: ...
     def replace_image(self, relationship_id: str, data: bytes) -> None: ...
@@ -694,7 +702,14 @@ class Document:
     def insert_section(self, index: int) -> None: ...
     def remove_section(self, index: int) -> None: ...
     @property
-    def styles(self) -> tuple[Style, ...]: ...
+    def styles(self) -> _shared._Styles:
+        """The styles, a tuple also indexed by style name or ID: ``styles['Normal']``."""
+    def add_section(self, start_type: int = 2) -> Section:
+        """Append a section starting as ``start_type`` (a ``WD_SECTION`` member) says."""
+    def section_xml(self, index: int) -> bytes:
+        """Section ``index``'s ``w:sectPr`` as standalone XML."""
+    def replace_section_xml(self, index: int, xml: _Xml) -> None:
+        """Replace section ``index``'s ``w:sectPr``, checked as ``Paragraph.replace_xml`` checks."""
     def add_style(
         self,
         name: str,
@@ -874,8 +889,18 @@ class Document:
     def paragraphs(self) -> ParagraphCollection: ...
     @property
     def tables(self) -> TableCollection: ...
-    def add_paragraph(self, text: str) -> Paragraph: ...
-    def add_table(self, rows: int, cols: int) -> Table: ...
+    def add_paragraph(self, text: str = "", style: str | Style | None = None) -> Paragraph:
+        """Append a paragraph. Every held handle stays valid.
+
+        ``style`` is a style name or ID. A python-docx list style such as
+        ``'List Bullet'`` or ``'List Number 2'`` that the document lacks is
+        added, linked to a list definition its siblings share.
+        """
+    def add_heading(self, text: str = "", level: int = 1) -> Paragraph:
+        """Append a heading: level 0 is the Title style, 1 to 9 the Heading styles."""
+    def add_page_break(self) -> Paragraph:
+        """Append a paragraph holding only a page break."""
+    def add_table(self, rows: int, cols: int, style: str | None = None) -> Table: ...
     def remove_content(self, index: int) -> bool: ...
     @_overload
     def find_content_index(self, content: Paragraph | Table) -> int: ...
@@ -910,6 +935,24 @@ class Paragraph:
     def alignment(self, value: _text.WD_ALIGN_PARAGRAPH | None) -> None: ...
     def add_run(self, text: str) -> Run: ...
     def add_hyperlink(self, text: str, url: str) -> Run: ...
+    @property
+    def xml(self) -> bytes:
+        """This paragraph's ``w:p`` as standalone XML."""
+    def replace_xml(self, xml: _Xml) -> None:
+        """Replace this paragraph with one ``w:p`` given as XML.
+
+        Prefixes the document root declares need no declaration, and CDATA is
+        read as the text it holds. Raises ``ValueError``, leaving the document
+        unchanged, when the XML is malformed or has a DOCTYPE, holds another
+        element or several, names an element rdocx would drop, places a ``w:``
+        element where Word refuses it or uses a namespace mc:Ignorable does
+        not cover, leaves a cell without a paragraph or a row without a cell,
+        references a relationship id the document part lacks or one of the
+        wrong type, or adds or removes a section break. This handle stays
+        valid and its run handles retire.
+        """
+    def insert_paragraph_before(self, text: str = "", style: str | None = None) -> Paragraph:
+        """Insert a body paragraph before this one. Every held handle stays valid."""
     @property
     def paragraph_format(self) -> ParagraphFormat: ...
     @property
@@ -948,6 +991,23 @@ class Run:
     @text.setter
     def text(self, value: str) -> None: ...
     def remove(self) -> None: ...
+    @property
+    def bold(self) -> bool | None: ...
+    @bold.setter
+    def bold(self, value: bool | None) -> None: ...
+    @property
+    def italic(self) -> bool | None: ...
+    @italic.setter
+    def italic(self, value: bool | None) -> None: ...
+    @property
+    def underline(self) -> bool | _text.WD_UNDERLINE | None: ...
+    @underline.setter
+    def underline(self, value: bool | _text.WD_UNDERLINE | None) -> None: ...
+    @property
+    def xml(self) -> bytes:
+        """This run's ``w:r`` as standalone XML."""
+    def replace_xml(self, xml: _Xml) -> None:
+        """Replace this run with one ``w:r``, checked as ``Paragraph.replace_xml`` checks."""
     @property
     def font(self) -> Font: ...
     @property
@@ -1016,6 +1076,10 @@ class Font:
     def shading(self) -> str | None: ...
     @shading.setter
     def shading(self, value: str | None) -> None: ...
+    @property
+    def highlight_color(self) -> _text.WD_COLOR_INDEX | None: ...
+    @highlight_color.setter
+    def highlight_color(self, value: _text.WD_COLOR_INDEX | None) -> None: ...
 
 
 @_final
@@ -1073,6 +1137,11 @@ class Table:
     @property
     def rows(self) -> RowCollection: ...
     def cell(self, row: int, col: int) -> Cell: ...
+    @property
+    def xml(self) -> bytes:
+        """This table's ``w:tbl`` as standalone XML."""
+    def replace_xml(self, xml: _Xml) -> None:
+        """Replace this table with one ``w:tbl``, checked as ``Paragraph.replace_xml`` checks."""
     @property
     def style(self) -> str | None: ...
     @style.setter
@@ -1169,6 +1238,11 @@ class Cell:
     @property
     def paragraphs(self) -> CellParagraphCollection: ...
     def add_paragraph(self, text: str) -> Paragraph: ...
+    @property
+    def xml(self) -> bytes:
+        """This cell's ``w:tc`` as standalone XML."""
+    def replace_xml(self, xml: _Xml) -> None:
+        """Replace this cell with one ``w:tc``, checked as ``Paragraph.replace_xml`` checks."""
     @property
     def width(self) -> _shared.Length | None: ...
     @width.setter

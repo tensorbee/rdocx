@@ -32,10 +32,11 @@ from .util import Length as _Length
 
 _Path = str | _os.PathLike[str]
 _ImageFile = _Path | bytes | _IO[bytes]
+_Xml = str | bytes | bytearray
 __all__ = [
     "Presentation", "CommentAuthor", "Comment", "CommentReply",
     "BoundingBox", "TextLineLayout", "TextFrameLayout", "ValidationIssue",
-    "SlideLayout", "SlideLayoutCollection", "Slide", "Background",
+    "SlideLayout", "SlideLayoutCollection", "Slide", "NotesSlide", "NotesTextFrame", "Background",
     "SlideCollection", "Shape", "ShapeCollection", "PlaceholderCollection",
     "Image", "AdjustmentCollection", "FillFormat", "LineFormat", "LineEndFormat",
     "ColorFormat", "ShadowFormat",
@@ -156,10 +157,10 @@ class ValidationIssue:
 
 @_final
 class Presentation:
-    def __new__(cls, path: _Path | None = None) -> Presentation: ...
+    def __new__(cls, path: _Path | _IO[bytes] | None = None) -> Presentation: ...
     @staticmethod
     def from_bytes(bytes: bytes) -> Presentation: ...
-    def save(self, path: _Path) -> None: ...
+    def save(self, path: _Path | _IO[bytes]) -> None: ...
     def to_bytes(self) -> bytes: ...
     def to_pdf(self) -> bytes: ...
     def render_slide_to_png(self, slide_index: int, dpi: float = 150.0) -> bytes | None: ...
@@ -200,8 +201,29 @@ class Presentation:
 
 
 @_final
+class NotesSlide:
+    def __new__(cls, *, _private: _Never) -> NotesSlide: ...
+    @property
+    def notes_text_frame(self) -> NotesTextFrame: ...
+
+
+@_final
+class NotesTextFrame:
+    def __new__(cls, *, _private: _Never) -> NotesTextFrame: ...
+    @property
+    def text(self) -> str: ...
+    @text.setter
+    def text(self, value: str) -> None: ...
+
+
+@_final
 class SlideLayout:
     def __new__(cls, *, _private: _Never) -> SlideLayout: ...
+    @property
+    def xml(self) -> bytes:
+        """This layout's ``p:sldLayout`` part XML."""
+    def replace_xml(self, xml: _Xml) -> None:
+        """Replace this layout with one ``p:sldLayout``, checked as ``Slide.replace_xml`` checks."""
     @property
     def name(self) -> str | None: ...
     def __eq__(self, other: object, /) -> bool: ...
@@ -232,6 +254,25 @@ class Slide:
     def notes_text(self) -> str | None: ...
     @notes_text.setter
     def notes_text(self, value: str) -> None: ...
+    @property
+    def has_notes_slide(self) -> bool: ...
+    @property
+    def notes_slide(self) -> NotesSlide:
+        """python-pptx's notes slide, whose ``notes_text_frame.text`` is ``notes_text``."""
+    @property
+    def xml(self) -> bytes:
+        """This slide's ``p:sld`` part XML."""
+    def replace_xml(self, xml: _Xml) -> None:
+        """Replace this slide with one ``p:sld`` given as XML.
+
+        Raises ``ValueError``, leaving the presentation unchanged, when the XML
+        is malformed or has a DOCTYPE, has another root element, does not
+        parse, names an element rpptx would drop, places a ``p:`` or ``a:``
+        element where PowerPoint refuses it or uses a namespace mc:Ignorable
+        does not cover, or references a relationship id the slide lacks or
+        one of the wrong type. CDATA is read as the text it holds. Held
+        handles retire.
+        """
     def try_replace_text(
         self,
         placeholder: str,
@@ -353,6 +394,8 @@ class Shape:
     def theme_effect_index(self, value: int) -> None: ...
     @property
     def xml(self) -> bytes: ...
+    def replace_xml(self, xml: _Xml) -> None:
+        """Replace this shape with one element of the same kind, checked as ``Slide.replace_xml`` checks."""
     @property
     def image(self) -> Image: ...
     @property
@@ -558,6 +601,11 @@ class ShadowFormat:
 @_final
 class TextFrame:
     def __new__(cls, *, _private: _Never) -> TextFrame: ...
+    @property
+    def xml(self) -> bytes:
+        """This text frame's ``p:txBody`` as standalone XML."""
+    def replace_xml(self, xml: _Xml) -> None:
+        """Replace the ``p:txBody``, checked as ``Shape.replace_xml`` checks the shape."""
     @property
     def text(self) -> str: ...
     @text.setter
@@ -799,6 +847,8 @@ class RowCollection:
 @_final
 class Row:
     def __new__(cls, *, _private: _Never) -> Row: ...
+    @property
+    def cells(self) -> list[Cell]: ...
     @property
     def height(self) -> _Length: ...
     @height.setter

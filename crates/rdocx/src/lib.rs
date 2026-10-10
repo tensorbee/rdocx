@@ -36,6 +36,7 @@ mod html;
 mod math;
 mod odt;
 pub mod paragraph;
+mod raw_xml;
 mod redaction;
 mod revision;
 mod rtf;
@@ -116,6 +117,7 @@ pub use paragraph::{
     ParagraphMark, ParagraphMarkRef, ParagraphRef, ParagraphTextAlignment, ParagraphTextDirection,
     SectionBreak, TabAlignment, TabLeader, TabStopRef, TextboxTightWrap,
 };
+pub use raw_xml::{XmlParagraph, XmlTarget};
 pub use rdocx_layout::RevisionView;
 pub use rdocx_oxml::document::{CT_DocGrid, ST_DocGrid};
 pub use rdocx_oxml::header_footer::HdrFtrType;

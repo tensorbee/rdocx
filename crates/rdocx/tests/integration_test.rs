@@ -24317,3 +24317,55 @@ fn issue_282_rtf_cell_import_keeps_empty_and_formatted_paragraphs() {
         }
     }
 }
+
+#[test]
+fn raw_xml_round_trips_each_body_element_and_refuses_what_it_cannot_keep() {
+    use rdocx::{XmlParagraph, XmlTarget};
+
+    let mut doc = Document::new();
+    doc.add_paragraph("Hello");
+    doc.add_table(1, 1);
+    let paragraph = XmlTarget::Paragraph(XmlParagraph::Body(0));
+    for target in [
+        paragraph.clone(),
+        XmlTarget::Table(0),
+        XmlTarget::Cell {
+            table: 0,
+            row: 0,
+            cell: 0,
+        },
+        XmlTarget::Section(0),
+    ] {
+        let xml = doc.element_xml(&target).unwrap();
+        doc.replace_element_xml(&target, &xml).unwrap();
+        assert_eq!(doc.element_xml(&target).unwrap(), xml, "{target:?}");
+    }
+    let run_path = doc.paragraph(0).unwrap().run_path(0).unwrap();
+    let run = XmlTarget::Run(XmlParagraph::Body(0), run_path);
+    doc.replace_element_xml(&run, b"<w:r><w:rPr><w:b/></w:rPr><w:t>Bold</w:t></w:r>")
+        .unwrap();
+    assert_eq!(doc.paragraph(0).unwrap().text(), "Bold");
+
+    let before = doc.to_bytes().unwrap();
+    for (xml, message) in [
+        (&b"<w:tbl/>"[..], "got w:tbl"),
+        (b"<w:p><w:r>", "not closed"),
+        (b"<w:p><w:hyperlink r:id=\"rId99\"/></w:p>", "rId99"),
+        (
+            b"<w:p><w:pPr><w:sectPr><w:pgSz w:w=\"12240\" w:h=\"15840\"/></w:sectPr></w:pPr></w:p>",
+            "section break",
+        ),
+        (
+            b"<w:p><w:r><w:b/></w:r></w:p>",
+            "w:b cannot sit directly in w:r",
+        ),
+        (
+            b"<w:p><w:r><w:rPr><w:b/><w:b/></w:rPr></w:r></w:p>",
+            "would not keep b",
+        ),
+    ] {
+        let error = doc.replace_element_xml(&paragraph, xml).unwrap_err();
+        assert!(error.to_string().contains(message), "{error}");
+    }
+    assert_eq!(doc.to_bytes().unwrap(), before);
+}

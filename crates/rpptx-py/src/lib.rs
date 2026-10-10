@@ -8,9 +8,9 @@ mod slide;
 mod table;
 mod text;
 
-use pyo3::exceptions::{PyIndexError, PyRuntimeError};
+use pyo3::exceptions::{PyAttributeError, PyIndexError, PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyType;
+use pyo3::types::{PyAny, PyType};
 
 use oxml_py_support::{ContentPath, PathSeg, StaleElementError};
 use presentation::{PyComment, PyCommentAuthor, PyCommentReply, PyPresentation, PyValidationIssue};
@@ -52,6 +52,134 @@ pub(crate) fn replacement_count_to_pyerr(
     match public_exception_type(py, "ReplacementCountError") {
         Ok(class) => PyErr::from_type(class, (message, expected, found)),
         Err(_) => PyRuntimeError::new_err(message),
+    }
+}
+
+/// python-pptx names that rpptx spells differently or does not have, by
+/// class and attribute, and the rpptx way to do the same.
+const DIVERGENCES: &[(&str, &str, &str)] = &[
+    (
+        "SlideCollection",
+        "_sldIdLst",
+        "use prs.slides.remove(slide) to delete a slide and prs.slides.move(old_index, new_index) to reorder slides",
+    ),
+    (
+        "Shape",
+        "insert_picture",
+        "add the picture with slide.shapes.add_picture(image, placeholder.left, placeholder.top, placeholder.width, placeholder.height), then remove the placeholder with slide.shapes.remove(placeholder)",
+    ),
+    (
+        "Shape",
+        "placeholder_format",
+        "find a placeholder by its idx with slide.placeholders[idx], and read shape.name to tell placeholders apart",
+    ),
+    (
+        "Shape",
+        "is_placeholder",
+        "find placeholders with slide.placeholders[idx] or slide.shapes.placeholders",
+    ),
+    (
+        "Cell",
+        "text_frame",
+        "set cell.text, or edit the cell's a:txBody in the table shape's XML with shape.replace_xml(xml)",
+    ),
+    (
+        "Cell",
+        "vertical_anchor",
+        "edit the cell's a:tcPr anchor attribute in the table shape's XML with shape.replace_xml(xml)",
+    ),
+    (
+        "NotesTextFrame",
+        "paragraphs",
+        "notes are read and written as plain text here: use notes_text_frame.text or slide.notes_text",
+    ),
+    (
+        "NotesTextFrame",
+        "add_paragraph",
+        "append a line to notes_text_frame.text, for example text_frame.text += '\\nNext point'",
+    ),
+    (
+        "Presentation",
+        "slide_master",
+        "edit the layouts a deck uses through prs.slide_layouts[i].xml and replace_xml(xml)",
+    ),
+];
+
+/// The lxml handles python-pptx scripts reach for, which have no rpptx
+/// counterpart: raw XML is read and replaced instead.
+const LXML_NAMES: &[&str] = &[
+    "_element", "element", "_sp", "_txBody", "_sld", "_r", "_p", "_tbl", "_tc",
+];
+
+/// The handles that read and replace their own XML.
+const XML_OWNERS: &[&str] = &["Shape", "TextFrame", "Slide", "SlideLayout"];
+
+/// An `AttributeError` for `class.name` that names the rpptx way when
+/// python-pptx spells it differently.
+pub(crate) fn missing_attribute(class: &str, name: &str) -> PyErr {
+    let hint = DIVERGENCES
+        .iter()
+        .find(|(owner, attribute, _)| *owner == class && *attribute == name)
+        .map(|(.., hint)| (*hint).to_owned())
+        .or_else(|| {
+            LXML_NAMES.contains(&name).then(|| {
+                if XML_OWNERS.contains(&class) {
+                    let handle = match class {
+                        "TextFrame" => "text_frame".to_owned(),
+                        "SlideLayout" => "slide_layout".to_owned(),
+                        other => other.to_lowercase(),
+                    };
+                    format!(
+                        "rpptx has no lxml element: read {handle}.xml and write {handle}.replace_xml(xml)"
+                    )
+                } else {
+                    "rpptx has no lxml element: read shape.xml or shape.text_frame.xml and write them back with replace_xml(xml)".to_owned()
+                }
+            })
+        });
+    match hint {
+        Some(hint) => PyAttributeError::new_err(format!(
+            "'{class}' object has no attribute '{name}': {hint}"
+        )),
+        None => PyAttributeError::new_err(format!("'{class}' object has no attribute '{name}'")),
+    }
+}
+
+/// Set `name` through the property the class defines, or raise
+/// [`missing_attribute`]: a pyclass without `__dict__` would otherwise say
+/// only that the attribute does not exist.
+pub(crate) fn set_attribute(
+    slf: &Bound<'_, PyAny>,
+    class: &str,
+    name: &str,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    match slf.get_type().getattr(name) {
+        Ok(descriptor) if descriptor.hasattr("__set__")? => {
+            descriptor.call_method1("__set__", (slf, value))?;
+            Ok(())
+        }
+        _ => Err(missing_attribute(class, name)),
+    }
+}
+
+/// The bytes of a `replace_xml` argument: `str`, `bytes` or `bytearray`.
+pub(crate) fn raw_xml_argument(xml: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    if let Ok(text) = xml.extract::<String>() {
+        return Ok(text.into_bytes());
+    }
+    xml.extract::<Vec<u8>>()
+        .map_err(|_| PyTypeError::new_err("xml must be str or bytes"))
+}
+
+/// A refused raw XML replacement is a `ValueError` that says why.
+pub(crate) fn raw_xml_error(py: Python<'_>, error: rpptx::Error) -> PyErr {
+    match error {
+        rpptx::Error::InvalidShapeMutation {
+            operation: "replace_xml",
+            message,
+        } => PyValueError::new_err(message),
+        error => rpptx_to_pyerr(py, error),
     }
 }
 

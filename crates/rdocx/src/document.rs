@@ -3032,7 +3032,7 @@ pub enum BodyContentRef<'a> {
 pub struct SectionRef<'a> {
     ordinal: usize,
     is_final: bool,
-    inner: &'a CT_SectPr,
+    pub(crate) inner: &'a CT_SectPr,
 }
 
 impl<'a> SectionRef<'a> {
@@ -3188,7 +3188,7 @@ impl<'a> SectionRef<'a> {
 pub struct Section<'a> {
     ordinal: usize,
     is_final: bool,
-    inner: &'a mut CT_SectPr,
+    pub(crate) inner: &'a mut CT_SectPr,
 }
 
 impl Section<'_> {

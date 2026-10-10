@@ -8140,6 +8140,7 @@ Pedro Assumpcao and the rdocx maintainers.
             "paragraph": "paragraph",
             "rdocx_layout": "operations",
             "rdocx_oxml": "run",
+            "raw_xml": "operations",
             "redaction": "operations",
             "revision": "collaboration",
             "rtf": "operations",
