@@ -18,6 +18,42 @@ pub const M_PREFIX: &[u8] = b"m";
 
 pub use oxml_core::xml::{MC_NS, R_NS, matches_local_name};
 
+/// Whether elements named one of `locals` nest more than `limit` levels deep
+/// in `xml`, found without recursing.
+///
+/// An element counts whatever its namespace, which can only over-count.
+/// Malformed XML counts up to the error, so the parser still reports it.
+pub(crate) fn nesting_exceeds(xml: &[u8], locals: &[&[u8]], limit: usize) -> bool {
+    let mut reader = quick_xml::Reader::from_reader(xml);
+    let mut buffer = Vec::new();
+    let mut open_counts = Vec::new();
+    let mut depth = 0usize;
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(start)) => {
+                let counts = locals
+                    .iter()
+                    .any(|local| matches_local_name(start.name().as_ref(), local));
+                if counts {
+                    depth += 1;
+                    if depth > limit {
+                        return true;
+                    }
+                }
+                open_counts.push(counts);
+            }
+            Ok(Event::End(_)) => {
+                if open_counts.pop() == Some(true) {
+                    depth -= 1;
+                }
+            }
+            Ok(Event::Eof) | Err(_) => return false,
+            Ok(_) => {}
+        }
+        buffer.clear();
+    }
+}
+
 /// The prefixes that an `mc:Ignorable` or `mc:MustUnderstand` attribute in
 /// `xml` lists without a namespace declaration in scope.
 ///

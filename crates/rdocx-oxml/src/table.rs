@@ -26,7 +26,7 @@ use crate::text::{
 };
 use crate::units::Twips;
 
-const MAX_RECOGNIZED_TABLE_NESTING: usize = 32;
+pub(crate) const MAX_RECOGNIZED_TABLE_NESTING: usize = 32;
 
 /// Write any captured raw XML that belongs immediately before position `pos`.
 ///
@@ -2064,7 +2064,7 @@ impl CT_Tc {
                             &capture_element(reader, e)?,
                             owner_bindings,
                         )?;
-                        if let Some(sdt) = CT_Sdt::from_cell_raw(&raw, &prefixes) {
+                        if let Some(sdt) = CT_Sdt::from_cell_raw(&raw, &prefixes)? {
                             content.push(CellContent::ContentControl(sdt));
                         } else {
                             extra_xml.push((content.len(), raw));
@@ -2311,7 +2311,7 @@ impl CT_Row {
                             &capture_element(reader, e)?,
                             owner_bindings,
                         )?;
-                        if let Some(sdt) = CT_Sdt::from_row_raw(&raw, &prefixes) {
+                        if let Some(sdt) = CT_Sdt::from_row_raw(&raw, &prefixes)? {
                             let raw_before = extra_xml
                                 .iter()
                                 .filter(|(at, _)| *at == cells.len())
@@ -2596,7 +2596,7 @@ impl CT_Tbl {
                             &capture_element(reader, e)?,
                             owner_bindings,
                         )?;
-                        if let Some(sdt) = CT_Sdt::from_table_raw(&raw, &prefixes) {
+                        if let Some(sdt) = CT_Sdt::from_table_raw(&raw, &prefixes)? {
                             let raw_before =
                                 extra_xml.iter().filter(|(at, _)| *at == rows.len()).count();
                             content_controls.push((rows.len(), raw_before, sdt));

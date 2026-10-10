@@ -221,6 +221,12 @@ struct XmlElement {
     namespace_declarations: NamespaceDeclarations,
 }
 
+/// Deepest element nesting that revision acceptance and rejection read.
+///
+/// Rendering recurses once per element, and Word documents nest far less
+/// than this, so the bound only keeps hostile input within the stack.
+const MAX_REVISION_XML_DEPTH: usize = 512;
+
 struct XmlTree<'a> {
     source: &'a [u8],
     elements: Vec<XmlElement>,
@@ -498,6 +504,11 @@ impl<'a> XmlTree<'a> {
                     root.get_or_insert(index);
                     stack.push(index);
                     scopes.push(scope);
+                    if stack.len() > MAX_REVISION_XML_DEPTH {
+                        return Err(Error::Other(format!(
+                            "revision XML nesting exceeds {MAX_REVISION_XML_DEPTH} elements"
+                        )));
+                    }
                 }
                 Event::Empty(start) => {
                     let (scope, declarations) =

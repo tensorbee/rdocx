@@ -338,6 +338,7 @@ impl CT_DocPart {
 impl CT_GlossaryDocument {
     pub fn from_xml(xml: &[u8]) -> Result<Self> {
         validate_document_declarations_and_doctype(xml)?;
+        crate::content_control::validate_story_part_nesting(xml)?;
         let mut reader = Reader::from_reader(xml);
         reader.config_mut().trim_text(false);
         let mut buffer = Vec::new();

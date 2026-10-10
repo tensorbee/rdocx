@@ -1,7 +1,7 @@
 //! Deterministic EPUB 3 export for the native Word facade.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
@@ -156,7 +156,7 @@ impl<'a> EpubWriter<'a> {
             .iter()
             .map(|heading| (heading.body_index, heading.anchor.clone()))
             .collect::<HashMap<_, _>>();
-        let mut list_counters = HashMap::new();
+        let mut list_counters = ListCounters::default();
 
         for item in &mut spine {
             let fragment = emit_spine_fragment(
@@ -2237,7 +2237,7 @@ fn emit_spine_fragment(
     input: &mut rdocx_html::HtmlInput,
     media: &[MediaItem],
     heading_anchors: &HashMap<usize, String>,
-    list_counters: &mut HashMap<(u32, u32), u32>,
+    list_counters: &mut ListCounters,
     start: usize,
     end: usize,
 ) -> Result<String> {
@@ -2283,7 +2283,7 @@ fn emit_list_level(
     input: &mut rdocx_html::HtmlInput,
     media: &[MediaItem],
     heading_anchors: &HashMap<usize, String>,
-    list_counters: &mut HashMap<(u32, u32), u32>,
+    list_counters: &mut ListCounters,
     index: &mut usize,
     end: usize,
     list: ListInfo,
@@ -2293,8 +2293,10 @@ fn emit_list_level(
         return Err(epub_error("list nesting exceeds the EPUB depth limit"));
     }
     let tag = list.kind.tag();
-    let counter_key = (list.num_id, list.level);
+    list_counters.start_instance(list.num_id, input.numbering.as_ref());
+    let counter_key = (list.abstract_num_id, list.level);
     let effective_start = list_counters
+        .next
         .get(&counter_key)
         .copied()
         .unwrap_or(list.start);
@@ -2348,7 +2350,9 @@ fn emit_list_level(
         if item_open {
             push_bounded_xhtml(output, "</li>\n")?;
         }
-        list_counters.retain(|(num_id, level), _| *num_id != list.num_id || *level <= list.level);
+        list_counters.next.retain(|(definition, level), _| {
+            *definition != list.abstract_num_id || *level <= list.level
+        });
         let anchor = heading_anchors.get(index).map(String::as_str);
         let preserve_heading = projects_as_heading(paragraph, &input.styles);
         push_bounded_xhtml(output, "<li>")?;
@@ -2366,7 +2370,10 @@ fn emit_list_level(
         }
         item_open = true;
         if list.kind == ListKind::Ordered {
-            let next = list_counters.entry(counter_key).or_insert(effective_start);
+            let next = list_counters
+                .next
+                .entry(counter_key)
+                .or_insert(effective_start);
             *next = next
                 .checked_add(1)
                 .ok_or_else(|| epub_error("list counter overflow during EPUB export"))?;
@@ -2789,9 +2796,41 @@ impl ListKind {
     }
 }
 
+/// The next number of each list level, shared as in Word by every numbering
+/// instance of one abstract definition.
+#[derive(Default)]
+struct ListCounters {
+    /// (abstractNumId, level) → next number
+    next: HashMap<(u32, u32), u32>,
+    /// Instances that have opened a list, so their start overrides apply once.
+    started_instances: HashSet<u32>,
+}
+
+impl ListCounters {
+    /// Restart the levels an instance overrides with `w:startOverride` when
+    /// the instance opens its first list.
+    fn start_instance(&mut self, num_id: u32, numbering: Option<&CT_Numbering>) {
+        if !self.started_instances.insert(num_id) {
+            return;
+        }
+        let Some(instance) = numbering
+            .and_then(|numbering| numbering.nums.iter().find(|item| item.num_id == num_id))
+        else {
+            return;
+        };
+        for level_override in &instance.level_overrides {
+            if level_override.start_override.is_some() {
+                self.next
+                    .remove(&(instance.abstract_num_id, level_override.ilvl));
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct ListInfo {
     num_id: u32,
+    abstract_num_id: u32,
     level: u32,
     kind: ListKind,
     start: u32,
@@ -2806,11 +2845,16 @@ fn detect_list(paragraph: &CT_P, numbering: Option<&CT_Numbering>) -> Option<Lis
         return None;
     }
     let numbering = numbering?;
-    let abstract_id = numbering
+    let instance = numbering
         .nums
         .iter()
-        .find(|numbering| numbering.num_id == num_id)?
-        .abstract_num_id;
+        .find(|numbering| numbering.num_id == num_id)?;
+    let abstract_id = instance.abstract_num_id;
+    let start_override = instance
+        .level_overrides
+        .iter()
+        .find(|level_override| level_override.ilvl == level)
+        .and_then(|level_override| level_override.start_override);
     let abstract_numbering = numbering
         .abstract_nums
         .iter()
@@ -2822,9 +2866,10 @@ fn detect_list(paragraph: &CT_P, numbering: Option<&CT_Numbering>) -> Option<Lis
     let (kind, marker_style) = epub_list_semantics(definition.num_fmt.as_ref())?;
     Some(ListInfo {
         num_id,
+        abstract_num_id: abstract_id,
         level,
         kind,
-        start: definition.start.unwrap_or(1),
+        start: start_override.or(definition.start).unwrap_or(1),
         marker_style,
     })
 }
@@ -4898,6 +4943,45 @@ mod tests {
             !body.contains("<ol start=\"2\" style=\"list-style-type:lower-alpha\""),
             "{body}"
         );
+    }
+
+    /// Numbering instances of one definition share its counters, as in
+    /// Word and in layout, and a start override restarts its level at the
+    /// instance's first list.
+    #[test]
+    fn epub_list_counters_follow_the_shared_numbering_definition() {
+        let mut document = Document::new();
+        let first = document.add_list_definition(&[ListLevel::decimal()]);
+        let definition = document.numbering_instance(first).unwrap().definition_id;
+        let continued = document.add_numbering_instance(definition, &[]).unwrap();
+        let restarted = document
+            .add_numbering_instance(
+                definition,
+                &[crate::NumberingLevelOverride::new(0).start(1)],
+            )
+            .unwrap();
+        for (text, number) in [
+            ("one", first),
+            ("two", first),
+            ("three", continued),
+            ("again one", restarted),
+        ] {
+            document.add_paragraph(text).set_numbering(number, 0);
+            document.add_paragraph("between");
+        }
+
+        let result = document.to_epub_bytes().unwrap();
+        let body = entry_text(&archive_entries(&result.bytes), "EPUB/document.xhtml");
+        let starts = body
+            .match_indices("<ol")
+            .map(|(index, _)| {
+                let tag = &body[index..index + body[index..].find('>').unwrap()];
+                tag.split("start=\"")
+                    .nth(1)
+                    .map_or(1, |rest| rest[..rest.find('"').unwrap()].parse().unwrap())
+            })
+            .collect::<Vec<u32>>();
+        assert_eq!(starts, [1, 2, 3, 1], "{body}");
     }
 
     #[test]

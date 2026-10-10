@@ -6,12 +6,12 @@ use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::{Reader, Writer, XmlVersion};
 
 use crate::error::{OxmlError, Result};
-use crate::namespace::{W_NS, matches_local_name};
+use crate::namespace::{W_NS, matches_local_name, nesting_exceeds};
 use crate::numbering::{local_namespace_overrides, namespace_bindings, word_prefixes_at};
 use crate::properties::is_word_element;
 use crate::raw_xml::{capture_element, capture_empty_element};
 use crate::revision::CT_Revision;
-use crate::table::{CT_Row, CT_Tbl, CT_Tc};
+use crate::table::{CT_Row, CT_Tbl, CT_Tc, MAX_RECOGNIZED_TABLE_NESTING};
 use crate::text::{
     AcceptedRunPath, AcceptedRunPathSegment, CT_P, CT_R, Field, LegacyFormFieldValue, RunContent,
 };
@@ -970,48 +970,69 @@ impl CT_Sdt {
     }
 
     /// Parse a content control at the reader's current `w:sdt` start.
+    ///
+    /// Fails when content controls nest more than 64 levels deep.
     pub fn from_xml(reader: &mut Reader<&[u8]>, start: &BytesStart<'_>) -> Result<Self> {
-        Self::from_xml_with_prefixes(reader, start, &["w".to_owned()], SdtOwner::Standalone)
+        let raw = capture_element(reader, start)?;
+        validate_content_control_nesting(&raw)?;
+        Self::parse_raw(&raw, &["w".to_owned()], SdtOwner::Standalone)
     }
 
-    pub(crate) fn from_body_raw(raw: &[u8], inherited: &[String]) -> Option<Self> {
+    pub(crate) fn from_body_raw(raw: &[u8], inherited: &[String]) -> Result<Option<Self>> {
         Self::from_raw_with_context(raw, inherited, SdtOwner::Body)
     }
 
-    pub(crate) fn from_table_raw(raw: &[u8], inherited: &[String]) -> Option<Self> {
+    pub(crate) fn from_table_raw(raw: &[u8], inherited: &[String]) -> Result<Option<Self>> {
         Self::from_raw_with_context(raw, inherited, SdtOwner::Table)
     }
 
-    pub(crate) fn from_row_raw(raw: &[u8], inherited: &[String]) -> Option<Self> {
+    pub(crate) fn from_row_raw(raw: &[u8], inherited: &[String]) -> Result<Option<Self>> {
         Self::from_raw_with_context(raw, inherited, SdtOwner::Row)
     }
 
-    pub(crate) fn from_cell_raw(raw: &[u8], inherited: &[String]) -> Option<Self> {
+    pub(crate) fn from_cell_raw(raw: &[u8], inherited: &[String]) -> Result<Option<Self>> {
         Self::from_raw_with_context(raw, inherited, SdtOwner::Cell)
     }
 
-    pub(crate) fn from_inline_raw(raw: &[u8], inherited: &[String]) -> Option<Self> {
+    pub(crate) fn from_inline_raw(raw: &[u8], inherited: &[String]) -> Result<Option<Self>> {
         Self::from_raw_with_context(raw, inherited, SdtOwner::Inline)
     }
 
     /// Whether a preserved control is admitted by the complete typed parser.
     #[doc(hidden)]
     pub fn story_raw_is_typed(raw: &[u8], inherited: &[String], owner: StorySdtOwner) -> bool {
-        Self::from_raw_with_context(raw, inherited, owner.into()).is_some()
+        matches!(
+            Self::from_raw_with_context(raw, inherited, owner.into()),
+            Ok(Some(_))
+        )
     }
 
-    fn from_raw_with_context(raw: &[u8], inherited: &[String], owner: SdtOwner) -> Option<Self> {
+    /// Parse a captured control, or `None` when the typed model does not
+    /// admit it and the caller preserves it as raw XML.
+    ///
+    /// Nesting beyond [`MAX_CONTENT_CONTROL_NESTING`] is an error rather than
+    /// `None`: the typed parser and every later walk of the preserved XML
+    /// recurse once per level, so such a control cannot be kept at all.
+    fn from_raw_with_context(
+        raw: &[u8],
+        inherited: &[String],
+        owner: SdtOwner,
+    ) -> Result<Option<Self>> {
+        validate_content_control_nesting(raw)?;
+        Ok(Self::parse_raw(raw, inherited, owner).ok())
+    }
+
+    fn parse_raw(raw: &[u8], inherited: &[String], owner: SdtOwner) -> Result<Self> {
         let mut reader = Reader::from_reader(raw);
         reader.config_mut().trim_text(false);
         let mut buffer = Vec::new();
         loop {
-            match reader.read_event_into(&mut buffer) {
-                Ok(Event::Start(start)) if matches_local_name(start.name().as_ref(), b"sdt") => {
-                    return Self::from_xml_with_prefixes(&mut reader, &start, inherited, owner)
-                        .ok();
+            match reader.read_event_into(&mut buffer)? {
+                Event::Start(start) if matches_local_name(start.name().as_ref(), b"sdt") => {
+                    return Self::from_xml_with_prefixes(&mut reader, &start, inherited, owner);
                 }
-                Ok(Event::Eof) | Err(_) => return None,
-                Ok(_) => {}
+                Event::Eof => return Err(OxmlError::MissingElement("w:sdt".to_owned())),
+                _ => {}
             }
             buffer.clear();
         }
@@ -1357,6 +1378,54 @@ fn set_nth_inline_legacy_form(
     field.set_nth_legacy_form_value_in_source_order(remaining, value)
 }
 
+/// Deepest `w:sdt` nesting the readers accept.
+///
+/// Word nests content controls a handful of levels deep. The typed parser,
+/// the serialiser and the story walks recurse once per level, so a bound far
+/// above anything a producer writes keeps every one of them within the stack.
+/// At this depth a release build loads, edits and saves a document within
+/// about 0.75 MB of stack, which fits the 1 MB stacks of Windows threads and
+/// of wasm32 and the 2 MB default of spawned Rust threads.
+const MAX_CONTENT_CONTROL_NESTING: usize = 64;
+
+/// Reject a story part whose content controls nest deeper than
+/// [`MAX_CONTENT_CONTROL_NESTING`] anywhere, without recursing.
+///
+/// The typed parser checks each control it reads, but a control inside
+/// content kept as raw XML, such as a text box, alternate content or a
+/// block-level custom XML element, is only walked later, by recursive
+/// passes such as revision acceptance. Checking the whole part at open keeps
+/// those passes within the same bound.
+#[doc(hidden)]
+pub fn validate_story_part_nesting(xml: &[u8]) -> Result<()> {
+    if nesting_exceeds(xml, &[b"sdt"], MAX_CONTENT_CONTROL_NESTING) {
+        return Err(content_control_nesting_error());
+    }
+    Ok(())
+}
+
+fn content_control_nesting_error() -> OxmlError {
+    OxmlError::InvalidValue(format!(
+        "content control nesting exceeds {MAX_CONTENT_CONTROL_NESTING} levels"
+    ))
+}
+
+/// Reject XML whose content controls nest deeper than
+/// [`MAX_CONTENT_CONTROL_NESTING`], without recursing.
+///
+/// Tables count too: a table parser starts its own nesting count inside each
+/// control, so without this check alternating controls and tables would nest
+/// tables past the table limit.
+fn validate_content_control_nesting(xml: &[u8]) -> Result<()> {
+    validate_story_part_nesting(xml)?;
+    if nesting_exceeds(xml, &[b"tbl"], MAX_RECOGNIZED_TABLE_NESTING) {
+        return Err(OxmlError::InvalidValue(
+            "recognized model nesting exceeds table limit".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn parse_content(
     reader: &mut Reader<&[u8]>,
     inherited: &[String],
@@ -1364,139 +1433,212 @@ fn parse_content(
     inline_run_sources: &mut Vec<InlineRunSource>,
     owner: SdtOwner,
 ) -> Result<Vec<SdtContent>> {
+    // Every nested `w:sdt` adds this frame to the stack, so it holds no
+    // `SdtContent` value of its own: the helpers build each child and push it,
+    // and their large temporaries leave the stack before the next level.
     let mut content = Vec::new();
+    let mut sources = ContentSources {
+        content: &mut content,
+        revisions,
+        inline_run_sources,
+    };
     let mut buffer = Vec::new();
     loop {
         match reader.read_event_into(&mut buffer) {
             Ok(Event::Start(child)) => {
                 let prefixes = word_prefixes_at(&child, inherited)?;
-                let owned_word_child = [
-                    b"p".as_slice(),
-                    b"tbl".as_slice(),
-                    b"tr".as_slice(),
-                    b"tc".as_slice(),
-                    b"r".as_slice(),
-                ]
-                .into_iter()
-                .find(|local| is_word_element(child.name().as_ref(), local, &prefixes));
-                if owned_word_child.is_some_and(|local| !owner.owns(local)) {
-                    content.push(SdtContent::RawXml(capture_element(reader, &child)?));
-                } else if is_word_element(child.name().as_ref(), b"p", &prefixes) {
-                    content.push(SdtContent::Paragraph(
-                        CT_P::from_xml_with_prefixes_and_root(reader, &prefixes, Some(&child))?,
-                    ));
-                } else if is_word_element(child.name().as_ref(), b"tbl", &prefixes) {
-                    let owner_bindings = local_namespace_overrides(&child, inherited)?;
-                    content.push(SdtContent::Table(
-                        CT_Tbl::from_xml_with_prefixes_and_owner_bindings(
-                            reader,
-                            &prefixes,
-                            &owner_bindings,
-                        )?,
-                    ));
-                } else if is_word_element(child.name().as_ref(), b"tr", &prefixes) {
-                    let owner_bindings = local_namespace_overrides(&child, inherited)?;
-                    content.push(SdtContent::Row(
-                        CT_Row::from_xml_with_prefixes_and_owner_bindings(
-                            reader,
-                            &prefixes,
-                            &owner_bindings,
-                            Some(&child),
-                        )?,
-                    ));
-                } else if is_word_element(child.name().as_ref(), b"tc", &prefixes) {
-                    let owner_bindings = local_namespace_overrides(&child, inherited)?;
-                    content.push(SdtContent::Cell(
-                        CT_Tc::from_xml_with_prefixes_and_owner_bindings(
-                            reader,
-                            &prefixes,
-                            &owner_bindings,
-                        )?,
-                    ));
-                } else if is_word_element(child.name().as_ref(), b"r", &prefixes) {
-                    let raw_xml = capture_element(reader, &child)?;
-                    let run = parse_inline_run(&raw_xml, inherited)?;
-                    inline_run_sources.push(InlineRunSource {
-                        content_index: content.len(),
-                        original: run.clone(),
-                        raw_xml,
-                    });
-                    content.push(SdtContent::Run(run));
-                } else if is_word_element(child.name().as_ref(), b"sdt", &prefixes) {
-                    let raw = capture_element(reader, &child)?;
-                    let parsed = CT_Sdt::from_raw_with_context(&raw, &prefixes, owner);
-                    if let Some(sdt) = parsed {
-                        content.push(SdtContent::ContentControl(sdt));
-                    } else {
-                        content.push(SdtContent::RawXml(raw));
-                    }
+                if is_word_element(child.name().as_ref(), b"sdt", &prefixes) {
+                    push_nested_control(reader, &child, &prefixes, &mut sources, owner)?;
                 } else {
-                    let raw = capture_element(reader, &child)?;
-                    if let Some(revision) = CT_Revision::from_raw(raw.clone(), &prefixes) {
-                        revisions.push((content.len(), revision));
-                    }
-                    content.push(SdtContent::RawXml(raw));
+                    push_content_child(reader, &child, &prefixes, inherited, &mut sources, owner)?;
                 }
             }
             Ok(Event::Empty(child)) => {
-                let prefixes = word_prefixes_at(&child, inherited)?;
-                let owned_word_child = [
-                    b"p".as_slice(),
-                    b"tbl".as_slice(),
-                    b"tr".as_slice(),
-                    b"tc".as_slice(),
-                    b"r".as_slice(),
-                ]
-                .into_iter()
-                .find(|local| is_word_element(child.name().as_ref(), local, &prefixes));
-                if owned_word_child.is_some_and(|local| !owner.owns(local)) {
-                    content.push(SdtContent::RawXml(capture_empty_element(&child)?));
-                } else if is_word_element(child.name().as_ref(), b"p", &prefixes) {
-                    content.push(SdtContent::Paragraph(CT_P::from_empty_root(
-                        &child, &prefixes,
-                    )?));
-                } else if is_word_element(child.name().as_ref(), b"tbl", &prefixes) {
-                    content.push(SdtContent::Table(CT_Tbl::new()));
-                } else if is_word_element(child.name().as_ref(), b"tr", &prefixes) {
-                    content.push(SdtContent::Row(CT_Row::from_empty_root(&child, &prefixes)?));
-                } else if is_word_element(child.name().as_ref(), b"tc", &prefixes) {
-                    content.push(SdtContent::Cell(CT_Tc {
-                        properties: None,
-                        content: Vec::new(),
-                        extra_xml: Vec::new(),
-                    }));
-                } else if is_word_element(child.name().as_ref(), b"r", &prefixes) {
-                    let run = CT_R {
-                        properties: None,
-                        content: Vec::new(),
-                        extra_xml: Vec::new(),
-                        extra_xml_positions: Vec::new(),
-                        alt_drawings: Vec::new(),
-                    };
-                    inline_run_sources.push(InlineRunSource {
-                        content_index: content.len(),
-                        original: run.clone(),
-                        raw_xml: capture_empty_element(&child)?,
-                    });
-                    content.push(SdtContent::Run(run));
-                } else {
-                    let raw = capture_empty_element(&child)?;
-                    if let Some(revision) = CT_Revision::from_raw(raw.clone(), &prefixes) {
-                        revisions.push((content.len(), revision));
-                    }
-                    content.push(SdtContent::RawXml(raw));
-                }
+                push_empty_content_child(&child, inherited, &mut sources, owner)?;
             }
             Ok(Event::End(end)) if matches_local_name(end.name().as_ref(), b"sdtContent") => break,
             Ok(Event::Eof) => {
                 return Err(OxmlError::MissingElement("w:sdtContent end".to_owned()));
             }
-            Ok(event) => content.push(SdtContent::RawXml(event_to_raw(event)?)),
+            Ok(event) => sources.push(SdtContent::RawXml(event_to_raw(event)?)),
             Err(error) => return Err(error.into()),
         }
         buffer.clear();
     }
     Ok(content)
+}
+
+/// The children of one `w:sdtContent` and the side tables that record
+/// sources against their positions.
+struct ContentSources<'a> {
+    content: &'a mut Vec<SdtContent>,
+    revisions: &'a mut Vec<(usize, CT_Revision)>,
+    inline_run_sources: &'a mut Vec<InlineRunSource>,
+}
+
+// Building an `SdtContent` in these helpers keeps that large value out of
+// the frames that stay on the stack while a nested control is parsed.
+impl ContentSources<'_> {
+    #[inline(never)]
+    fn push(&mut self, item: SdtContent) {
+        self.content.push(item);
+    }
+
+    #[inline(never)]
+    fn push_control(&mut self, control: CT_Sdt) {
+        self.content.push(SdtContent::ContentControl(control));
+    }
+}
+
+/// Parse a nested control in place, or preserve it as raw XML when the typed
+/// model does not admit it.
+///
+/// The outermost control's [`CT_Sdt::from_raw_with_context`] has already
+/// bounded the nesting. Parsing from a copy of the reader, rather than from a
+/// captured copy of the subtree, reads each byte once however deep the
+/// controls nest, and the untouched reader still captures a rejected control.
+#[inline(never)]
+fn push_nested_control(
+    reader: &mut Reader<&[u8]>,
+    child: &BytesStart<'_>,
+    prefixes: &[String],
+    sources: &mut ContentSources<'_>,
+    owner: SdtOwner,
+) -> Result<()> {
+    let mut attempt = reader.clone();
+    match CT_Sdt::from_xml_with_prefixes(&mut attempt, child, prefixes, owner) {
+        Ok(sdt) => {
+            *reader = attempt;
+            sources.push_control(sdt);
+        }
+        Err(_) => sources.push(SdtContent::RawXml(capture_element(reader, child)?)),
+    }
+    Ok(())
+}
+
+/// The Word block, row, cell and run elements a control may own.
+fn owned_word_child(child: &BytesStart<'_>, prefixes: &[String]) -> Option<&'static [u8]> {
+    [
+        b"p".as_slice(),
+        b"tbl".as_slice(),
+        b"tr".as_slice(),
+        b"tc".as_slice(),
+        b"r".as_slice(),
+    ]
+    .into_iter()
+    .find(|local| is_word_element(child.name().as_ref(), local, prefixes))
+}
+
+/// Parse one non-control `w:sdtContent` child that has content.
+#[inline(never)]
+fn push_content_child(
+    reader: &mut Reader<&[u8]>,
+    child: &BytesStart<'_>,
+    prefixes: &[String],
+    inherited: &[String],
+    sources: &mut ContentSources<'_>,
+    owner: SdtOwner,
+) -> Result<()> {
+    let owned = owned_word_child(child, prefixes);
+    let index = sources.content.len();
+    let item = if owned.is_some_and(|local| !owner.owns(local)) {
+        SdtContent::RawXml(capture_element(reader, child)?)
+    } else if owned == Some(b"p".as_slice()) {
+        SdtContent::Paragraph(CT_P::from_xml_with_prefixes_and_root(
+            reader,
+            prefixes,
+            Some(child),
+        )?)
+    } else if owned == Some(b"tbl".as_slice()) {
+        let owner_bindings = local_namespace_overrides(child, inherited)?;
+        SdtContent::Table(CT_Tbl::from_xml_with_prefixes_and_owner_bindings(
+            reader,
+            prefixes,
+            &owner_bindings,
+        )?)
+    } else if owned == Some(b"tr".as_slice()) {
+        let owner_bindings = local_namespace_overrides(child, inherited)?;
+        SdtContent::Row(CT_Row::from_xml_with_prefixes_and_owner_bindings(
+            reader,
+            prefixes,
+            &owner_bindings,
+            Some(child),
+        )?)
+    } else if owned == Some(b"tc".as_slice()) {
+        let owner_bindings = local_namespace_overrides(child, inherited)?;
+        SdtContent::Cell(CT_Tc::from_xml_with_prefixes_and_owner_bindings(
+            reader,
+            prefixes,
+            &owner_bindings,
+        )?)
+    } else if owned == Some(b"r".as_slice()) {
+        let raw_xml = capture_element(reader, child)?;
+        let run = parse_inline_run(&raw_xml, inherited)?;
+        sources.inline_run_sources.push(InlineRunSource {
+            content_index: index,
+            original: run.clone(),
+            raw_xml,
+        });
+        SdtContent::Run(run)
+    } else {
+        let raw = capture_element(reader, child)?;
+        if let Some(revision) = CT_Revision::from_raw(raw.clone(), prefixes) {
+            sources.revisions.push((index, revision));
+        }
+        SdtContent::RawXml(raw)
+    };
+    sources.content.push(item);
+    Ok(())
+}
+
+/// Parse one empty `w:sdtContent` child.
+#[inline(never)]
+fn push_empty_content_child(
+    child: &BytesStart<'_>,
+    inherited: &[String],
+    sources: &mut ContentSources<'_>,
+    owner: SdtOwner,
+) -> Result<()> {
+    let prefixes = word_prefixes_at(child, inherited)?;
+    let owned = owned_word_child(child, &prefixes);
+    let index = sources.content.len();
+    let item = if owned.is_some_and(|local| !owner.owns(local)) {
+        SdtContent::RawXml(capture_empty_element(child)?)
+    } else if owned == Some(b"p".as_slice()) {
+        SdtContent::Paragraph(CT_P::from_empty_root(child, &prefixes)?)
+    } else if owned == Some(b"tbl".as_slice()) {
+        SdtContent::Table(CT_Tbl::new())
+    } else if owned == Some(b"tr".as_slice()) {
+        SdtContent::Row(CT_Row::from_empty_root(child, &prefixes)?)
+    } else if owned == Some(b"tc".as_slice()) {
+        SdtContent::Cell(CT_Tc {
+            properties: None,
+            content: Vec::new(),
+            extra_xml: Vec::new(),
+        })
+    } else if owned == Some(b"r".as_slice()) {
+        let run = CT_R {
+            properties: None,
+            content: Vec::new(),
+            extra_xml: Vec::new(),
+            extra_xml_positions: Vec::new(),
+            alt_drawings: Vec::new(),
+        };
+        sources.inline_run_sources.push(InlineRunSource {
+            content_index: index,
+            original: run.clone(),
+            raw_xml: capture_empty_element(child)?,
+        });
+        SdtContent::Run(run)
+    } else {
+        let raw = capture_empty_element(child)?;
+        if let Some(revision) = CT_Revision::from_raw(raw.clone(), &prefixes) {
+            sources.revisions.push((index, revision));
+        }
+        SdtContent::RawXml(raw)
+    };
+    sources.content.push(item);
+    Ok(())
 }
 
 fn write_val_element<W: Write>(
@@ -1872,12 +2014,102 @@ mod tests {
         assert!(matches!(malformed.body.content[0], BodyContent::RawXml(_)));
     }
 
+    fn nested_controls(depth: usize, inner: &str) -> String {
+        format!(
+            "{}{inner}{}",
+            "<w:sdt><w:sdtContent>".repeat(depth),
+            "</w:sdtContent></w:sdt>".repeat(depth)
+        )
+    }
+
+    fn document_error(body: &str) -> String {
+        let xml = format!(r#"<w:document xmlns:w="{W_NS}"><w:body>{body}</w:body></w:document>"#);
+        CT_Document::from_xml(xml.as_bytes())
+            .expect_err("deep controls are rejected")
+            .to_string()
+    }
+
+    #[test]
+    fn controls_nested_past_the_limit_are_rejected_at_every_placement() {
+        let run = "<w:r><w:t>x</w:t></w:r>";
+        let paragraph = "<w:p><w:r><w:t>x</w:t></w:r></w:p>";
+        let limit = MAX_CONTENT_CONTROL_NESTING;
+        let body = |placement: &str, depth: usize| match placement {
+            "block" => nested_controls(depth, paragraph),
+            "inline" => format!("<w:p>{}</w:p>", nested_controls(depth, run)),
+            "cell" => format!(
+                "<w:tbl><w:tr><w:tc>{}</w:tc></w:tr></w:tbl>",
+                nested_controls(depth, "<w:p/>")
+            ),
+            _ => format!(
+                "<w:tbl>{}</w:tbl>",
+                nested_controls(depth, "<w:tr><w:tc><w:p/></w:tc></w:tr>")
+            ),
+        };
+        for name in ["block", "inline", "cell", "row"] {
+            assert!(
+                document_error(&body(name, limit + 1))
+                    .contains("content control nesting exceeds 64 levels"),
+                "{name}"
+            );
+            parse_document(&body(name, limit));
+        }
+
+        let mut depth = 0;
+        let document = parse_document(&nested_controls(limit, paragraph));
+        let BodyContent::ContentControl(outer) = &document.body.content[0] else {
+            panic!("the outer control is typed");
+        };
+        let mut control = outer;
+        loop {
+            depth += 1;
+            match &control.content[..] {
+                [SdtContent::ContentControl(inner)] => control = inner,
+                [SdtContent::Paragraph(_)] => break,
+                other => panic!("unexpected content {other:?}"),
+            }
+        }
+        assert_eq!(depth, limit);
+
+        let xml = nested_controls(limit + 1, run).replacen(
+            "<w:sdt>",
+            &format!(r#"<w:sdt xmlns:w="{W_NS}">"#),
+            1,
+        );
+        let mut reader = Reader::from_str(&xml);
+        let Ok(Event::Start(start)) = reader.read_event() else {
+            panic!("control start");
+        };
+        let start = start.into_owned();
+        assert!(CT_Sdt::from_xml(&mut reader, &start).is_err());
+    }
+
+    /// A nested control the typed model rejects stays raw in place, and the
+    /// parent goes on reading the siblings that follow it.
+    #[test]
+    fn rejected_nested_control_is_preserved_before_its_siblings() {
+        let rejected = r#"<w:sdt><w:sdtPr><w:id w:val="not-an-integer"/></w:sdtPr><w:sdtContent><w:p/></w:sdtContent></w:sdt>"#;
+        let document = parse_document(&format!(
+            r#"<w:sdt><w:sdtContent>{rejected}<w:p><w:r><w:t>after</w:t></w:r></w:p></w:sdtContent></w:sdt>"#
+        ));
+        let BodyContent::ContentControl(control) = &document.body.content[0] else {
+            panic!("the outer control is typed");
+        };
+        let [SdtContent::RawXml(raw), SdtContent::Paragraph(paragraph)] = &control.content[..]
+        else {
+            panic!("unexpected content {:?}", control.content);
+        };
+        assert_eq!(std::str::from_utf8(raw).unwrap(), rejected);
+        assert_eq!(paragraph.text(), "after");
+    }
+
     #[test]
     fn block_control_parser_types_only_children_owned_at_its_placement() {
         let body = CT_Sdt::from_body_raw(
             br#"<w:sdt><w:sdtContent><w:p/><w:tbl/><w:tr data-case="body-row"/><w:tc data-case="body-cell"/></w:sdtContent></w:sdt>"#,
             &["w".to_owned()],
         )
+        .expect("body control is within the nesting limit")
         .expect("body control parses");
         assert!(matches!(body.content[0], SdtContent::Paragraph(_)));
         assert!(matches!(body.content[1], SdtContent::Table(_)));
@@ -1894,6 +2126,7 @@ mod tests {
             br#"<w:sdt><w:sdtContent><w:tr/><w:p data-case="table-paragraph"/><w:tbl data-case="table-table"/><w:tc data-case="table-cell"/></w:sdtContent></w:sdt>"#,
             &["w".to_owned()],
         )
+        .expect("table control is within the nesting limit")
         .expect("table control parses");
         assert!(matches!(table.content[0], SdtContent::Row(_)));
         assert_eq!(
@@ -1913,6 +2146,7 @@ mod tests {
             br#"<w:sdt><w:sdtContent><w:tc/><w:p data-case="row-paragraph"/><w:tbl data-case="row-table"/><w:tr data-case="row-row"/></w:sdtContent></w:sdt>"#,
             &["w".to_owned()],
         )
+        .expect("row control is within the nesting limit")
         .expect("row control parses");
         assert!(matches!(row.content[0], SdtContent::Cell(_)));
         assert_eq!(
@@ -1932,6 +2166,7 @@ mod tests {
             br#"<w:sdt><w:sdtContent><w:p/><w:tbl/><w:tr data-case="cell-row"/><w:tc data-case="cell-cell"/></w:sdtContent></w:sdt>"#,
             &["w".to_owned()],
         )
+        .expect("cell control is within the nesting limit")
         .expect("cell control parses");
         assert!(matches!(cell.content[0], SdtContent::Paragraph(_)));
         assert!(matches!(cell.content[1], SdtContent::Table(_)));
