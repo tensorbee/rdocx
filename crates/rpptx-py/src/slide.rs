@@ -2,14 +2,15 @@ use oxml_py_support::{ContentPath, PathSeg};
 use pyo3::PyClass;
 use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyList, PySlice, PyTuple};
+use pyo3::types::{PyAny, PyBytes, PyList, PySlice, PyTuple};
 use smallvec::smallvec;
 
 use crate::dml::{FillTarget, PyFillFormat};
 use crate::normalize_index;
 use crate::presentation::{PyComment, PyPresentation};
 use crate::replacement_count_to_pyerr;
-use crate::shape::{PyPlaceholderCollection, PyShapeCollection};
+use crate::rpptx_to_pyerr;
+use crate::shape::{MediaFile, PyPlaceholderCollection, PyShapeCollection};
 use crate::validate_path;
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -18,7 +19,64 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PySlide>()?;
     module.add_class::<PySlideCollection>()?;
     module.add_class::<PyBackground>()?;
+    module.add_class::<PyMediaInfo>()?;
     Ok(())
+}
+
+/// One video or audio clip on a slide.
+#[pyclass(name = "MediaInfo", frozen, get_all, eq, skip_from_py_object)]
+#[derive(Clone, PartialEq, Eq)]
+pub struct PyMediaInfo {
+    /// The id of the picture shape that plays the clip.
+    pub shape_id: u32,
+    /// `video` or `audio`.
+    pub kind: &'static str,
+    /// The content type of an embedded clip, or `None` for a linked one.
+    pub content_type: Option<String>,
+    /// Whether the clip is linked rather than embedded.
+    pub linked: bool,
+    /// The package part of an embedded clip or the target of a linked one.
+    pub target: String,
+}
+
+#[pymethods]
+impl PyMediaInfo {
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let text = |value: &str| pyo3::types::PyString::new(py, value).repr();
+        Ok(format!(
+            "MediaInfo(shape_id={}, kind={}, content_type={}, linked={}, target={})",
+            self.shape_id,
+            text(self.kind)?,
+            match &self.content_type {
+                Some(value) => text(value)?.to_string(),
+                None => "None".to_owned(),
+            },
+            if self.linked { "True" } else { "False" },
+            text(&self.target)?
+        ))
+    }
+}
+
+impl From<&rpptx::MediaInfo> for PyMediaInfo {
+    fn from(info: &rpptx::MediaInfo) -> Self {
+        let (content_type, linked, target) = match &info.source {
+            rpptx::MediaLocation::Embedded {
+                part_name,
+                content_type,
+            } => (Some(content_type.clone()), false, part_name.clone()),
+            rpptx::MediaLocation::Linked { target } => (None, true, target.clone()),
+        };
+        Self {
+            shape_id: info.shape_id,
+            kind: match info.kind {
+                rpptx::MediaKind::Audio => "audio",
+                rpptx::MediaKind::Video => "video",
+            },
+            content_type,
+            linked,
+            target,
+        }
+    }
 }
 
 #[pyclass(name = "SlideLayout")]
@@ -340,6 +398,80 @@ impl PySlide {
         Ok(())
     }
 
+    /// The slide id, unique in the presentation and stable when slides move,
+    /// as python-pptx `Slide.slide_id`.
+    #[getter]
+    fn slide_id(&self, py: Python<'_>) -> PyResult<u32> {
+        let index = self.validate(py)?;
+        self.presentation
+            .borrow(py)
+            .inner
+            .slide(index)
+            .map(|slide| slide.id())
+            .ok_or_else(|| PyIndexError::new_err(format!("slide index {index} is out of range")))
+    }
+
+    /// The video and audio clips on the slide, in z-order.
+    #[getter]
+    fn media<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let index = self.validate(py)?;
+        let media = self
+            .presentation
+            .borrow(py)
+            .inner
+            .media(index)
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        PyTuple::new(py, media.iter().map(PyMediaInfo::from))
+    }
+
+    /// Returns the bytes of an embedded clip, found by shape id, or `None`
+    /// for a linked one.
+    fn extract_media<'py>(
+        &self,
+        py: Python<'py>,
+        shape_id: u32,
+    ) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        let index = self.validate(py)?;
+        let bytes = self
+            .presentation
+            .borrow(py)
+            .inner
+            .extract_media(index, shape_id)
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        Ok(bytes.map(|bytes| PyBytes::new(py, &bytes)))
+    }
+
+    /// Replaces the clip of one media shape, keeping its poster, position,
+    /// and playback settings.
+    #[pyo3(signature = (shape_id, media_file, mime_type = None))]
+    fn replace_media(
+        &self,
+        py: Python<'_>,
+        shape_id: u32,
+        media_file: &Bound<'_, PyAny>,
+        mime_type: Option<&str>,
+    ) -> PyResult<()> {
+        let index = self.validate(py)?;
+        let media = MediaFile::read(media_file, mime_type)?;
+        self.presentation
+            .borrow_mut(py)
+            .inner
+            .replace_media(index, shape_id, media.input())
+            .map_err(|error| rpptx_to_pyerr(py, error))
+    }
+
+    /// Removes one media shape with its clip, poster, and timing.
+    fn remove_media(&self, py: Python<'_>, shape_id: u32) -> PyResult<()> {
+        let index = self.validate(py)?;
+        let mut presentation = self.presentation.borrow_mut(py);
+        presentation
+            .inner
+            .remove_media(index, shape_id)
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        presentation.revisions.bump();
+        Ok(())
+    }
+
     #[getter]
     fn background(&self, py: Python<'_>) -> PyResult<Py<PyBackground>> {
         self.validate(py)?;
@@ -378,6 +510,11 @@ impl PySlide {
             .ok_or_else(|| PyIndexError::new_err(format!("slide index {index} is out of range")))?;
         if value {
             slide.remove_background();
+            // A picture background leaves an image nothing shows any more.
+            presentation
+                .inner
+                .release_unused_slide_images(index)
+                .map_err(|error| crate::rpptx_to_pyerr(py, error))?;
         } else if !explicit {
             slide
                 .set_background(rpptx::Fill::NoFill(rpptx::NoFill::default()))

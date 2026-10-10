@@ -831,6 +831,33 @@ impl CT_TextCharacterProperties {
         &self.raw_children
     }
 
+    /// Returns the `lang` language tag, such as `en-US`, when present.
+    pub fn language(&self) -> Option<&str> {
+        self.raw_attributes
+            .iter()
+            .find(|(name, _)| name == "lang")
+            .map(|(_, value)| value.as_str())
+    }
+
+    /// Replaces or removes the `lang` language tag, keeping its position
+    /// among the preserved attributes.
+    pub fn set_language(&mut self, language: Option<&str>) {
+        let position = self
+            .raw_attributes
+            .iter()
+            .position(|(name, _)| name == "lang");
+        match (position, language) {
+            (Some(index), Some(value)) => self.raw_attributes[index].1 = value.to_owned(),
+            (Some(index), None) => {
+                self.raw_attributes.remove(index);
+            }
+            (None, Some(value)) => self
+                .raw_attributes
+                .push(("lang".to_owned(), value.to_owned())),
+            (None, None) => {}
+        }
+    }
+
     /// Returns these properties as formatting for new text, without the click
     /// and mouse-over hyperlinks, which name relationships rather than format.
     pub(crate) fn without_hyperlinks(mut self) -> Self {
@@ -2327,6 +2354,23 @@ mod tests {
         let mut writer = quick_xml::Writer::new(Vec::new());
         properties.write_xml(&mut writer, "a:rPr").unwrap();
         assert_eq!(writer.into_inner(), br#"<a:rPr cap="small" lang="en-US"/>"#);
+    }
+
+    #[test]
+    fn language_reads_replaces_and_removes_the_lang_attribute_in_place() {
+        let mut properties =
+            CT_TextCharacterProperties::from_xml(br#"<q:rPr lang="en-US" dirty="0"/>"#).unwrap();
+        assert_eq!(properties.language(), Some("en-US"));
+        properties.set_language(Some("fr-FR"));
+        let mut writer = quick_xml::Writer::new(Vec::new());
+        properties.write_xml(&mut writer, "a:rPr").unwrap();
+        assert_eq!(writer.into_inner(), br#"<a:rPr lang="fr-FR" dirty="0"/>"#);
+        properties.set_language(None);
+        assert_eq!(properties.language(), None);
+        properties.set_language(Some("de-DE"));
+        let mut writer = quick_xml::Writer::new(Vec::new());
+        properties.write_xml(&mut writer, "a:rPr").unwrap();
+        assert_eq!(writer.into_inner(), br#"<a:rPr dirty="0" lang="de-DE"/>"#);
     }
 
     #[test]

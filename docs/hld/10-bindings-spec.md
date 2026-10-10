@@ -797,6 +797,52 @@ collaboration operation advances the global revision once. Constructor or
 native validation failure publishes no candidate and leaves existing handles
 valid.
 
+Issue #308 brings the rest of the native presentation surface to the binding.
+`Presentation.core_properties` reads and writes the package core properties
+under python-pptx's names, with the rdocx binding's text and date rules. A new
+`Presentation()` carries empty core properties, no author, description or
+dates, so output stays deterministic as a new rdocx document does, and its
+bundled master and eleven layouts use the Office 16:9 placeholder rectangles.
+`Presentation.sections` returns frozen `Section` snapshots and
+`set_sections([(name, slide_indices), ...])` replaces them. The sections must
+take every slide once in slide order, and a section keeps the id of a current
+section with the same name, so an edit does not churn ids. `Slide.slide_id`
+reads the stable slide id. `ShapeCollection.add_movie` follows python-pptx's
+signature, takes an audio clip for an `audio/` type, and shows a black poster
+without one. `Slide.media`, `extract_media`, `replace_media`, and
+`remove_media` wrap the native media calls, and only the removal advances the
+revision.
+
+`render_slides(*, dpi, format, quality, transparent, slides)` returns one PNG
+or JPEG per selected slide or one multi-page TIFF. It refuses `quality` for a
+format other than JPEG and `transparent` for a format other than PNG rather
+than ignoring them. `to_pdfa(profile)` writes PDF/A-2b or PDF/A-3b.
+`to_handout_pdf(slides_per_page)` and `render_all_handouts` need a handout
+master and say how to get one when the deck has none. `Presentation.from_odp`
+converts an ODP path or bytes, and `to_odp` and `save_odp` write one, each with
+the ordered `(path, message)` diagnostics of what the conversion changed or
+dropped.
+
+`FillFormat` adds python-pptx's `gradient()`, `gradient_angle`,
+`gradient_stops`, `patterned()`, `pattern` (`MSO_PATTERN_TYPE`), and
+`back_color`, and rpptx's `gradient_path` for path gradients and `picture()`
+for a stretched picture on a shape, table cell, or slide background. A new
+gradient is python-pptx's accent 1 default. `GradientStops.append(position)`
+and deletion advance the revision, and a gradient keeps at least two stops.
+`ColorFormat.alpha` reads and writes a colour's `a:alpha` as an opacity from
+0.0 to 1.0. `Font` adds `baseline` as a fraction of the font size,
+`spacing` as a `Length`, `language` as a tag, python-pptx's `language_id` as
+an `MSO_LANGUAGE_ID` member from `rpptx.enum.lang`, and `east_asian_name` and
+`complex_script_name`. `Paragraph` adds `auto_number` with an
+`ST_TextAutonumberScheme` token, `auto_number_start`, `bullet_color`,
+`bullet_size` as a fraction of the text size, and `bullet_font`. `Table` adds
+python-pptx's banding flags and a `style_id` that must name one of
+PowerPoint's 74 built-in table styles or a style the deck's `tableStyles.xml`
+defines, matched without regard to case and written in that style's spelling,
+since LibreOffice refuses a deck whose table names an unknown or lower-case id.
+Replacing or removing a picture fill releases the image relationship and part
+when nothing else on the slide shows that image.
+
 ## Native Word facade stability
 Native Rust exposes `BibliographySourceKind`, `BibliographyContributorRole`,
 `BibliographySourceField`, `BibliographyStyle`, source/person/contributor/property

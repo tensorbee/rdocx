@@ -8108,7 +8108,7 @@ const F124_ARTIFACT_SHA256: &str =
 const F116_ARTIFACT_SHA256: &str =
     "d36da6e8849eabd4487d2572baea19c3716ee7d0fe03aaa4714a28ce3c41de4f";
 const F116_CURRENT_ARTIFACT_SHA256: &str =
-    "f85098f013b90871a343d2da9b13d5bb3ab125788a7075cf2d423ac865efce08";
+    "099862804d94aa12b7223b8575d0ddd2dd85669158a96207267542301c9b31bf";
 const F116_FINAL_TITLES: [&str; 10] = [
     "F-116 slide 10",
     "F-116 slide 02",
@@ -9437,6 +9437,120 @@ fn notes_and_handouts_export_pdf_and_png_with_deterministic_dimensions() {
 }
 
 #[test]
+fn selected_slides_render_as_jpeg_or_one_tiff_and_handouts_need_a_master() {
+    let presentation = Presentation::from_bytes(&f226_fixture_bytes()).unwrap();
+    assert!(presentation.has_handout_master());
+    assert!(!Presentation::new().unwrap().has_handout_master());
+    let options = |format| rpptx::RasterOptions { dpi: 36.0, format };
+    let rpptx::RasterOutput::SeparatePages(jpegs) = presentation
+        .render_slides_deterministic(&[1, 0], options(rpptx::RasterFormat::Jpeg { quality: 80 }))
+        .unwrap()
+    else {
+        panic!("JPEG renders one image per slide");
+    };
+    assert_eq!(jpegs.len(), 2);
+    assert!(
+        jpegs
+            .iter()
+            .all(|jpeg| jpeg.starts_with(&[0xFF, 0xD8, 0xFF]))
+    );
+    let rpptx::RasterOutput::MultiPageTiff(tiff) = presentation
+        .render_slides_deterministic(&[0], options(rpptx::RasterFormat::Tiff))
+        .unwrap()
+    else {
+        panic!("TIFF renders one stream");
+    };
+    assert!(tiff.starts_with(b"II*\0"));
+    assert!(matches!(
+        presentation.render_slides_deterministic(&[9], options(rpptx::RasterFormat::Tiff)),
+        Err(Error::Render { .. })
+    ));
+}
+
+#[test]
+fn slide_images_back_picture_fills_and_tables_keep_a_style_id() {
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    let png = valid_one_pixel_png();
+    let first = presentation.add_slide_image(0, &png, "fill.png").unwrap();
+    assert_eq!(
+        presentation.add_slide_image(0, &png, "again.png").unwrap(),
+        first
+    );
+    assert!(
+        presentation
+            .add_slide_image(0, b"not an image", "x.png")
+            .is_err()
+    );
+    let fill = Fill::from_xml(
+        format!(
+            r#"<a:blipFill xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><a:blip r:embed="{first}"/><a:stretch><a:fillRect/></a:stretch></a:blipFill>"#
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    {
+        let mut slide = presentation.slide_mut(0).unwrap();
+        slide.set_background(fill).unwrap();
+        let mut shape = slide
+            .add_table(2, 2, Emu(10), Emu(20), Emu(300), Emu(200))
+            .unwrap();
+        let mut table = shape.table_mut().unwrap();
+        assert_eq!(table.style_id(), None);
+        table.set_style_id(Some("{073A0DAA-6AF3-43AB-8588-CEC1D06C72B9}"));
+    }
+    let reopened = Presentation::from_bytes(&presentation.to_bytes().unwrap()).unwrap();
+    assert!(reopened.validate().is_empty());
+    let slide = reopened.slide(0).unwrap();
+    assert!(matches!(slide.background_fill(), Some(Fill::Blip(_))));
+    let table = slide.shapes().last().unwrap().table().unwrap();
+    assert_eq!(
+        table.style_id(),
+        Some("{073A0DAA-6AF3-43AB-8588-CEC1D06C72B9}")
+    );
+    assert!(reopened.slide_png_deterministic(0, 24.0).unwrap().is_some());
+}
+
+#[test]
+fn released_slide_images_leave_no_dangling_relationship_and_style_ids_are_canonical() {
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    let id = presentation
+        .add_slide_image(0, &valid_one_pixel_png(), "fill.png")
+        .unwrap();
+    assert!(!presentation.validate().is_empty());
+    presentation.release_unused_slide_images(0).unwrap();
+    assert!(presentation.validate().is_empty());
+    let package = open_opc(&presentation.to_bytes().unwrap(), "released.pptx");
+    assert!(
+        package
+            .parts
+            .keys()
+            .all(|part| !part.starts_with("/ppt/media/"))
+    );
+    assert!(
+        package
+            .get_part_rels("/ppt/slides/slide1.xml")
+            .is_none_or(|relationships| relationships.get_by_id(&id).is_none())
+    );
+
+    let medium = "{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}";
+    assert_eq!(
+        presentation
+            .table_style_id(&medium.to_ascii_lowercase())
+            .unwrap()
+            .as_deref(),
+        Some(medium)
+    );
+    assert_eq!(
+        presentation
+            .table_style_id("{00000000-0000-0000-0000-000000000000}")
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
 fn slide_png_conveniences_match_the_resolved_layout_raster_path() {
     let presentation = Presentation::from_bytes(&f226_fixture_bytes()).unwrap();
     let (_, layout) = presentation.render_deterministic().unwrap();
@@ -9922,11 +10036,11 @@ fn text_layout_lines_match_the_glyph_runs_the_renderer_draws() {
     assert_eq!(matched + rotated_runs, drawn.len());
 }
 
-const MASTER_TITLE: (i64, i64, i64, i64) = (457_200, 274_638, 8_229_600, 1_143_000);
-const MASTER_BODY: (i64, i64, i64, i64) = (457_200, 1_600_200, 8_229_600, 4_525_963);
-const MASTER_SLIDE_NUMBER: (i64, i64, i64, i64) = (6_553_200, 6_356_350, 2_133_600, 365_125);
-const TITLE_SLIDE_TITLE: (i64, i64, i64, i64) = (685_800, 2_130_425, 7_772_400, 1_470_025);
-const TITLE_SLIDE_SUBTITLE: (i64, i64, i64, i64) = (1_371_600, 3_886_200, 6_400_800, 1_752_600);
+const MASTER_TITLE: (i64, i64, i64, i64) = (838_200, 365_125, 10_515_600, 1_325_563);
+const MASTER_BODY: (i64, i64, i64, i64) = (838_200, 1_825_625, 10_515_600, 4_351_338);
+const MASTER_SLIDE_NUMBER: (i64, i64, i64, i64) = (8_610_600, 6_356_350, 2_743_200, 365_125);
+const TITLE_SLIDE_TITLE: (i64, i64, i64, i64) = (1_524_000, 1_122_363, 9_144_000, 2_387_600);
+const TITLE_SLIDE_SUBTITLE: (i64, i64, i64, i64) = (1_524_000, 3_602_038, 9_144_000, 1_655_762);
 
 /// A geometry as `Presentation::effective_geometry` reports it.
 fn emu_geometry((left, top, width, height): (i64, i64, i64, i64)) -> Option<(Emu, Emu, Emu, Emu)> {
@@ -10068,7 +10182,7 @@ fn materialized_placeholder_geometry_keeps_the_shape_drawn_after_one_coordinate_
             .unwrap()
             .shape_mut(0)
             .unwrap()
-            .set_position(Emu(548_640), Emu(274_638))
+            .set_position(Emu(929_640), Emu(365_125))
             .unwrap();
     };
 
@@ -10082,8 +10196,8 @@ fn materialized_placeholder_geometry_keeps_the_shape_drawn_after_one_coordinate_
     assert_eq!(
         (title.position(), title.size()),
         (
-            Some((Emu(457_200), Emu(274_638))),
-            Some((Emu(8_229_600), Emu(1_143_000)))
+            Some((Emu(838_200), Emu(365_125))),
+            Some((Emu(10_515_600), Emu(1_325_563)))
         )
     );
     let materialized = presentation.to_bytes().unwrap();
@@ -10092,7 +10206,7 @@ fn materialized_placeholder_geometry_keeps_the_shape_drawn_after_one_coordinate_
     move_title(&mut presentation);
     assert_eq!(
         presentation.effective_geometry(0, &[0]).unwrap(),
-        emu_geometry((548_640, 274_638, 8_229_600, 1_143_000))
+        emu_geometry((929_640, 365_125, 10_515_600, 1_325_563))
     );
     assert_text_frames_use_effective_geometry(&presentation, 1);
 
@@ -10169,8 +10283,8 @@ fn two_master_deck() -> Presentation {
         &master_xml[layouts_end..]
     )
     .replacen(
-        r#"<a:off x="457200" y="274638"/>"#,
-        r#"<a:off x="457200" y="137319"/>"#,
+        r#"<a:off x="838200" y="365125"/>"#,
+        r#"<a:off x="838200" y="182563"/>"#,
         1,
     );
     package.set_part(
@@ -10251,8 +10365,8 @@ fn changing_a_slide_layout_retargets_it_and_keeps_unplaced_placeholders_in_place
             slide.shape(1).unwrap().size()
         ),
         (
-            Some((Emu(457_200), Emu(1_600_200))),
-            Some((Emu(8_229_600), Emu(4_525_963)))
+            Some((Emu(838_200), Emu(1_825_625))),
+            Some((Emu(10_515_600), Emu(4_351_338)))
         ),
         "the body Title Only does not place keeps where it was drawn"
     );
@@ -10296,7 +10410,7 @@ fn changing_a_slide_layout_retargets_it_and_keeps_unplaced_placeholders_in_place
     assert_eq!(presentation.layout_count(), 12);
     presentation.set_slide_layout(0, 11).unwrap();
     assert_eq!(presentation.slide_layout_index(0), Some(11));
-    for (index, geometry) in [(457_200, 137_319, 8_229_600, 1_143_000), MASTER_BODY]
+    for (index, geometry) in [(838_200, 182_563, 10_515_600, 1_325_563), MASTER_BODY]
         .into_iter()
         .enumerate()
     {
@@ -11185,7 +11299,7 @@ struct M21RecordedMovieSample {
 
 #[cfg(all(feature = "digital-signatures", feature = "render"))]
 const M21_CURRENT_MINIMAL_SOURCE_SHA256: &str =
-    "2a47b59d92718712a134e51a7ebc08a705505b4d7dd0cc39abd4febb53ea000b";
+    "7d19b5b40d558063c83ac0df5bbdc71f8f825b0c23d7003b6e9d23f13a660cbc";
 
 #[cfg(all(feature = "digital-signatures", feature = "render"))]
 const M21_LEGACY_UNSIGNED_SOURCE_SHA256: &str =
@@ -13211,11 +13325,10 @@ fn ten_slide_write_api_deck_validates_and_reopens() {
     let core = package
         .get_part("/docProps/core.xml")
         .expect("F-116 core properties part");
+    let core = std::str::from_utf8(core).expect("UTF-8 core properties");
     assert!(
-        std::str::from_utf8(core)
-            .expect("UTF-8 core properties")
-            .contains("<cp:revision>"),
-        "the updated core-property model must preserve the template revision"
+        core.contains("rdocx M11 cross-viewer acceptance") && !core.contains("python-pptx"),
+        "the deck writes its own core properties over the neutral template ones"
     );
     let presentation_part = package.main_document_part().unwrap();
     let slide_relationships = package
@@ -20138,6 +20251,71 @@ fn bundled_template_has_the_documented_part_graph() {
         table_styles
             .windows(b"{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}".len())
             .any(|window| window == b"{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}")
+    );
+}
+
+#[test]
+#[cfg(feature = "default-template")]
+fn new_presentation_carries_no_template_metadata() {
+    let presentation = Presentation::new().expect("open bundled presentation template");
+    let properties = presentation
+        .core_properties()
+        .expect("bundled template core properties");
+    assert_eq!(properties, &rpptx::CoreProperties::default());
+
+    let package = open_opc(&presentation.to_bytes().unwrap(), "new.pptx");
+    let core = String::from_utf8(package.get_part("/docProps/core.xml").unwrap().to_vec()).unwrap();
+    for stale in ["Steve Canny", "python-pptx", "2013-"] {
+        assert!(!core.contains(stale), "core.xml still carries {stale:?}");
+    }
+    let app = String::from_utf8(package.get_part("/docProps/app.xml").unwrap().to_vec()).unwrap();
+    assert!(app.contains("<PresentationFormat>Widescreen</PresentationFormat>"));
+}
+
+#[test]
+#[cfg(feature = "default-template")]
+fn bundled_master_and_layouts_place_placeholders_for_16x9() {
+    let (slide_width, slide_height) = (12_192_000_i64, 6_858_000_i64);
+    let presentation = Presentation::new().expect("open bundled presentation template");
+    let package = open_opc(&presentation.to_bytes().unwrap(), "new.pptx");
+    let attribute = |xml: &str, name: &str| -> i64 {
+        let start = xml.find(&format!("{name}=\"")).unwrap() + name.len() + 2;
+        let end = start + xml[start..].find('"').unwrap();
+        xml[start..end].parse().unwrap()
+    };
+    let mut checked = 0;
+    for (part_name, content_type) in &package.content_types.overrides {
+        if content_type != content_types::SLIDE_MASTER
+            && content_type != content_types::SLIDE_LAYOUT
+        {
+            continue;
+        }
+        let xml = String::from_utf8(package.get_part(part_name).unwrap().to_vec()).unwrap();
+        for offset in xml.split("<a:off ").skip(1) {
+            let (x, y) = (attribute(offset, "x"), attribute(offset, "y"));
+            let (cx, cy) = (attribute(offset, "cx"), attribute(offset, "cy"));
+            if (x, y, cx, cy) == (0, 0, 0, 0) {
+                continue;
+            }
+            assert!(
+                x + cx <= slide_width && y + cy <= slide_height,
+                "{part_name} places a shape outside the slide"
+            );
+            checked += 1;
+        }
+        if content_type == content_types::SLIDE_MASTER {
+            let title = &xml[xml.find("type=\"title\"").unwrap()..];
+            let (x, cx) = (attribute(title, "x"), attribute(title, "cx"));
+            assert_eq!(
+                (x, cx),
+                (838_200, 10_515_600),
+                "master title is not the 16:9 one"
+            );
+        }
+    }
+    assert!(
+        checked >= 24,
+        "only {checked} placeholder rectangles were checked"
     );
 }
 

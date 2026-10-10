@@ -36,9 +36,10 @@ pub use oxml_drawing::line::{
 };
 use oxml_drawing::namespace::A_NS;
 use oxml_drawing::shape_props::CT_ShapeProperties;
-#[cfg(feature = "render")]
-use oxml_drawing::table::CT_TableStyleList;
-use oxml_drawing::table::{CT_Table, CT_TableCell, CT_TableCellProperties, CT_TableProperties};
+use oxml_drawing::table::{
+    CT_Table, CT_TableCell, CT_TableCellProperties, CT_TableProperties, CT_TableStyle,
+    CT_TableStyleList,
+};
 #[cfg(feature = "render")]
 use oxml_drawing::text::CT_TextListStyle;
 use oxml_drawing::text::{
@@ -150,6 +151,8 @@ pub use animation::{
 pub use html::{HtmlDiagnostic, HtmlImageResource, HtmlReadResult};
 #[cfg(feature = "default-template")]
 pub use odp::{OdpDiagnostic, OdpReadResult, OdpWriteResult};
+#[cfg(feature = "render")]
+pub use oxml_pdf::{PdfConformance, RasterFormat, RasterOptions, RasterOutput};
 #[cfg(feature = "render")]
 pub use pdf::{PdfImportDiagnostic, PdfImportLimits, PdfImportMode, PdfImportResult};
 
@@ -1186,6 +1189,31 @@ impl Presentation {
         render_export_pngs(&layout, dpi)
     }
 
+    /// Renders the selected zero-based slides as one PNG or JPEG each, or as
+    /// one multi-page TIFF, with deterministic fonts.
+    #[cfg(feature = "render")]
+    pub fn render_slides_deterministic(
+        &self,
+        slide_indices: &[usize],
+        options: RasterOptions,
+    ) -> Result<RasterOutput> {
+        let (_, layout) = self.render_deterministic()?;
+        let pages = slide_indices
+            .iter()
+            .map(|index| {
+                layout.pages.get(*index).cloned().ok_or_else(|| {
+                    render_failure(format!(
+                        "slide index {index} is out of range for {} slides",
+                        layout.pages.len()
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        validate_export_png_pages(&pages, options.dpi)?;
+        oxml_pdf::render_pages(&layout, slide_indices, options)
+            .map_err(|error| render_failure(error.to_string()))
+    }
+
     /// Lays out the text of every text-bearing slide shape with deterministic fonts.
     ///
     /// Frames come in slide order, then draw order, from the same resolved
@@ -1311,6 +1339,12 @@ impl Presentation {
         let package = self.staged_package(false)?;
         let layout = render_notes_pages(&package)?;
         render_export_pngs(&layout, dpi)
+    }
+
+    /// Returns whether the presentation has the handout master that handout
+    /// rendering lays its pages out from.
+    pub fn has_handout_master(&self) -> bool {
+        self.handout_master.is_some()
     }
 
     /// Renders deterministic audience handouts in the selected arrangement.
@@ -3404,29 +3438,8 @@ impl Presentation {
         let (width, height) = picture_dimensions(image_data, image_filename, width, height)?;
         let id = ShapeIdAllocator::scan(&slide.slide.common_slide_data.shape_tree).allocate();
 
-        let mut package = self.package.clone();
-        let mut media_store = self.media_store.clone();
-        let media_part = media_store.insert(&mut package, image_data, image_filename);
-        let mut relationships = package
-            .get_part_rels(&slide_part)
-            .cloned()
-            .unwrap_or_default();
-        let relationship_id = relationships
-            .items
-            .iter()
-            .find(|relationship| {
-                relationship.rel_type == rel_types::IMAGE
-                    && !relationship_is_external(relationship)
-                    && OpcPackage::resolve_rel_target(&slide_part, &relationship.target)
-                        == media_part
-            })
-            .map(|relationship| relationship.id.clone())
-            .unwrap_or_else(|| {
-                relationships.add(
-                    rel_types::IMAGE,
-                    &relative_part_target(&slide_part, &media_part),
-                )
-            });
+        let (package, media_store, relationship_id) =
+            self.staged_slide_image(&slide_part, image_data, image_filename);
         let picture = CT_Picture::new(
             id,
             &format!("Picture {id}"),
@@ -3435,11 +3448,127 @@ impl Presentation {
         )
         .map_err(|error| invalid_shape_construction("add picture", error))?;
 
-        package.set_part_rels(&slide_part, relationships);
         self.package = package;
         self.media_store = media_store;
         let tree = &mut self.slides[slide_index].slide.common_slide_data.shape_tree;
         Ok(append_member(tree, group, ShapeTreeChild::Picture(picture)))
+    }
+
+    /// Stores an image part for one slide and returns the slide relationship
+    /// id that names it, for a picture fill such as [`Fill::Blip`] on a shape
+    /// or the slide background. An image the slide already relates to is
+    /// reused, so the same bytes are stored once.
+    pub fn add_slide_image(
+        &mut self,
+        slide_index: usize,
+        image_data: &[u8],
+        image_filename: &str,
+    ) -> Result<String> {
+        self.require_slide_index(slide_index)?;
+        picture_dimensions(image_data, image_filename, None, None)?;
+        let slide_part = self.slides[slide_index].part_name.clone();
+        let (package, media_store, relationship_id) =
+            self.staged_slide_image(&slide_part, image_data, image_filename);
+        self.package = package;
+        self.media_store = media_store;
+        Ok(relationship_id)
+    }
+
+    /// Removes the slide's image relationships that nothing on the slide
+    /// names any more, such as the picture of a replaced picture fill, with
+    /// the image parts no other relationship reaches.
+    pub fn release_unused_slide_images(&mut self, slide_index: usize) -> Result<()> {
+        self.require_slide_index(slide_index)?;
+        let record = &self.slides[slide_index];
+        let part_name = record.part_name.clone();
+        let referenced = slide_relationship_ids(&record.slide)?;
+        let Some(mut relationships) = self.package.get_part_rels(&part_name).cloned() else {
+            return Ok(());
+        };
+        let mut released = HashSet::new();
+        relationships.items.retain(|relationship| {
+            let unused = relationship.rel_type == rel_types::IMAGE
+                && !relationship_is_external(relationship)
+                && !referenced.contains(&relationship.id);
+            if unused {
+                released.insert(OpcPackage::resolve_rel_target(
+                    &part_name,
+                    &relationship.target,
+                ));
+            }
+            !unused
+        });
+        if released.is_empty() {
+            return Ok(());
+        }
+        self.package.set_part_rels(&part_name, relationships);
+        prune_unreachable_parts(&mut self.package, &released);
+        self.media_store = MediaStore::scan(&self.package);
+        Ok(())
+    }
+
+    /// Returns the spelling of a table style id a table can apply, matched
+    /// without regard to case: one of PowerPoint's 74 built-in styles, in
+    /// upper case, or one `ppt/tableStyles.xml` defines, as it spells it.
+    pub fn table_style_id(&self, style_id: &str) -> Result<Option<String>> {
+        let upper = style_id.to_ascii_uppercase();
+        if CT_TableStyle::builtin(&upper).is_some() {
+            return Ok(Some(upper));
+        }
+        let Some(relationship) = self
+            .package
+            .get_part_rels(&self.presentation_part)
+            .and_then(|relationships| relationships.get_by_type(rel_types::TABLE_STYLES))
+        else {
+            return Ok(None);
+        };
+        let target = OpcPackage::resolve_rel_target(&self.presentation_part, &relationship.target);
+        let styles = CT_TableStyleList::from_xml(required_part(&self.package, &target)?).map_err(
+            |error| Error::MalformedPart {
+                part_name: target,
+                message: error.to_string(),
+            },
+        )?;
+        Ok(styles
+            .styles
+            .into_iter()
+            .map(|style| style.style_id)
+            .find(|id| id.eq_ignore_ascii_case(style_id)))
+    }
+
+    /// Returns a package and media store holding the image and a slide
+    /// relationship to it, with that relationship's id.
+    fn staged_slide_image(
+        &self,
+        slide_part: &str,
+        image_data: &[u8],
+        image_filename: &str,
+    ) -> (OpcPackage, MediaStore, String) {
+        let mut package = self.package.clone();
+        let mut media_store = self.media_store.clone();
+        let media_part = media_store.insert(&mut package, image_data, image_filename);
+        let mut relationships = package
+            .get_part_rels(slide_part)
+            .cloned()
+            .unwrap_or_default();
+        let relationship_id = relationships
+            .items
+            .iter()
+            .find(|relationship| {
+                relationship.rel_type == rel_types::IMAGE
+                    && !relationship_is_external(relationship)
+                    && OpcPackage::resolve_rel_target(slide_part, &relationship.target)
+                        == media_part
+            })
+            .map(|relationship| relationship.id.clone())
+            .unwrap_or_else(|| {
+                relationships.add(
+                    rel_types::IMAGE,
+                    &relative_part_target(slide_part, &media_part),
+                )
+            });
+        package.set_part_rels(slide_part, relationships);
+        (package, media_store, relationship_id)
     }
 
     /// Returns the embedded image one picture shows, found by shape id.
@@ -8253,6 +8382,11 @@ impl<'a> TableRef<'a> {
             .as_ref()
             .is_some_and(|properties| properties.band_columns)
     }
+
+    /// Returns the `a:tableStyleId` GUID the table applies, when present.
+    pub fn style_id(&self) -> Option<&'a str> {
+        self.table.properties.as_ref()?.style_id.as_deref()
+    }
 }
 
 /// A behavior-bearing mutable DrawingML table and its containing frame extent.
@@ -8526,6 +8660,16 @@ impl<'a> TableMut<'a> {
     /// Enables or disables vertical column banding.
     pub fn set_vertical_banding(&mut self, value: bool) {
         table_properties_mut(self.table).band_columns = value;
+    }
+
+    /// Returns the `a:tableStyleId` GUID the table applies, when present.
+    pub fn style_id(&self) -> Option<&str> {
+        self.table.properties.as_ref()?.style_id.as_deref()
+    }
+
+    /// Replaces or removes the `a:tableStyleId` GUID the table applies.
+    pub fn set_style_id(&mut self, style_id: Option<&str>) {
+        table_properties_mut(self.table).style_id = style_id.map(str::to_owned);
     }
 }
 

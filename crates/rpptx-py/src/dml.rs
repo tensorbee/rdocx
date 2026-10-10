@@ -4,17 +4,23 @@
 //! border fills share one fill model, so the formats read and write through a
 //! single target.
 
+use oxml_drawing::fill::{
+    Blip, BlipFill, BlipMode, GradientFill, GradientGeometry, GradientStop, PathGradientKind,
+    RelativeRect,
+};
+use oxml_drawing::order::OrderedRawChildren;
 use oxml_py_support::ContentPath;
 use pyo3::exceptions::{PyIndexError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyList;
 
 use crate::presentation::PyPresentation;
 use crate::shape::{
-    ANGLE_UNITS_PER_DEGREE, ANGLE_UNITS_PER_TURN, MAX_COORDINATE, length, shape_mut_at,
-    shape_ref_at, slide_index,
+    ANGLE_UNITS_PER_DEGREE, ANGLE_UNITS_PER_TURN, MAX_COORDINATE, image_bytes, length,
+    shape_mut_at, shape_ref_at, slide_index,
 };
 use crate::table::{cell_mut_at, cell_ref_at};
-use crate::{rpptx_to_pyerr, validate_path};
+use crate::{normalize_index, rpptx_to_pyerr, validate_path};
 
 const MAX_LINE_WIDTH_EMU: i64 = 20_116_800;
 
@@ -23,6 +29,8 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyLineFormat>()?;
     module.add_class::<PyLineEndFormat>()?;
     module.add_class::<PyColorFormat>()?;
+    module.add_class::<PyGradientStops>()?;
+    module.add_class::<PyGradientStop>()?;
     module.add_class::<PyShadowFormat>()?;
     Ok(())
 }
@@ -125,7 +133,29 @@ fn current_fill(
     })
 }
 
+/// Writes a fill. Replacing a picture fill releases the image it showed
+/// when nothing else on the slide shows it.
 fn write_fill(
+    py: Python<'_>,
+    presentation: &mut rpptx::Presentation,
+    path: &ContentPath,
+    target: FillTarget,
+    fill: rpptx::Fill,
+) -> PyResult<()> {
+    let replaces_picture = matches!(
+        current_fill(presentation, path, target)?,
+        Some(rpptx::Fill::Blip(_))
+    );
+    write_fill_only(py, presentation, path, target, fill)?;
+    if replaces_picture {
+        presentation
+            .release_unused_slide_images(slide_index(path)?)
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+    }
+    Ok(())
+}
+
+fn write_fill_only(
     py: Python<'_>,
     presentation: &mut rpptx::Presentation,
     path: &ContentPath,
@@ -307,6 +337,88 @@ fn with_rgb(color: Option<rpptx::ColorChoice>, rgb: rpptx::RgbColor) -> rpptx::C
     }
 }
 
+/// The python-pptx default gradient: accent 1 shaded from top to bottom.
+const DEFAULT_GRADIENT: &str = r#"<a:gradFill xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" rotWithShape="1"><a:gsLst><a:gs pos="0"><a:schemeClr val="accent1"><a:tint val="100000"/><a:shade val="100000"/><a:satMod val="130000"/></a:schemeClr></a:gs><a:gs pos="100000"><a:schemeClr val="accent1"><a:tint val="50000"/><a:shade val="100000"/><a:satMod val="350000"/></a:schemeClr></a:gs></a:gsLst><a:lin ang="16200000" scaled="0"/></a:gradFill>"#;
+
+/// A new pattern fill: five percent black dots on white.
+const DEFAULT_PATTERN: &str = r#"<a:pattFill xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" prst="pct5"><a:fgClr><a:srgbClr val="000000"/></a:fgClr><a:bgClr><a:srgbClr val="FFFFFF"/></a:bgClr></a:pattFill>"#;
+
+/// `MSO_PATTERN_TYPE` values and their `ST_PresetPatternVal` tokens.
+const PATTERNS: [(i32, &str); 54] = [
+    (1, "pct5"),
+    (2, "pct10"),
+    (3, "pct20"),
+    (4, "pct25"),
+    (5, "pct30"),
+    (6, "pct40"),
+    (7, "pct50"),
+    (8, "pct60"),
+    (9, "pct70"),
+    (10, "pct75"),
+    (11, "pct80"),
+    (12, "pct90"),
+    (13, "dkHorz"),
+    (14, "dkVert"),
+    (15, "dkDnDiag"),
+    (16, "dkUpDiag"),
+    (17, "smCheck"),
+    (18, "trellis"),
+    (19, "ltHorz"),
+    (20, "ltVert"),
+    (21, "ltDnDiag"),
+    (22, "ltUpDiag"),
+    (23, "smGrid"),
+    (24, "dotDmnd"),
+    (25, "wdDnDiag"),
+    (26, "wdUpDiag"),
+    (27, "dashUpDiag"),
+    (28, "dashDnDiag"),
+    (29, "narVert"),
+    (30, "narHorz"),
+    (31, "dashVert"),
+    (32, "dashHorz"),
+    (33, "lgConfetti"),
+    (34, "lgGrid"),
+    (35, "horzBrick"),
+    (36, "lgCheck"),
+    (37, "smConfetti"),
+    (38, "zigZag"),
+    (39, "solidDmnd"),
+    (40, "diagBrick"),
+    (41, "openDmnd"),
+    (42, "plaid"),
+    (43, "sphere"),
+    (44, "weave"),
+    (45, "dotGrid"),
+    (46, "divot"),
+    (47, "shingle"),
+    (48, "wave"),
+    (49, "horz"),
+    (50, "vert"),
+    (51, "cross"),
+    (52, "dnDiag"),
+    (53, "upDiag"),
+    (54, "diagCross"),
+];
+
+fn parse_fill(xml: &str) -> rpptx::Fill {
+    rpptx::Fill::from_xml(xml.as_bytes()).expect("built-in fill XML is valid")
+}
+
+fn not_a_gradient(fill: Option<&rpptx::Fill>) -> PyErr {
+    PyTypeError::new_err(format!(
+        "fill type {} is not a gradient, call .gradient() first",
+        fill_type_name(fill)
+    ))
+}
+
+fn not_a_pattern(fill: Option<&rpptx::Fill>) -> PyErr {
+    PyTypeError::new_err(format!(
+        "fill type {} has no pattern, call .patterned() first",
+        fill_type_name(fill)
+    ))
+}
+
 /// A live view of one shape fill, line fill, or slide background fill.
 #[pyclass(name = "FillFormat")]
 pub struct PyFillFormat {
@@ -337,6 +449,34 @@ impl PyFillFormat {
     fn set(&self, py: Python<'_>, fill: rpptx::Fill) -> PyResult<()> {
         let mut presentation = self.presentation.borrow_mut(py);
         write_fill(py, &mut presentation.inner, &self.path, self.target, fill)
+    }
+
+    fn color_format(&self, py: Python<'_>, source: ColorSource) -> PyResult<Py<PyColorFormat>> {
+        Py::new(
+            py,
+            PyColorFormat {
+                presentation: self.presentation.clone_ref(py),
+                path: self.path.clone(),
+                source,
+            },
+        )
+    }
+
+    fn gradient_fill(&self, py: Python<'_>) -> PyResult<GradientFill> {
+        match self.fill(py)? {
+            Some(rpptx::Fill::Gradient(gradient)) => Ok(gradient),
+            other => Err(not_a_gradient(other.as_ref())),
+        }
+    }
+
+    fn edit_gradient(
+        &self,
+        py: Python<'_>,
+        edit: impl FnOnce(&mut GradientFill) -> PyResult<()>,
+    ) -> PyResult<()> {
+        let mut gradient = self.gradient_fill(py)?;
+        edit(&mut gradient)?;
+        self.set(py, rpptx::Fill::Gradient(gradient))
     }
 }
 
@@ -369,6 +509,57 @@ impl PyFillFormat {
         self.set(py, rpptx::Fill::NoFill(rpptx::NoFill::default()))
     }
 
+    /// Sets python-pptx's default linear gradient, accent 1 shaded from top
+    /// to bottom, keeping an existing gradient as it is.
+    fn gradient(&self, py: Python<'_>) -> PyResult<()> {
+        if matches!(self.fill(py)?, Some(rpptx::Fill::Gradient(_))) {
+            return Ok(());
+        }
+        self.set(py, parse_fill(DEFAULT_GRADIENT))
+    }
+
+    /// Sets a pattern fill, five percent black dots on white, keeping an
+    /// existing pattern fill as it is. PowerPoint and LibreOffice draw it,
+    /// Google Slides degrades it, and rpptx's own renderer
+    /// does not draw pattern fills yet.
+    fn patterned(&self, py: Python<'_>) -> PyResult<()> {
+        if matches!(self.fill(py)?, Some(rpptx::Fill::Pattern(_))) {
+            return Ok(());
+        }
+        self.set(py, parse_fill(DEFAULT_PATTERN))
+    }
+
+    /// Fills with a stretched picture, from a path or a binary file object.
+    /// A slide background or a table cell takes one too, a line does not.
+    fn picture(&self, py: Python<'_>, image_file: &Bound<'_, PyAny>) -> PyResult<()> {
+        if matches!(self.target, FillTarget::Line | FillTarget::CellBorder(_)) {
+            return Err(PyTypeError::new_err("a line cannot take a picture fill"));
+        }
+        self.fill(py)?;
+        let (bytes, filename) = image_bytes(image_file)?;
+        let mut presentation = self.presentation.borrow_mut(py);
+        let relationship_id = presentation
+            .inner
+            .add_slide_image(slide_index(&self.path)?, &bytes, &filename)
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        let mut blip = Blip::default();
+        blip.embed = Some(relationship_id);
+        let mut fill = BlipFill::default();
+        fill.rotate_with_shape = Some(true);
+        fill.blip = Some(blip);
+        fill.mode = Some(BlipMode::Stretch {
+            fill_rect: Some(RelativeRect::default()),
+            raw_children: OrderedRawChildren::default(),
+        });
+        write_fill(
+            py,
+            &mut presentation.inner,
+            &self.path,
+            self.target,
+            rpptx::Fill::Blip(fill),
+        )
+    }
+
     #[getter]
     fn fore_color(&self, py: Python<'_>) -> PyResult<Py<PyColorFormat>> {
         let fill = self.fill(py)?;
@@ -387,6 +578,341 @@ impl PyFillFormat {
             },
         )
     }
+
+    /// The background colour of a pattern fill.
+    #[getter]
+    fn back_color(&self, py: Python<'_>) -> PyResult<Py<PyColorFormat>> {
+        let fill = self.fill(py)?;
+        if !matches!(fill, Some(rpptx::Fill::Pattern(_))) {
+            return Err(not_a_pattern(fill.as_ref()));
+        }
+        self.color_format(
+            py,
+            ColorSource::PatternBackground {
+                target: self.target,
+            },
+        )
+    }
+
+    /// The preset of a pattern fill as an `MSO_PATTERN_TYPE` member, or
+    /// `None` when the fill names none.
+    #[getter]
+    fn pattern(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let fill = self.fill(py)?;
+        let Some(rpptx::Fill::Pattern(pattern)) = &fill else {
+            return Err(not_a_pattern(fill.as_ref()));
+        };
+        pattern
+            .preset
+            .as_deref()
+            .and_then(|token| PATTERNS.iter().find(|(_, name)| *name == token))
+            .map(|(value, _)| dml_enum(py, "MSO_PATTERN_TYPE", *value))
+            .transpose()
+    }
+
+    #[setter]
+    fn set_pattern(&self, py: Python<'_>, value: i32) -> PyResult<()> {
+        let token = PATTERNS
+            .iter()
+            .find(|(member, _)| *member == value)
+            .map(|(_, token)| *token)
+            .ok_or_else(|| {
+                PyValueError::new_err("pattern must be an MSO_PATTERN_TYPE member other than MIXED")
+            })?;
+        let fill = self.fill(py)?;
+        let Some(rpptx::Fill::Pattern(mut pattern)) = fill else {
+            return Err(not_a_pattern(fill.as_ref()));
+        };
+        pattern.preset = Some(token.to_owned());
+        self.set(py, rpptx::Fill::Pattern(pattern))
+    }
+
+    /// The angle of a linear gradient in degrees, counter-clockwise from the
+    /// positive x axis as python-pptx reports it, in `0.0 <= angle < 360.0`.
+    #[getter]
+    fn gradient_angle(&self, py: Python<'_>) -> PyResult<f64> {
+        match self.gradient_fill(py)?.geometry {
+            Some(GradientGeometry::Linear(linear)) => {
+                let clockwise = f64::from(linear.angle.0) / ANGLE_UNITS_PER_DEGREE;
+                Ok(if clockwise == 0.0 {
+                    0.0
+                } else {
+                    360.0 - clockwise
+                })
+            }
+            _ => Err(PyValueError::new_err("not a linear gradient")),
+        }
+    }
+
+    #[setter]
+    fn set_gradient_angle(&self, py: Python<'_>, value: f64) -> PyResult<()> {
+        if !value.is_finite() {
+            return Err(PyValueError::new_err(
+                "gradient angle must be a finite number of degrees",
+            ));
+        }
+        let units = ((-value * ANGLE_UNITS_PER_DEGREE).round_ties_even() as i64)
+            .rem_euclid(ANGLE_UNITS_PER_TURN);
+        let angle = rpptx::Angle(i32::try_from(units).expect("a normalized angle fits in i32"));
+        self.edit_gradient(py, |gradient| match gradient.geometry.as_mut() {
+            Some(GradientGeometry::Linear(linear)) => {
+                linear.angle = angle;
+                Ok(())
+            }
+            _ => Err(PyValueError::new_err("not a linear gradient")),
+        })
+    }
+
+    /// The shape of a path gradient, `circle`, `rect`, or `shape`, or `None`
+    /// for a linear gradient. Assigning a shape makes the gradient radiate
+    /// from the centre, and `None` makes it linear, left to right.
+    /// PowerPoint and LibreOffice draw a path gradient, Google Slides
+    /// degrades it, and rpptx's own renderer does not draw
+    /// path gradients yet.
+    #[getter]
+    fn gradient_path(&self, py: Python<'_>) -> PyResult<Option<&'static str>> {
+        Ok(match self.gradient_fill(py)?.geometry {
+            Some(GradientGeometry::Path(path)) => Some(match path.kind {
+                PathGradientKind::Circle => "circle",
+                PathGradientKind::Rectangle => "rect",
+                PathGradientKind::Shape => "shape",
+            }),
+            _ => None,
+        })
+    }
+
+    #[setter]
+    fn set_gradient_path(&self, py: Python<'_>, value: Option<&str>) -> PyResult<()> {
+        let geometry = match value {
+            None => r#"<a:lin ang="0" scaled="0"/>"#,
+            Some("circle") => {
+                r#"<a:path path="circle"><a:fillToRect l="50000" t="50000" r="50000" b="50000"/></a:path>"#
+            }
+            Some("rect") => {
+                r#"<a:path path="rect"><a:fillToRect l="50000" t="50000" r="50000" b="50000"/></a:path>"#
+            }
+            Some("shape") => {
+                r#"<a:path path="shape"><a:fillToRect l="50000" t="50000" r="50000" b="50000"/></a:path>"#
+            }
+            Some(other) => {
+                return Err(PyValueError::new_err(format!(
+                    "gradient path must be circle, rect, shape, or None, got {other:?}"
+                )));
+            }
+        };
+        let probe = format!(
+            r#"<a:gradFill xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:gsLst><a:gs pos="0"/><a:gs pos="100000"/></a:gsLst>{geometry}</a:gradFill>"#
+        );
+        let rpptx::Fill::Gradient(probe) = parse_fill(&probe) else {
+            unreachable!("a gradFill parses as a gradient");
+        };
+        self.edit_gradient(py, |gradient| {
+            gradient.geometry = probe.geometry;
+            Ok(())
+        })
+    }
+
+    /// The stops of a gradient fill, in document order.
+    #[getter]
+    fn gradient_stops(&self, py: Python<'_>) -> PyResult<Py<PyGradientStops>> {
+        self.gradient_fill(py)?;
+        Py::new(
+            py,
+            PyGradientStops {
+                presentation: self.presentation.clone_ref(py),
+                path: self.path.clone(),
+                target: self.target,
+            },
+        )
+    }
+}
+
+/// The stops of one gradient fill, like python-pptx `_GradientStops`, with
+/// `append` and deletion as rpptx extensions.
+#[pyclass(name = "GradientStops")]
+pub struct PyGradientStops {
+    presentation: Py<PyPresentation>,
+    path: ContentPath,
+    target: FillTarget,
+}
+
+/// The fewest stops `a:gsLst` allows.
+const MIN_GRADIENT_STOPS: usize = 2;
+
+impl PyGradientStops {
+    fn format(&self, py: Python<'_>) -> PyFillFormat {
+        PyFillFormat::new(
+            self.presentation.clone_ref(py),
+            self.path.clone(),
+            self.target,
+        )
+    }
+
+    fn len(&self, py: Python<'_>) -> PyResult<usize> {
+        Ok(self.format(py).gradient_fill(py)?.stops.len())
+    }
+
+    fn stop(&self, py: Python<'_>, index: usize) -> PyResult<Py<PyGradientStop>> {
+        Py::new(
+            py,
+            PyGradientStop {
+                presentation: self.presentation.clone_ref(py),
+                path: self.path.clone(),
+                target: self.target,
+                index,
+            },
+        )
+    }
+
+    /// Changes the stop list and advances the revision, because every stop
+    /// handle names an index.
+    fn restructure(
+        &self,
+        py: Python<'_>,
+        edit: impl FnOnce(&mut Vec<GradientStop>) -> PyResult<()>,
+    ) -> PyResult<()> {
+        self.format(py)
+            .edit_gradient(py, |gradient| edit(&mut gradient.stops))?;
+        self.presentation.borrow_mut(py).revisions.bump();
+        Ok(())
+    }
+}
+
+#[pymethods]
+impl PyGradientStops {
+    fn __len__(&self, py: Python<'_>) -> PyResult<usize> {
+        self.len(py)
+    }
+
+    fn __getitem__(&self, py: Python<'_>, index: isize) -> PyResult<Py<PyGradientStop>> {
+        let index = normalize_index(index, self.len(py)?, "gradient stop")?;
+        self.stop(py, index)
+    }
+
+    fn __iter__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let stops = (0..self.len(py)?)
+            .map(|index| self.stop(py, index))
+            .collect::<PyResult<Vec<_>>>()?;
+        PyList::new(py, stops)?
+            .call_method0("__iter__")
+            .map(Bound::unbind)
+    }
+
+    /// Removes one stop. A gradient keeps at least two.
+    fn __delitem__(&self, py: Python<'_>, index: isize) -> PyResult<()> {
+        let len = self.len(py)?;
+        let index = normalize_index(index, len, "gradient stop")?;
+        if len <= MIN_GRADIENT_STOPS {
+            return Err(PyValueError::new_err("a gradient keeps at least two stops"));
+        }
+        self.restructure(py, |stops| {
+            stops.remove(index);
+            Ok(())
+        })
+    }
+
+    /// Adds a stop at `position`, from 0.0 to 1.0, in position order, with
+    /// the colour of the nearest stop before it, and returns it.
+    fn append(&self, py: Python<'_>, position: f64) -> PyResult<Py<PyGradientStop>> {
+        let position = stop_position(position)?;
+        let mut inserted = 0;
+        self.restructure(py, |stops| {
+            inserted = stops
+                .iter()
+                .position(|stop| stop.position.0 > position)
+                .unwrap_or(stops.len());
+            let mut stop = stops[inserted.saturating_sub(1)].clone();
+            stop.position = rpptx::Percent1000(position);
+            stops.insert(inserted, stop);
+            Ok(())
+        })?;
+        let path = self
+            .presentation
+            .borrow(py)
+            .revisions
+            .capture(self.path.segs.clone());
+        Py::new(
+            py,
+            PyGradientStop {
+                presentation: self.presentation.clone_ref(py),
+                path,
+                target: self.target,
+                index: inserted,
+            },
+        )
+    }
+}
+
+fn stop_position(position: f64) -> PyResult<i32> {
+    if !(0.0..=1.0).contains(&position) {
+        return Err(PyValueError::new_err(format!(
+            "gradient stop position must be from 0.0 to 1.0, got {position}"
+        )));
+    }
+    Ok((position * 100_000.0).round_ties_even() as i32)
+}
+
+/// One stop of a gradient fill, like python-pptx `_GradientStop`.
+#[pyclass(name = "GradientStop")]
+pub struct PyGradientStop {
+    presentation: Py<PyPresentation>,
+    path: ContentPath,
+    target: FillTarget,
+    index: usize,
+}
+
+#[pymethods]
+impl PyGradientStop {
+    #[getter]
+    fn color(&self, py: Python<'_>) -> PyResult<Py<PyColorFormat>> {
+        self.position(py)?;
+        Py::new(
+            py,
+            PyColorFormat {
+                presentation: self.presentation.clone_ref(py),
+                path: self.path.clone(),
+                source: ColorSource::GradientStop {
+                    target: self.target,
+                    index: self.index,
+                },
+            },
+        )
+    }
+
+    /// The stop's place along the gradient, from 0.0 to 1.0.
+    #[getter]
+    fn position(&self, py: Python<'_>) -> PyResult<f64> {
+        let gradient = PyFillFormat::new(
+            self.presentation.clone_ref(py),
+            self.path.clone(),
+            self.target,
+        )
+        .gradient_fill(py)?;
+        gradient
+            .stops
+            .get(self.index)
+            .map(|stop| f64::from(stop.position.0) / 100_000.0)
+            .ok_or_else(|| PyIndexError::new_err("gradient stop index out of range"))
+    }
+
+    #[setter]
+    fn set_position(&self, py: Python<'_>, value: f64) -> PyResult<()> {
+        let position = stop_position(value)?;
+        let index = self.index;
+        PyFillFormat::new(
+            self.presentation.clone_ref(py),
+            self.path.clone(),
+            self.target,
+        )
+        .edit_gradient(py, |gradient| {
+            gradient
+                .stops
+                .get_mut(index)
+                .ok_or_else(|| PyIndexError::new_err("gradient stop index out of range"))?
+                .position = rpptx::Percent1000(position);
+            Ok(())
+        })
+    }
 }
 
 /// The colour one colour format reads and writes.
@@ -394,6 +920,10 @@ impl PyFillFormat {
 enum ColorSource {
     /// The foreground of a fill. `solidify` makes a set colour a solid fill.
     Fill { target: FillTarget, solidify: bool },
+    /// The background of a pattern fill.
+    PatternBackground { target: FillTarget },
+    /// The colour of one gradient stop.
+    GradientStop { target: FillTarget, index: usize },
     /// The colour of the outer shadow.
     Shadow,
 }
@@ -402,9 +932,107 @@ impl ColorSource {
     fn suffix(self) -> &'static str {
         match self {
             Self::Fill { target, .. } => target.suffix(),
+            Self::PatternBackground { .. } => ".fill.back_color",
+            Self::GradientStop { .. } => ".fill.gradient_stops",
             Self::Shadow => ".shadow.color",
         }
     }
+}
+
+fn read_color(
+    presentation: &rpptx::Presentation,
+    path: &ContentPath,
+    source: ColorSource,
+) -> PyResult<Option<rpptx::ColorChoice>> {
+    Ok(match source {
+        ColorSource::Fill { target, .. } => match current_fill(presentation, path, target)? {
+            Some(rpptx::Fill::Solid(fill)) => fill.color,
+            Some(rpptx::Fill::Pattern(fill)) => fill.foreground,
+            _ => None,
+        },
+        ColorSource::PatternBackground { target } => {
+            match current_fill(presentation, path, target)? {
+                Some(rpptx::Fill::Pattern(fill)) => fill.background,
+                _ => None,
+            }
+        }
+        ColorSource::GradientStop { target, index } => {
+            match current_fill(presentation, path, target)? {
+                Some(rpptx::Fill::Gradient(fill)) => {
+                    fill.stops
+                        .into_iter()
+                        .nth(index)
+                        .ok_or_else(|| PyIndexError::new_err("gradient stop index out of range"))?
+                        .color
+                }
+                _ => None,
+            }
+        }
+        ColorSource::Shadow => current_shadow(presentation, path)?.and_then(|shadow| shadow.color),
+    })
+}
+
+/// Replaces the colour a source names with `change` applied to the current
+/// one, solidifying a line fill when its source asks for it.
+fn write_color(
+    py: Python<'_>,
+    presentation: &mut rpptx::Presentation,
+    path: &ContentPath,
+    source: ColorSource,
+    change: impl FnOnce(Option<rpptx::ColorChoice>) -> rpptx::ColorChoice,
+) -> PyResult<()> {
+    let (target, fill) = match source {
+        ColorSource::Shadow => {
+            return edit_shadow(py, presentation, path, |shadow| {
+                let color = change(shadow.color.take());
+                shadow.replace_color(color);
+            });
+        }
+        ColorSource::Fill { target, solidify } => {
+            let fill = match current_fill(presentation, path, target)? {
+                Some(rpptx::Fill::Solid(mut fill)) => {
+                    fill.color = Some(change(fill.color.take()));
+                    rpptx::Fill::Solid(fill)
+                }
+                Some(rpptx::Fill::Pattern(mut fill)) => {
+                    fill.foreground = Some(change(fill.foreground.take()));
+                    rpptx::Fill::Pattern(fill)
+                }
+                _ if solidify => {
+                    let mut fill = rpptx::SolidFill::default();
+                    fill.color = Some(change(None));
+                    rpptx::Fill::Solid(fill)
+                }
+                other => return Err(no_foreground(other.as_ref())),
+            };
+            (target, fill)
+        }
+        ColorSource::PatternBackground { target } => {
+            let fill = match current_fill(presentation, path, target)? {
+                Some(rpptx::Fill::Pattern(mut fill)) => {
+                    fill.background = Some(change(fill.background.take()));
+                    rpptx::Fill::Pattern(fill)
+                }
+                other => return Err(not_a_pattern(other.as_ref())),
+            };
+            (target, fill)
+        }
+        ColorSource::GradientStop { target, index } => {
+            let fill = match current_fill(presentation, path, target)? {
+                Some(rpptx::Fill::Gradient(mut fill)) => {
+                    let stop = fill
+                        .stops
+                        .get_mut(index)
+                        .ok_or_else(|| PyIndexError::new_err("gradient stop index out of range"))?;
+                    stop.color = Some(change(stop.color.take()));
+                    rpptx::Fill::Gradient(fill)
+                }
+                other => return Err(not_a_gradient(other.as_ref())),
+            };
+            (target, fill)
+        }
+    };
+    write_fill(py, presentation, path, target, fill)
 }
 
 /// A live view of the foreground colour of one fill, or of a shadow colour.
@@ -421,18 +1049,7 @@ impl PyColorFormat {
     fn rgb(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         let presentation = self.presentation.borrow(py);
         validate_path(py, &presentation, &self.path, "color", self.source.suffix())?;
-        let color = match self.source {
-            ColorSource::Fill { target, .. } => {
-                match current_fill(&presentation.inner, &self.path, target)? {
-                    Some(rpptx::Fill::Solid(fill)) => fill.color,
-                    Some(rpptx::Fill::Pattern(fill)) => fill.foreground,
-                    _ => None,
-                }
-            }
-            ColorSource::Shadow => {
-                current_shadow(&presentation.inner, &self.path)?.and_then(|shadow| shadow.color)
-            }
-        };
+        let color = read_color(&presentation.inner, &self.path, self.source)?;
         drop(presentation);
         let Some(rpptx::ColorChoice::Srgb { value, .. }) = color else {
             return Ok(None);
@@ -456,32 +1073,79 @@ impl PyColorFormat {
         let rgb = rpptx::RgbColor::new(red, green, blue);
         let mut presentation = self.presentation.borrow_mut(py);
         validate_path(py, &presentation, &self.path, "color", self.source.suffix())?;
-        let (target, solidify) = match self.source {
-            ColorSource::Fill { target, solidify } => (target, solidify),
-            ColorSource::Shadow => {
-                return edit_shadow(py, &mut presentation.inner, &self.path, |shadow| {
-                    let color = shadow_rgb(shadow.color.take(), rgb);
-                    shadow.replace_color(color);
-                });
-            }
-        };
-        let fill = match current_fill(&presentation.inner, &self.path, target)? {
-            Some(rpptx::Fill::Solid(mut fill)) => {
-                fill.color = Some(with_rgb(fill.color.take(), rgb));
-                rpptx::Fill::Solid(fill)
-            }
-            Some(rpptx::Fill::Pattern(mut fill)) => {
-                fill.foreground = Some(with_rgb(fill.foreground.take(), rgb));
-                rpptx::Fill::Pattern(fill)
-            }
-            _ if solidify => {
-                let mut fill = rpptx::SolidFill::default();
-                fill.color = Some(rpptx::ColorChoice::srgb(rgb));
-                rpptx::Fill::Solid(fill)
-            }
-            other => return Err(no_foreground(other.as_ref())),
-        };
-        write_fill(py, &mut presentation.inner, &self.path, target, fill)
+        let shadow = matches!(self.source, ColorSource::Shadow);
+        write_color(
+            py,
+            &mut presentation.inner,
+            &self.path,
+            self.source,
+            |color| {
+                if shadow {
+                    shadow_rgb(color, rgb)
+                } else {
+                    with_rgb(color, rgb)
+                }
+            },
+        )
+    }
+
+    /// The opacity from 0.0, transparent, to 1.0, opaque, read from the
+    /// colour's `a:alpha`. An rpptx extension: PowerPoint shows `1 - alpha`
+    /// as the transparency of a fill. A colour without `a:alpha` reads 1.0
+    /// and no colour reads `None`. Setting it needs a colour, so set `rgb`
+    /// first.
+    #[getter]
+    fn alpha(&self, py: Python<'_>) -> PyResult<Option<f64>> {
+        let presentation = self.presentation.borrow(py);
+        validate_path(py, &presentation, &self.path, "color", self.source.suffix())?;
+        Ok(
+            read_color(&presentation.inner, &self.path, self.source)?.map(|color| {
+                color
+                    .transforms()
+                    .iter()
+                    .rev()
+                    .find_map(|transform| match transform {
+                        rpptx::ColorTransform::Alpha(value) => {
+                            Some(f64::from(value.0) / OPAQUE_ALPHA)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(1.0)
+            }),
+        )
+    }
+
+    #[setter]
+    fn set_alpha(&self, py: Python<'_>, value: f64) -> PyResult<()> {
+        if !(0.0..=1.0).contains(&value) {
+            return Err(PyValueError::new_err(format!(
+                "alpha must be from 0.0 to 1.0, got {value}"
+            )));
+        }
+        let mut presentation = self.presentation.borrow_mut(py);
+        validate_path(py, &presentation, &self.path, "color", self.source.suffix())?;
+        if read_color(&presentation.inner, &self.path, self.source)?.is_none() {
+            return Err(PyValueError::new_err(
+                "cannot set alpha without a colour, set color.rgb first",
+            ));
+        }
+        let alpha = (value * OPAQUE_ALPHA).round_ties_even() as i32;
+        write_color(
+            py,
+            &mut presentation.inner,
+            &self.path,
+            self.source,
+            |color| {
+                let mut color = color.expect("the colour was checked above");
+                let transforms = color_transforms_mut(&mut color);
+                transforms
+                    .retain(|transform| !matches!(transform, rpptx::ColorTransform::Alpha(_)));
+                if alpha < OPAQUE_ALPHA as i32 {
+                    transforms.push(rpptx::ColorTransform::Alpha(rpptx::Percent1000(alpha)));
+                }
+                color
+            },
+        )
     }
 }
 

@@ -483,7 +483,8 @@ pub enum TextAutoNumberScheme {
 }
 
 impl TextAutoNumberScheme {
-    fn parse(value: &str) -> Option<Self> {
+    /// Reads an `ST_TextAutonumberScheme` token such as `arabicPeriod`.
+    pub fn parse(value: &str) -> Option<Self> {
         Some(match value {
             "alphaLcParenBoth" => Self::AlphaLowerParenBoth,
             "alphaUcParenBoth" => Self::AlphaUpperParenBoth,

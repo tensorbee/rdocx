@@ -27,6 +27,7 @@ default = []
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
+oxml-drawing = { workspace = true }
 oxml-py-support = { workspace = true }
 pyo3 = { workspace = true }
 rpptx = { workspace = true, features = ["default-template", "render", "system-fonts"] }

@@ -75,6 +75,16 @@ with open("review.pdf", "wb") as output:
 - Run hyperlinks, read, added, retargeted, and removed as in python-pptx.
 - Shape click actions, a hyperlink or a slide jump, through `shape.click_action`
   as in python-pptx.
+- Gradient, pattern, and picture fills on shapes and slide backgrounds, and
+  colour opacity through `color.alpha`.
+- Numbered paragraphs, bullet colour, size, and font, superscript and
+  subscript through `font.baseline`, character spacing, language, and East
+  Asian and complex-script typefaces.
+- Table banding flags and table style ids, as in python-pptx.
+- Core properties through `prs.core_properties`, presentation sections, and
+  video and audio clips with their posters.
+- JPEG and multi-page TIFF slide images, PDF/A, audience handouts, and ODP
+  conversion both ways.
 
 ## Use it when
 

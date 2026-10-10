@@ -1759,6 +1759,7 @@ dependencies = [
 name = "rpptx-py"
 version = "0.14.0"
 dependencies = [
+ "oxml-drawing",
  "oxml-py-support",
  "pyo3",
  "rpptx",

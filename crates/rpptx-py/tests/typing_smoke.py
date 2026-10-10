@@ -29,7 +29,11 @@ from rpptx._rpptx import (
     ColorFormat,
     Column,
     ColumnCollection,
+    CoreProperties,
     FillFormat,
+    GradientStop,
+    GradientStops,
+    MediaInfo,
     Font,
     Hyperlink,
     Image,
@@ -42,6 +46,7 @@ from rpptx._rpptx import (
     RowCollection,
     Run,
     RunCollection,
+    Section,
     ShadowFormat,
     Shape,
     ShapeClickAction,
@@ -60,6 +65,7 @@ from rpptx.enum.dml import (
     MSO_ARROWHEAD_WIDTH,
     MSO_FILL_TYPE,
     MSO_LINE_DASH_STYLE,
+    MSO_PATTERN_TYPE,
 )
 from rpptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE_TYPE
 
@@ -503,12 +509,98 @@ def exercise_rpptx_text_layout_types(presentation: Presentation) -> None:
         )
 
 
+def exercise_rpptx_issue_308_types(presentation: Presentation, path: Path) -> None:
+    properties: CoreProperties = presentation.core_properties
+    properties.title = "Deck"
+    properties.author = None
+    title: str = properties.title
+    revision: int = properties.revision
+    sections: tuple[Section, ...] = presentation.sections
+    presentation.set_sections([("Intro", [0])])
+    section_indices: list[int] = sections[0].slide_indices
+    jpegs: list[bytes] = presentation.render_slides(format="jpeg", quality=80, slides=[0])
+    tiff: bytes = presentation.render_slides(format="tiff")
+    pdfa: bytes = presentation.to_pdfa("pdfa-3b")
+    handout: bytes = presentation.to_handout_pdf(3)
+    handouts: list[bytes] = presentation.render_all_handouts(6, dpi=72.0)
+    odp, odp_diagnostics = presentation.to_odp()
+    converted, read_diagnostics = Presentation.from_odp(odp)
+    saved_diagnostics: list[tuple[str, str]] = presentation.save_odp(path)
+
+    slide = presentation.slides[0]
+    slide_id: int = slide.slide_id
+    movie: Shape = slide.shapes.add_movie(
+        io.BytesIO(b""), 0, 0, 10, 10, poster_frame_image=None, mime_type="video/mp4"
+    )
+    media: tuple[MediaInfo, ...] = slide.media
+    kind: str = media[0].kind
+    clip: bytes | None = slide.extract_media(media[0].shape_id)
+    slide.replace_media(media[0].shape_id, io.BytesIO(b""), mime_type="video/mp4")
+    slide.remove_media(media[0].shape_id)
+
+    shape = slide.shapes[0]
+    fill: FillFormat = shape.fill
+    fill.gradient()
+    fill.gradient_angle = 45.0
+    fill.gradient_path = "circle"
+    stops: GradientStops = fill.gradient_stops
+    stop: GradientStop = stops.append(0.5)
+    position: float = stop.position
+    stop.color.rgb = RGBColor(1, 2, 3)
+    stop.color.alpha = 0.5
+    alpha: float | None = stop.color.alpha
+    del stops[0]
+    fill.patterned()
+    fill.pattern = MSO_PATTERN_TYPE.DIAGONAL_CROSS
+    pattern: MSO_PATTERN_TYPE | None = fill.pattern
+    back: ColorFormat = fill.back_color
+    fill.picture(io.BytesIO(b""))
+    slide.background.fill.picture(path)
+
+    paragraph = shape.text_frame.paragraphs[0]
+    paragraph.auto_number = "arabicPeriod"
+    scheme: str | None = paragraph.auto_number
+    paragraph.auto_number_start = 3
+    paragraph.bullet_color = "#123456"
+    paragraph.bullet_color = (1, 2, 3)
+    bullet_color: RGBColor | None = paragraph.bullet_color
+    paragraph.bullet_size = 0.8
+    paragraph.bullet_font = "Arial"
+    font = paragraph.runs[0].font
+    font.baseline = 0.3
+    font.spacing = Pt(1)
+    font.language = "en-US"
+    font.east_asian_name = "Yu Gothic"
+    font.complex_script_name = None
+    baseline: float | None = font.baseline
+    spacing: Length | None = font.spacing
+
+    table = shape.table
+    table.first_row = False
+    table.horz_banding = True
+    table.style_id = "{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}"
+    style_id: str | None = table.style_id
+    banding: bool = table.vert_banding
+
+    _ = (
+        title, revision, section_indices, jpegs, tiff, pdfa, handout, handouts,
+        odp_diagnostics, converted, read_diagnostics, saved_diagnostics, slide_id, movie,
+        kind, clip, position, alpha, pattern, back, scheme, bullet_color, baseline, spacing,
+        style_id, banding,
+    )
+
+
 if TYPE_CHECKING:
     BoundingBox()  # type: ignore[call-arg]
     AdjustmentCollection()  # type: ignore[call-arg]
     Background()  # type: ignore[call-arg]
     Cell()  # type: ignore[call-arg]
     ColorFormat()  # type: ignore[call-arg]
+    CoreProperties()  # type: ignore[call-arg]
+    GradientStop()  # type: ignore[call-arg]
+    GradientStops()  # type: ignore[call-arg]
+    MediaInfo()  # type: ignore[call-arg]
+    Section()  # type: ignore[call-arg]
     FillFormat()  # type: ignore[call-arg]
     Image()  # type: ignore[call-arg]
     LineFormat()  # type: ignore[call-arg]

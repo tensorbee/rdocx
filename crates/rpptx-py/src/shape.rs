@@ -55,7 +55,7 @@ pub(crate) fn length(py: Python<'_>, value: Option<rpptx::Emu>) -> PyResult<Opti
 /// Reads the bytes of a path, a bytes-like object, or a binary file-like object.
 ///
 /// A file-like object is rewound first when it can seek, as python-pptx does.
-fn image_bytes(image_file: &Bound<'_, PyAny>) -> PyResult<(Vec<u8>, String)> {
+pub(crate) fn image_bytes(image_file: &Bound<'_, PyAny>) -> PyResult<(Vec<u8>, String)> {
     fn blob(data: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
         match data.cast::<PyBytes>() {
             Ok(bytes) => Ok(bytes.as_bytes().to_vec()),
@@ -1197,6 +1197,143 @@ impl PyShapeCollection {
                     height.map(rpptx::Emu),
                 )
                 .map(drop)
+        })
+    }
+
+    /// Adds a video, or an audio clip for an `audio/` type, played on click,
+    /// with `poster_frame_image` shown until it plays, as python-pptx
+    /// `add_movie` does. Without a poster a black frame shows. `mime_type`
+    /// defaults to the one the file extension names.
+    #[pyo3(signature = (movie_file, left, top, width, height, poster_frame_image = None, mime_type = None))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_movie(
+        &mut self,
+        py: Python<'_>,
+        movie_file: &Bound<'_, PyAny>,
+        left: i64,
+        top: i64,
+        width: i64,
+        height: i64,
+        poster_frame_image: Option<&Bound<'_, PyAny>>,
+        mime_type: Option<&str>,
+    ) -> PyResult<Py<PyShape>> {
+        let (slide_index, group) = self.target(py)?;
+        if !group.is_empty() {
+            return Err(PyValueError::new_err(
+                "a movie goes on the slide's own shapes, not in a group",
+            ));
+        }
+        let media = MediaFile::read(movie_file, mime_type)?;
+        let (poster, poster_name) = match poster_frame_image {
+            Some(image) => image_bytes(image)?,
+            None => (BLACK_POSTER.to_vec(), "poster.png".to_owned()),
+        };
+        let index = self.len(py)?;
+        let mut presentation = self.presentation.borrow_mut(py);
+        presentation
+            .inner
+            .add_media(
+                slide_index,
+                media.kind(),
+                media.input(),
+                rpptx::MediaPoster {
+                    bytes: &poster,
+                    filename: &poster_name,
+                },
+                rpptx::Emu(left),
+                rpptx::Emu(top),
+                rpptx::Emu(width),
+                rpptx::Emu(height),
+                rpptx::MediaPlaybackSettings::default(),
+            )
+            .map_err(|error| rpptx_to_pyerr(py, error))?;
+        drop(presentation);
+        self.capture_added(py, index)
+    }
+}
+
+/// A one-pixel black PNG, the poster of a movie added without one.
+const BLACK_POSTER: [u8; 67] = [
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x00, 0x00, 0x00, 0x00, 0x3A, 0x7E, 0x9B,
+    0x55, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0xDA, 0x63, 0x60, 0x00, 0x00, 0x00,
+    0x02, 0x00, 0x01, 0xE5, 0x27, 0xDE, 0xFC, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+    0x42, 0x60, 0x82,
+];
+
+/// Media file extensions and the content types they name.
+const MEDIA_TYPES: [(&str, &str); 14] = [
+    ("mp4", "video/mp4"),
+    ("m4v", "video/mp4"),
+    ("mov", "video/quicktime"),
+    ("avi", "video/x-msvideo"),
+    ("wmv", "video/x-ms-wmv"),
+    ("webm", "video/webm"),
+    ("mpg", "video/mpeg"),
+    ("mpeg", "video/mpeg"),
+    ("mp3", "audio/mpeg"),
+    ("m4a", "audio/mp4"),
+    ("wav", "audio/wav"),
+    ("wma", "audio/x-ms-wma"),
+    ("aac", "audio/aac"),
+    ("ogg", "audio/ogg"),
+];
+
+/// Media bytes from a path, bytes, or a binary file object, with a file
+/// name whose extension matches the content type.
+pub(crate) struct MediaFile {
+    bytes: Vec<u8>,
+    filename: String,
+    content_type: String,
+}
+
+impl MediaFile {
+    pub(crate) fn read(file: &Bound<'_, PyAny>, mime_type: Option<&str>) -> PyResult<Self> {
+        let (bytes, filename) = image_bytes(file)?;
+        let extension = filename
+            .rsplit_once('.')
+            .map(|(_, extension)| extension.to_ascii_lowercase());
+        let content_type = match mime_type {
+            Some(mime_type) => mime_type.to_owned(),
+            None => extension
+                .as_deref()
+                .and_then(|extension| MEDIA_TYPES.iter().find(|(known, _)| *known == extension))
+                .map(|(_, content_type)| (*content_type).to_owned())
+                .ok_or_else(|| {
+                    PyValueError::new_err(
+                        "pass mime_type, such as \"video/mp4\", for media without a known extension",
+                    )
+                })?,
+        };
+        let filename = if extension.is_some() {
+            filename
+        } else {
+            let extension = MEDIA_TYPES
+                .iter()
+                .find(|(_, known)| *known == content_type)
+                .map_or("bin", |(extension, _)| *extension);
+            format!("media.{extension}")
+        };
+        Ok(Self {
+            bytes,
+            filename,
+            content_type,
+        })
+    }
+
+    pub(crate) fn kind(&self) -> rpptx::MediaKind {
+        if self.content_type.starts_with("audio/") {
+            rpptx::MediaKind::Audio
+        } else {
+            rpptx::MediaKind::Video
+        }
+    }
+
+    pub(crate) fn input(&self) -> rpptx::MediaSourceInput<'_> {
+        rpptx::MediaSourceInput::Embedded(rpptx::EmbeddedMediaInput {
+            bytes: &self.bytes,
+            filename: &self.filename,
+            content_type: &self.content_type,
         })
     }
 }
