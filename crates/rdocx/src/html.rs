@@ -172,6 +172,7 @@ struct ComputedStyle {
     strike: Option<bool>,
     color: Option<String>,
     background: Option<String>,
+    mark_highlight: Option<String>,
     alignment: Option<Alignment>,
     space_before: Option<Length>,
     space_after: Option<Length>,
@@ -192,6 +193,7 @@ impl ComputedStyle {
             underline: self.underline,
             strike: self.strike,
             color: self.color.clone(),
+            mark_highlight: self.mark_highlight.clone(),
             alignment: self.alignment,
             vertical: self.vertical,
             hyperlink: self.hyperlink.clone(),
@@ -3329,6 +3331,9 @@ impl Importer<'_> {
                 change.apply(&mut style);
             }
         }
+        if element.value().name() == "mark" {
+            style.mark_highlight = style.background.clone();
+        }
         Ok(style)
     }
 
@@ -3527,7 +3532,7 @@ fn apply_run_style(run: &mut Run<'_>, style: &ComputedStyle) {
     if let Some(color) = &style.color {
         run.set_color(color);
     }
-    if let Some(background) = &style.background {
+    if let Some(background) = style.background.as_ref().or(style.mark_highlight.as_ref()) {
         run.set_highlight(background);
     }
     match style.vertical {
@@ -3895,6 +3900,28 @@ mod tests {
         Document, Length, Limits, MhtmlLimits, from_html_with_limits, from_mhtml_with_limits,
         parse_mhtml, preflight_markup, read_bounded, to_mhtml_with_limits,
     };
+
+    #[test]
+    fn mark_highlight_reaches_formatted_children_without_leaking_to_siblings() {
+        let parsed = Document::from_html(
+            "<p>Before <mark>key <strong>fact</strong> <em>here</em></mark> after</p>",
+        )
+        .unwrap();
+        let paragraph = parsed.document.paragraph(0).unwrap();
+        let runs = paragraph.runs().collect::<Vec<_>>();
+
+        assert_eq!(
+            runs.iter().map(|run| run.text()).collect::<Vec<_>>(),
+            ["Before", " key", " fact", " here", " after"]
+        );
+        assert_eq!(runs[0].highlight(), None);
+        for run in &runs[1..4] {
+            assert_eq!(run.highlight().as_deref(), Some("FFFF00"));
+        }
+        assert_eq!(runs[4].highlight(), None);
+        assert_eq!(runs[2].bold_value(), Some(true));
+        assert_eq!(runs[3].italic_value(), Some(true));
+    }
 
     fn one_pixel_png() -> Vec<u8> {
         vec![
