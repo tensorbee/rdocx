@@ -2366,7 +2366,9 @@ def test_insert_and_remove_section_restructure_the_body():
         _ = held.text
 
     assert [section.is_final for section in document.sections] == [False, True]
-    assert document.sections[1].margin_top is None
+    # The new section takes the page geometry of the section before it.
+    assert document.sections[1].margin_top == Inches(1)
+    assert document.sections[1].page_width == Inches(8.5)
     assert document.update_section(1, margin_top=Inches(1)).margin_right == Inches(1)
     document.update_section(
         1,
@@ -4127,3 +4129,520 @@ def test_whole_story_comment_refusals_preserve_bytes_and_revision(kind):
             getattr(document, f"set_{kind}")(text)
         assert document.to_bytes() == before
         assert held.text == "main retained"
+
+
+
+# ---- #304: headers, footers, notes and page setup ----
+
+
+def _pdf_pages(document):
+    pdf = document.to_pdf()
+    result = subprocess.run(
+        ["pdftotext", "-layout", "-", "-"],
+        input=pdf,
+        capture_output=True,
+        check=True,
+    )
+    return result.stdout.decode().rstrip("\f").split("\f")
+
+
+def _long_document(paragraphs=90):
+    import rdocx
+
+    document = rdocx.Document()
+    for index in range(paragraphs):
+        document.add_paragraph(f"Body paragraph {index} long enough to fill the page.")
+    return document
+
+
+def test_an_inserted_section_keeps_the_page_geometry_and_landscape_swaps_it():
+    import rdocx
+    from rdocx import Inches
+
+    document = rdocx.Document()
+    document.add_paragraph("portrait")
+    document.update_section(0, margin_left=Inches(1.5))
+    document.insert_section(1)
+    new = document.sections[1]
+    assert (new.page_width, new.page_height) == (Inches(8.5), Inches(11))
+    assert (new.margin_left, new.margin_top) == (Inches(1.5), Inches(1))
+    assert (new.header_distance, new.footer_distance) == (Inches(0.5), Inches(0.5))
+
+    updated = document.update_section(1, orientation="landscape")
+    assert (updated.page_width, updated.page_height) == (Inches(11), Inches(8.5))
+    document.add_paragraph("landscape")
+    body = _document_xml(document).decode()
+    assert '<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>' in body
+    assert body.count("<w:pgMar ") == 2
+    assert [document.layout_page(i).width for i in range(2)] == [612.0, 792.0]
+    assert document.layout_page(1).height == 612.0
+
+
+def test_an_even_page_footer_turns_on_odd_and_even_pages_and_renders():
+    import rdocx
+
+    document = _long_document(120)
+    section = document.sections[0]
+    assert document.settings.odd_and_even_pages_header_footer is False
+    section.footer.paragraphs[0].text = "ODD FOOTER"
+    section.even_page_footer.add_paragraph("EVEN FOOTER")
+    assert document.settings.odd_and_even_pages_header_footer is True
+    assert b"<w:evenAndOddHeaders/>" in _package_part_bytes(document, "word/settings.xml")
+    pages = _pdf_pages(document)
+    assert "ODD FOOTER" in pages[0] and "EVEN FOOTER" not in pages[0]
+    assert "EVEN FOOTER" in pages[1] and "ODD FOOTER" not in pages[1]
+
+    document.settings.odd_and_even_pages_header_footer = False
+    assert document.settings.odd_and_even_pages_header_footer is False
+    # The low-level story call turns the setting on too.
+    document.create_section_story(0, "header", "even")
+    assert document.settings.odd_and_even_pages_header_footer is True
+
+
+def test_a_page_x_of_y_footer_built_from_python_numbers_every_page():
+    import rdocx
+
+    document = _long_document(150)
+    paragraph = document.sections[0].footer.add_page_number()
+    assert paragraph.text == "Page 1 of 1"
+    assert paragraph.alignment == rdocx.WD_ALIGN_PARAGRAPH.CENTER
+    pages = _pdf_pages(rdocx.Document.from_bytes(document.to_bytes()))
+    assert len(pages) >= 3
+    for number, page in enumerate(pages, start=1):
+        assert f"Page {number} of {len(pages)}" in page, page
+
+    footer = document.sections[0].footer
+    with pytest.raises(ValueError, match="PAGE"):
+        footer.add_page_number("Page {PAGES}")
+    with pytest.raises(ValueError, match="names no field"):
+        footer.add_page_number("Page")
+
+
+def test_header_paragraphs_are_live_handles_in_their_own_story():
+    import rdocx
+    from rdocx import Inches, Pt
+
+    document = rdocx.Document()
+    document.add_paragraph("body")
+    header = document.sections[0].header
+    assert header.is_linked_to_previous is True
+    paragraphs = header.paragraphs
+    assert [p.text for p in paragraphs] == [""]
+    assert header.is_linked_to_previous is False
+    assert (header.kind, header.variant, header.section_index) == ("header", "default", 0)
+
+    paragraph = header.paragraphs[0]
+    paragraph.text = "Quarterly report"
+    paragraph = header.paragraphs[0]
+    paragraph.alignment = rdocx.WD_ALIGN_PARAGRAPH.RIGHT
+    run = paragraph.runs[0]
+    run.font.bold = True
+    run.font.size = Pt(9)
+    paragraph = header.paragraphs[0]
+    assert paragraph.alignment == rdocx.WD_ALIGN_PARAGRAPH.RIGHT
+    assert paragraph.runs[0].font.bold is True
+    assert paragraph.runs[0].font.size == Pt(9)
+    assert paragraph.replace_text("Quarterly", "Annual", expect=1) == 1
+    with pytest.raises(rdocx.ReplacementCountError):
+        header.paragraphs[0].replace_text("Annual", "Yearly", expect=2)
+
+    link = header.paragraphs[0].add_hyperlink(" site", "https://example.com/h")
+    assert link.text == " site"
+    second = header.add_paragraph("Second line", style="Title")
+    assert second.style == "Title"
+    assert [p.text for p in header.paragraphs] == ["Annual report site", "Second line"]
+    second.add_run(" more")
+    with pytest.raises(rdocx.StaleElementError, match=r"sections\[0\]\.header\.paragraphs\[1\]"):
+        second.text
+
+    table = header.add_table(1, 3, Inches(6))
+    assert (table.row_count, table.column_count) == (1, 3)
+    table.cell(0, 0).text = "Left"
+    table.cell(0, 2).text = "Right"
+    table.cell(0, 1).paragraphs[0].add_run("Middle").font.italic = True
+    assert [header.tables[0].cell(0, col).text for col in range(3)] == [
+        "Left",
+        "Middle",
+        "Right",
+    ]
+    with pytest.raises(IndexError):
+        header.tables[0].cell(1, 0)
+
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    header = reopened.sections[0].header
+    assert [p.text for p in header.paragraphs] == ["Annual report site", "Second line more"]
+    assert header.tables[0].cell(0, 1).text == "Middle"
+    header_part = next(
+        item.story.part_name for item in reopened.story_items if item.story.kind == "header"
+    )
+    rels = _package_part_bytes(reopened, "word/_rels/" + posixpath.basename(header_part) + ".rels")
+    assert b"https://example.com/h" in rels
+    assert b"https://example.com/h" not in _package_part_bytes(
+        reopened, "word/_rels/document.xml.rels"
+    )
+    pages = _pdf_pages(reopened)
+    assert "Annual report site" in pages[0]
+    assert "Middle" in pages[0]
+
+
+def test_headers_follow_python_docx_linking_between_sections():
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("first")
+    document.insert_section(1)
+    document.add_paragraph("second")
+    first, second = document.sections
+    assert second.header.is_linked_to_previous is True
+    # Writing through a linked header edits the story it shows, the first
+    # section's, which python-docx creates there.
+    second.header.paragraphs[0].text = "Shared"
+    assert first.header.is_linked_to_previous is False
+    assert [p.text for p in first.header.paragraphs] == ["Shared"]
+
+    second.header.is_linked_to_previous = False
+    assert [p.text for p in second.header.paragraphs] == [""]
+    second.header.paragraphs[0].text = "Own"
+    assert [p.text for p in first.header.paragraphs] == ["Shared"]
+    second.header.is_linked_to_previous = True
+    assert [p.text for p in second.header.paragraphs] == ["Shared"]
+
+
+def test_first_page_header_footer_switch_and_variants():
+    import rdocx
+
+    document = _long_document(60)
+    section = document.sections[0]
+    assert section.different_first_page_header_footer is False
+    section.different_first_page_header_footer = True
+    assert section.different_first_page_header_footer is True
+    assert document.sections[0].different_first_page is True
+    section.different_first_page_header_footer = False
+    assert document.sections[0].different_first_page_header_footer is False
+
+    # Writing into the first-page footer turns the switch back on.
+    section.first_page_footer.add_paragraph("FIRST FOOTER")
+    assert document.sections[0].different_first_page_header_footer is True
+    section.footer.add_paragraph("OTHER FOOTER")
+    pages = _pdf_pages(document)
+    assert "FIRST FOOTER" in pages[0] and "OTHER FOOTER" not in pages[0]
+    assert "OTHER FOOTER" in pages[1]
+
+    # A first-page story for a later section stays on that section, so the
+    # first page of the earlier one keeps its default header.
+    two = rdocx.Document()
+    two.add_paragraph("first")
+    two.insert_section(1)
+    two.sections[1].first_page_header.add_paragraph("Cover")
+    assert [s.different_first_page_header_footer for s in two.sections] == [False, True]
+    assert two.sections[0].first_page_header.is_linked_to_previous is True
+
+    with pytest.raises(AttributeError, match=r"update_section\(0, margin_left=\.\.\.\)"):
+        section.left_margin = rdocx.Inches(1)
+    with pytest.raises(AttributeError, match="snapshot"):
+        section.orientation = "landscape"
+    hand_made = rdocx.Section(
+        ordinal=0, is_final=True, orientation=None, page_width=None, page_height=None,
+        margin_top=None, margin_right=None, margin_bottom=None, margin_left=None,
+        gutter=None, column_count=None, column_spacing=None, page_number_start=None,
+        header_distance=None, footer_distance=None, different_first_page=None,
+        break_type=None,
+    )
+    with pytest.raises(ValueError, match="document.sections"):
+        hand_made.header
+
+
+def test_run_breaks_follow_python_docx():
+    import rdocx
+    from rdocx import WD_BREAK
+
+    document = rdocx.Document()
+    document.add_paragraph("one")
+    document.add_paragraph("two")
+    document.add_paragraph("three")
+    document.paragraphs[0].runs[0].add_break(WD_BREAK.PAGE)
+    document.paragraphs[1].runs[0].add_break()
+    document.paragraphs[2].runs[0].add_break(WD_BREAK.COLUMN)
+    body = _document_xml(document).decode()
+    assert '<w:br w:type="page"/>' in body
+    assert '<w:br w:type="column"/>' in body
+    assert "<w:br/>" in body
+    assert [fragment.physical_page for fragment in document.layout()][:2] == [1, 2]
+    with pytest.raises(ValueError, match="WD_BREAK.LINE"):
+        document.paragraphs[0].runs[0].add_break(2)
+
+    footer = document.sections[0].footer.paragraphs[0]
+    run = footer.add_run("footer")
+    with pytest.raises(ValueError, match="no effect in a header or footer"):
+        run.add_break(WD_BREAK.PAGE)
+    run.add_break(WD_BREAK.LINE)
+
+
+def test_footnotes_and_endnotes_are_added_numbered_and_removed():
+    import rdocx
+
+    document = rdocx.Document()
+    paragraph = document.add_paragraph("Claim")
+    note = document.add_footnote(paragraph, "Source one")
+    paragraph = document.paragraphs[0]
+    paragraph.add_run(" and more")
+    last = document.paragraphs[0].runs[-1]
+    second = document.add_footnote(last, "Source two")
+    endnote = document.add_endnote(document.paragraphs[0], "Closing note")
+    assert second != note
+    notes = [
+        item.text for item in document.story_items if item.story.kind == "footnote"
+    ]
+    assert any("Source one" in text for text in notes)
+    assert any("Source two" in text for text in notes)
+    assert any(
+        "Closing note" in (item.text or "")
+        for item in document.story_items
+        if item.story.kind == "endnote"
+    )
+
+    document.add_paragraph("Second paragraph").add_run(" tail")
+    first_run = document.paragraphs[1].runs[0]
+    with pytest.raises(ValueError, match="end of its paragraph"):
+        document.add_footnote(first_run, "misplaced")
+    table = document.add_table(1, 1)
+    with pytest.raises(ValueError, match="body paragraph"):
+        document.add_footnote(table.cell(0, 0).paragraphs[0], "in a cell")
+    with pytest.raises(TypeError, match="Paragraph or a Run"):
+        document.add_footnote("text", "nothing")
+
+    document.set_note_numbering("footnote", number_format="lowerRoman", restart="eachPage")
+    document.set_note_numbering("endnote", number_format="upperLetter", section=0)
+    settings = _package_part_bytes(document, "word/settings.xml").decode()
+    assert '<w:numFmt w:val="lowerRoman"/>' in settings
+    assert '<w:numRestart w:val="eachPage"/>' in settings
+    assert '<w:numFmt w:val="upperLetter"/>' in _document_xml(document).decode()
+    with pytest.raises(ValueError, match="placement"):
+        document.set_note_numbering("footnote", placement="docEnd")
+
+    document.remove_footnote(note)
+    document.remove_endnote(endnote)
+    body = _document_xml(document).decode()
+    assert f'w:footnoteReference w:id="{note}"' not in body
+    assert f'w:footnoteReference w:id="{second}"' in body
+    assert "w:endnoteReference" not in body
+
+
+def test_page_colour_watermarks_and_page_borders():
+    import rdocx
+    from rdocx import Pt, RGBColor
+
+    document = rdocx.Document()
+    document.add_paragraph("decorated")
+    assert document.page_color is None
+    document.page_color = RGBColor(0xFF, 0xF2, 0xCC)
+    assert document.page_color == RGBColor(0xFF, 0xF2, 0xCC)
+    assert '<w:background w:color="FFF2CC"/>' in _document_xml(document).decode()
+    assert b"<w:displayBackgroundShape/>" in _package_part_bytes(document, "word/settings.xml")
+    document.page_color = "dde4ee"
+    assert str(document.page_color) == "DDE4EE"
+    with pytest.raises(ValueError, match="six hexadecimal digits"):
+        document.page_color = "blue"
+    with pytest.raises(ValueError, match="six hexadecimal digits"):
+        document.page_color = "auto"
+    document.page_color = "#dde4ee"
+    assert str(document.page_color) == "DDE4EE"
+    document.page_color = None
+    assert document.page_color is None
+
+    document.set_text_watermark("DRAFT")
+    header_texts = [
+        item.xml for item in document.story_items if item.story.kind == "header"
+    ]
+    assert any(b"DRAFT" in xml for xml in header_texts)
+    document.set_image_watermark(_one_pixel_png(), "mark.png", Pt(100), Pt(100))
+
+    document.set_page_borders(0, "double", width=Pt(1.5), color=RGBColor(0xFF, 0, 0), space=Pt(20))
+    body = _document_xml(document).decode()
+    assert '<w:pgBorders w:offsetFrom="page">' in body
+    assert '<w:top w:val="double" w:sz="12" w:space="20" w:color="FF0000"/>' in body
+    with pytest.raises(ValueError, match="Pt\\(0.25\\) to Pt\\(12\\)"):
+        document.set_page_borders(0, width=Pt(20))
+    for bad in ("red", "#FF00", "FF0000FF"):
+        with pytest.raises(ValueError, match="six hexadecimal digits"):
+            document.set_page_borders(0, color=bad)
+    document.set_page_borders(0, color="#00ff00")
+    assert 'w:color="00FF00"' in _document_xml(document).decode()
+    document.set_page_borders(0, color="auto")
+    assert 'w:color="auto"' in _document_xml(document).decode()
+    document.set_page_borders(0, None)
+    assert "w:pgBorders" not in _document_xml(document).decode()
+
+
+def test_section_lengths_accept_length_objects_and_refuse_a_twips_int():
+    import rdocx
+    from rdocx import Inches, Twips
+
+    assert Twips(1440) == Inches(1)
+    assert Twips(12240).twips == 12240
+    document = rdocx.Document()
+    with pytest.raises(ValueError, match="section lengths are EMU"):
+        document.update_section(0, page_width=12240)
+    updated = document.update_section(0, page_width=Twips(11906), page_height=Twips(16838))
+    assert (updated.page_width, updated.page_height) == (Twips(11906), Twips(16838))
+
+
+
+def test_notes_carry_word_styles_space_and_separators():
+    import rdocx
+
+    document = rdocx.Document()
+    paragraph = document.add_paragraph("Claim")
+    document.add_footnote(paragraph, "Source")
+    # The reference is appended, so the paragraph handle stays valid.
+    assert paragraph.text == "Claim"
+    document.add_endnote(paragraph, "Closing")
+    body = _document_xml(document).decode()
+    assert '<w:rStyle w:val="FootnoteReference"/>' in body
+    assert '<w:rStyle w:val="EndnoteReference"/>' in body
+    footnotes = _package_part_bytes(document, "word/footnotes.xml").decode()
+    assert '<w:pStyle w:val="FootnoteText"/>' in footnotes
+    assert '<w:r><w:rPr><w:rStyle w:val="FootnoteReference"/></w:rPr><w:footnoteRef/></w:r>' in footnotes
+    assert '<w:t xml:space="preserve"> </w:t>' in footnotes
+    assert 'w:type="separator" w:id="-1"' in footnotes or 'w:id="-1" w:type="separator"' in footnotes
+    assert "<w:continuationSeparator/>" in footnotes
+    assert "<w:separator/>" in _package_part_bytes(document, "word/endnotes.xml").decode()
+    settings = _package_part_bytes(document, "word/settings.xml").decode()
+    assert '<w:footnote w:id="-1"/><w:footnote w:id="0"/>' in settings
+    assert '<w:endnote w:id="-1"/><w:endnote w:id="0"/>' in settings
+    styles = {style.style_id: style for style in document.styles}
+    for style_id in ("FootnoteReference", "FootnoteText", "EndnoteReference", "EndnoteText"):
+        assert style_id in styles
+    # A second note reuses the styles and separators.
+    document.add_footnote(document.paragraphs[0], "Another")
+    footnotes = _package_part_bytes(document, "word/footnotes.xml").decode()
+    assert footnotes.count("<w:separator/>") == 1
+    pages = _pdf_pages(document)
+    assert "Claim1" in pages[0].replace(" ", "")
+
+
+def test_header_footer_details_follow_word_and_python_docx():
+    import rdocx
+    from rdocx import Inches, WD_BREAK
+
+    document = rdocx.Document()
+    document.add_paragraph("body")
+    document.add_style("Header")
+    document.add_style("Footer")
+    footer = document.sections[0].footer
+    paragraph = footer.add_page_number()
+    # The page number fills the new story's lone empty paragraph.
+    assert [p.text for p in footer.paragraphs] == ["Page 1 of 1"]
+    assert paragraph.style == "Footer"
+    header = document.sections[0].header
+    assert header.paragraphs[0].style == "Header"
+
+    table = header.add_table(2, 2, Inches(6))
+    rows = table.rows
+    assert [len(row.cells) for row in rows] == [2, 2]
+    rows[1].cells[0].text = "Bottom left"
+    assert table.cell(1, 0).text == "Bottom left"
+    assert table.style is None
+    table.style = "Table Grid"
+    assert header.tables[0].style == "TableGrid"
+    with pytest.raises(KeyError):
+        table.style = "No such style"
+
+    held = document.sections[0].footer
+    stale_section = document.sections[0]
+    document.insert_section(0)
+    with pytest.raises(rdocx.StaleElementError, match=r"sections\[0\]\.footer"):
+        held.paragraphs
+    with pytest.raises(rdocx.StaleElementError, match="section was inserted or removed"):
+        stale_section.header
+
+    run = document.paragraphs[-1].runs[0]
+    run.add_break(WD_BREAK.LINE_CLEAR_ALL)
+    run = document.paragraphs[-1].runs[0]
+    run.add_break(WD_BREAK.LINE_CLEAR_LEFT)
+    body = _document_xml(document).decode()
+    assert '<w:br w:type="textWrapping" w:clear="all"/>' in body
+    assert '<w:br w:type="textWrapping" w:clear="left"/>' in body
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert '<w:br w:type="textWrapping" w:clear="all"/>' in _document_xml(reopened).decode()
+
+    with pytest.raises(ValueError, match="margin_left=1440 .*Twips"):
+        document.update_section(0, margin_left=1440)
+    with pytest.raises(ValueError, match="header_distance"):
+        document.update_section(0, header_distance=720)
+    document.update_section(0, margin_left=0)
+
+
+def _story_paragraph_styles(document, attribute):
+    """The pStyle value of each paragraph of section 0's `attribute` story
+    in the saved package, None where a paragraph has no pStyle."""
+    slot = getattr(document.sections[0], attribute)
+    texts = [paragraph.text for paragraph in slot.paragraphs]
+    kind = "header" if attribute.endswith("header") else "footer"
+    with zipfile.ZipFile(io.BytesIO(document.to_bytes())) as archive:
+        for part in archive.namelist():
+            if not re.fullmatch(rf"word/{kind}\d+\.xml", part):
+                continue
+            xml = archive.read(part).decode()
+            paragraphs = re.findall(r"<w:p(?:/>|[ >].*?</w:p>)", xml, flags=re.S)
+            found = [
+                "".join(re.findall(r"<w:t(?: [^>]*)?>([^<]*)</w:t>", paragraph))
+                for paragraph in paragraphs
+            ]
+            if found == texts:
+                return [
+                    (match.group(1) if match else None)
+                    for match in (
+                        re.search(r'<w:pStyle w:val="([^"]*)"/>', paragraph)
+                        for paragraph in paragraphs
+                    )
+                ]
+    raise AssertionError(f"no {kind} part holds {texts!r}")
+
+
+@pytest.mark.parametrize(
+    ("names", "style_ids"),
+    [
+        (("Header", "Footer"), (None, None)),
+        (("header", "footer"), ("Header", "Footer")),
+        (("header", "footer"), ("En-tte", "Pieddepage")),
+    ],
+    ids=["python-docx", "word", "localized-word"],
+)
+def test_added_header_and_footer_paragraphs_take_the_header_and_footer_styles(names, style_ids):
+    import rdocx
+
+    expected = {
+        kind: style_id or name for kind, name, style_id in zip(("header", "footer"), names, style_ids)
+    }
+    attributes = (
+        "header",
+        "footer",
+        "first_page_header",
+        "first_page_footer",
+        "even_page_header",
+        "even_page_footer",
+    )
+
+    document = rdocx.Document()
+    document.add_paragraph("body")
+    for name, style_id in zip(names, style_ids):
+        document.add_style(name, "paragraph", style_id=style_id)
+    for attribute in attributes:
+        style = expected["header" if attribute.endswith("header") else "footer"]
+        slot = getattr(document.sections[0], attribute)
+        added = slot.add_paragraph(attribute)
+        assert added.style == style, attribute
+        explicit = slot.add_paragraph("explicit", style="Title")
+        assert explicit.style == "Title", attribute
+        # The story created on first access holds one empty paragraph that
+        # takes the style too.
+        assert [p.style for p in slot.paragraphs] == [style, style, "Title"], attribute
+        assert _story_paragraph_styles(document, attribute) == [style, style, "Title"]
+
+    plain = rdocx.Document()
+    plain.add_paragraph("body")
+    for attribute in attributes:
+        slot = getattr(plain.sections[0], attribute)
+        assert slot.add_paragraph(attribute).style is None, attribute
+        assert _story_paragraph_styles(plain, attribute) == [None, None]

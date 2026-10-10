@@ -7,9 +7,10 @@ use quick_xml::{Reader, Writer, XmlVersion};
 
 use crate::error::{OxmlError, Result};
 use crate::namespace::{W_NS, matches_local_name};
-use crate::numbering::{namespace_bindings, word_prefixes_at};
+use crate::numbering::{local_namespace_overrides, namespace_bindings, word_prefixes_at};
 use crate::properties::is_word_element;
 use crate::raw_xml::{capture_element, capture_empty_element};
+use crate::table::CT_Tbl;
 use crate::text::{
     CT_P, ROOT_R_BINDING, ROOT_WP_BINDING, declare_w14_on_part_root, root_binding_scope,
 };
@@ -334,6 +335,76 @@ impl CT_HdrFtr {
         })
     }
 
+    /// The number of direct `w:tbl` children, which the model keeps as raw
+    /// XML between its paragraphs.
+    pub fn table_count(&self) -> usize {
+        self.table_entries().len()
+    }
+
+    /// Read the `index`-th direct table, or `None` when there is none.
+    pub fn read_table<R>(
+        &self,
+        index: usize,
+        read: impl FnOnce(&CT_Tbl) -> R,
+    ) -> Result<Option<R>> {
+        let Some(&entry) = self.table_entries().get(index) else {
+            return Ok(None);
+        };
+        let (table, _) = parse_raw_table(&self.extra_xml[entry], &self.word_prefixes)?;
+        Ok(Some(read(&table)))
+    }
+
+    /// Edit the `index`-th direct table in place, or return `None` when
+    /// there is none. The table is written back with the namespaces its
+    /// source declared, and an edit whose result would leave a prefix
+    /// unbound is refused.
+    pub fn edit_table<R>(
+        &mut self,
+        index: usize,
+        edit: impl FnOnce(&mut CT_Tbl) -> R,
+    ) -> Result<Option<R>> {
+        let Some(&entry) = self.table_entries().get(index) else {
+            return Ok(None);
+        };
+        let raw = &self.extra_xml[entry];
+        let (mut table, bindings) = parse_raw_table(raw, &self.word_prefixes)?;
+        let result = edit(&mut table);
+        let mut writer = Writer::new(Vec::new());
+        table.to_xml(&mut writer)?;
+        let rewritten = crate::placeholder::with_source_namespaces(
+            raw,
+            &writer.into_inner(),
+            &bindings,
+            &self.word_prefixes,
+        )
+        .ok_or_else(|| {
+            OxmlError::InvalidValue(
+                "the header or footer table uses namespaces a rewrite cannot keep".into(),
+            )
+        })?;
+        self.extra_xml[entry] = rewritten;
+        Ok(Some(result))
+    }
+
+    /// Append a table after the last child of the story.
+    pub fn push_table(&mut self, table: &CT_Tbl) -> Result<()> {
+        let mut writer = Writer::new(Vec::new());
+        table.to_xml(&mut writer)?;
+        self.extra_xml.push(writer.into_inner());
+        self.extra_xml_positions.push(self.paragraphs.len());
+        Ok(())
+    }
+
+    /// The `extra_xml` indices of the direct `w:tbl` children, in order.
+    fn table_entries(&self) -> Vec<usize> {
+        self.extra_xml
+            .iter()
+            .enumerate()
+            .filter(|(_, raw)| raw_word_element_is(raw, b"tbl", &self.word_prefixes))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
     /// Serialize to XML bytes as a header.
     pub fn to_xml_header(&self) -> Result<Vec<u8>> {
         self.to_xml_root("w:hdr")
@@ -421,6 +492,39 @@ impl CT_HdrFtr {
         declare_w14_on_part_root(&mut xml)?;
         Ok(xml)
     }
+}
+
+/// Whether a raw child is the Word element `local`.
+fn raw_word_element_is(raw: &[u8], local: &[u8], part_prefixes: &[String]) -> bool {
+    let mut reader = Reader::from_reader(raw);
+    let mut buffer = Vec::new();
+    match reader.read_event_into(&mut buffer) {
+        Ok(Event::Start(start) | Event::Empty(start)) => word_prefixes_at(&start, part_prefixes)
+            .is_ok_and(|prefixes| is_word_element(start.name().as_ref(), local, &prefixes)),
+        _ => false,
+    }
+}
+
+/// Parse a raw `w:tbl` child, with the namespace bindings its start tag
+/// declares other than the part does.
+fn parse_raw_table(
+    raw: &[u8],
+    part_prefixes: &[String],
+) -> Result<(CT_Tbl, Vec<(String, String)>)> {
+    let mut reader = Reader::from_reader(raw);
+    reader.config_mut().trim_text(false);
+    let mut buffer = Vec::new();
+    let Event::Start(start) = reader.read_event_into(&mut buffer)? else {
+        return Err(OxmlError::InvalidValue(
+            "a header or footer table has no content".into(),
+        ));
+    };
+    let start = start.into_owned();
+    let prefixes = word_prefixes_at(&start, part_prefixes)?;
+    let bindings = local_namespace_overrides(&start, part_prefixes)?;
+    let table =
+        CT_Tbl::from_xml_with_prefixes_and_owner_bindings(&mut reader, &prefixes, &bindings)?;
+    Ok((table, bindings))
 }
 
 /// Replace the exact API-owned VML shape without reconstructing its header.
@@ -1345,6 +1449,53 @@ mod tests {
         ]
         .map(|marker| written.find(marker).unwrap());
         assert!(positions.is_sorted(), "{written}");
+    }
+
+    /// #304: a table is edited where it stands, among the raw children, with
+    /// the prefix its source used and the children around it in place.
+    fn first_cell_text(table: &CT_Tbl) -> String {
+        table.rows[0].cells[0].text()
+    }
+
+    #[test]
+    fn a_direct_table_is_read_edited_and_appended_in_place() {
+        let xml = format!(
+            r#"<w:hdr xmlns:w="{W_NS}"><w:p><w:r><w:t>one</w:t></w:r></w:p><x:tbl xmlns:x="{W_NS}"><x:tblGrid><x:gridCol x:w="100"/></x:tblGrid><x:tr><x:tc><x:p><x:r><x:t>cell</x:t></x:r></x:p></x:tc></x:tr></x:tbl><w:sdt><w:sdtContent><w:p/></w:sdtContent></w:sdt><w:p><w:r><w:t>two</w:t></w:r></w:p></w:hdr>"#
+        );
+        let mut header = CT_HdrFtr::from_xml(xml.as_bytes()).unwrap();
+        assert_eq!(header.table_count(), 1);
+        assert_eq!(
+            header.read_table(0, first_cell_text).unwrap().as_deref(),
+            Some("cell")
+        );
+        assert!(header.read_table(1, first_cell_text).unwrap().is_none());
+        header
+            .edit_table(0, |table| {
+                table.rows[0].cells[0].paragraphs_mut()[0].add_run(" edited");
+            })
+            .unwrap()
+            .unwrap();
+        let mut appended = CT_Tbl::new();
+        appended.rows.push(crate::table::CT_Row::new());
+        header.push_table(&appended).unwrap();
+        assert_eq!(header.table_count(), 2);
+
+        let written = String::from_utf8(header.to_xml_header().unwrap()).unwrap();
+        let positions = [
+            ">one<",
+            "cell",
+            " edited",
+            "<w:sdt>",
+            ">two<",
+            "<w:tbl><w:tr>",
+        ]
+        .map(|marker| written.find(marker).unwrap());
+        assert!(positions.is_sorted(), "{written}");
+        let reopened = CT_HdrFtr::from_xml(written.as_bytes()).unwrap();
+        assert_eq!(
+            reopened.read_table(0, first_cell_text).unwrap().as_deref(),
+            Some("cell edited")
+        );
     }
 
     /// A raw child was captured with trimmed text events, so the page-number

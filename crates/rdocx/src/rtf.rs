@@ -1200,7 +1200,7 @@ impl<'a> RtfWriter<'a> {
                 self.diagnose(location, "symbol character was dropped during RTF export");
                 Ok(())
             }
-            RunContent::Break(BreakType::Line) => {
+            RunContent::Break(BreakType::Line | BreakType::TextWrapping(_)) => {
                 write!(output, "\\line ")?;
                 Ok(())
             }

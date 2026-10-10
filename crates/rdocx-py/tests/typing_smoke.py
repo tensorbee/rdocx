@@ -371,3 +371,55 @@ def scoped_replacement_signatures_cover_paragraph_cell_and_story_item(document: 
 def whole_story_setter_signatures(document: Document) -> None:
     assert_type(document.set_header(text="header"), None)
     assert_type(document.set_footer(text="footer"), None)
+
+
+def headers_footers_notes_and_page_setup(document: Document) -> None:
+    from rdocx import (
+        WD_ALIGN_PARAGRAPH,
+        WD_BREAK,
+        HeaderFooter,
+        HeaderFooterCell,
+        HeaderFooterTable,
+        Pt,
+        Settings,
+        Twips,
+    )
+
+    section = document.sections[0]
+    footer: HeaderFooter = section.footer
+    for header in (
+        section.header,
+        section.first_page_header,
+        section.first_page_footer,
+        section.even_page_header,
+        section.even_page_footer,
+    ):
+        assert_type(header, HeaderFooter)
+    assert_type(footer.is_linked_to_previous, bool)
+    footer.is_linked_to_previous = False
+    assert_type(footer.kind, Literal["header", "footer"])
+    assert_type(footer.paragraphs, list[Paragraph])
+    paragraph: Paragraph = footer.add_paragraph("text", style="Footer")
+    page: Paragraph = footer.add_page_number(alignment=WD_ALIGN_PARAGRAPH.RIGHT)
+    table: HeaderFooterTable = footer.add_table(1, 3, Inches(6))
+    cell: HeaderFooterCell = table.cell(0, 1)
+    cell.text = "Center"
+    assert_type(cell.paragraphs, list[Paragraph])
+    assert_type(footer.tables, list[HeaderFooterTable])
+    section.different_first_page_header_footer = True
+    assert_type(section.different_first_page_header_footer, bool)
+    settings: Settings = document.settings
+    settings.odd_and_even_pages_header_footer = True
+    paragraph.runs[0].add_break(WD_BREAK.PAGE)
+    page.runs[0].add_break()
+    note: int = document.add_footnote(paragraph, "note")
+    document.add_endnote(paragraph.runs[0], "note")
+    document.remove_footnote(note)
+    document.set_note_numbering("footnote", number_format="lowerRoman", restart="eachPage")
+    document.page_color = RGBColor(0xFF, 0xF2, 0xCC)
+    document.page_color = "FFF2CC"
+    assert_type(document.page_color, RGBColor | None)
+    document.set_text_watermark("DRAFT")
+    document.set_page_borders(0, "single", width=Pt(1), color="FF0000", space=Pt(24))
+    document.update_section(0, page_width=Twips(12240))
+    document.set_note_numbering("footnote", restart="never")  # type: ignore[arg-type]

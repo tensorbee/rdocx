@@ -22,6 +22,9 @@ pub enum PathSeg {
     Para(usize),
     /// A run in a paragraph.
     Run(usize),
+    /// A story outside the main flow, such as a Word header or footer. The
+    /// binding that captures the path defines what the number names.
+    Story(usize),
 }
 
 /// An index path paired with the document revision at which it was captured.

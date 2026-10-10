@@ -1,8 +1,8 @@
 """Python bindings for rdocx."""
 
 from .enum.table import WD_CELL_VERTICAL_ALIGNMENT, WD_ROW_HEIGHT_RULE, WD_TABLE_ALIGNMENT
-from .enum.text import WD_ALIGN_PARAGRAPH, WD_UNDERLINE
-from .shared import Cm, Emu, Inches, Length, Mm, Pt, RGBColor
+from .enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK, WD_UNDERLINE
+from .shared import Cm, Emu, Inches, Length, Mm, Pt, RGBColor, Twips
 
 
 class RdocxError(Exception):
@@ -56,6 +56,10 @@ from ._rdocx import (
     CoreProperties,
     Document,
     Font,
+    HeaderFooter,
+    HeaderFooterCell,
+    HeaderFooterRow,
+    HeaderFooterTable,
     HeaderFooterVariant,
     Hyperlink,
     LayoutFragment,
@@ -73,6 +77,7 @@ from ._rdocx import (
     RunPosition,
     RunRange,
     Section,
+    Settings,
     Story,
     StoryItem,
     StoryRunPosition,
@@ -99,6 +104,10 @@ __all__ = [
     "Document",
     "Emu",
     "Font",
+    "HeaderFooter",
+    "HeaderFooterCell",
+    "HeaderFooterRow",
+    "HeaderFooterTable",
     "HeaderFooterVariant",
     "Hyperlink",
     "Inches",
@@ -125,6 +134,7 @@ __all__ = [
     "RunPosition",
     "RunRange",
     "Section",
+    "Settings",
     "StaleElementError",
     "Story",
     "StoryItem",
@@ -136,7 +146,9 @@ __all__ = [
     "Table",
     "TableCollection",
     "TocRebuildReport",
+    "Twips",
     "WD_ALIGN_PARAGRAPH",
+    "WD_BREAK",
     "WD_CELL_VERTICAL_ALIGNMENT",
     "WD_ROW_HEIGHT_RULE",
     "WD_TABLE_ALIGNMENT",

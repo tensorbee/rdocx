@@ -311,7 +311,7 @@ fn emit_run(
                 out.push_str("&emsp;");
             }
             RunContent::Break(bt) => match bt {
-                BreakType::Line => out.push_str("<br>"),
+                BreakType::Line | BreakType::TextWrapping(_) => out.push_str("<br>"),
                 BreakType::Page => out.push_str("<hr>"),
                 BreakType::Column => out.push_str("<br>"),
             },

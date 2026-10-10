@@ -19,9 +19,9 @@ _Margins = tuple[
 __all__ = [
     "Bookmark", "BoundingBox", "Cell", "CellCollection", "CellParagraphCollection",
     "Comment", "ComparisonDiagnostic", "ContentFragment", "CoreProperties", "Document", "Font",
-    "HeaderFooterVariant", "Hyperlink", "LayoutBackedFieldUpdateReport", "LayoutFragment", "LayoutPage", "ListLevel", "Paragraph", "ParagraphCollection",
+    "HeaderFooter", "HeaderFooterCell", "HeaderFooterRow", "HeaderFooterTable", "HeaderFooterVariant", "Hyperlink", "LayoutBackedFieldUpdateReport", "LayoutFragment", "LayoutPage", "ListLevel", "Paragraph", "ParagraphCollection",
     "ParagraphFormat", "Revision", "Row", "RowCollection", "Run", "RunCollection", "RunPosition",
-    "RunRange", "Section", "Story", "StoryItem", "StoryRunPosition", "StoryRunRange", "Style",
+    "RunRange", "Section", "Settings", "Story", "StoryItem", "StoryRunPosition", "StoryRunRange", "Style",
     "SvgDiagnostic", "SvgRenderResult", "Table", "TableCollection", "TocRebuildReport",
 ]
 
@@ -449,6 +449,118 @@ class Section:
     def different_first_page(self) -> bool | None: ...
     @property
     def break_type(self) -> str | None: ...
+    # The page geometry above is a snapshot taken when the section was read.
+    # Change it with Document.update_section. The members below act on the
+    # document a section read from Document.sections belongs to.
+    @property
+    def header(self) -> HeaderFooter: ...
+    @property
+    def footer(self) -> HeaderFooter: ...
+    @property
+    def first_page_header(self) -> HeaderFooter: ...
+    @property
+    def first_page_footer(self) -> HeaderFooter: ...
+    @property
+    def even_page_header(self) -> HeaderFooter: ...
+    @property
+    def even_page_footer(self) -> HeaderFooter: ...
+    @property
+    def different_first_page_header_footer(self) -> bool:
+        """Whether the first page shows the first-page header and footer.
+
+        Read from and written to the document, unlike the snapshot fields.
+        """
+    @different_first_page_header_footer.setter
+    def different_first_page_header_footer(self, value: bool) -> None: ...
+
+
+@_final
+class HeaderFooter:
+    """A section's header or footer, python-docx's ``section.header``.
+
+    The handle names a section and a variant, so it stays valid across edits.
+    Reading ``paragraphs`` or adding content gives the story a definition when
+    no section up to this one has one, as python-docx does. Writing into a
+    linked story edits the earlier section's story. Writing into a first-page
+    story turns the section's different first page on, and writing into an
+    even-page story turns ``Settings.odd_and_even_pages_header_footer`` on.
+    """
+
+    def __new__(cls, *, _private: _Never) -> HeaderFooter: ...
+    @property
+    def kind(self) -> _Literal["header", "footer"]: ...
+    @property
+    def variant(self) -> _Literal["default", "first", "even"]: ...
+    @property
+    def section_index(self) -> int: ...
+    @property
+    def is_linked_to_previous(self) -> bool: ...
+    @is_linked_to_previous.setter
+    def is_linked_to_previous(self, value: bool) -> None: ...
+    @property
+    def paragraphs(self) -> list[Paragraph]: ...
+    def add_paragraph(self, text: str = "", style: str | None = None) -> Paragraph: ...
+    def add_table(
+        self, rows: int, cols: int, width: int | None = None
+    ) -> HeaderFooterTable: ...
+    @property
+    def tables(self) -> list[HeaderFooterTable]: ...
+    def add_page_number(
+        self,
+        template: str = "Page {PAGE} of {NUMPAGES}",
+        *,
+        alignment: _text.WD_ALIGN_PARAGRAPH | int | None = _text.WD_ALIGN_PARAGRAPH.CENTER,
+    ) -> Paragraph:
+        """Append a paragraph showing the page number, such as "Page 3 of 7".
+
+        ``template`` mixes literal text with ``{PAGE}``, ``{NUMPAGES}`` and
+        ``{SECTIONPAGES}`` fields that Word, Google Docs and rdocx fill in on
+        every page.
+        """
+
+
+@_final
+class HeaderFooterTable:
+    def __new__(cls, *, _private: _Never) -> HeaderFooterTable: ...
+    @property
+    def row_count(self) -> int: ...
+    @property
+    def column_count(self) -> int: ...
+    @property
+    def rows(self) -> list[HeaderFooterRow]: ...
+    @property
+    def style(self) -> str | None: ...
+    @style.setter
+    def style(self, value: str) -> None: ...
+    def cell(self, row: int, col: int) -> HeaderFooterCell: ...
+
+
+@_final
+class HeaderFooterRow:
+    def __new__(cls, *, _private: _Never) -> HeaderFooterRow: ...
+    @property
+    def cells(self) -> list[HeaderFooterCell]: ...
+
+
+@_final
+class HeaderFooterCell:
+    def __new__(cls, *, _private: _Never) -> HeaderFooterCell: ...
+    @property
+    def text(self) -> str: ...
+    @text.setter
+    def text(self, value: str) -> None: ...
+    @property
+    def paragraphs(self) -> list[Paragraph]: ...
+    def add_paragraph(self, text: str = "") -> Paragraph: ...
+
+
+@_final
+class Settings:
+    def __new__(cls, *, _private: _Never) -> Settings: ...
+    @property
+    def odd_and_even_pages_header_footer(self) -> bool: ...
+    @odd_and_even_pages_header_footer.setter
+    def odd_and_even_pages_header_footer(self, value: bool) -> None: ...
 
 
 @_final
@@ -690,7 +802,15 @@ class Document:
         break_type: _Literal[
             "nextPage", "continuous", "evenPage", "oddPage", "nextColumn"
         ] | None = None,
-    ) -> Section: ...
+    ) -> Section:
+        """Change one section's page setup and return its new snapshot.
+
+        Lengths are EMU: pass a Length such as ``Inches(8.5)``, ``Pt(612)``,
+        ``Twips(12240)`` or ``Cm(21)``. A bare int is read as EMU, so a page
+        under a tenth of an inch, the mark of a twips or points value, raises
+        ``ValueError``. Switching the orientation swaps the width and height
+        to match it.
+        """
     def insert_section(self, index: int) -> None: ...
     def remove_section(self, index: int) -> None: ...
     @property
@@ -890,6 +1010,46 @@ class Document:
     ) -> None: ...
     def clone_content(self, source: Paragraph | Table, destination: int) -> None: ...
     def move_content(self, source: Paragraph | Table, destination: int) -> None: ...
+    @property
+    def settings(self) -> Settings: ...
+    def add_footnote(self, target: Paragraph | Run, text: str) -> int:
+        """Add a footnote whose reference ends a body paragraph and return its ID.
+
+        ``target`` is the paragraph, or its last run.
+        """
+    def add_endnote(self, target: Paragraph | Run, text: str) -> int: ...
+    def remove_footnote(self, id: int) -> None: ...
+    def remove_endnote(self, id: int) -> None: ...
+    def set_note_numbering(
+        self,
+        kind: _Literal["footnote", "endnote"],
+        *,
+        number_format: _Literal[
+            "decimal", "upperRoman", "lowerRoman", "upperLetter", "lowerLetter"
+        ] = "decimal",
+        start: int = 1,
+        restart: _Literal["continuous", "eachSect", "eachPage"] = "continuous",
+        placement: _Literal["pageBottom", "beneathText", "sectEnd", "docEnd"] | None = None,
+        section: int | None = None,
+    ) -> None: ...
+    @property
+    def page_color(self) -> _shared.RGBColor | None: ...
+    @page_color.setter
+    def page_color(self, value: _shared.RGBColor | str | None) -> None: ...
+    def set_text_watermark(self, text: str) -> None: ...
+    def set_image_watermark(
+        self, data: bytes, filename: str, width: int, height: int
+    ) -> None: ...
+    def set_page_borders(
+        self,
+        section: int,
+        style: str | None = "single",
+        *,
+        width: int = 6350,
+        color: _shared.RGBColor | str | None = None,
+        space: int = 304800,
+        offset_from: _Literal["page", "text"] = "page",
+    ) -> None: ...
 
 
 @_final
@@ -956,6 +1116,7 @@ class Run:
     def style_id(self, value: str | None) -> None: ...
     def add_tab(self) -> None: ...
     def add_field(self, instruction: str, cached_result: str = "") -> None: ...
+    def add_break(self, break_type: _text.WD_BREAK | int = _text.WD_BREAK.LINE) -> None: ...
 
 
 @_final

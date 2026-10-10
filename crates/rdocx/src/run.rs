@@ -6,6 +6,7 @@ use rdocx_oxml::properties::{
     CT_EastAsianLayout, CT_FitText, CT_RPr, CT_Shd, ST_Em, ST_TextEffect,
 };
 use rdocx_oxml::shared::{ST_HighlightColor, ST_Underline};
+pub use rdocx_oxml::text::BreakClear;
 use rdocx_oxml::text::{BreakType, CT_R, CT_Text, Field, RunContent, SpecialCharacter};
 use rdocx_oxml::units::{HalfPoint, Twips};
 
@@ -20,6 +21,9 @@ pub enum BreakKind {
     Page,
     /// A column break.
     Column,
+    /// A text-wrapping line break that clears the floating objects on one
+    /// side, Word's `w:br w:type="textWrapping" w:clear`.
+    TextWrapping(BreakClear),
 }
 
 /// Semantic kind of drawing exposed by the reader facade.
@@ -490,6 +494,7 @@ impl<'a> Run<'a> {
             BreakKind::Line => BreakType::Line,
             BreakKind::Page => BreakType::Page,
             BreakKind::Column => BreakType::Column,
+            BreakKind::TextWrapping(clear) => BreakType::TextWrapping(clear),
         };
         self.inner.append_content(RunContent::Break(kind));
     }
@@ -1188,6 +1193,7 @@ impl<'a> RunRef<'a> {
                         BreakType::Line => BreakKind::Line,
                         BreakType::Page => BreakKind::Page,
                         BreakType::Column => BreakKind::Column,
+                        BreakType::TextWrapping(clear) => BreakKind::TextWrapping(*clear),
                     }),
                     RunContent::Drawing(drawing) => {
                         RunItemRef::Drawing(DrawingRef { inner: drawing })

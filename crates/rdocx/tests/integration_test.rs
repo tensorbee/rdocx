@@ -5737,7 +5737,9 @@ fn section_aware_watermark_pages_select_the_requested_variant() {
             rdocx::TextWatermarkOptions::default(),
         )
         .unwrap();
-    assert!(!document.even_and_odd_headers());
+    // Giving the section an even-page header turns the setting on, since
+    // Word and Google Docs ignore the even-page variant without it.
+    assert!(document.even_and_odd_headers());
     document
         .section_mut(0)
         .unwrap()
@@ -22495,7 +22497,8 @@ fn rich_footnotes_match_word_after_create_edit_reorder_and_remove() {
     assert!(notes.contains("rich continuation"));
     document.remove_footnote(first).unwrap();
     let mut reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
-    assert_eq!(reopened.footnotes(), vec![(second, "second".to_owned())]);
+    // A created note starts with its mark and a space, as Word writes it.
+    assert_eq!(reopened.footnotes(), vec![(second, " second".to_owned())]);
     let package =
         OpcPackage::from_reader(std::io::Cursor::new(reopened.to_bytes().unwrap())).unwrap();
     let body = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
@@ -23260,7 +23263,9 @@ fn removing_note_policy_keeps_special_record_selection() {
     let properties = document
         .note_properties(rdocx::NoteFamily::Footnote)
         .unwrap();
-    assert_eq!(properties.special_references, vec![id]);
+    // The first footnote also wrote Word's continuation separator, which
+    // keeps its own reference.
+    assert_eq!(properties.special_references, vec![id, 0]);
     assert_eq!(properties.num_fmt, None);
     let layout = document.layout_deterministic().unwrap();
     let mut found = false;
@@ -24315,5 +24320,292 @@ fn issue_282_rtf_cell_import_keeps_empty_and_formatted_paragraphs() {
             assert!(rtf.contains("\\b "), "{rtf}");
             assert!(rtf.contains("\\i "), "{rtf}");
         }
+    }
+}
+
+/// #304: section geometry, even-page stories, page colour and header and
+/// footer content edited in place.
+mod issue_304_stories_and_pages {
+    use super::*;
+    use rdocx::{HeaderFooterKind, HeaderFooterParagraph};
+    use rdocx_oxml::units::Twips;
+
+    fn pdf_pages(document: &Document) -> Vec<String> {
+        let pdf = document.to_pdf_deterministic().unwrap();
+        let source = std::env::temp_dir().join(format!(
+            "issue-304-{}-{:?}.pdf",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&source, pdf).unwrap();
+        let output = std::process::Command::new("pdftotext")
+            .arg("-layout")
+            .arg(&source)
+            .arg("-")
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&source);
+        assert!(output.status.success());
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .trim_end_matches('\u{c}')
+            .split('\u{c}')
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn settings_xml(document: &mut Document) -> String {
+        let bytes = document.to_bytes().unwrap();
+        let package = OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+        package
+            .get_part("/word/settings.xml")
+            .map(|xml| String::from_utf8(xml.to_vec()).unwrap())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn an_inserted_section_takes_the_page_geometry_of_its_neighbour() {
+        let mut document = Document::new();
+        document.add_paragraph("first");
+        let mut section = document.section_mut(0).unwrap();
+        section
+            .set_page_size(Length::twips(11906), Length::twips(16838))
+            .unwrap();
+        section
+            .set_margins(
+                Length::twips(1000),
+                Length::twips(1100),
+                Length::twips(1200),
+                Length::twips(1300),
+            )
+            .unwrap();
+        section
+            .set_header_footer_distance(Length::twips(500), Length::twips(600))
+            .unwrap();
+        section.set_columns(2, Length::twips(360)).unwrap();
+
+        // Appended after the last section, ahead of the first, and between two.
+        document.insert_section(1).unwrap();
+        document.insert_section(0).unwrap();
+        document.insert_section(1).unwrap();
+        assert_eq!(document.section_count(), 4);
+        for section in document.sections() {
+            let properties = section.properties();
+            assert_eq!(
+                section.page_size(),
+                Some((Length::twips(11906), Length::twips(16838))),
+                "section {}",
+                section.ordinal()
+            );
+            assert_eq!(
+                (
+                    properties.margin_top,
+                    properties.margin_right,
+                    properties.margin_bottom,
+                    properties.margin_left,
+                    properties.header_distance,
+                    properties.footer_distance,
+                ),
+                (
+                    Some(Twips(1000)),
+                    Some(Twips(1100)),
+                    Some(Twips(1200)),
+                    Some(Twips(1300)),
+                    Some(Twips(500)),
+                    Some(Twips(600)),
+                ),
+                "section {}",
+                section.ordinal()
+            );
+            // Word copies the columns, page borders and grid too.
+            assert_eq!(section.columns(), Some((2, Length::twips(360))));
+        }
+        let xml = String::from_utf8(document_xml(&mut document)).unwrap();
+        assert_eq!(xml.matches(r#"<w:pgSz w:w="11906" w:h="16838""#).count(), 4);
+    }
+
+    #[test]
+    fn switching_a_new_section_to_landscape_writes_and_lays_out_a_swapped_page() {
+        let mut document = Document::new();
+        document.add_paragraph("portrait");
+        document.insert_section(1).unwrap();
+        document
+            .section_mut(1)
+            .unwrap()
+            .set_orientation(ST_PageOrientation::Landscape);
+        document.add_paragraph("landscape");
+
+        let xml = compact_body_xml(&mut document);
+        assert!(
+            xml.contains(r#"<w:pgSz w:w="15840" w:h="12240" w:orient="landscape"/>"#),
+            "{xml}"
+        );
+        let first = document.layout_page(0).unwrap().unwrap();
+        let second = document.layout_page(1).unwrap().unwrap();
+        assert_eq!((first.width, first.height), (612.0, 792.0));
+        assert_eq!((second.width, second.height), (792.0, 612.0));
+    }
+
+    #[test]
+    fn orientation_completes_a_page_size_without_dimensions() {
+        let mut document = Document::new();
+        let mut section = document.section_mut(0).unwrap();
+        let properties = section.properties_mut();
+        properties.page_width = None;
+        properties.page_height = None;
+        section.set_orientation(ST_PageOrientation::Landscape);
+        assert_eq!(
+            section.page_size(),
+            Some((Length::twips(15840), Length::twips(12240)))
+        );
+    }
+
+    #[test]
+    fn an_even_page_story_turns_on_odd_and_even_pages_and_shows_on_even_pages() {
+        let mut document = Document::new();
+        for index in 0..120 {
+            document.add_paragraph(&format!(
+                "Body paragraph {index} long enough to fill pages."
+            ));
+        }
+        let odd = document
+            .create_section_story(0, HeaderFooterKind::Footer, HdrFtrType::Default)
+            .unwrap();
+        document
+            .add_header_footer_paragraph(&odd, "ODD FOOTER")
+            .unwrap();
+        assert!(!document.even_and_odd_headers());
+        let even = document
+            .create_section_story(0, HeaderFooterKind::Footer, HdrFtrType::Even)
+            .unwrap();
+        document
+            .add_header_footer_paragraph(&even, "EVEN FOOTER")
+            .unwrap();
+        assert!(document.even_and_odd_headers());
+        assert!(settings_xml(&mut document).contains("<w:evenAndOddHeaders/>"));
+
+        let pages = pdf_pages(&document);
+        assert!(pages.len() >= 2);
+        assert!(pages[0].contains("ODD FOOTER") && !pages[0].contains("EVEN FOOTER"));
+        assert!(pages[1].contains("EVEN FOOTER") && !pages[1].contains("ODD FOOTER"));
+    }
+
+    #[test]
+    fn header_and_footer_paragraphs_and_tables_are_edited_in_place() {
+        let mut document = Document::new();
+        document.add_paragraph("body");
+        let story = document
+            .create_section_story(0, HeaderFooterKind::Footer, HdrFtrType::Default)
+            .unwrap();
+        assert_eq!(document.header_footer_paragraph_count(&story).unwrap(), 0);
+        let index = document
+            .add_header_footer_paragraph(&story, "Page ")
+            .unwrap();
+        let at = HeaderFooterParagraph::Direct(index);
+        document
+            .edit_header_footer_paragraph(&story, at, |paragraph| {
+                paragraph.set_alignment(Alignment::Center);
+                paragraph.add_run("").add_field("PAGE", "1").unwrap();
+                paragraph.add_run(" of ");
+                paragraph.add_run("").add_field("NUMPAGES", "1").unwrap();
+            })
+            .unwrap()
+            .unwrap();
+        let table = document
+            .add_header_footer_table(&story, 1, 2, Some(Length::inches(6.0)))
+            .unwrap();
+        document
+            .edit_header_footer_table(&story, table, |table| {
+                table.cell(0, 1).unwrap().set_text("Right");
+            })
+            .unwrap()
+            .unwrap();
+        let cell = HeaderFooterParagraph::Cell {
+            table,
+            row: 0,
+            cell: 0,
+            paragraph: 0,
+        };
+        document
+            .edit_header_footer_paragraph(&story, cell, |paragraph| {
+                paragraph.add_run("Left").bold(true);
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            document
+                .try_replace_text_in_header_footer_paragraph(
+                    &story,
+                    cell,
+                    "Left",
+                    "Gauche",
+                    Some(1)
+                )
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            1
+        );
+        let mismatch = document
+            .try_replace_text_in_header_footer_paragraph(&story, at, "Page", "P.", Some(2))
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!((mismatch.expected, mismatch.found), (2, 1));
+        assert!(
+            document
+                .read_header_footer_paragraph(&story, HeaderFooterParagraph::Direct(5), |_| ())
+                .unwrap()
+                .is_none()
+        );
+
+        let bytes = document.to_bytes().unwrap();
+        let reopened = Document::from_bytes(&bytes).unwrap();
+        let story = reopened
+            .section_story(0, HeaderFooterKind::Footer, HdrFtrType::Default)
+            .unwrap()
+            .unwrap()
+            .story()
+            .clone();
+        assert_eq!(reopened.header_footer_table_count(&story).unwrap(), 1);
+        let texts = reopened
+            .read_header_footer_table(&story, 0, |table| {
+                (
+                    table.cell(0, 0).unwrap().text(),
+                    table.cell(0, 1).unwrap().text(),
+                )
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(texts, ("Gauche".to_owned(), "Right".to_owned()));
+        let alignment = reopened
+            .read_header_footer_paragraph(&story, at, |paragraph| paragraph.alignment())
+            .unwrap()
+            .unwrap();
+        assert_eq!(alignment, Some(Alignment::Center));
+        let pages = pdf_pages(&reopened);
+        assert!(pages[0].contains("Page 1 of 1"), "{}", pages[0]);
+        assert!(pages[0].contains("Gauche") && pages[0].contains("Right"));
+    }
+
+    #[test]
+    fn page_colour_writes_the_background_and_its_display_setting() {
+        let mut document = Document::new();
+        document.add_paragraph("coloured");
+        assert_eq!(document.page_color(), None);
+        document.set_page_color(Some("fff2cc")).unwrap();
+        assert_eq!(document.page_color().as_deref(), Some("FFF2CC"));
+        let xml = String::from_utf8(document_xml(&mut document)).unwrap();
+        assert!(xml.contains(r#"<w:background w:color="FFF2CC"/>"#), "{xml}");
+        assert!(settings_xml(&mut document).contains("<w:displayBackgroundShape/>"));
+        let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.page_color().as_deref(), Some("FFF2CC"));
+
+        assert!(document.set_page_color(Some("yellow")).is_err());
+        document.set_page_color(None).unwrap();
+        assert_eq!(document.page_color(), None);
+        let xml = String::from_utf8(document_xml(&mut document)).unwrap();
+        assert!(!xml.contains("w:background"));
+        assert!(!settings_xml(&mut document).contains("displayBackgroundShape"));
     }
 }

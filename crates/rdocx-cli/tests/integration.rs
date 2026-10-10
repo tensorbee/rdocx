@@ -1881,6 +1881,41 @@ fn validate_exit_status_is_a_verdict() {
     );
 }
 
+/// #304: a page size without dimensions leaves each consumer to guess the
+/// page, and an even-page story without `w:evenAndOddHeaders` never shows.
+#[test]
+fn validate_reports_a_page_size_without_dimensions_and_an_ignored_even_story() {
+    let temp = TempWorkspace::new("validate-sections");
+    let path = temp.path.join("sections.docx");
+    let mut document = Document::new();
+    document.add_paragraph("body");
+    document
+        .create_section_story(0, rdocx::HeaderFooterKind::Footer, rdocx::HdrFtrType::Even)
+        .unwrap();
+    document.set_even_and_odd_headers(false).unwrap();
+    let mut section = document.section_mut(0).unwrap();
+    let properties = section.properties_mut();
+    properties.page_width = None;
+    properties.page_height = None;
+    properties.orientation = Some(rdocx_oxml::shared::ST_PageOrientation::Landscape);
+    document.save(&path).unwrap();
+
+    // Both findings are schema-valid, so they warn without failing.
+    let output = cli(&["validate", path_text(&path)]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("section 0 has a w:pgSz without both w:w and w:h"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "section 0 has an even-page footer that is ignored because w:evenAndOddHeaders is off"
+        ),
+        "{stdout}"
+    );
+}
+
 /// #160: rdocx 0.14 rewrote an empty comments root without its `w14`
 /// declaration while `mc:Ignorable` still listed `w14`, and validate passed
 /// the part.

@@ -512,6 +512,7 @@ pub struct CT_Settings {
     zoom: Option<DocumentZoom>,
     remove_personal_information: Option<bool>,
     remove_date_and_time: Option<bool>,
+    display_background_shape: Option<bool>,
     mirror_margins: Option<bool>,
     gutter_at_top: Option<bool>,
     proof_state: Option<DocumentProofState>,
@@ -706,6 +707,11 @@ impl CT_Settings {
                 let value = parse_toggle(element, prefixes)?;
                 let total = self.tally.record(&[name], value.is_some());
                 assign(&mut self.remove_date_and_time, value, total);
+            }
+            "displayBackgroundShape" => {
+                let value = parse_toggle(element, prefixes)?;
+                let total = self.tally.record(&[name], value.is_some());
+                assign(&mut self.display_background_shape, value, total);
             }
             "mirrorMargins" => {
                 let value = parse_toggle(element, prefixes)?;
@@ -1148,6 +1154,29 @@ impl CT_Settings {
         }
         let removed = self.remove_date_and_time.take();
         self.finish_removal("removeDateAndTime")?;
+        Ok(removed)
+    }
+
+    /// Return the `w:displayBackgroundShape` toggle, which Word sets with a
+    /// page colour so that the document background shows.
+    pub fn display_background_shape(&self) -> Option<bool> {
+        self.display_background_shape
+    }
+
+    pub fn set_display_background_shape(&mut self, enabled: bool) -> Result<()> {
+        self.display_background_shape = Some(enabled);
+        self.finish_set(
+            "displayBackgroundShape",
+            write_toggle_setting("w:displayBackgroundShape", enabled)?,
+        )
+    }
+
+    pub fn remove_display_background_shape(&mut self) -> Result<Option<bool>> {
+        if !self.begin_removal("displayBackgroundShape")? {
+            return Ok(None);
+        }
+        let removed = self.display_background_shape.take();
+        self.finish_removal("displayBackgroundShape")?;
         Ok(removed)
     }
 
@@ -1972,6 +2001,7 @@ impl CT_Settings {
             && self.zoom.is_none()
             && self.remove_personal_information.is_none()
             && self.remove_date_and_time.is_none()
+            && self.display_background_shape.is_none()
             && self.mirror_margins.is_none()
             && self.gutter_at_top.is_none()
             && self.proof_state.is_none()
@@ -2033,6 +2063,7 @@ impl CT_Settings {
                 self.remove_personal_information,
             ),
             ("w:removeDateAndTime", self.remove_date_and_time),
+            ("w:displayBackgroundShape", self.display_background_shape),
             ("w:mirrorMargins", self.mirror_margins),
             ("w:gutterAtTop", self.gutter_at_top),
         ] {
@@ -2575,6 +2606,7 @@ pub const SUPPORTED_SETTINGS: &[&str] = &[
     "zoom",
     "removePersonalInformation",
     "removeDateAndTime",
+    "displayBackgroundShape",
     "mirrorMargins",
     "gutterAtTop",
     "proofState",
@@ -3501,6 +3533,7 @@ mod tests {
                 r#"<w:zoom w:val="fullPage" w:percent="120"/>"#,
                 r#"<w:removePersonalInformation/>"#,
                 r#"<w:removeDateAndTime w:val="false"/>"#,
+                r#"<w:displayBackgroundShape/>"#,
                 r#"<w:mirrorMargins/>"#,
                 r#"<w:gutterAtTop/>"#,
                 r#"<w:proofState w:spelling="clean" w:grammar="dirty"/>"#,
@@ -3839,7 +3872,7 @@ mod tests {
             assert!(!seen.contains(name), "duplicate supported name {name}");
             seen.push(name);
         }
-        assert_eq!(SUPPORTED_SETTINGS.len(), 31);
+        assert_eq!(SUPPORTED_SETTINGS.len(), 32);
 
         let mut cursor = 0usize;
         for name in SUPPORTED_SETTINGS {
@@ -3870,6 +3903,7 @@ mod tests {
         );
         assert_eq!(settings.remove_personal_information(), Some(true));
         assert_eq!(settings.remove_date_and_time(), Some(false));
+        assert_eq!(settings.display_background_shape(), Some(true));
         assert_eq!(settings.mirror_margins(), Some(true));
         assert_eq!(settings.gutter_at_top(), Some(true));
         assert_eq!(

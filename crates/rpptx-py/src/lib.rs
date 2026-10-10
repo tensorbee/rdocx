@@ -79,6 +79,8 @@ pub(crate) fn recovery_hint(path: &ContentPath, suffix: &str) -> String {
                 public_path.push_str(&format!(".text_frame.paragraphs[{index}]"));
             }
             PathSeg::Run(index) => public_path.push_str(&format!(".runs[{index}]")),
+            // Presentation handles never capture a story segment.
+            PathSeg::Story(_) => {}
         }
     }
     if let Some(row) = pending_row {

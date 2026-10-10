@@ -1183,7 +1183,12 @@ and footer distance setters fill every other `w:pgMar` value the section lacks
 with the default that layout already assumes for it, so the written element
 carries all seven attributes `CT_PageMar` requires. `Document` adds
 `section_count`, `sections`, total `section` and `section_mut` lookup, and
-fallible staged `insert_section` and `remove_section` operations. Its older
+fallible staged `insert_section` and `remove_section` operations. An inserted
+section copies the page size, orientation, margins, gutter, header and
+footer distances, page borders, columns and document grid of the section
+before it, or of the section it precedes when it becomes the first one, so
+every section writes a complete `w:pgSz` and `w:pgMar`. Setting an orientation on a section without both page dimensions
+takes the Letter default first, then normalizes it. Its older
 final-section geometry convenience setters remain infallible and unchecked.
 
 Native Rust also exposes non-exhaustive `HeaderFooterKind`, the existing
@@ -1194,7 +1199,9 @@ section and inherited state. `create_section_story`, `link_section_story`,
 `remove_section_story` are staged fallible operations. Rich content remains
 addressed by the returned `StoryId` through the common story API. The facade
 also exposes `even_and_odd_headers` and `set_even_and_odd_headers`, while first
-story creation enables section `titlePg`. These are additive pre-1.0 native
+story creation enables section `titlePg` and giving a section an even story,
+through create, link, replace or remove, enables `w:evenAndOddHeaders` in the
+same staged commit. These are additive pre-1.0 native
 Rust APIs. Python exposes immutable inspection snapshots, the default header
 and footer text setters `Document.set_header` and `Document.set_footer`, and
 `Document.create_section_story`, `link_section_story`, and
@@ -1204,9 +1211,59 @@ kind, and a `default`, `first`, or `even` variant, the names
 name raises `ValueError` and a section index out of range raises `IndexError`,
 both before any change. The native operations publish a reopened package, so
 a successful call advances the revision once, even when the variant already
-had its own story. Rich story content is authored with the typed body
-API and moved with `pop_content` and `insert_content`, which accept story
-coordinates. WASM and CLI gain no corresponding binding surface.
+had its own story. Rich story content is authored in place through the
+`HeaderFooter` handles below, or with the typed body API and moved with
+`pop_content` and `insert_content`, which accept story coordinates. WASM and
+CLI gain no corresponding binding surface.
+
+Native Rust reads and edits header and footer content in place through
+`HeaderFooterParagraph`, a direct paragraph index or a paragraph of one cell of
+a direct table. `header_footer_paragraph_count`, `header_footer_table_count`,
+`read_header_footer_paragraph`, `edit_header_footer_paragraph`,
+`add_header_footer_paragraph`, `add_header_footer_table`,
+`read_header_footer_table`, `edit_header_footer_table` and
+`try_replace_text_in_header_footer_paragraph` take a header or footer `StoryId`
+and hand the body `Paragraph`, `ParagraphRef`, `Table` and `TableRef` facades
+to a closure, then write the part back. `CT_HdrFtr` gains `table_count`,
+`read_table`, `edit_table` and `push_table` for its raw direct tables, which
+keep their source namespaces or refuse the edit. `Document::page_color` and
+`set_page_color` read and write `w:background/@w:color` and the
+`w:displayBackgroundShape` setting. These are additive pre-1.0 native APIs.
+
+Python `Section` snapshots reached through `Document.sections` or returned by
+`update_section` carry python-docx's `header`, `footer`, `first_page_header`,
+`first_page_footer`, `even_page_header` and `even_page_footer`. Each is a
+`HeaderFooter` handle that names a section and a variant and resolves the
+story it shows on every use, so it survives revisions. `paragraphs` and
+`tables` return lists, `add_paragraph(text, style)` and
+`add_table(rows, cols, width)` append, and `is_linked_to_previous` reports and
+switches inheritance. As in python-docx, reading or writing a header without a
+story up to its section gives the first section one, holding one empty
+paragraph, and writing through a linked header edits the earlier story.
+Writing into a first-page story turns the section's title page on, and writing
+into an even story turns `w:evenAndOddHeaders` on. `add_page_number(template)`
+fills the story's lone empty paragraph, or appends one, with centred `PAGE`,
+`NUMPAGES` and `SECTIONPAGES` simple fields. A paragraph a new story holds, a
+paragraph `add_paragraph` appends without a `style` and a page-number paragraph
+take the "Header" or "Footer" paragraph style, found by ID or name, when the
+document defines it. Paragraph, run, font and paragraph-format handles inside a header or
+footer are the body types, with the story slot in their path, and
+`HeaderFooterTable.cell(row, col)` and `rows[i].cells` return a
+`HeaderFooterCell` with `text` and `paragraphs`, and its `style` reads and
+sets the table style by ID or name. A `HeaderFooter` handle and a `Section`
+snapshot record the document's sections when made, so after
+`insert_section` or `remove_section` they raise `StaleElementError` rather
+than reach a renumbered section. Appending paragraphs and tables, or setting a cell's text, moves
+no index and keeps live handles valid. `Section.different_first_page_header_footer`
+reads and writes the document, and setting any other `Section` attribute
+raises `AttributeError` naming the `update_section` keyword.
+`Document.settings.odd_and_even_pages_header_footer` reads and writes
+`w:evenAndOddHeaders`. `Run.add_break` follows python-docx: `WD_BREAK.LINE`,
+`PAGE`, `COLUMN`, and `LINE_CLEAR_LEFT`, `LINE_CLEAR_RIGHT` and
+`LINE_CLEAR_ALL` (alias `TEXT_WRAPPING`) for a `textWrapping` break with its
+`w:clear`. It refuses a page or column break in a header or footer. Native
+`BreakType` and `BreakKind` gain `TextWrapping(BreakClear)`, which keeps
+`w:clear` through a round trip and lays out as a line break.
 
 Native Rust `Document::create_footnote(&ContentLocation, &str)` appends a normal
 footnote and its reference to one direct body paragraph in a staged operation.
@@ -1215,9 +1272,18 @@ to its current checked `StoryId`. `move_footnote_before(i32, i32)` reorders the
 note elements without changing IDs, and `remove_footnote(i32)` removes the note
 and all matching body references together. All four methods are fallible.
 Rich paragraphs, tables, fields, links, pictures, content controls, and
-comments use the common story APIs on the resolved footnote story. This is an
-additive pre-1.0 native API. Python, WASM, and CLI gain no matching authoring
-entry point.
+comments use the common story APIs on the resolved footnote story. A created
+note follows Word: the reference run and the note mark take the
+`FootnoteReference` character style, the note paragraph `FootnoteText`, and a
+space follows the mark. The styles are added when missing, superscript and
+10 point, and a document without note separators gains the separator and
+continuation separator records, IDs -1 and 0, which the settings reference.
+Endnotes do the same with `EndnoteReference` and `EndnoteText`. The renderer
+no longer shrinks a reference run that its style already raises. This is an
+additive pre-1.0 native API. Python `Document.add_footnote(paragraph or last
+run, text)` and `remove_footnote(id)` call it, and refuse a run that is not the
+last of its paragraph and a paragraph outside the body. WASM and CLI gain no
+matching authoring entry point.
 
 Native Rust `Document::create_endnote(&ContentLocation, &str)` stages a normal
 endnote with its reference in a direct body paragraph and returns its stable
@@ -1227,8 +1293,10 @@ IDs. `remove_endnote(i32)` removes a normal endnote and every matching body
 reference together. All four methods are fallible. Endnotes allocate IDs
 independently from footnotes and use the common rich story operations,
 including part-scoped pictures, links, and comment anchors. This is additive
-pre-1.0 native API. Python, WASM, and CLI gain no corresponding authoring
-entry point.
+pre-1.0 native API. Python `Document.add_endnote` and `remove_endnote` call it
+as the footnote calls do, and `Document.set_note_numbering(kind, ...)` sets the
+document or one section's note policy. WASM and CLI gain no corresponding
+authoring entry point.
 
 `CT_SectPr` adds typed page-number start and raw child-position state, while
 `PageFrame` adds `displayed_page_number` beside its physical `page_number`.
@@ -1252,7 +1320,19 @@ footer distances, and 720 twip column spacing. Column partners come from the
 equal-width view the snapshot reports. A one-sided column edit on explicit
 unequal-width tracks raises `ValueError` rather than rewriting those tracks.
 Page size applies before orientation, which then normalizes
-the dimensions as the native setter does.
+the dimensions as the native setter does. A bare int is read as EMU, and
+`Twips`, `Pt`, `Inches`, `Cm`, `Mm` and `Emu` build one. A page width or
+height under a tenth of an inch, the mark of a twips or points int, raises
+`ValueError` naming the Length constructors before any change, and so does a
+margin, gutter, column gap or header or footer distance above zero but under
+a hundredth of an inch.
+`Document.page_color` takes an `RGBColor`, six hexadecimal digits with or
+without `#`, or `None`, and a border `color` also takes `auto`. Any other
+string raises `ValueError`.
+`Document.set_text_watermark`, `set_image_watermark` and
+`set_page_borders(section, style, width, color, space, offset_from)` call the
+native operations, the last refusing a width outside a quarter point to twelve
+points and a space over 31 points.
 The whole call is atomic: a name or partner problem raises before any change,
 and a value a native setter rejects restores the section. Section edits move
 no content, so they keep live handles valid and do not advance the revision.

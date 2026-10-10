@@ -1074,7 +1074,7 @@ fn restore_scoped_container_attributes(source: &[u8], rewritten: &[u8]) -> crate
 /// left to the part must not be one that `source` declares with a namespace
 /// the part does not bind it to. Otherwise the prefix would be unbound, or
 /// name another namespace, and this returns `None`.
-fn with_source_namespaces(
+pub(crate) fn with_source_namespaces(
     source: &[u8],
     rewritten: &[u8],
     start_bindings: &[(String, String)],

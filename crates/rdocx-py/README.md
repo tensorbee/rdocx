@@ -45,6 +45,14 @@ with open("report.pdf", "wb") as output:
 - Paragraphs, runs, fonts, tables, rows, cells, sections, and styles.
 - Rich per-section headers and footers, related stories, and hyperlinks
   resolved, retargeted, or removed in any story.
+- python-docx's `section.header`, `section.footer`, `first_page_header` and
+  `even_page_header` with live paragraphs, runs, tables and
+  `is_linked_to_previous`, `different_first_page_header_footer`,
+  `document.settings.odd_and_even_pages_header_footer`, and a
+  `footer.add_page_number()` helper for "Page X of Y".
+- Footnotes and endnotes added after a body paragraph, removed, and numbered,
+  page and column breaks with `Run.add_break(WD_BREAK.PAGE)`, page colour,
+  text and picture watermarks, and page borders.
 - Paragraph text replacement that keeps paragraph formatting, comments, and
   bookmarks.
 - Counted literal replacement with `Paragraph.replace_text`, `Cell.replace_text`
@@ -106,6 +114,34 @@ document = Document("template.docx")
 document.add_paragraph("Approved")
 document.save("approved.docx")
 ```
+
+## Headers, footers and page setup
+
+Section lengths are EMU. Pass a `Length` such as `Inches(1)`, `Pt(12)`,
+`Cm(2)` or `Twips(1440)`. A bare int is read as EMU, so a page width that is
+really twips raises `ValueError` instead of writing a 26-twip page.
+
+```python
+from rdocx import Document, Inches, WD_BREAK
+
+document = Document()
+section = document.sections[0]
+section.header.paragraphs[0].text = "Quarterly report"
+section.footer.add_page_number("Page {PAGE} of {NUMPAGES}")
+paragraph = document.add_paragraph("Results")
+document.add_footnote(paragraph, "Audited figures.")
+document.paragraphs[0].runs[0].add_break(WD_BREAK.PAGE)
+document.insert_section(1)
+document.update_section(1, orientation="landscape", margin_left=Inches(1))
+document.save("report.docx")
+```
+
+A header or footer handle names its section and variant. Writing into a
+linked one edits the earlier section's story, as python-docx does. Writing
+into a first-page story turns the section's different first page on, and
+writing into an even-page story turns odd and even pages on, since Word and
+Google Docs ignore those stories otherwise. A new section takes the page size,
+margins and header and footer distances of the section before it.
 
 ## Package XML escape hatch
 

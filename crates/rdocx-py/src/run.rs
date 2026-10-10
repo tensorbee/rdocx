@@ -49,6 +49,10 @@ impl PyRun {
         path_indices(&self.path)
     }
 
+    pub(crate) fn belongs_to(&self, py: Python<'_>, document: &Py<PyDocument>) -> bool {
+        self.document.bind(py).is(document.bind(py))
+    }
+
     /// Apply one edit to this run where it lives, in the body or in a cell.
     fn edit(&self, py: Python<'_>, edit: impl FnOnce(&mut rdocx::run::Run<'_>)) -> PyResult<()> {
         let (location, _) = self.validate(py)?;
@@ -76,6 +80,12 @@ impl PyRun {
                     .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?
                     .edit_run(&self.run_path, edit)
             }
+            ParagraphLocation::Story { slot, at } => {
+                crate::story::edit_paragraph(py, &mut document, slot, at, |paragraph| {
+                    paragraph.edit_run(&self.run_path, edit)
+                })?
+                .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?
+            }
         }
         .map_err(|error| crate::rdocx_to_pyerr(py, error))
     }
@@ -102,6 +112,12 @@ impl PyRun {
                 let paragraph = cell.paragraph(paragraph)?;
                 paragraph.run(run_index).map(|run| run.text())
             }),
+            ParagraphLocation::Story { slot, at } => {
+                crate::story::read_paragraph(py, &document, slot, at, |paragraph| {
+                    paragraph.run(run_index).map(|run| run.text())
+                })?
+                .flatten()
+            }
         }
         .ok_or_else(|| PyIndexError::new_err("run index out of range"))
     }
@@ -115,6 +131,18 @@ impl PyRun {
     // handles stay valid.
     fn add_tab(&self, py: Python<'_>) -> PyResult<()> {
         self.edit(py, |run| run.add_tab())
+    }
+
+    /// Append a break inside this run, as python-docx `Run.add_break` does:
+    /// `WD_BREAK.LINE` (the default), `PAGE`, `COLUMN`, or a text-wrapping
+    /// `LINE_CLEAR_LEFT`, `LINE_CLEAR_RIGHT` or `LINE_CLEAR_ALL` break.
+    /// No run index moves, so live handles stay valid.
+    #[pyo3(signature = (break_type = 6))]
+    fn add_break(&self, py: Python<'_>, break_type: i32) -> PyResult<()> {
+        let kind = crate::story::break_kind(break_type)?;
+        let (location, _) = self.validate(py)?;
+        crate::story::check_break_location(location, kind)?;
+        self.edit(py, |run| run.add_break(kind))
     }
 
     #[pyo3(signature = (instruction, cached_result = ""))]
@@ -154,6 +182,12 @@ impl PyRun {
                 cell.paragraph_mut(paragraph)
                     .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?
                     .remove_run(run_index)
+            }
+            ParagraphLocation::Story { slot, at } => {
+                crate::story::edit_paragraph(py, &mut document, slot, at, |paragraph| {
+                    paragraph.remove_run(run_index)
+                })?
+                .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))?
             }
         };
         removed.map_err(|error| crate::rdocx_to_pyerr(py, error))?;
@@ -237,6 +271,11 @@ impl PyRunCollection {
                 cell.paragraph(paragraph)
                     .map(|paragraph| paragraph.run_count())
             }),
+            ParagraphLocation::Story { slot, at } => {
+                crate::story::read_paragraph(py, &document, slot, at, |paragraph| {
+                    paragraph.run_count()
+                })?
+            }
         }
         .ok_or_else(|| PyIndexError::new_err("paragraph index out of range"))
     }
@@ -262,6 +301,12 @@ impl PyRunCollection {
                     cell.paragraph(paragraph)
                         .and_then(|paragraph| paragraph.run_path(index))
                 }),
+                ParagraphLocation::Story { slot, at } => {
+                    crate::story::read_paragraph(py, &document, slot, at, |paragraph| {
+                        paragraph.run_path(index)
+                    })?
+                    .flatten()
+                }
             }
             .ok_or_else(|| PyIndexError::new_err("run index out of range"))?;
             (document.revisions.capture(segments), run_path)

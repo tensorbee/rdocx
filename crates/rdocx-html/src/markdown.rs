@@ -225,7 +225,7 @@ fn collect_run_text(run: &CT_R) -> String {
             RunContent::Text(t) | RunContent::DeletedText(t) => raw.push_str(&t.text),
             RunContent::Tab => raw.push('\t'),
             RunContent::Break(bt) => match bt {
-                BreakType::Line => raw.push_str("  \n"),
+                BreakType::Line | BreakType::TextWrapping(_) => raw.push_str("  \n"),
                 BreakType::Page => raw.push_str("\n---\n"),
                 BreakType::Column => raw.push_str("  \n"),
             },

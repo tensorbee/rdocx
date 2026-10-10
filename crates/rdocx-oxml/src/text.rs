@@ -2037,6 +2037,39 @@ pub enum BreakType {
     Line,
     Page,
     Column,
+    /// A `textWrapping` line break that moves the next line below the
+    /// floating objects on the `clear` side.
+    TextWrapping(BreakClear),
+}
+
+/// `ST_BrClear`, the side a text-wrapping break clears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BreakClear {
+    None,
+    Left,
+    Right,
+    All,
+}
+
+impl BreakClear {
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "none" => Some(Self::None),
+            "left" => Some(Self::Left),
+            "right" => Some(Self::Right),
+            "all" => Some(Self::All),
+            _ => None,
+        }
+    }
+
+    pub fn to_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::All => "all",
+        }
+    }
 }
 
 /// `CT_R` — A run of text with uniform formatting.
@@ -2686,13 +2719,21 @@ impl CT_R {
                         content.push(RunContent::Tab);
                         modeled_children += 1;
                     } else if is_word_element(name.as_ref(), b"br", &prefixes) {
+                        let clear = optional_word_attribute(e, b"clear", &prefixes)
+                            .and_then(|value| BreakClear::from_str(&value));
                         let break_type = optional_word_attribute(e, b"type", &prefixes)
                             .map(|value| match value.as_bytes() {
                                 b"page" => BreakType::Page,
                                 b"column" => BreakType::Column,
+                                b"textWrapping" => {
+                                    BreakType::TextWrapping(clear.unwrap_or(BreakClear::None))
+                                }
                                 _ => BreakType::Line,
                             })
-                            .unwrap_or(BreakType::Line);
+                            .unwrap_or(match clear {
+                                Some(clear) => BreakType::TextWrapping(clear),
+                                None => BreakType::Line,
+                            });
                         content.push(RunContent::Break(break_type));
                         modeled_children += 1;
                     } else if is_word_element(name.as_ref(), b"footnoteReference", &prefixes) {
@@ -2841,6 +2882,12 @@ impl CT_R {
                     match bt {
                         BreakType::Page => e.push_attribute(("w:type", "page")),
                         BreakType::Column => e.push_attribute(("w:type", "column")),
+                        BreakType::TextWrapping(clear) => {
+                            e.push_attribute(("w:type", "textWrapping"));
+                            if *clear != BreakClear::None {
+                                e.push_attribute(("w:clear", clear.to_str()));
+                            }
+                        }
                         BreakType::Line => {}
                     }
                     writer.write_event(Event::Empty(e))?;
@@ -3318,7 +3365,7 @@ fn simple_result_run_display(raw: &[u8], word_prefixes: &[String]) -> Result<Opt
                     display.get_or_insert_default().push('\t');
                 } else if is_word_element(start.name().as_ref(), b"br", &prefixes) {
                     let marker = match field_break_type(&start, &prefixes) {
-                        BreakType::Line => '\n',
+                        BreakType::Line | BreakType::TextWrapping(_) => '\n',
                         BreakType::Page => '\u{000c}',
                         BreakType::Column => '\u{000b}',
                     };
@@ -3338,7 +3385,7 @@ fn simple_result_run_display(raw: &[u8], word_prefixes: &[String]) -> Result<Opt
                     display.get_or_insert_default().push('\t');
                 } else if is_word_element(element.name().as_ref(), b"br", &prefixes) {
                     let marker = match field_break_type(&element, &prefixes) {
-                        BreakType::Line => '\n',
+                        BreakType::Line | BreakType::TextWrapping(_) => '\n',
                         BreakType::Page => '\u{000c}',
                         BreakType::Column => '\u{000b}',
                     };
@@ -4383,7 +4430,7 @@ fn project_complex_fields(projection: ComplexFieldProjection<'_>) -> Result<()> 
                 }
                 ComplexFieldEvent::Break(break_type) => {
                     let marker = match break_type {
-                        BreakType::Line => '\n',
+                        BreakType::Line | BreakType::TextWrapping(_) => '\n',
                         BreakType::Page => '\u{000c}',
                         BreakType::Column => '\u{000b}',
                     };

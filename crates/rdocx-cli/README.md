@@ -25,7 +25,7 @@ and produces fixed or flow output without an Office host.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rdocx-cli | 72,988 compressed bytes, 326,487 member bytes, 8 members | 0.16.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --no-verify` | Tracked `rdocx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-09 |
+| Crates.io archive: rdocx-cli | 73,938 compressed bytes, 329,766 member bytes, 8 members | 0.16.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --no-verify` | Tracked `rdocx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-09 |
 
 ## Use it when
 
@@ -163,7 +163,10 @@ to the default style for such an id. A style id inside a tracked property
 change is not checked, because it records the formatting before the change,
 and neither is one inside `mc:Fallback`, which Word does not read, or an empty
 id.
-Empty paragraphs, heading level gaps, and missing metadata are warnings.
+Empty paragraphs, heading level gaps, and missing metadata are warnings. So
+are a section whose `w:pgSz` lacks a width or a height, which leaves each
+consumer to guess the page, and an even-page header or footer while
+`w:evenAndOddHeaders` is off, which Word and Google Docs ignore.
 
 `layout --json` uses bundled deterministic fonts. It lists every direct body
 item, including preserved items that have no fragments. Each laid-out fragment

@@ -7577,6 +7577,7 @@ fn paragraph_fingerprint(paragraph: &CT_P) -> u64 {
                         BreakType::Line => 0,
                         BreakType::Page => 1,
                         BreakType::Column => 2,
+                        BreakType::TextWrapping(clear) => 3 + *clear as u8,
                     });
                 }
                 RunContent::Symbol { font, char_code } => {
@@ -9235,7 +9236,11 @@ fn layout_paragraph_with_source_and_table(
                 // Word drops a page or column break inside a table cell, so
                 // the text on either side of it joins on one line.
                 RunContent::Break(bt) => match bt {
-                    BreakType::Line => inline_items.push(InlineItem::LineBreak),
+                    // A text-wrapping break lays out as a line break: the
+                    // floats it clears are not yet modelled.
+                    BreakType::Line | BreakType::TextWrapping(_) => {
+                        inline_items.push(InlineItem::LineBreak)
+                    }
                     BreakType::Page | BreakType::Column if in_table_cell => {}
                     BreakType::Page => inline_items.push(InlineItem::PageBreak),
                     BreakType::Column => inline_items.push(InlineItem::ColumnBreak),
@@ -9599,8 +9604,15 @@ fn layout_paragraph_with_source_and_table(
                     let marker = num_state
                         .note_label(NoteRef { stream, id: *id })
                         .to_string();
-                    let sup_size = font_size * 0.58;
-                    let sup_offset = font_size * 0.33; // raise baseline
+                    // A reference run already raised to superscript, as
+                    // Word's note reference styles make it, keeps that size
+                    // and raise instead of shrinking twice.
+                    let (sup_size, sup_offset) =
+                        if effective_rpr.vert_align.as_deref() == Some("superscript") {
+                            (font_size, baseline_offset)
+                        } else {
+                            (font_size * 0.58, font_size * 0.33)
+                        };
                     let shaped = fm.shape_text(font_id, &marker, sup_size)?;
                     let sup_metrics = fm.metrics(font_id, sup_size)?;
                     let revision_marker = input.revision_view == RevisionView::Tracked

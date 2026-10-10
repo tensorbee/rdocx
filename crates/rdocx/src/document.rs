@@ -888,6 +888,20 @@ impl HeaderFooterKind {
     }
 }
 
+/// One paragraph of a header or footer story.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HeaderFooterParagraph {
+    /// The paragraph at this index among the story's direct paragraphs.
+    Direct(usize),
+    /// A paragraph of one cell of the story's `table`-th direct table.
+    Cell {
+        table: usize,
+        row: usize,
+        cell: usize,
+        paragraph: usize,
+    },
+}
+
 /// The effective header or footer story selected for one section variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SectionStory {
@@ -3227,8 +3241,17 @@ impl Section<'_> {
     }
 
     /// Set this section's orientation and normalize its page dimensions.
+    ///
+    /// A section without both page dimensions takes the layout default size
+    /// first, so the written `w:pgSz` always carries a width and a height
+    /// that agree with the orientation.
     pub fn set_orientation(&mut self, orientation: ST_PageOrientation) {
         self.inner.orientation = Some(orientation);
+        if self.inner.page_width.is_none() || self.inner.page_height.is_none() {
+            let defaults = CT_SectPr::default_letter();
+            self.inner.page_width = self.inner.page_width.or(defaults.page_width);
+            self.inner.page_height = self.inner.page_height.or(defaults.page_height);
+        }
         if let (Some(width), Some(height)) = (self.inner.page_width, self.inner.page_height) {
             let dimensions_need_swap = match orientation {
                 ST_PageOrientation::Landscape => width.0 < height.0,
@@ -3680,6 +3703,123 @@ fn empty_section_properties() -> CT_SectPr {
         extra_xml_positions: Vec::new(),
         change: None,
     }
+}
+
+/// The reference character style and note text paragraph style Word uses
+/// for one note family, as IDs and names.
+fn note_style_names(
+    family: NoteFamily,
+) -> (&'static str, &'static str, &'static str, &'static str) {
+    match family {
+        NoteFamily::Footnote => (
+            "FootnoteReference",
+            "footnote reference",
+            "FootnoteText",
+            "footnote text",
+        ),
+        NoteFamily::Endnote => (
+            "EndnoteReference",
+            "endnote reference",
+            "EndnoteText",
+            "endnote text",
+        ),
+    }
+}
+
+/// An empty run in the note reference character style.
+fn note_reference_run(family: NoteFamily) -> CT_R {
+    let mut run = CT_R::new("");
+    run.properties = Some(CT_RPr {
+        style_id: Some(note_style_names(family).0.to_owned()),
+        ..CT_RPr::default()
+    });
+    run
+}
+
+/// The paragraph of a new note as Word writes it: the note text style, the
+/// note mark, or `mark` when the reference shows a custom one, in the
+/// reference style, a space, then `text`.
+fn new_note_paragraph(family: NoteFamily, mark: Option<&str>, text: &str) -> CT_P {
+    let mut paragraph = CT_P::new();
+    paragraph.properties = Some(CT_PPr {
+        style_id: Some(note_style_names(family).2.to_owned()),
+        ..CT_PPr::default()
+    });
+    let mut marker = note_reference_run(family);
+    match mark {
+        Some(mark) => marker.content = CT_R::new(mark).content,
+        None => {
+            marker.content.clear();
+            marker.extra_xml.push(match family {
+                NoteFamily::Footnote => b"<w:footnoteRef/>".to_vec(),
+                NoteFamily::Endnote => b"<w:endnoteRef/>".to_vec(),
+            });
+            // After the run properties, which come first in a run.
+            marker.extra_xml_positions.push(1);
+        }
+    }
+    paragraph.runs.push(marker);
+    paragraph.add_run(" ");
+    paragraph.add_run(text);
+    paragraph
+}
+
+/// Edit one paragraph of a parsed header or footer part, or return `None`
+/// when the part has no paragraph there.
+fn edit_header_footer_model_paragraph<R>(
+    model: &mut CT_HdrFtr,
+    at: HeaderFooterParagraph,
+    edit: impl FnOnce(&mut CT_P) -> R,
+) -> Result<Option<R>> {
+    match at {
+        HeaderFooterParagraph::Direct(index) => Ok(model.paragraphs.get_mut(index).map(edit)),
+        HeaderFooterParagraph::Cell {
+            table,
+            row,
+            cell,
+            paragraph,
+        } => Ok(model
+            .edit_table(table, |inner| {
+                let mut table = Table { inner };
+                let mut cell = table.cell(row, cell)?;
+                let paragraph = cell.paragraph_mut(paragraph)?;
+                Some(edit(paragraph.inner))
+            })?
+            .flatten()),
+    }
+}
+
+/// Properties for a new section that takes its page geometry from `source`,
+/// as a section break inserted in Word does.
+///
+/// The page size, orientation, margins, gutter and header and footer
+/// distances are copied, and a value `source` lacks takes its layout default,
+/// so the new section always writes a complete `w:pgSz` and `w:pgMar`. The
+/// page borders, columns and document grid are copied as they are. Header
+/// and footer references are not copied: the new section inherits them.
+fn section_properties_with_geometry_of(source: Option<&CT_SectPr>) -> CT_SectPr {
+    let defaults = CT_SectPr::default_letter();
+    let value =
+        |pick: fn(&CT_SectPr) -> Option<Twips>| source.and_then(pick).or_else(|| pick(&defaults));
+    let mut properties = empty_section_properties();
+    properties.page_width = value(|section| section.page_width);
+    properties.page_height = value(|section| section.page_height);
+    properties.orientation = source
+        .and_then(|section| section.orientation)
+        .or(defaults.orientation);
+    properties.margin_top = value(|section| section.margin_top);
+    properties.margin_right = value(|section| section.margin_right);
+    properties.margin_bottom = value(|section| section.margin_bottom);
+    properties.margin_left = value(|section| section.margin_left);
+    properties.gutter = value(|section| section.gutter);
+    properties.header_distance = value(|section| section.header_distance);
+    properties.footer_distance = value(|section| section.footer_distance);
+    if let Some(source) = source {
+        properties.page_borders = source.page_borders.clone();
+        properties.columns = source.columns.clone();
+        properties.doc_grid = source.doc_grid.clone();
+    }
+    properties
 }
 
 /// Package and WordprocessingML identity state owned by the document facade.
@@ -18646,6 +18786,59 @@ impl Document {
         self.document.background_xml.is_some()
     }
 
+    /// The page colour, the `w:color` of `w:background`, as six upper-case
+    /// hexadecimal digits, or `None` when the document has no background
+    /// colour, `auto` included.
+    pub fn page_color(&self) -> Option<String> {
+        let xml = self.document.background_xml.as_deref()?;
+        let mut reader = quick_xml::Reader::from_reader(xml);
+        let mut buffer = Vec::new();
+        let start = match reader.read_event_into(&mut buffer).ok()? {
+            Event::Start(start) | Event::Empty(start) => start,
+            _ => return None,
+        };
+        let color = start.attributes().flatten().find_map(|attribute| {
+            (attribute.key.local_name().as_ref() == b"color")
+                .then(|| String::from_utf8_lossy(&attribute.value).into_owned())
+        })?;
+        (color.len() == 6 && color.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then(|| color.to_ascii_uppercase())
+    }
+
+    /// Set the page colour as six hexadecimal digits, or remove it with `None`.
+    ///
+    /// A colour replaces any `w:background` with `<w:background w:color/>`
+    /// and turns on `w:displayBackgroundShape`, as Word's Page Color does.
+    /// `None` removes the background and that setting.
+    pub fn set_page_color(&mut self, color: Option<&str>) -> Result<()> {
+        let Some(color) = color else {
+            let mut candidate = self.clone_for_staging();
+            candidate.document.background_xml = None;
+            if let Some(settings) = candidate.settings.as_mut() {
+                settings.remove_display_background_shape()?;
+            }
+            candidate.prune_empty_owned_settings();
+            candidate.invalidate_layout();
+            self.commit_staged_mutation(candidate);
+            return Ok(());
+        };
+        if color.len() != 6 || !color.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(Error::Other(format!(
+                "page colour {color:?} must be six hexadecimal digits, such as \"FFF2CC\""
+            )));
+        }
+        let mut candidate = self.settings_mutation_candidate()?;
+        candidate
+            .settings
+            .get_or_insert_with(CT_Settings::new)
+            .set_display_background_shape(true)?;
+        candidate.document.background_xml = Some(
+            format!("<w:background w:color=\"{}\"/>", color.to_ascii_uppercase()).into_bytes(),
+        );
+        self.commit_staged_mutation(candidate);
+        Ok(())
+    }
+
     /// Whether any document section carries layout formatting.
     ///
     /// This includes the final body section and sections attached to paragraph
@@ -18750,6 +18943,8 @@ impl Document {
         }
         let mut candidate = self.clone_for_staging();
         candidate.story_paragraph_mut(reference)?;
+        candidate.prepare_note_family(NoteFamily::Footnote)?;
+        let reference = &candidate.current_location(reference)?;
         let occupied = candidate
             .footnotes
             .footnotes
@@ -18763,13 +18958,7 @@ impl Document {
                 .ok_or_else(|| Error::Other("footnote ID range is exhausted".to_owned()))?;
         }
         candidate.reserve_footnotes_bundle()?;
-        let mut paragraph = CT_P::new();
-        let mut note_marker = CT_R::new("");
-        note_marker.content.clear();
-        note_marker.extra_xml.push(b"<w:footnoteRef/>".to_vec());
-        note_marker.extra_xml_positions.push(0);
-        paragraph.runs.push(note_marker);
-        paragraph.add_run(text);
+        let paragraph = new_note_paragraph(NoteFamily::Footnote, None, text);
         candidate
             .footnotes
             .footnotes
@@ -18782,7 +18971,7 @@ impl Document {
         candidate.flush_dirty_related_story_models()?;
         candidate.refresh_related_story_caches()?;
         candidate.invalidate_layout();
-        let mut run = CT_R::new("");
+        let mut run = note_reference_run(NoteFamily::Footnote);
         run.content = vec![RunContent::FootnoteRef {
             id,
             custom_mark: None,
@@ -18803,6 +18992,8 @@ impl Document {
         }
         let mut candidate = self.clone_for_staging();
         candidate.story_paragraph_mut(reference)?;
+        candidate.prepare_note_family(NoteFamily::Endnote)?;
+        let reference = &candidate.current_location(reference)?;
         candidate.flush_to_package()?;
         let existing_part = candidate.note_part_name(StoryKind::Endnote)?;
         let part_name = candidate.reserve_document_part_bundle(
@@ -18827,13 +19018,7 @@ impl Document {
                 .checked_add(1)
                 .ok_or_else(|| Error::Other("endnote ID range is exhausted".to_owned()))?;
         }
-        let mut paragraph = CT_P::new();
-        let mut note_marker = CT_R::new("");
-        note_marker.content.clear();
-        note_marker.extra_xml.push(b"<w:endnoteRef/>".to_vec());
-        note_marker.extra_xml_positions.push(0);
-        paragraph.runs.push(note_marker);
-        paragraph.add_run(text);
+        let paragraph = new_note_paragraph(NoteFamily::Endnote, None, text);
         let note = rdocx_oxml::footnotes::CT_Footnote {
             id,
             note_type: rdocx_oxml::footnotes::NoteType::Normal,
@@ -18844,7 +19029,7 @@ impl Document {
             append_story_fragments_to_root(&source, b"endnotes", b"endnote", &[fragment])?;
         set_story_source_xml(&mut candidate, &part_name, updated)?;
         candidate.invalidate_layout();
-        let mut run = CT_R::new("");
+        let mut run = note_reference_run(NoteFamily::Endnote);
         run.content = vec![RunContent::EndnoteRef {
             id,
             custom_mark: None,
@@ -18932,10 +19117,7 @@ impl Document {
             .into_iter()
             .find(|owner| owner.kind == kind && owner.owner_index == story.owner_index)
             .ok_or_else(|| Error::Other("new note owner is missing".to_owned()))?;
-        let mut paragraph = CT_P::new();
-        let marker_run = CT_R::new(mark);
-        paragraph.runs.push(marker_run);
-        paragraph.add_run(text);
+        let paragraph = new_note_paragraph(family, Some(mark), text);
         let note = rdocx_oxml::footnotes::CT_Footnote {
             id,
             note_type: rdocx_oxml::footnotes::NoteType::Normal,
@@ -18947,6 +19129,111 @@ impl Document {
         let reopened = candidate.prepare_and_reopen_staged()?;
         self.commit_staged_mutation(reopened);
         Ok(id)
+    }
+
+    /// The same location in the story as it is now, after a staged edit of
+    /// another part republished the package and refreshed story identities.
+    fn current_location(&self, location: &ContentLocation) -> Result<ContentLocation> {
+        let story = self
+            .stories()?
+            .into_iter()
+            .find(|story| {
+                story.kind == location.story.kind
+                    && story.part_name == location.story.part_name
+                    && story.owner_index == location.story.owner_index
+            })
+            .ok_or_else(|| StoryError::OwnerNotFound {
+                story: location.story.clone(),
+            })?;
+        Ok(ContentLocation {
+            story,
+            ..location.clone()
+        })
+    }
+
+    /// Give the document what Word writes with a first note of `family`:
+    /// the reference character style and note text paragraph style, and the
+    /// separator and continuation separator records the settings name.
+    fn prepare_note_family(&mut self, family: NoteFamily) -> Result<()> {
+        let (reference, reference_name, text, text_name) = note_style_names(family);
+        if self.styles.get_by_id(reference).is_none() {
+            let mut builder = StyleBuilder::character(reference, reference_name)
+                .priority(99)
+                .semi_hidden(true)
+                .unhide_when_used(true)
+                .run_properties(CT_RPr {
+                    vert_align: Some("superscript".to_owned()),
+                    ..CT_RPr::default()
+                });
+            if self.styles.get_by_id("DefaultParagraphFont").is_some() {
+                builder = builder.based_on("DefaultParagraphFont");
+            }
+            self.add_style(builder)?;
+        }
+        if self.styles.get_by_id(text).is_none() {
+            let mut builder = StyleBuilder::paragraph(text, text_name)
+                .priority(99)
+                .semi_hidden(true)
+                .unhide_when_used(true)
+                .paragraph_properties(CT_PPr {
+                    space_after: Some(Twips(0)),
+                    line_spacing: Some(Twips(240)),
+                    line_rule: Some("auto".to_owned()),
+                    ..CT_PPr::default()
+                })
+                .size(10.0);
+            if self.styles.get_by_id("Normal").is_some() {
+                builder = builder.based_on("Normal");
+            }
+            self.add_style(builder)?;
+        }
+        let records = match family {
+            NoteFamily::Footnote => self
+                .footnotes
+                .footnotes
+                .iter()
+                .map(|note| note.note_type)
+                .collect::<Vec<_>>(),
+            NoteFamily::Endnote => match self.note_part_name(StoryKind::Endnote)? {
+                Some(part) => match self.package.get_part(&part) {
+                    Some(xml) => rdocx_oxml::footnotes::CT_Footnotes::from_xml(xml)?
+                        .footnotes
+                        .iter()
+                        .map(|note| note.note_type)
+                        .collect(),
+                    None => Vec::new(),
+                },
+                None => Vec::new(),
+            },
+        };
+        if records
+            .iter()
+            .any(|kind| *kind != rdocx_oxml::footnotes::NoteType::Normal)
+        {
+            return Ok(());
+        }
+        for (record, element) in [
+            (NoteSpecialRecord::Separator, b"<w:separator/>".as_slice()),
+            (
+                NoteSpecialRecord::ContinuationSeparator,
+                b"<w:continuationSeparator/>".as_slice(),
+            ),
+        ] {
+            let mut paragraph = CT_P::new();
+            paragraph.properties = Some(CT_PPr {
+                space_after: Some(Twips(0)),
+                line_spacing: Some(Twips(240)),
+                line_rule: Some("auto".to_owned()),
+                ..CT_PPr::default()
+            });
+            let mut run = CT_R::new("");
+            run.content.clear();
+            run.extra_xml.push(element.to_vec());
+            run.extra_xml_positions.push(0);
+            paragraph.runs.push(run);
+            self.set_note_special_record(family, record, vec![paragraph])?;
+        }
+        Ok(())
     }
 
     /// Create or replace an authored note separator or continuation record.
@@ -23477,6 +23764,12 @@ impl Document {
 
     /// Ensure that one section has an explicit story, creating an empty story
     /// when the variant is absent or inherited.
+    ///
+    /// Giving a section an even-page story, here or through
+    /// [`Self::link_section_story`], [`Self::replace_section_story`] or
+    /// [`Self::remove_section_story`], also turns on the
+    /// [`Self::even_and_odd_headers`] setting, which Word and Google Docs need
+    /// to show it.
     pub fn create_section_story(
         &mut self,
         section_index: usize,
@@ -23510,7 +23803,7 @@ impl Document {
             self.commit_staged_mutation(reopened);
             return Ok(result);
         }
-        let mut candidate = self.clone_for_staging();
+        let mut candidate = self.section_story_candidate(hdr_type)?;
         candidate.flush_to_package()?;
         let story = candidate.install_empty_section_story(section_index, kind, hdr_type)?;
         candidate.reconcile_comment_removal(self)?;
@@ -23532,7 +23825,7 @@ impl Document {
         hdr_type: HdrFtrType,
         story: &StoryId,
     ) -> Result<StoryId> {
-        let mut candidate = self.clone_for_staging();
+        let mut candidate = self.section_story_candidate(hdr_type)?;
         candidate.flush_to_package()?;
         candidate.validate_section_story_target(story, kind)?;
         let relationship_id = candidate.document_story_relationship(kind, story.part_name())?;
@@ -23593,7 +23886,7 @@ impl Document {
         hdr_type: HdrFtrType,
         source: &StoryId,
     ) -> Result<StoryId> {
-        let mut candidate = self.clone_for_staging();
+        let mut candidate = self.section_story_candidate(hdr_type)?;
         candidate.flush_to_package()?;
         candidate.validate_section_story_target(source, kind)?;
         let part_name = candidate.clone_header_footer_story_part(source.part_name(), kind)?;
@@ -23622,7 +23915,7 @@ impl Document {
         kind: HeaderFooterKind,
         hdr_type: HdrFtrType,
     ) -> Result<StoryId> {
-        let mut candidate = self.clone_for_staging();
+        let mut candidate = self.section_story_candidate(hdr_type)?;
         candidate.flush_to_package()?;
         candidate.install_empty_section_story(section_index, kind, hdr_type)?;
         candidate.reconcile_comment_removal(self)?;
@@ -23633,6 +23926,247 @@ impl Document {
             .ok_or_else(|| Error::Other("empty section story was not published".to_owned()))?;
         self.commit_staged_mutation(reopened);
         Ok(result)
+    }
+
+    // ---- Header and footer content ----
+    //
+    // A header or footer story lives in its own part. These calls read and
+    // edit that part's paragraphs and tables in place, through the same
+    // `Paragraph` and `Table` facades the body uses.
+
+    /// The number of direct paragraphs of a header or footer story.
+    pub fn header_footer_paragraph_count(&self, story: &StoryId) -> Result<usize> {
+        Ok(self.header_footer_model(story)?.paragraphs.len())
+    }
+
+    /// The number of direct tables of a header or footer story.
+    pub fn header_footer_table_count(&self, story: &StoryId) -> Result<usize> {
+        Ok(self.header_footer_model(story)?.table_count())
+    }
+
+    /// Read one paragraph of a header or footer story, or `None` when the
+    /// story has no paragraph there.
+    pub fn read_header_footer_paragraph<R>(
+        &self,
+        story: &StoryId,
+        at: HeaderFooterParagraph,
+        read: impl FnOnce(ParagraphRef<'_>) -> R,
+    ) -> Result<Option<R>> {
+        let model = self.header_footer_model(story)?;
+        match at {
+            HeaderFooterParagraph::Direct(index) => Ok(model
+                .paragraphs
+                .get(index)
+                .map(|inner| read(ParagraphRef { inner }))),
+            HeaderFooterParagraph::Cell {
+                table,
+                row,
+                cell,
+                paragraph,
+            } => Ok(model
+                .read_table(table, |inner| {
+                    let table = TableRef { inner };
+                    let cell = table.cell(row, cell)?;
+                    cell.paragraph(paragraph).map(read)
+                })?
+                .flatten()),
+        }
+    }
+
+    /// Edit one paragraph of a header or footer story in place, or return
+    /// `None` when the story has no paragraph there.
+    pub fn edit_header_footer_paragraph<R>(
+        &mut self,
+        story: &StoryId,
+        at: HeaderFooterParagraph,
+        edit: impl FnOnce(&mut Paragraph<'_>) -> R,
+    ) -> Result<Option<R>> {
+        let mut model = self.header_footer_model(story)?;
+        let result = edit_header_footer_model_paragraph(&mut model, at, |inner| {
+            edit(&mut Paragraph { inner })
+        })?;
+        if result.is_some() {
+            self.store_header_footer_model(story, &model)?;
+        }
+        Ok(result)
+    }
+
+    /// Replace literal text within one paragraph of a header or footer
+    /// story, keeping run formatting, or return `None` when the story has no
+    /// paragraph there.
+    ///
+    /// When `expected` is given and the paragraph holds a different number of
+    /// matches, nothing changes and the mismatch is returned.
+    pub fn try_replace_text_in_header_footer_paragraph(
+        &mut self,
+        story: &StoryId,
+        at: HeaderFooterParagraph,
+        placeholder: &str,
+        replacement: &str,
+        expected: Option<usize>,
+    ) -> Result<Option<std::result::Result<usize, ReplacementCountMismatch>>> {
+        oxml_core::xml::reject_non_xml_characters("replacement text", replacement)?;
+        let mut model = self.header_footer_model(story)?;
+        let found = edit_header_footer_model_paragraph(&mut model, at, |paragraph| {
+            rdocx_oxml::placeholder::replace_in_paragraph(paragraph, placeholder, replacement)
+        })?;
+        let Some(found) = found else {
+            return Ok(None);
+        };
+        if let Some(expected) = expected
+            && expected != found
+        {
+            return Ok(Some(Err(ReplacementCountMismatch {
+                index: 0,
+                placeholder: placeholder.to_owned(),
+                expected,
+                found,
+            })));
+        }
+        if found > 0 {
+            self.store_header_footer_model(story, &model)?;
+        }
+        Ok(Some(Ok(found)))
+    }
+
+    /// Append a paragraph holding `text` to a header or footer story and
+    /// return its index among the direct paragraphs.
+    pub fn add_header_footer_paragraph(&mut self, story: &StoryId, text: &str) -> Result<usize> {
+        oxml_core::xml::reject_non_xml_characters("paragraph text", text)?;
+        let mut model = self.header_footer_model(story)?;
+        let mut paragraph = CT_P::new();
+        if !text.is_empty() {
+            paragraph.add_run(text);
+        }
+        model.paragraphs.push(paragraph);
+        self.store_header_footer_model(story, &model)?;
+        Ok(model.paragraphs.len() - 1)
+    }
+
+    /// Append an empty `rows` by `cols` grid table to a header or footer
+    /// story and return its index among the direct tables.
+    ///
+    /// The columns share `width`, or the 6.5 inch text width of a Letter
+    /// page with one-inch margins, as [`Self::add_table`] does.
+    pub fn add_header_footer_table(
+        &mut self,
+        story: &StoryId,
+        rows: usize,
+        cols: usize,
+        width: Option<Length>,
+    ) -> Result<usize> {
+        use rdocx_oxml::table::{CT_TblGrid, CT_TblGridCol, CT_TblPr, CT_TblWidth};
+
+        if rows == 0 || cols == 0 {
+            return Err(Error::Other(
+                "a header or footer table needs at least one row and one column".to_owned(),
+            ));
+        }
+        let total = match width {
+            Some(width) if width.to_emu() <= 0 => {
+                return Err(Error::Other("table width must be positive".to_owned()));
+            }
+            Some(width) => width.as_twips().0,
+            None => 9360,
+        };
+        let column_width = Twips(total / cols as i32);
+        let mut table = CT_Tbl::new();
+        table.properties = Some(CT_TblPr {
+            width: Some(CT_TblWidth::dxa(column_width.0 * cols as i32)),
+            ..Default::default()
+        });
+        table.grid = Some(CT_TblGrid {
+            columns: (0..cols)
+                .map(|_| CT_TblGridCol {
+                    width: column_width,
+                })
+                .collect(),
+            ..Default::default()
+        });
+        for _ in 0..rows {
+            let mut row = CT_Row::new();
+            for _ in 0..cols {
+                let mut cell = CT_Tc::new();
+                cell.properties = Some(rdocx_oxml::table::CT_TcPr {
+                    width: Some(CT_TblWidth::dxa(column_width.0)),
+                    ..Default::default()
+                });
+                row.cells.push(cell);
+            }
+            table.rows.push(row);
+        }
+        let mut model = self.header_footer_model(story)?;
+        model.push_table(&table)?;
+        self.store_header_footer_model(story, &model)?;
+        Ok(model.table_count() - 1)
+    }
+
+    /// Read one direct table of a header or footer story, or `None` when the
+    /// story has no table there.
+    pub fn read_header_footer_table<R>(
+        &self,
+        story: &StoryId,
+        table: usize,
+        read: impl FnOnce(TableRef<'_>) -> R,
+    ) -> Result<Option<R>> {
+        Ok(self
+            .header_footer_model(story)?
+            .read_table(table, |inner| read(TableRef { inner }))?)
+    }
+
+    /// Edit one direct table of a header or footer story in place, or return
+    /// `None` when the story has no table there.
+    pub fn edit_header_footer_table<R>(
+        &mut self,
+        story: &StoryId,
+        table: usize,
+        edit: impl FnOnce(&mut Table<'_>) -> R,
+    ) -> Result<Option<R>> {
+        let mut model = self.header_footer_model(story)?;
+        let result = model.edit_table(table, |inner| edit(&mut Table { inner }))?;
+        if result.is_some() {
+            self.store_header_footer_model(story, &model)?;
+        }
+        Ok(result)
+    }
+
+    fn header_footer_model(&self, story: &StoryId) -> Result<CT_HdrFtr> {
+        if !matches!(story.kind, StoryKind::Header | StoryKind::Footer) {
+            return Err(Error::Other(format!(
+                "a {:?} story is not a header or footer",
+                story.kind
+            )));
+        }
+        let xml = self.package.get_part(&story.part_name).ok_or_else(|| {
+            Error::Other(format!(
+                "header or footer part {} is missing",
+                story.part_name
+            ))
+        })?;
+        Ok(CT_HdrFtr::from_xml(xml)?)
+    }
+
+    fn store_header_footer_model(&mut self, story: &StoryId, model: &CT_HdrFtr) -> Result<()> {
+        let xml = Self::serialize_hdr_ftr(model, story.kind == StoryKind::Header)?;
+        self.package.set_part(&story.part_name, xml);
+        self.invalidate_layout();
+        Ok(())
+    }
+
+    /// A staging candidate for an edit that gives one section variant a
+    /// story. The even-page variant also turns `w:evenAndOddHeaders` on,
+    /// since Word and Google Docs ignore every even-page header and footer
+    /// without it.
+    fn section_story_candidate(&self, hdr_type: HdrFtrType) -> Result<Self> {
+        if hdr_type != HdrFtrType::Even || self.even_and_odd_headers() {
+            return Ok(self.clone_for_staging());
+        }
+        let mut candidate = self.settings_mutation_candidate()?;
+        candidate
+            .settings
+            .get_or_insert_with(CT_Settings::new)
+            .set_even_and_odd_headers(true)?;
+        Ok(candidate)
     }
 
     fn story_id_for_header_footer_part(
@@ -23898,13 +24432,14 @@ impl Document {
         }
         self.invalidate_layout();
         if count == 0 {
-            self.document.body.sect_pr = Some(empty_section_properties());
+            self.document.body.sect_pr = Some(section_properties_with_geometry_of(None));
             return Ok(());
         }
         if index == count {
             let previous_final = self.document.body.sect_pr.take().ok_or_else(|| {
                 Error::Other("document section ownership changed during insertion".to_owned())
             })?;
+            let inserted = section_properties_with_geometry_of(Some(&previous_final));
             let mut paragraph = CT_P::new();
             paragraph.properties = Some(CT_PPr {
                 sect_pr: Some(previous_final),
@@ -23914,9 +24449,16 @@ impl Document {
                 .body
                 .content
                 .push(BodyContent::Paragraph(paragraph));
-            self.document.body.sect_pr = Some(empty_section_properties());
+            self.document.body.sect_pr = Some(inserted);
             return Ok(());
         }
+        // The new section takes the geometry of the section before it, or of
+        // the section it is inserted ahead of when it becomes the first one.
+        let geometry_source = index.saturating_sub(1);
+        let inserted = section_properties_with_geometry_of(
+            self.section(geometry_source)
+                .map(|section| section.properties()),
+        );
 
         let insert_at = if index == 0 {
             0
@@ -23929,7 +24471,7 @@ impl Document {
         };
         let mut paragraph = CT_P::new();
         paragraph.properties = Some(CT_PPr {
-            sect_pr: Some(empty_section_properties()),
+            sect_pr: Some(inserted),
             ..CT_PPr::default()
         });
         self.document

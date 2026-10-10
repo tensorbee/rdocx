@@ -2309,7 +2309,47 @@ pub fn validate(file: &Path) -> Result<bool> {
         errors.push(format!("invalid comment ownership: {error}"));
     }
 
+    // A `w:pgSz` that names an orientation or one dimension without both a
+    // width and a height is schema-valid but leaves the page size to each
+    // consumer's default.
+    for section in doc.sections() {
+        let properties = section.properties();
+        let has_page_size = properties.orientation.is_some()
+            || properties.page_width.is_some()
+            || properties.page_height.is_some();
+        if has_page_size && (properties.page_width.is_none() || properties.page_height.is_none()) {
+            warnings.push(format!(
+                "section {} has a w:pgSz without both w:w and w:h",
+                section.ordinal()
+            ));
+        }
+    }
+
     // --- Advisory findings ---
+
+    // Word and Google Docs show an even-page header or footer only when the
+    // settings turn on w:evenAndOddHeaders.
+    if !doc.even_and_odd_headers() {
+        for section in 0..doc.section_count() {
+            for kind in [HeaderFooterKind::Header, HeaderFooterKind::Footer] {
+                let even = doc
+                    .section_story(section, kind, HdrFtrType::Even)
+                    .ok()
+                    .flatten();
+                if even.is_some_and(|story| !story.is_inherited()) {
+                    warnings.push(format!(
+                        "section {section} has an even-page {} that is ignored because \
+                         w:evenAndOddHeaders is off",
+                        if kind == HeaderFooterKind::Header {
+                            "header"
+                        } else {
+                            "footer"
+                        }
+                    ));
+                }
+            }
+        }
+    }
 
     if doc.content_count() == 0 {
         warnings.push("Document has no content (no paragraphs or tables)".to_string());
