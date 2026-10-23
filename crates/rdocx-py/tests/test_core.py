@@ -10167,6 +10167,41 @@ def test_issue391_part_inspection_reflects_current_package():
     assert bom.part_xml("/word/bom.xml") == "<bom/>"
 
 
+def test_issue406_part_inspection_lists_and_reads_relationship_parts_and_content_types():
+    import rdocx
+
+    def assert_parts_match_saved_entries(document):
+        names = document.part_names()
+        with zipfile.ZipFile(io.BytesIO(document.to_bytes())) as saved:
+            entries = {name: saved.read(name) for name in saved.namelist()}
+        assert names == tuple(sorted(f"/{entry}" for entry in entries))
+        for name in ("/[Content_Types].xml", "/_rels/.rels", "/word/_rels/document.xml.rels"):
+            assert name in names
+        for entry, data in entries.items():
+            if entry.endswith((".xml", ".rels")):
+                assert document.part_xml(f"/{entry}").encode() == data, entry
+        return entries
+
+    new = rdocx.Document()
+    new.add_paragraph("x")
+    assert_parts_match_saved_entries(new)
+    document = rdocx.Document()
+    document.add_paragraph("See ").add_hyperlink("docs", "https://example.invalid/body")
+    document.set_header("Header")
+    header = next(story for story in document.stories if story.kind == "header")
+    document.add_hyperlink_to_story(header, "home", "https://example.invalid/header")
+    document.add_picture(PNG, "pixel.png", rdocx.Pt(1), rdocx.Pt(1))
+    document.add_comment_on_text("See", author="Ada", text="Note")
+    entries = assert_parts_match_saved_entries(document)
+    assert b"https://example.invalid/header" in entries["word/_rels/header1.xml.rels"]
+    assert b"https://example.invalid/body" in entries["word/_rels/document.xml.rels"]
+    assert "word/comments.xml" in entries
+    assert document.part_xml("word/_rels/DOCUMENT.XML.RELS").encode() == entries["word/_rels/document.xml.rels"]
+    assert document.part_xml("[content_types].xml").encode() == entries["[Content_Types].xml"]
+    with pytest.raises(rdocx.RdocxError, match="missing"):
+        document.part_xml("/word/_rels/absent.xml.rels")
+
+
 def test_issue391_default_paragraph_format_is_owned_and_atomic():
     import rdocx
 

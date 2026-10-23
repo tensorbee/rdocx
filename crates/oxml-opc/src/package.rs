@@ -1,5 +1,6 @@
 //! OPC Package reader and writer for ZIP-based OOXML packages.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -280,43 +281,51 @@ impl OpcPackage {
 
     /// Write the OPC package to any writer.
     pub fn write_to<W: Write + Seek>(&self, writer: W) -> Result<()> {
-        Self::write_serialized(writer, self.serialize()?)
-    }
-
-    fn write_serialized<W: Write + Seek>(
-        writer: W,
-        serialized: SerializedPackage<'_>,
-    ) -> Result<()> {
+        // Serialize before the ZIP writer exists: a failure then writes nothing.
+        let entries = self.zip_entries()?;
         let mut zip = ZipWriter::new(writer);
         let options =
             SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-
-        // Write [Content_Types].xml
-        zip.start_file("[Content_Types].xml", options)?;
-        zip.write_all(&serialized.content_types)?;
-
-        // Write _rels/.rels
-        zip.start_file("_rels/.rels", options)?;
-        zip.write_all(&serialized.package_relationships)?;
-
-        // Write part-level .rels files. Both loops iterate in sorted order so
-        // that saving the same package twice produces byte-identical output;
-        // a HashMap's order would vary between runs.
-        for (rels_path, rels_xml) in serialized.part_relationships {
-            zip.start_file(&rels_path, options)?;
-            zip.write_all(&rels_xml)?;
+        for (name, data) in entries {
+            zip.start_file(name, options)?;
+            zip.write_all(&data)?;
         }
-
-        // Write all parts
-        for (name, data) in serialized.parts {
-            // Strip leading "/" for ZIP entry name
-            let zip_name = name.strip_prefix('/').unwrap_or(name);
-            zip.start_file(zip_name, options)?;
-            zip.write_all(data)?;
-        }
-
         zip.finish()?;
         Ok(())
+    }
+
+    /// The ZIP entries [`Self::write_to`] writes, in its order, each as its
+    /// entry name without a leading slash and its bytes.
+    ///
+    /// `[Content_Types].xml` and `_rels/.rels` come first, then one
+    /// relationship part per relationship owner, sorted by owner part name,
+    /// then the parts, sorted by part name. The same package always yields
+    /// the same entries.
+    pub fn zip_entries(&self) -> Result<Vec<(String, Cow<'_, [u8]>)>> {
+        let serialized = self.serialize()?;
+        let mut entries =
+            Vec::with_capacity(2 + serialized.part_relationships.len() + serialized.parts.len());
+        entries.push((
+            "[Content_Types].xml".to_owned(),
+            Cow::Owned(serialized.content_types),
+        ));
+        entries.push((
+            "_rels/.rels".to_owned(),
+            Cow::Owned(serialized.package_relationships),
+        ));
+        entries.extend(
+            serialized
+                .part_relationships
+                .into_iter()
+                .map(|(rels_path, rels_xml)| (rels_path, Cow::Owned(rels_xml))),
+        );
+        entries.extend(serialized.parts.into_iter().map(|(name, data)| {
+            (
+                name.strip_prefix('/').unwrap_or(name).to_owned(),
+                Cow::Borrowed(data),
+            )
+        }));
+        Ok(entries)
     }
 
     /// Append a password-protected CFB envelope around the deterministic OPC ZIP.

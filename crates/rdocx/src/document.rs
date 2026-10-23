@@ -29890,39 +29890,43 @@ impl Document {
         Ok(candidate.package)
     }
 
-    /// Package part names a save would write, each with a leading slash,
-    /// in lexicographic order. The order includes parts with no relationship.
+    /// Package part names [`Self::to_bytes`] would write now, each with a
+    /// leading slash, in lexicographic order. They are its ZIP entries, so
+    /// they include `/[Content_Types].xml`, `/_rels/.rels`, every
+    /// relationship part such as `/word/_rels/document.xml.rels`, and parts
+    /// with no relationship. When the package would not save, this returns
+    /// the save error, such as a graph validation failure, a duplicate part
+    /// identity or a character XML cannot carry.
     pub fn part_names(&self) -> Result<Vec<String>> {
-        let mut names = self
-            .staged_output_package()?
-            .parts
-            .into_keys()
+        let package = self.staged_output_package()?;
+        let mut names = package
+            .zip_entries()?
+            .into_iter()
+            .map(|(entry, _)| format!("/{entry}"))
             .collect::<Vec<_>>();
         names.sort();
         Ok(names)
     }
 
-    /// UTF-8 XML of one package part as a save would write it now.
+    /// UTF-8 XML of one package part as [`Self::to_bytes`] would write it now.
     ///
-    /// The name may omit its leading slash and matches without regard to
-    /// case. A missing, binary, or non-UTF-8 part returns an error that names
-    /// the part and its content type. A UTF-8 BOM is stripped. UTF-16 is not
-    /// decoded.
+    /// The part is the ZIP entry of [`Self::to_bytes`] with that name, a
+    /// relationship part and `/[Content_Types].xml` included. The name may
+    /// omit its leading slash and matches without regard to case. A missing,
+    /// binary, or non-UTF-8 part returns an error that names the part and its
+    /// content type. A UTF-8 BOM is stripped. UTF-16 is not decoded. When the
+    /// package would not save, this returns the save error, as
+    /// [`Self::part_names`] does.
     pub fn part_xml(&self, part_name: &str) -> Result<String> {
-        let requested = format!(
-            "/{}",
-            part_name
-                .trim()
-                .strip_prefix('/')
-                .unwrap_or(part_name.trim())
-        );
+        let requested = part_name.trim();
+        let requested = requested.strip_prefix('/').unwrap_or(requested);
         let package = self.staged_output_package()?;
-        let Some(stored) = package
-            .parts
-            .keys()
-            .find(|name| name.eq_ignore_ascii_case(&requested))
-            .cloned()
+        let entries = package.zip_entries()?;
+        let Some((entry, data)) = entries
+            .iter()
+            .find(|(entry, _)| entry.eq_ignore_ascii_case(requested))
         else {
+            let requested = format!("/{requested}");
             let content_type = package
                 .content_types
                 .content_type_for(&requested)
@@ -29931,18 +29935,21 @@ impl Document {
                 "part {requested} is missing (content type {content_type})"
             )));
         };
+        let stored = format!("/{entry}");
         let content_type = package
             .content_types
             .content_type_for(&stored)
             .unwrap_or("none");
-        let data = package.get_part(&stored).expect("listed package part");
-        let xml_type = content_type.to_ascii_lowercase().contains("xml");
+        // A relationship part and [Content_Types].xml are XML whatever the
+        // content types declare. Every other entry is a stored part.
+        let xml_type =
+            !package.contains_part(&stored) || content_type.to_ascii_lowercase().contains("xml");
         if !xml_type {
             return Err(Error::Other(format!(
                 "part {stored} has content type {content_type} and is not UTF-8 XML"
             )));
         }
-        let body = data.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(data);
+        let body = data.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(data.as_ref());
         // UTF-16 text without a BOM is ASCII bytes interleaved with NUL.
         // Those bytes are valid UTF-8, and XML 1.0 forbids NUL, so a NUL is
         // the non-UTF-8 refusal for an XML content type.

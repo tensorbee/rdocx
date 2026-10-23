@@ -406225,6 +406225,121 @@ fn issue391_part_inspection_reflects_current_package() {
     assert_eq!(bom.part_xml("/word/bom.xml").unwrap(), "<bom/>");
 }
 
+/// `part_names` lists exactly the ZIP entries `to_bytes` writes, and
+/// `part_xml` returns each XML entry's saved bytes.
+fn issue406_assert_parts_match_saved_entries(document: &mut Document) -> BTreeMap<String, Vec<u8>> {
+    let names = document.part_names().unwrap();
+    let saved = zip_entries(&document.to_bytes().unwrap());
+    assert_eq!(
+        names,
+        saved
+            .keys()
+            .map(|entry| format!("/{entry}"))
+            .collect::<Vec<_>>()
+    );
+    for name in [
+        "/[Content_Types].xml",
+        "/_rels/.rels",
+        "/word/_rels/document.xml.rels",
+    ] {
+        assert!(names.iter().any(|listed| listed == name), "{name}");
+    }
+    for (entry, bytes) in &saved {
+        let name = format!("/{entry}");
+        match document.part_xml(&name) {
+            Ok(xml) => assert_eq!(xml.as_bytes(), bytes.as_slice(), "{name}"),
+            Err(error) => assert!(
+                !entry.ends_with(".xml") && !entry.ends_with(".rels"),
+                "{name}: {error}"
+            ),
+        }
+    }
+    saved
+}
+
+#[test]
+fn issue406_part_inspection_lists_and_reads_relationship_parts_and_content_types() {
+    let mut new = Document::new();
+    new.add_paragraph("x");
+    issue406_assert_parts_match_saved_entries(&mut new);
+
+    let mut document = Document::new();
+    document.add_paragraph("linked and remarked");
+    document.set_header("header");
+    let header = f254_story(&document, StoryKind::Header);
+    document
+        .add_hyperlink_to_story(&header, "header link", "https://example.invalid/header")
+        .unwrap();
+    let body = f254_story(&document, StoryKind::Body);
+    document
+        .add_hyperlink_to_story(&body, "body link", "https://example.invalid/body")
+        .unwrap();
+    document.add_picture(
+        &f_x204_picture_fixture(b"issue406"),
+        "pixel.png",
+        Length::pt(1.0),
+        Length::pt(1.0),
+    );
+    document
+        .add_comment_on_text("remarked", 0, "Ada", None, "Note", None)
+        .unwrap();
+    let saved = issue406_assert_parts_match_saved_entries(&mut document);
+    let header_rels = std::str::from_utf8(&saved["word/_rels/header1.xml.rels"]).unwrap();
+    assert!(header_rels.contains("https://example.invalid/header"));
+    assert!(saved.contains_key("word/comments.xml"));
+    assert!(saved.keys().any(|entry| entry.starts_with("word/media/")));
+    let document_rels = std::str::from_utf8(&saved["word/_rels/document.xml.rels"]).unwrap();
+    assert!(document_rels.contains("https://example.invalid/body"));
+    assert!(document_rels.contains("comments.xml"));
+    assert_eq!(
+        document.part_xml("word/_rels/DOCUMENT.XML.RELS").unwrap(),
+        document_rels
+    );
+    assert_eq!(
+        document.part_xml("[content_types].xml").unwrap().as_bytes(),
+        saved["[Content_Types].xml"].as_slice()
+    );
+    assert_eq!(
+        document.part_xml("_RELS/.rels").unwrap().as_bytes(),
+        saved["_rels/.rels"].as_slice()
+    );
+    let missing = document
+        .part_xml("/word/_rels/absent.xml.rels")
+        .unwrap_err()
+        .to_string();
+    assert!(missing.contains("is missing"), "{missing}");
+
+    // An opened package keeps its producer's [Content_Types].xml and
+    // relationship bytes while their model is unchanged.
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    let mut writer = zip::ZipWriter::new(&mut cursor);
+    for (entry, bytes) in &saved {
+        writer
+            .start_file(entry.as_str(), zip::write::SimpleFileOptions::default())
+            .unwrap();
+        let bytes = if entry == "[Content_Types].xml" || entry.ends_with(".rels") {
+            String::from_utf8(bytes.clone())
+                .unwrap()
+                .replacen("?>", "?><!-- issue 406 producer -->", 1)
+                .into_bytes()
+        } else {
+            bytes.clone()
+        };
+        std::io::Write::write_all(&mut writer, &bytes).unwrap();
+    }
+    writer.finish().unwrap();
+    let mut opened = Document::from_bytes(cursor.get_ref()).unwrap();
+    let saved = issue406_assert_parts_match_saved_entries(&mut opened);
+    for (entry, bytes) in &saved {
+        if entry == "[Content_Types].xml" || entry.ends_with(".rels") {
+            assert!(
+                String::from_utf8_lossy(bytes).contains("issue 406 producer"),
+                "{entry}"
+            );
+        }
+    }
+}
+
 #[test]
 fn issue391_story_item_snapshots_are_namespace_complete() {
     let mut document = Document::new();
