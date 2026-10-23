@@ -10192,7 +10192,7 @@ def test_issue391_default_paragraph_format_is_owned_and_atomic():
     assert 'w:after="240"' in defaults
     assert 'w:line="360"' in defaults
     before = document.to_bytes()
-    for value in (1.5, 12, True, "12"):
+    for value in (True, "12"):
         with pytest.raises(TypeError):
             document.set_default_paragraph_format(line_spacing=value)
         assert document.to_bytes() == before
@@ -10243,11 +10243,123 @@ def test_issue391_default_paragraph_line_rules_keep_imported_states():
     assigned.set_default_paragraph_format(line_spacing=None)
     defaults = _fx261_defaults(assigned.part_xml("/word/styles.xml"))
     assert "w:line" not in defaults and "w:lineRule" not in defaults
-    refused = opened('w:line="360" w:lineRule="auto"')
-    before = refused.to_bytes()
-    with pytest.raises(TypeError):
-        refused.set_default_paragraph_format(line_spacing=1.5)
-    assert refused.to_bytes() == before
+    rewritten = opened('w:line="360" w:lineRule="auto"')
+    before = rewritten.to_bytes()
+    rewritten.set_default_paragraph_format(line_spacing=1.5)
+    assert rewritten.to_bytes() == before
+
+
+def test_issue402_default_line_spacing_takes_a_line_multiple():
+    import rdocx
+
+    document = rdocx.Document()
+    held = document.default_paragraph_format.line_spacing
+    assert held == 259 / 240
+    before = document.to_bytes()
+    document.set_default_paragraph_format(line_spacing=held)
+    assert document.to_bytes() == before
+    for value, line in ((1.15, 276), (2, 480), (0.5, 120)):
+        document.set_default_paragraph_format(line_spacing=value)
+        defaults = _fx261_defaults(document.part_xml("/word/styles.xml"))
+        assert f'w:line="{line}"' in defaults and 'w:lineRule="auto"' in defaults
+        assert document.default_paragraph_format.line_spacing == line / 240
+    document.set_default_paragraph_format(line_spacing=rdocx.Pt(12))
+    defaults = _fx261_defaults(document.part_xml("/word/styles.xml"))
+    assert 'w:line="240"' in defaults and 'w:lineRule="exact"' in defaults
+    document.set_default_paragraph_format(line_spacing=1.0)
+    defaults = _fx261_defaults(document.part_xml("/word/styles.xml"))
+    assert 'w:line="240"' in defaults and 'w:lineRule="auto"' in defaults
+    before = document.to_bytes()
+    refusals = (
+        (True, TypeError),
+        ("1.5", TypeError),
+        (float("nan"), ValueError),
+        (float("inf"), ValueError),
+        (1e10, ValueError),
+    )
+    for value, error in refusals:
+        with pytest.raises(error):
+            document.set_default_paragraph_format(
+                space_before=rdocx.Pt(6), line_spacing=value
+            )
+        assert document.to_bytes() == before
+    for name in ("space_before", "space_after"):
+        with pytest.raises(TypeError):
+            document.set_default_paragraph_format(**{name: 1.5})
+        assert document.to_bytes() == before
+
+
+# The stored lines whose multiple, read as line / 240, truncates one below
+# the line when multiplied back, and the common ones.
+_ISSUE402_LINES = [
+    *(line for line in range(1, 2000) if int(line / 240 * 240) != line),
+    240, 259, 276, 360, 480,
+]
+
+
+def test_issue402_every_stored_auto_line_writes_back_unchanged():
+    import rdocx
+
+    assert len(_ISSUE402_LINES) == 38 + 5
+    for line in _ISSUE402_LINES:
+        for rule in (' w:lineRule="auto"', ""):
+            document = _fx261_set_doc_defaults(
+                rdocx.Document(),
+                f'<w:pPrDefault><w:pPr><w:spacing w:line="{line}"{rule}/></w:pPr></w:pPrDefault>',
+            )
+            before = document.to_bytes()
+            read = document.default_paragraph_format.line_spacing
+            document.set_default_paragraph_format(line_spacing=read)
+            assert document.to_bytes() == before, (line, rule)
+
+
+def test_issue402_style_and_paragraph_multiples_write_back_the_read_line():
+    import rdocx
+
+    document = rdocx.Document()
+    paragraph_format = document.add_paragraph("held").paragraph_format
+    for line in _ISSUE402_LINES:
+        paragraph_format.line_spacing = line / 240
+        assert paragraph_format.line_spacing == line / 240
+        document.set_style("Normal", line_spacing=line / 240)
+        styles = document.part_xml("/word/styles.xml")
+        normal = re.search(r'<w:style [^>]*w:styleId="Normal".*?</w:style>', styles, re.S)
+        assert normal is not None
+        assert f'w:line="{line}" w:lineRule="auto"' in normal.group(0), line
+    paragraph_format.line_spacing = 1.0021
+    assert paragraph_format.line_spacing == 1.0
+
+
+def test_issue402_style_line_spacing_reads_an_int_as_a_line_multiple():
+    import rdocx
+
+    def spacing(document, style_id):
+        styles = document.part_xml("/word/styles.xml")
+        style = re.search(
+            rf'<w:style [^>]*w:styleId="{style_id}".*?</w:style>', styles, re.S
+        )
+        assert style is not None
+        found = re.search(r"<w:spacing [^>]*/>", style.group(0))
+        return None if found is None else found.group(0)
+
+    document = rdocx.Document()
+    document.set_style("Normal", line_spacing=2)
+    assert 'w:line="480" w:lineRule="auto"' in spacing(document, "Normal")
+    document.add_style("Twice", line_spacing=2)
+    assert 'w:line="480" w:lineRule="auto"' in spacing(document, "Twice")
+    document.set_style("Normal", line_spacing=rdocx.Pt(18))
+    assert 'w:line="360" w:lineRule="exact"' in spacing(document, "Normal")
+    before = document.to_bytes()
+    for value in (True, "2"):
+        with pytest.raises(TypeError):
+            document.set_style("Normal", line_spacing=value)
+        assert document.to_bytes() == before
+        with pytest.raises(TypeError):
+            document.add_style(f"Refused {value}", line_spacing=value)
+        assert document.to_bytes() == before
+    with pytest.raises(ValueError):
+        document.set_style("Normal", line_spacing=float("nan"))
+    assert document.to_bytes() == before
 
 
 def test_issue391_root_attributes_use_declared_namespace_scope():

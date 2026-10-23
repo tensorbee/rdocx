@@ -385,6 +385,10 @@ signed32 range checked on the truncating EMU/635 quotient for absolute lengths
 or the finite multiple-times240 product for multiples. Unsupported types,
 nonfinite products and saturation refuse before mutation. Native off-grid
 multiple truncation remains distinct from python-docx's twip rounding.
+`rdocx::auto_line_spacing` converts every line multiple, here and in
+`add_style`, `set_style` and the document defaults. A multiple equal to the
+stored integer divided by 240 writes that integer, so a value read back from
+`line_spacing` writes the same `w:line`. Any other multiple truncates.
 
 `ParagraphFormat.tab_stops` is a live parent-bound collection with length,
 indexing, iteration, indexed deletion, add_tab_stop and clear_all. Returned
@@ -411,8 +415,11 @@ explicit empty border/tab collections clear active owned entries. The selected
 Word border or tab container can remain empty to suppress earlier duplicate
 owners while retaining foreign attributes and opaque payload. Border clearing
 leaves no active owned edge, and tab clearing leaves no active owned tab.
-These retained containers do not represent active formatting. Invalid input or
-style graph changes fail before source publication.
+These retained containers do not represent active formatting. Their
+`line_spacing` follows `ParagraphFormat.line_spacing`. A `Length` writes the
+exact rule, a non-bool integer or float writes a multiple with the auto rule,
+and a bool or another type refuses. Invalid input or style graph changes fail
+before source publication.
 
 `add_numbering_instance(definition_id, *, start=None, level=0)` creates an
 instance of one existing definition. Start is a checked u32, including zero,
@@ -4209,7 +4216,7 @@ Membership and failed operations create no properties part.
 
 Python `part_names` returns a tuple of package paths with a leading slash, in lexicographic order, including a part with no relationship. `part_xml` returns the UTF-8 text of one staged part. Rust returns `Result`. A missing, binary, or non-UTF-8 part raises `RdocxError` and names the part and content type. The read sees unsaved staged parts, returns no mutable handle, and has no WASM surface.
 
-Python `DefaultParagraphFormat` exposes `space_before`, `space_after` and `line_spacing` on `Length`. An omitted keyword keeps the stored value. A keyword set to `None` clears only that property. Rust `default_paragraph_properties` and `set_default_paragraph_properties` expose the stored `CT_PPr`. Clearing the whole native object preserves `w:rPrDefault` and unrelated opaque source. A float, int, or bool assigned to `line_spacing` refuses and does not publish. Assigning a `Length` writes `w:line` in twips and `w:lineRule="exact"`. The twip conversion divides EMU by 635 toward zero, so `Pt(12)` is 240 twips. Assigning `None` clears both `w:line` and `w:lineRule`. The getter returns a `Length` for `exact` and `atLeast`, the stored integer divided by 240 as a float for `auto` and for a missing rule, and `None` when `w:line` is absent or the rule is any other string. Omitting the keyword keeps `atLeast`, a missing rule, and an unknown rule.
+Python `DefaultParagraphFormat` exposes `space_before` and `space_after` on `Length`, and `line_spacing` on `Length` or a float line multiple. An omitted keyword keeps the stored value. A keyword set to `None` clears only that property. Rust `default_paragraph_properties` and `set_default_paragraph_properties` expose the stored `CT_PPr`. Clearing the whole native object preserves `w:rPrDefault` and unrelated opaque source. A bool, or a value that is neither a `Length` nor a number, refuses and does not publish, as does a float or int for `space_before` or `space_after`. Assigning a non-bool int or float to `line_spacing` writes `w:line` from `rdocx::auto_line_spacing` and `w:lineRule="auto"`, as `set_style` does. A nonfinite product or one outside signed 32 bits refuses. A multiple equal to the stored `auto` line keeps a missing rule missing, so a value read from `default_paragraph_format` writes back without changing the bytes. Assigning a `Length` writes `w:line` in twips and `w:lineRule="exact"`. The twip conversion divides EMU by 635 toward zero, so `Pt(12)` is 240 twips. Assigning `None` clears both `w:line` and `w:lineRule`. The getter returns a `Length` for `exact` and `atLeast`, the stored integer divided by 240 as a float for `auto` and for a missing rule, and `None` when `w:line` is absent or the rule is any other string. Omitting the keyword keeps `atLeast`, a missing rule, and an unknown rule.
 
 AppProperties and presence-sensitive track_revisions are live document-owned handles. Equations return immutable source snapshots, ordered per-child conversion results and native loss diagnostics. Tag and alias control updates stage all selected qualified values once. Runtime constructors, explicit exports and strict stubs describe the same public classes and defaults.
 

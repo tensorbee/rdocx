@@ -864,6 +864,22 @@ impl ParagraphMarkRef<'_> {
     }
 }
 
+/// The `w:line` value, in 240ths of a line, that `w:lineRule="auto"` stores
+/// for a line multiple.
+///
+/// A multiple equal to `n / 240.0`, the value [`ParagraphRef::line_spacing_multiple`]
+/// reads for `n`, writes `n`, so a read multiple writes back unchanged. Any
+/// other multiple truncates toward zero.
+pub fn auto_line_spacing(multiple: f64) -> Twips {
+    let scaled = multiple * 240.0;
+    let nearest = scaled.round();
+    if nearest / 240.0 == multiple {
+        Twips(nearest as i32)
+    } else {
+        Twips(scaled as i32)
+    }
+}
+
 /// A mutable reference to a paragraph in a document.
 pub struct Paragraph<'a> {
     pub(crate) inner: &'a mut CT_P,
@@ -1609,11 +1625,11 @@ impl<'a> Paragraph<'a> {
         self
     }
 
-    /// Set multiplied line spacing in place.
+    /// Set multiplied line spacing in place, converted by [`auto_line_spacing`].
     pub fn set_line_spacing_multiple(&mut self, multiple: f64) {
         let ppr = self.ensure_ppr();
         // In "auto" mode, line spacing is in 240ths of a line (240 = single)
-        ppr.line_spacing = Some(Twips((multiple * 240.0) as i32));
+        ppr.line_spacing = Some(auto_line_spacing(multiple));
         ppr.line_rule = Some("auto".to_string());
     }
 

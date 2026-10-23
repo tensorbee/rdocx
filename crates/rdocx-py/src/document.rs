@@ -2997,7 +2997,14 @@ impl StyleFormatting {
         }
         if let Some(value) = &self.line_spacing {
             let value = value.bind(py);
-            if value.is_instance_of::<PyFloat>() {
+            let message = "style line_spacing requires a numeric line multiple or a Length";
+            if value.is_instance_of::<PyBool>() {
+                return Err(PyTypeError::new_err(message));
+            }
+            if value.is_instance(&py.import("rdocx")?.getattr("Length")?)? {
+                properties.line_spacing = Some(twips(value.extract()?)?);
+                properties.line_rule = Some("exact".to_owned());
+            } else if value.is_instance_of::<PyInt>() || value.is_instance_of::<PyFloat>() {
                 let multiple = value.extract::<f64>()?;
                 let twip = multiple * 240.0;
                 if !multiple.is_finite() || twip < i32::MIN as f64 || twip > i32::MAX as f64 {
@@ -3005,11 +3012,10 @@ impl StyleFormatting {
                         "style line_spacing must be finite and fit signed twips",
                     ));
                 }
-                properties.line_spacing = Some(rdocx::Twips(twip as i32));
+                properties.line_spacing = Some(rdocx::auto_line_spacing(multiple));
                 properties.line_rule = Some("auto".to_owned());
             } else {
-                properties.line_spacing = Some(twips(value.extract()?)?);
-                properties.line_rule = Some("exact".to_owned());
+                return Err(PyTypeError::new_err(message));
             }
         }
         if let Some(value) = self.keep_with_next {
@@ -3456,6 +3462,35 @@ fn length_keyword(
     let twips = i32::try_from(emu / 635)
         .map_err(|_| PyValueError::new_err(format!("{name} must fit signed twips")))?;
     Ok(Some(rdocx::Twips(twips)))
+}
+
+/// The `w:line` value and rule for a default `line_spacing` keyword: a
+/// `Length` is an exact pitch, a non-bool int or float a line multiple.
+fn line_spacing_keyword(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Option<(rdocx::Twips, &'static str)>> {
+    if value.is_none() {
+        return Ok(None);
+    }
+    let message = "line_spacing requires a numeric line multiple, a Length or None";
+    if value.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(message));
+    }
+    if value.is_instance(&py.import("rdocx")?.getattr("Length")?)? {
+        return Ok(length_keyword(py, value, "line_spacing")?.map(|twips| (twips, "exact")));
+    }
+    if !value.is_instance_of::<PyInt>() && !value.is_instance_of::<PyFloat>() {
+        return Err(PyTypeError::new_err(message));
+    }
+    let multiple = value.extract::<f64>()?;
+    let twips = (multiple * 240.0).trunc();
+    if !twips.is_finite() || twips < i32::MIN as f64 || twips > i32::MAX as f64 {
+        return Err(PyValueError::new_err(
+            "line_spacing multiple must be finite and fit signed twips",
+        ));
+    }
+    Ok(Some((rdocx::auto_line_spacing(multiple), "auto")))
 }
 
 #[pyclass(name = "CustomProperties")]
@@ -10229,13 +10264,22 @@ impl PyDocument {
             let Some(value) = kwargs.get_item(name)? else {
                 continue;
             };
-            let twips = length_keyword(py, &value, name)?;
             match name {
-                "space_before" => next.space_before = twips,
-                "space_after" => next.space_after = twips,
+                "space_before" => next.space_before = length_keyword(py, &value, name)?,
+                "space_after" => next.space_after = length_keyword(py, &value, name)?,
                 "line_spacing" => {
-                    next.line_spacing = twips;
-                    next.line_rule = twips.map(|_| "exact".to_owned());
+                    let line = line_spacing_keyword(py, &value)?;
+                    // A missing rule already means auto, so writing back the
+                    // stored multiple keeps it missing.
+                    let kept = line.is_some_and(|(twips, rule)| {
+                        rule == "auto"
+                            && next.line_rule.is_none()
+                            && next.line_spacing == Some(twips)
+                    });
+                    next.line_spacing = line.map(|(twips, _)| twips);
+                    if !kept {
+                        next.line_rule = line.map(|(_, rule)| rule.to_owned());
+                    }
                 }
                 _ => unreachable!("keyword was checked above"),
             }

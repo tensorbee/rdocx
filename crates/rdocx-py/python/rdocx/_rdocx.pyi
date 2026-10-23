@@ -1159,9 +1159,11 @@ class Document:
         hyphens of the name, as Word derives one, or is `a`, `a0` and so on
         when none is left.
         `based_on` and `next_style` take an ID or a name. Lengths and the font
-        size are EMU. Raises `KeyError` when a base or next style names no
-        style, and `ValueError` for a duplicate ID or name or any other
-        invalid argument.
+        size are EMU. A Length line_spacing writes an exact pitch, and an int
+        or float writes a line multiple with the auto rule. Raises `KeyError`
+        when a base or next style names no style, `TypeError` for a bool or
+        another line_spacing type, and `ValueError` for a duplicate ID or name
+        or any other invalid argument.
         """
     def set_style(
         self,
@@ -1192,8 +1194,10 @@ class Document:
         """Update the supplied formatting on a style selected by ID or name.
 
         Unspecified properties keep their existing values. Lengths and font
-        size are EMU. Invalid style references or graph changes leave the
-        document unchanged.
+        size are EMU. A Length line_spacing writes an exact pitch, and an int
+        or float writes a line multiple with the auto rule. Invalid style
+        references, invalid values or graph changes leave the document
+        unchanged.
         """
     def remove_style(self, style: str) -> bool: ...
     def set_default_style(self, style: str) -> None: ...
@@ -1204,14 +1208,17 @@ class Document:
         *,
         space_before: _shared.Length | None = ...,
         space_after: _shared.Length | None = ...,
-        line_spacing: _shared.Length | None = ...,
+        line_spacing: _shared.Length | float | None = ...,
     ) -> None:
         """Set document default paragraph spacing.
 
         An omitted keyword keeps its stored value. None clears only that
-        keyword. A Length writes that spacing. line_spacing writes an exact
-        rule. A float, an int or a bool is refused and the document stays
-        unchanged.
+        keyword. A Length writes that spacing. A Length line_spacing writes
+        an exact rule, and a float or int line_spacing writes a line multiple
+        with the auto rule, as set_style does, so the value
+        default_paragraph_format reads writes back unchanged. A float or an
+        int for space_before or space_after, a bool, or any other type is
+        refused and the document stays unchanged.
         """
     def part_names(self) -> tuple[str, ...]: ...
     def part_xml(self, name: str) -> str: ...

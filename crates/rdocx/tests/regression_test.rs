@@ -406128,6 +406128,32 @@ fn issue391_default_paragraph_line_rules_keep_imported_states() {
     assert!(at_least.default_paragraph_properties().is_none());
 }
 
+#[test]
+fn issue402_line_multiple_writes_back_the_stored_line() {
+    for line in -4800..=4800 {
+        assert_eq!(
+            rdocx::auto_line_spacing(f64::from(line) / 240.0),
+            Twips(line),
+            "w:line {line}"
+        );
+    }
+    assert_eq!(rdocx::auto_line_spacing(1.15), Twips(276));
+    assert_eq!(rdocx::auto_line_spacing(1.0021), Twips(240));
+    assert_eq!(rdocx::auto_line_spacing(-1.0021), Twips(-240));
+    assert_eq!(rdocx::auto_line_spacing(f64::NAN), Twips(0));
+    let mut document = Document::new();
+    let read = 123.0 / 240.0;
+    document
+        .add_paragraph("one 240th below half a line")
+        .set_line_spacing_multiple(read);
+    let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+    let paragraphs = reopened.paragraphs();
+    assert_eq!(
+        paragraphs.last().unwrap().line_spacing_multiple(),
+        Some(read)
+    );
+}
+
 fn fx261_add_part(bytes: &[u8], name: &str, payload: &[u8], content_type: &str) -> Vec<u8> {
     let mut package = fx261_package(bytes);
     package.set_part(name, payload.to_vec());
