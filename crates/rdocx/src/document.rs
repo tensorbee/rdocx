@@ -4823,6 +4823,10 @@ pub(crate) struct DocumentIdentifiers {
     authored_nested_story_drawing_ids: HashMap<String, HashSet<u32>>,
     authored_bundle_relationship_ids: HashMap<String, HashSet<String>>,
     provisional_relationship_ids: HashMap<String, HashSet<String>>,
+    /// Main-part relationship ids that something outside the body model
+    /// names: imported XML not inserted yet, or an id returned to a caller.
+    /// Staging keeps each id until the main story references it.
+    pending_relationship_ids: HashMap<String, HashSet<String>>,
 }
 
 impl DocumentIdentifiers {
@@ -4870,6 +4874,7 @@ impl DocumentIdentifiers {
             authored_nested_story_drawing_ids: HashMap::new(),
             authored_bundle_relationship_ids: HashMap::new(),
             provisional_relationship_ids: HashMap::new(),
+            pending_relationship_ids: HashMap::new(),
         };
         identifiers.part_names.extend(
             package
@@ -5646,6 +5651,10 @@ impl DocumentIdentifiers {
         );
         self.provisional_relationship_ids = intersect_relationship_registry(
             &source.provisional_relationship_ids,
+            &self.relationship_ids,
+        );
+        self.pending_relationship_ids = intersect_relationship_registry(
+            &source.pending_relationship_ids,
             &self.relationship_ids,
         );
         self.preserved_bookmark_ids = source
@@ -17613,6 +17622,18 @@ impl Document {
             .collect())
     }
 
+    /// Keep a main-part relationship id from staging renumbering until the
+    /// main story references it.
+    pub(crate) fn register_pending_relationship(&mut self, owner: &str, id: &str) {
+        if owner == self.doc_part_name {
+            self.identifiers
+                .pending_relationship_ids
+                .entry(relationship_owner_identity(owner))
+                .or_default()
+                .insert(id.to_owned());
+        }
+    }
+
     fn canonicalize_drawing_ids(&mut self) -> Result<()> {
         let owner = self.doc_part_name.clone();
         let owner_identity = relationship_owner_identity(&owner);
@@ -17685,6 +17706,23 @@ impl Document {
             .get_part_rels(&owner)
             .map(|relationships| relationships.items.clone())
             .unwrap_or_default();
+        // Pending XML or a caller still names these ids, so renumbering them
+        // would point it at other relationships. Once the main story
+        // references one, it is canonicalized like any other.
+        if let Some(pending) = self
+            .identifiers
+            .pending_relationship_ids
+            .get_mut(&owner_identity)
+        {
+            pending.retain(|id| {
+                !modeled_story_relationships.contains(id)
+                    && !opaque_relationships.contains(id)
+                    && relationships
+                        .iter()
+                        .any(|relationship| relationship.id == *id)
+            });
+            opaque_relationships.extend(pending.iter().cloned());
+        }
         story_relationships.retain(|id| {
             !preserved_relationships.contains(id)
                 && relationships
@@ -22627,7 +22665,8 @@ impl Document {
                     && relationship.target_mode.as_deref() == Some("External")
             })
             .count();
-        candidate.add_external_relationship_checked(&owner, rel_types::HYPERLINK, url)?;
+        let id = candidate.add_external_relationship_checked(&owner, rel_types::HYPERLINK, url)?;
+        candidate.register_pending_relationship(&owner, &id);
         let reopened = candidate.prepare_and_reopen_staged()?;
         let relationship_id = reopened
             .package
@@ -27930,6 +27969,7 @@ impl Document {
         let relationship_id = candidate
             .add_image_relationship_checked(&owner, image_data, filename)
             .expect("an in-memory package cannot exhaust every relationship identifier");
+        candidate.register_pending_relationship(&owner, &relationship_id);
         candidate.invalidate_layout();
         self.commit_staged_mutation(candidate);
         relationship_id
@@ -28097,6 +28137,7 @@ impl Document {
         let id = candidate
             .add_external_relationship_checked(&owner, rel_types::HYPERLINK, url)
             .expect("an in-memory document can install a hyperlink relationship");
+        candidate.register_pending_relationship(&owner, &id);
         self.commit_staged_mutation(candidate);
         id
     }

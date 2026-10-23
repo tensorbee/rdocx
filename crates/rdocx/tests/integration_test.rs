@@ -28428,3 +28428,417 @@ fn batched_paragraph_locations_match_the_single_lookups() {
     assert_eq!(cells.len(), resolved);
     assert!(resolved >= 7);
 }
+
+fn solid_png(rgb: [u8; 3]) -> Vec<u8> {
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(2, 2).unwrap();
+    pixmap.fill(resvg::tiny_skia::Color::from_rgba8(
+        rgb[0], rgb[1], rgb[2], 255,
+    ));
+    pixmap.encode_png().unwrap()
+}
+
+/// A reopened document with one picture paragraph per entry.
+fn reopened_with_pictures(pictures: &[&[u8]]) -> Document {
+    let mut document = Document::new();
+    for (index, picture) in pictures.iter().enumerate() {
+        document.add_picture(
+            picture,
+            &format!("picture{index}.png"),
+            Length::inches(1.0),
+            Length::inches(1.0),
+        );
+    }
+    Document::from_bytes(&document.to_bytes().unwrap()).unwrap()
+}
+
+/// The part and bytes each main-body drawing from `first` on shows.
+fn shown_pictures(document: &mut Document, first: usize) -> Vec<(String, Vec<u8>)> {
+    let package =
+        OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap())).unwrap();
+    let relationships = package.get_part_rels("/word/document.xml").unwrap();
+    let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+    xml.split(r#"r:embed=""#)
+        .skip(1)
+        .filter_map(|tail| tail.split('"').next())
+        .skip(first)
+        .map(|id| {
+            let relationship = relationships.get_by_id(id).unwrap();
+            let part = OpcPackage::resolve_rel_target("/word/document.xml", &relationship.target);
+            let bytes = package.get_part(&part).unwrap().to_vec();
+            (part, bytes)
+        })
+        .collect()
+}
+
+/// The colour names of the pictures each main-body drawing from `first` on shows.
+fn shown_colours(
+    document: &mut Document,
+    first: usize,
+    colours: &[(&'static str, &[u8])],
+) -> Vec<&'static str> {
+    shown_pictures(document, first)
+        .into_iter()
+        .map(|(_, bytes)| {
+            colours
+                .iter()
+                .find(|(_, colour)| *colour == bytes.as_slice())
+                .map_or("other", |(name, _)| name)
+        })
+        .collect()
+}
+
+/// Insert the whole body of `source` at the end of `target`, as the Python
+/// `Document.insert_document` does.
+fn insert_whole_body(
+    target: &mut Document,
+    source: &Document,
+    policy: rdocx::FragmentConflictPolicy,
+) {
+    let source_body = body_story(source);
+    let start = source.story_items(&source_body).unwrap()[0]
+        .location()
+        .clone();
+    let fragment = rdocx::DocumentFragment::from_range(
+        source,
+        &start,
+        &rdocx::ContentLocation::end(source_body),
+        false,
+    )
+    .unwrap();
+    let body = body_story(target);
+    target
+        .import_fragment(&rdocx::ContentLocation::end(body), &fragment, policy)
+        .unwrap();
+}
+
+fn fragment_import_policies() -> [(&'static str, rdocx::FragmentConflictPolicy); 3] {
+    [
+        ("default", rdocx::FragmentConflictPolicy::default()),
+        (
+            "reuse_equivalent",
+            rdocx::FragmentConflictPolicy::reuse_equivalent(),
+        ),
+        (
+            "related-part reuse off",
+            rdocx::FragmentConflictPolicy::reuse_equivalent().with_related_part_reuse(false),
+        ),
+    ]
+}
+
+/// A reopened copy of `document` whose body holds only `pictures`. The copy
+/// keeps the relationships of the replaced body, so its pictures are stored
+/// after the parts those relationships target.
+fn copy_with_body_replaced_by_pictures(document: &mut Document, pictures: &[&[u8]]) -> Document {
+    let mut copy = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+    let replaced = copy.content_count();
+    for (index, picture) in pictures.iter().enumerate() {
+        copy.add_picture(
+            picture,
+            &format!("new{index}.png"),
+            Length::inches(1.0),
+            Length::inches(1.0),
+        );
+    }
+    for _ in 0..replaced {
+        let body = body_story(&copy);
+        let first = copy.story_items(&body).unwrap()[0].location().clone();
+        copy.remove_content_at(&first).unwrap();
+    }
+    Document::from_bytes(&copy.to_bytes().unwrap()).unwrap()
+}
+
+/// tensorbee/rdocx#404, case 1: the target holds blue then red, and related-part
+/// reuse maps the inserted red then blue onto its image2 and image1. Staging
+/// renumbered the new relationships in target order before the inserted
+/// drawings reached the body, so each drawing showed the other picture.
+#[test]
+fn inserted_pictures_keep_their_bytes_when_the_target_holds_them_in_another_order() {
+    let red = solid_png([200, 0, 0]);
+    let blue = solid_png([0, 0, 200]);
+    let colours = [("red", red.as_slice()), ("blue", blue.as_slice())];
+    let mut failures = Vec::new();
+    for (label, policy) in fragment_import_policies() {
+        for inserted in [["red", "blue"], ["blue", "red"]] {
+            let pictures = inserted.map(|name| if name == "red" { &red[..] } else { &blue[..] });
+            let mut target = reopened_with_pictures(&[&blue, &red]);
+            let source = reopened_with_pictures(&pictures);
+            insert_whole_body(&mut target, &source, policy);
+            let shown = shown_colours(&mut target, 2, &colours);
+            if shown != inserted {
+                failures.push(format!("{label}, inserted {inserted:?}, shown {shown:?}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// tensorbee/rdocx#404, case 2, reconstructed: the reported document was not
+/// available. Its literal shape, two unused relationships with the pictures
+/// stored as image3.png and image4.png, imports correctly on a57be365 without
+/// related-part reuse. With eight unused relationships the pictures are stored
+/// as image9.png and image10.png, which sort in the other order, and the
+/// inserted drawings swapped pictures as in case 1, with or without
+/// related-part reuse. In this reconstruction a plain target swaps them too.
+#[test]
+fn inserted_pictures_stored_past_image9_keep_their_bytes() {
+    let red = solid_png([200, 0, 0]);
+    let blue = solid_png([0, 0, 200]);
+    let colours = [("red", red.as_slice()), ("blue", blue.as_slice())];
+    let fillers = (0..6_u8)
+        .map(|index| solid_png([20 * index, 120, 60]))
+        .collect::<Vec<_>>();
+    let mut held: Vec<&[u8]> = vec![&blue, &red];
+    held.extend(fillers.iter().map(Vec::as_slice));
+    let mut failures = Vec::new();
+    for (label, policy) in fragment_import_policies() {
+        for inserted in [["red", "blue"], ["blue", "red"]] {
+            let pictures = inserted.map(|name| if name == "red" { &red[..] } else { &blue[..] });
+            for plain_target in [false, true] {
+                let mut target = reopened_with_pictures(&held);
+                let mut source = copy_with_body_replaced_by_pictures(&mut target, &pictures);
+                let stored = shown_pictures(&mut source, 0)
+                    .into_iter()
+                    .map(|(part, _)| part)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    stored,
+                    ["/word/media/image9.png", "/word/media/image10.png"]
+                );
+                let first = if plain_target {
+                    target = reopened_with_pictures(&[]);
+                    0
+                } else {
+                    held.len()
+                };
+                insert_whole_body(&mut target, &source, policy);
+                let shown = shown_colours(&mut target, first, &colours);
+                if shown != inserted {
+                    failures.push(format!(
+                        "{label}, plain target {plain_target}, inserted {inserted:?}, shown {shown:?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// tensorbee/rdocx#404: staging sorted the new relationships by type and
+/// target, so an inserted picture followed by a chart pointed at the chart and
+/// inserted hyperlinks whose URLs sort in the other order swapped targets.
+#[test]
+fn inserted_relationships_of_every_type_keep_their_targets() {
+    let red = solid_png([200, 0, 0]);
+    let blue = solid_png([0, 0, 200]);
+    let mut source = Document::new();
+    source.add_picture(&red, "red.png", Length::inches(1.0), Length::inches(1.0));
+    source
+        .add_chart(
+            oxml_chart::ChartKind::Bar,
+            Length::inches(3.0),
+            Length::inches(2.0),
+            &oxml_chart::ChartData {
+                categories: vec!["North".to_owned(), "South".to_owned()],
+                series: vec![("Revenue".to_owned(), vec![12.0, 18.0])],
+                ..oxml_chart::ChartData::default()
+            },
+        )
+        .unwrap();
+    for url in ["https://b.example/", "https://a.example/"] {
+        let body = body_story(&source);
+        source.add_hyperlink_to_story(&body, url, url).unwrap();
+    }
+    let source = Document::from_bytes(&source.to_bytes().unwrap()).unwrap();
+    for (label, policy) in fragment_import_policies() {
+        let mut target = reopened_with_pictures(&[&blue, &red]);
+        insert_whole_body(&mut target, &source, policy);
+        let package =
+            OpcPackage::from_reader(std::io::Cursor::new(target.to_bytes().unwrap())).unwrap();
+        let relationships = package.get_part_rels("/word/document.xml").unwrap();
+        let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap())
+            .unwrap()
+            .replace(r#"r:embed=""#, r#"r:id=""#);
+        let shown = xml
+            .split(r#"r:id=""#)
+            .skip(3)
+            .filter_map(|tail| tail.split('"').next())
+            .map(|id| {
+                let relationship = relationships.get_by_id(id).unwrap();
+                if relationship.rel_type == rel_types::HYPERLINK {
+                    return relationship.target.clone();
+                }
+                let part =
+                    OpcPackage::resolve_rel_target("/word/document.xml", &relationship.target);
+                if relationship.rel_type == rel_types::CHART {
+                    return format!("chart {}", part.starts_with("/word/charts/"));
+                }
+                let bytes = package.get_part(&part).unwrap();
+                format!("image red {}", bytes == red.as_slice())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shown,
+            [
+                "image red true",
+                "chart true",
+                "https://b.example/",
+                "https://a.example/"
+            ],
+            "{label}"
+        );
+    }
+}
+
+/// tensorbee/rdocx#404: each repeated copy of a template loop imports its
+/// pictures, and the copies reach the body only after the last import. The
+/// loop's pictures are stored as image9.png and image10.png.
+#[test]
+fn repeated_template_pictures_keep_their_bytes() {
+    let red = solid_png([200, 0, 0]);
+    let blue = solid_png([0, 0, 200]);
+    let colours = [("red", red.as_slice()), ("blue", blue.as_slice())];
+    let mut document = Document::new();
+    for index in 0..8_u8 {
+        document.add_picture(
+            &solid_png([20 * index, 120, 60]),
+            &format!("filler{index}.png"),
+            Length::inches(1.0),
+            Length::inches(1.0),
+        );
+    }
+    document.add_paragraph("{% for item in items %}");
+    document.add_picture(&red, "red.png", Length::inches(1.0), Length::inches(1.0));
+    document.add_picture(&blue, "blue.png", Length::inches(1.0), Length::inches(1.0));
+    document.add_paragraph("{% endfor %}");
+    let mut document = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+    let stored = shown_pictures(&mut document, 8)
+        .into_iter()
+        .map(|(part, _)| part)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        stored,
+        ["/word/media/image9.png", "/word/media/image10.png"]
+    );
+    document
+        .render_template_versioned(&serde_json::json!({"items": [1, 2, 3]}), 1)
+        .unwrap();
+    assert_eq!(
+        shown_colours(&mut document, 8, &colours),
+        ["red", "blue", "red", "blue", "red", "blue"]
+    );
+}
+
+/// The target of each main-body hyperlink, with its text.
+fn shown_hyperlinks(document: &mut Document) -> Vec<(String, String)> {
+    let package =
+        OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap())).unwrap();
+    let relationships = package.get_part_rels("/word/document.xml").unwrap();
+    let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+    xml.split("<w:hyperlink ")
+        .skip(1)
+        .map(|tail| {
+            let id = tail.split(r#"r:id=""#).nth(1).unwrap();
+            let id = id.split('"').next().unwrap();
+            let text = tail.split("<w:t>").nth(1).unwrap();
+            let text = text.split('<').next().unwrap();
+            let target = relationships.get_by_id(id).unwrap().target.clone();
+            (text.to_owned(), target)
+        })
+        .collect()
+}
+
+/// Clone the first body item to the end, a staged edit that canonicalizes
+/// relationship ids.
+fn clone_first_body_item(document: &mut Document) {
+    let body = body_story(document);
+    let first = document.story_items(&body).unwrap()[0].location().clone();
+    document
+        .clone_content(&first, &rdocx::ContentLocation::end(body))
+        .unwrap();
+}
+
+/// tensorbee/rdocx#404, sibling: staging renumbered a returned hyperlink
+/// relationship that the body did not reference yet, so a later hyperlink
+/// built from the returned id pointed at another URL.
+#[test]
+fn returned_hyperlink_relationship_ids_survive_staged_edits() {
+    let mut document = Document::new();
+    document.add_paragraph("cloned");
+    let b = document.add_hyperlink_relationship("https://b.example/");
+    let a = document.add_hyperlink_relationship("https://a.example/");
+    clone_first_body_item(&mut document);
+    let mut paragraph = document.add_paragraph("");
+    paragraph.add_hyperlink("b", &b);
+    paragraph.add_hyperlink("a", &a);
+    assert_eq!(
+        shown_hyperlinks(&mut document),
+        [
+            ("b".to_owned(), "https://b.example/".to_owned()),
+            ("a".to_owned(), "https://a.example/".to_owned())
+        ]
+    );
+}
+
+/// tensorbee/rdocx#404, sibling: the same for a story hyperlink relationship.
+/// Each call stages the document, so the second call renumbered the first id.
+#[test]
+fn returned_story_hyperlink_relationship_ids_survive_staged_edits() {
+    let mut document = Document::new();
+    document.add_paragraph("cloned");
+    let body = body_story(&document);
+    let b = document
+        .add_hyperlink_relationship_to_story(&body, "https://b.example/")
+        .unwrap();
+    let body = body_story(&document);
+    let a = document
+        .add_hyperlink_relationship_to_story(&body, "https://a.example/")
+        .unwrap();
+    clone_first_body_item(&mut document);
+    let mut paragraph = document.add_paragraph("");
+    paragraph.add_hyperlink("b", &b);
+    paragraph.add_hyperlink("a", &a);
+    assert_eq!(
+        shown_hyperlinks(&mut document),
+        [
+            ("b".to_owned(), "https://b.example/".to_owned()),
+            ("a".to_owned(), "https://a.example/".to_owned())
+        ]
+    );
+}
+
+/// tensorbee/rdocx#404, sibling: images embedded after eight others are
+/// stored as image9.png and image10.png, which sort in the other order, so
+/// staging swapped the returned ids before the body referenced them. A
+/// returned id the body never references keeps its relationship at save.
+#[test]
+fn returned_image_relationship_ids_survive_staged_edits() {
+    let red = solid_png([200, 0, 0]);
+    let blue = solid_png([0, 0, 200]);
+    let colours = [("red", red.as_slice()), ("blue", blue.as_slice())];
+    let fillers = (0..8_u8)
+        .map(|index| solid_png([20 * index, 120, 60]))
+        .collect::<Vec<_>>();
+    let mut document =
+        reopened_with_pictures(&fillers.iter().map(Vec::as_slice).collect::<Vec<_>>());
+    let red_id = document.embed_image(&red, "red.png");
+    let blue_id = document.embed_image(&blue, "blue.png");
+    let orphan = solid_png([0, 200, 0]);
+    let orphan_id = document.embed_image(&orphan, "orphan.png");
+    clone_first_body_item(&mut document);
+    let mut paragraph = document.add_paragraph("");
+    for id in [&red_id, &blue_id] {
+        paragraph
+            .add_run("")
+            .add_picture(id, Length::inches(1.0), Length::inches(1.0));
+    }
+    assert_eq!(shown_colours(&mut document, 9, &colours), ["red", "blue"]);
+    let package =
+        OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap())).unwrap();
+    let relationship = package
+        .get_part_rels("/word/document.xml")
+        .unwrap()
+        .get_by_id(&orphan_id)
+        .unwrap();
+    let part = OpcPackage::resolve_rel_target("/word/document.xml", &relationship.target);
+    assert_eq!(package.get_part(&part).unwrap(), orphan.as_slice());
+}

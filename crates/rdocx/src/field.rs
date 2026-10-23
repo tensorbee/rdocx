@@ -3505,7 +3505,7 @@ fn import_fragment_content_with_state(
     let mut part_map = BTreeMap::new();
     let mut imports = Vec::new();
     let mut external_imports = Vec::new();
-    for relationship_id in used_relationships {
+    for relationship_id in used_relationships.clone() {
         let relationship = source_rels.get_by_id(&relationship_id).ok_or_else(|| {
             Error::Other(format!(
                 "rich mail merge fragment relationship {relationship_id} is missing"
@@ -3960,6 +3960,10 @@ fn import_fragment_content_with_state(
                 ))
             })?;
         if selected_owner {
+            // A custom XML store is named by its item id, not by this id.
+            if used_relationships.contains(&relationship_id) {
+                document.register_pending_relationship(&destination_owner, &destination_id);
+            }
             relationship_map.insert(relationship_id, destination_id);
         } else {
             comment_relationship_map.insert(relationship_id, destination_id);
@@ -3972,6 +3976,7 @@ fn import_fragment_content_with_state(
             &relationship.target,
         )?;
         if selected_owner {
+            document.register_pending_relationship(&destination_owner, &destination_id);
             relationship_map.insert(relationship_id, destination_id);
         } else {
             comment_relationship_map.insert(relationship_id, destination_id);
