@@ -1961,6 +1961,9 @@ Internal cycles retain exact payload bytes and part-local relationship IDs,
 with allocated part names and rewritten internal targets. External edges keep
 their target, type and mode without fetching resources. Reuse applies only to
 structurally equivalent styles, numbering and relationship-free leaf parts.
+A style ID the fragment defines more than once resolves to its first
+definition, as layout and the style mutations do, for the dependency closure
+and for reuse.
 
 One staged document serializes and reopens before publication. Insertion into
 a note or comment part retains companions imported into that same part.

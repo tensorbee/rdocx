@@ -39730,6 +39730,246 @@ fn fragment_conflict_policies_reuse_only_equivalent_graphs() {
     assert_eq!(authored_numbering.matches("<w:num ").count(), 1);
 }
 
+fn issue_408_style(id: &str, name: &str, color: &str) -> String {
+    format!(
+        r#"<w:style w:type="paragraph" w:styleId="{id}"><w:name w:val="{name}"/><w:basedOn w:val="Normal"/><w:rPr><w:color w:val="{color}"/></w:rPr></w:style>"#
+    )
+}
+
+/// Heading1 and Title defined a second time with another colour, as Google
+/// Docs writes styles parts.
+fn issue_408_duplicates() -> String {
+    issue_408_style("Heading1", "heading 1", "C00000")
+        + &issue_408_style("Title", "Title", "C00000")
+}
+
+/// A Heading1 and a Title paragraph, restyled by [`issue_408_restyled`].
+fn issue_408_document(text: &str, first_heading_color: Option<&str>, appended: &str) -> Document {
+    let mut document = Document::new();
+    document.add_paragraph(text).style("Heading1");
+    document.add_paragraph(text).style("Title");
+    issue_408_restyled(document, first_heading_color, appended)
+}
+
+/// `first_heading_color` replaces the first Heading1 definition, and
+/// `appended` ends the styles part.
+fn issue_408_restyled(
+    mut document: Document,
+    first_heading_color: Option<&str>,
+    appended: &str,
+) -> Document {
+    let mut package =
+        oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap()))
+            .unwrap();
+    let mut styles =
+        String::from_utf8(package.get_part("/word/styles.xml").unwrap().to_vec()).unwrap();
+    if let Some(color) = first_heading_color {
+        let id = styles.find(r#"w:styleId="Heading1""#).unwrap();
+        let start = styles[..id].rfind("<w:style").unwrap();
+        let end = start + styles[start..].find("</w:style>").unwrap() + "</w:style>".len();
+        styles.replace_range(start..end, &issue_408_style("Heading1", "heading 1", color));
+    }
+    let styles = styles.replacen("</w:styles>", &format!("{appended}</w:styles>"), 1);
+    package.set_part("/word/styles.xml", styles.into_bytes());
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    Document::from_bytes(bytes.get_ref()).unwrap()
+}
+
+/// Every `w:style` element of the saved styles part, in source order. A
+/// rewritten part declares the root's Word namespace again on preserved
+/// children, which changes nothing, so that declaration is left out.
+fn issue_408_style_elements(document: &mut Document) -> Vec<String> {
+    let package =
+        oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap()))
+            .unwrap();
+    let styles = std::str::from_utf8(package.get_part("/word/styles.xml").unwrap()).unwrap();
+    let redeclared = format!(r#" xmlns:w="{W_NS}""#);
+    styles
+        .match_indices("<w:style ")
+        .map(|(start, _)| {
+            let end = start + styles[start..].find("</w:style>").unwrap() + "</w:style>".len();
+            styles[start..end].replace(&redeclared, "")
+        })
+        .collect()
+}
+
+fn issue_408_insert(target: &mut Document, source: &Document) {
+    let body = f254_story(source, StoryKind::Body);
+    let fragment = DocumentFragment::from_range(
+        source,
+        &f254_item(source, &body, 0),
+        &ContentLocation::end(body),
+        false,
+    )
+    .unwrap();
+    let body = f254_story(target, StoryKind::Body);
+    target
+        .import_fragment(
+            &ContentLocation::end(body),
+            &fragment,
+            FragmentConflictPolicy::default(),
+        )
+        .unwrap();
+}
+
+fn issue_408_paragraph_styles(document: &Document) -> Vec<String> {
+    document
+        .paragraphs()
+        .iter()
+        .map(|paragraph| paragraph.style_id().unwrap_or_default().to_owned())
+        .collect()
+}
+
+#[test]
+fn issue_408_insert_resolves_a_repeated_style_id_by_its_first_definition() {
+    let duplicates = issue_408_duplicates();
+    for (target_appended, source_appended) in [
+        (duplicates.as_str(), duplicates.as_str()),
+        (duplicates.as_str(), ""),
+        ("", duplicates.as_str()),
+    ] {
+        let case = format!("target {target_appended:?}, source {source_appended:?}");
+        let mut target = issue_408_document("target", None, target_appended);
+        let source = issue_408_document("inserted", None, source_appended);
+        let before = issue_408_style_elements(&mut target);
+        for _ in 0..2 {
+            issue_408_insert(&mut target, &source);
+            assert_eq!(issue_408_style_elements(&mut target), before, "{case}");
+        }
+        assert_eq!(
+            issue_408_paragraph_styles(&target),
+            ["Heading1", "Title"].repeat(3),
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn issue_408_insert_ignores_the_dependencies_of_a_shadowed_style_definition() {
+    let mut target = issue_408_document("target", None, "");
+    let source = issue_408_document(
+        "inserted",
+        None,
+        r#"<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Issue408Shadowed"/></w:style><w:style w:type="paragraph" w:styleId="Issue408Shadowed"><w:name w:val="Issue 408 shadowed"/><w:basedOn w:val="Normal"/></w:style>"#,
+    );
+    let before = issue_408_style_elements(&mut target);
+    for _ in 0..2 {
+        issue_408_insert(&mut target, &source);
+        assert_eq!(issue_408_style_elements(&mut target), before);
+    }
+    assert_eq!(
+        issue_408_paragraph_styles(&target),
+        ["Heading1", "Title"].repeat(3)
+    );
+}
+
+#[test]
+fn issue_408_insert_keeps_a_repeated_default_style() {
+    let normal = r#"<w:style w:type="paragraph" w:styleId="Normal" w:default="1"><w:name w:val="Normal"/><w:rPr><w:color w:val="C00000"/></w:rPr></w:style>"#;
+    for (target_appended, source_appended) in [("", normal), (normal, normal), (normal, "")] {
+        let case = format!("target {target_appended:?}, source {source_appended:?}");
+        let mut target = issue_408_document("target", None, target_appended);
+        let source = issue_408_document("inserted", None, source_appended);
+        let before = issue_408_style_elements(&mut target);
+        for _ in 0..2 {
+            issue_408_insert(&mut target, &source);
+            assert_eq!(issue_408_style_elements(&mut target), before, "{case}");
+        }
+        assert_eq!(
+            issue_408_paragraph_styles(&target),
+            ["Heading1", "Title"].repeat(3),
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn issue_408_template_repeat_resolves_a_repeated_style_id_by_its_first_definition() {
+    let mut template = Document::new();
+    template.add_paragraph("{% for item in items %}");
+    template.add_paragraph("{{ item }}").style("Heading1");
+    template.add_paragraph("{{ item }}").style("Title");
+    template.add_paragraph("{% endfor %}");
+    let mut document = issue_408_restyled(template, None, &issue_408_duplicates());
+    let before = issue_408_style_elements(&mut document);
+    document
+        .render_template(&serde_json::json!({"items": ["one", "two", "three"]}))
+        .unwrap();
+    assert_eq!(issue_408_style_elements(&mut document), before);
+    assert_eq!(
+        issue_408_paragraph_styles(&document),
+        ["Heading1", "Title"].repeat(3)
+    );
+}
+
+#[test]
+fn issue_408_insert_copies_a_repeated_style_id_whose_first_definition_differs() {
+    let mut target = issue_408_document("target", None, &issue_408_duplicates());
+    let source = issue_408_document("inserted", Some("00B050"), &issue_408_duplicates());
+    let mut expected = issue_408_style_elements(&mut target);
+    expected.push(issue_408_style("Heading1Merge1", "heading 1", "00B050"));
+    issue_408_insert(&mut target, &source);
+    assert_eq!(issue_408_style_elements(&mut target), expected);
+    assert_eq!(
+        issue_408_paragraph_styles(&target),
+        ["Heading1", "Title", "Heading1Merge1", "Title"]
+    );
+}
+
+/// Word, Google Docs and python-docx write a Normal that differs from the one
+/// `Document::new` writes, so importing a new document renames its Normal.
+#[test]
+fn issue_408_insert_renames_a_differing_default_style_without_its_default_flag() {
+    let mut target = Document::new();
+    target.add_paragraph("target");
+    let mut package =
+        oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(target.to_bytes().unwrap()))
+            .unwrap();
+    let styles = String::from_utf8(package.get_part("/word/styles.xml").unwrap().to_vec())
+        .unwrap()
+        .replacen(
+            r#"<w:name w:val="Normal"/></w:style>"#,
+            r#"<w:name w:val="Normal"/><w:rPr><w:sz w:val="22"/></w:rPr></w:style>"#,
+            1,
+        );
+    assert!(styles.contains(r#"<w:sz w:val="22"/>"#));
+    package.set_part("/word/styles.xml", styles.into_bytes());
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    let mut target = Document::from_bytes(bytes.get_ref()).unwrap();
+    let mut source = Document::new();
+    source.add_paragraph("inserted");
+    let mut expected = issue_408_style_elements(&mut target);
+
+    issue_408_insert(&mut target, &source);
+
+    target.validate_style_graph().unwrap();
+    let defaults = target
+        .styles()
+        .iter()
+        .filter(|style| style.is_default() && style.style_type() == StyleType::Paragraph)
+        .map(|style| style.style_id().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(defaults, ["Normal"]);
+    let copy = target.style("NormalMerge1").unwrap();
+    assert!(!copy.is_default());
+    let elements = issue_408_style_elements(&mut target);
+    let copied = elements
+        .iter()
+        .position(|element| element.contains(r#"w:styleId="NormalMerge1""#))
+        .unwrap();
+    expected.insert(copied, elements[copied].clone());
+    assert_eq!(elements, expected);
+    let texts = target
+        .paragraphs()
+        .iter()
+        .map(|paragraph| paragraph.text())
+        .collect::<Vec<_>>();
+    assert_eq!(texts, ["target", "inserted"]);
+    assert_eq!(issue_408_paragraph_styles(&target), ["", ""]);
+}
+
 #[test]
 fn fragment_import_rejects_incomplete_graph_atomically() {
     let mut source = Document::new();
