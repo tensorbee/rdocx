@@ -497,6 +497,21 @@ impl PyTable {
         Ok(self)
     }
 
+    /// Bind the table a prepared body splice inserts, before the native edit
+    /// places it.
+    pub(crate) fn bind_prepared_splice(
+        mut self,
+        document: &PyDocument,
+        prepared: &crate::document::PreparedBodySplice,
+    ) -> PyResult<Self> {
+        self.furniture_scope = None;
+        let (path, owner) =
+            document.capture_prepared_splice_owner(prepared, self.path.segs.clone())?;
+        self.path = path;
+        self.owner = Some(owner);
+        Ok(self)
+    }
+
     pub(crate) fn bind_prepared(
         mut self,
         py: Python<'_>,
@@ -634,11 +649,27 @@ impl PyTable {
             .owner
             .as_ref()
             .ok_or_else(|| PyValueError::new_err("table XML owner route is unsupported"))?;
-        let location = document.current_table_owner(owner)?;
-        let bytes = document
-            .inner
-            .table_element_xml(&location)
-            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        let current = || -> PyResult<Vec<u8>> {
+            crate::document::note_word_whole_source_read();
+            let location = document.current_table_owner(owner)?;
+            document
+                .inner
+                .table_element_xml(&location)
+                .map_err(|error| rdocx_to_pyerr(py, error))
+        };
+        // A direct body table serializes alone, without the `w14`
+        // declaration that only the rest of the body can bring.
+        let bytes = match document
+            .direct_body_table_slot(owner)
+            .and_then(|slot| document.inner.direct_body_table_xml(slot).ok().flatten())
+        {
+            Some(bytes) => {
+                #[cfg(debug_assertions)]
+                crate::document::assert_direct_read(&bytes, current, "table");
+                bytes
+            }
+            None => current()?,
+        };
         String::from_utf8(bytes).map_err(|error| PyValueError::new_err(error.to_string()))
     }
 
@@ -2061,11 +2092,31 @@ impl PyCell {
             .owner
             .as_ref()
             .ok_or_else(|| PyValueError::new_err("cell XML owner route is unsupported"))?;
-        let (location, row, cell) = document.current_cell_owner(owner)?;
-        let bytes = document
-            .inner
-            .cell_element_xml(&location, row, cell)
-            .map_err(|error| rdocx_to_pyerr(py, error))?;
+        let current = || -> PyResult<Vec<u8>> {
+            crate::document::note_word_whole_source_read();
+            let (location, row, cell) = document.current_cell_owner(owner)?;
+            document
+                .inner
+                .cell_element_xml(&location, row, cell)
+                .map_err(|error| rdocx_to_pyerr(py, error))
+        };
+        // A cell of a direct body table serializes with that table alone.
+        let bytes = match document
+            .direct_body_cell_slot(owner)
+            .and_then(|(slot, row, cell)| {
+                document
+                    .inner
+                    .direct_body_cell_xml(slot, row, cell)
+                    .ok()
+                    .flatten()
+            }) {
+            Some(bytes) => {
+                #[cfg(debug_assertions)]
+                crate::document::assert_direct_read(&bytes, current, "cell");
+                bytes
+            }
+            None => current()?,
+        };
         String::from_utf8(bytes).map_err(|error| PyValueError::new_err(error.to_string()))
     }
 

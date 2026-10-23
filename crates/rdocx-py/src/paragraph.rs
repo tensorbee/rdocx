@@ -485,6 +485,21 @@ impl PyParagraph {
         Ok(self)
     }
 
+    /// Bind the paragraph a prepared plain body splice inserts, before the
+    /// native edit places it.
+    pub(crate) fn bind_prepared_splice(
+        mut self,
+        document: &PyDocument,
+        prepared: &crate::document::PreparedBodySplice,
+    ) -> PyResult<Self> {
+        self.furniture_scope = None;
+        let (path, owner) =
+            document.capture_prepared_splice_owner(prepared, self.path.segs.clone())?;
+        self.path = path;
+        self.owner = Some(owner);
+        Ok(self)
+    }
+
     pub(crate) fn validate(&self, py: Python<'_>) -> PyResult<ParagraphLocation> {
         let location = match &self.related {
             Some(location) => ParagraphLocation::Related(location.clone()),
@@ -688,11 +703,31 @@ impl PyParagraph {
             .owner
             .as_ref()
             .ok_or_else(|| PyValueError::new_err("paragraph XML owner route is unsupported"))?;
-        let location = document.current_paragraph_owner(owner)?;
-        let bytes = document
-            .inner
-            .paragraph_element_xml(&location)
-            .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
+        let current = || -> PyResult<Vec<u8>> {
+            crate::document::note_word_whole_source_read();
+            let location = document.current_paragraph_owner(owner)?;
+            document
+                .inner
+                .paragraph_element_xml(&location)
+                .map_err(|error| crate::rdocx_to_pyerr(py, error))
+        };
+        // A direct body paragraph serializes alone, without the `w14`
+        // declaration that only the rest of the body can bring. Any other
+        // owner reads the whole story source.
+        let bytes = match document.direct_body_paragraph_slot(owner).and_then(|slot| {
+            document
+                .inner
+                .direct_body_paragraph_xml(slot)
+                .ok()
+                .flatten()
+        }) {
+            Some(bytes) => {
+                #[cfg(debug_assertions)]
+                crate::document::assert_direct_read(&bytes, current, "paragraph");
+                bytes
+            }
+            None => current()?,
+        };
         String::from_utf8(bytes).map_err(|error| PyValueError::new_err(error.to_string()))
     }
 

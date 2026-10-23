@@ -26,6 +26,61 @@ fn reset_fx260_word_visits() {
     FX260_WORD_VISITS.with(|cell| cell.set(0));
 }
 
+// Debug builds count the whole-body work that direct reads and body splices
+// avoid, outside the guards that check them against it, so that a test of
+// the extension module proves each call took its direct route.
+#[cfg(debug_assertions)]
+static WORD_INVENTORY_REBUILDS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(debug_assertions)]
+static WORD_WHOLE_SOURCE_READS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(debug_assertions)]
+thread_local! {
+    static WORD_GUARDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Count one owner inventory rebuild from the whole document.
+fn note_word_inventory_rebuild() {
+    #[cfg(debug_assertions)]
+    if !WORD_GUARDING.with(std::cell::Cell::get) {
+        WORD_INVENTORY_REBUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Count one element read from its whole story source.
+pub(crate) fn note_word_whole_source_read() {
+    #[cfg(debug_assertions)]
+    if !WORD_GUARDING.with(std::cell::Cell::get) {
+        WORD_WHOLE_SOURCE_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Run a debug guard's own whole-body work without counting it.
+#[cfg(debug_assertions)]
+fn guarded<T>(work: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            WORD_GUARDING.with(|cell| cell.set(self.0));
+        }
+    }
+    let _restore = Restore(WORD_GUARDING.with(|cell| cell.replace(true)));
+    work()
+}
+
+/// The whole-body work counted so far: owner inventory rebuilds and
+/// whole-source element reads. Debug builds only.
+#[cfg(debug_assertions)]
+#[pyfunction]
+#[pyo3(name = "_word_whole_body_work")]
+pub(crate) fn word_whole_body_work() -> (usize, usize) {
+    (
+        WORD_INVENTORY_REBUILDS.load(std::sync::atomic::Ordering::Relaxed),
+        WORD_WHOLE_SOURCE_READS.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
 use oxml_py_support::{
     ContentPath, PathSeg, PreparedRevision, RevisionCounter, RevisionScope, RevisionState,
     StaleElementError, revision_to_pyerr,
@@ -4145,7 +4200,7 @@ impl PyCoreProperties {
 // Only current physical owners are retained. A committed mutation supplies the
 // replacement inventory before any state is published.
 #[derive(Clone)]
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+#[cfg_attr(any(test, debug_assertions), derive(Debug, PartialEq, Eq))]
 pub(crate) enum WordOwnerLocation {
     Paragraph(rdocx::ContentLocation),
     Run(rdocx::ContentLocation, rdocx_oxml::text::AcceptedRunPath),
@@ -4161,7 +4216,7 @@ pub(crate) enum WordOwnerLocation {
 }
 
 #[derive(Clone, Default)]
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+#[cfg_attr(any(test, debug_assertions), derive(Debug, PartialEq, Eq))]
 enum WordReadFacts {
     #[default]
     None,
@@ -4170,7 +4225,7 @@ enum WordReadFacts {
     Table(Vec<Vec<usize>>),
 }
 
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+#[cfg_attr(any(test, debug_assertions), derive(Debug, PartialEq, Eq))]
 struct WordOwnerAddress {
     location: WordOwnerLocation,
     parent: Option<usize>,
@@ -4200,24 +4255,58 @@ pub(crate) enum WordView {
 }
 
 struct WordOwnerIndexes {
-    by_generation: HashMap<u64, usize>,
-    by_route: HashMap<u64, Vec<usize>>,
-    direct_body_paragraphs: HashMap<usize, usize>,
+    by_generation: IndexMap<u64, usize>,
+    by_route: IndexMap<u64, Vec<usize>>,
+    direct_body_paragraphs: IndexMap<usize, usize>,
     body_paragraphs: Option<Vec<Option<rdocx::ContentLocation>>>,
     body_tables: Vec<Option<rdocx::ContentLocation>>,
     cell_paragraphs: HashMap<(usize, usize, usize), Vec<rdocx::ContentLocation>>,
-    paragraphs_by_parent: HashMap<usize, Vec<usize>>,
-    tables_by_parent: HashMap<usize, Vec<usize>>,
+    paragraphs_by_parent: IndexMap<usize, Vec<usize>>,
+    tables_by_parent: IndexMap<usize, Vec<usize>>,
+}
+
+/// A multiply-rotate hasher over machine words, for owner routes and the
+/// owner index maps. Their keys are process-local integers and route
+/// hashes whose bucket members are still compared with `same_route`, so
+/// they need no keyed hash, and a body edit indexes every owner again.
+#[derive(Default)]
+struct IndexHasher(u64);
+
+/// A map of the owner indexes.
+type IndexMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<IndexHasher>>;
+
+impl Hasher for IndexHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(8) {
+            let mut word = [0; 8];
+            word[..chunk.len()].copy_from_slice(chunk);
+            self.write_u64(u64::from_le_bytes(word));
+        }
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.0 = (self.0.rotate_left(5) ^ value).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        self.write_u64(value as u64);
+    }
 }
 
 impl WordOwnerLocation {
     fn route_hash(&self) -> u64 {
-        let mut hash = DefaultHasher::new();
+        let mut hash = IndexHasher::default();
         std::mem::discriminant(self).hash(&mut hash);
         let mut content = |location: &rdocx::ContentLocation| {
             let story = location.story();
             story.kind().hash(&mut hash);
-            story.part_name().hash(&mut hash);
+            // Equal routes share their part, so its length tells parts apart
+            // well enough for buckets.
+            story.part_name().len().hash(&mut hash);
             story.owner_index().hash(&mut hash);
             location.item_kind().hash(&mut hash);
             location.index_path().hash(&mut hash);
@@ -4248,16 +4337,16 @@ impl WordOwnerLocation {
 impl WordOwnerIndexes {
     fn prepare(owners: &[WordOwner], document: &rdocx::Document) -> PyResult<Self> {
         let mut indexes = Self {
-            by_generation: HashMap::new(),
-            by_route: HashMap::new(),
-            direct_body_paragraphs: HashMap::new(),
+            by_generation: IndexMap::default(),
+            by_route: IndexMap::default(),
+            direct_body_paragraphs: IndexMap::default(),
             body_paragraphs: document.paragraph_story_locations().ok(),
             body_tables: Vec::new(),
             cell_paragraphs: document
                 .cell_paragraph_story_locations()
                 .unwrap_or_default(),
-            paragraphs_by_parent: HashMap::new(),
-            tables_by_parent: HashMap::new(),
+            paragraphs_by_parent: IndexMap::default(),
+            tables_by_parent: IndexMap::default(),
         };
         let fail =
             |_| pyo3::exceptions::PyMemoryError::new_err("Word owner index allocation failed");
@@ -4270,6 +4359,37 @@ impl WordOwnerIndexes {
             .direct_body_paragraphs
             .try_reserve(owners.len())
             .map_err(fail)?;
+        let body_tables = indexes.index_owners(owners);
+        indexes.body_tables = (0..document.table_count())
+            .map(|index| {
+                document
+                    .content_index_of_table(index)
+                    .and_then(|slot| body_tables.get(&slot).cloned())
+            })
+            .collect();
+        Ok(indexes)
+    }
+
+    /// Index `owners` again after they moved in place, keeping the document
+    /// projections, which the caller moves with them.
+    fn index_owners_again(&mut self, owners: &[WordOwner]) {
+        self.by_generation.clear();
+        self.by_generation.reserve(owners.len());
+        // Route buckets keep their allocations, and those left empty go.
+        self.by_route.values_mut().for_each(Vec::clear);
+        self.by_route
+            .reserve(owners.len().saturating_sub(self.by_route.len()));
+        self.direct_body_paragraphs.clear();
+        self.paragraphs_by_parent.clear();
+        self.tables_by_parent.clear();
+        self.index_owners(owners);
+        self.by_route.retain(|_, bucket| !bucket.is_empty());
+    }
+
+    /// Index every owner, and return the first body table owner of each
+    /// direct body slot.
+    fn index_owners(&mut self, owners: &[WordOwner]) -> HashMap<usize, rdocx::ContentLocation> {
+        let indexes = self;
         let mut body_tables = HashMap::new();
         for (index, owner) in owners.iter().enumerate() {
             note_fx260_word(1);
@@ -4314,14 +4434,7 @@ impl WordOwnerIndexes {
                 _ => {}
             }
         }
-        indexes.body_tables = (0..document.table_count())
-            .map(|index| {
-                document
-                    .content_index_of_table(index)
-                    .and_then(|slot| body_tables.get(&slot).cloned())
-            })
-            .collect();
-        Ok(indexes)
+        body_tables
     }
 
     fn find(&self, owners: &[WordOwner], location: &WordOwnerLocation) -> Option<usize> {
@@ -4349,6 +4462,73 @@ pub(crate) struct PreparedWordRevision {
     owners: Vec<WordOwner>,
     indexes: WordOwnerIndexes,
     snapshot_scope: RevisionState,
+}
+
+/// Under debug assertions, check a direct read against the whole-source
+/// read: the same bytes up to the root `w14` declaration, which a direct
+/// read decides from the root and the read item alone.
+#[cfg(debug_assertions)]
+pub(crate) fn assert_direct_read(
+    direct: &[u8],
+    whole: impl FnOnce() -> PyResult<Vec<u8>>,
+    owner: &str,
+) {
+    let without_w14 = |xml: &[u8]| {
+        let xml = String::from_utf8_lossy(xml).into_owned();
+        let root = xml.find('>').unwrap_or(xml.len());
+        let declaration = r#" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml""#;
+        format!(
+            "{}{}",
+            xml[..root].replacen(declaration, "", 1),
+            &xml[root..]
+        )
+    };
+    let whole = guarded(whole).expect("a direct read has a whole-source read");
+    assert_eq!(
+        without_w14(direct),
+        without_w14(&whole),
+        "direct {owner} XML"
+    );
+}
+
+#[cfg(debug_assertions)]
+fn unfingerprinted_location(location: &rdocx::ContentLocation) -> rdocx::ContentLocation {
+    let story = location.story();
+    rdocx::ContentLocation::new(
+        rdocx::StoryId::new(story.kind(), story.part_name(), story.owner_index()),
+        location.item_kind(),
+        location.index_path().to_vec(),
+    )
+}
+
+#[cfg(debug_assertions)]
+fn unfingerprinted_owner_location(location: &WordOwnerLocation) -> WordOwnerLocation {
+    match location {
+        WordOwnerLocation::Paragraph(location) => {
+            WordOwnerLocation::Paragraph(unfingerprinted_location(location))
+        }
+        WordOwnerLocation::Table(location) => {
+            WordOwnerLocation::Table(unfingerprinted_location(location))
+        }
+        WordOwnerLocation::Run(location, path) => {
+            WordOwnerLocation::Run(unfingerprinted_location(location), path.clone())
+        }
+        WordOwnerLocation::Hyperlink(location, index) => {
+            WordOwnerLocation::Hyperlink(unfingerprinted_location(location), *index)
+        }
+        WordOwnerLocation::Cell {
+            table,
+            row,
+            cell,
+            story,
+        } => WordOwnerLocation::Cell {
+            table: unfingerprinted_location(table),
+            row: *row,
+            cell: *cell,
+            story: rdocx::StoryId::new(story.kind(), story.part_name(), story.owner_index()),
+        },
+        WordOwnerLocation::Section(index) => WordOwnerLocation::Section(*index),
+    }
 }
 
 fn word_owner_capture(
@@ -4527,33 +4707,59 @@ fn word_table_read_facts(
         .unwrap_or_default()
         .into_iter()
         .filter(|item| item.location().item_kind() == rdocx::StoryItemKind::Table)
-        .filter_map(|item| {
-            let table = rdocx_oxml::table::CT_Tbl::from_xml_fragment_checked(item.xml()).ok()?;
-            let rows = table
-                .rows
-                .iter()
-                .map(|row| {
-                    row.cells
-                        .iter()
-                        .map(|cell| cell.paragraphs().len())
-                        .collect()
-                })
-                .collect();
-            Some((item.location().clone(), WordReadFacts::Table(rows)))
-        })
+        .filter_map(|item| Some((item.location().clone(), word_table_facts(item.xml())?)))
         .collect()
 }
 
+/// The facade paragraph count of each modeled cell of a standalone table.
+fn word_table_facts(xml: &[u8]) -> Option<WordReadFacts> {
+    let table = rdocx_oxml::table::CT_Tbl::from_xml_fragment_checked(xml).ok()?;
+    let rows = table
+        .rows
+        .iter()
+        .map(|row| {
+            row.cells
+                .iter()
+                .map(|cell| cell.paragraphs().len())
+                .collect()
+        })
+        .collect();
+    Some(WordReadFacts::Table(rows))
+}
+
+/// The four owner snapshot families of [`rdocx::Document::story_owner_snapshots`].
+type WordOwnerSnapshots = (
+    Vec<rdocx::StoryItemSnapshot>,
+    Vec<(rdocx::ContentLocation, usize, usize, rdocx::StoryId)>,
+    Vec<(rdocx::ContentLocation, Vec<u8>)>,
+    Vec<(rdocx::ContentLocation, rdocx::LinkInfo)>,
+);
+
 fn word_owner_locations(
     document: &rdocx::Document,
-    mut form_sources: Option<&mut FormSources>,
+    form_sources: Option<&mut FormSources>,
 ) -> rdocx::Result<Vec<WordOwnerAddress>> {
     note_fx260_word(document.content_count().max(1));
+    note_word_inventory_rebuild();
+    let table_facts = word_table_read_facts(document);
+    word_owner_addresses(
+        document.story_owner_snapshots()?,
+        &table_facts,
+        Some(document),
+        form_sources,
+    )
+}
+
+/// The owner inventory of the given snapshots. Sections are those of
+/// `document`, and a snapshot of a detached item has none.
+fn word_owner_addresses(
+    (snapshots, cell_snapshots, paragraph_snapshots, link_snapshots): WordOwnerSnapshots,
+    table_facts: &HashMap<rdocx::ContentLocation, WordReadFacts>,
+    document: Option<&rdocx::Document>,
+    mut form_sources: Option<&mut FormSources>,
+) -> rdocx::Result<Vec<WordOwnerAddress>> {
     let mut result = Vec::new();
     let mut table_ordinals = HashMap::new();
-    let table_facts = word_table_read_facts(document);
-    let (snapshots, cell_snapshots, paragraph_snapshots, link_snapshots) =
-        document.story_owner_snapshots()?;
     if let Some(sources) = form_sources.as_deref_mut() {
         for snapshot in &snapshots {
             if snapshot.location().item_kind() == rdocx::StoryItemKind::Table {
@@ -4726,8 +4932,8 @@ fn word_owner_locations(
             });
         }
     }
-    for index in 0..document.section_count() {
-        if let Some(sources) = form_sources.as_deref_mut() {
+    for index in 0..document.map_or(0, rdocx::Document::section_count) {
+        if let (Some(sources), Some(document)) = (form_sources.as_deref_mut(), document) {
             sources.xml.insert(
                 FormOwnerRoute::Section(index),
                 Some(document.section_properties_xml(index)?),
@@ -4757,6 +4963,1156 @@ fn word_owner_locations(
         *position += 1;
     }
     Ok(result)
+}
+
+/// One direct body item that a splice inserts, with what the owner
+/// inventory reads for it.
+pub(crate) enum SplicedBodyItem {
+    /// A plain paragraph's accepted text and run paths.
+    Paragraph(String, Vec<rdocx_oxml::text::AcceptedRunPath>),
+    /// A table's namespace-complete XML and its owner snapshots in a body
+    /// that holds only that table.
+    Table(Vec<u8>, WordOwnerSnapshots),
+}
+
+/// Plain direct body paragraphs removed from a body slot, or one item
+/// inserted at it.
+pub(crate) struct BodySplice {
+    pub(crate) slot: usize,
+    pub(crate) removed: usize,
+    pub(crate) inserted: Option<SplicedBodyItem>,
+}
+
+/// A splice of the current owner inventory for one direct body edit.
+///
+/// The inserted item is one body story item, a plain paragraph or a table
+/// with no nested table, text box or link, and the removed items are plain
+/// paragraphs. So only body routes after the slot move, by the items inserted
+/// less those removed, and only the cell stories after an inserted table,
+/// by its cells. Every other owner keeps its place in the inventory.
+pub(crate) struct BodySplicePlan {
+    slot: usize,
+    removed: usize,
+    // The body story item index of the splice slot.
+    first: usize,
+    // The inserted owners, in blocks that each precede a current inventory
+    // index, with next-inventory parents.
+    blocks: Vec<(usize, Vec<WordOwnerAddress>)>,
+    // The current inventory range of the removed paragraphs and their runs.
+    removed_owners: std::ops::Range<usize>,
+    // Cell story owners from the first index on move by the second.
+    cells: (usize, usize),
+    inserted_paragraph: bool,
+    inserted_table: bool,
+    // The facade paragraph and table indexes of the splice slot.
+    pub(crate) paragraph: usize,
+    pub(crate) table: usize,
+    // The inserted table's route and the routes of its cell paragraphs.
+    table_entry: Option<(rdocx::ContentLocation, Vec<CellParagraphs>)>,
+}
+
+/// The facade coordinates of a cell and the routes of its paragraphs.
+type CellParagraphs = ((usize, usize), Vec<rdocx::ContentLocation>);
+
+impl BodySplicePlan {
+    fn added(&self) -> usize {
+        self.blocks.iter().map(|(_, block)| block.len()).sum()
+    }
+
+    /// The body story item index that `item` moves to.
+    fn moved(&self, item: usize) -> usize {
+        if item >= self.first + self.removed {
+            item + usize::from(self.inserted_paragraph || self.inserted_table) - self.removed
+        } else {
+            item
+        }
+    }
+
+    /// The next inventory index of current owner `index`, unless removed.
+    fn next_index(&self, index: usize) -> Option<usize> {
+        if self.removed_owners.contains(&index) {
+            return None;
+        }
+        let mut next = index;
+        if index >= self.removed_owners.end {
+            next -= self.removed_owners.len();
+        }
+        for (at, block) in &self.blocks {
+            if index >= *at {
+                next += block.len();
+            }
+        }
+        Some(next)
+    }
+
+    /// The next inventory, in order: kept current owners and inserted ones.
+    fn next_owners(&self, current: usize) -> impl Iterator<Item = NextWordOwner<'_>> + '_ {
+        (0..=current).flat_map(move |index| {
+            self.blocks
+                .iter()
+                .filter(move |(at, _)| *at == index)
+                .flat_map(|(_, block)| block.iter().map(NextWordOwner::Inserted))
+                .chain(
+                    (index < current && !self.removed_owners.contains(&index))
+                        .then_some(NextWordOwner::Kept(index)),
+                )
+        })
+    }
+
+    /// Move the cell stories of a kept owner's routes.
+    fn move_cell_stories(&self, location: &mut WordOwnerLocation, part: &str) {
+        let (first, count) = self.cells;
+        if count == 0 {
+            return;
+        }
+        let route = |location: &mut rdocx::ContentLocation| {
+            let story = location.story();
+            if story.kind() == rdocx::StoryKind::TableCell
+                && story.part_name() == part
+                && story.owner_index() >= first
+            {
+                let mut story = story.clone();
+                story.set_owner_index(story.owner_index() + count);
+                *location = rdocx::ContentLocation::new(
+                    story,
+                    location.item_kind(),
+                    location.index_path().to_vec(),
+                );
+            }
+        };
+        match location {
+            WordOwnerLocation::Paragraph(location)
+            | WordOwnerLocation::Table(location)
+            | WordOwnerLocation::Run(location, _)
+            | WordOwnerLocation::Hyperlink(location, _) => route(location),
+            WordOwnerLocation::Cell { table, story, .. } => {
+                route(table);
+                if story.kind() == rdocx::StoryKind::TableCell
+                    && story.part_name() == part
+                    && story.owner_index() >= first
+                {
+                    story.set_owner_index(story.owner_index() + count);
+                }
+            }
+            WordOwnerLocation::Section(_) => {}
+        }
+    }
+}
+
+/// One owner of the next inventory.
+enum NextWordOwner<'a> {
+    Kept(usize),
+    Inserted(&'a WordOwnerAddress),
+}
+
+/// A prepared body splice: its revision and the scope states of the next
+/// inventory, in order.
+pub(crate) struct PreparedBodySplice {
+    pub(crate) revision: PreparedRevision,
+    pub(crate) plan: BodySplicePlan,
+    states: Vec<RevisionState>,
+    // The index in `states` of the first inserted owner's scopes.
+    inserted_state: usize,
+    snapshot_scope: RevisionState,
+}
+
+/// The body story item index of an owner's content route.
+fn word_owner_body_item(location: &WordOwnerLocation) -> Option<usize> {
+    let route = match location {
+        WordOwnerLocation::Paragraph(location)
+        | WordOwnerLocation::Table(location)
+        | WordOwnerLocation::Run(location, _)
+        | WordOwnerLocation::Hyperlink(location, _) => location,
+        WordOwnerLocation::Cell { table, .. } => table,
+        WordOwnerLocation::Section(_) => return None,
+    };
+    (route.story().kind() == rdocx::StoryKind::Body)
+        .then(|| route.index_path().first().copied())
+        .flatten()
+}
+
+/// Move the body story item index of an owner's content route.
+fn move_word_owner_body_item(location: &mut WordOwnerLocation, item: usize) {
+    match location {
+        WordOwnerLocation::Paragraph(location)
+        | WordOwnerLocation::Table(location)
+        | WordOwnerLocation::Run(location, _)
+        | WordOwnerLocation::Hyperlink(location, _)
+        | WordOwnerLocation::Cell {
+            table: location, ..
+        } => location.set_index_path_head(item),
+        WordOwnerLocation::Section(_) => {}
+    }
+}
+
+/// The story of an owner's content route.
+fn word_owner_story(location: &WordOwnerLocation) -> Option<&rdocx::StoryId> {
+    match location {
+        WordOwnerLocation::Paragraph(location)
+        | WordOwnerLocation::Table(location)
+        | WordOwnerLocation::Run(location, _)
+        | WordOwnerLocation::Hyperlink(location, _) => Some(location.story()),
+        WordOwnerLocation::Cell { table, .. } => Some(table.story()),
+        WordOwnerLocation::Section(_) => None,
+    }
+}
+
+/// Whether `owners` has the order a rebuild gives it: tables each followed
+/// by its cells, paragraphs each followed by its runs with the body story
+/// first and in source order, then sections, then hyperlinks. A local edit
+/// appends the runs it creates, which a later rebuild puts back in place.
+fn word_inventory_is_canonical(owners: &[WordOwner]) -> bool {
+    let mut family = 0;
+    let mut table = None;
+    let mut paragraph = None;
+    let mut body_item = Some(0);
+    for (index, owner) in owners.iter().enumerate() {
+        let (next, parent) = match &owner.location {
+            WordOwnerLocation::Table(_) => {
+                table = Some(index);
+                (0, owner.parent)
+            }
+            WordOwnerLocation::Cell { .. } => (0, table),
+            WordOwnerLocation::Paragraph(location) => {
+                paragraph = Some(index);
+                if location.story().kind() == rdocx::StoryKind::Body {
+                    let item = location.index_path().first().copied();
+                    if body_item.is_none() || item < body_item {
+                        return false;
+                    }
+                    body_item = item;
+                } else {
+                    body_item = None;
+                }
+                (1, owner.parent)
+            }
+            WordOwnerLocation::Run(..) => (1, paragraph),
+            WordOwnerLocation::Section(_) => (2, None),
+            WordOwnerLocation::Hyperlink(..) => (3, None),
+        };
+        let child = matches!(
+            owner.location,
+            WordOwnerLocation::Cell { .. } | WordOwnerLocation::Run(..)
+        );
+        if next < family || (child && (parent.is_none() || owner.parent != parent)) {
+            return false;
+        }
+        family = next;
+    }
+    true
+}
+
+impl PyDocument {
+    /// Plan `splice` from the current inventory alone. `None` keeps the
+    /// rebuild for every case this does not prove, and debug builds check
+    /// each committed splice against the rebuild.
+    pub(crate) fn plan_body_splice(&self, splice: BodySplice) -> PyResult<Option<BodySplicePlan>> {
+        let Some(body_paragraphs) = &self.indexes.body_paragraphs else {
+            return Ok(None);
+        };
+        let content_count = self.inner.content_count();
+        let Some(end_slot) = splice.slot.checked_add(splice.removed) else {
+            return Ok(None);
+        };
+        let inserted_table = matches!(splice.inserted, Some(SplicedBodyItem::Table(..)));
+        if end_slot > content_count
+            || (splice.removed == 0) == splice.inserted.is_none()
+            || (inserted_table && self.indexes.body_tables.iter().any(Option::is_none))
+            || !(splice.slot..end_slot).all(|slot| self.inner.plain_removable_paragraph(slot))
+            || !word_inventory_is_canonical(&self.owners)
+        {
+            return Ok(None);
+        }
+        note_fx260_word(1);
+        // The body story, and the item index of every owned direct body slot.
+        let mut story = None;
+        let mut slot_items = HashMap::new();
+        for owner in &self.owners {
+            let (WordOwnerLocation::Paragraph(location) | WordOwnerLocation::Table(location)) =
+                &owner.location
+            else {
+                continue;
+            };
+            if location.story().kind() != rdocx::StoryKind::Body {
+                continue;
+            }
+            story.get_or_insert_with(|| location.story().clone());
+            if let (Some(slot), Some(item)) = (owner.body_slot, location.index_path().first()) {
+                slot_items.entry(slot).or_insert(*item);
+            }
+        }
+        let Some(story) = story else {
+            return Ok(None);
+        };
+        let part = story.part_name().to_owned();
+        // An insertion at the end, or before a slot that owns no item (a
+        // content control whose paragraphs no route reaches), starts where
+        // the previous slot's items end.
+        let first = if let Some(item) = slot_items.get(&splice.slot) {
+            *item
+        } else if splice.removed == 0 && splice.slot > 0 {
+            let Some(previous) = slot_items.get(&(splice.slot - 1)) else {
+                return Ok(None);
+            };
+            let Some(count) = self
+                .inner
+                .direct_body_story_item_count(splice.slot - 1)
+                .ok()
+                .flatten()
+            else {
+                return Ok(None);
+            };
+            previous + count
+        } else {
+            return Ok(None);
+        };
+        // Each removed slot is the direct paragraph owner at its own item.
+        for offset in 0..splice.removed {
+            let Some(owner) = self
+                .indexes
+                .direct_body_paragraphs
+                .get(&(splice.slot + offset))
+                .and_then(|index| self.owners.get(*index))
+            else {
+                return Ok(None);
+            };
+            match &owner.location {
+                WordOwnerLocation::Paragraph(location)
+                    if location.index_path() == [first + offset] => {}
+                _ => return Ok(None),
+            }
+        }
+        let Some(cells_before) = (if inserted_table {
+            self.cell_stories_before(first, &part)
+        } else {
+            Some(0)
+        }) else {
+            return Ok(None);
+        };
+        let removed_items = first..first + splice.removed;
+        let mut removed_owners = None::<std::ops::Range<usize>>;
+        let mut paragraph_at = None;
+        let mut table_at = None;
+        let mut cells_at = None;
+        let mut paragraph_ordinal = 0;
+        let mut table_ordinal = 0;
+        for (index, owner) in self.owners.iter().enumerate() {
+            note_fx260_word(1);
+            let item = word_owner_body_item(&owner.location);
+            let story = word_owner_story(&owner.location);
+            let body = story.is_some_and(|story| story.kind() == rdocx::StoryKind::Body);
+            let (paragraph, table) = match &owner.location {
+                WordOwnerLocation::Paragraph(_) => (true, false),
+                WordOwnerLocation::Table(_) => (false, true),
+                _ => (false, false),
+            };
+            let later = matches!(
+                owner.location,
+                WordOwnerLocation::Section(_) | WordOwnerLocation::Hyperlink(..)
+            );
+            if paragraph_at.is_none() && (later || (paragraph && !(body && item < Some(first)))) {
+                paragraph_at = Some(index);
+            }
+            if table_at.is_none()
+                && (later
+                    || paragraph
+                    || matches!(owner.location, WordOwnerLocation::Run(..))
+                    || (table && !(body && item < Some(first))))
+            {
+                table_at = Some(index);
+            }
+            let later_cell_story = story.is_some_and(|story| {
+                story.part_name() != part
+                    || (story.kind() == rdocx::StoryKind::TableCell
+                        && story.owner_index() >= cells_before)
+            });
+            if cells_at.is_none() && (later || (paragraph && later_cell_story)) {
+                cells_at = Some(index);
+            }
+            if item.is_some_and(|item| removed_items.contains(&item)) {
+                // Only the removed paragraphs and their runs, contiguously.
+                let contiguous = removed_owners
+                    .as_ref()
+                    .is_none_or(|range| range.end == index);
+                if !contiguous
+                    || !matches!(
+                        owner.location,
+                        WordOwnerLocation::Paragraph(_) | WordOwnerLocation::Run(..)
+                    )
+                {
+                    return Ok(None);
+                }
+                removed_owners =
+                    Some(removed_owners.map_or(index..index + 1, |range| range.start..index + 1));
+                continue;
+            }
+            if owner.parent.is_some_and(|parent| {
+                removed_owners
+                    .as_ref()
+                    .is_some_and(|range| range.contains(&parent))
+            }) {
+                return Ok(None);
+            }
+            if body && item < Some(first) {
+                paragraph_ordinal += usize::from(paragraph);
+                table_ordinal += usize::from(table);
+            }
+        }
+        if splice.removed > 0 && removed_owners.is_none() {
+            return Ok(None);
+        }
+        let current = self.owners.len();
+        // Facade paragraphs and body tables keep source order, so the splice
+        // is one contiguous run of their entries. A paragraph that a nested
+        // content control holds has no route of its own, and stays in place.
+        let head = |location: &Option<rdocx::ContentLocation>| {
+            location
+                .as_ref()
+                .and_then(|location| location.index_path().first().copied())
+        };
+        let paragraph = self.inner.paragraph_count_before_content(splice.slot);
+        let Some(after) = body_paragraphs.get(paragraph..) else {
+            return Ok(None);
+        };
+        for (offset, location) in after.iter().enumerate() {
+            let fits = if offset < splice.removed {
+                location.as_ref().map(rdocx::ContentLocation::index_path) == Some(&[first + offset])
+            } else {
+                location.is_none() || head(location) >= Some(removed_items.end)
+            };
+            if !fits {
+                return Ok(None);
+            }
+        }
+        if body_paragraphs[..paragraph]
+            .iter()
+            .any(|location| location.is_some() && head(location) >= Some(first))
+        {
+            return Ok(None);
+        }
+        let table = self
+            .indexes
+            .body_tables
+            .partition_point(|location| head(location) < Some(first));
+        if self.indexes.body_tables.iter().any(|location| {
+            location.as_ref().is_some_and(|location| {
+                location.story().kind() == rdocx::StoryKind::Body
+                    && removed_items.contains(&location.index_path()[0])
+            })
+        }) {
+            return Ok(None);
+        }
+        let mut plan = BodySplicePlan {
+            slot: splice.slot,
+            removed: splice.removed,
+            first,
+            blocks: Vec::new(),
+            removed_owners: removed_owners.unwrap_or(0..0),
+            cells: (cells_before, 0),
+            inserted_paragraph: false,
+            inserted_table: false,
+            paragraph,
+            table,
+            table_entry: None,
+        };
+        match splice.inserted {
+            None => {}
+            Some(SplicedBodyItem::Paragraph(text, runs)) => {
+                let at = paragraph_at.unwrap_or(current);
+                let location = rdocx::ContentLocation::new(
+                    story,
+                    rdocx::StoryItemKind::Paragraph,
+                    vec![first],
+                );
+                let mut block = vec![WordOwnerAddress {
+                    location: WordOwnerLocation::Paragraph(location.clone()),
+                    parent: None,
+                    body_slot: Some(splice.slot),
+                    projection_ordinal: Some(paragraph_ordinal),
+                    read_facts: WordReadFacts::Paragraph(text),
+                }];
+                block.extend(runs.into_iter().map(|path| WordOwnerAddress {
+                    location: WordOwnerLocation::Run(location.clone(), path),
+                    parent: Some(at),
+                    body_slot: None,
+                    projection_ordinal: None,
+                    read_facts: WordReadFacts::None,
+                }));
+                plan.blocks.push((at, block));
+                plan.inserted_paragraph = true;
+            }
+            Some(SplicedBodyItem::Table(xml, snapshots)) => {
+                let table_at = table_at.unwrap_or(current);
+                let cells_at = cells_at.unwrap_or(current);
+                let Some((blocks, cells, entry)) = spliced_table_blocks(
+                    xml,
+                    snapshots,
+                    &story,
+                    (splice.slot, first, table_ordinal),
+                    (table_at, cells_at, cells_before),
+                ) else {
+                    return Ok(None);
+                };
+                plan.blocks = blocks;
+                plan.cells = (cells_before, cells);
+                plan.inserted_table = true;
+                plan.table_entry = Some(entry);
+            }
+        }
+        Ok(Some(plan))
+    }
+
+    /// The number of cell stories of the main part before body story item
+    /// `first`, when the inventory holds every cell story of that part and
+    /// can place each one: no text box story, and every cell under a body
+    /// table, so that cell story owner indexes count exactly those cells.
+    fn cell_stories_before(&self, first: usize, part: &str) -> Option<usize> {
+        let mut cells = Vec::new();
+        let mut referenced = std::collections::HashSet::new();
+        for owner in &self.owners {
+            note_fx260_word(1);
+            if let Some(story) = word_owner_story(&owner.location)
+                && story.part_name() == part
+            {
+                match story.kind() {
+                    rdocx::StoryKind::TextBox => return None,
+                    rdocx::StoryKind::TableCell => {
+                        referenced.insert(story.owner_index());
+                    }
+                    _ => {}
+                }
+            }
+            let WordOwnerLocation::Cell { story, .. } = &owner.location else {
+                continue;
+            };
+            if story.part_name() != part {
+                continue;
+            }
+            // The body table that holds this cell, through nested tables.
+            let mut table = owner.parent;
+            let root = loop {
+                let holder = self.owners.get(table?)?;
+                match &holder.location {
+                    WordOwnerLocation::Table(location)
+                        if location.story().kind() == rdocx::StoryKind::Body =>
+                    {
+                        break location.index_path().first().copied()?;
+                    }
+                    WordOwnerLocation::Table(_) => {
+                        table = self.owners.get(holder.parent?)?.parent;
+                    }
+                    _ => return None,
+                }
+            };
+            cells.push((story.owner_index(), root));
+        }
+        cells.sort_unstable();
+        let complete = cells
+            .iter()
+            .enumerate()
+            .all(|(index, (owner_index, _))| index == *owner_index)
+            && referenced
+                .iter()
+                .all(|owner_index| *owner_index < cells.len());
+        let before = cells.iter().filter(|(_, root)| *root < first).count();
+        (complete
+            && cells
+                .iter()
+                .all(|(owner_index, root)| (*root < first) == (*owner_index < before)))
+        .then_some(before)
+    }
+
+    /// Prepare a conservative or append publication of `plan`, with the
+    /// retirements and births, in inventory order, that the rebuild would
+    /// give, before the native edit.
+    pub(crate) fn prepare_body_splice(
+        &mut self,
+        plan: BodySplicePlan,
+        operation: &'static str,
+        publication: &WordPublication,
+    ) -> PyResult<PreparedBodySplice> {
+        // An append keeps every owner. A conservative publication retires
+        // every owner and gives the next inventory new scopes.
+        let keep = match publication {
+            WordPublication::AppendBody => true,
+            WordPublication::Conservative => false,
+            _ => return Err(PyValueError::new_err("body splice publication")),
+        };
+        let fail =
+            |_| pyo3::exceptions::PyMemoryError::new_err("Word owner splice allocation failed");
+        let current = self.owners.len();
+        let scopes = |next: &NextWordOwner<'_>| match next {
+            NextWordOwner::Kept(index) => self.owners[*index].location.scopes().len(),
+            NextWordOwner::Inserted(address) => address.location.scopes().len(),
+        };
+        let kept_scopes = self
+            .owners
+            .iter()
+            .map(|owner| owner.location.scopes().len())
+            .sum::<usize>();
+        let inserted_scopes = plan
+            .blocks
+            .iter()
+            .flat_map(|(_, block)| block)
+            .map(|address| address.location.scopes().len())
+            .sum::<usize>();
+        let mut births = Vec::new();
+        births
+            .try_reserve(inserted_scopes + if keep { 0 } else { kept_scopes } + 1)
+            .map_err(fail)?;
+        let mut retired = Vec::new();
+        retired
+            .try_reserve(if keep { 1 } else { kept_scopes + 1 })
+            .map_err(fail)?;
+        if !keep {
+            retired.extend(
+                self.owners
+                    .iter()
+                    .flat_map(WordOwner::scope_states)
+                    .cloned(),
+            );
+        }
+        for next in plan.next_owners(current) {
+            note_fx260_word(1);
+            match next {
+                NextWordOwner::Kept(_) if keep => {}
+                NextWordOwner::Kept(index) => {
+                    births.extend_from_slice(self.owners[index].location.scopes());
+                }
+                NextWordOwner::Inserted(address) => {
+                    births.extend_from_slice(address.location.scopes());
+                }
+            }
+        }
+        retired.push(self.snapshot_scope.clone());
+        births.push(RevisionScope::Text);
+        let revision = self
+            .revisions
+            .prepare_scopes(operation, &retired, &births)
+            .map_err(revision_to_pyerr)?;
+        let mut states = Vec::new();
+        states
+            .try_reserve_exact(inserted_scopes + kept_scopes)
+            .map_err(fail)?;
+        let mut born = 0;
+        let mut inserted_state = None;
+        for next in plan.next_owners(current) {
+            let count = scopes(&next);
+            match next {
+                NextWordOwner::Kept(index) if keep => {
+                    states.extend(self.owners[index].scope_states().cloned());
+                    continue;
+                }
+                NextWordOwner::Inserted(_) => {
+                    inserted_state.get_or_insert(states.len());
+                }
+                NextWordOwner::Kept(_) => {}
+            }
+            for _ in 0..count {
+                states.push(revision.born(born).expect("prepared owner birth"));
+                born += 1;
+            }
+        }
+        let snapshot_scope = revision.born(born).expect("prepared snapshot birth");
+        // Capacity for the commit, which moves owners and indexes them again.
+        let added = plan.added();
+        self.owners.try_reserve(added).map_err(fail)?;
+        if let Some(paragraphs) = &mut self.indexes.body_paragraphs {
+            paragraphs.try_reserve(1).map_err(fail)?;
+        }
+        self.indexes.body_tables.try_reserve(1).map_err(fail)?;
+        Ok(PreparedBodySplice {
+            revision,
+            plan,
+            states,
+            inserted_state: inserted_state.unwrap_or(0),
+            snapshot_scope,
+        })
+    }
+
+    /// Capture the first owner a prepared splice inserts, the paragraph or
+    /// table it places, as [`Self::capture_prepared_owner`] captures a
+    /// prepared owner.
+    pub(crate) fn capture_prepared_splice_owner(
+        &self,
+        prepared: &PreparedBodySplice,
+        segments: smallvec::SmallVec<[PathSeg; 5]>,
+    ) -> PyResult<(ContentPath, RevisionState)> {
+        self.revisions
+            .capture_prepared(&prepared.revision, smallvec![])
+            .map_err(revision_to_pyerr)?;
+        let unbound = || PyValueError::new_err("element has no current checked physical owner");
+        let address = prepared
+            .plan
+            .blocks
+            .first()
+            .and_then(|(_, block)| block.first())
+            .filter(|address| address.parent.is_none())
+            .ok_or_else(unbound)?;
+        let at = prepared.inserted_state;
+        let states = prepared
+            .states
+            .get(at..at + address.location.scopes().len())
+            .ok_or_else(unbound)?;
+        let owners = word_owners_with_states(
+            vec![WordOwnerAddress {
+                location: address.location.clone(),
+                parent: None,
+                body_slot: address.body_slot,
+                projection_ordinal: address.projection_ordinal,
+                read_facts: WordReadFacts::None,
+            }],
+            states,
+        );
+        let (mut path, owner) = word_owner_capture(
+            &self.revisions,
+            &owners,
+            (prepared.revision.document_scope(), &self.removal_scope),
+            0,
+            segments,
+            WordView::Owner,
+            None,
+        )?;
+        path.revision = prepared.revision.committed_serial();
+        Ok((path, owner))
+    }
+
+    /// Publish a prepared splice after its native edit: move the kept owners
+    /// in place, place the inserted ones, and index the inventory again.
+    pub(crate) fn commit_body_splice(
+        &mut self,
+        prepared: PreparedBodySplice,
+        publication: &WordPublication,
+    ) -> PyResult<()> {
+        #[cfg(debug_assertions)]
+        if matches!(publication, WordPublication::AppendBody) {
+            self.assert_body_append_matches(&prepared.plan, publication);
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = publication;
+        let PreparedBodySplice {
+            revision,
+            plan,
+            states,
+            snapshot_scope,
+            ..
+        } = prepared;
+        self.revisions
+            .commit_scopes(revision)
+            .map_err(revision_to_pyerr)?;
+        let part = self
+            .owners
+            .iter()
+            .find_map(|owner| {
+                word_owner_story(&owner.location)
+                    .filter(|story| story.kind() == rdocx::StoryKind::Body)
+                    .map(|story| story.part_name().to_owned())
+            })
+            .unwrap_or_default();
+        let current = self.owners.len();
+        // The scope states of each inserted owner, in inventory order.
+        let mut inserted = Vec::with_capacity(plan.added());
+        let mut cursor = 0;
+        for next in plan.next_owners(current) {
+            let (count, address) = match next {
+                NextWordOwner::Kept(index) => (self.owners[index].location.scopes().len(), None),
+                NextWordOwner::Inserted(address) => {
+                    (address.location.scopes().len(), Some(address))
+                }
+            };
+            if let Some(address) = address {
+                inserted.extend(word_owners_with_states(
+                    vec![WordOwnerAddress {
+                        location: address.location.clone(),
+                        parent: address.parent,
+                        body_slot: address.body_slot,
+                        projection_ordinal: address.projection_ordinal,
+                        read_facts: address.read_facts.clone(),
+                    }],
+                    &states[cursor..cursor + count],
+                ));
+            }
+            cursor += count;
+        }
+        self.owners.drain(plan.removed_owners.clone());
+        let mut inserted = inserted.into_iter();
+        let mut spans = Vec::with_capacity(plan.blocks.len());
+        let mut placed = 0;
+        for (at, block) in &plan.blocks {
+            let start = *at + placed;
+            self.owners
+                .splice(start..start, inserted.by_ref().take(block.len()));
+            spans.push(start..start + block.len());
+            placed += block.len();
+        }
+        let after = plan.first + plan.removed;
+        let paragraph_delta = isize::from(plan.inserted_paragraph) - plan.removed as isize;
+        let moved_ordinal = |ordinal: usize, delta: isize| ordinal.saturating_add_signed(delta);
+        // Kept owners take their next states, in inventory order, by move.
+        let mut states = states.into_iter();
+        for (index, owner) in self.owners.iter_mut().enumerate() {
+            note_fx260_word(1);
+            if spans.iter().any(|span| span.contains(&index)) {
+                for _ in 0..owner.location.scopes().len() {
+                    states.next();
+                }
+                continue;
+            }
+            let item = word_owner_body_item(&owner.location);
+            let body_route = matches!(
+                &owner.location,
+                WordOwnerLocation::Paragraph(location) | WordOwnerLocation::Table(location)
+                    if location.story().kind() == rdocx::StoryKind::Body
+            );
+            if let Some(item) = item.filter(|item| *item >= after) {
+                move_word_owner_body_item(&mut owner.location, plan.moved(item));
+                if body_route {
+                    let delta = match owner.location {
+                        WordOwnerLocation::Paragraph(_) => paragraph_delta,
+                        _ => isize::from(plan.inserted_table),
+                    };
+                    owner.projection_ordinal = owner
+                        .projection_ordinal
+                        .map(|ordinal| moved_ordinal(ordinal, delta));
+                }
+            }
+            if body_route {
+                owner.body_slot = owner.body_slot.map(|slot| {
+                    if slot >= plan.slot + plan.removed {
+                        slot + usize::from(plan.inserted_paragraph || plan.inserted_table)
+                            - plan.removed
+                    } else {
+                        slot
+                    }
+                });
+            }
+            plan.move_cell_stories(&mut owner.location, &part);
+            owner.parent = owner.parent.map(|parent| {
+                plan.next_index(parent)
+                    .expect("a kept owner's parent is kept")
+            });
+            let mut next = || states.next().expect("a prepared state for every scope");
+            owner.owner = next();
+            for state in [&mut owner.content, &mut owner.properties, &mut owner.grid]
+                .into_iter()
+                .flatten()
+            {
+                *state = next();
+            }
+        }
+        self.indexes.index_owners_again(&self.owners);
+        let moved = |location: &mut rdocx::ContentLocation| {
+            if location.story().kind() == rdocx::StoryKind::Body {
+                let item = location.index_path()[0];
+                location.set_index_path_head(plan.moved(item));
+            }
+        };
+        if let Some(paragraphs) = &mut self.indexes.body_paragraphs {
+            paragraphs.drain(plan.paragraph..plan.paragraph + plan.removed);
+            paragraphs.iter_mut().flatten().for_each(moved);
+            if plan.inserted_paragraph
+                && let Some(WordOwnerLocation::Paragraph(location)) = plan
+                    .blocks
+                    .first()
+                    .and_then(|(_, block)| block.first())
+                    .map(|address| &address.location)
+            {
+                paragraphs.insert(plan.paragraph, Some(location.clone()));
+            }
+        }
+        self.indexes
+            .body_tables
+            .iter_mut()
+            .flatten()
+            .for_each(moved);
+        if let Some((location, cells)) = &plan.table_entry {
+            self.indexes
+                .body_tables
+                .insert(plan.table, Some(location.clone()));
+            let mut shifted =
+                HashMap::with_capacity(self.indexes.cell_paragraphs.len() + cells.len());
+            for ((table, row, cell), mut locations) in self.indexes.cell_paragraphs.drain() {
+                for location in &mut locations {
+                    let mut route = WordOwnerLocation::Paragraph(location.clone());
+                    plan.move_cell_stories(&mut route, &part);
+                    if let WordOwnerLocation::Paragraph(route) = route {
+                        *location = route;
+                    }
+                }
+                let table = if table >= plan.table {
+                    table + 1
+                } else {
+                    table
+                };
+                shifted.insert((table, row, cell), locations);
+            }
+            for ((row, cell), locations) in cells {
+                shifted.insert((plan.table, *row, *cell), locations.clone());
+            }
+            self.indexes.cell_paragraphs = shifted;
+        }
+        self.snapshot_scope = snapshot_scope;
+        #[cfg(debug_assertions)]
+        self.assert_word_inventory_rebuilds();
+        Ok(())
+    }
+
+    /// Under debug assertions, prove that an append keeps exactly the owners
+    /// the rebuild's matcher keeps. Runs after the native edit.
+    #[cfg(debug_assertions)]
+    fn assert_body_append_matches(&self, plan: &BodySplicePlan, publication: &WordPublication) {
+        #[cfg(test)]
+        let visits = fx260_word_visits();
+        let rebuilt = guarded(|| word_owner_locations(&self.inner, None))
+            .expect("a spliced inventory has a rebuild");
+        let mut expected = vec![None; self.owners.len() + plan.added()];
+        for index in 0..self.owners.len() {
+            if let Some(next) = plan.next_index(index) {
+                expected[next] = Some(index);
+            }
+        }
+        assert_eq!(
+            indexed_inventory_matches(&self.owners, &rebuilt, publication),
+            expected,
+            "spliced Word owner matches"
+        );
+        #[cfg(test)]
+        FX260_WORD_VISITS.with(|cell| cell.set(visits));
+    }
+
+    /// Under debug assertions, prove the inventory and its document indexes
+    /// equal their rebuild from the current document, story fingerprints
+    /// aside, which local edits leave stale in the inventory too.
+    #[cfg(debug_assertions)]
+    fn assert_word_inventory_rebuilds(&self) {
+        #[cfg(test)]
+        let visits = fx260_word_visits();
+        let address = |location: &WordOwnerLocation,
+                       parent: Option<usize>,
+                       body_slot: Option<usize>,
+                       projection_ordinal: Option<usize>,
+                       read_facts: &WordReadFacts| WordOwnerAddress {
+            location: unfingerprinted_owner_location(location),
+            parent,
+            body_slot,
+            projection_ordinal,
+            read_facts: read_facts.clone(),
+        };
+        let actual = self
+            .owners
+            .iter()
+            .map(|owner| {
+                address(
+                    &owner.location,
+                    owner.parent,
+                    owner.body_slot,
+                    owner.projection_ordinal,
+                    &owner.read_facts,
+                )
+            })
+            .collect::<Vec<_>>();
+        let expected = guarded(|| word_owner_locations(&self.inner, None))
+            .expect("a spliced inventory has a rebuild")
+            .iter()
+            .map(|owner| {
+                address(
+                    &owner.location,
+                    owner.parent,
+                    owner.body_slot,
+                    owner.projection_ordinal,
+                    &owner.read_facts,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "spliced Word owner inventory");
+        let indexes = WordOwnerIndexes::prepare(&self.owners, &self.inner)
+            .expect("a spliced inventory has rebuilt indexes");
+        let locations = |locations: &[Option<rdocx::ContentLocation>]| {
+            locations
+                .iter()
+                .map(|location| location.as_ref().map(unfingerprinted_location))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            self.indexes.body_paragraphs.as_deref().map(locations),
+            indexes.body_paragraphs.as_deref().map(locations),
+            "spliced body paragraph index"
+        );
+        assert_eq!(
+            locations(&self.indexes.body_tables),
+            locations(&indexes.body_tables),
+            "spliced body table index"
+        );
+        let cells = |cells: &HashMap<(usize, usize, usize), Vec<rdocx::ContentLocation>>| {
+            cells
+                .iter()
+                .map(|(key, locations)| {
+                    (
+                        *key,
+                        locations
+                            .iter()
+                            .map(unfingerprinted_location)
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        assert_eq!(
+            cells(&self.indexes.cell_paragraphs),
+            cells(&indexes.cell_paragraphs),
+            "spliced cell paragraph index"
+        );
+        assert_eq!(
+            self.indexes.direct_body_paragraphs, indexes.direct_body_paragraphs,
+            "spliced direct body paragraph index"
+        );
+        #[cfg(test)]
+        FX260_WORD_VISITS.with(|cell| cell.set(visits));
+    }
+}
+
+/// The inserted blocks of a detached table placed at body story item
+/// `first` of slot `slot`: the table and its cells before current owner
+/// `table_at`, its cell paragraphs and runs before `cells_at`, with cell
+/// story owners counted from `cells_before`. Also the number of cells, and
+/// the table route with the routes of each cell's paragraphs.
+#[allow(clippy::type_complexity)] // The blocks, the cell count and the index entry of one table.
+fn spliced_table_blocks(
+    xml: Vec<u8>,
+    snapshots: WordOwnerSnapshots,
+    story: &rdocx::StoryId,
+    (slot, first, ordinal): (usize, usize, usize),
+    (table_at, cells_at, cells_before): (usize, usize, usize),
+) -> Option<(
+    Vec<(usize, Vec<WordOwnerAddress>)>,
+    usize,
+    (rdocx::ContentLocation, Vec<CellParagraphs>),
+)> {
+    // The detached body holds this table as its only item.
+    let mut items = snapshots
+        .0
+        .iter()
+        .filter(|item| item.location().story().kind() == rdocx::StoryKind::Body);
+    let item = items.next()?;
+    if items.next().is_some()
+        || item.location().item_kind() != rdocx::StoryItemKind::Table
+        || item.location().index_path() != [0]
+    {
+        return None;
+    }
+    let facts = word_table_facts(&xml)
+        .map(|facts| (item.location().clone(), facts))
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+    let addresses = word_owner_addresses(snapshots, &facts, None, None).ok()?;
+    let cells = addresses
+        .iter()
+        .skip(1)
+        .take_while(|address| matches!(address.location, WordOwnerLocation::Cell { .. }))
+        .count();
+    // The table, its cells in story order, then only their paragraphs and runs.
+    let cell_story = |address: &WordOwnerAddress| match &address.location {
+        WordOwnerLocation::Cell { story, .. } => Some(story.owner_index()),
+        _ => None,
+    };
+    let in_cells = |location: &rdocx::ContentLocation| {
+        location.story().kind() == rdocx::StoryKind::TableCell
+            && location.story().owner_index() < cells
+    };
+    let cell_parent =
+        |parent: Option<usize>| parent.is_some_and(|parent| (1..=cells).contains(&parent));
+    let shaped = matches!(addresses.first()?.location, WordOwnerLocation::Table(_))
+        && addresses[1..=cells]
+            .iter()
+            .enumerate()
+            .all(|(index, address)| {
+                cell_story(address) == Some(index) && address.parent == Some(0)
+            })
+        && addresses[cells + 1..]
+            .iter()
+            .all(|address| match &address.location {
+                WordOwnerLocation::Paragraph(location) => {
+                    in_cells(location) && cell_parent(address.parent)
+                }
+                WordOwnerLocation::Run(location, _) => {
+                    in_cells(location) && address.parent.is_some_and(|parent| parent > cells)
+                }
+                _ => false,
+            });
+    if !shaped {
+        return None;
+    }
+    // Detached owner `index` takes this next-inventory index.
+    let next = |index: usize| {
+        if index <= cells {
+            table_at + index
+        } else {
+            cells_at + index
+        }
+    };
+    let moved = |location: &rdocx::ContentLocation| {
+        let mut story = location.story().clone();
+        story.set_owner_index(story.owner_index() + cells_before);
+        rdocx::ContentLocation::new(story, location.item_kind(), location.index_path().to_vec())
+    };
+    let table =
+        rdocx::ContentLocation::new(story.clone(), rdocx::StoryItemKind::Table, vec![first]);
+    let mut entries = Vec::with_capacity(cells);
+    let mut head = Vec::with_capacity(cells + 1);
+    let mut tail = Vec::with_capacity(addresses.len() - cells - 1);
+    for (index, address) in addresses.into_iter().enumerate() {
+        let parent = address.parent.map(next);
+        let location = match &address.location {
+            WordOwnerLocation::Table(_) => WordOwnerLocation::Table(table.clone()),
+            WordOwnerLocation::Cell {
+                row, cell, story, ..
+            } => {
+                let mut story = story.clone();
+                story.set_owner_index(story.owner_index() + cells_before);
+                entries.push(((*row, *cell), Vec::new()));
+                WordOwnerLocation::Cell {
+                    table: table.clone(),
+                    row: *row,
+                    cell: *cell,
+                    story,
+                }
+            }
+            WordOwnerLocation::Paragraph(location) => {
+                let location = moved(location);
+                entries[address.parent? - 1].1.push(location.clone());
+                WordOwnerLocation::Paragraph(location)
+            }
+            WordOwnerLocation::Run(location, path) => {
+                WordOwnerLocation::Run(moved(location), path.clone())
+            }
+            _ => return None,
+        };
+        let address = if index == 0 {
+            WordOwnerAddress {
+                location,
+                parent: None,
+                body_slot: Some(slot),
+                projection_ordinal: Some(ordinal),
+                read_facts: address.read_facts,
+            }
+        } else {
+            WordOwnerAddress {
+                location,
+                parent,
+                ..address
+            }
+        };
+        if index <= cells {
+            head.push(address);
+        } else {
+            tail.push(address);
+        }
+    }
+    let mut blocks = vec![(table_at, head)];
+    if !tail.is_empty() {
+        blocks.push((cells_at, tail));
+    }
+    Some((blocks, cells, (table, entries)))
 }
 
 #[derive(Clone)]
@@ -5451,17 +6807,15 @@ fn indexed_inventory_matches(
 
 impl WordOwner {
     fn states(&self) -> Vec<RevisionState> {
-        let mut states = vec![self.owner.clone()];
-        if let Some(content) = &self.content {
-            states.push(content.clone());
-        }
-        if let Some(properties) = &self.properties {
-            states.push(properties.clone());
-        }
-        if let Some(grid) = &self.grid {
-            states.push(grid.clone());
-        }
-        states
+        self.scope_states().cloned().collect()
+    }
+
+    /// The owner's scope states, in [`WordOwnerLocation::scopes`] order.
+    fn scope_states(&self) -> impl Iterator<Item = &RevisionState> {
+        std::iter::once(&self.owner)
+            .chain(&self.content)
+            .chain(&self.properties)
+            .chain(&self.grid)
     }
 }
 
@@ -6183,6 +7537,83 @@ impl PyDocument {
             furniture,
         )
         .map(|(path, _)| path)
+    }
+
+    /// The direct body slot of a current paragraph owner, from the inventory.
+    pub(crate) fn direct_body_paragraph_slot(&self, state: &RevisionState) -> Option<usize> {
+        let (_, owner) = self.indexed_owner(state)?;
+        match &owner.location {
+            WordOwnerLocation::Paragraph(location)
+                if location.story().kind() == rdocx::StoryKind::Body
+                    && location.index_path().len() == 1 =>
+            {
+                owner.body_slot
+            }
+            _ => None,
+        }
+    }
+
+    /// The direct body slot of a current run owner's paragraph, and the run
+    /// route in it, from the inventory.
+    pub(crate) fn direct_body_run_slot(
+        &self,
+        state: &RevisionState,
+    ) -> Option<(usize, rdocx_oxml::text::AcceptedRunPath)> {
+        let (_, owner) = self.indexed_owner(state)?;
+        let WordOwnerLocation::Run(location, path) = &owner.location else {
+            return None;
+        };
+        let paragraph = self.owners.get(owner.parent?)?;
+        match &paragraph.location {
+            WordOwnerLocation::Paragraph(parent)
+                if parent.story().kind() == rdocx::StoryKind::Body
+                    && parent.index_path().len() == 1
+                    && parent.index_path() == location.index_path() =>
+            {
+                Some((paragraph.body_slot?, path.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    /// The direct body slot of a current cell owner's table, and the cell
+    /// coordinates, from the inventory.
+    pub(crate) fn direct_body_cell_slot(
+        &self,
+        state: &RevisionState,
+    ) -> Option<(usize, usize, usize)> {
+        let (_, owner) = self.indexed_owner(state)?;
+        let WordOwnerLocation::Cell {
+            table, row, cell, ..
+        } = &owner.location
+        else {
+            return None;
+        };
+        let parent = self.owners.get(owner.parent?)?;
+        match &parent.location {
+            WordOwnerLocation::Table(location)
+                if location.story().kind() == rdocx::StoryKind::Body
+                    && location.index_path().len() == 1
+                    && location.index_path() == table.index_path() =>
+            {
+                Some((parent.body_slot?, *row, *cell))
+            }
+            _ => None,
+        }
+    }
+
+    /// The direct body slot of a current table owner, from the inventory.
+    pub(crate) fn direct_body_table_slot(&self, state: &RevisionState) -> Option<usize> {
+        let (_, owner) = self.indexed_owner(state)?;
+        match &owner.location {
+            WordOwnerLocation::Table(location)
+                if location.story().kind() == rdocx::StoryKind::Body
+                    && location.index_path().len() == 1 =>
+            {
+                owner.body_slot
+            }
+            _ => None,
+        }
     }
 
     pub(crate) fn cached_paragraph_text(&self, state: &RevisionState) -> Option<&str> {
@@ -11868,8 +13299,39 @@ impl PyDocument {
         style: Option<&str>,
     ) -> PyResult<Py<PyTable>> {
         let mut document = slf.borrow_mut(py);
+        document.refuse_unsavable_body_edit(py)?;
+        let index = document.inner.table_count();
+        // A style may add its definition, so only a plain table splices.
+        if style.is_none() {
+            let appended = rdocx::Document::detached_table(rows, cols);
+            let slot = document.inner.content_count();
+            if let Ok((xml, snapshots)) = document.inner.detached_table_owner_snapshots(&appended)
+                && let Some(plan) = document.plan_body_splice(BodySplice {
+                    slot,
+                    removed: 0,
+                    inserted: Some(SplicedBodyItem::Table(xml, snapshots)),
+                })?
+            {
+                // Every fallible step precedes the in-place native append.
+                let publication = crate::document::WordPublication::AppendBody;
+                let prepared =
+                    document.prepare_body_splice(plan, "Document.add_table", &publication)?;
+                let path = document
+                    .revisions
+                    .capture_prepared(&prepared.revision, smallvec![PathSeg::Body(index)])
+                    .map_err(revision_to_pyerr)?;
+                let result = Py::new(
+                    py,
+                    PyTable::new(slf.clone_ref(py), path)
+                        .bind_prepared_splice(&document, &prepared)?,
+                )?;
+                document.inner.add_table(rows, cols);
+                debug_assert_eq!(prepared.plan.table, index);
+                document.commit_body_splice(prepared, &publication)?;
+                return Ok(result);
+            }
+        }
         let mut candidate = document.inner.clone_for_staging();
-        let index = candidate.table_count();
         let style = style
             .map(|value| crate::table::checked_table_style(py, &mut candidate, value))
             .transpose()?;
@@ -11909,6 +13371,22 @@ impl PyDocument {
             }
             return Ok(removed);
         }
+        if let Some(plan) = self.plan_body_splice(BodySplice {
+            slot: index,
+            removed: 1,
+            inserted: None,
+        })? {
+            let publication = crate::document::WordPublication::Conservative;
+            let prepared =
+                self.prepare_body_splice(plan, "Document.remove_content", &publication)?;
+            let removed = py
+                .detach(|| self.inner.try_remove_content(index))
+                .map_err(|error| rdocx_to_pyerr(py, error))?;
+            if removed {
+                self.commit_body_splice(prepared, &publication)?;
+            }
+            return Ok(removed);
+        }
         let mut candidate = self.inner.clone_for_staging();
         let removed = py
             .detach(|| candidate.try_remove_content(index))
@@ -11941,6 +13419,20 @@ impl PyDocument {
         }
         if start == end {
             return Ok(0);
+        }
+        if let Some(plan) = self.plan_body_splice(BodySplice {
+            slot: start,
+            removed: end - start,
+            inserted: None,
+        })? {
+            let publication = crate::document::WordPublication::Conservative;
+            let prepared =
+                self.prepare_body_splice(plan, "Document.remove_content_range", &publication)?;
+            let removed = py
+                .detach(|| self.inner.remove_content_range(start, end))
+                .map_err(|error| rdocx_to_pyerr(py, error))?;
+            self.commit_body_splice(prepared, &publication)?;
+            return Ok(removed);
         }
         let mut candidate = self.inner.clone_for_staging();
         let removed = py
@@ -11990,17 +13482,59 @@ impl PyDocument {
     ) -> PyResult<Py<PyParagraph>> {
         let result = {
             let mut document = slf.borrow_mut(py);
-            let mut candidate = document.inner.clone_for_staging();
-            if index > candidate.content_count() {
+            if index > document.inner.content_count() {
                 return Err(PyIndexError::new_err("content index out of range"));
             }
+            document.refuse_unsavable_body_edit(py)?;
             let style = style
-                .map(|value| style_id_of_type(&candidate, value, rdocx::StyleType::Paragraph))
+                .map(|value| style_id_of_type(&document.inner, value, rdocx::StyleType::Paragraph))
                 .transpose()?;
-            let mut inserted = candidate.insert_paragraph(index, text);
-            if let Some(style) = style {
-                inserted.set_style(&style);
+            // The same edit builds the paragraph read for the inventory and
+            // the paragraph placed.
+            let edit = |paragraph: &mut rdocx::Paragraph<'_>| {
+                if let Some(style) = &style {
+                    paragraph.set_style(style);
+                }
+            };
+            let mut inserted = rdocx::Document::detached_text_paragraph(text);
+            edit(&mut rdocx::Paragraph::detached(&mut inserted));
+            let splice = document.inner.direct_body_paragraph_facts(&inserted);
+            if let Ok(Some(facts)) = splice
+                && let Some(plan) = document.plan_body_splice(BodySplice {
+                    slot: index,
+                    removed: 0,
+                    inserted: Some(SplicedBodyItem::Paragraph(facts.0, facts.1)),
+                })?
+            {
+                // Every fallible step precedes the in-place native insertion.
+                let publication = crate::document::WordPublication::Conservative;
+                let prepared = document.prepare_body_splice(
+                    plan,
+                    "Document.insert_paragraph",
+                    &publication,
+                )?;
+                let path = document
+                    .revisions
+                    .capture_prepared(
+                        &prepared.revision,
+                        smallvec![PathSeg::Body(0), PathSeg::Para(prepared.plan.paragraph)],
+                    )
+                    .map_err(revision_to_pyerr)?;
+                let result = Py::new(
+                    py,
+                    PyParagraph::new(slf.clone_ref(py), path)
+                        .bind_prepared_splice(&document, &prepared)?,
+                )?;
+                edit(&mut document.inner.insert_paragraph(index, text));
+                debug_assert_eq!(
+                    document.inner.paragraph_index_of_content(index),
+                    Some(prepared.plan.paragraph)
+                );
+                document.commit_body_splice(prepared, &publication)?;
+                return Ok(result);
             }
+            let mut candidate = document.inner.clone_for_staging();
+            edit(&mut candidate.insert_paragraph(index, text));
             let paragraph = candidate
                 .paragraph_index_of_content(index)
                 .expect("an inserted body paragraph has a paragraph index");
@@ -12039,10 +13573,43 @@ impl PyDocument {
     ) -> PyResult<Py<PyTable>> {
         let result = {
             let mut document = slf.borrow_mut(py);
-            let mut candidate = document.inner.clone_for_staging();
-            if index > candidate.content_count() {
+            if index > document.inner.content_count() {
                 return Err(PyIndexError::new_err("content index out of range"));
             }
+            document.refuse_unsavable_body_edit(py)?;
+            let inserted = rdocx::Document::detached_table(rows, cols);
+            if let Ok((xml, snapshots)) = document.inner.detached_table_owner_snapshots(&inserted)
+                && let Some(plan) = document.plan_body_splice(BodySplice {
+                    slot: index,
+                    removed: 0,
+                    inserted: Some(SplicedBodyItem::Table(xml, snapshots)),
+                })?
+            {
+                // Every fallible step precedes the in-place native insertion.
+                let publication = crate::document::WordPublication::Conservative;
+                let prepared =
+                    document.prepare_body_splice(plan, "Document.insert_table", &publication)?;
+                let path = document
+                    .revisions
+                    .capture_prepared(
+                        &prepared.revision,
+                        smallvec![PathSeg::Body(prepared.plan.table)],
+                    )
+                    .map_err(revision_to_pyerr)?;
+                let result = Py::new(
+                    py,
+                    PyTable::new(slf.clone_ref(py), path)
+                        .bind_prepared_splice(&document, &prepared)?,
+                )?;
+                document.inner.insert_table(index, rows, cols);
+                debug_assert_eq!(
+                    document.inner.content_index_of_table(prepared.plan.table),
+                    Some(index)
+                );
+                document.commit_body_splice(prepared, &publication)?;
+                return Ok(result);
+            }
+            let mut candidate = document.inner.clone_for_staging();
             candidate.insert_table(index, rows, cols);
             // Preserve the direct body table ordinal while capturing its physical owner.
             let table = (0..candidate.table_count())
@@ -13720,6 +15287,15 @@ fn fx241_form_certificates_require_unique_routes_and_unchanged_source() {
 }
 
 impl PyDocument {
+    /// A body insertion that no save could write refuses before it changes
+    /// anything, with the error the save would give.
+    fn refuse_unsavable_body_edit(&self, py: Python<'_>) -> PyResult<()> {
+        match self.inner.unsavable_body_edit() {
+            Some(error) => Err(rdocx_to_pyerr(py, rdocx::Error::Other(error.to_owned()))),
+            None => Ok(()),
+        }
+    }
+
     fn append_paragraph_candidate(
         slf: Py<Self>,
         py: Python<'_>,
@@ -13728,18 +15304,55 @@ impl PyDocument {
         page_break: bool,
     ) -> PyResult<Py<PyParagraph>> {
         let mut document = slf.borrow_mut(py);
-        let mut candidate = document.inner.clone_for_staging();
-        let index = candidate.paragraph_count();
+        document.refuse_unsavable_body_edit(py)?;
+        let index = document.inner.paragraph_count();
         let style = style
-            .map(|value| style_id_of_type(&candidate, value, rdocx::StyleType::Paragraph))
+            .map(|value| style_id_of_type(&document.inner, value, rdocx::StyleType::Paragraph))
             .transpose()?;
-        let mut paragraph = candidate.add_paragraph(text);
-        if let Some(style) = style {
-            paragraph.set_style(&style);
+        // The same edit builds the paragraph read for the inventory and the
+        // paragraph placed.
+        let edit = |paragraph: &mut rdocx::Paragraph<'_>| {
+            if let Some(style) = &style {
+                paragraph.set_style(style);
+            }
+            if page_break {
+                paragraph.add_run("").add_break(rdocx::BreakKind::Page);
+            }
+        };
+        let mut appended = rdocx::Document::detached_text_paragraph(text);
+        edit(&mut rdocx::Paragraph::detached(&mut appended));
+        let slot = document.inner.content_count();
+        let splice = document.inner.direct_body_paragraph_facts(&appended);
+        if let Ok(Some(facts)) = splice
+            && let Some(plan) = document.plan_body_splice(BodySplice {
+                slot,
+                removed: 0,
+                inserted: Some(SplicedBodyItem::Paragraph(facts.0, facts.1)),
+            })?
+        {
+            // Every fallible step precedes the in-place native append.
+            let publication = crate::document::WordPublication::AppendBody;
+            let prepared =
+                document.prepare_body_splice(plan, "Document.add_paragraph", &publication)?;
+            let path = document
+                .revisions
+                .capture_prepared(
+                    &prepared.revision,
+                    smallvec![PathSeg::Body(0), PathSeg::Para(index)],
+                )
+                .map_err(revision_to_pyerr)?;
+            let result = Py::new(
+                py,
+                PyParagraph::new(slf.clone_ref(py), path)
+                    .bind_prepared_splice(&document, &prepared)?,
+            )?;
+            edit(&mut document.inner.add_paragraph(text));
+            debug_assert_eq!(prepared.plan.paragraph, index);
+            document.commit_body_splice(prepared, &publication)?;
+            return Ok(result);
         }
-        if page_break {
-            paragraph.add_run("").add_break(rdocx::BreakKind::Page);
-        }
+        let mut candidate = document.inner.clone_for_staging();
+        edit(&mut candidate.add_paragraph(text));
         let prepared = document.prepare_word_revision(
             py,
             &candidate,

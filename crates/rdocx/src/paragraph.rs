@@ -870,6 +870,13 @@ pub struct Paragraph<'a> {
 }
 
 impl<'a> Paragraph<'a> {
+    /// Edit a paragraph built by [`crate::Document::detached_text_paragraph`]
+    /// before it is placed.
+    #[doc(hidden)]
+    pub fn detached(inner: &'a mut CT_P) -> Self {
+        Self { inner }
+    }
+
     /// Get the combined text of all runs, with the text of the runs inside
     /// smart tags, inline custom XML elements and simple fields.
     pub fn text(&self) -> String {

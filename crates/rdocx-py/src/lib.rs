@@ -136,6 +136,8 @@ pub(crate) fn rdocx_to_pyerr(py: Python<'_>, error: rdocx::Error) -> PyErr {
 #[pymodule]
 fn _rdocx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyDocument>()?;
+    #[cfg(debug_assertions)]
+    module.add_function(wrap_pyfunction!(document::word_whole_body_work, module)?)?;
     module.add_class::<document::PyFontEmbeddingLicense>()?;
     module.add_class::<document::PyEmbeddedFont>()?;
     module.add_class::<document::PyFontDefinition>()?;

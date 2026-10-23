@@ -195,11 +195,31 @@ impl PyRun {
             .owner
             .as_ref()
             .ok_or_else(|| PyValueError::new_err("run XML owner route is unsupported"))?;
-        let (location, path) = document.current_run_owner(owner)?;
-        let bytes = document
-            .inner
-            .run_element_xml(&location, &path)
-            .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
+        let current = || -> PyResult<Vec<u8>> {
+            crate::document::note_word_whole_source_read();
+            let (location, path) = document.current_run_owner(owner)?;
+            document
+                .inner
+                .run_element_xml(&location, &path)
+                .map_err(|error| crate::rdocx_to_pyerr(py, error))
+        };
+        // A run of a direct body paragraph serializes with that paragraph alone.
+        let bytes = match document
+            .direct_body_run_slot(owner)
+            .and_then(|(slot, path)| {
+                document
+                    .inner
+                    .direct_body_run_xml(slot, &path)
+                    .ok()
+                    .flatten()
+            }) {
+            Some(bytes) => {
+                #[cfg(debug_assertions)]
+                crate::document::assert_direct_read(&bytes, current, "run");
+                bytes
+            }
+            None => current()?,
+        };
         String::from_utf8(bytes).map_err(|error| PyValueError::new_err(error.to_string()))
     }
 
