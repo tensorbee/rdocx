@@ -1343,10 +1343,7 @@ impl PyShape {
                 &filename,
             )
             .map_err(|error| rpptx_to_pyerr(py, error))?;
-        let mut survivors = presentation.unchanged_owners()?;
-        survivors.retain(|proof| {
-            proof.layout_index.is_some() || !proof.destination.starts_with(&current.segs)
-        });
+        let survivors = presentation.replaced_shape_owners(&current.segs)?;
         let prepared = presentation.prepare_owners(
             &candidate,
             "Shape.insert_picture",

@@ -2301,7 +2301,7 @@ mod tests {
         let after = OpcPackage::from_reader(Cursor::new(updated)).unwrap();
         for (name, bytes) in &before.parts {
             if name != "/xl/worksheets/sheet1.xml" {
-                assert_eq!(after.get_part(name).unwrap(), bytes);
+                assert_eq!(after.get_part(name).unwrap(), bytes.as_slice());
             }
         }
         assert_eq!(
@@ -2452,7 +2452,11 @@ mod tests {
             assert!(xml.contains(foreign_cell), "{label}");
             for (part, bytes) in &before.parts {
                 if part != "/xl/worksheets/sheet1.xml" {
-                    assert_eq!(reopened.get_part(part).unwrap(), bytes, "{label}: {part}");
+                    assert_eq!(
+                        reopened.get_part(part).unwrap(),
+                        bytes.as_slice(),
+                        "{label}: {part}"
+                    );
                 }
             }
             assert_eq!(
@@ -2563,7 +2567,7 @@ mod tests {
             );
             for (name, bytes) in &before.parts {
                 if name != "/xl/worksheets/sheet1.xml" {
-                    assert_eq!(after.get_part(name).unwrap(), bytes);
+                    assert_eq!(after.get_part(name).unwrap(), bytes.as_slice());
                 }
             }
             assert_eq!(

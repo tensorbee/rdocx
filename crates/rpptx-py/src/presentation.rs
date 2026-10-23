@@ -1,23 +1,26 @@
 use oxml_py_support::PathSeg;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use oxml_py_support::RevisionCounter;
-#[cfg(test)]
+#[cfg(debug_assertions)]
 use std::cell::Cell;
 
-#[cfg(test)]
+// Debug builds, which the binding tests use, count the owner inventory work.
+#[cfg(debug_assertions)]
 thread_local! {
     static FX260_PPT_VISITS: Cell<usize> = const { Cell::new(0) };
 }
 
 pub(crate) fn note_fx260_ppt(count: usize) {
-    #[cfg(test)]
+    #[cfg(debug_assertions)]
     FX260_PPT_VISITS.with(|cell| cell.set(cell.get().saturating_add(count)));
-    #[cfg(not(test))]
+    #[cfg(not(debug_assertions))]
     let _ = count;
 }
 
-#[cfg(test)]
+#[cfg(debug_assertions)]
 fn fx260_ppt_visits() -> usize {
     FX260_PPT_VISITS.with(|cell| cell.get())
 }
@@ -25,6 +28,15 @@ fn fx260_ppt_visits() -> usize {
 #[cfg(test)]
 fn reset_fx260_ppt_visits() {
     FX260_PPT_VISITS.with(|cell| cell.set(0));
+}
+
+/// Debug builds only: the owner inventory work counted since the previous
+/// call, so that the Python tests can compare decks of N and 4N slides.
+#[cfg(debug_assertions)]
+#[pyfunction]
+#[pyo3(name = "_inventory_work")]
+pub(crate) fn inventory_work() -> usize {
+    FX260_PPT_VISITS.with(|cell| cell.replace(0))
 }
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
@@ -878,8 +890,7 @@ impl PyPresentationTextExport {
 pub struct PyPresentation {
     pub(crate) inner: rpptx::Presentation,
     pub(crate) revisions: RevisionCounter,
-    owners: Vec<LiveOwner>,
-    indexes: OwnerIndexes,
+    owners: OwnerInventory,
     pub(crate) gradient_stops: Vec<crate::dml::GradientStopTokens>,
     pub(crate) next_gradient_stop: u64,
     slides: oxml_py_support::RevisionState,
@@ -2194,10 +2205,8 @@ impl PyPptElement {
             )
         })?;
         let actual = owner
-            .indexes
-            .by_generation
-            .get(&generation)
-            .and_then(|index| owner.owners.get(*index))
+            .owners
+            .owner(generation)
             .ok_or_else(|| PyValueError::new_err("Element owner is absent"))?;
         let valid = matches!(
             (self.kind, &actual.address.physical),
@@ -2478,7 +2487,7 @@ enum PartIdentity {
     Master(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum PhysicalOwner {
     Master(String),
     Slide(u32),
@@ -2514,7 +2523,7 @@ enum PhysicalOwner {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct OwnerAddress {
     physical: PhysicalOwner,
     path: smallvec::SmallVec<[oxml_py_support::PathSeg; 5]>,
@@ -2531,8 +2540,9 @@ struct LiveOwner {
     grid: Option<oxml_py_support::RevisionState>,
 }
 
-/// An operation's explicit survival proof. Omitted old generations are deleted.
+/// One owner's explicit survival proof.
 /// A matching native ID never constructs this proof automatically.
+#[derive(Clone)]
 pub(crate) struct OwnerSurvival {
     pub(crate) generation: u64,
     pub(crate) destination: smallvec::SmallVec<[oxml_py_support::PathSeg; 5]>,
@@ -2540,6 +2550,117 @@ pub(crate) struct OwnerSurvival {
     pub(crate) text_changed: bool,
     pub(crate) xml_children_changed: bool,
     pub(crate) grid_changed: bool,
+}
+
+/// An operation's explicit survival proofs. Omitted old generations are deleted.
+pub(crate) struct OwnerProofs {
+    /// How slide or layout ordinals move. Every owner of a part absent from
+    /// `parts` survives unchanged at its path under this edit.
+    edit: PartEdit,
+    /// Parts whose surviving owners are exactly these proofs, in inventory order.
+    parts: Vec<(OwnerPart, Vec<OwnerSurvival>)>,
+}
+
+#[derive(Clone, Copy)]
+enum PartEdit {
+    Unchanged,
+    Slides(SlideOwnerEdit),
+    RemoveLayout(usize),
+}
+
+impl PartEdit {
+    /// Where a live slide ends up, or `None` when the edit removes it.
+    fn slide_index(self, index: usize) -> Option<usize> {
+        let Self::Slides(edit) = self else {
+            return Some(index);
+        };
+        Some(match edit {
+            SlideOwnerEdit::Insert(at) if index >= at => index + 1,
+            SlideOwnerEdit::InsertMany { at, count } if index >= at => index
+                .checked_add(count)
+                .expect("native slide count was checked"),
+            SlideOwnerEdit::Remove(at) if index == at => return None,
+            SlideOwnerEdit::Remove(at) if index > at => index - 1,
+            SlideOwnerEdit::Move { from, to } if index == from => to,
+            SlideOwnerEdit::Move { from, to } if from < to && index > from && index <= to => {
+                index - 1
+            }
+            SlideOwnerEdit::Move { from, to } if to < from && index >= to && index < from => {
+                index + 1
+            }
+            _ => index,
+        })
+    }
+
+    /// The proof of an owner this edit keeps unchanged, or `None` when it
+    /// removes the owner's slide or layout.
+    fn proof(self, owner: &LiveOwner) -> Option<OwnerSurvival> {
+        let mut proof = OwnerSurvival {
+            generation: owner.owner.generation(),
+            destination: owner.address.path.clone(),
+            layout_index: owner.address.layout_index,
+            text_changed: false,
+            xml_children_changed: false,
+            grid_changed: false,
+        };
+        match self {
+            Self::Unchanged => {}
+            Self::Slides(_) => {
+                if let Some(PathSeg::Slide(index)) = proof.destination.first_mut() {
+                    *index = self.slide_index(*index)?;
+                }
+            }
+            Self::RemoveLayout(removed) => {
+                if proof.layout_index == Some(removed)
+                    || matches!(proof.destination.first(), Some(PathSeg::Layout(index)) if *index == removed)
+                {
+                    return None;
+                }
+                if let Some(index) = &mut proof.layout_index
+                    && *index > removed
+                {
+                    *index -= 1;
+                }
+                if let Some(PathSeg::Layout(index)) = proof.destination.first_mut()
+                    && *index > removed
+                {
+                    *index -= 1;
+                }
+            }
+        }
+        Some(proof)
+    }
+}
+
+impl OwnerProofs {
+    fn edit(edit: PartEdit) -> Self {
+        Self {
+            edit,
+            parts: Vec::new(),
+        }
+    }
+
+    /// The proofs of one live part's owners, in inventory order.
+    fn for_part(
+        &self,
+        part: OwnerPart,
+        owners: &PartOwners,
+    ) -> PyResult<std::borrow::Cow<'_, [OwnerSurvival]>> {
+        if let Some((_, proofs)) = self.parts.iter().find(|(listed, _)| *listed == part) {
+            return Ok(std::borrow::Cow::Borrowed(proofs));
+        }
+        let mut proofs = Vec::new();
+        proofs.try_reserve_exact(owners.owners.len()).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("owner proofs allocation failed")
+        })?;
+        proofs.extend(
+            owners
+                .owners
+                .iter()
+                .filter_map(|owner| self.edit.proof(owner)),
+        );
+        Ok(std::borrow::Cow::Owned(proofs))
+    }
 }
 
 type OwnerPathKey = (
@@ -2550,42 +2671,72 @@ type OwnerPathKey = (
 
 struct PreparedShapeXml {
     revision: oxml_py_support::PreparedRevision,
+    part: OwnerPart,
     updates: Vec<(usize, LiveOwner)>,
 }
 
-struct OwnerIndexes {
-    by_generation: std::collections::HashMap<u64, usize>,
-    by_path: std::collections::HashMap<OwnerPathKey, usize>,
-    shape_id_counts: std::collections::HashMap<(PartIdentity, u32), usize>,
+/// One part of the owner inventory: a slide, or every layout and master.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum OwnerPart {
+    Slide(usize),
+    Masters,
 }
 
-impl OwnerIndexes {
-    fn prepare(owners: &[LiveOwner]) -> PyResult<Self> {
-        let mut indexes = Self {
-            by_generation: std::collections::HashMap::new(),
-            by_path: std::collections::HashMap::new(),
-            shape_id_counts: std::collections::HashMap::new(),
-        };
-        indexes.reserve(owners.len())?;
-        for (index, owner) in owners.iter().enumerate() {
-            indexes.insert(index, owner);
+impl OwnerPart {
+    /// The part that holds the owners under a path. Layout owners have an
+    /// empty path and belong with the layout and master shapes.
+    fn of(path: &[PathSeg]) -> Self {
+        match path.first() {
+            Some(PathSeg::Slide(index)) => Self::Slide(*index),
+            _ => Self::Masters,
         }
-        Ok(indexes)
+    }
+}
+
+/// The owners of one part in inventory order, with their local lookups.
+#[derive(Clone, Debug, Default)]
+struct PartOwners {
+    owners: Vec<LiveOwner>,
+    by_path: HashMap<OwnerPathKey, usize>,
+    shape_ids: HashMap<(PartIdentity, u32), usize>,
+    /// The structural proof's refusal when the whole part survives unchanged:
+    /// its first shape without an ID or with one the part repeats.
+    refusal: Option<&'static str>,
+}
+
+impl PartOwners {
+    fn new(owners: Vec<LiveOwner>) -> PyResult<Self> {
+        let mut part = Self {
+            owners,
+            ..Self::default()
+        };
+        let fail = |_| {
+            pyo3::exceptions::PyMemoryError::new_err("PowerPoint owner index allocation failed")
+        };
+        part.by_path.try_reserve(part.owners.len()).map_err(fail)?;
+        part.shape_ids
+            .try_reserve(part.owners.len())
+            .map_err(fail)?;
+        for index in 0..part.owners.len() {
+            part.index(index);
+        }
+        part.refusal = part.structural_refusal();
+        Ok(part)
     }
 
     fn reserve(&mut self, additional: usize) -> PyResult<()> {
         let fail = |_| {
             pyo3::exceptions::PyMemoryError::new_err("PowerPoint owner index allocation failed")
         };
-        self.by_generation.try_reserve(additional).map_err(fail)?;
+        self.owners.try_reserve(additional).map_err(fail)?;
         self.by_path.try_reserve(additional).map_err(fail)?;
-        self.shape_id_counts.try_reserve(additional).map_err(fail)?;
+        self.shape_ids.try_reserve(additional).map_err(fail)?;
         Ok(())
     }
 
-    fn insert(&mut self, index: usize, owner: &LiveOwner) {
+    fn index(&mut self, index: usize) {
         note_fx260_ppt(1);
-        self.by_generation.insert(owner.owner.generation(), index);
+        let owner = &self.owners[index];
         let body = matches!(owner.address.physical, PhysicalOwner::TextBody { .. });
         self.by_path
             .entry((owner.address.path.clone(), owner.address.layout_index, body))
@@ -2596,19 +2747,237 @@ impl OwnerIndexes {
             ..
         } = &owner.address.physical
         {
-            *self
-                .shape_id_counts
-                .entry((slide.clone(), *id))
-                .or_default() += 1;
+            *self.shape_ids.entry((slide.clone(), *id)).or_default() += 1;
+        }
+    }
+
+    fn structural_refusal(&self) -> Option<&'static str> {
+        self.owners
+            .iter()
+            .find_map(|owner| match &owner.address.physical {
+                PhysicalOwner::Shape {
+                    kind: rpptx::ShapeKind::AlternateContent,
+                    ..
+                } => None,
+                PhysicalOwner::Shape { id: None, .. } => {
+                    Some("structural owner proof requires a shape id")
+                }
+                PhysicalOwner::Shape {
+                    slide,
+                    id: Some(id),
+                    ..
+                } => (self.shape_ids.get(&(slide.clone(), *id)) != Some(&1))
+                    .then_some("structural owner proof has an ambiguous shape id"),
+                _ => None,
+            })
+    }
+
+    /// The same owners after their slide moved to another ordinal.
+    fn moved_to(&self, slide: usize) -> PyResult<Self> {
+        let mut owners = Vec::new();
+        owners.try_reserve_exact(self.owners.len()).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("moved owner inventory allocation failed")
+        })?;
+        owners.extend(self.owners.iter().cloned());
+        for owner in &mut owners {
+            if let Some(PathSeg::Slide(index)) = owner.address.path.first_mut() {
+                *index = slide;
+            }
+        }
+        Self::new(owners)
+    }
+}
+
+/// The owner inventory in parts, one per slide in slide order, then the
+/// layouts and masters. Untouched parts are shared with a prepared edit.
+#[derive(Clone, Debug, Default)]
+struct OwnerParts {
+    slides: Vec<Arc<PartOwners>>,
+    masters: Arc<PartOwners>,
+}
+
+impl OwnerParts {
+    fn part(&self, part: OwnerPart) -> Option<&PartOwners> {
+        match part {
+            OwnerPart::Slide(index) => self.slides.get(index).map(|owners| &**owners),
+            OwnerPart::Masters => Some(&self.masters),
+        }
+    }
+
+    fn part_mut(&mut self, part: OwnerPart) -> Option<&mut PartOwners> {
+        match part {
+            OwnerPart::Slide(index) => self.slides.get_mut(index).map(Arc::make_mut),
+            OwnerPart::Masters => Some(Arc::make_mut(&mut self.masters)),
+        }
+    }
+
+    /// Every part in inventory order.
+    fn iter(&self) -> impl Iterator<Item = (OwnerPart, &PartOwners)> {
+        self.slides
+            .iter()
+            .enumerate()
+            .map(|(index, owners)| (OwnerPart::Slide(index), &**owners))
+            .chain(std::iter::once((OwnerPart::Masters, &*self.masters)))
+    }
+
+    fn len(&self) -> usize {
+        self.iter().map(|(_, part)| part.owners.len()).sum()
+    }
+
+    fn owner_at(
+        &self,
+        path: &[PathSeg],
+        layout_index: Option<usize>,
+        body: bool,
+    ) -> Option<&LiveOwner> {
+        note_fx260_ppt(1);
+        let part = self.part(OwnerPart::of(path))?;
+        let key = (smallvec::SmallVec::from_slice(path), layout_index, body);
+        part.owners.get(*part.by_path.get(&key)?)
+    }
+}
+
+/// The live owner inventory with its generation and shape ID indexes.
+#[derive(Debug, Default)]
+struct OwnerInventory {
+    parts: OwnerParts,
+    by_generation: HashMap<u64, (OwnerPart, usize)>,
+    shape_ids: HashMap<(PartIdentity, u32), usize>,
+}
+
+impl OwnerInventory {
+    fn new(parts: OwnerParts) -> PyResult<Self> {
+        let mut inventory = Self {
+            parts,
+            ..Self::default()
+        };
+        let fail = |_| {
+            pyo3::exceptions::PyMemoryError::new_err("PowerPoint owner index allocation failed")
+        };
+        let parts = &inventory.parts;
+        inventory
+            .by_generation
+            .try_reserve(parts.len())
+            .map_err(fail)?;
+        for (part, owners) in parts.iter() {
+            for (index, owner) in owners.owners.iter().enumerate() {
+                inventory
+                    .by_generation
+                    .insert(owner.owner.generation(), (part, index));
+            }
+            for (key, count) in &owners.shape_ids {
+                *inventory.shape_ids.entry(key.clone()).or_default() += count;
+            }
+        }
+        Ok(inventory)
+    }
+
+    fn owner(&self, generation: u64) -> Option<&LiveOwner> {
+        let (part, index) = self.by_generation.get(&generation)?;
+        self.parts.part(*part)?.owners.get(*index)
+    }
+
+    /// Reserves every index entry a prepared change adds, before its commit.
+    fn reserve(&mut self, change: &InventoryChange) -> PyResult<()> {
+        let fail = |_| {
+            pyo3::exceptions::PyMemoryError::new_err("PowerPoint owner index allocation failed")
+        };
+        let mut owners = 0;
+        let mut ids = 0;
+        for part in change.rebuilt.iter().chain(&change.moved) {
+            let part = change.parts.part(*part).expect("prepared inventory part");
+            owners += part.owners.len();
+            ids += part.shape_ids.len();
+        }
+        self.by_generation.try_reserve(owners).map_err(fail)?;
+        self.shape_ids.try_reserve(ids).map_err(fail)?;
+        Ok(())
+    }
+
+    /// Installs a prepared change. Nothing here can fail.
+    fn apply(&mut self, change: InventoryChange) {
+        for part in &change.dropped {
+            let owners = self.parts.part(*part).expect("dropped live part");
+            for owner in &owners.owners {
+                self.by_generation.remove(&owner.owner.generation());
+            }
+            for (key, count) in &owners.shape_ids {
+                match self.shape_ids.get_mut(key) {
+                    Some(total) if *total > *count => *total -= count,
+                    _ => {
+                        self.shape_ids.remove(key);
+                    }
+                }
+            }
+        }
+        self.parts = change.parts;
+        for part in change.rebuilt.iter().chain(&change.moved) {
+            let owners = self.parts.part(*part).expect("prepared inventory part");
+            for (index, owner) in owners.owners.iter().enumerate() {
+                self.by_generation
+                    .insert(owner.owner.generation(), (*part, index));
+            }
+        }
+        for part in &change.rebuilt {
+            let owners = self.parts.part(*part).expect("rebuilt inventory part");
+            for (key, count) in &owners.shape_ids {
+                *self.shape_ids.entry(key.clone()).or_default() += count;
+            }
+        }
+        #[cfg(debug_assertions)]
+        self.assert_indexes();
+    }
+
+    /// Debug builds check that the indexes kept by deltas match a rebuild.
+    #[cfg(debug_assertions)]
+    fn assert_indexes(&self) {
+        let rebuilt = Self::new(self.parts.clone()).expect("debug index rebuild");
+        assert_eq!(
+            self.by_generation, rebuilt.by_generation,
+            "owner generation index"
+        );
+        assert_eq!(self.shape_ids, rebuilt.shape_ids, "shape ID index");
+    }
+}
+
+/// A prepared inventory and the live parts it replaces.
+struct InventoryChange {
+    parts: OwnerParts,
+    /// Live parts whose owners leave the indexes.
+    dropped: Vec<OwnerPart>,
+    /// Prepared parts walked again, whose owners enter the indexes.
+    rebuilt: Vec<OwnerPart>,
+    /// Prepared parts carried from another slide ordinal.
+    moved: Vec<OwnerPart>,
+}
+
+/// The live parts a prepared edit keeps.
+struct CarriedParts {
+    /// For each candidate slide, the live slide whose part it keeps.
+    slides: Vec<Option<usize>>,
+    /// Whether the layout and master part is kept.
+    masters: bool,
+}
+
+impl CarriedParts {
+    fn none(candidate: &rpptx::Presentation) -> Self {
+        Self {
+            slides: vec![None; candidate.len()],
+            masters: false,
+        }
+    }
+
+    /// Whether a candidate part is kept from the live inventory.
+    fn keeps(&self, part: OwnerPart) -> bool {
+        match part {
+            OwnerPart::Slide(at) => self.slides.get(at).is_some_and(Option::is_some),
+            OwnerPart::Masters => self.masters,
         }
     }
 }
 
 enum OwnerChanges {
-    Replace {
-        owners: Vec<LiveOwner>,
-        indexes: OwnerIndexes,
-    },
+    Replace(InventoryChange),
     Append(Vec<LiveOwner>),
 }
 
@@ -2618,8 +2987,65 @@ pub(crate) struct PreparedOwners {
     slides: oxml_py_support::RevisionState,
     layouts: oxml_py_support::RevisionState,
     masters: oxml_py_support::RevisionState,
+    /// The generations this edit retires or replaces, in preparation order.
+    #[cfg(debug_assertions)]
+    retired: Vec<u64>,
 }
 
+/// Runs a debug-only cross-check without counting its work.
+#[cfg(debug_assertions)]
+fn without_work_count<T>(run: impl FnOnce() -> T) -> T {
+    let visits = fx260_ppt_visits();
+    let result = run();
+    FX260_PPT_VISITS.with(|cell| cell.set(visits));
+    result
+}
+
+/// Debug builds check that carrying parts over prepares what walking every
+/// part prepares: the same error, or the same retired generations, owners,
+/// generations and inventory scopes.
+#[cfg(debug_assertions)]
+fn assert_same_preparation(carried: &PyResult<PreparedOwners>, walked: &PyResult<PreparedOwners>) {
+    let summary = |prepared: &PreparedOwners| {
+        let OwnerChanges::Replace(change) = &prepared.owners else {
+            unreachable!("a full preparation replaces the inventory");
+        };
+        let owners = change
+            .parts
+            .iter()
+            .flat_map(|(_, part)| &part.owners)
+            .map(|owner| {
+                (
+                    owner.address.clone(),
+                    owner.owner.generation(),
+                    owner.text.generation(),
+                    owner.xml_children.generation(),
+                    owner
+                        .grid
+                        .as_ref()
+                        .map(oxml_py_support::RevisionState::generation),
+                )
+            })
+            .collect::<Vec<_>>();
+        let scopes = [&prepared.slides, &prepared.layouts, &prepared.masters]
+            .map(oxml_py_support::RevisionState::generation);
+        (prepared.retired.clone(), owners, scopes)
+    };
+    match (carried, walked) {
+        (Ok(carried), Ok(walked)) => {
+            assert!(
+                summary(carried) == summary(walked),
+                "carried owner inventory differs from a full walk"
+            );
+        }
+        (Err(carried), Err(walked)) => assert_eq!(carried.to_string(), walked.to_string()),
+        _ => panic!(
+            "carried and walked owner inventories disagree: {:?} {:?}",
+            carried.as_ref().err(),
+            walked.as_ref().err()
+        ),
+    }
+}
 fn text_owner_addresses(
     frame: rpptx::TextFrameRef<'_>,
     slide: PartIdentity,
@@ -2772,28 +3198,52 @@ fn shape_owner_addresses(
 }
 
 fn owner_addresses(inner: &rpptx::Presentation) -> PyResult<Vec<OwnerAddress>> {
-    note_fx260_ppt(inner.slides().len().max(1));
-    use oxml_py_support::PathSeg;
     let mut out = Vec::new();
-    for (index, slide) in inner.slides().enumerate() {
-        out.try_reserve(1).map_err(|_| {
-            pyo3::exceptions::PyMemoryError::new_err("owner inventory allocation failed")
-        })?;
-        out.push(OwnerAddress {
-            physical: PhysicalOwner::Slide(slide.id()),
-            path: smallvec![PathSeg::Slide(index)],
-            layout_index: None,
-            table: false,
-        });
-        for (shape_index, shape) in slide.shapes().enumerate() {
-            shape_owner_addresses(
-                shape,
-                PartIdentity::Slide(slide.id()),
-                smallvec![PathSeg::Slide(index), PathSeg::Shape(shape_index)],
-                &mut out,
-            )?;
-        }
+    for index in 0..inner.len() {
+        slide_owner_addresses(inner, index, &mut out)?;
     }
+    master_owner_addresses(inner, &mut out)?;
+    Ok(out)
+}
+
+/// The owners of one slide part: the slide and its shapes.
+fn slide_owner_addresses(
+    inner: &rpptx::Presentation,
+    index: usize,
+    out: &mut Vec<OwnerAddress>,
+) -> PyResult<()> {
+    let start = out.len();
+    let slide = inner
+        .slide(index)
+        .ok_or_else(|| PyValueError::new_err("slide owner is absent"))?;
+    out.try_reserve(1).map_err(|_| {
+        pyo3::exceptions::PyMemoryError::new_err("owner inventory allocation failed")
+    })?;
+    out.push(OwnerAddress {
+        physical: PhysicalOwner::Slide(slide.id()),
+        path: smallvec![PathSeg::Slide(index)],
+        layout_index: None,
+        table: false,
+    });
+    for (shape_index, shape) in slide.shapes().enumerate() {
+        shape_owner_addresses(
+            shape,
+            PartIdentity::Slide(slide.id()),
+            smallvec![PathSeg::Slide(index), PathSeg::Shape(shape_index)],
+            out,
+        )?;
+    }
+    note_fx260_ppt(out.len() - start);
+    Ok(())
+}
+
+/// The owners of the layout and master part: every layout, then the layout
+/// shapes, then each master with its shapes.
+fn master_owner_addresses(
+    inner: &rpptx::Presentation,
+    out: &mut Vec<OwnerAddress>,
+) -> PyResult<()> {
+    let start = out.len();
     for index in 0..inner.layout_count() {
         // Originating layout parts provide physical ownership independently of order.
         let part = inner
@@ -2829,7 +3279,7 @@ fn owner_addresses(inner: &rpptx::Presentation) -> PyResult<Vec<OwnerAddress>> {
                     .map_err(|e| PyValueError::new_err(e.to_string()))?,
                 PartIdentity::Layout(part.clone()),
                 smallvec![PathSeg::Layout(index), PathSeg::Shape(shape_index)],
-                &mut out,
+                out,
             )?;
         }
     }
@@ -2855,19 +3305,26 @@ fn owner_addresses(inner: &rpptx::Presentation) -> PyResult<Vec<OwnerAddress>> {
                         .map_err(|e| PyValueError::new_err(e.to_string()))?,
                     PartIdentity::Master(part.clone()),
                     smallvec![PathSeg::Master(index), PathSeg::Shape(shape_index)],
-                    &mut out,
+                    out,
                 )?;
             }
         }
     }
-    Ok(out)
+    note_fx260_ppt(out.len() - start);
+    Ok(())
 }
 
 impl PyPresentation {
     /// Fallible construction before any Python handles can escape.
     fn from_presentation_owned(inner: rpptx::Presentation) -> PyResult<Self> {
         use oxml_py_support::RevisionScope as S;
-        let addresses = owner_addresses(&inner)?;
+        let mut addresses = Vec::new();
+        let mut slide_ends = Vec::new();
+        for index in 0..inner.len() {
+            slide_owner_addresses(&inner, index, &mut addresses)?;
+            slide_ends.push(addresses.len());
+        }
+        master_owner_addresses(&inner, &mut addresses)?;
         let mut kinds = vec![S::SlideInventory, S::LayoutInventory, S::MasterInventory];
         for address in &addresses {
             kinds.try_reserve(4).map_err(|_| {
@@ -2892,17 +3349,23 @@ impl PyPresentation {
         let masters = states
             .next()
             .expect("three inventory scopes were initialized");
+        let mut parts = OwnerParts::default();
         let mut owners = Vec::new();
-        owners.try_reserve_exact(addresses.len()).map_err(|_| {
-            pyo3::exceptions::PyMemoryError::new_err("owner inventory allocation failed")
-        })?;
-        for address in addresses {
+        for (at, address) in addresses.into_iter().enumerate() {
+            if parts.slides.len() < slide_ends.len() && at == slide_ends[parts.slides.len()] {
+                parts
+                    .slides
+                    .push(Arc::new(PartOwners::new(std::mem::take(&mut owners))?));
+            }
             let owner = states.next().expect("owner scope was initialized");
             let text = states.next().expect("text scope was initialized");
             let xml_children = states.next().expect("XML child scope was initialized");
             let grid = address
                 .table
                 .then(|| states.next().expect("table grid scope was initialized"));
+            owners.try_reserve(1).map_err(|_| {
+                pyo3::exceptions::PyMemoryError::new_err("owner inventory allocation failed")
+            })?;
             owners.push(LiveOwner {
                 address,
                 owner,
@@ -2911,12 +3374,16 @@ impl PyPresentation {
                 grid,
             });
         }
-        let indexes = OwnerIndexes::prepare(&owners)?;
+        while parts.slides.len() < slide_ends.len() {
+            parts
+                .slides
+                .push(Arc::new(PartOwners::new(std::mem::take(&mut owners))?));
+        }
+        parts.masters = Arc::new(PartOwners::new(owners)?);
         Ok(Self {
             inner,
             revisions,
-            owners,
-            indexes,
+            owners: OwnerInventory::new(parts)?,
             gradient_stops: Vec::new(),
             next_gradient_stop: 0,
             slides,
@@ -2931,10 +3398,7 @@ impl PyPresentation {
         layout_index: Option<usize>,
         body: bool,
     ) -> Option<&LiveOwner> {
-        note_fx260_ppt(1);
-        let key = (smallvec::SmallVec::from_slice(path), layout_index, body);
-        let index = *self.indexes.by_path.get(&key)?;
-        self.owners.get(index)
+        self.owners.parts.owner_at(path, layout_index, body)
     }
 
     fn owner_at(
@@ -2961,9 +3425,7 @@ impl PyPresentation {
             return Some(captured.clone());
         };
         note_fx260_ppt(1);
-        let owner = self
-            .owners
-            .get(*self.indexes.by_generation.get(&generation)?)?;
+        let owner = self.owners.owner(generation)?;
         let mut path = captured.clone();
         let end = match &owner.address.physical {
             PhysicalOwner::TextBody { cell, .. } => {
@@ -3047,7 +3509,7 @@ impl PyPresentation {
             ));
         };
         if *kind == rpptx::ShapeKind::AlternateContent
-            || self.indexes.shape_id_counts.get(&(slide.clone(), *id)) != Some(&1)
+            || self.owners.shape_ids.get(&(slide.clone(), *id)) != Some(&1)
         {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "shape id is ambiguous or read-only",
@@ -3062,7 +3524,7 @@ impl PyPresentation {
         descendants: Option<oxml_py_support::RevisionScope>,
     ) -> PyResult<oxml_py_support::ContentPath> {
         self.capture_owner_path(
-            &self.owners,
+            &self.owners.parts,
             &self.slides,
             self.revisions.current(),
             segs,
@@ -3077,8 +3539,8 @@ impl PyPresentation {
         descendants: Option<oxml_py_support::RevisionScope>,
     ) -> PyResult<oxml_py_support::ContentPath> {
         match &prepared.owners {
-            OwnerChanges::Replace { owners, .. } => self.capture_owner_path(
-                owners,
+            OwnerChanges::Replace(change) => self.capture_owner_path(
+                &change.parts,
                 &prepared.slides,
                 prepared.revision.committed_serial(),
                 segs,
@@ -3121,7 +3583,7 @@ impl PyPresentation {
         descendants: Option<oxml_py_support::RevisionScope>,
     ) -> PyResult<oxml_py_support::ContentPath> {
         self.capture_owner_path(
-            &self.owners,
+            &self.owners.parts,
             &self.slides,
             self.revisions.current(),
             segs,
@@ -3134,7 +3596,7 @@ impl PyPresentation {
         segs: smallvec::SmallVec<[oxml_py_support::PathSeg; 5]>,
     ) -> PyResult<oxml_py_support::ContentPath> {
         self.capture_owner_path(
-            &self.owners,
+            &self.owners.parts,
             &self.slides,
             self.revisions.current(),
             segs,
@@ -3144,7 +3606,7 @@ impl PyPresentation {
 
     fn capture_owner_path(
         &self,
-        owners: &[LiveOwner],
+        parts: &OwnerParts,
         slides: &oxml_py_support::RevisionState,
         serial: u64,
         segs: smallvec::SmallVec<[oxml_py_support::PathSeg; 5]>,
@@ -3153,16 +3615,7 @@ impl PyPresentation {
         use oxml_py_support::PathSeg;
         let (descendants, select_body, xml_children) = selection;
         let owner_at = |path: &[PathSeg], layout_index: Option<usize>, body: bool| {
-            if std::ptr::eq(owners, self.owners.as_slice()) {
-                self.indexed_owner_at(path, layout_index, body)
-            } else {
-                owners.iter().find(|owner| {
-                    note_fx260_ppt(1);
-                    owner.address.path.as_slice() == path
-                        && owner.address.layout_index == layout_index
-                        && matches!(owner.address.physical, PhysicalOwner::TextBody { .. }) == body
-                })
-            }
+            parts.owner_at(path, layout_index, body)
         };
         if segs.is_empty() {
             let mut path = self
@@ -3216,16 +3669,19 @@ impl PyPresentation {
         let owner = match direct {
             Some(owner) => owner,
             None => {
+                // An opaque ancestor shares the first segment, so its part.
                 let opaque_parent = !select_body
-                    && owners.iter().any(|owner| {
-                        matches!(
-                            &owner.address.physical,
-                            PhysicalOwner::Shape {
-                                kind: rpptx::ShapeKind::AlternateContent,
-                                ..
-                            }
-                        ) && owner_path.starts_with(&owner.address.path)
-                            && owner_path.len() > owner.address.path.len()
+                    && parts.part(OwnerPart::of(&owner_path)).is_some_and(|part| {
+                        part.owners.iter().any(|owner| {
+                            matches!(
+                                &owner.address.physical,
+                                PhysicalOwner::Shape {
+                                    kind: rpptx::ShapeKind::AlternateContent,
+                                    ..
+                                }
+                            ) && owner_path.starts_with(&owner.address.path)
+                                && owner_path.len() > owner.address.path.len()
+                        })
                     });
                 if opaque_parent && serial == self.revisions.current() {
                     return Ok(self.revisions.capture(segs));
@@ -3324,124 +3780,270 @@ impl PyPresentation {
         &self,
         path: &oxml_py_support::ContentPath,
     ) -> Option<usize> {
-        let generation = path.owner_generation()?;
         self.owners
-            .iter()
-            .find(|owner| owner.owner.generation() == generation)?
+            .owner(path.owner_generation()?)?
             .address
             .layout_index
     }
 
-    /// Build a complete candidate inventory, checking all survival proofs.
+    /// Build the candidate inventory, checking all survival proofs.
     /// It never infers that an ID still names the same incarnation.
+    ///
+    /// A part whose native records the candidate still shares, and whose
+    /// owners all survive unchanged, is kept. Every other part is walked
+    /// again, so the work follows the parts an edit touches.
     pub(crate) fn prepare_owners(
         &self,
         candidate: &rpptx::Presentation,
         operation: &'static str,
-        preserved: &[OwnerSurvival],
+        preserved: &OwnerProofs,
         slides_changed: bool,
         layouts_changed: bool,
         masters_changed: bool,
     ) -> PyResult<PreparedOwners> {
-        let next = owner_addresses(candidate)?;
-        self.finish_prepare_owners(
-            next,
-            operation,
-            preserved,
-            slides_changed,
-            layouts_changed,
-            masters_changed,
-        )
+        let changed = [slides_changed, layouts_changed, masters_changed];
+        let carried = self.carried_parts(candidate, preserved);
+        let prepared = self.prepare_parts(candidate, operation, preserved, &carried, changed);
+        // Debug builds, which run the binding tests, check that carrying
+        // parts over prepares exactly what walking every part prepares.
+        #[cfg(debug_assertions)]
+        if carried.masters || carried.slides.iter().any(Option::is_some) {
+            let walked = without_work_count(|| {
+                let none = CarriedParts::none(candidate);
+                self.prepare_parts(candidate, operation, preserved, &none, changed)
+            });
+            assert_same_preparation(&prepared, &walked);
+        }
+        prepared
     }
 
-    fn finish_prepare_owners(
+    /// The live parts a candidate keeps: those whose native records it
+    /// shares, at the ordinal the proofs move them to, without an explicit
+    /// proof. Any doubt walks every part.
+    fn carried_parts(&self, candidate: &rpptx::Presentation, proofs: &OwnerProofs) -> CarriedParts {
+        let walk_all = CarriedParts::none(candidate);
+        // Shape ID counts stay local to a part while slide IDs are unique.
+        let unique = |inner: &rpptx::Presentation| {
+            let mut ids = HashSet::new();
+            inner.slides().all(|slide| ids.insert(slide.id()))
+        };
+        if self.owners.parts.slides.len() != self.inner.len()
+            || !unique(&self.inner)
+            || !unique(candidate)
+        {
+            return walk_all;
+        }
+        let listed = proofs
+            .parts
+            .iter()
+            .map(|(part, _)| *part)
+            .collect::<HashSet<_>>();
+        let slides = candidate
+            .unchanged_slides_since(&self.inner)
+            .into_iter()
+            .enumerate()
+            .map(|(at, origin)| {
+                origin.filter(|from| {
+                    proofs.edit.slide_index(*from) == Some(at)
+                        && !listed.contains(&OwnerPart::Slide(*from))
+                })
+            })
+            .collect::<Vec<_>>();
+        // Master part names come from the presentation relationships, not
+        // from the master records, so they are compared too.
+        let masters = !matches!(proofs.edit, PartEdit::RemoveLayout(_))
+            && !listed.contains(&OwnerPart::Masters)
+            && candidate.unchanged_layouts_and_masters_since(&self.inner)
+            && (0..candidate.master_count()).all(|index| {
+                let live = self.owners.parts.owner_at(&[PathSeg::Master(index)], None, false);
+                matches!(
+                    (live.map(|owner| &owner.address.physical), candidate.slide_master_part_name(index)),
+                    (Some(PhysicalOwner::Master(live)), Ok(Some(part))) if *live == part
+                )
+            });
+        let carried = CarriedParts { slides, masters };
+        // Explicit proofs must prove owners of their own part and land in a
+        // part walked again, as every proof of a full walk does.
+        for (part, list) in &proofs.parts {
+            for proof in list {
+                let own = self
+                    .owners
+                    .by_generation
+                    .get(&proof.generation)
+                    .is_some_and(|(at, _)| at == part);
+                if !own || carried.keeps(OwnerPart::of(&proof.destination)) {
+                    return walk_all;
+                }
+            }
+        }
+        carried
+    }
+
+    fn prepare_parts(
         &self,
-        next: Vec<OwnerAddress>,
+        candidate: &rpptx::Presentation,
         operation: &'static str,
-        preserved: &[OwnerSurvival],
-        slides_changed: bool,
-        layouts_changed: bool,
-        masters_changed: bool,
+        proofs: &OwnerProofs,
+        carried: &CarriedParts,
+        [slides_changed, layouts_changed, masters_changed]: [bool; 3],
     ) -> PyResult<PreparedOwners> {
         use oxml_py_support::RevisionScope as S;
         let fail = |message: &str| pyo3::exceptions::PyValueError::new_err(message.to_owned());
-        let mut seen = std::collections::HashSet::new();
-        let mut destinations = std::collections::HashSet::new();
-        seen.try_reserve(preserved.len()).map_err(|_| {
-            pyo3::exceptions::PyMemoryError::new_err("survival identities allocation failed")
-        })?;
-        destinations.try_reserve(preserved.len()).map_err(|_| {
-            pyo3::exceptions::PyMemoryError::new_err("survival destinations allocation failed")
-        })?;
-        let mut retained = Vec::new();
-        retained.try_reserve_exact(preserved.len()).map_err(|_| {
-            pyo3::exceptions::PyMemoryError::new_err("survival proof allocation failed")
-        })?;
-        for proof in preserved {
-            if !seen.insert(proof.generation) {
-                return Err(fail("duplicate owner survival proof"));
-            }
-            let old = self
-                .owners
-                .iter()
-                .find(|owner| owner.owner.generation() == proof.generation)
-                .ok_or_else(|| fail("survival proof has no current owner"))?;
-            let index = next
-                .iter()
-                .position(|address| {
-                    address.path == proof.destination
-                        && address.layout_index == proof.layout_index
-                        && std::mem::discriminant(&address.physical)
-                            == std::mem::discriminant(&old.address.physical)
-                })
-                .ok_or_else(|| fail("survival destination is absent"))?;
-            if !destinations.insert(index) {
-                return Err(fail("two owners claim one destination"));
-            }
-            if old.address.physical != next[index].physical
-                || old.address.table != next[index].table
-            {
-                return Err(fail("survival proof changes physical owner identity"));
-            }
-            retained.push((index, old, proof));
+        let live = &self.owners.parts;
+        let mut kept = vec![false; live.slides.len()];
+        for from in carried.slides.iter().flatten() {
+            kept[*from] = true;
         }
-        let structural = next.len() != self.owners.len()
-            || retained.iter().any(|(_, old, proof)| {
+        let kept_part = |part: OwnerPart| match part {
+            OwnerPart::Slide(index) => kept[index],
+            OwnerPart::Masters => carried.masters,
+        };
+        // Live parts nothing carries over, with the proofs of their owners.
+        let mut old_parts = Vec::new();
+        for (part, owners) in live.iter() {
+            if !kept_part(part) {
+                old_parts.push((part, owners, proofs.for_part(part, owners)?));
+            }
+        }
+        // Candidate parts walked again, in inventory order.
+        let mut new_parts = Vec::new();
+        for (at, origin) in carried.slides.iter().enumerate() {
+            if origin.is_none() {
+                let mut addresses = Vec::new();
+                slide_owner_addresses(candidate, at, &mut addresses)?;
+                new_parts.push((OwnerPart::Slide(at), addresses));
+            }
+        }
+        if !carried.masters {
+            let mut addresses = Vec::new();
+            master_owner_addresses(candidate, &mut addresses)?;
+            new_parts.push((OwnerPart::Masters, addresses));
+        }
+        let mut destinations = HashMap::new();
+        for (part_at, (_, addresses)) in new_parts.iter().enumerate() {
+            destinations.try_reserve(addresses.len()).map_err(|_| {
+                pyo3::exceptions::PyMemoryError::new_err("survival destinations allocation failed")
+            })?;
+            for (index, address) in addresses.iter().enumerate() {
+                let key = (
+                    address.path.clone(),
+                    address.layout_index,
+                    std::mem::discriminant(&address.physical),
+                );
+                destinations.entry(key).or_insert((part_at, index));
+            }
+        }
+        let mut claims = new_parts
+            .iter()
+            .map(|(_, addresses)| vec![None; addresses.len()])
+            .collect::<Vec<_>>();
+        let mut seen = HashSet::new();
+        let mut retained = Vec::new();
+        let mut retained_ends = Vec::new();
+        for (_, _, list) in &old_parts {
+            for proof in list.iter() {
+                note_fx260_ppt(1);
+                if !seen.insert(proof.generation) {
+                    return Err(fail("duplicate owner survival proof"));
+                }
+                let old = self
+                    .owners
+                    .owner(proof.generation)
+                    .ok_or_else(|| fail("survival proof has no current owner"))?;
+                let key = (
+                    proof.destination.clone(),
+                    proof.layout_index,
+                    std::mem::discriminant(&old.address.physical),
+                );
+                let &(part_at, index) = destinations
+                    .get(&key)
+                    .ok_or_else(|| fail("survival destination is absent"))?;
+                if claims[part_at][index].is_some() {
+                    return Err(fail("two owners claim one destination"));
+                }
+                let next = &new_parts[part_at].1[index];
+                if old.address.physical != next.physical || old.address.table != next.table {
+                    return Err(fail("survival proof changes physical owner identity"));
+                }
+                claims[part_at][index] = Some(retained.len());
+                retained.push((old, proof));
+            }
+            retained_ends.push(retained.len());
+        }
+        let next_len = carried
+            .slides
+            .iter()
+            .flatten()
+            .map(|from| live.slides[*from].owners.len())
+            .chain(carried.masters.then(|| live.masters.owners.len()))
+            .chain(new_parts.iter().map(|(_, addresses)| addresses.len()))
+            .sum::<usize>();
+        let structural = next_len != live.len()
+            || carried
+                .slides
+                .iter()
+                .enumerate()
+                .any(|(at, from)| from.is_some_and(|from| from != at))
+            || retained.iter().any(|(old, proof)| {
                 old.address.path != proof.destination
                     || old.address.layout_index != proof.layout_index
             });
         if structural {
             // A mutation cannot disambiguate imported missing/duplicate IDs by
-            // merely finding the same number again in a candidate tree.
-            for (_, old, _) in &retained {
-                if let PhysicalOwner::Shape { slide, id, kind } = &old.address.physical {
-                    if *kind == rpptx::ShapeKind::AlternateContent {
-                        continue;
-                    }
-                    let Some(id) = id else {
-                        return Err(fail("structural owner proof requires a shape id"));
-                    };
-                    let original_count = self.owners.iter().filter(|owner| matches!(&owner.address.physical,
-                        PhysicalOwner::Shape { slide: at, id: Some(value), .. } if at == slide && value == id)).count();
-                    let candidate_count = next.iter().filter(|address| matches!(&address.physical,
-                        PhysicalOwner::Shape { slide: at, id: Some(value), .. } if at == slide && value == id)).count();
-                    if original_count != 1 || candidate_count != 1 {
-                        return Err(fail("structural owner proof has an ambiguous shape id"));
+            // merely finding the same number again in a candidate tree. The
+            // candidate counts are the live ones with the walked parts swapped.
+            let mut walked_ids = HashMap::<(PartIdentity, u32), (usize, usize)>::new();
+            for (_, owners, _) in &old_parts {
+                for (key, count) in &owners.shape_ids {
+                    walked_ids.entry(key.clone()).or_default().0 += count;
+                }
+            }
+            for (_, addresses) in &new_parts {
+                for address in addresses {
+                    if let PhysicalOwner::Shape {
+                        slide,
+                        id: Some(id),
+                        ..
+                    } = &address.physical
+                    {
+                        walked_ids.entry((slide.clone(), *id)).or_default().1 += 1;
                     }
                 }
             }
+            let mut walked = 0_usize;
+            for (part, owners) in live.iter() {
+                if kept_part(part) {
+                    if let Some(refusal) = owners.refusal {
+                        return Err(fail(refusal));
+                    }
+                    continue;
+                }
+                let start = walked.checked_sub(1).map_or(0, |at| retained_ends[at]);
+                for (old, _) in &retained[start..retained_ends[walked]] {
+                    if let PhysicalOwner::Shape { slide, id, kind } = &old.address.physical {
+                        if *kind == rpptx::ShapeKind::AlternateContent {
+                            continue;
+                        }
+                        let Some(id) = id else {
+                            return Err(fail("structural owner proof requires a shape id"));
+                        };
+                        let key = (slide.clone(), *id);
+                        let original = self.owners.shape_ids.get(&key).copied().unwrap_or(0);
+                        let (before, after) = walked_ids.get(&key).copied().unwrap_or_default();
+                        if original != 1 || original - before + after != 1 {
+                            return Err(fail("structural owner proof has an ambiguous shape id"));
+                        }
+                    }
+                }
+                walked += 1;
+            }
         }
         let mut affected = Vec::new();
-        let mut replacements = Vec::new();
-        let mut xml_replacements = Vec::new();
-        xml_replacements
-            .try_reserve_exact(preserved.len())
-            .map_err(|_| {
-                pyo3::exceptions::PyMemoryError::new_err("XML child replacements allocation failed")
-            })?;
-        let affected_capacity = self
-            .owners
-            .len()
+        let walked_owners = old_parts
+            .iter()
+            .map(|(_, owners, _)| owners.owners.len())
+            .sum::<usize>();
+        let affected_capacity = walked_owners
             .checked_mul(4)
             .and_then(|count| count.checked_add(3))
             .ok_or_else(|| {
@@ -3450,41 +4052,39 @@ impl PyPresentation {
         affected.try_reserve_exact(affected_capacity).map_err(|_| {
             pyo3::exceptions::PyMemoryError::new_err("owner retirement allocation failed")
         })?;
-        replacements
-            .try_reserve_exact(preserved.len().checked_mul(2).ok_or_else(|| {
-                pyo3::exceptions::PyOverflowError::new_err("owner replacement count overflow")
-            })?)
-            .map_err(|_| {
-                pyo3::exceptions::PyMemoryError::new_err("owner replacements allocation failed")
-            })?;
-        for old in &self.owners {
-            if !seen.contains(&old.owner.generation()) {
-                affected.push(old.owner.clone());
-                affected.push(old.text.clone());
-                affected.push(old.xml_children.clone());
-                if let Some(grid) = &old.grid {
-                    affected.push(grid.clone());
+        for (_, owners, _) in &old_parts {
+            for old in &owners.owners {
+                if !seen.contains(&old.owner.generation()) {
+                    affected.push(old.owner.clone());
+                    affected.push(old.text.clone());
+                    affected.push(old.xml_children.clone());
+                    if let Some(grid) = &old.grid {
+                        affected.push(grid.clone());
+                    }
                 }
             }
         }
-        for (index, old, proof) in &retained {
-            if proof.xml_children_changed {
-                xml_replacements.push((*index, affected.len()));
-                affected.push(old.xml_children.clone());
-            }
-            if proof.text_changed {
-                replacements.push((*index, S::Text, affected.len()));
-                affected.push(old.text.clone());
-            }
-            if proof.grid_changed {
-                replacements.push((*index, S::Grid, affected.len()));
-                affected.push(
+        let mut successors = Vec::new();
+        successors.try_reserve_exact(retained.len()).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("owner replacements allocation failed")
+        })?;
+        for (old, proof) in &retained {
+            let mut push = |state: &oxml_py_support::RevisionState| {
+                affected.push(state.clone());
+                affected.len() - 1
+            };
+            let xml_children = proof.xml_children_changed.then(|| push(&old.xml_children));
+            let text = proof.text_changed.then(|| push(&old.text));
+            let grid = if proof.grid_changed {
+                Some(push(
                     old.grid
                         .as_ref()
-                        .ok_or_else(|| fail("grid change on non-table"))?
-                        .clone(),
-                );
-            }
+                        .ok_or_else(|| fail("grid change on non-table"))?,
+                ))
+            } else {
+                None
+            };
+            successors.push((xml_children, text, grid));
         }
         let slides_at = slides_changed.then(|| {
             let index = affected.len();
@@ -3502,23 +4102,24 @@ impl PyPresentation {
             index
         });
         let mut births = Vec::new();
-        let mut birth_offsets = Vec::new();
+        let walked_addresses = new_parts
+            .iter()
+            .map(|(_, addresses)| addresses.len())
+            .sum::<usize>();
         births
-            .try_reserve_exact(next.len().checked_mul(4).ok_or_else(|| {
+            .try_reserve_exact(walked_addresses.checked_mul(4).ok_or_else(|| {
                 pyo3::exceptions::PyOverflowError::new_err("owner birth count overflow")
             })?)
             .map_err(|_| {
                 pyo3::exceptions::PyMemoryError::new_err("owner births allocation failed")
             })?;
-        birth_offsets.try_reserve_exact(next.len()).map_err(|_| {
-            pyo3::exceptions::PyMemoryError::new_err("owner birth offsets allocation failed")
-        })?;
-        for (index, address) in next.iter().enumerate() {
-            if !destinations.contains(&index) {
-                birth_offsets.push((index, births.len()));
-                births.extend([S::Owner, S::Text, S::Text]);
-                if address.table {
-                    births.push(S::Grid);
+        for (part_at, (_, addresses)) in new_parts.iter().enumerate() {
+            for (index, address) in addresses.iter().enumerate() {
+                if claims[part_at][index].is_none() {
+                    births.extend([S::Owner, S::Text, S::Text]);
+                    if address.table {
+                        births.push(S::Grid);
+                    }
                 }
             }
         }
@@ -3526,47 +4127,71 @@ impl PyPresentation {
             .revisions
             .prepare_scopes(operation, &affected, &births)
             .map_err(oxml_py_support::revision_to_pyerr)?;
-        let mut owners = Vec::new();
-        owners.try_reserve_exact(next.len()).map_err(|_| {
-            pyo3::exceptions::PyMemoryError::new_err("candidate owner inventory allocation failed")
-        })?;
-        for (index, address) in next.into_iter().enumerate() {
-            if let Some((_, old, _)) = retained.iter().find(|(at, _, _)| *at == index) {
-                let mut owner = (**old).clone();
-                owner.address = address;
-                for (_, scope, at) in replacements.iter().filter(|(at, _, _)| *at == index) {
-                    let successor = revision
-                        .successor(*at)
-                        .expect("affected scope successor exists");
-                    match scope {
-                        S::Text => owner.text = successor,
-                        S::Grid => owner.grid = Some(successor),
-                        _ => unreachable!(),
+        let mut born = 0;
+        let mut rebuilt = Vec::new();
+        for (part_at, (part, addresses)) in new_parts.into_iter().enumerate() {
+            let mut owners = Vec::new();
+            owners.try_reserve_exact(addresses.len()).map_err(|_| {
+                pyo3::exceptions::PyMemoryError::new_err(
+                    "candidate owner inventory allocation failed",
+                )
+            })?;
+            for (index, address) in addresses.into_iter().enumerate() {
+                if let Some(at) = claims[part_at][index] {
+                    let (old, _) = retained[at];
+                    let (xml_children, text, grid) = successors[at];
+                    let successor = |at: usize| {
+                        revision
+                            .successor(at)
+                            .expect("affected scope successor exists")
+                    };
+                    let mut owner = old.clone();
+                    owner.address = address;
+                    if let Some(at) = text {
+                        owner.text = successor(at);
                     }
+                    if let Some(at) = grid {
+                        owner.grid = Some(successor(at));
+                    }
+                    if let Some(at) = xml_children {
+                        owner.xml_children = successor(at);
+                    }
+                    owners.push(owner);
+                } else {
+                    let start = born;
+                    born += 3 + usize::from(address.table);
+                    let grid = address
+                        .table
+                        .then(|| revision.born(start + 3).expect("table birth exists"));
+                    owners.push(LiveOwner {
+                        address,
+                        owner: revision.born(start).expect("owner birth exists"),
+                        text: revision.born(start + 1).expect("text birth exists"),
+                        xml_children: revision.born(start + 2).expect("XML child birth exists"),
+                        grid,
+                    });
                 }
-                if let Some((_, at)) = xml_replacements.iter().find(|(at, _)| *at == index) {
-                    owner.xml_children =
-                        revision.successor(*at).expect("XML child successor exists");
-                }
-                owners.push(owner);
-            } else {
-                let start = birth_offsets
-                    .iter()
-                    .find(|(at, _)| *at == index)
-                    .expect("every unclaimed address has birth scopes")
-                    .1;
-                let grid = address
-                    .table
-                    .then(|| revision.born(start + 3).expect("table birth exists"));
-                owners.push(LiveOwner {
-                    address,
-                    owner: revision.born(start).expect("owner birth exists"),
-                    text: revision.born(start + 1).expect("text birth exists"),
-                    xml_children: revision.born(start + 2).expect("XML child birth exists"),
-                    grid,
-                });
             }
+            rebuilt.push((part, Arc::new(PartOwners::new(owners)?)));
         }
+        let mut parts = OwnerParts::default();
+        let mut moved = Vec::new();
+        let mut walked = rebuilt.iter();
+        for (at, from) in carried.slides.iter().enumerate() {
+            parts.slides.push(match from {
+                Some(from) if *from == at => Arc::clone(&live.slides[*from]),
+                Some(from) => {
+                    moved.push(OwnerPart::Slide(at));
+                    Arc::new(live.slides[*from].moved_to(at)?)
+                }
+                None => Arc::clone(&walked.next().expect("walked slide part").1),
+            });
+        }
+        parts.masters = if carried.masters {
+            Arc::clone(&live.masters)
+        } else {
+            Arc::clone(&walked.next().expect("walked master part").1)
+        };
         let slides = slides_at.map_or_else(
             || self.slides.clone(),
             |at| revision.successor(at).expect("inventory successor exists"),
@@ -3579,13 +4204,19 @@ impl PyPresentation {
             || self.masters.clone(),
             |at| revision.successor(at).expect("inventory successor exists"),
         );
-        let indexes = OwnerIndexes::prepare(&owners)?;
         Ok(PreparedOwners {
             revision,
-            owners: OwnerChanges::Replace { owners, indexes },
+            owners: OwnerChanges::Replace(InventoryChange {
+                parts,
+                dropped: old_parts.iter().map(|(part, _, _)| *part).collect(),
+                rebuilt: rebuilt.into_iter().map(|(part, _)| part).collect(),
+                moved,
+            }),
             slides,
             layouts,
             masters,
+            #[cfg(debug_assertions)]
+            retired: affected.iter().map(|state| state.generation()).collect(),
         })
     }
 
@@ -3601,20 +4232,60 @@ impl PyPresentation {
     }
 
     pub(crate) fn commit_prepared(&mut self, prepared: PreparedOwners) -> PyResult<()> {
+        match &prepared.owners {
+            OwnerChanges::Replace(change) => self.owners.reserve(change)?,
+            OwnerChanges::Append(owners) => {
+                self.owners
+                    .by_generation
+                    .try_reserve(owners.len())
+                    .map_err(|_| {
+                        pyo3::exceptions::PyMemoryError::new_err(
+                            "PowerPoint owner index allocation failed",
+                        )
+                    })?;
+                self.owners.shape_ids.try_reserve(1).map_err(|_| {
+                    pyo3::exceptions::PyMemoryError::new_err(
+                        "PowerPoint owner index allocation failed",
+                    )
+                })?;
+            }
+        }
         self.revisions
             .commit_scopes(prepared.revision)
             .map_err(oxml_py_support::revision_to_pyerr)?;
         match prepared.owners {
-            OwnerChanges::Replace { owners, indexes } => {
-                self.owners = owners;
-                self.indexes = indexes;
-            }
+            OwnerChanges::Replace(change) => self.owners.apply(change),
             OwnerChanges::Append(owners) => {
-                let start = self.owners.len();
-                self.owners.extend(owners);
-                for index in start..self.owners.len() {
-                    self.indexes.insert(index, &self.owners[index]);
+                let Some(&PathSeg::Slide(slide)) = owners[0].address.path.first() else {
+                    unreachable!("appended owners belong to a slide");
+                };
+                let part = OwnerPart::Slide(slide);
+                let owners_part = self
+                    .owners
+                    .parts
+                    .part_mut(part)
+                    .expect("appended slide part");
+                for owner in owners {
+                    let index = owners_part.owners.len();
+                    if let PhysicalOwner::Shape {
+                        slide,
+                        id: Some(id),
+                        ..
+                    } = &owner.address.physical
+                    {
+                        *self
+                            .owners
+                            .shape_ids
+                            .entry((slide.clone(), *id))
+                            .or_default() += 1;
+                    }
+                    self.owners
+                        .by_generation
+                        .insert(owner.owner.generation(), (part, index));
+                    owners_part.owners.push(owner);
+                    owners_part.index(index);
                 }
+                owners_part.refusal = owners_part.structural_refusal();
             }
         }
         self.slides = prepared.slides;
@@ -3655,10 +4326,11 @@ impl PyPresentation {
     ) -> PyResult<PreparedOwners> {
         use oxml_py_support::PathSeg;
         use oxml_py_support::RevisionScope as S;
-        self.owners.try_reserve(3).map_err(|_| {
-            pyo3::exceptions::PyMemoryError::new_err("textbox owner allocation failed")
-        })?;
-        self.indexes.reserve(3)?;
+        self.owners
+            .parts
+            .part_mut(OwnerPart::Slide(slide_index))
+            .ok_or_else(|| PyValueError::new_err("slide owner is absent"))?
+            .reserve(3)?;
         let slide_id = self
             .inner
             .slide(slide_index)
@@ -3741,6 +4413,8 @@ impl PyPresentation {
             slides: self.slides.clone(),
             layouts: self.layouts.clone(),
             masters: self.masters.clone(),
+            #[cfg(debug_assertions)]
+            retired: Vec::new(),
         })
     }
 
@@ -3784,15 +4458,15 @@ impl PyPresentation {
         path: &oxml_py_support::ContentPath,
         kind: PptElementKind,
         generation: u64,
-    ) -> PyResult<Vec<OwnerSurvival>> {
+    ) -> PyResult<OwnerProofs> {
         use oxml_py_support::PathSeg;
-        let mut survivors = self.unchanged_owners()?;
-        survivors.retain_mut(|proof| {
-            let old = self
-                .owners
-                .iter()
-                .find(|item| item.owner.generation() == proof.generation)
-                .expect("unchanged owner proof");
+        let mut parts = self.prefix_parts(&path.segs);
+        if let Some((part, _)) = self.owners.by_generation.get(&generation)
+            && !parts.contains(part)
+        {
+            parts.push(*part);
+        }
+        self.part_owner_proofs(parts, |old, proof| {
             let old_path = if let Some(index) = old.address.layout_index {
                 smallvec![PathSeg::Layout(index)]
             } else {
@@ -3802,12 +4476,12 @@ impl PyPresentation {
                 proof.xml_children_changed = kind != PptElementKind::Table;
                 proof.text_changed = kind != PptElementKind::Run;
                 proof.grid_changed = old.address.table;
-                return true;
+                return Ok(true);
             }
             if !old_path.starts_with(&path.segs) {
-                return true;
+                return Ok(true);
             }
-            match kind {
+            Ok(match kind {
                 PptElementKind::Run => true,
                 PptElementKind::Paragraph => {
                     !matches!(old.address.physical, PhysicalOwner::Run { .. })
@@ -3817,17 +4491,16 @@ impl PyPresentation {
                     PhysicalOwner::Paragraph { .. } | PhysicalOwner::Run { .. }
                 ),
                 _ => false,
-            }
-        });
-        Ok(survivors)
+            })
+        })
     }
 
     fn prepare_shape_xml(
         &mut self,
         path: &oxml_py_support::ContentPath,
     ) -> PyResult<PreparedShapeXml> {
-        let selected = *self
-            .indexes
+        let (part, selected) = *self
+            .owners
             .by_generation
             .get(
                 &path
@@ -3835,7 +4508,12 @@ impl PyPresentation {
                     .ok_or_else(|| PyValueError::new_err("Element owner is absent"))?,
             )
             .ok_or_else(|| PyValueError::new_err("Element owner is absent"))?;
-        let PhysicalOwner::Shape { slide, .. } = &self.owners[selected].address.physical else {
+        let owners = self
+            .owners
+            .parts
+            .part(part)
+            .ok_or_else(|| PyValueError::new_err("Element owner is absent"))?;
+        let PhysicalOwner::Shape { slide, .. } = &owners.owners[selected].address.physical else {
             return Err(PyValueError::new_err("Element is not a shape owner"));
         };
         let shape = crate::shape::native_shape_ref_at(&self.inner, path)
@@ -3847,27 +4525,21 @@ impl PyPresentation {
             note_fx260_ppt(1);
             let body = matches!(address.physical, PhysicalOwner::TextBody { .. });
             let key = (address.path, address.layout_index, body);
-            let index =
-                *self.indexes.by_path.get(&key).ok_or_else(|| {
-                    PyValueError::new_err("local shape descendant owner is absent")
-                })?;
-            if self.owners[index].address.physical != address.physical {
+            let index = *owners
+                .by_path
+                .get(&key)
+                .ok_or_else(|| PyValueError::new_err("local shape descendant owner is absent"))?;
+            if owners.owners[index].address.physical != address.physical {
                 return Err(PyValueError::new_err(
                     "local shape descendant identity changed",
                 ));
             }
             indices.push(index);
         }
-        self.indexes
-            .by_generation
-            .try_reserve(indices.len())
-            .map_err(|_| {
-                pyo3::exceptions::PyMemoryError::new_err("shape successor index allocation failed")
-            })?;
         let mut retired = Vec::new();
         for &index in &indices {
             note_fx260_ppt(1);
-            let owner = &self.owners[index];
+            let owner = &owners.owners[index];
             if index != selected {
                 retired.push(owner.owner.clone());
             }
@@ -3886,7 +4558,7 @@ impl PyPresentation {
             .into_iter()
             .map(|index| {
                 note_fx260_ppt(1);
-                let mut owner = self.owners[index].clone();
+                let mut owner = owners.owners[index].clone();
                 if index != selected {
                     owner.owner = revision
                         .successor(next)
@@ -3902,23 +4574,40 @@ impl PyPresentation {
                 }
                 (index, owner)
             })
-            .collect();
-        Ok(PreparedShapeXml { revision, updates })
+            .collect::<Vec<_>>();
+        self.owners
+            .by_generation
+            .try_reserve(updates.len())
+            .map_err(|_| {
+                pyo3::exceptions::PyMemoryError::new_err("shape successor index allocation failed")
+            })?;
+        // Unshare the part before the commit, after which nothing may fail.
+        self.owners.parts.part_mut(part);
+        Ok(PreparedShapeXml {
+            revision,
+            part,
+            updates,
+        })
     }
 
     fn commit_shape_xml(&mut self, prepared: PreparedShapeXml) -> PyResult<()> {
         self.revisions
             .commit_scopes(prepared.revision)
             .map_err(oxml_py_support::revision_to_pyerr)?;
+        let owners = self
+            .owners
+            .parts
+            .part_mut(prepared.part)
+            .expect("prepared shape part");
         for (index, owner) in prepared.updates {
             note_fx260_ppt(1);
-            self.indexes
+            self.owners
                 .by_generation
-                .remove(&self.owners[index].owner.generation());
-            self.indexes
+                .remove(&owners.owners[index].owner.generation());
+            self.owners
                 .by_generation
-                .insert(owner.owner.generation(), index);
-            self.owners[index] = owner;
+                .insert(owner.owner.generation(), (prepared.part, index));
+            owners.owners[index] = owner;
         }
         Ok(())
     }
@@ -4118,21 +4807,23 @@ impl PyPresentation {
     /// Footer staging only removes owned footer shapes, appends fresh copies,
     /// and preserves every surviving physical identity. Match that explicit
     /// native guarantee and compare complete text owners before publication.
-    pub(crate) fn footer_owners(
-        &self,
-        candidate: &rpptx::Presentation,
-    ) -> PyResult<Vec<OwnerSurvival>> {
+    pub(crate) fn footer_owners(&self, candidate: &rpptx::Presentation) -> PyResult<OwnerProofs> {
         use oxml_py_support::ContentPath;
         let next = owner_addresses(candidate)?;
-        let mut proofs = Vec::new();
-        proofs.try_reserve_exact(self.owners.len()).map_err(|_| {
+        let mut by_physical =
+            HashMap::<&PhysicalOwner, smallvec::SmallVec<[&OwnerAddress; 1]>>::new();
+        by_physical.try_reserve(next.len()).map_err(|_| {
             pyo3::exceptions::PyMemoryError::new_err("footer owner allocation failed")
         })?;
-        let mut changed_bodies: Vec<&[oxml_py_support::PathSeg]> = Vec::new();
-        changed_bodies.try_reserve(self.owners.len()).map_err(|_| {
-            pyo3::exceptions::PyMemoryError::new_err("footer text inventory allocation failed")
-        })?;
-        for old in &self.owners {
+        for address in &next {
+            by_physical
+                .entry(&address.physical)
+                .or_default()
+                .push(address);
+        }
+        let mut changed_bodies = Vec::<smallvec::SmallVec<[PathSeg; 5]>>::new();
+        let every_part = self.prefix_parts(&[]);
+        self.part_owner_proofs(every_part, |old, proof| {
             // The native footer provider retains the body but replaces its
             // text children. Earlier nodes do not survive by ordinal.
             if matches!(
@@ -4142,17 +4833,17 @@ impl PyPresentation {
                 .iter()
                 .any(|base| old.address.path.starts_with(base))
             {
-                continue;
+                return Ok(false);
             }
-            let matching = next
-                .iter()
-                .filter(|address| address.physical == old.address.physical)
-                .collect::<Vec<_>>();
-            let [after] = matching.as_slice() else {
-                if matching.is_empty() {
-                    continue;
+            let after = match by_physical
+                .get(&old.address.physical)
+                .map(|found| found.as_slice())
+            {
+                None | Some([]) => return Ok(false),
+                Some([after]) => *after,
+                Some(_) => {
+                    return Err(PyValueError::new_err("footer owner identity is ambiguous"));
                 }
-                return Err(PyValueError::new_err("footer owner identity is ambiguous"));
             };
             let before_path = ContentPath::new(old.address.path.clone(), self.revisions.current());
             let after_path = ContentPath::new(after.path.clone(), self.revisions.current());
@@ -4182,55 +4873,65 @@ impl PyPresentation {
                 | PhysicalOwner::Run { .. } => false,
             };
             if text_changed && matches!(old.address.physical, PhysicalOwner::TextBody { .. }) {
-                changed_bodies.push(old.address.path.as_slice());
+                changed_bodies.push(old.address.path.clone());
             }
-            proofs.push(OwnerSurvival {
-                generation: old.owner.generation(),
-                destination: after.path.clone(),
-                layout_index: after.layout_index,
-                text_changed,
-                xml_children_changed: false,
-                grid_changed: false,
-            });
-        }
-        Ok(proofs)
+            proof.destination = after.path.clone();
+            proof.layout_index = after.layout_index;
+            proof.text_changed = text_changed;
+            Ok(true)
+        })
     }
 
-    pub(crate) fn unchanged_owners(&self) -> PyResult<Vec<OwnerSurvival>> {
-        let mut proofs = Vec::new();
-        proofs.try_reserve_exact(self.owners.len()).map_err(|_| {
-            pyo3::exceptions::PyMemoryError::new_err("owner proofs allocation failed")
-        })?;
-        proofs.extend(self.owners.iter().map(|owner| OwnerSurvival {
-            generation: owner.owner.generation(),
-            destination: owner.address.path.clone(),
-            layout_index: owner.address.layout_index,
-            text_changed: false,
-            xml_children_changed: false,
-            grid_changed: false,
-        }));
-        Ok(proofs)
+    /// The parts holding the owners under a path prefix, every part for an
+    /// empty prefix.
+    fn prefix_parts(&self, prefix: &[PathSeg]) -> Vec<OwnerPart> {
+        if prefix.is_empty() {
+            self.owners.parts.iter().map(|(part, _)| part).collect()
+        } else {
+            vec![OwnerPart::of(prefix)]
+        }
+    }
+
+    /// Explicit proofs for every owner of `parts`, each starting as the
+    /// owner's unchanged proof. `edit` adjusts one proof, or returns false to
+    /// retire its owner. Owners of other parts survive unchanged.
+    fn part_owner_proofs(
+        &self,
+        parts: Vec<OwnerPart>,
+        mut edit: impl FnMut(&LiveOwner, &mut OwnerSurvival) -> PyResult<bool>,
+    ) -> PyResult<OwnerProofs> {
+        let mut listed = Vec::new();
+        for part in parts {
+            let Some(owners) = self.owners.parts.part(part) else {
+                continue;
+            };
+            let mut proofs = Vec::new();
+            proofs.try_reserve_exact(owners.owners.len()).map_err(|_| {
+                pyo3::exceptions::PyMemoryError::new_err("owner proofs allocation failed")
+            })?;
+            for owner in &owners.owners {
+                let mut proof = PartEdit::Unchanged
+                    .proof(owner)
+                    .expect("an unchanged owner survives");
+                if edit(owner, &mut proof)? {
+                    proofs.push(proof);
+                }
+            }
+            listed.push((part, proofs));
+        }
+        Ok(OwnerProofs {
+            edit: PartEdit::Unchanged,
+            parts: listed,
+        })
+    }
+
+    pub(crate) fn unchanged_owners(&self) -> PyResult<OwnerProofs> {
+        Ok(OwnerProofs::edit(PartEdit::Unchanged))
     }
 
     /// Retires one removed layout and its descendants, preserving exact surviving part owners.
-    pub(crate) fn removed_layout_owners(&self, removed: usize) -> PyResult<Vec<OwnerSurvival>> {
-        use oxml_py_support::PathSeg;
-        let mut proofs = self.unchanged_owners()?;
-        proofs.retain(|proof| proof.layout_index != Some(removed)
-            && !matches!(proof.destination.first(), Some(PathSeg::Layout(index)) if *index == removed));
-        for proof in &mut proofs {
-            if let Some(index) = &mut proof.layout_index
-                && *index > removed
-            {
-                *index -= 1;
-            }
-            if let Some(PathSeg::Layout(index)) = proof.destination.first_mut()
-                && *index > removed
-            {
-                *index -= 1;
-            }
-        }
-        Ok(proofs)
+    pub(crate) fn removed_layout_owners(&self, removed: usize) -> PyResult<OwnerProofs> {
+        Ok(OwnerProofs::edit(PartEdit::RemoveLayout(removed)))
     }
 
     /// Remap exactly one existing sibling ordinal. The operation must use this
@@ -4240,15 +4941,14 @@ impl PyPresentation {
         parent: &[oxml_py_support::PathSeg],
         from: usize,
         to: usize,
-    ) -> PyResult<Vec<OwnerSurvival>> {
+    ) -> PyResult<OwnerProofs> {
         use oxml_py_support::PathSeg;
-        let mut proofs = self.unchanged_owners()?;
-        for proof in &mut proofs {
+        self.part_owner_proofs(self.prefix_parts(parent), |_, proof| {
             if proof.layout_index.is_some() || !proof.destination.starts_with(parent) {
-                continue;
+                return Ok(true);
             }
             let Some(PathSeg::Shape(index)) = proof.destination.get_mut(parent.len()) else {
-                continue;
+                return Ok(true);
             };
             *index = if *index == from {
                 to
@@ -4259,95 +4959,70 @@ impl PyPresentation {
             } else {
                 *index
             };
-        }
-        Ok(proofs)
+            Ok(true)
+        })
+    }
+
+    /// Retires one shape replaced in place with every owner under it.
+    pub(crate) fn replaced_shape_owners(
+        &self,
+        shape: &[oxml_py_support::PathSeg],
+    ) -> PyResult<OwnerProofs> {
+        self.part_owner_proofs(self.prefix_parts(shape), |_, proof| {
+            Ok(proof.layout_index.is_some() || !proof.destination.starts_with(shape))
+        })
     }
 
     pub(crate) fn removed_shape_owners(
         &self,
         parent: &[oxml_py_support::PathSeg],
         removed: usize,
-    ) -> PyResult<Vec<OwnerSurvival>> {
+    ) -> PyResult<OwnerProofs> {
         use oxml_py_support::PathSeg;
-        let mut proofs = self.unchanged_owners()?;
-        proofs.retain_mut(|proof| {
+        self.part_owner_proofs(self.prefix_parts(parent), |_, proof| {
             if proof.layout_index.is_some() || !proof.destination.starts_with(parent) {
-                return true;
+                return Ok(true);
             }
             let Some(PathSeg::Shape(index)) = proof.destination.get_mut(parent.len()) else {
-                return true;
+                return Ok(true);
             };
             if *index == removed {
-                return false;
+                return Ok(false);
             }
             if *index > removed {
                 *index -= 1;
             }
-            true
-        });
-        Ok(proofs)
+            Ok(true)
+        })
     }
 
     /// Apply the same explicit ordinal operation to every surviving physical
     /// slide descendant. Removed members never contribute a survival proof.
-    pub(crate) fn slide_owner_edit(&self, edit: SlideOwnerEdit) -> PyResult<Vec<OwnerSurvival>> {
-        use oxml_py_support::PathSeg;
-        let mut proofs = self.unchanged_owners()?;
-        proofs.retain_mut(|proof| {
-            let Some(PathSeg::Slide(index)) = proof.destination.first_mut() else {
-                return true;
-            };
-            match edit {
-                SlideOwnerEdit::Insert(at) => {
-                    if *index >= at {
-                        *index += 1;
-                    }
-                }
-                SlideOwnerEdit::InsertMany { at, count } => {
-                    if *index >= at {
-                        *index = index
-                            .checked_add(count)
-                            .expect("native slide count was checked");
-                    }
-                }
-                SlideOwnerEdit::Remove(at) => {
-                    if *index == at {
-                        return false;
-                    }
-                    if *index > at {
-                        *index -= 1;
-                    }
-                }
-                SlideOwnerEdit::Move { from, to } => {
-                    *index = if *index == from {
-                        to
-                    } else if from < to && *index > from && *index <= to {
-                        *index - 1
-                    } else if to < from && *index >= to && *index < from {
-                        *index + 1
-                    } else {
-                        *index
-                    };
-                }
-            }
-            true
-        });
-        Ok(proofs)
+    pub(crate) fn slide_owner_edit(&self, edit: SlideOwnerEdit) -> PyResult<OwnerProofs> {
+        Ok(OwnerProofs::edit(PartEdit::Slides(edit)))
     }
 
     /// Literal edits preserve bodies but retire the actual old text nodes in
-    /// each changed body. Matching ordinals are not survival evidence.
+    /// each changed body. Matching ordinals are not survival evidence. A part
+    /// whose native records the candidate still shares has no changed text.
     pub(crate) fn replaced_text_owners(
         &self,
         candidate: &rpptx::Presentation,
-    ) -> PyResult<Vec<OwnerSurvival>> {
+    ) -> PyResult<OwnerProofs> {
         use oxml_py_support::ContentPath;
-        let mut changed = Vec::new();
-        changed.try_reserve(self.owners.len()).map_err(|_| {
-            pyo3::exceptions::PyMemoryError::new_err("changed text inventory allocation failed")
-        })?;
-        let mut proofs = self.unchanged_owners()?;
-        for (owner, proof) in self.owners.iter().zip(&mut proofs) {
+        let origins = candidate.unchanged_slides_since(&self.inner);
+        let masters = candidate.unchanged_layouts_and_masters_since(&self.inner);
+        let parts = self
+            .owners
+            .parts
+            .iter()
+            .map(|(part, _)| part)
+            .filter(|part| match part {
+                OwnerPart::Slide(index) => origins.get(*index) != Some(&Some(*index)),
+                OwnerPart::Masters => !masters,
+            })
+            .collect();
+        let mut proofs = self.part_owner_proofs(parts, |owner, proof| {
             let path = ContentPath::new(owner.address.path.clone(), self.revisions.current());
             proof.text_changed = match &owner.address.physical {
                 PhysicalOwner::Slide(_) => {
@@ -4370,25 +5045,36 @@ impl PyPresentation {
                 }
                 _ => false,
             };
-            if proof.text_changed
-                && matches!(owner.address.physical, PhysicalOwner::TextBody { .. })
-            {
-                changed.push(owner.address.path.as_slice());
-            }
-        }
-        proofs.retain(|proof| {
-            let owner = self
+            Ok(true)
+        })?;
+        // A changed body's paragraphs and runs share its part.
+        for (part, list) in &mut proofs.parts {
+            let owners = &self
                 .owners
+                .parts
+                .part(*part)
+                .expect("listed live part")
+                .owners;
+            let changed = owners
                 .iter()
-                .find(|owner| owner.owner.generation() == proof.generation)
-                .expect("unchanged owner proof");
-            !matches!(
-                owner.address.physical,
-                PhysicalOwner::Paragraph { .. } | PhysicalOwner::Run { .. }
-            ) || !changed
-                .iter()
-                .any(|base| owner.address.path.starts_with(base))
-        });
+                .zip(list.iter())
+                .filter(|(owner, proof)| {
+                    proof.text_changed
+                        && matches!(owner.address.physical, PhysicalOwner::TextBody { .. })
+                })
+                .map(|(owner, _)| owner.address.path.clone())
+                .collect::<Vec<_>>();
+            let mut owners = owners.iter();
+            list.retain(|_| {
+                let owner = owners.next().expect("one proof per owner");
+                !matches!(
+                    owner.address.physical,
+                    PhysicalOwner::Paragraph { .. } | PhysicalOwner::Run { .. }
+                ) || !changed
+                    .iter()
+                    .any(|base| owner.address.path.starts_with(base))
+            });
+        }
         Ok(proofs)
     }
 
@@ -4399,7 +5085,7 @@ impl PyPresentation {
         last_row: usize,
         first_column: usize,
         last_column: usize,
-    ) -> PyResult<Vec<OwnerSurvival>> {
+    ) -> PyResult<OwnerProofs> {
         use oxml_py_support::PathSeg;
         let table_path = path
             .segs
@@ -4412,16 +5098,10 @@ impl PyPresentation {
             })
             .copied()
             .collect::<smallvec::SmallVec<[PathSeg; 5]>>();
-        let mut proofs = self.unchanged_owners()?;
-        proofs.retain_mut(|proof| {
-            let owner = self
-                .owners
-                .iter()
-                .find(|owner| owner.owner.generation() == proof.generation)
-                .expect("unchanged owner proof");
+        self.part_owner_proofs(self.prefix_parts(&table_path), |owner, proof| {
             if owner.address.layout_index.is_some() || !owner.address.path.starts_with(&table_path)
             {
-                return true;
+                return Ok(true);
             }
             let cell = match owner.address.physical {
                 PhysicalOwner::Cell { row, column, .. } => Some((row, column)),
@@ -4442,12 +5122,11 @@ impl PyPresentation {
                     PhysicalOwner::Paragraph { .. } | PhysicalOwner::Run { .. }
                 )
             {
-                return false;
+                return Ok(false);
             }
             proof.text_changed = affected;
-            true
-        });
-        Ok(proofs)
+            Ok(true)
+        })
     }
 
     /// Keep earlier paragraph and run owners. Retire only the appended
@@ -4455,24 +5134,19 @@ impl PyPresentation {
     pub(crate) fn appended_text_owners(
         &self,
         path: &oxml_py_support::ContentPath,
-    ) -> PyResult<Vec<OwnerSurvival>> {
+    ) -> PyResult<OwnerProofs> {
         let generation = path
             .owner_generation()
             .ok_or_else(|| PyValueError::new_err("text append needs a bound owner"))?;
-        if !self
+        let (part, _) = *self
             .owners
-            .iter()
-            .any(|owner| owner.owner.generation() == generation)
-        {
-            return Err(PyValueError::new_err("text append owner is absent"));
-        }
-        let mut proofs = self.unchanged_owners()?;
-        let proof = proofs
-            .iter_mut()
-            .find(|proof| proof.generation == generation)
-            .expect("unchanged owner proof");
-        proof.text_changed = true;
-        Ok(proofs)
+            .by_generation
+            .get(&generation)
+            .ok_or_else(|| PyValueError::new_err("text append owner is absent"))?;
+        self.part_owner_proofs(vec![part], |_, proof| {
+            proof.text_changed |= proof.generation == generation;
+            Ok(true)
+        })
     }
 
     /// Text replacement retains its physical paragraph and body ancestors,
@@ -4480,7 +5154,7 @@ impl PyPresentation {
     pub(crate) fn text_changed_owners(
         &self,
         path: &oxml_py_support::ContentPath,
-    ) -> PyResult<Vec<OwnerSurvival>> {
+    ) -> PyResult<OwnerProofs> {
         use oxml_py_support::PathSeg;
         let current = self
             .current_path(path)
@@ -4501,27 +5175,30 @@ impl PyPresentation {
         let body = self
             .body_owner_at(&base)
             .map(|owner| owner.owner.generation());
-        let mut proofs = self.unchanged_owners()?;
+        let owner = self.owners.by_generation.get(&generation);
         // The slide scalar setter edits only the notes part. Slide body
         // owners are unrelated and cannot be retired by that operation.
-        if self.owners.iter().any(|owner| {
-            owner.owner.generation() == generation
-                && matches!(owner.address.physical, PhysicalOwner::Slide(_))
-        }) {
-            proofs
-                .iter_mut()
-                .find(|proof| proof.generation == generation)
-                .expect("unchanged slide proof")
-                .text_changed = true;
-            return Ok(proofs);
+        if let Some((part, index)) = owner
+            && matches!(
+                self.owners
+                    .parts
+                    .part(*part)
+                    .map(|owners| &owners.owners[*index].address.physical),
+                Some(PhysicalOwner::Slide(_))
+            )
+        {
+            return self.part_owner_proofs(vec![*part], |_, proof| {
+                proof.text_changed |= proof.generation == generation;
+                Ok(true)
+            });
         }
-
-        proofs.retain_mut(|proof| {
-            let old = self
-                .owners
-                .iter()
-                .find(|owner| owner.owner.generation() == proof.generation)
-                .expect("unchanged owner proof");
+        let mut parts = self.prefix_parts(&base);
+        if let Some((part, _)) = owner
+            && !parts.contains(part)
+        {
+            parts.push(*part);
+        }
+        self.part_owner_proofs(parts, |old, proof| {
             let removed = if paragraph {
                 matches!(old.address.physical, PhysicalOwner::Run { .. })
                     && old.address.path.starts_with(&current.segs)
@@ -4532,20 +5209,19 @@ impl PyPresentation {
                 ) && old.address.path.starts_with(&base)
             };
             if removed {
-                return false;
+                return Ok(false);
             }
             if proof.generation == generation || !paragraph && Some(proof.generation) == body {
                 proof.text_changed = true;
             }
-            true
-        });
-        Ok(proofs)
+            Ok(true)
+        })
     }
 
     pub(crate) fn grid_changed_owners(
         &self,
         path: &oxml_py_support::ContentPath,
-    ) -> PyResult<Vec<OwnerSurvival>> {
+    ) -> PyResult<OwnerProofs> {
         use oxml_py_support::PathSeg;
         let current = self
             .current_path(path)
@@ -4563,23 +5239,23 @@ impl PyPresentation {
             .collect::<smallvec::SmallVec<[PathSeg; 5]>>();
         let table = self
             .owner_at(&table_path, None)
-            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("table owner is absent"))?;
-        let mut proofs = self.unchanged_owners()?;
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("table owner is absent"))?
+            .owner
+            .generation();
         // Every old physical cell retires on grid restructure. The table
         // survives with a fresh grid generation, and new cells get births.
-        proofs.retain(|proof| {
-            !(proof.destination.starts_with(&table_path)
+        self.part_owner_proofs(self.prefix_parts(&table_path), |_, proof| {
+            if proof.destination.starts_with(&table_path)
                 && proof
                     .destination
                     .get(table_path.len())
-                    .is_some_and(|seg| matches!(seg, PathSeg::Row(_))))
-        });
-        proofs
-            .iter_mut()
-            .find(|proof| proof.generation == table.owner.generation())
-            .expect("table inventory supplied survival proof")
-            .grid_changed = true;
-        Ok(proofs)
+                    .is_some_and(|seg| matches!(seg, PathSeg::Row(_)))
+            {
+                return Ok(false);
+            }
+            proof.grid_changed |= proof.generation == table;
+            Ok(true)
+        })
     }
 }
 
@@ -4607,7 +5283,7 @@ impl PyPresentation {
         parent: &[oxml_py_support::PathSeg],
         start: usize,
         count: usize,
-    ) -> PyResult<Vec<OwnerSurvival>> {
+    ) -> PyResult<OwnerProofs> {
         use oxml_py_support::PathSeg;
         let end = start
             .checked_add(count)
@@ -4617,13 +5293,12 @@ impl PyPresentation {
                 "empty group selection",
             ));
         }
-        let mut proofs = self.unchanged_owners()?;
-        for proof in &mut proofs {
+        self.part_owner_proofs(self.prefix_parts(parent), |_, proof| {
             if proof.layout_index.is_some() || !proof.destination.starts_with(parent) {
-                continue;
+                return Ok(true);
             }
             let Some(PathSeg::Shape(index)) = proof.destination.get(parent.len()).copied() else {
-                continue;
+                return Ok(true);
             };
             if index >= start && index < end {
                 proof.destination.try_reserve(1).map_err(|_| {
@@ -4636,54 +5311,61 @@ impl PyPresentation {
             } else if index >= end {
                 proof.destination[parent.len()] = PathSeg::Shape(index - (count - 1));
             }
-        }
-        Ok(proofs)
+            Ok(true)
+        })
     }
     pub(crate) fn ungrouped_shape_owners(
         &self,
         parent: &[oxml_py_support::PathSeg],
         index: usize,
         count: usize,
-    ) -> PyResult<Vec<OwnerSurvival>> {
+    ) -> PyResult<OwnerProofs> {
         use oxml_py_support::PathSeg;
-        let mut proofs = self.unchanged_owners()?;
-        proofs.retain(|proof| {
-            !(proof.destination.starts_with(parent)
-                && proof.destination.len() == parent.len() + 1
-                && proof.destination[parent.len()] == PathSeg::Shape(index))
-        });
-        for proof in &mut proofs {
-            if proof.layout_index.is_some() || !proof.destination.starts_with(parent) {
-                continue;
-            }
-            let Some(PathSeg::Shape(at)) = proof.destination.get(parent.len()).copied() else {
-                continue;
-            };
-            if at == index {
-                let Some(PathSeg::Shape(child)) = proof.destination.get(parent.len() + 1).copied()
-                else {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
-                        "invalid group child proof",
-                    ));
-                };
-                if child >= count {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
-                        "group child proof out of range",
-                    ));
+        let group = |destination: &[PathSeg]| {
+            destination.starts_with(parent)
+                && destination.len() == parent.len() + 1
+                && destination[parent.len()] == PathSeg::Shape(index)
+        };
+        // Retire the group first, then remap, so that a remap error names
+        // the first proof the original two passes would have rejected.
+        let mut proofs = self.part_owner_proofs(self.prefix_parts(parent), |_, proof| {
+            Ok(!group(&proof.destination))
+        })?;
+        for (_, list) in &mut proofs.parts {
+            for proof in list {
+                if proof.layout_index.is_some() || !proof.destination.starts_with(parent) {
+                    continue;
                 }
-                proof.destination[parent.len()] =
-                    PathSeg::Shape(index.checked_add(child).ok_or_else(|| {
-                        pyo3::exceptions::PyOverflowError::new_err("ungroup index overflow")
-                    })?);
-                proof.destination.remove(parent.len() + 1);
-            } else if at > index {
-                proof.destination[parent.len()] = PathSeg::Shape(
-                    at.checked_sub(1)
-                        .and_then(|v| v.checked_add(count))
-                        .ok_or_else(|| {
+                let Some(PathSeg::Shape(at)) = proof.destination.get(parent.len()).copied() else {
+                    continue;
+                };
+                if at == index {
+                    let Some(PathSeg::Shape(child)) =
+                        proof.destination.get(parent.len() + 1).copied()
+                    else {
+                        return Err(pyo3::exceptions::PyValueError::new_err(
+                            "invalid group child proof",
+                        ));
+                    };
+                    if child >= count {
+                        return Err(pyo3::exceptions::PyValueError::new_err(
+                            "group child proof out of range",
+                        ));
+                    }
+                    proof.destination[parent.len()] =
+                        PathSeg::Shape(index.checked_add(child).ok_or_else(|| {
                             pyo3::exceptions::PyOverflowError::new_err("ungroup index overflow")
-                        })?,
-                );
+                        })?);
+                    proof.destination.remove(parent.len() + 1);
+                } else if at > index {
+                    proof.destination[parent.len()] = PathSeg::Shape(
+                        at.checked_sub(1)
+                            .and_then(|v| v.checked_add(count))
+                            .ok_or_else(|| {
+                                pyo3::exceptions::PyOverflowError::new_err("ungroup index overflow")
+                            })?,
+                    );
+                }
             }
         }
         Ok(proofs)
@@ -5034,6 +5716,100 @@ impl PyPresentation {
 mod fx260_visit_tests {
     use super::*;
     use oxml_py_support::PathSeg;
+
+    /// Edits on the first slide walk its part and the layouts and masters,
+    /// and match their proofs, whatever the number of later slides.
+    #[test]
+    fn issue403_shape_edits_do_the_same_inventory_work_at_n_and_4n_slides() {
+        Python::initialize();
+        Python::attach(|py| -> PyResult<()> {
+            let mut expected_work = None;
+            for slides in [3usize, 12] {
+                let mut native = rpptx::Presentation::new().unwrap();
+                for slide in 0..slides {
+                    native.add_slide(6).unwrap();
+                    let mut shapes = native.shapes_mut(slide, &[]).unwrap();
+                    for _ in 0..6 {
+                        shapes
+                            .add_textbox(
+                                rpptx::Emu(0),
+                                rpptx::Emu(0),
+                                rpptx::Emu(100),
+                                rpptx::Emu(100),
+                            )
+                            .unwrap();
+                    }
+                    shapes
+                        .add_table(
+                            3,
+                            3,
+                            rpptx::Emu(0),
+                            rpptx::Emu(0),
+                            rpptx::Emu(900),
+                            rpptx::Emu(900),
+                        )
+                        .unwrap();
+                }
+                let presentation = Py::new(py, PyPresentation::from_presentation_owned(native)?)?;
+                let deck = presentation.bind(py);
+                let shapes = deck.getattr("slides")?.get_item(0)?.getattr("shapes")?;
+                for index in 0..6 {
+                    shapes.get_item(index)?.setattr("text", "before")?;
+                }
+                let mut work = Vec::new();
+                let mut count = |label: &'static str, edit: &dyn Fn() -> PyResult<()>| {
+                    reset_fx260_ppt_visits();
+                    edit()?;
+                    work.push((label, fx260_ppt_visits()));
+                    PyResult::Ok(())
+                };
+                count("ShapeCollection.add_shape", &|| {
+                    shapes.call_method1("add_shape", ("rect", 0, 0, 100, 100))?;
+                    Ok(())
+                })?;
+                count("Paragraph.add_run", &|| {
+                    let paragraph = shapes
+                        .get_item(0)?
+                        .getattr("text_frame")?
+                        .getattr("paragraphs")?
+                        .get_item(0)?;
+                    paragraph.call_method1("add_run", ("run",))?;
+                    Ok(())
+                })?;
+                count("Shape.text", &|| {
+                    shapes.get_item(1)?.setattr("text", "after")
+                })?;
+                count("Cell.text", &|| {
+                    shapes
+                        .get_item(6)?
+                        .getattr("table")?
+                        .call_method1("cell", (1, 1))?
+                        .setattr("text", "cell")
+                })?;
+                count("Element.replace_xml (shape text)", &|| {
+                    let element = shapes.get_item(2)?.getattr("element")?;
+                    let xml = element.getattr("xml")?.extract::<String>()?;
+                    assert!(xml.contains(">before<"), "{xml}");
+                    element.call_method1("replace_xml", (xml.replace(">before<", ">after<"),))?;
+                    Ok(())
+                })?;
+                count("SlideCollection.add_slide", &|| {
+                    let layout = deck.getattr("slide_layouts")?.get_item(6)?;
+                    deck.getattr("slides")?
+                        .call_method1("add_slide", (layout,))?;
+                    Ok(())
+                })?;
+                assert!(work.iter().all(|(_, visits)| *visits > 0), "{work:?}");
+                if let Some(expected) = &expected_work {
+                    assert_eq!(&work, expected, "later slides changed the inventory work");
+                } else {
+                    expected_work = Some(work);
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
 
     #[test]
     fn issue389_local_edits_do_not_scale_with_unrelated_package() {

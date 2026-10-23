@@ -12165,6 +12165,58 @@ def test_issue389_local_edits_do_not_scale_with_unrelated_package():
             assert int(other.left) == 0
 
 
+def test_issue403_shape_edits_do_the_same_inventory_work_at_n_and_4n_slides():
+    """Debug builds count the owner inventory work of each edit: the owner
+    addresses walked, the survival proofs matched and the owners indexed.
+    An edit on the first slide does the same work whatever the number of later
+    slides, which only keep their inventory parts. Release builds do not count.
+    """
+    import rpptx
+    from rpptx import _rpptx
+    from rpptx.enum.shapes import MSO_SHAPE
+
+    inventory_work = getattr(_rpptx, "_inventory_work", None)
+    if inventory_work is None:
+        pytest.skip("release build: the inventory work counter is debug-only")
+
+    def work(slides):
+        presentation = rpptx.Presentation()
+        for _ in range(slides):
+            slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+            for _ in range(6):
+                slide.shapes.add_textbox(0, 0, 100, 100).text_frame.text = "before"
+            slide.shapes.add_table(3, 3, 0, 0, 900, 900)
+        slide = presentation.slides[0]
+        shapes = slide.shapes
+        table = shapes[6].table
+        counts = {}
+
+        def count(name, edit):
+            inventory_work()
+            edit()
+            counts[name] = inventory_work()
+
+        def replace_shape_text():
+            element = shapes[2].element
+            element.replace_xml(element.xml.replace(">before<", ">after<"))
+
+        count("ShapeCollection.add_shape", lambda: shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, 100, 100))
+        count("Paragraph.add_run", lambda: shapes[0].text_frame.paragraphs[0].add_run("run"))
+        count("TextFrame.add_paragraph", lambda: shapes[0].text_frame.add_paragraph())
+        count("Shape.text", lambda: setattr(shapes[1], "text", "after"))
+        count("TextFrame.text", lambda: setattr(shapes[3].text_frame, "text", "after"))
+        count("Cell.text", lambda: setattr(table.cell(1, 1), "text", "cell"))
+        count("RowCollection.add_row", lambda: table.rows.add_row())
+        count("Element.replace_xml (shape text)", replace_shape_text)
+        count("Slide.try_replace_text", lambda: slide.try_replace_text("before", "later"))
+        count("SlideCollection.add_slide", lambda: presentation.slides.add_slide(presentation.slide_layouts[6]))
+        return counts
+
+    small, large = work(3), work(12)
+    assert all(small.values()), small
+    assert large == small
+
+
 @pytest.mark.parametrize("kind", ["shape", "table", "cell", "body", "paragraph", "run", "slide", "layout", "master"])
 def test_issue389_element_publication_and_refusal_for_every_kind(kind):
     import rpptx

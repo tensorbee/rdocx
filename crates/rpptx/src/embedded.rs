@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::io::Cursor;
 use std::ops::Range;
+use std::sync::Arc;
 
 use oxml_opc::OpcPackage;
 use oxml_opc::relationship::{Relationship, rel_types};
@@ -501,14 +502,14 @@ impl Presentation {
             .iter_mut()
             .find(|slide| slide.part_name == source_part)
         {
-            slide.slide =
+            Arc::make_mut(slide).slide =
                 CT_Slide::from_xml(&rewritten).map_err(|error| malformed(source_part, error))?;
         } else if let Some(layout) = self
             .layouts
             .iter_mut()
             .find(|layout| layout.part_name == source_part)
         {
-            layout.layout = CT_SlideLayout::from_xml(&rewritten)
+            Arc::make_mut(layout).layout = CT_SlideLayout::from_xml(&rewritten)
                 .map_err(|error| malformed(source_part, error))?;
             self.package.set_part(source_part, rewritten);
         } else {

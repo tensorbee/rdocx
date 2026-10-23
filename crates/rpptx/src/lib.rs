@@ -19,6 +19,7 @@ use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::path::Path;
+use std::sync::Arc;
 
 #[cfg(feature = "render")]
 use diagram::{DiagramResources, ScopedDiagramResources};
@@ -1122,17 +1123,20 @@ pub struct Presentation {
     comment_authors: CommentAuthorList,
     comment_authors_dirty: bool,
     notes_master_part: Option<String>,
-    notes_master: Option<Box<CT_NotesMaster>>,
+    notes_master: Option<Arc<CT_NotesMaster>>,
     notes_master_dirty: bool,
     handout_master_part: Option<String>,
-    handout_master: Option<Box<CT_HandoutMaster>>,
+    handout_master: Option<Arc<CT_HandoutMaster>>,
     handout_master_dirty: bool,
     embedded_invalidated_signatures: HashSet<(String, String)>,
     package_signatures_invalidated: bool,
-    layouts: Vec<LayoutRecord>,
-    masters: Vec<MasterRecord>,
+    // Slide, layout and master records are shared between clones and copied
+    // on write, so a candidate copy costs one pointer per part and an edit
+    // copies only its own part.
+    layouts: Vec<Arc<LayoutRecord>>,
+    masters: Vec<Arc<MasterRecord>>,
     themes: Vec<ThemeRecord>,
-    slides: Vec<SlideRecord>,
+    slides: Vec<Arc<SlideRecord>>,
 }
 
 #[derive(Clone, Debug)]
@@ -2708,7 +2712,8 @@ struct NotesRecord {
 #[derive(Clone, Debug)]
 struct MediaEntry {
     part_name: String,
-    bytes: Vec<u8>,
+    // The same allocation as the package part, so a clone copies no media.
+    bytes: Arc<Vec<u8>>,
     extension: String,
     content_type: String,
     newly_inserted: bool,
@@ -2784,7 +2789,7 @@ impl MediaStore {
         if let Some(existing) = self
             .by_id
             .get(&media_id)
-            .and_then(|bucket| bucket.iter().find(|entry| entry.bytes == bytes))
+            .and_then(|bucket| bucket.iter().find(|entry| entry.bytes.as_slice() == bytes))
         {
             return existing.part_name.clone();
         }
@@ -2793,11 +2798,12 @@ impl MediaStore {
         let extension = format.extension();
         let content_type = format.content_type();
         let part_name = self.namer.next_part_name(extension);
-        package.set_part(&part_name, bytes.to_vec());
+        let bytes = Arc::new(bytes.to_vec());
+        package.set_part(&part_name, Arc::clone(&bytes));
         register_content_type(package, &part_name, extension, content_type);
         self.by_id.entry(media_id).or_default().push(MediaEntry {
             part_name: part_name.clone(),
-            bytes: bytes.to_vec(),
+            bytes,
             extension: extension.to_owned(),
             content_type: content_type.to_owned(),
             newly_inserted: true,
@@ -2815,7 +2821,7 @@ impl MediaStore {
         let media_id = MediaId::from_bytes(bytes);
         if let Some(existing) = self.by_id.get(&media_id).and_then(|bucket| {
             bucket.iter().find(|entry| {
-                entry.bytes == bytes
+                entry.bytes.as_slice() == bytes
                     && entry.extension == extension
                     && entry.content_type == content_type
             })
@@ -2823,11 +2829,12 @@ impl MediaStore {
             return existing.part_name.clone();
         }
         let part_name = self.media_namer.next_part_name(extension);
-        package.set_part(&part_name, bytes.to_vec());
+        let bytes = Arc::new(bytes.to_vec());
+        package.set_part(&part_name, Arc::clone(&bytes));
         register_content_type(package, &part_name, extension, content_type);
         self.by_id.entry(media_id).or_default().push(MediaEntry {
             part_name: part_name.clone(),
-            bytes: bytes.to_vec(),
+            bytes,
             extension: extension.to_owned(),
             content_type: content_type.to_owned(),
             newly_inserted: true,
@@ -2838,7 +2845,7 @@ impl MediaStore {
     fn write_new_parts(&self, package: &mut OpcPackage) {
         for entry in self.by_id.values().flatten() {
             if entry.newly_inserted {
-                package.set_part(&entry.part_name, entry.bytes.clone());
+                package.set_part(&entry.part_name, Arc::clone(&entry.bytes));
                 register_content_type(
                     package,
                     &entry.part_name,
@@ -3029,17 +3036,17 @@ impl Presentation {
             comment_authors,
             comment_authors_dirty: false,
             notes_master_part,
-            notes_master,
+            notes_master: notes_master.map(Arc::from),
             notes_master_dirty: false,
             handout_master_part,
-            handout_master,
+            handout_master: handout_master.map(Arc::from),
             handout_master_dirty: false,
             embedded_invalidated_signatures: HashSet::new(),
             package_signatures_invalidated,
-            layouts,
-            masters,
+            layouts: layouts.into_iter().map(Arc::new).collect(),
+            masters: masters.into_iter().map(Arc::new).collect(),
             themes,
-            slides,
+            slides: slides.into_iter().map(Arc::new).collect(),
         })
     }
 
@@ -4776,7 +4783,7 @@ impl Presentation {
 
     /// Returns one slide by zero-based presentation index.
     pub fn slide(&self, index: usize) -> Option<SlideRef<'_>> {
-        self.slides.get(index).map(slide_ref)
+        self.slides.get(index).map(|record| slide_ref(record))
     }
 
     /// Returns one slide for in-place mutation by zero-based index.
@@ -4814,7 +4821,41 @@ impl Presentation {
 
     /// Iterates slides in `p:sldIdLst` order.
     pub fn slides(&self) -> impl ExactSizeIterator<Item = SlideRef<'_>> {
-        self.slides.iter().map(slide_ref)
+        self.slides.iter().map(|record| slide_ref(record))
+    }
+
+    /// For each slide in order, the index in `earlier` of the slide whose
+    /// record it still shares, or `None` for a slide changed or added since.
+    ///
+    /// A clone shares every slide record with its source until an edit
+    /// copies one, so a caller holding both can find the slides an edit
+    /// touched without comparing their content.
+    #[doc(hidden)]
+    pub fn unchanged_slides_since(&self, earlier: &Presentation) -> Vec<Option<usize>> {
+        let origins = earlier
+            .slides
+            .iter()
+            .enumerate()
+            .map(|(index, record)| (Arc::as_ptr(record), index))
+            .collect::<HashMap<_, _>>();
+        self.slides
+            .iter()
+            .map(|record| origins.get(&Arc::as_ptr(record)).copied())
+            .collect()
+    }
+
+    /// Whether every layout and master record is still the one of `earlier`,
+    /// in the same order.
+    #[doc(hidden)]
+    pub fn unchanged_layouts_and_masters_since(&self, earlier: &Presentation) -> bool {
+        fn shared<T>(records: &[Arc<T>], earlier: &[Arc<T>]) -> bool {
+            records.len() == earlier.len()
+                && records
+                    .iter()
+                    .zip(earlier)
+                    .all(|(record, earlier)| Arc::ptr_eq(record, earlier))
+        }
+        shared(&self.layouts, &earlier.layouts) && shared(&self.masters, &earlier.masters)
     }
 
     /// Replaces literal text across regular DrawingML runs in every editable shape.
@@ -4829,9 +4870,14 @@ impl Presentation {
         }
         // Stored as the run text setters store it, so it can be saved.
         let value = &oxml_drawing::text::escape_invalid_xml_characters(value);
+        // A slide without a match keeps its record, so a shared one is not
+        // copied and callers can tell the changed slides by pointer identity.
         self.slides
             .iter_mut()
-            .map(|record| replace_text_in_slide_record(record, placeholder, value, true))
+            .filter(|record| slide_record_has_text(record, placeholder))
+            .map(|record| {
+                replace_text_in_slide_record(Arc::make_mut(record), placeholder, value, true)
+            })
             .sum()
     }
 
@@ -4900,7 +4946,7 @@ impl Presentation {
     ) -> Result<usize> {
         self.require_slide_index(slide_index)?;
         require_replacement_placeholder(placeholder)?;
-        let mut candidate = self.slides[slide_index].clone();
+        let mut candidate = SlideRecord::clone(&self.slides[slide_index]);
         let value = &oxml_drawing::text::escape_invalid_xml_characters(value);
         let count = replace_text_in_slide_record(&mut candidate, placeholder, value, notes);
         if expect.is_some_and(|expected| expected != count) {
@@ -4922,7 +4968,7 @@ impl Presentation {
                     message: error.to_string(),
                 })?;
         }
-        self.slides[slide_index] = candidate;
+        self.slides[slide_index] = Arc::new(candidate);
         Ok(count)
     }
 
@@ -5327,13 +5373,16 @@ impl Presentation {
     fn owner_data_mut(&mut self, owner: ShapeOwner) -> Result<&mut CT_CommonSlideData> {
         self.owner_data(owner)?;
         match owner {
-            ShapeOwner::Slide(index) => Ok(&mut self.slides[index].slide.common_slide_data),
+            ShapeOwner::Slide(index) => Ok(&mut Arc::make_mut(&mut self.slides[index])
+                .slide
+                .common_slide_data),
             ShapeOwner::Layout(index) => {
-                self.layouts[index].dirty = true;
-                Ok(&mut self.layouts[index].layout.common_slide_data)
+                let record = Arc::make_mut(&mut self.layouts[index]);
+                record.dirty = true;
+                Ok(&mut record.layout.common_slide_data)
             }
             ShapeOwner::Master(index) => {
-                let record = &mut self.masters[index];
+                let record = Arc::make_mut(&mut self.masters[index]);
                 record.dirty = true;
                 record
                     .master
@@ -5531,8 +5580,8 @@ impl Presentation {
         let master = CT_SlideMaster::from_xml(&changed_source)
             .map_err(|error| footer_malformed(&part, error.to_string()))?;
         candidate.package.set_part(&part, changed_source);
-        candidate.masters[master_index].master = Ok(master);
-        candidate.masters[master_index].dirty = false;
+        Arc::make_mut(&mut candidate.masters[master_index]).master = Ok(master);
+        Arc::make_mut(&mut candidate.masters[master_index]).dirty = false;
         candidate.commit_owned_parts(None)?;
         *self = candidate;
         Ok(())
@@ -5707,10 +5756,16 @@ impl Presentation {
         }
         let mut candidate = self.clone();
         match owner {
-            ShapeOwner::Slide(index) => candidate.slides[index].slide.show_master_shapes = show,
+            ShapeOwner::Slide(index) => {
+                Arc::make_mut(&mut candidate.slides[index])
+                    .slide
+                    .show_master_shapes = show
+            }
             ShapeOwner::Layout(index) => {
-                candidate.layouts[index].layout.show_master_shapes = show;
-                candidate.layouts[index].dirty = true;
+                Arc::make_mut(&mut candidate.layouts[index])
+                    .layout
+                    .show_master_shapes = show;
+                Arc::make_mut(&mut candidate.layouts[index]).dirty = true;
             }
             ShapeOwner::Master(_) => unreachable!(),
         }
@@ -6399,22 +6454,24 @@ impl Presentation {
 
     #[inline(never)]
     fn assign_xml_slide(&mut self, index: usize, xml: &str) -> Result<()> {
-        self.slides[index].slide = CT_Slide::from_xml(xml.as_bytes())
+        Arc::make_mut(&mut self.slides[index]).slide = CT_Slide::from_xml(xml.as_bytes())
             .map_err(|error| invalid_shape_mutation("replace XML", error.to_string()))?;
         Ok(())
     }
     #[inline(never)]
     fn assign_xml_layout(&mut self, index: usize, xml: &str) -> Result<()> {
-        self.layouts[index].layout = CT_SlideLayout::from_xml(xml.as_bytes())
-            .map_err(|error| invalid_shape_mutation("replace XML", error.to_string()))?;
-        self.layouts[index].dirty = true;
+        Arc::make_mut(&mut self.layouts[index]).layout =
+            CT_SlideLayout::from_xml(xml.as_bytes())
+                .map_err(|error| invalid_shape_mutation("replace XML", error.to_string()))?;
+        Arc::make_mut(&mut self.layouts[index]).dirty = true;
         Ok(())
     }
     #[inline(never)]
     fn assign_xml_master(&mut self, index: usize, xml: &str) -> Result<()> {
-        self.masters[index].master = Ok(CT_SlideMaster::from_xml(xml.as_bytes())
-            .map_err(|error| invalid_shape_mutation("replace XML", error.to_string()))?);
-        self.masters[index].dirty = true;
+        Arc::make_mut(&mut self.masters[index]).master =
+            Ok(CT_SlideMaster::from_xml(xml.as_bytes())
+                .map_err(|error| invalid_shape_mutation("replace XML", error.to_string()))?);
+        Arc::make_mut(&mut self.masters[index]).dirty = true;
         Ok(())
     }
 
@@ -6683,8 +6740,11 @@ impl Presentation {
             return Ok(());
         }
         let mut candidate = self.clone();
-        candidate.layouts[index].layout.common_slide_data.name = name.map(str::to_owned);
-        candidate.layouts[index].dirty = true;
+        Arc::make_mut(&mut candidate.layouts[index])
+            .layout
+            .common_slide_data
+            .name = name.map(str::to_owned);
+        Arc::make_mut(&mut candidate.layouts[index]).dirty = true;
         candidate.commit_owned_parts(None)?;
         *self = candidate;
         Ok(())
@@ -7169,21 +7229,21 @@ impl Presentation {
         self.package.set_part(&self.presentation_part, changed);
         let master = CT_SlideMaster::from_xml(required_part(&self.package, &new_master)?)
             .map_err(|error| footer_malformed(&new_master, error.to_string()))?;
-        self.masters.push(MasterRecord {
+        self.masters.push(Arc::new(MasterRecord {
             id: Some(id),
             part_name: new_master,
             master: Ok(master),
             dirty: false,
-        });
+        }));
         let mut imported = Vec::new();
         for index in layouts {
             let part_name = mapping[&source.layouts[index].part_name].clone();
             imported.push(self.layouts.len());
-            self.layouts.push(LayoutRecord {
+            self.layouts.push(Arc::new(LayoutRecord {
                 part_name,
                 layout: source.layouts[index].layout.clone(),
                 dirty: false,
-            });
+            }));
         }
         Ok(imported)
     }
@@ -7595,19 +7655,19 @@ impl Presentation {
             .part_rels
             .insert(master_part.clone(), edited_relationships);
         let master_source = required_part(&source_package, &master_part)?;
-        let edited_master = candidate.masters[master_index]
+        let edited_master = Arc::make_mut(&mut candidate.masters[master_index])
             .master
             .as_mut()
             .map_err(|error| footer_malformed(&master_part, error))?
             .append_slide_layout_id(master_source, id, &relationship_id)
             .map_err(|error| footer_malformed(&master_part, error))?;
         candidate.package.set_part(&master_part, edited_master);
-        candidate.masters[master_index].dirty = false;
-        candidate.layouts.push(LayoutRecord {
+        Arc::make_mut(&mut candidate.masters[master_index]).dirty = false;
+        candidate.layouts.push(Arc::new(LayoutRecord {
             part_name: part.clone(),
             layout: record.layout.clone(),
             dirty: false,
-        });
+        }));
         candidate.commit_owned_parts(None)?;
         let inserted = candidate
             .layouts
@@ -7671,14 +7731,14 @@ impl Presentation {
         collect_media_targets(&candidate.package, &record.part_name, &mut media);
         let source_package = self.staged_package(true)?;
         let master_source = required_part(&source_package, &master_part)?;
-        let edited_master = candidate.masters[master_index]
+        let edited_master = Arc::make_mut(&mut candidate.masters[master_index])
             .master
             .as_mut()
             .map_err(|error| footer_malformed(&master_part, error))?
             .remove_slide_layout_id(master_source, &selected_id)
             .map_err(|error| footer_malformed(&master_part, error))?;
         candidate.package.set_part(&master_part, edited_master);
-        candidate.masters[master_index].dirty = false;
+        Arc::make_mut(&mut candidate.masters[master_index]).dirty = false;
         let relationships = candidate
             .package
             .get_part_rels(&master_part)
@@ -7977,7 +8037,7 @@ impl Presentation {
         let (new_layout, new_master) = self.layout_and_master(layout_index)?;
         let mut staged = self.clone();
         keep_unplaced_placeholder_transforms(
-            &mut staged.slides[slide_index]
+            &mut Arc::make_mut(&mut staged.slides[slide_index])
                 .slide
                 .common_slide_data
                 .shape_tree
@@ -8151,20 +8211,20 @@ impl Presentation {
                 rel_types::POWERPOINT_COMMENTS,
                 &relative_part_target(&slide_part, &comment_part),
             );
-            staged.slides[slide_index]
+            Arc::make_mut(&mut staged.slides[slide_index])
                 .slide
                 .ensure_modern_comment_relationship(&relationship_id)
                 .map_err(|error| Error::MalformedPart {
                     part_name: slide_part,
                     message: error.to_string(),
                 })?;
-            staged.slides[slide_index].comments = Some(CommentRecord {
+            Arc::make_mut(&mut staged.slides[slide_index]).comments = Some(CommentRecord {
                 part_name: comment_part,
                 comments: CommentList::new(),
                 dirty: true,
             });
         }
-        let comments = staged.slides[slide_index]
+        let comments = Arc::make_mut(&mut staged.slides[slide_index])
             .comments
             .as_mut()
             .expect("comment record was materialized");
@@ -8248,7 +8308,7 @@ impl Presentation {
         self.require_slide_index(slide_index)?;
         self.validate_comment_identity(&reply.id, &reply.author_id)?;
         let mut staged = self.clone();
-        let comments = staged.slides[slide_index]
+        let comments = Arc::make_mut(&mut staged.slides[slide_index])
             .comments
             .as_mut()
             .ok_or_else(|| {
@@ -8279,7 +8339,7 @@ impl Presentation {
     pub fn move_comment(&mut self, slide_index: usize, from: usize, to: usize) -> Result<()> {
         self.require_slide_index(slide_index)?;
         let mut staged = self.clone();
-        let comments = staged.slides[slide_index]
+        let comments = Arc::make_mut(&mut staged.slides[slide_index])
             .comments
             .as_mut()
             .ok_or_else(|| {
@@ -8306,7 +8366,7 @@ impl Presentation {
     ) -> Result<()> {
         self.require_slide_index(slide_index)?;
         let mut staged = self.clone();
-        let comments = staged.slides[slide_index]
+        let comments = Arc::make_mut(&mut staged.slides[slide_index])
             .comments
             .as_mut()
             .ok_or_else(|| {
@@ -8346,7 +8406,7 @@ impl Presentation {
                 format!("unknown comment id {comment_id}"),
             )
         };
-        let comments = staged.slides[slide_index]
+        let comments = Arc::make_mut(&mut staged.slides[slide_index])
             .comments
             .as_mut()
             .ok_or_else(unknown)?;
@@ -8373,7 +8433,7 @@ impl Presentation {
                 format!("unknown comment id {comment_id}"),
             )
         };
-        let comments = staged.slides[slide_index]
+        let comments = Arc::make_mut(&mut staged.slides[slide_index])
             .comments
             .as_mut()
             .ok_or_else(unknown)?;
@@ -8413,7 +8473,7 @@ impl Presentation {
             .is_some_and(|master| master.header_footer.is_some());
         self.notes_master
             .as_mut()
-            .and_then(|master| master.header_footer.as_mut())
+            .and_then(|master| Arc::make_mut(master).header_footer.as_mut())
     }
 
     /// Returns mutable handout-master header/footer settings when both exist.
@@ -8424,7 +8484,7 @@ impl Presentation {
             .is_some_and(|master| master.header_footer.is_some());
         self.handout_master
             .as_mut()
-            .and_then(|master| master.header_footer.as_mut())
+            .and_then(|master| Arc::make_mut(master).header_footer.as_mut())
     }
 
     fn require_slide_index(&self, index: usize) -> Result<()> {
@@ -8698,7 +8758,7 @@ impl Presentation {
         self.package
             .content_types
             .add_override(&notes_part, content_types::NOTES_SLIDE);
-        self.slides[slide_index].notes = Some(NotesRecord {
+        Arc::make_mut(&mut self.slides[slide_index]).notes = Some(NotesRecord {
             part_name: notes_part,
             notes,
         });
@@ -8797,7 +8857,7 @@ impl Presentation {
         *self = staged;
         self.slides
             .get(inserted)
-            .map(slide_ref)
+            .map(|record| slide_ref(record))
             .ok_or(Error::UnknownSlideIndex {
                 index: inserted,
                 slide_count: self.slides.len(),
@@ -8840,7 +8900,7 @@ impl Presentation {
         let inserted = staged.slides.len();
         staged.copy_slide_from_in_place(
             &source_package,
-            source.slides[index].clone(),
+            SlideRecord::clone(&source.slides[index]),
             inserted,
             "transfer SmartArt slide",
             Some(&destination_layout),
@@ -8849,7 +8909,7 @@ impl Presentation {
         self.commit_candidate(staged)?;
         self.slides
             .get(inserted)
-            .map(slide_ref)
+            .map(|record| slide_ref(record))
             .ok_or(Error::UnknownSlideIndex {
                 index: inserted,
                 slide_count: self.slides.len(),
@@ -8882,7 +8942,7 @@ impl Presentation {
         let inserted = import.0[0];
         self.slides
             .get(inserted)
-            .map(slide_ref)
+            .map(|record| slide_ref(record))
             .ok_or(Error::UnknownSlideIndex {
                 index: inserted,
                 slide_count: self.slides.len(),
@@ -9132,7 +9192,7 @@ impl Presentation {
                     staged.adopt_source_layout(&source_package, layout, &mut adopted)?
                 }
             };
-            let mut record = source.slides[*index].clone();
+            let mut record = SlideRecord::clone(&source.slides[*index]);
             if !table_styles.is_empty() {
                 record.slide =
                     CT_Slide::from_xml(required_part(&source_package, &record.part_name)?)
@@ -9451,14 +9511,15 @@ impl Presentation {
                 }
                 !dropped
             });
-            record.slide = CT_Slide::from_xml(&xml).map_err(malformed)?;
+            let slide = CT_Slide::from_xml(&xml).map_err(malformed)?;
+            Arc::make_mut(record).slide = slide;
         }
         Ok(())
     }
 
     fn duplicate_slide_in_place(&mut self, index: usize) -> Result<usize> {
         let source_package = self.package.clone();
-        let source = self.slides[index].clone();
+        let source = SlideRecord::clone(&self.slides[index]);
         self.copy_slide_from_in_place(
             &source_package,
             source,
@@ -9758,13 +9819,13 @@ impl Presentation {
         self.presentation.slide_ids.insert(inserted, slide_id);
         self.slides.insert(
             inserted,
-            SlideRecord {
+            Arc::new(SlideRecord {
                 id,
                 part_name: slide_part,
                 slide,
                 notes,
                 comments,
-            },
+            }),
         );
         Ok(inserted)
     }
@@ -9834,11 +9895,11 @@ impl Presentation {
             .append_slide_layout_id(master_xml, id, &relationship_id)
             .map_err(malformed)?;
         self.package.set_part(&master, master_xml);
-        self.layouts.push(LayoutRecord {
+        self.layouts.push(Arc::new(LayoutRecord {
             part_name: part_name.clone(),
             layout: copied,
             dirty: false,
-        });
+        }));
         adopted.insert(layout.to_owned(), part_name.clone());
         Ok(part_name)
     }
@@ -11129,16 +11190,16 @@ impl Presentation {
             .content_types
             .add_override(&slide_part, content_types::SLIDE);
         self.presentation.slide_ids.push(slide_id);
-        self.slides.push(SlideRecord {
+        self.slides.push(Arc::new(SlideRecord {
             id,
             part_name: slide_part,
             slide,
             notes: None,
             comments: None,
-        });
+        }));
         self.slides
             .last()
-            .map(slide_ref)
+            .map(|record| slide_ref(record))
             .ok_or(Error::MalformedPart {
                 part_name: self.presentation_part.clone(),
                 message: "new slide record was not retained".to_owned(),
@@ -11348,7 +11409,7 @@ impl Presentation {
         }
         candidate.package.set_part_rels(&slide_part, rels);
         *child_at_mut(
-            &mut candidate.slides[slide_index]
+            &mut Arc::make_mut(&mut candidate.slides[slide_index])
                 .slide
                 .common_slide_data
                 .shape_tree
@@ -11857,10 +11918,12 @@ impl Presentation {
         let removed_ids: HashSet<u32> = removed_counts.into_keys().collect();
         let before = staged.owner_relationship_ids(owner)?;
         let timing = match owner {
-            ShapeOwner::Slide(index) => &mut staged.slides[index].slide.timing,
-            ShapeOwner::Layout(index) => &mut staged.layouts[index].layout.timing,
+            ShapeOwner::Slide(index) => &mut Arc::make_mut(&mut staged.slides[index]).slide.timing,
+            ShapeOwner::Layout(index) => {
+                &mut Arc::make_mut(&mut staged.layouts[index]).layout.timing
+            }
             ShapeOwner::Master(index) => {
-                &mut staged.masters[index]
+                &mut Arc::make_mut(&mut staged.masters[index])
                     .master
                     .as_mut()
                     .expect("owner was checked")
@@ -12220,18 +12283,21 @@ impl Presentation {
         candidate.package = self.staged_package(true)?;
         match owner {
             ShapeOwner::Slide(index) => {
-                candidate.slides[index].slide = CT_Slide::from_xml(&rewritten)
-                    .map_err(|error| invalid_shape_mutation(operation, error.to_string()))?
+                Arc::make_mut(&mut candidate.slides[index]).slide =
+                    CT_Slide::from_xml(&rewritten)
+                        .map_err(|error| invalid_shape_mutation(operation, error.to_string()))?
             }
             ShapeOwner::Layout(index) => {
-                candidate.layouts[index].layout = CT_SlideLayout::from_xml(&rewritten)
-                    .map_err(|error| invalid_shape_mutation(operation, error.to_string()))?;
-                candidate.layouts[index].dirty = false;
+                Arc::make_mut(&mut candidate.layouts[index]).layout =
+                    CT_SlideLayout::from_xml(&rewritten)
+                        .map_err(|error| invalid_shape_mutation(operation, error.to_string()))?;
+                Arc::make_mut(&mut candidate.layouts[index]).dirty = false;
             }
             ShapeOwner::Master(index) => {
-                candidate.masters[index].master = Ok(CT_SlideMaster::from_xml(&rewritten)
-                    .map_err(|error| invalid_shape_mutation(operation, error.to_string()))?);
-                candidate.masters[index].dirty = false;
+                Arc::make_mut(&mut candidate.masters[index]).master =
+                    Ok(CT_SlideMaster::from_xml(&rewritten)
+                        .map_err(|error| invalid_shape_mutation(operation, error.to_string()))?);
+                Arc::make_mut(&mut candidate.masters[index]).dirty = false;
             }
         }
         candidate.package.set_part(&part_name, rewritten);
@@ -12560,9 +12626,13 @@ impl Presentation {
         }
         let mut package = self.package.clone();
         package.set_part_rels(&part_name, relationships);
-        prune_unreachable_parts(&mut package, &removed_parts);
-        let media = MediaStore::scan(&package);
-        self.slides[slide_index].slide = slide;
+        // Scanning hashes every medium, so it waits for a removed part.
+        let media = if prune_unreachable_parts(&mut package, &removed_parts) {
+            MediaStore::scan(&package)
+        } else {
+            self.media_store.clone()
+        };
+        Arc::make_mut(&mut self.slides[slide_index]).slide = slide;
         self.package = package;
         self.media_store = media;
         Ok(())
@@ -12817,12 +12887,12 @@ impl Presentation {
             positioned_transform(left, top, width, height),
         )
         .map_err(|error| invalid_media_mutation("add media", error.to_string()))?;
-        staged.slides[slide_index]
+        Arc::make_mut(&mut staged.slides[slide_index])
             .slide
             .common_slide_data
             .shape_tree
             .append_child(ShapeTreeChild::Picture(picture));
-        let timing = staged.slides[slide_index]
+        let timing = Arc::make_mut(&mut staged.slides[slide_index])
             .slide
             .timing
             .get_or_insert_with(|| {
@@ -12916,7 +12986,7 @@ impl Presentation {
                 relationship_id: source_id,
             },
         };
-        let target_picture = staged.slides[slide_index]
+        let target_picture = Arc::make_mut(&mut staged.slides[slide_index])
             .slide
             .common_slide_data
             .shape_tree
@@ -13010,14 +13080,14 @@ impl Presentation {
                     relationship_id: relationship_id.clone(),
                 })?;
         }
-        staged.slides[slide_index]
+        Arc::make_mut(&mut staged.slides[slide_index])
             .slide
             .common_slide_data
             .shape_tree
             .remove_child_by_id(shape_id)
             .map_err(|error| invalid_media_mutation("remove media", error.to_string()))?
             .ok_or_else(|| invalid_media_mutation("remove media", "media picture is missing"))?;
-        if let Some(timing) = &mut staged.slides[slide_index].slide.timing {
+        if let Some(timing) = &mut Arc::make_mut(&mut staged.slides[slide_index]).slide.timing {
             timing
                 .remove_media(shape_id)
                 .map_err(|error| invalid_media_mutation("remove media", error.to_string()))?;
@@ -13268,7 +13338,7 @@ impl Presentation {
                 &relative_part_target(&slide_part, &chart_part),
             );
             let Some(ShapeTreeChild::GraphicFrame(frame)) = child_at_mut(
-                &mut staged.slides[slide_index]
+                &mut Arc::make_mut(&mut staged.slides[slide_index])
                     .slide
                     .common_slide_data
                     .shape_tree
@@ -13387,7 +13457,10 @@ impl Presentation {
             .add_override(&workbook_part, content_types::EMBEDDED_WORKBOOK);
 
         self.package = package;
-        let tree = &mut self.slides[slide_index].slide.common_slide_data.shape_tree;
+        let tree = &mut Arc::make_mut(&mut self.slides[slide_index])
+            .slide
+            .common_slide_data
+            .shape_tree;
         Ok(shape_ref(tree.append_child(ShapeTreeChild::GraphicFrame(
             Box::new(frame),
         ))))
@@ -19330,7 +19403,10 @@ fn collect_media_targets(package: &OpcPackage, source_part: &str, targets: &mut 
 ///
 /// A removed part's own internal targets become candidates in turn, so a
 /// removed chart also drops its embedded workbook.
-fn prune_unreachable_parts(package: &mut OpcPackage, candidates: &HashSet<String>) {
+/// Removes the candidate parts nothing references any more, and the parts
+/// only they referenced. Returns whether any part was removed.
+fn prune_unreachable_parts(package: &mut OpcPackage, candidates: &HashSet<String>) -> bool {
+    let mut removed = false;
     let mut pending = candidates.iter().cloned().collect::<Vec<_>>();
     pending.sort_unstable();
     while let Some(candidate) = pending.pop() {
@@ -19366,7 +19442,9 @@ fn prune_unreachable_parts(package: &mut OpcPackage, candidates: &HashSet<String
         package.remove_part(&candidate);
         package.remove_part_rels(&candidate);
         package.content_types.remove_override(&candidate);
+        removed = true;
     }
+    removed
 }
 
 fn expanded_property_root(source: &[u8], namespace: &str, root: &str) -> Result<Vec<u8>> {
@@ -21490,14 +21568,14 @@ fn slide_mut(presentation: &mut Presentation, index: usize) -> SlideMut<'_> {
 impl<'a> SlideMut<'a> {
     /// Sets whether the slide is hidden from the slideshow.
     pub fn set_hidden(&mut self, hidden: bool) {
-        self.presentation.slides[self.index]
+        Arc::make_mut(&mut self.presentation.slides[self.index])
             .slide
             .set_hidden(hidden);
     }
 
     /// Sets a direct DrawingML fill without replacing a theme reference.
     pub fn set_background(&mut self, fill: Fill) -> Result<()> {
-        self.presentation.slides[self.index]
+        Arc::make_mut(&mut self.presentation.slides[self.index])
             .slide
             .set_background(fill)
             .map_err(|error| Error::InvalidSlideMutation {
@@ -21508,7 +21586,7 @@ impl<'a> SlideMut<'a> {
 
     /// Removes only a direct-fill background.
     pub fn clear_background(&mut self) {
-        self.presentation.slides[self.index]
+        Arc::make_mut(&mut self.presentation.slides[self.index])
             .slide
             .clear_background();
     }
@@ -21516,7 +21594,7 @@ impl<'a> SlideMut<'a> {
     /// Removes any slide background, direct fill or theme reference, so the
     /// slide follows its layout and master background.
     pub fn remove_background(&mut self) {
-        self.presentation.slides[self.index]
+        Arc::make_mut(&mut self.presentation.slides[self.index])
             .slide
             .common_slide_data
             .background = None;
@@ -21524,7 +21602,7 @@ impl<'a> SlideMut<'a> {
 
     /// Replaces speaker-note text while preserving its body placeholder.
     pub fn set_notes_text(&mut self, text: &str) -> Result<()> {
-        let notes = self.presentation.slides[self.index]
+        let notes = Arc::make_mut(&mut self.presentation.slides[self.index])
             .notes
             .as_mut()
             .ok_or_else(|| Error::InvalidSlideMutation {
@@ -21649,7 +21727,7 @@ impl<'a> SlideMut<'a> {
     }
 
     fn shape_tree(&mut self) -> &mut CT_ShapeTree {
-        &mut self.presentation.slides[self.index]
+        &mut Arc::make_mut(&mut self.presentation.slides[self.index])
             .slide
             .common_slide_data
             .shape_tree
@@ -21701,7 +21779,7 @@ impl<'a> SlideMut<'a> {
         }
         note_fx260_slide(self.presentation.slides.len().max(1));
         let mut candidate = self.presentation.clone();
-        let tree = &mut candidate.slides[self.index]
+        let tree = &mut Arc::make_mut(&mut candidate.slides[self.index])
             .slide
             .common_slide_data
             .shape_tree;
@@ -22457,7 +22535,7 @@ impl<'a> SlideRef<'a> {
 }
 
 /// The structural kind of one PresentationML shape-tree child.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ShapeKind {
     Shape,
     Picture,
@@ -25040,6 +25118,59 @@ fn replace_text_in_slide_record(
         )
     });
     slide_count + notes_count
+}
+
+/// Whether `replace_text_in_slide_record` would replace anything in a slide
+/// or its notes: the same run segments, read without copying the record.
+fn slide_record_has_text(record: &SlideRecord, placeholder: &str) -> bool {
+    fn in_body(body: &CT_TextBody, placeholder: &str) -> bool {
+        body.paragraphs().iter().any(|paragraph| {
+            paragraph
+                .runs
+                .split(|run| !matches!(run, TextRun::Run(_)))
+                .any(|segment| {
+                    let text = segment
+                        .iter()
+                        .filter_map(|run| match run {
+                            TextRun::Run(run) => Some(run.text.value.as_str()),
+                            _ => None,
+                        })
+                        .collect::<String>();
+                    text.contains(placeholder)
+                })
+        })
+    }
+    fn in_children(children: &[ShapeTreeChild], placeholder: &str) -> bool {
+        children.iter().any(|child| match child {
+            ShapeTreeChild::Shape(shape) => shape
+                .text_body
+                .as_ref()
+                .is_some_and(|body| in_body(body, placeholder)),
+            ShapeTreeChild::GraphicFrame(frame) => match frame.graphic_data.payload() {
+                GraphicDataPayload::Table(table) => table
+                    .rows
+                    .iter()
+                    .flat_map(|row| &row.cells)
+                    .filter_map(|cell| cell.text_body.as_ref())
+                    .any(|body| in_body(body, placeholder)),
+                _ => false,
+            },
+            ShapeTreeChild::GroupShape(group) => in_children(&group.children, placeholder),
+            ShapeTreeChild::Picture(_)
+            | ShapeTreeChild::Connector(_)
+            | ShapeTreeChild::AlternateContent(_) => false,
+        })
+    }
+    !placeholder.is_empty()
+        && (in_children(
+            &record.slide.common_slide_data.shape_tree.children,
+            placeholder,
+        ) || record.notes.as_ref().is_some_and(|notes| {
+            in_children(
+                &notes.notes.common_slide_data.shape_tree.children,
+                placeholder,
+            )
+        }))
 }
 
 fn replace_text_in_children(
@@ -29857,7 +29988,7 @@ impl Presentation {
         let mut field = text_field(field_type, text, &mut ids)?;
         let mut candidate = self.clone();
         let child = child_at_mut(
-            &mut candidate.slides[slide_index]
+            &mut Arc::make_mut(&mut candidate.slides[slide_index])
                 .slide
                 .common_slide_data
                 .shape_tree
@@ -29927,7 +30058,7 @@ impl Presentation {
         if slide == self.slides[slide_index].slide {
             return Ok(false);
         }
-        staged.slides[slide_index].slide = slide;
+        Arc::make_mut(&mut staged.slides[slide_index]).slide = slide;
         self.commit_candidate(staged)?;
         Ok(true)
     }
@@ -29992,31 +30123,34 @@ impl Presentation {
                 effective,
                 &mut field_ids,
             )?;
-            changed |= slide != staged.slides[slide_index].slide;
-            staged.slides[slide_index].slide = slide;
+            // An unchanged slide keeps its shared record.
+            if slide != staged.slides[slide_index].slide {
+                changed = true;
+                Arc::make_mut(&mut staged.slides[slide_index]).slide = slide;
+            }
         }
         for (layout_index, record) in staged.layouts.iter_mut().enumerate() {
-            let original = record.layout.clone();
+            let mut layout = record.layout.clone();
             let effective = if title_layouts[layout_index] {
                 &hidden
             } else {
                 settings
             };
-            update_header_footer_flags(&mut record.layout.header_footer, effective);
+            update_header_footer_flags(&mut layout.header_footer, effective);
             update_templates(
-                &mut record.layout.common_slide_data.shape_tree.children,
+                &mut layout.common_slide_data.shape_tree.children,
                 settings,
                 &mut field_ids,
             )?;
-            if record.layout == original {
+            if layout == record.layout {
                 continue;
             }
             changed = true;
-            let xml = record
-                .layout
+            let xml = layout
                 .to_xml()
                 .map_err(|error| footer_malformed(&record.part_name, error))?;
             staged.package.set_part(&record.part_name, xml);
+            Arc::make_mut(record).layout = layout;
         }
         staged
             .presentation
@@ -30450,7 +30584,7 @@ impl Presentation {
             .flatten();
         let changed = record.slide.transition != model;
         if changed {
-            record.slide.transition = model;
+            Arc::make_mut(record).slide.transition = model;
         }
         if changed {
             self.commit_candidate(candidate)?;
@@ -30467,7 +30601,7 @@ impl Presentation {
                 .transpose()?
                 .flatten();
             if model != record.slide.transition {
-                record.slide.transition = model;
+                Arc::make_mut(record).slide.transition = model;
                 changed = true;
             }
         }
@@ -30537,7 +30671,7 @@ mod write_tests {
             relationship_id,
         )
         .unwrap();
-        deck.slides[slide_index]
+        Arc::make_mut(&mut deck.slides[slide_index])
             .slide
             .common_slide_data
             .shape_tree
@@ -30623,7 +30757,7 @@ mod write_tests {
                 "sibling" | "group" => {
                     fx215_second_frame(&mut deck, 0, &old_id);
                     if retained_by == "group" {
-                        let child = deck.slides[0]
+                        let child = Arc::make_mut(&mut deck.slides[0])
                             .slide
                             .common_slide_data
                             .shape_tree
@@ -30633,7 +30767,7 @@ mod write_tests {
                         let mut group =
                             rpptx_oxml::shape_tree::CT_GroupShape::new_empty(100, "Retained group");
                         group.children.push(child);
-                        deck.slides[0]
+                        Arc::make_mut(&mut deck.slides[0])
                             .slide
                             .common_slide_data
                             .shape_tree
@@ -30652,7 +30786,8 @@ mod write_tests {
                     );
                     let slide = String::from_utf8(deck.slides[0].slide.to_xml().unwrap()).unwrap();
                     let source = slide.replace("</p:sld>", &format!("{raw}</p:sld>"));
-                    deck.slides[0].slide = CT_Slide::from_xml(source.as_bytes()).unwrap();
+                    Arc::make_mut(&mut deck.slides[0]).slide =
+                        CT_Slide::from_xml(source.as_bytes()).unwrap();
                     opaque = Some(raw);
                 }
                 "other_part" => {
@@ -30833,7 +30968,7 @@ mod write_tests {
         assert!(wrong_type.chart_type(0, id).is_err());
         assert!(deck.chart_type(99, id).is_err());
         assert!(deck.chart_type(0, 999).is_err());
-        let child = deck.slides[0]
+        let child = Arc::make_mut(&mut deck.slides[0])
             .slide
             .common_slide_data
             .shape_tree
@@ -30842,7 +30977,7 @@ mod write_tests {
             .unwrap();
         let mut group = rpptx_oxml::shape_tree::CT_GroupShape::new_empty(100, "Chart group");
         group.children.push(child);
-        deck.slides[0]
+        Arc::make_mut(&mut deck.slides[0])
             .slide
             .common_slide_data
             .shape_tree
@@ -30850,7 +30985,7 @@ mod write_tests {
             .push(ShapeTreeChild::GroupShape(Box::new(group)));
         assert_eq!(deck.chart_type(0, id).unwrap(), Some(58));
         let duplicate = deck.slides[0].slide.common_slide_data.shape_tree.children[0].clone();
-        deck.slides[0]
+        Arc::make_mut(&mut deck.slides[0])
             .slide
             .common_slide_data
             .shape_tree
@@ -30896,7 +31031,7 @@ mod write_tests {
     #[test]
     fn fx215_native_nested_unique_owner_and_ambiguity() {
         let (mut deck, id, old) = fx215_native_deck();
-        let child = deck.slides[0]
+        let child = Arc::make_mut(&mut deck.slides[0])
             .slide
             .common_slide_data
             .shape_tree
@@ -30905,7 +31040,7 @@ mod write_tests {
             .unwrap();
         let mut group = rpptx_oxml::shape_tree::CT_GroupShape::new_empty(100, "Chart group");
         group.children.push(child.clone());
-        deck.slides[0]
+        Arc::make_mut(&mut deck.slides[0])
             .slide
             .common_slide_data
             .shape_tree
@@ -30916,7 +31051,7 @@ mod write_tests {
             .unwrap();
         assert_eq!(deck.chart_owner(0, id, "test").unwrap().0.len(), 2);
         let selected = deck.slides[0].slide.common_slide_data.shape_tree.children[0].clone();
-        deck.slides[0]
+        Arc::make_mut(&mut deck.slides[0])
             .slide
             .common_slide_data
             .shape_tree
@@ -31370,7 +31505,7 @@ mod write_tests {
                     if part != &chart && part != &workbook {
                         assert_eq!(
                             reopened.package.get_part(part).unwrap(),
-                            bytes,
+                            bytes.as_slice(),
                             "{name}/{label}: unrelated {part}"
                         );
                     }
@@ -31484,7 +31619,11 @@ mod write_tests {
                 let selected = CT_Picture::from_xml(owner.as_bytes()).unwrap();
                 assert_eq!(selected.hidden(), hidden);
                 let retained = selected.to_xml().unwrap();
-                deck.slides[0].slide.common_slide_data.shape_tree.children = vec![
+                Arc::make_mut(&mut deck.slides[0])
+                    .slide
+                    .common_slide_data
+                    .shape_tree
+                    .children = vec![
                     ShapeTreeChild::Picture(selected),
                     ShapeTreeChild::Picture(picture(8, 508_000)),
                 ];
@@ -31621,7 +31760,7 @@ mod write_tests {
             if name != &part {
                 assert_eq!(
                     required_part(&deck.staged_package(true).unwrap(), name).unwrap(),
-                    bytes
+                    bytes.as_slice()
                 );
             }
         }
@@ -32841,12 +32980,16 @@ mod write_tests {
             let timing = CT_Timing::from_xml(format!("<p:timing xmlns:p=\"{}\"><p:tnLst><p:animEffect transition=\"in\" filter=\"fade\"><p:cBhvr><p:cTn id=\"1\" dur=\"1000\" fill=\"hold\"/><p:tgtEl><p:spTgt spid=\"{id}\"/></p:tgtEl></p:cBhvr></p:animEffect></p:tnLst></p:timing>", rpptx_oxml::namespace::P_NS).as_bytes()).unwrap();
             match owner {
                 ShapeOwner::Master(index) => {
-                    deck.masters[index].master.as_mut().unwrap().timing = Some(timing);
-                    deck.masters[index].dirty = true;
+                    Arc::make_mut(&mut deck.masters[index])
+                        .master
+                        .as_mut()
+                        .unwrap()
+                        .timing = Some(timing);
+                    Arc::make_mut(&mut deck.masters[index]).dirty = true;
                 }
                 ShapeOwner::Layout(index) => {
-                    deck.layouts[index].layout.timing = Some(timing);
-                    deck.layouts[index].dirty = true;
+                    Arc::make_mut(&mut deck.layouts[index]).layout.timing = Some(timing);
+                    Arc::make_mut(&mut deck.layouts[index]).dirty = true;
                 }
                 _ => unreachable!(),
             }
@@ -32855,9 +32998,15 @@ mod write_tests {
             assert_eq!(deck.to_bytes().unwrap(), animated);
             match owner {
                 ShapeOwner::Master(index) => {
-                    deck.masters[index].master.as_mut().unwrap().timing = None
+                    Arc::make_mut(&mut deck.masters[index])
+                        .master
+                        .as_mut()
+                        .unwrap()
+                        .timing = None
                 }
-                ShapeOwner::Layout(index) => deck.layouts[index].layout.timing = None,
+                ShapeOwner::Layout(index) => {
+                    Arc::make_mut(&mut deck.layouts[index]).layout.timing = None
+                }
                 _ => unreachable!(),
             }
             deck.remove_shape_at(owner, 0).unwrap();
@@ -33518,6 +33667,97 @@ mod write_tests {
 
     use super::*;
 
+    #[cfg(feature = "default-template")]
+    #[test]
+    fn issue403_a_clone_shares_records_and_bytes_until_an_edit_copies_one() {
+        let mut live = Presentation::new().unwrap();
+        for _ in 0..4 {
+            live.add_slide(6).unwrap();
+        }
+        live.add_picture(
+            1,
+            b"\x89PNG\r\n\x1a\nissue403",
+            "pixel.png",
+            Emu(0),
+            Emu(0),
+            Some(Emu(100)),
+            Some(Emu(100)),
+        )
+        .unwrap();
+        let mut candidate = live.clone();
+        fn shared<T>(left: &[Arc<T>], right: &[Arc<T>]) -> bool {
+            left.len() == right.len() && left.iter().zip(right).all(|(a, b)| Arc::ptr_eq(a, b))
+        }
+        assert!(shared(&live.slides, &candidate.slides));
+        assert!(shared(&live.layouts, &candidate.layouts));
+        assert!(shared(&live.masters, &candidate.masters));
+        for (name, bytes) in &live.package.parts {
+            assert!(Arc::ptr_eq(bytes, &candidate.package.parts[name]), "{name}");
+        }
+        let media = candidate
+            .media_store
+            .by_id
+            .values()
+            .flatten()
+            .collect::<Vec<_>>();
+        assert!(!media.is_empty());
+        for entry in media {
+            let part = &candidate.package.parts[&entry.part_name];
+            assert!(Arc::ptr_eq(&entry.bytes, part), "{}", entry.part_name);
+        }
+        assert_eq!(
+            candidate.unchanged_slides_since(&live),
+            [Some(0), Some(1), Some(2), Some(3)]
+        );
+
+        // A shape edit copies its own slide record and nothing else.
+        candidate
+            .shapes_mut(2, &[])
+            .unwrap()
+            .add_textbox(Emu(0), Emu(0), Emu(100), Emu(100))
+            .unwrap();
+        assert_eq!(
+            candidate.unchanged_slides_since(&live),
+            [Some(0), Some(1), None, Some(3)]
+        );
+        assert!(candidate.unchanged_layouts_and_masters_since(&live));
+        let mut layout_edit = live.clone();
+        layout_edit
+            .shapes_mut_at(ShapeOwner::Layout(1), &[])
+            .unwrap()
+            .add_textbox(Emu(0), Emu(0), Emu(100), Emu(100))
+            .unwrap();
+        assert!(!layout_edit.unchanged_layouts_and_masters_since(&live));
+        assert_eq!(
+            layout_edit.unchanged_slides_since(&live),
+            [Some(0), Some(1), Some(2), Some(3)]
+        );
+        candidate.move_slide(3, 0).unwrap();
+        assert_eq!(
+            candidate.unchanged_slides_since(&live),
+            [Some(3), Some(0), Some(1), None]
+        );
+
+        // Text replacement copies only a shared slide it changes.
+        let mut text = live.clone();
+        text.slide_mut(3)
+            .unwrap()
+            .add_textbox(Emu(0), Emu(0), Emu(100), Emu(100))
+            .unwrap()
+            .set_text("issue403 marker")
+            .unwrap();
+        let mut replaced = text.clone();
+        assert_eq!(replaced.replace_text("marker", "done"), 1);
+        assert_eq!(
+            replaced.unchanged_slides_since(&text),
+            [Some(0), Some(1), Some(2), None]
+        );
+        drop((replaced, live, candidate, layout_edit));
+        let owned = Arc::as_ptr(&text.slides[3]);
+        assert_eq!(text.replace_text("marker", "done"), 1);
+        assert_eq!(Arc::as_ptr(&text.slides[3]), owned);
+    }
+
     #[cfg(feature = "render")]
     #[test]
     fn fx207_refresh_preserves_unknown_autofit_on_selected_and_unrelated_owners() {
@@ -33617,7 +33857,7 @@ mod write_tests {
                 ("/ppt/slides/slide1.xml", selected),
                 ("/ppt/slides/slide2.xml", other),
             ] {
-                let xml = String::from_utf8(package.parts[part].clone()).unwrap();
+                let xml = String::from_utf8(package.parts[part].to_vec()).unwrap();
                 assert_eq!(xml.matches("<a:normAutofit/>").count(), 1);
                 let numeric = if part.ends_with("slide2.xml") {
                     " fontScale=\"100000\" lnSpcReduction=\"0\""
@@ -33631,7 +33871,7 @@ mod write_tests {
                 package.set_part(part, xml.into_bytes());
             }
             let part = "/ppt/slides/slide1.xml";
-            let xml = String::from_utf8(package.parts[part].clone()).unwrap();
+            let xml = String::from_utf8(package.parts[part].to_vec()).unwrap();
             assert_eq!(xml.matches("<a:bodyPr/>").count(), 1);
             package.set_part(
                 part,
@@ -33643,7 +33883,7 @@ mod write_tests {
             );
             if inherited {
                 for part in ["/ppt/slides/slide1.xml", "/ppt/slides/slide2.xml"] {
-                    let xml = String::from_utf8(package.parts[part].clone()).unwrap();
+                    let xml = String::from_utf8(package.parts[part].to_vec()).unwrap();
                     let namespace_scope = " xmlns:q='http://schemas.openxmlformats.org/drawingml/2006/main' xmlns:e='urn:example' xmlns:mc='http://schemas.openxmlformats.org/markup-compatibility/2006' mc:Ignorable='e'";
                     // Imported provider bodies can already carry local canonical
                     // declarations. Move only the fixture choice declarations first,
@@ -33678,7 +33918,7 @@ mod write_tests {
             let saved = deck.to_bytes().unwrap();
             let reopened = Presentation::from_bytes(&saved).unwrap();
             let after = reopened.staged_package(true).unwrap();
-            let changed_xml = String::from_utf8(after.parts[part].clone()).unwrap();
+            let changed_xml = String::from_utf8(after.parts[part].to_vec()).unwrap();
             assert!(
                 changed_xml.contains(if inherited {
                     "e:proof='selected&amp;keep'"
@@ -33743,7 +33983,7 @@ mod write_tests {
             let fitted = deck.to_bytes().unwrap();
             let fitted_deck = Presentation::from_bytes(&fitted).unwrap();
             let fitted_xml =
-                String::from_utf8(fitted_deck.staged_package(true).unwrap().parts[part].clone())
+                String::from_utf8(fitted_deck.staged_package(true).unwrap().parts[part].to_vec())
                     .unwrap();
             assert!(
                 fitted_xml.contains(if inherited {
@@ -33781,7 +34021,7 @@ mod write_tests {
                 .unwrap();
             let mut package = deck.staged_package(true).unwrap();
             let part = "/ppt/slides/slide1.xml";
-            let xml = String::from_utf8(package.parts[part].clone()).unwrap();
+            let xml = String::from_utf8(package.parts[part].to_vec()).unwrap();
             assert_eq!(xml.matches("<a:bodyPr/>").count(), 1);
             let xml = xml
                 .replace(
@@ -34352,9 +34592,11 @@ mod write_tests {
                             != frames[0].update.location.child_path)
             );
             assert!(
-                String::from_utf8(foreign_deck.staged_package(false).unwrap().parts[&part].clone())
-                    .unwrap()
-                    .contains(&foreign)
+                String::from_utf8(
+                    foreign_deck.staged_package(false).unwrap().parts[&part].to_vec()
+                )
+                .unwrap()
+                .contains(&foreign)
             );
         }
     }
@@ -34436,7 +34678,7 @@ mod write_tests {
             .unwrap();
         let part = deck.slides[0].notes.as_ref().unwrap().part_name.clone();
         let body = first_notes_body_mut(
-            &mut deck.slides[0]
+            &mut Arc::make_mut(&mut deck.slides[0])
                 .notes
                 .as_mut()
                 .unwrap()
@@ -34714,7 +34956,10 @@ mod write_tests {
         }
         presentation.set_notes_text(0, "caller notes").unwrap();
         {
-            let notes = presentation.slides[0].notes.as_mut().unwrap();
+            let notes = Arc::make_mut(&mut presentation.slides[0])
+                .notes
+                .as_mut()
+                .unwrap();
             let body = first_notes_body_mut(&mut notes.notes.common_slide_data.shape_tree.children)
                 .unwrap();
             let paragraph = body.paragraph_mut(0).unwrap();
@@ -35965,7 +36210,7 @@ mod write_tests {
         });
 
         let mut duplicate_placeholder = presentation_with_slide();
-        duplicate_placeholder.slides[0]
+        Arc::make_mut(&mut duplicate_placeholder.slides[0])
             .slide
             .common_slide_data
             .shape_tree
@@ -35974,7 +36219,7 @@ mod write_tests {
                 CT_Shape::new_placeholder(100, CT_Placeholder::new(Some(PhType::Body), Some(999)))
                     .unwrap(),
             ));
-        duplicate_placeholder.slides[0]
+        Arc::make_mut(&mut duplicate_placeholder.slides[0])
             .slide
             .common_slide_data
             .shape_tree
@@ -36214,7 +36459,9 @@ mod write_tests {
         deck.package
             .set_part(&master_part, master.to_xml().unwrap());
         deck = Presentation::from_package(deck.staged_package(true).unwrap()).unwrap();
-        deck.layouts[layout].layout.header_footer = None;
+        Arc::make_mut(&mut deck.layouts[layout])
+            .layout
+            .header_footer = None;
         assert_eq!(deck.slide_header_footer_policy(0).unwrap(), None);
         assert!(!deck.slide_header_footer(0).unwrap().slide_number);
         master.header_footer = Some(CT_HeaderFooter::new(Some(false), None, Some(true), None));
@@ -36232,8 +36479,9 @@ mod write_tests {
                 }
             ))
         );
-        deck.layouts[layout].layout.header_footer =
-            Some(CT_HeaderFooter::new(None, None, Some(false), Some(true)));
+        Arc::make_mut(&mut deck.layouts[layout])
+            .layout
+            .header_footer = Some(CT_HeaderFooter::new(None, None, Some(false), Some(true)));
         assert_eq!(
             deck.slide_header_footer_policy(0).unwrap(),
             Some((
@@ -36331,7 +36579,7 @@ mod write_tests {
         let original = format!(
             r#"<q:transition xmlns:q="{P_NS}" xmlns:e="urn:fx208" e:raw='opaque' advClick="0"><q:fade/><q:sndAc><q:stSnd><q:snd name="owned sound"/></q:stSnd></q:sndAc><q:extLst><q:ext uri="opaque"><e:payload/></q:ext></q:extLst></q:transition>"#
         );
-        deck.slides[0].slide.transition =
+        Arc::make_mut(&mut deck.slides[0]).slide.transition =
             Some(rpptx_oxml::timing::CT_SlideTransition::from_xml(original.as_bytes()).unwrap());
         for name in TransitionKind::NAMES {
             let kind = TransitionKind::parse(name).unwrap();
@@ -36387,7 +36635,7 @@ mod write_tests {
         typed.transition = None;
         let clean = String::from_utf8(typed.to_xml().unwrap()).unwrap();
         let injected = clean.replace("</p:sld>", &format!("{alternate}</p:sld>"));
-        deck.slides[0].slide = CT_Slide::from_xml(injected.as_bytes()).unwrap();
+        Arc::make_mut(&mut deck.slides[0]).slide = CT_Slide::from_xml(injected.as_bytes()).unwrap();
         let cover = SlideTransition {
             kind: Some(TransitionKind::Cover),
             direction: Some(TransitionDirection::RightDown),
@@ -36404,7 +36652,7 @@ mod write_tests {
         let opaque = format!(
             r#"<q:transition xmlns:q="{P_NS}" xmlns:e="urn:fx208"><q:fade e:opaque='retain'/></q:transition>"#
         );
-        deck.slides[1].slide.transition =
+        Arc::make_mut(&mut deck.slides[1]).slide.transition =
             Some(rpptx_oxml::timing::CT_SlideTransition::from_xml(opaque.as_bytes()).unwrap());
         let before = deck.to_bytes().unwrap();
         assert!(deck.set_all_transitions(Some(&cover)).is_err());
@@ -36550,7 +36798,7 @@ mod write_tests {
                 // the typed authoring boundary before any publication.
                 assert!(CT_Transform2D::from_xml(&transform.to_xml().unwrap()).is_err());
                 let mut typed = source.clone();
-                let layout = &mut typed.layouts[1].layout;
+                let layout = &mut Arc::make_mut(&mut typed.layouts[1]).layout;
                 layout.header_footer = Some(CT_HeaderFooter::new(
                     Some(false),
                     Some(false),
@@ -36836,7 +37084,7 @@ mod write_tests {
         std::fs::remove_file(path).unwrap();
 
         let mut generated = presentation_with_slide();
-        generated.slides[0].slide = imported.slides[0].slide.clone();
+        Arc::make_mut(&mut generated.slides[0]).slide = imported.slides[0].slide.clone();
         assert!(
             !generated.save_invariants_preserved(),
             "new duplicate identities stay invalid"
@@ -37030,7 +37278,7 @@ mod write_tests {
         let raw = br#"<p:ph xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:f="urn:foreign" idx="1" orient="vert" sz="half" f:orient="horz" f:keep="A &amp; B"><f:payload spelling="kept&#32;exact"/></p:ph>"#;
         let replacement = CT_Placeholder::from_xml(raw).unwrap();
         let expected_ph = replacement.to_xml().unwrap();
-        let child = &mut deck.layouts[index]
+        let child = &mut Arc::make_mut(&mut deck.layouts[index])
             .layout
             .common_slide_data
             .shape_tree
@@ -37170,7 +37418,7 @@ mod write_tests {
         // Imported duplicate names and IDs stay in the source layout. New owners use fresh IDs.
         let mut deck = Presentation::new().unwrap();
         let index = layout_index(&deck, "Title and Content");
-        for child in &mut deck.layouts[index]
+        for child in &mut Arc::make_mut(&mut deck.layouts[index])
             .layout
             .common_slide_data
             .shape_tree
@@ -37328,7 +37576,7 @@ mod write_tests {
                 .shape_tree
                 .children
                 .len();
-            presentation.slides[0]
+            Arc::make_mut(&mut presentation.slides[0])
                 .slide
                 .common_slide_data
                 .shape_tree
@@ -37470,7 +37718,7 @@ mod write_tests {
             .unwrap()
             .to_vec();
         presentation.package.set_part(relocated_layout, layout_xml);
-        presentation.layouts[0].part_name = relocated_layout.to_owned();
+        Arc::make_mut(&mut presentation.layouts[0]).part_name = relocated_layout.to_owned();
         presentation.add_slide(0).unwrap();
         let record = &presentation.slides[0];
         let xml = String::from_utf8(record.slide.to_xml().unwrap()).unwrap();
@@ -37844,8 +38092,11 @@ mod write_tests {
                     Emu(700),
                 )
                 .unwrap();
-            let ShapeTreeChild::Connector(connector) =
-                &mut p.slides[0].slide.common_slide_data.shape_tree.children[1]
+            let ShapeTreeChild::Connector(connector) = &mut Arc::make_mut(&mut p.slides[0])
+                .slide
+                .common_slide_data
+                .shape_tree
+                .children[1]
             else {
                 panic!("fixture connector");
             };
@@ -37947,8 +38198,11 @@ mod write_tests {
                 Emu(700),
             )
             .unwrap();
-        let ShapeTreeChild::Connector(connector) =
-            &mut p.slides[0].slide.common_slide_data.shape_tree.children[2]
+        let ShapeTreeChild::Connector(connector) = &mut Arc::make_mut(&mut p.slides[0])
+            .slide
+            .common_slide_data
+            .shape_tree
+            .children[2]
         else {
             panic!("fixture connector");
         };
@@ -38004,8 +38258,11 @@ mod write_tests {
                 Emu(700),
             )
             .unwrap();
-        let ShapeTreeChild::Connector(connector) =
-            &mut p.slides[0].slide.common_slide_data.shape_tree.children[1]
+        let ShapeTreeChild::Connector(connector) = &mut Arc::make_mut(&mut p.slides[0])
+            .slide
+            .common_slide_data
+            .shape_tree
+            .children[1]
         else {
             panic!("fixture connector");
         };
@@ -38054,7 +38311,10 @@ mod write_tests {
     fn fx206_raw_presentation(tree: CT_ShapeTree) -> Presentation {
         let mut p = Presentation::new().unwrap();
         p.add_slide(6).unwrap();
-        p.slides[0].slide.common_slide_data.shape_tree = tree;
+        Arc::make_mut(&mut p.slides[0])
+            .slide
+            .common_slide_data
+            .shape_tree = tree;
         p
     }
     fn fx206_assert_raw_order(xml: &[u8], markers: &[&str]) {
@@ -38597,7 +38857,10 @@ mod write_tests {
             .set_notes_text(0, "Actual Aptos speaker notes")
             .unwrap();
         {
-            let notes = presentation.slides[0].notes.as_mut().unwrap();
+            let notes = Arc::make_mut(&mut presentation.slides[0])
+                .notes
+                .as_mut()
+                .unwrap();
             let body = first_notes_body_mut(&mut notes.notes.common_slide_data.shape_tree.children)
                 .unwrap();
             let TextRun::Run(run) = &mut body.paragraph_mut(0).unwrap().runs[0] else {
@@ -38750,7 +39013,10 @@ mod write_tests {
         );
         assert_eq!(presentation.to_bytes().unwrap(), export_before);
         {
-            let notes = presentation.slides[0].notes.as_mut().unwrap();
+            let notes = Arc::make_mut(&mut presentation.slides[0])
+                .notes
+                .as_mut()
+                .unwrap();
             let body = first_notes_body_mut(&mut notes.notes.common_slide_data.shape_tree.children)
                 .unwrap();
             let TextRun::Run(run) = &mut body.paragraph_mut(0).unwrap().runs[0] else {
