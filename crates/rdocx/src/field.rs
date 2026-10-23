@@ -13254,7 +13254,16 @@ fn ref_bookmark_runs(document: &Document, target: &str) -> Result<Option<RefBook
         }
         return Ok(Some(cache));
     }
-    let range = document.story_ranges()?.into_iter().find(|range| matches!(range.kind(), crate::StoryRangeKind::Bookmark { name, .. } if name == target));
+    let (ranges, across) = document.story_range_inventory()?;
+    if across
+        .iter()
+        .any(|kind| matches!(kind, crate::StoryRangeKind::Bookmark { name, .. } if name == target))
+    {
+        return Err(Error::Other(
+            "REF f target bookmark runs across story owners".into(),
+        ));
+    }
+    let range = ranges.into_iter().find(|range| matches!(range.kind(), crate::StoryRangeKind::Bookmark { name, .. } if name == target));
     let Some(range) = range else {
         return Ok(None);
     };
@@ -13345,6 +13354,9 @@ struct Evaluator<'a> {
     document: &'a Document,
     context: &'a FieldEvaluationContext,
     bookmarks: BTreeMap<String, BookmarkValue>,
+    // Related-story bookmarks whose two markers are in two owners. A REF to
+    // one refuses by name instead of reading as missing.
+    cross_owner_bookmarks: HashSet<String>,
     numbering_layout: Option<Arc<rdocx_layout::WordLayoutResult>>,
     numbering_nodes: HashMap<rdocx_layout::WordSourcePath, rdocx_layout::SourceNodeId>,
     navigation_styles: HashMap<String, Vec<rdocx_layout::SourceNodeId>>,
@@ -13405,7 +13417,15 @@ impl<'a> Evaluator<'a> {
         // Related ranges are admitted only by the checked physical inventory.
         // One paragraph inventory serves the ranges and the name counts.
         let paragraphs = document.story_range_paragraphs().ok();
-        if let Some(Ok(ranges)) = paragraphs.as_deref().map(Document::story_ranges_in) {
+        let mut cross_owner_bookmarks = HashSet::new();
+        if let Some(Ok((ranges, across))) = paragraphs.as_deref().map(Document::story_ranges_in) {
+            for kind in across {
+                if let crate::StoryRangeKind::Bookmark { name, .. } = kind
+                    && !bookmarks.contains_key(&name)
+                {
+                    cross_owner_bookmarks.insert(name);
+                }
+            }
             for range in ranges {
                 let crate::StoryRangeKind::Bookmark { name, .. } = range.kind() else {
                     continue;
@@ -13447,6 +13467,7 @@ impl<'a> Evaluator<'a> {
             document,
             context,
             bookmarks,
+            cross_owner_bookmarks,
             numbering_layout: None,
             numbering_nodes: HashMap::new(),
             navigation_styles: HashMap::new(),
@@ -14119,6 +14140,9 @@ impl<'a> Evaluator<'a> {
                     value.push_str(&position);
                 }
                 FieldOutcome::Resolved(value)
+            }
+            None if self.cross_owner_bookmarks.contains(target) => {
+                keep(&format!("REF target {target} runs across story owners"))
             }
             None => keep(&format!("REF target {target} was not found")),
         }
@@ -15261,6 +15285,11 @@ fn legacy_story_paragraphs(
     let mut paragraphs = Vec::new();
     let mut root_seen = false;
     let mut root_closed = false;
+    let general_context = |depth: usize| match story_kind {
+        PackageStoryKind::Header | PackageStoryKind::Footer => depth == 1,
+        PackageStoryKind::Footnotes | PackageStoryKind::Endnotes => depth == 2,
+        PackageStoryKind::Comments => false,
+    };
     loop {
         let before = reader.buffer_position() as usize;
         let (namespace, event) = reader
@@ -15311,13 +15340,7 @@ fn legacy_story_paragraphs(
                     paragraphs.push(LegacyStoryParagraph {
                         start: before,
                         end,
-                        general_context: match story_kind {
-                            PackageStoryKind::Header | PackageStoryKind::Footer => stack.len() == 1,
-                            PackageStoryKind::Footnotes | PackageStoryKind::Endnotes => {
-                                stack.len() == 2
-                            }
-                            PackageStoryKind::Comments => false,
-                        },
+                        general_context: general_context(stack.len()),
                         original: paragraph.clone(),
                         paragraph,
                     });
@@ -15337,6 +15360,40 @@ fn legacy_story_paragraphs(
                 bindings = binding_scopes.pop().unwrap_or_default();
                 if stack.is_empty() {
                     root_closed = true;
+                }
+            }
+            // A self-closing paragraph is a story paragraph too, as the
+            // layout source inventory counts it.
+            Event::Empty(element) if !stack.is_empty() => {
+                let word = namespace_is_word(&namespace);
+                let name = element.name();
+                let local = local_name(name.as_ref());
+                if word
+                    && local == b"p"
+                    && legacy_story_element_kind(
+                        story_kind,
+                        &stack,
+                        word,
+                        local,
+                        &element,
+                        reader.resolver(),
+                    )
+                    .is_none()
+                {
+                    let end = reader.buffer_position() as usize;
+                    let fragment = paragraph_fragment_with_bindings(
+                        &xml[before..end],
+                        end - before,
+                        &bindings,
+                    )?;
+                    let paragraph = parsed_physical_field_paragraph(&fragment)?;
+                    paragraphs.push(LegacyStoryParagraph {
+                        start: before,
+                        end,
+                        general_context: general_context(stack.len()),
+                        original: paragraph.clone(),
+                        paragraph,
+                    });
                 }
             }
             Event::Empty(element) if stack.is_empty() => {
@@ -15629,8 +15686,15 @@ fn paragraph_fragment_with_bindings(
     start_len: usize,
     bindings: &BTreeMap<String, Vec<u8>>,
 ) -> Result<Vec<u8>> {
+    // Declarations go before the `>` of a start tag, or the `/>` of an
+    // empty paragraph.
+    let close = if raw[..start_len].ends_with(b"/>") {
+        2
+    } else {
+        1
+    };
     let insert_at = start_len
-        .checked_sub(1)
+        .checked_sub(close)
         .ok_or_else(|| Error::Other("package story paragraph start tag is missing".to_owned()))?;
     let mut output = raw[..insert_at].to_vec();
     for (key, value) in bindings {

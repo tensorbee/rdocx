@@ -21372,7 +21372,7 @@ impl Document {
             .collect::<Result<Vec<_>>>()?;
         let mut result = Vec::new();
         let mut seen = HashSet::new();
-        for (source_index, paragraph, location, xml) in paragraphs {
+        for (source_index, _, paragraph, location, xml) in paragraphs {
             if !matches!(
                 location.story.kind,
                 StoryKind::TextBox | StoryKind::TableCell
@@ -21551,8 +21551,18 @@ impl Document {
         Ok(restored)
     }
 
-    pub(crate) fn comment_story_range_paragraphs(&self) -> Result<Vec<(ContentLocation, Vec<u8>)>> {
-        let mut paragraphs = self.story_range_paragraphs()?;
+    /// The checked range paragraphs in story order, each with its flow, as
+    /// the source index and flow that `story_range_paragraph_sources` gives,
+    /// and its offset in that source, which orders the paragraphs of a flow.
+    #[allow(clippy::type_complexity)] // Located paragraphs with their flow and source order.
+    pub(crate) fn comment_story_range_paragraphs(
+        &self,
+    ) -> Result<Vec<((usize, usize), usize, ContentLocation, Vec<u8>)>> {
+        let (_, paragraphs) = self.story_range_paragraph_sources()?;
+        let mut paragraphs = paragraphs
+            .into_iter()
+            .map(|(source, flow, span, location, xml)| ((source, flow), span.start, location, xml))
+            .collect::<Vec<_>>();
         let canonical = self.document.to_xml()?;
         let restored = self.namespace_restored_main_source()?;
         if restored == canonical {
@@ -21591,7 +21601,7 @@ impl Document {
                 .values()
                 .filter_map(|span| boundaries.get(&span.start).copied()),
         )?;
-        for (location, xml) in &mut paragraphs {
+        for (_, _, location, xml) in &mut paragraphs {
             if location.story.part_name != self.doc_part_name {
                 continue;
             }
@@ -21617,12 +21627,17 @@ impl Document {
         let (_, paragraphs) = self.story_range_paragraph_sources()?;
         Ok(paragraphs
             .into_iter()
-            .map(|(_, _, location, xml)| (location, xml))
+            .map(|(_, _, _, location, xml)| (location, xml))
             .collect())
     }
 
     /// List every checked range paragraph in story order, with the index of
-    /// its source and its span there, after building each package source once.
+    /// its source, its flow and its span there, after building each package
+    /// source once.
+    ///
+    /// The flow is the start offset of the paragraph's owner, or for a table
+    /// cell that of the innermost other owner holding it, so the paragraphs of
+    /// one flow are one story with its table cells, in source order.
     ///
     /// Stories keep the identities and order of [`Self::stories`]. Each source
     /// is scanned for its owners once and its paragraph scopes are inventoried
@@ -21632,7 +21647,7 @@ impl Document {
         &self,
     ) -> Result<(
         Vec<StorySource<'_>>,
-        Vec<(usize, Range<usize>, ContentLocation, Vec<u8>)>,
+        Vec<(usize, usize, Range<usize>, ContentLocation, Vec<u8>)>,
     )> {
         let sources = self.story_sources()?;
         let mut paragraphs = Vec::new();
@@ -21641,7 +21656,23 @@ impl Document {
         for (source_index, source) in sources.iter().enumerate() {
             let source_xml = source.xml.as_ref();
             let mut owners = Vec::new();
+            let mut flows = Vec::new();
+            // Owners come in start order, so the open non-cell owners nest.
+            let mut holders = Vec::<Range<usize>>::new();
             for owner in scan_story_owners(source_xml, source.root_kind)? {
+                while holders
+                    .last()
+                    .is_some_and(|holder| holder.end <= owner.full.start)
+                {
+                    holders.pop();
+                }
+                let flow = match holders.last() {
+                    Some(holder) if owner.kind == StoryKind::TableCell => holder.start,
+                    _ => owner.full.start,
+                };
+                if owner.kind != StoryKind::TableCell {
+                    holders.push(owner.full.clone());
+                }
                 let identity = (owner.kind, source.part_name.clone(), owner.owner_index);
                 if !seen.insert(identity) {
                     continue;
@@ -21653,29 +21684,32 @@ impl Document {
                     fingerprint: owner.fingerprint,
                 };
                 owners.push((story, owner));
+                flows.push(flow);
             }
             let spans = story_range_paragraph_spans(source_xml, &owners)?;
             let scopes = story_namespace_scopes_at(
                 source_xml,
                 spans.iter().flatten().map(|(_, span)| span.start),
             )?;
-            for story_spans in spans {
+            for (story_spans, flow) in spans.into_iter().zip(flows) {
                 for (location, span) in story_spans {
                     let scope = scopes.get(&span.start).ok_or_else(|| {
                         Error::Other("story paragraph namespace scope was not inventoried".into())
                     })?;
                     let xml = close_content_fragment_namespaces(&source_xml[span.clone()], scope)?;
-                    paragraphs.push((story_index, source_index, span, location, xml));
+                    paragraphs.push((story_index, source_index, flow, span, location, xml));
                 }
                 story_index += 1;
             }
         }
-        paragraphs.sort_by_key(|(story_index, _, span, _, _)| (*story_index, span.start));
+        paragraphs.sort_by_key(|(story_index, _, _, span, _, _)| (*story_index, span.start));
         Ok((
             sources,
             paragraphs
                 .into_iter()
-                .map(|(_, source_index, span, location, xml)| (source_index, span, location, xml))
+                .map(|(_, source_index, flow, span, location, xml)| {
+                    (source_index, flow, span, location, xml)
+                })
                 .collect(),
         ))
     }
@@ -22332,9 +22366,15 @@ impl Document {
             oxml_core::xml::reject_non_xml_characters("internal hyperlink", value)?;
         }
         crate::comments::validate_bookmark_name(bookmark)?;
-        let matching = self.story_ranges()?.into_iter().filter(|entry| {
-            matches!(entry.kind(), crate::StoryRangeKind::Bookmark { name, .. } if name == bookmark)
-        }).count();
+        let (ranges, across) = self.story_range_inventory()?;
+        let matching = ranges
+            .iter()
+            .map(crate::StoryRangeRef::kind)
+            .chain(&across)
+            .filter(|kind| {
+                matches!(kind, crate::StoryRangeKind::Bookmark { name, .. } if name == bookmark)
+            })
+            .count();
         if matching != 1 {
             return Err(Error::Other(
                 "internal hyperlink bookmark is missing or ambiguous".into(),
@@ -22443,7 +22483,7 @@ impl Document {
             ));
         }
         let run_count = paragraph.accepted_run_paths().len();
-        let ranges = self.story_ranges()?;
+        let (ranges, across) = self.story_range_inventory()?;
         let existing = ranges.iter().find_map(|entry| {
             let crate::StoryRangeKind::Bookmark { name, .. } = entry.kind() else {
                 return None;
@@ -22462,7 +22502,9 @@ impl Document {
             None => {
                 let names = ranges
                     .iter()
-                    .filter_map(|entry| match entry.kind() {
+                    .map(crate::StoryRangeRef::kind)
+                    .chain(&across)
+                    .filter_map(|kind| match kind {
                         crate::StoryRangeKind::Bookmark { name, .. } => Some(name.as_str()),
                         _ => None,
                     })
@@ -44739,7 +44781,12 @@ mod tests {
                 reference_story_range_paragraphs(&document).unwrap()
             );
             assert_eq!(
-                document.comment_story_range_paragraphs().unwrap(),
+                document
+                    .comment_story_range_paragraphs()
+                    .unwrap()
+                    .into_iter()
+                    .map(|(_, _, location, xml)| (location, xml))
+                    .collect::<Vec<_>>(),
                 reference_comment_story_range_paragraphs(&document).unwrap()
             );
             assert_eq!(

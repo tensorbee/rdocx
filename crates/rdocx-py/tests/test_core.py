@@ -4699,6 +4699,138 @@ def test_comment_anchor_fields_preserve_constructor_compatibility():
         document.add_comment(comment.anchor, author="Ben", text="Stale span")
     reopened = rdocx.Document.from_bytes(document.to_bytes())
     assert [item.anchor_text for item in reopened.comments] == [preserved, preserved]
+    assert detached.anchor_issue is None
+    assert comment.anchor_issue is None
+
+
+def _with_comment_markers(document, edit, ids):
+    """Rewrite the main part with `edit` and add one comment per id."""
+    w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    archive = zipfile.ZipFile(io.BytesIO(document.to_bytes()))
+    parts = {item.filename: archive.read(item.filename) for item in archive.infolist()}
+    parts["word/document.xml"] = edit(parts["word/document.xml"].decode()).encode()
+    entries = "".join(
+        f'<w:comment w:id="{id}" w:author="A"><w:p><w:r><w:t>remark {id}</w:t></w:r></w:p></w:comment>'
+        for id in ids
+    )
+    parts["word/comments.xml"] = f'<w:comments xmlns:w="{w}">{entries}</w:comments>'.encode()
+    parts["[Content_Types].xml"] = parts["[Content_Types].xml"].replace(
+        b"</Types>",
+        b'<Override PartName="/word/comments.xml" '
+        b'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml"/></Types>',
+    )
+    parts["word/_rels/document.xml.rels"] = parts["word/_rels/document.xml.rels"].replace(
+        b"</Relationships>",
+        b'<Relationship Id="rIdC" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" '
+        b'Target="comments.xml"/></Relationships>',
+    )
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as rewritten:
+        for name, data in parts.items():
+            rewritten.writestr(name, data)
+    import rdocx
+
+    return rdocx.Document.from_bytes(output.getvalue())
+
+
+@pytest.mark.parametrize("start_in_control", [False, True])
+def test_comment_across_table_cells_is_listed_with_its_anchor(start_in_control):
+    # Issue 405, as Google Docs writes a comment selected across two cells.
+    import rdocx
+
+    document = rdocx.Document()
+    table = document.add_table(1, 2)
+    table.cell(0, 0).paragraphs[0].add_run("Preconditions and test data")
+    table.cell(0, 1).paragraphs[0].add_run("the second cell")
+    start = '<w:commentRangeStart w:id="0"/>'
+    if start_in_control:
+        start = (f'<w:sdt><w:sdtPr><w:tag w:val="goog_rdk_0"/></w:sdtPr>'
+                 f"<w:sdtContent>{start}</w:sdtContent></w:sdt>")
+
+    def edit(xml):
+        first = xml.index("<w:r>", xml.index("<w:tc>"))
+        xml = xml[:first] + start + xml[first:]
+        second = xml.index("</w:p>", xml.index("the second cell"))
+        end = '<w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r>'
+        return xml[:second] + end + xml[second:]
+
+    document = _with_comment_markers(document, edit, [0])
+    (comment,) = document.comments
+    assert comment.anchor_text == "Preconditions and test data\nthe second cell"
+    assert comment.anchor_issue is None
+    assert comment.anchor.start.item.text == "Preconditions and test data"
+    assert comment.anchor.end.item.text == "the second cell"
+    stories = [(position.item.story.kind, position.item.story.owner_index)
+               for position in (comment.anchor.start, comment.anchor.end)]
+    assert stories == [("table_cell", 0), ("table_cell", 1)]
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert reopened.comments[0].anchor_text == comment.anchor_text
+    assert document.remove_comment(0)
+    assert document.comments == ()
+
+
+def test_fields_update_beside_a_self_closing_header_paragraph():
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("body")
+    document.set_header("header")
+    archive = zipfile.ZipFile(io.BytesIO(document.to_bytes()))
+    parts = {item.filename: archive.read(item.filename) for item in archive.infolist()}
+    (header,) = [name for name, data in parts.items() if b"<w:hdr" in data]
+    parts[header] = parts[header].replace(
+        b"</w:hdr>",
+        b"<w:tbl><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl><w:p/></w:hdr>",
+    )
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as rewritten:
+        for name, data in parts.items():
+            rewritten.writestr(name, data)
+    reopened = rdocx.Document.from_bytes(output.getvalue())
+    assert reopened.update_fields() == 0
+
+
+@pytest.mark.parametrize("by_story_range", [False, True])
+def test_comment_moves_whichever_range_made_it(by_story_range):
+    import rdocx
+
+    def story_range(document, body_index):
+        item = next(item for item in document.story_items if item.story.kind == "body"
+                    and item.kind == "paragraph" and item.direct_body_index == body_index)
+        return rdocx.StoryRunRange(start=rdocx.StoryRunPosition(item=item, run_index=0),
+                                   end=rdocx.StoryRunPosition(item=item, run_index=1))
+
+    document = rdocx.Document()
+    document.add_paragraph("the commented paragraph")
+    document.add_paragraph("the paragraph the comment moves to")
+    where = story_range(document, 0) if by_story_range else rdocx.RunRange(
+        start=rdocx.RunPosition(body_index=0, run_index=0),
+        end=rdocx.RunPosition(body_index=0, run_index=1))
+    comment = document.add_comment(where, author="Reviewer", text="a remark")
+    document.move_comment(comment, story_range(document, 1))
+    assert [item.anchor_text for item in document.comments] == ["the paragraph the comment moves to"]
+
+
+def test_comment_listing_keeps_the_others_when_one_anchor_cannot_be_read():
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("kept")
+    document.add_paragraph("wrapped")
+
+    def edit(xml):
+        for id, text in ((0, "kept"), (1, "wrapped")):
+            run = f"<w:r><w:t>{text}</w:t></w:r>"
+            content = run if id == 0 else f"<w:smartTag>{run}</w:smartTag>"
+            xml = xml.replace(run, f'<w:commentRangeStart w:id="{id}"/>{content}<w:commentRangeEnd w:id="{id}"/>'
+                                   f'<w:r><w:commentReference w:id="{id}"/></w:r>')
+        return xml
+
+    document = _with_comment_markers(document, edit, [0, 1])
+    kept, wrapped = document.comments
+    assert (kept.anchor_text, kept.anchor_issue) == ("kept", None)
+    assert wrapped.anchor is None and wrapped.anchor_text is None
+    assert "comment 1" in wrapped.anchor_issue
 
 
 @pytest.mark.parametrize("kind", ["body", "table_cell", "header", "footer"])

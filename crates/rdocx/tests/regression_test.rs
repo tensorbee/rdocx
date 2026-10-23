@@ -61251,7 +61251,15 @@ fn comment_anchor_refuses_malformed_or_unrepresentable_without_losing_source() {
         let before = document.to_bytes().unwrap();
         assert!(document.comment_anchor(id).is_err(), "{content}");
         assert!(document.comment_anchor_text(id).is_err(), "{content}");
-        assert!(document.comment_anchor_snapshots().is_err(), "{content}");
+        // The listing keeps the comment, its anchor the same error.
+        assert_eq!(
+            document.comment_anchor_snapshots().unwrap()[&id]
+                .as_ref()
+                .unwrap_err()
+                .to_string(),
+            document.comment_anchor(id).unwrap_err().to_string(),
+            "{content}"
+        );
         assert_eq!(document.to_bytes().unwrap(), before);
     }
     // Foreign lookalikes never supply an endpoint or contribute accepted text.
@@ -61322,6 +61330,10 @@ fn comment_anchor_related_block_paths_aliases_and_cross_owner_refusal() {
         if cross_owner {
             assert!(document.comment_anchor(id).is_err());
             assert!(document.comment_anchor_text(id).is_err());
+            // A pair from the body into a header leaves its part, which story
+            // ranges still refuse, while the listing keeps the comment.
+            assert!(document.story_ranges().is_err());
+            assert!(document.comment_anchor_snapshots().unwrap()[&id].is_err());
         } else {
             assert_eq!(
                 document.comment_anchor_text(id).unwrap().as_deref(),
@@ -61348,6 +61360,580 @@ fn comment_anchor_related_block_paths_aliases_and_cross_owner_refusal() {
             assert_eq!(document.to_bytes().unwrap(), before);
         }
     }
+}
+
+/// Issue 405: a comment range that runs from one table cell into another, as
+/// Google Docs writes one selected across two cells with its start plain or in
+/// a `goog_rdk` content control, reads in physical order across the cells.
+#[test]
+fn comment_anchor_runs_across_table_cells_in_physical_order() {
+    let mut seed = Document::new();
+    seed.add_paragraph("seed");
+    let id = seed
+        .add_comment(
+            RunRange {
+                start: RunPosition {
+                    body_index: 0,
+                    run_index: 0,
+                },
+                end: RunPosition {
+                    body_index: 0,
+                    run_index: 1,
+                },
+            },
+            "Ada",
+            None,
+            "source",
+        )
+        .unwrap();
+    let seed = seed.to_bytes().unwrap();
+    let start = format!(r#"<w:commentRangeStart w:id="{id}"/>"#);
+    let goog = format!(
+        r#"<w:sdt><w:sdtPr><w:id w:val="-346012225"/><w:tag w:val="goog_rdk_0"/></w:sdtPr><w:sdtContent>{start}</w:sdtContent></w:sdt>"#
+    );
+    let end =
+        format!(r#"<w:commentRangeEnd w:id="{id}"/><w:r><w:commentReference w:id="{id}"/></w:r>"#);
+    let p = |head: &str, text: &str, tail: &str| {
+        format!("<w:p>{head}<w:r><w:t>{text}</w:t></w:r>{tail}</w:p>")
+    };
+    let row = |left: String, right: String| {
+        format!("<w:tr><w:tc>{left}</w:tc><w:tc>{right}</w:tc></w:tr>")
+    };
+    let table = |rows: String| format!("<w:tbl>{rows}</w:tbl>");
+    let cell = StoryKind::TableCell;
+    let body = StoryKind::Body;
+    for (label, xml, expected, start_at, end_at) in [
+        (
+            "plain start",
+            table(row(
+                p(&start, "Preconditions and test data", ""),
+                p("", "the second cell", &end),
+            )),
+            "Preconditions and test data\nthe second cell",
+            (cell, 0, 0),
+            (cell, 1, 0),
+        ),
+        (
+            "goog_rdk start",
+            table(row(
+                p(&goog, "Preconditions and test data", ""),
+                p("", "the second cell", &end),
+            )),
+            "Preconditions and test data\nthe second cell",
+            (cell, 0, 0),
+            (cell, 1, 0),
+        ),
+        (
+            "next row",
+            table(row(p("", "A", ""), p(&start, "B", "")) + &row(p("", "C", &end), p("", "D", ""))),
+            "B\nC",
+            (cell, 1, 0),
+            (cell, 2, 0),
+        ),
+        (
+            "body into cell",
+            p(&start, "before", "")
+                + &table(row(p("", "A", ""), p("", "B", &end)))
+                + &p("", "after", ""),
+            "before\nA\nB",
+            (body, 0, 0),
+            (cell, 1, 0),
+        ),
+        (
+            "cell into body",
+            p("", "before", "")
+                + &table(row(p("", "A", ""), p(&start, "B", "")))
+                + &p("", "after", &end),
+            "B\nafter",
+            (cell, 1, 0),
+            (body, 0, 2),
+        ),
+        (
+            "body around a table",
+            p(&start, "before", "")
+                + &table(row(p("", "A", ""), p("", "B", "")))
+                + &p("", "after", &end),
+            "before\nA\nB\nafter",
+            (body, 0, 0),
+            (body, 0, 2),
+        ),
+        (
+            "nested table",
+            table(row(
+                p(&start, "A", "") + &table(row(p("", "N", ""), p("", "M", ""))) + &p("", "A2", ""),
+                p("", "B", &end),
+            )),
+            "A\nN\nM\nA2\nB",
+            (cell, 0, 0),
+            (cell, 3, 0),
+        ),
+    ] {
+        let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(&seed)).unwrap();
+        package.set_part("/word/document.xml", wrap_word_body(&xml).into_bytes());
+        let mut output = std::io::Cursor::new(Vec::new());
+        package.write_to(&mut output).unwrap();
+        let mut document = Document::from_bytes(output.get_ref()).unwrap();
+        let before = document.to_bytes().unwrap();
+        let endpoint = |position: &StoryRunPosition| {
+            let story = position.location.story();
+            (
+                story.kind(),
+                story.owner_index(),
+                position.location.index_path()[0],
+                position.run_index,
+            )
+        };
+        let range = document.comment_anchor(id).unwrap().unwrap();
+        assert_eq!(
+            (endpoint(&range.start), endpoint(&range.end)),
+            (
+                (start_at.0, start_at.1, start_at.2, 0),
+                (end_at.0, end_at.1, end_at.2, 1)
+            ),
+            "{label}"
+        );
+        assert_eq!(
+            document.comment_anchor_text(id).unwrap().as_deref(),
+            Some(expected),
+            "{label}"
+        );
+        assert_eq!(
+            document.comment_anchor_snapshots().unwrap()[&id]
+                .as_ref()
+                .unwrap(),
+            &(Some(range.clone()), Some(expected.to_owned())),
+            "{label}"
+        );
+        assert_eq!(document.to_bytes().unwrap(), before, "{label}");
+        let reopened = Document::from_bytes(&before).unwrap();
+        let again = reopened.comment_anchor(id).unwrap().unwrap();
+        assert_eq!(
+            (endpoint(&again.start), endpoint(&again.end)),
+            (endpoint(&range.start), endpoint(&range.end)),
+            "{label}"
+        );
+        assert_eq!(
+            reopened.comment_anchor_text(id).unwrap().as_deref(),
+            Some(expected),
+            "{label}"
+        );
+        // A pair whose ends are in two owners is no story range. Moving it
+        // or placing its range refuses and leaves the document unchanged.
+        let cross_owner = range.start.location.story() != range.end.location.story();
+        assert_eq!(
+            document
+                .story_ranges()
+                .unwrap()
+                .iter()
+                .any(|entry| matches!(
+                    entry.kind(),
+                    rdocx::StoryRangeKind::Comment { id: found } if *found == id
+                )),
+            !cross_owner,
+            "{label}"
+        );
+        if cross_owner {
+            assert!(
+                document
+                    .move_comment(id, range.clone())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("across story owners"),
+                "{label}"
+            );
+            assert!(
+                document
+                    .move_comment_to_text(id, &expected[..1], 0)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("across story owners"),
+                "{label}"
+            );
+            assert!(
+                document
+                    .add_story_comment(range.clone(), "Ben", None, "copy")
+                    .unwrap_err()
+                    .to_string()
+                    .contains("one story owner"),
+                "{label}"
+            );
+            assert_eq!(document.to_bytes().unwrap(), before, "{label}");
+        }
+        // Thread edits keep the range, and removal takes the comment whole.
+        document.reply_to(id, "Ben", "reply").unwrap();
+        assert!(document.resolve_comment(id, true).unwrap());
+        assert_eq!(
+            document.comment_anchor_text(id).unwrap().as_deref(),
+            Some(expected),
+            "{label}"
+        );
+        assert!(document.remove_comment(id).unwrap(), "{label}");
+        assert!(document.comments().is_empty(), "{label}");
+        let main = document_xml(&mut document);
+        assert!(
+            !main.contains("commentRange") && !main.contains("commentReference"),
+            "{label}"
+        );
+    }
+}
+
+/// Issue 405: a bookmark or permission range across table cells, or from a
+/// body paragraph into a cell, is no story range, yet story edits work on its
+/// document, its name and identifier stay taken, and a REF to it resolves in
+/// the body and refuses by name in a header.
+#[test]
+fn story_edits_work_beside_bookmarks_and_permissions_across_cells() {
+    let mut seed = Document::new();
+    seed.add_paragraph("seed");
+    seed.set_header("header");
+    let id = seed
+        .add_comment(
+            RunRange {
+                start: RunPosition {
+                    body_index: 0,
+                    run_index: 0,
+                },
+                end: RunPosition {
+                    body_index: 0,
+                    run_index: 1,
+                },
+            },
+            "Ada",
+            None,
+            "source",
+        )
+        .unwrap();
+    let header = f254_story(&seed, StoryKind::Header);
+    let seed = seed.to_bytes().unwrap();
+    let field = |target: &str| {
+        format!(
+            r#"<w:p><w:fldSimple w:instr=" REF {target} "><w:r><w:t>OLD</w:t></w:r></w:fldSimple></w:p>"#
+        )
+    };
+    let build = |extra: &str| {
+        let body = format!(
+            r#"<w:p><w:bookmarkStart w:id="3" w:name="into"/><w:r><w:t>before</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:bookmarkStart w:id="1" w:name="across"/><w:permStart w:id="0" w:ed="ada"/><w:r><w:t>A</w:t></w:r><w:bookmarkEnd w:id="3"/></w:p></w:tc><w:tc><w:p><w:r><w:t>B</w:t></w:r><w:permEnd w:id="0"/><w:bookmarkEnd w:id="1"/></w:p></w:tc></w:tr></w:tbl><w:p><w:commentRangeStart w:id="{id}"/><w:r><w:t>body</w:t></w:r><w:commentRangeEnd w:id="{id}"/><w:r><w:commentReference w:id="{id}"/></w:r></w:p>{}{}<w:p><w:r><w:t>one</w:t></w:r></w:p><w:p><w:r><w:t>two</w:t></w:r></w:p><w:p><w:r><w:t>three</w:t></w:r></w:p>{extra}"#,
+            field("across"),
+            field("header_across"),
+        );
+        let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(&seed)).unwrap();
+        // Keep the section properties, which reference the header.
+        let main =
+            String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+        let head = main.find("<w:body>").unwrap() + "<w:body>".len();
+        let main = format!(
+            "{}{body}{}",
+            &main[..head],
+            &main[main.find("<w:sectPr").unwrap()..]
+        );
+        package.set_part("/word/document.xml", main.into_bytes());
+        package.set_part(
+            header.part_name(),
+            format!(
+                r#"<w:hdr xmlns:w="{W_NS}"><w:tbl><w:tr><w:tc><w:p><w:bookmarkStart w:id="2" w:name="header_across"/><w:r><w:t>H1</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>H2</w:t></w:r><w:bookmarkEnd w:id="2"/></w:p></w:tc></w:tr></w:tbl><w:p/></w:hdr>"#
+            )
+            .into_bytes(),
+        );
+        let mut output = std::io::Cursor::new(Vec::new());
+        package.write_to(&mut output).unwrap();
+        Document::from_bytes(output.get_ref()).unwrap()
+    };
+    // An in-owner bookmark reusing a cross-owner name is still a duplicate.
+    let duplicate = build(
+        r#"<w:p><w:bookmarkStart w:id="9" w:name="across"/><w:r><w:t>dup</w:t></w:r><w:bookmarkEnd w:id="9"/></w:p>"#,
+    );
+    assert!(duplicate.story_ranges().is_err());
+    let mut document = build("");
+    let ranges = document.story_ranges().unwrap();
+    assert!(ranges.iter().all(|entry| matches!(
+        entry.kind(),
+        rdocx::StoryRangeKind::Comment { id: found } if *found == id
+    )));
+    let outcomes = document
+        .evaluate_fields(&FieldEvaluationContext::default())
+        .unwrap()
+        .into_iter()
+        .map(|evaluation| evaluation.outcome)
+        .collect::<Vec<_>>();
+    assert!(
+        matches!(&outcomes[0], FieldOutcome::Resolved(text) if text.contains('A') && text.contains('B')),
+        "{outcomes:?}"
+    );
+    assert!(
+        matches!(&outcomes[1], FieldOutcome::KeepStored { diagnostic } if diagnostic.contains("header_across runs across story owners")),
+        "{outcomes:?}"
+    );
+    let at = |document: &Document, text: &str| {
+        document
+            .story_item_snapshots()
+            .unwrap()
+            .into_iter()
+            .find(|item| {
+                item.location().story().kind() == StoryKind::Body
+                    && item.location().item_kind() == StoryItemKind::Paragraph
+                    && item.text() == Some(text)
+            })
+            .unwrap()
+            .location()
+            .clone()
+    };
+    let paragraph = |document: &Document, text: &str| {
+        let location = at(document, text);
+        StoryRunRange {
+            start: StoryRunPosition {
+                location: location.clone(),
+                run_index: 0,
+            },
+            end: StoryRunPosition {
+                location,
+                run_index: 1,
+            },
+        }
+    };
+    for name in ["across", "into", "header_across"] {
+        assert!(
+            document
+                .add_story_bookmark(name, paragraph(&document, "one"))
+                .unwrap_err()
+                .to_string()
+                .contains("already exists"),
+            "{name}"
+        );
+    }
+    assert!(
+        document
+            .remove_story_bookmark(1)
+            .unwrap_err()
+            .to_string()
+            .contains("across story owners")
+    );
+    document
+        .add_story_bookmark("fresh", paragraph(&document, "one"))
+        .unwrap();
+    let permission = document
+        .add_story_permission_range(Some("ben"), None, paragraph(&document, "two"))
+        .unwrap();
+    assert_ne!(permission, 0);
+    document
+        .add_story_comment(paragraph(&document, "three"), "Ben", None, "story")
+        .unwrap();
+    document
+        .move_comment(id, paragraph(&document, "before"))
+        .unwrap();
+    document
+        .insert_caption(&at(&document, "body"), &rdocx::CaptionOptions::default())
+        .unwrap();
+    document.rebuild_generated_tables().unwrap();
+    let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+    assert!(reopened.story_ranges().is_ok());
+}
+
+/// A self-closing paragraph in a header, footer or note, alone, after a table
+/// or in a cell, is one story paragraph for field evaluation as it is for the
+/// layout source inventory, which it was missing from.
+#[test]
+fn fields_evaluate_beside_self_closing_story_paragraphs() {
+    let mut seed = Document::new();
+    seed.add_paragraph("BODY");
+    seed.set_header("HEAD");
+    seed.set_footer("FOOT");
+    seed.add_footnote("FNOTE");
+    let body = seed.paragraph_story_location(0).unwrap().unwrap();
+    seed.create_endnote(&body, "ENOTE").unwrap();
+    let stories = seed.stories().unwrap();
+    let part = |kind: StoryKind| {
+        stories
+            .iter()
+            .find(|story| story.kind() == kind)
+            .unwrap()
+            .part_name()
+            .to_owned()
+    };
+    let parts = [
+        (part(StoryKind::Header), "HEAD"),
+        (part(StoryKind::Footer), "FOOT"),
+        (part(StoryKind::Footnote), "FNOTE"),
+        (part(StoryKind::Endnote), "ENOTE"),
+    ];
+    let seed = seed.to_bytes().unwrap();
+    let page = r#"<w:p><w:fldSimple w:instr=" PAGE "><w:r><w:t>9</w:t></w:r></w:fldSimple></w:p>"#;
+    let after = |xml: &str, marker: &str, insertion: &str| {
+        let end = xml[xml.find(marker).unwrap()..].find("</w:p>").unwrap()
+            + xml.find(marker).unwrap()
+            + "</w:p>".len();
+        format!("{}{insertion}{}", &xml[..end], &xml[end..])
+    };
+    for shape in [
+        "<w:p/>",
+        "<w:tbl><w:tr><w:tc><w:p><w:r><w:t>C</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>",
+        "<w:tbl><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>",
+    ] {
+        for (part_name, marker) in &parts {
+            let mut package =
+                oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(&seed)).unwrap();
+            let xml = String::from_utf8(package.get_part(part_name).unwrap().to_vec()).unwrap();
+            package.set_part(
+                part_name,
+                after(&xml, marker, &format!("{shape}{page}")).into_bytes(),
+            );
+            let mut output = std::io::Cursor::new(Vec::new());
+            package.write_to(&mut output).unwrap();
+            let mut document = Document::from_bytes(output.get_ref()).unwrap();
+            let evaluations = document
+                .evaluate_fields(&FieldEvaluationContext::default())
+                .unwrap_or_else(|error| panic!("{shape} in {part_name}: {error}"));
+            assert_eq!(evaluations.len(), 1, "{shape} in {part_name}");
+            document
+                .update_fields(&FieldEvaluationContext::default())
+                .unwrap();
+            document.update_layout_backed_fields().unwrap();
+            let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+            assert_eq!(
+                reopened
+                    .evaluate_fields(&FieldEvaluationContext::default())
+                    .unwrap()
+                    .len(),
+                1,
+                "{shape} in {part_name}"
+            );
+        }
+    }
+}
+
+/// A comment that `add_comment` made from a `RunRange` moves like one made
+/// from a `StoryRunRange`. That in-place edit left the main part of the
+/// package behind the typed body, and the move read that part as its source.
+#[test]
+fn comment_added_from_a_run_range_moves_before_and_after_reopen() {
+    for reopen in [false, true] {
+        for to_text in [false, true] {
+            let mut document = Document::new();
+            document.add_paragraph("the commented paragraph");
+            document.add_paragraph("the paragraph the comment moves to");
+            let id = document
+                .add_comment(
+                    RunRange {
+                        start: RunPosition {
+                            body_index: 0,
+                            run_index: 0,
+                        },
+                        end: RunPosition {
+                            body_index: 0,
+                            run_index: 1,
+                        },
+                    },
+                    "Reviewer",
+                    None,
+                    "a remark",
+                )
+                .unwrap();
+            if reopen {
+                document = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+            }
+            let expected = if to_text {
+                document.move_comment_to_text(id, "moves", 0).unwrap();
+                "moves"
+            } else {
+                let location = document.paragraph_story_location(1).unwrap().unwrap();
+                document
+                    .move_comment(
+                        id,
+                        StoryRunRange {
+                            start: StoryRunPosition {
+                                location: location.clone(),
+                                run_index: 0,
+                            },
+                            end: StoryRunPosition {
+                                location,
+                                run_index: 1,
+                            },
+                        },
+                    )
+                    .unwrap();
+                "the paragraph the comment moves to"
+            };
+            assert_eq!(document.comments().len(), 1);
+            assert_eq!(document.comments()[0].id(), id);
+            assert_eq!(
+                document.comment_anchor_text(id).unwrap().as_deref(),
+                Some(expected)
+            );
+            let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+            assert_eq!(
+                reopened.comment_anchor_text(id).unwrap().as_deref(),
+                Some(expected)
+            );
+        }
+    }
+}
+
+/// Issue 405: a comment whose anchor cannot be read does not fail the
+/// listing. Its own entry is the error that `comment_anchor` returns.
+#[test]
+fn comment_listing_keeps_other_comments_when_one_anchor_cannot_be_read() {
+    let mut seed = Document::new();
+    seed.add_paragraph("kept");
+    let range = RunRange {
+        start: RunPosition {
+            body_index: 0,
+            run_index: 0,
+        },
+        end: RunPosition {
+            body_index: 0,
+            run_index: 1,
+        },
+    };
+    let kept = seed.add_comment(range, "Ada", None, "kept").unwrap();
+    let wrapped = seed.add_comment(range, "Ben", None, "wrapped").unwrap();
+    let boxed = seed.add_comment(range, "Cy", None, "boxed").unwrap();
+    let marked = |id: i32, content: &str| {
+        format!(
+            r#"<w:p><w:commentRangeStart w:id="{id}"/>{content}<w:commentRangeEnd w:id="{id}"/><w:r><w:commentReference w:id="{id}"/></w:r></w:p>"#
+        )
+    };
+    // The third range runs from a cell into a text box in the next cell, a
+    // flow of its own, so it has no ordered end in the cells' story.
+    let body = marked(kept, "<w:r><w:t>kept</w:t></w:r>")
+        + &marked(
+            wrapped,
+            "<w:smartTag><w:r><w:t>wrapped</w:t></w:r></w:smartTag>",
+        )
+        + &format!(
+            r#"<w:tbl><w:tr><w:tc><w:p><w:commentRangeStart w:id="{boxed}"/><w:r><w:t>A</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>B</w:t></w:r><w:r><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml"><v:textbox><w:txbxContent><w:p><w:r><w:t>T</w:t></w:r><w:commentRangeEnd w:id="{boxed}"/><w:r><w:commentReference w:id="{boxed}"/></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>"#
+        );
+    let bytes = seed.to_bytes().unwrap();
+    let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(&bytes)).unwrap();
+    package.set_part("/word/document.xml", wrap_word_body(&body).into_bytes());
+    let mut output = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut output).unwrap();
+    let mut document = Document::from_bytes(output.get_ref()).unwrap();
+    let before = document.to_bytes().unwrap();
+    let listed = document.comment_anchor_snapshots().unwrap();
+    assert_eq!(
+        listed.keys().copied().collect::<Vec<_>>(),
+        vec![kept, wrapped, boxed]
+    );
+    assert!(
+        listed[&boxed]
+            .as_ref()
+            .unwrap_err()
+            .to_string()
+            .contains("no ordered end")
+    );
+    assert!(document.comment_anchor(boxed).is_err());
+    assert_eq!(listed[&kept].as_ref().unwrap().1.as_deref(), Some("kept"));
+    let issue = document.comment_anchor(wrapped).unwrap_err().to_string();
+    assert_eq!(listed[&wrapped].as_ref().unwrap_err().to_string(), issue);
+    assert!(document.comment_anchor_text(wrapped).is_err());
+    assert_eq!(
+        document.comment_anchor_text(kept).unwrap().as_deref(),
+        Some("kept")
+    );
+    assert_eq!(document.comments().len(), 3);
+    // Edits that read the range stay strict.
+    let anchor = document.comment_anchor(kept).unwrap().unwrap();
+    assert!(document.move_comment(wrapped, anchor).is_err());
+    assert_eq!(document.to_bytes().unwrap(), before);
 }
 
 #[test]
@@ -61503,7 +62089,7 @@ fn comment_anchor_listing_proves_absence_without_weakening_owned_graph() {
     let before = document.to_bytes().unwrap();
     let snapshots = document.comment_anchor_snapshots().unwrap();
     assert_eq!(snapshots.keys().copied().collect::<Vec<_>>(), vec![id]);
-    assert_eq!(snapshots[&id].1.as_deref(), Some("owned"));
+    assert_eq!(snapshots[&id].as_ref().unwrap().1.as_deref(), Some("owned"));
     assert!(document.comment_anchor(77).is_err());
     assert!(document.validate_comment_ownership().is_err());
     assert_eq!(document.to_bytes().unwrap(), before);

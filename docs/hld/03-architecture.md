@@ -2215,11 +2215,19 @@ read-only view over the typed comment and its comments-extended thread entry.
 Its checked `anchor()` and `anchor_text()` accessors share the document's
 qualified comment ownership proof. `Document::comment_anchor` returns an
 accepted-view `StoryRunRange`, and `comment_anchor_text` returns exactly the
-selected accepted display, with one newline between paragraphs. A known
+selected accepted display, with one newline between paragraphs. A range
+runs in physical order through one flow, a story owner with the table cells it
+holds, so a range across cells or between a cell and the story around its
+table has endpoints in two owners. A body range around a whole table now reads
+the paragraphs of its cells, which it used to skip: paragraphs `before` and
+`after` around a table of cells `A` and `B` read `before\nA\nB\nafter`
+instead of `before\nafter`, and a cell range around a nested table reads the
+nested cells too. A known
 orphan returns no range or text, and a reference-only point returns no paired
 range with empty text. Replies do not inherit a fabricated parent range.
 Unknown identities and malformed, ambiguous or unprojectable selected sources
-return errors. Listing validates all owned definitions and companions, while
+return errors. The batch listing keeps such an error per comment, so one
+comment never fails the others. Listing validates all owned definitions and companions, while
 raw marker ids proven absent from qualified definitions do not invent records
 or block established comparison reads. Strict deletion and CLI ownership
 validation still reject those undefined markers, and reads preserve their XML. Source-order temporary projections reuse the existing paragraph
@@ -2230,8 +2238,8 @@ represent it faithfully. Supported controls, revisions and ordinary field
 caches retain accepted-view semantics. Multi-paragraph insertion qualifies both
 source endpoints before publishing either, retaining stale-owner checks.
 `Document::move_comment` selects a complete root range and reference through
-that same qualified proof. Replies, unknown ids and incomplete or ambiguous
-sources refuse atomically. Moving preserves thread identity and metadata,
+that same qualified proof. Replies, unknown ids, ranges across owners and
+incomplete or ambiguous sources refuse atomically. Moving preserves thread identity and metadata,
 transports the original reference properties and opaque attributes, and leaves
 mixed-run neighbors in source order. Destination paragraph identity and run
 boundaries rebase after removal. Only newly empty pure Google marker controls

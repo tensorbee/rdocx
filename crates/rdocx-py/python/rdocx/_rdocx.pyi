@@ -198,6 +198,7 @@ class Comment:
         resolved: bool | None,
         anchor_text: str | None = None,
         anchor: StoryRunRange | None = None,
+        anchor_issue: str | None = None,
     ) -> Comment: ...
     @property
     def id(self) -> int: ...
@@ -217,6 +218,8 @@ class Comment:
     def anchor_text(self) -> str | None: ...
     @property
     def anchor(self) -> StoryRunRange | None: ...
+    @property
+    def anchor_issue(self) -> str | None: ...
 
 
 @_final

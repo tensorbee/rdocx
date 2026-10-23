@@ -2362,20 +2362,31 @@ revision. `CommentRef` exposes
 comment metadata, text, parent identity, resolved state and checked accepted-view
 anchor access without permitting part-local mutation. `resolved` is `Option<bool>` in Rust and `bool` or `None` in Python. A missing `commentsExtended` entry is `None`. A library-written comment that still has an extension is `False`. The CLI treats only `Some(true)` as resolved. Frozen Python `Comment`
 snapshots retain the seven original keyword arguments and add optional
-`anchor_text` and `anchor` values, both defaulting to `None` for manually
-constructed records. Equality retains the original seven metadata fields, since
-derived revision-bound locations are not comment metadata identity. Document
-listing materializes real `StoryRunRange`
-endpoints with checked story identity, paragraph path and revision. Paragraphs
+`anchor_text`, `anchor` and `anchor_issue` values, all defaulting to `None` for
+manually constructed records. Equality retains the original seven metadata
+fields, since derived revision-bound locations are not comment metadata
+identity. Document listing materializes real `StoryRunRange`
+endpoints with checked story identity, paragraph path and revision. A range
+that runs from one table cell into another, or between a cell and the story
+around its table, reads in physical order, its text one newline between
+paragraphs, and its two endpoints then name different story owners. The same
+walk reads the cells of a table inside a range: a body range from `before`
+around a table of cells `A` and `B` to `after` reads `before\nA\nB\nafter`,
+where it read `before\nafter` before, and a cell range around a nested table
+reads the nested cells. Paragraphs
 directly inside block controls retain their two-segment path and actual containing
 body index. Recursive facade handles use the actual direct paragraph identity,
 so nested control or table descendants have no two-segment location. Non-body
 owners never acquire a body index. Snapshots remain readable
-after mutation, while reuse of their stale range refuses. Listing propagates
-extraction errors instead of converting unsupported sources to orphans.
-CLI `comment list --json` retains metadata and adds nullable `anchor_text` and
-`anchor`, with explicit start/end story kind, part, owner index, paragraph kind,
-index path, run index and containing body index. Its scope is `all_stories`.
+after mutation, while reuse of their stale range refuses. A failure of the
+document, such as its comment ownership, fails the listing. A comment whose own
+anchor cannot be read is still listed, with no anchor or anchor text and the
+reason in `anchor_issue`, so it never reads as an orphan, and
+`Document::comment_anchor` returns that reason as its error.
+CLI `comment list --json` retains metadata and adds nullable `anchor_text`,
+`anchor` and `anchor_issue`, with explicit start/end story kind, part, owner
+index, paragraph kind, index path, run index and containing body index. Its
+scope is `all_stories`.
 Empty point text differs from orphan null text, and replies have no invented
 parent range. `rdocx-cli comment` lists, adds, replies to, resolves, and
 removes comments. Add ranges use explicit zero-based, half-open body paragraph
@@ -2422,7 +2433,12 @@ The additive native pre-1.0 story range API exposes `StoryRangeKind`,
 accepted run boundaries and pair order before committing. Permission starts
 retain an editor or group, while proofing pairs use `spell` or `gram` and no
 numeric id. Removing a comment pair retains its reference and definition as
-a point comment. Moving the pair relocates the reference with it. Existing
+a point comment. Moving the pair relocates the reference with it. A
+bookmark, comment or permission pair whose start and end are in two owners of
+one part, such as one across table cells, is not listed, while its name and id
+stay taken. Moving that comment or removing that bookmark refuses. A REF to
+that bookmark reads it in the main story and refuses by name in another story.
+Existing
 Python, WASM and CLI APIs remain source compatible and preserve these markers.
 
 Native Word callers author captions with `CaptionOptions` and `CaptionTarget`,

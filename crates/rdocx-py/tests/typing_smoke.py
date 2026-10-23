@@ -351,6 +351,7 @@ def exercise_rdocx_types(path: Path) -> None:
     assert_type(comments[0].date, str | None)
     assert_type(comments[0].anchor_text, str | None)
     assert_type(comments[0].anchor, StoryRunRange | None)
+    assert_type(comments[0].anchor_issue, str | None)
     assert_type(sections[0].page_width, int | None)
     assert_type(styles[0].style_type, str)
     assert_type(stories[0].owner_index, int)

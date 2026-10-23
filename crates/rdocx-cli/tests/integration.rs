@@ -3543,6 +3543,7 @@ fn comment_commands_round_trip_one_resolved_thread() {
                         "start": { "story_kind": "body", "part_name": "/word/document.xml", "owner_index": 0, "item_kind": "paragraph", "index_path": [0], "run_index": 0, "direct_body_index": 0 },
                         "end": { "story_kind": "body", "part_name": "/word/document.xml", "owner_index": 0, "item_kind": "paragraph", "index_path": [0], "run_index": 1, "direct_body_index": 0 },
                     },
+                    "anchor_issue": null,
                 },
                 {
                     "id": 1,
@@ -3554,6 +3555,7 @@ fn comment_commands_round_trip_one_resolved_thread() {
                     "resolved": false,
                     "anchor_text": null,
                     "anchor": null,
+                    "anchor_issue": null,
                 },
             ],
         })
@@ -4987,6 +4989,61 @@ fn comment_list_json_keeps_related_locations_and_point_orphan_states() {
             if point { json!("") } else { Value::Null }
         );
         assert_eq!(fs::read(&path).unwrap(), before);
+    }
+    // Issue 405: a range across table cells lists its two cell endpoints, and
+    // one whose anchor cannot be read is listed with the reason.
+    let start = format!(r#"<w:commentRangeStart w:id="{id}"/>"#);
+    let end =
+        format!(r#"<w:commentRangeEnd w:id="{id}"/><w:r><w:commentReference w:id="{id}"/></w:r>"#);
+    for (name, body) in [
+        (
+            "cells",
+            format!(
+                "<w:tbl><w:tr><w:tc><w:p>{start}<w:r><w:t>left</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>right</w:t></w:r>{end}</w:p></w:tc></w:tr></w:tbl><w:p/>"
+            ),
+        ),
+        (
+            "issue",
+            format!(
+                "<w:p>{start}<w:smartTag><w:r><w:t>wrapped</w:t></w:r></w:smartTag>{end}</w:p>"
+            ),
+        ),
+    ] {
+        let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(&seed)).unwrap();
+        let main =
+            String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+        let head = main.find("<w:body>").unwrap() + "<w:body>".len();
+        let main = format!(
+            "{}{body}{}",
+            &main[..head],
+            &main[main.find("<w:sectPr").unwrap()..]
+        );
+        package.set_part("/word/document.xml", main.into_bytes());
+        let path = workspace.path.join(format!("{name}.docx"));
+        package
+            .write_to(&mut fs::File::create(&path).unwrap())
+            .unwrap();
+        let output = cli(&["comment", "list", path_text(&path), "--json"]);
+        assert_success(&output, name);
+        let comment = &serde_json::from_slice::<Value>(&output.stdout).unwrap()["comments"][0];
+        if name == "cells" {
+            assert_eq!(comment["anchor_text"], "left\nright");
+            assert_eq!(comment["anchor_issue"], Value::Null);
+            for (boundary, owner, run) in [("start", 0, 0), ("end", 1, 1)] {
+                assert_eq!(comment["anchor"][boundary]["story_kind"], "table_cell");
+                assert_eq!(comment["anchor"][boundary]["owner_index"], owner);
+                assert_eq!(comment["anchor"][boundary]["run_index"], run);
+            }
+        } else {
+            assert_eq!(comment["anchor"], Value::Null);
+            assert_eq!(comment["anchor_text"], Value::Null);
+            assert!(
+                comment["anchor_issue"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("comment {id}"))
+            );
+        }
     }
 }
 

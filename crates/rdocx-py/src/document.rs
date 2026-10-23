@@ -594,6 +594,7 @@ pub struct PyComment {
     pub resolved: Option<bool>,
     pub anchor_text: Option<String>,
     pub anchor: Option<PyStoryRunRange>,
+    pub anchor_issue: Option<String>,
 }
 
 // Preserve the established metadata value equality. Derived anchor snapshots
@@ -615,7 +616,7 @@ impl Eq for PyComment {}
 #[pymethods]
 impl PyComment {
     #[new]
-    #[pyo3(signature = (*, id, author, initials, date, text, parent_id, resolved, anchor_text=None, anchor=None))]
+    #[pyo3(signature = (*, id, author, initials, date, text, parent_id, resolved, anchor_text=None, anchor=None, anchor_issue=None))]
     #[allow(clippy::too_many_arguments)] // Preserve seven original fields plus optional anchor snapshots.
     fn new(
         id: i32,
@@ -627,10 +628,12 @@ impl PyComment {
         resolved: Option<bool>,
         anchor_text: Option<String>,
         anchor: Option<PyRef<'_, PyStoryRunRange>>,
+        anchor_issue: Option<String>,
     ) -> Self {
         Self {
             anchor_text,
             anchor: anchor.map(|range| (*range).clone()),
+            anchor_issue,
             id,
             author,
             initials,
@@ -9439,24 +9442,37 @@ impl PyDocument {
             .comments()
             .into_iter()
             .map(|comment| {
-                let (range, anchor_text) = anchors.remove(&comment.id()).ok_or_else(|| {
+                let snapshot = anchors.remove(&comment.id()).ok_or_else(|| {
                     PyValueError::new_err(
                         "comment snapshot is missing its checked ownership record",
                     )
                 })?;
-                let anchor = range
-                    .map(|range| -> PyResult<PyStoryRunRange> {
-                        Ok(PyStoryRunRange {
-                            start: this.comment_story_position(
-                                py,
-                                &range.start,
-                                &mut items,
-                                &owner,
-                            )?,
-                            end: this.comment_story_position(py, &range.end, &mut items, &owner)?,
-                        })
-                    })
-                    .transpose()?;
+                // A comment whose anchor cannot be read or placed keeps its
+                // record, with the reason as its issue.
+                let (anchor, anchor_text, anchor_issue) = match snapshot
+                    .map_err(|error| error.to_string())
+                    .and_then(|(range, text)| {
+                        range
+                            .map(|range| -> PyResult<PyStoryRunRange> {
+                                Ok(PyStoryRunRange {
+                                    start: this.comment_story_position(
+                                        py,
+                                        &range.start,
+                                        &mut items,
+                                        &owner,
+                                    )?,
+                                    end: this.comment_story_position(
+                                        py, &range.end, &mut items, &owner,
+                                    )?,
+                                })
+                            })
+                            .transpose()
+                            .map(|anchor| (anchor, text))
+                            .map_err(|error| error.to_string())
+                    }) {
+                    Ok((anchor, text)) => (anchor, text, None),
+                    Err(issue) => (None, None, Some(issue)),
+                };
                 Ok(PyComment {
                     id: comment.id(),
                     author: comment.author().map(str::to_owned),
@@ -9467,6 +9483,7 @@ impl PyDocument {
                     resolved: comment.resolved(),
                     anchor_text,
                     anchor,
+                    anchor_issue,
                 })
             })
             .collect::<PyResult<Vec<_>>>()?;

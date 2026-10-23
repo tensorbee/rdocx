@@ -65,6 +65,10 @@ pub struct StoryRunPosition {
 }
 
 /// A half-open run range within one checked story owner.
+///
+/// A comment anchor that [`Document::comment_anchor`] reads may instead run
+/// from one table cell into a later cell of the same story, or between a cell
+/// and the story around its table. Placing a range still takes one owner.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StoryRunRange {
     pub start: StoryRunPosition,
@@ -416,8 +420,9 @@ impl Document {
     /// Add a bookmark across one checked story owner.
     pub fn add_story_bookmark(&mut self, name: &str, range: StoryRunRange) -> Result<i32> {
         validate_bookmark_name(name)?;
-        if self.story_ranges()?.iter().any(|entry| {
-            matches!(&entry.kind, StoryRangeKind::Bookmark { name: existing, .. } if existing == name)
+        let (ranges, across) = self.story_range_inventory()?;
+        if ranges.iter().map(StoryRangeRef::kind).chain(&across).any(|kind| {
+            matches!(kind, StoryRangeKind::Bookmark { name: existing, .. } if existing == name)
         }) {
             return Err(Error::Other(format!("bookmark name {name} already exists")));
         }
@@ -454,11 +459,13 @@ impl Document {
         }
         oxml_core::xml::reject_non_xml_characters("permission editor", editor.unwrap_or_default())?;
         oxml_core::xml::reject_non_xml_characters("permission group", group.unwrap_or_default())?;
-        let occupied = self
-            .story_ranges()?
-            .into_iter()
-            .filter_map(|entry| match entry.kind {
-                StoryRangeKind::Permission { id, .. } => Some(id),
+        let (ranges, across) = self.story_range_inventory()?;
+        let occupied = ranges
+            .iter()
+            .map(StoryRangeRef::kind)
+            .chain(&across)
+            .filter_map(|kind| match kind {
+                StoryRangeKind::Permission { id, .. } => Some(*id),
                 _ => None,
             })
             .collect::<HashSet<_>>();
@@ -496,7 +503,15 @@ impl Document {
 
     /// Remove one checked bookmark pair by its identifier.
     pub fn remove_story_bookmark(&mut self, id: i32) -> Result<bool> {
-        let entry = self.story_ranges()?.into_iter().find(|entry| {
+        let (ranges, across) = self.story_range_inventory()?;
+        if across.iter().any(
+            |kind| matches!(kind, StoryRangeKind::Bookmark { id: existing, .. } if *existing == id),
+        ) {
+            return Err(Error::Other(format!(
+                "bookmark {id} runs across story owners and is not one story range"
+            )));
+        }
+        let entry = ranges.into_iter().find(|entry| {
             matches!(entry.kind, StoryRangeKind::Bookmark { id: existing, .. } if existing == id)
         });
         let Some(entry) = entry else {
@@ -523,6 +538,9 @@ impl Document {
     pub fn move_comment_to_text(&mut self, id: i32, anchor: &str, occurrence: usize) -> Result<()> {
         let selected = self.checked_movable_comment(id)?;
         let mut candidate = self.clone_for_staging();
+        // The move reads the main part as its source authority, which an
+        // in-place edit such as `add_comment` leaves behind the typed body.
+        candidate.flush_to_package()?;
         let reference = candidate.remove_comment_source_for_move(&selected)?;
         candidate.anchor_existing_comment_on_text(id, anchor, occurrence)?;
         candidate.restore_comment_reference_run(id, reference)?;
@@ -553,9 +571,16 @@ impl Document {
             )));
         }
         // This exact accepted projection also rejects hidden, reversed,
-        // cross-owner or unrepresentable endpoints rather than inventing one.
-        self.comment_anchor(id)?
+        // cross-story or unrepresentable endpoints rather than inventing one.
+        // A range across table cells is read but placing it takes one owner.
+        let anchor = self
+            .comment_anchor(id)?
             .ok_or_else(|| Error::Other(format!("comment {id} has no movable paired range")))?;
+        if anchor.start.location.story() != anchor.end.location.story() {
+            return Err(Error::Other(format!(
+                "comment {id} range runs across story owners and cannot be moved"
+            )));
+        }
         let mut selected = self.story_ranges()?.into_iter().filter(
             |entry| matches!(entry.kind(), StoryRangeKind::Comment { id: found } if *found == id),
         );
@@ -584,6 +609,8 @@ impl Document {
                 return Err(Error::Other("selected comment range is stale".into()));
             }
             let mut candidate = self.clone_for_staging();
+            // As in `move_comment_to_text`, bring the main part up to date.
+            candidate.flush_to_package()?;
             candidate.move_comment_story_range(selected, &range, *id)?;
             candidate.flush_to_package()?;
             candidate.comment_ownership_at(&candidate.doc_part_name)?;
@@ -654,26 +681,104 @@ impl Document {
 
     /// Return checked paired-marker ranges in physical story order.
     ///
-    /// Unmatched, reversed and crossing markers are rejected. Unsupported
-    /// marker families remain opaque and are not included.
+    /// Within one story owner, unmatched, reversed and crossing markers are
+    /// rejected, as is a pair that leaves its owner for another part.
+    /// Unsupported marker families remain opaque and are not included, nor
+    /// is a bookmark, comment or permission pair whose one start and one end
+    /// are in two owners of one part, such as a range from one table cell
+    /// into another. Its name and identifier still count as taken. Its order
+    /// across the owners is not checked here, [`Self::comment_anchor`]
+    /// checks a comment's.
     pub fn story_ranges(&self) -> Result<Vec<StoryRangeRef>> {
+        Ok(self.story_range_inventory()?.0)
+    }
+
+    /// [`Self::story_ranges`] with the kinds of the pairs it leaves out
+    /// across owners, whose names and identifiers stay taken.
+    pub(crate) fn story_range_inventory(
+        &self,
+    ) -> Result<(Vec<StoryRangeRef>, Vec<StoryRangeKind>)> {
         Self::story_ranges_in(&self.story_range_paragraphs()?)
     }
 
     /// Pair the markers of checked range paragraphs listed in physical story
-    /// order, as `story_range_paragraphs` returns them.
+    /// order, as `story_range_paragraphs` returns them, with the kinds of the
+    /// pairs left out across owners.
     pub(crate) fn story_ranges_in(
         paragraphs: &[(ContentLocation, Vec<u8>)],
-    ) -> Result<Vec<StoryRangeRef>> {
-        let mut ranges = Vec::new();
-        let mut open = Vec::<StoryMarker>::new();
-        let mut story = None;
+    ) -> Result<(Vec<StoryRangeRef>, Vec<StoryRangeKind>)> {
+        let scanned = paragraphs
+            .iter()
+            .map(|(location, xml)| scan_story_markers(xml, location))
+            .collect::<Result<Vec<_>>>()?;
+        let identity = |kind: &StoryRangeKind| match kind {
+            StoryRangeKind::Bookmark { id, .. } => Some((0u8, *id)),
+            StoryRangeKind::Comment { id } => Some((1, *id)),
+            StoryRangeKind::Permission { id, .. } => Some((2, *id)),
+            StoryRangeKind::Proofing { .. } => None,
+        };
+        // A range may leave its owner within one part, as one across table
+        // cells does. Its one start and one end keep their ordinals but form
+        // no story range. Any other marker set is paired and checked below.
+        let mut paired = BTreeMap::<(u8, i32), Vec<&StoryMarker>>::new();
+        for marker in scanned.iter().flatten() {
+            if let Some(key) = identity(&marker.kind) {
+                paired.entry(key).or_default().push(marker);
+            }
+        }
+        let mut cross_owner = HashSet::new();
+        let mut across = Vec::new();
+        for (key, markers) in paired {
+            let [first, second] = markers.as_slice() else {
+                continue;
+            };
+            let (left, right) = (first.location.story(), second.location.story());
+            if left != right && left.part_name() == right.part_name() && first.start != second.start
+            {
+                cross_owner.insert(key);
+                across.push(if first.start { first } else { second }.kind.clone());
+            }
+        }
         let mut bookmark_names = HashSet::new();
         let mut bookmark_ids = HashSet::new();
         let mut comment_ids = HashSet::new();
         let mut permission_ids = HashSet::new();
+        let mut take = |kind: &StoryRangeKind| -> Result<()> {
+            if let StoryRangeKind::Bookmark { name, .. } = kind
+                && (name.is_empty() || !bookmark_names.insert(name.clone()))
+            {
+                return Err(Error::Other(
+                    "bookmark name is missing or duplicated".to_owned(),
+                ));
+            }
+            let unique = match kind {
+                StoryRangeKind::Bookmark { id, .. } => bookmark_ids.insert(*id),
+                StoryRangeKind::Comment { id } => comment_ids.insert(*id),
+                StoryRangeKind::Permission { id, editor, group } => {
+                    if editor.is_some() == group.is_some() {
+                        return Err(Error::Other(
+                            "permission start needs one editor or group".to_owned(),
+                        ));
+                    }
+                    permission_ids.insert(*id)
+                }
+                StoryRangeKind::Proofing { .. } => true,
+            };
+            if !unique {
+                return Err(Error::Other(
+                    "paired marker identity is duplicated".to_owned(),
+                ));
+            }
+            Ok(())
+        };
+        for kind in &across {
+            take(kind)?;
+        }
+        let mut ranges = Vec::new();
+        let mut open = Vec::<StoryMarker>::new();
+        let mut story = None;
         let mut marker_ordinal = 0usize;
-        for (location, xml) in paragraphs {
+        for ((location, _), markers) in paragraphs.iter().zip(scanned) {
             if story.as_ref() != Some(location.story()) {
                 if !open.is_empty() {
                     return Err(Error::Other(
@@ -683,9 +788,12 @@ impl Document {
                 story = Some(location.story().clone());
                 marker_ordinal = 0;
             }
-            for mut marker in scan_story_markers(xml, location)? {
+            for mut marker in markers {
                 marker.ordinal = marker_ordinal;
                 marker_ordinal += 1;
+                if identity(&marker.kind).is_some_and(|key| cross_owner.contains(&key)) {
+                    continue;
+                }
                 if marker.start {
                     open.push(marker);
                     continue;
@@ -698,31 +806,7 @@ impl Document {
                         "paired markers cross or use different identities".to_owned(),
                     ));
                 }
-                if let StoryRangeKind::Bookmark { name, .. } = &start.kind
-                    && (name.is_empty() || !bookmark_names.insert(name.clone()))
-                {
-                    return Err(Error::Other(
-                        "bookmark name is missing or duplicated".to_owned(),
-                    ));
-                }
-                let unique = match &start.kind {
-                    StoryRangeKind::Bookmark { id, .. } => bookmark_ids.insert(*id),
-                    StoryRangeKind::Comment { id } => comment_ids.insert(*id),
-                    StoryRangeKind::Permission { id, editor, group } => {
-                        if editor.is_some() == group.is_some() {
-                            return Err(Error::Other(
-                                "permission start needs one editor or group".to_owned(),
-                            ));
-                        }
-                        permission_ids.insert(*id)
-                    }
-                    StoryRangeKind::Proofing { .. } => true,
-                };
-                if !unique {
-                    return Err(Error::Other(
-                        "paired marker identity is duplicated".to_owned(),
-                    ));
-                }
+                take(&start.kind)?;
                 ranges.push(StoryRangeRef {
                     kind: start.kind,
                     range: StoryRunRange {
@@ -745,7 +829,7 @@ impl Document {
                 "paired marker has an unmatched start".to_owned(),
             ));
         }
-        Ok(ranges)
+        Ok((ranges, across))
     }
 
     pub(crate) fn ensure_fragment_comment_models_staged(&mut self) -> Result<String> {
@@ -1188,7 +1272,7 @@ impl Document {
         validate_comment_date(date)?;
         if range.start.location.story() != range.end.location.story() {
             return Err(Error::Other(
-                "comment story range start must not follow its end".to_owned(),
+                "comment story range must stay in one story owner".to_owned(),
             ));
         }
         if range.start.location != range.end.location
@@ -2625,31 +2709,40 @@ fn comment_part_entries(
 impl Document {
     /// Return a selected comment's exact accepted-view run range.
     /// Unknown or malformed ownership and unrepresentable endpoints are errors.
-    /// Known orphans and reference-only points have no paired range.
+    /// Known orphans and reference-only points have no paired range. A range
+    /// may run from one table cell into a later cell of the same story, or
+    /// between a table cell and the story around its table, so its two ends
+    /// are then in different story owners.
     pub fn comment_anchor(&self, id: i32) -> Result<Option<StoryRunRange>> {
         Ok(self
             .comment_anchor_snapshots_selected(Some(id))?
             .remove(&id)
-            .ok_or_else(|| Error::Other(format!("unknown comment {id}")))?
+            .ok_or_else(|| Error::Other(format!("unknown comment {id}")))??
             .0)
     }
 
     /// Return accepted span text, empty for a reference-only point and absent
-    /// for a known orphan or a reply without its own source markers.
+    /// for a known orphan or a reply without its own source markers. One
+    /// newline separates two paragraphs, table cells included.
     pub fn comment_anchor_text(&self, id: i32) -> Result<Option<String>> {
         Ok(self
             .comment_anchor_snapshots_selected(Some(id))?
             .remove(&id)
-            .ok_or_else(|| Error::Other(format!("unknown comment {id}")))?
+            .ok_or_else(|| Error::Other(format!("unknown comment {id}")))??
             .1)
     }
 
     /// Build checked owned anchor snapshots with one source inventory for listings.
+    ///
+    /// A failure of the document, such as its comment ownership, fails the
+    /// whole listing. The anchor of one comment that cannot be read is that
+    /// comment's own error, which [`Self::comment_anchor`] returns, so the
+    /// other comments are still listed.
     #[doc(hidden)]
     #[allow(clippy::type_complexity)] // Concrete shared range and text listing contract.
     pub fn comment_anchor_snapshots(
         &self,
-    ) -> Result<BTreeMap<i32, (Option<StoryRunRange>, Option<String>)>> {
+    ) -> Result<BTreeMap<i32, Result<(Option<StoryRunRange>, Option<String>)>>> {
         self.comment_anchor_snapshots_selected(None)
     }
 
@@ -2657,7 +2750,7 @@ impl Document {
     fn comment_anchor_snapshots_selected(
         &self,
         selected: Option<i32>,
-    ) -> Result<BTreeMap<i32, (Option<StoryRunRange>, Option<String>)>> {
+    ) -> Result<BTreeMap<i32, Result<(Option<StoryRunRange>, Option<String>)>>> {
         let mut source = self.clone_for_staging();
         source.flush_to_package()?;
         let ownership = source.comment_owned_graph_at(&source.doc_part_name)?;
@@ -2670,39 +2763,46 @@ impl Document {
         let paragraphs = source
             .comment_story_range_paragraphs()?
             .into_iter()
-            .map(|(location, xml)| {
+            .map(|(flow, offset, location, xml)| {
                 let ids = comment_source_markers(&xml)?
                     .into_iter()
                     .map(|marker| marker.id)
                     .collect::<HashSet<_>>();
-                Ok((location, CT_P::from_xml_fragment(&xml)?, ids, xml))
+                Ok((
+                    location,
+                    CT_P::from_xml_fragment(&xml)?,
+                    ids,
+                    xml,
+                    flow,
+                    offset,
+                ))
             })
             .collect::<Result<Vec<_>>>()?;
+        // Physical order: the source, then the offset in it.
+        let order = |index: &usize| (paragraphs[*index].4.0, paragraphs[*index].5);
         let mut marker_paragraphs = HashMap::<i32, Vec<usize>>::new();
-        let mut owner_paragraphs = HashMap::<crate::StoryId, Vec<usize>>::new();
-        for (index, (location, _, ids, _)) in paragraphs.iter().enumerate() {
-            owner_paragraphs
-                .entry(location.story().clone())
-                .or_default()
-                .push(index);
+        // A range runs through one flow, the paragraphs of one story owner and
+        // of the table cells it holds, in physical order.
+        let mut flow_paragraphs = HashMap::<(usize, usize), Vec<usize>>::new();
+        for (index, (_, _, ids, _, flow, _)) in paragraphs.iter().enumerate() {
+            flow_paragraphs.entry(*flow).or_default().push(index);
             for &id in ids {
                 marker_paragraphs.entry(id).or_default().push(index);
             }
         }
-        let mut snapshots = BTreeMap::new();
-        for &id in ownership
-            .parents
-            .keys()
-            .filter(|id| selected.is_none_or(|selected| selected == **id))
+        for indexes in flow_paragraphs
+            .values_mut()
+            .chain(marker_paragraphs.values_mut())
         {
+            indexes.sort_by_key(order);
+        }
+        let project = |id: i32| -> Result<(Option<StoryRunRange>, Option<String>)> {
             let count = counts.get(&id).copied().unwrap_or_default();
             if count == [0; 3] {
-                snapshots.insert(id, (None, None));
-                continue;
+                return Ok((None, None));
             }
             if count == [0, 0, 1] {
-                snapshots.insert(id, (None, Some(String::new())));
-                continue;
+                return Ok((None, Some(String::new())));
             }
             if count[0] != 1 || count[1] != 1 || count[2] > 1 {
                 return Err(Error::Other(format!(
@@ -2715,7 +2815,7 @@ impl Document {
             let mut text = String::new();
             let mut first_paragraph = None;
             for &index in marker_paragraphs.get(&id).into_iter().flatten() {
-                let (_, _, _, xml) = &paragraphs[index];
+                let (_, _, _, xml, _, _) = &paragraphs[index];
                 let (_, _, first, last) = CT_P::accepted_comment_source_projection(xml, id, false)?;
                 if first.is_some() || last.is_some() {
                     first_paragraph = Some(index);
@@ -2725,12 +2825,12 @@ impl Document {
             let first_paragraph = first_paragraph.ok_or_else(|| Error::Other(format!(
                 "comment {id} source cannot be projected faithfully on the existing accepted run axis"
             )))?;
-            let owner = &owner_paragraphs[paragraphs[first_paragraph].0.story()];
-            let offset = owner
-                .binary_search(&first_paragraph)
-                .expect("registered owner paragraph");
-            for &index in &owner[offset..] {
-                let (location, paragraph, ids, xml) = &paragraphs[index];
+            let flow = &flow_paragraphs[&paragraphs[first_paragraph].4];
+            let offset = flow
+                .binary_search_by_key(&order(&first_paragraph), order)
+                .expect("registered flow paragraph");
+            for &index in &flow[offset..] {
+                let (location, paragraph, ids, xml, _, _) = &paragraphs[index];
                 let was_open = open;
                 let (contribution, next_open, first, last) = if ids.contains(&id) {
                     CT_P::accepted_comment_source_projection(xml, id, open)?
@@ -2770,19 +2870,24 @@ impl Document {
                     break;
                 }
             }
-            let (Some(start), Some(end)) = (start, end) else {
-                return Err(Error::Other(format!(
+            match (start, end) {
+                (Some(start), Some(end)) if !open => {
+                    Ok((Some(StoryRunRange { start, end }), Some(text)))
+                }
+                (None, _) => Err(Error::Other(format!(
                     "comment {id} source cannot be projected faithfully on the existing accepted run axis"
-                )));
-            };
-            if open || start.location.story() != end.location.story() {
-                return Err(Error::Other(format!(
-                    "comment {id} range has no ordered end in the same story owner"
-                )));
+                ))),
+                _ => Err(Error::Other(format!(
+                    "comment {id} range has no ordered end in the same story or its table cells"
+                ))),
             }
-            snapshots.insert(id, (Some(StoryRunRange { start, end }), Some(text)));
-        }
-        Ok(snapshots)
+        };
+        Ok(ownership
+            .parents
+            .keys()
+            .filter(|id| selected.is_none_or(|selected| selected == **id))
+            .map(|&id| (id, project(id)))
+            .collect())
     }
 
     /// Classify glossary review ownership from one actual internal relationship.
