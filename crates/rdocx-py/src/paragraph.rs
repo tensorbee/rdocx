@@ -432,7 +432,7 @@ impl PyParagraph {
         {
             let document = self.document.borrow(py);
             match document
-                .indexed_paragraph_location(&location)
+                .indexed_paragraph_location(&location, None)
                 .map(Ok)
                 .unwrap_or_else(|| location.native(&document.inner))
             {
@@ -470,8 +470,8 @@ impl PyParagraph {
             || paragraph_location(&self.path),
             |location| Ok(ParagraphLocation::Related(location.clone())),
         )?;
-        let location = location
-            .native(candidate)
+        let location = document
+            .paragraph_route(&location, Some((prepared, candidate)))
             .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
         let (path, owner) = document.capture_prepared_owner(
             prepared,
@@ -480,6 +480,21 @@ impl PyParagraph {
             crate::document::WordView::Owner,
             self.furniture_scope.as_ref(),
         )?;
+        self.path = path;
+        self.owner = Some(owner);
+        Ok(self)
+    }
+
+    /// Bind the paragraph a prepared plain body splice inserts, before the
+    /// native edit places it.
+    pub(crate) fn bind_prepared_splice(
+        mut self,
+        document: &PyDocument,
+        prepared: &crate::document::PreparedBodySplice,
+    ) -> PyResult<Self> {
+        self.furniture_scope = None;
+        let (path, owner) =
+            document.capture_prepared_splice_owner(prepared, self.path.segs.clone())?;
         self.path = path;
         self.owner = Some(owner);
         Ok(self)
@@ -638,8 +653,8 @@ impl PyParagraph {
                 &candidate,
                 operation,
                 crate::document::WordPublication::ParagraphAppend(
-                    location
-                        .native(&document.inner)
+                    document
+                        .paragraph_route(&location, None)
                         .map_err(|error| crate::rdocx_to_pyerr(py, error))?,
                 ),
             )?;
@@ -688,11 +703,31 @@ impl PyParagraph {
             .owner
             .as_ref()
             .ok_or_else(|| PyValueError::new_err("paragraph XML owner route is unsupported"))?;
-        let location = document.current_paragraph_owner(owner)?;
-        let bytes = document
-            .inner
-            .paragraph_element_xml(&location)
-            .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
+        let current = || -> PyResult<Vec<u8>> {
+            crate::document::note_word_whole_source_read();
+            let location = document.current_paragraph_owner(owner)?;
+            document
+                .inner
+                .paragraph_element_xml(&location)
+                .map_err(|error| crate::rdocx_to_pyerr(py, error))
+        };
+        // A direct body paragraph serializes alone, without the `w14`
+        // declaration that only the rest of the body can bring. Any other
+        // owner reads the whole story source.
+        let bytes = match document.direct_body_paragraph_slot(owner).and_then(|slot| {
+            document
+                .inner
+                .direct_body_paragraph_xml(slot)
+                .ok()
+                .flatten()
+        }) {
+            Some(bytes) => {
+                #[cfg(debug_assertions)]
+                crate::document::assert_direct_read(&bytes, current, "paragraph");
+                bytes
+            }
+            None => current()?,
+        };
         String::from_utf8(bytes).map_err(|error| PyValueError::new_err(error.to_string()))
     }
 
@@ -856,8 +891,8 @@ impl PyParagraph {
             &candidate,
             "Paragraph.add_equation",
             crate::document::WordPublication::ParagraphAppend(
-                location
-                    .native(&document.inner)
+                document
+                    .paragraph_route(&location, None)
                     .map_err(|error| crate::rdocx_to_pyerr(py, error))?,
             ),
         )?;
@@ -953,8 +988,8 @@ impl PyParagraph {
             py,
             &candidate,
             "Paragraph.text",
-            location
-                .native(&document.inner)
+            document
+                .paragraph_route(&location, None)
                 .map(crate::document::WordPublication::ParagraphText)
                 .unwrap_or(crate::document::WordPublication::Conservative),
         )?;

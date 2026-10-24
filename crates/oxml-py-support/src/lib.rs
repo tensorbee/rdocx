@@ -151,6 +151,27 @@ struct ScopeGeneration {
     retired: std::sync::OnceLock<InvalidationCause>,
 }
 
+/// Hashes an allocation address, unique while the allocation is held, for
+/// the scope set of one preparation.
+#[derive(Default)]
+struct AddressHasher(u64);
+
+impl std::hash::Hasher for AddressHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 = (self.0.rotate_left(8) ^ u64::from(*byte)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        }
+    }
+
+    fn write_usize(&mut self, address: usize) {
+        self.0 = (address as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+}
+
 /// One immutable generation retained by the current inventory and live handles.
 #[derive(Debug, Clone)]
 pub struct RevisionState(std::sync::Arc<ScopeGeneration>);
@@ -433,6 +454,15 @@ impl RevisionCounter {
             .try_reserve_exact(scopes.len() + 1)
             .map_err(|_| RevisionError::Allocation)?;
         retired.push(self.document.clone());
+        // Identity is the shared allocation, as in `same_state`. A set keeps a
+        // whole-inventory retirement linear in the number of scopes.
+        let mut seen = std::collections::HashSet::<
+            *const ScopeGeneration,
+            std::hash::BuildHasherDefault<AddressHasher>,
+        >::default();
+        seen.try_reserve(scopes.len() + 1)
+            .map_err(|_| RevisionError::Allocation)?;
+        seen.insert(std::sync::Arc::as_ptr(&self.document.0));
         for scope in scopes {
             if !self.owns(scope) {
                 return Err(RevisionError::ForeignOwner);
@@ -440,7 +470,7 @@ impl RevisionCounter {
             if scope.first_cause().is_some() {
                 return Err(RevisionError::Retired);
             }
-            if retired.iter().any(|old| old.same_state(scope)) {
+            if !seen.insert(std::sync::Arc::as_ptr(&scope.0)) {
                 return Err(RevisionError::DuplicateScope);
             }
             retired.push(scope.clone());

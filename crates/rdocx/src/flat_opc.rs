@@ -429,7 +429,7 @@ fn parts_to_package(parts: Vec<FlatPart>) -> Result<OpcPackage> {
             )));
         }
         content_types.add_override(&part.name, &part.content_type);
-        package_parts.insert(part.name, part.data);
+        package_parts.insert(part.name, part.data.into());
     }
     if part_rels.keys().any(|owner| {
         !package_parts
@@ -478,7 +478,7 @@ fn write_flat_package(package: &OpcPackage) -> Result<Vec<u8>> {
         parts.push(FlatPart {
             name: name.clone(),
             content_type: content_type.to_owned(),
-            data: data.clone(),
+            data: data.to_vec(),
             is_xml: !opaque_parts.contains(&part_identity(name)) && xml_content_type(content_type),
         });
     }

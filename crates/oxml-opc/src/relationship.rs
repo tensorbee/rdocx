@@ -1,6 +1,7 @@
 //! Parsing and writing of `.rels` relationship files.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use quick_xml::encoding::Decoder;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, Event};
@@ -144,7 +145,8 @@ pub struct Relationship {
 pub struct Relationships {
     pub items: Vec<Relationship>,
     next_id: u32,
-    source: Option<(Vec<u8>, Vec<Relationship>)>,
+    // The bytes read and the items they gave, shared between clones.
+    source: Option<Arc<(Vec<u8>, Vec<Relationship>)>>,
 }
 
 impl Relationships {
@@ -219,7 +221,7 @@ impl Relationships {
             return Err(OpcError::InvalidRelationship);
         }
         Ok(Relationships {
-            source: Some((xml.to_vec(), items.clone())),
+            source: Some(Arc::new((xml.to_vec(), items.clone()))),
             items,
             next_id: next_relationship_number(max_id),
         })
@@ -250,7 +252,7 @@ impl Relationships {
             }
         }
         let source = match &self.source {
-            Some((xml, _)) => xml.clone(),
+            Some(source) => source.0.clone(),
             None => self.to_xml()?,
         };
         let parsed = relationship_xml(&source)?;
@@ -485,10 +487,10 @@ impl Relationships {
     /// Serialize to XML bytes.
     pub fn to_xml(&self) -> Result<Vec<u8>> {
         self.validate_ids()?;
-        if let Some((xml, items)) = &self.source
-            && items == &self.items
+        if let Some(source) = &self.source
+            && source.1 == self.items
         {
-            return Ok(xml.clone());
+            return Ok(source.0.clone());
         }
         let mut writer = Writer::new_with_indent(Vec::new(), b' ', 2);
 
@@ -699,6 +701,26 @@ impl Relationships {
             }
         }
         unreachable!("the generated relationship id space is unbounded")
+    }
+
+    /// Whether two relationship sets hold the same items, identifier counter
+    /// and source.
+    pub(crate) fn same_as(&self, other: &Relationships) -> bool {
+        self.items == other.items && self.next_id == other.next_id && self.source == other.source
+    }
+
+    /// Whether these relationships still hold the items their source bytes
+    /// were read into, with the identifier counter reading them sets, so
+    /// that writing and reading them back gives them unchanged.
+    pub(crate) fn is_as_read(&self) -> bool {
+        let Some(source) = &self.source else {
+            return false;
+        };
+        let mut maximum = 0;
+        for item in &self.items {
+            update_max_relationship_id(&item.id, &mut maximum);
+        }
+        source.1 == self.items && self.next_id == next_relationship_number(maximum)
     }
 
     pub(crate) fn validate_ids(&self) -> Result<()> {
