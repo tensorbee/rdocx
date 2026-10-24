@@ -1955,12 +1955,8 @@ impl PyTheme {
             .set_theme_name(index, value)
             .map_err(|error| crate::rpptx_to_pyerr(py, error))?;
         if candidate
-            .to_bytes()
+            .saves_as(&presentation.inner)
             .map_err(|error| crate::rpptx_to_pyerr(py, error))?
-            == presentation
-                .inner
-                .to_bytes()
-                .map_err(|error| crate::rpptx_to_pyerr(py, error))?
         {
             return Ok(());
         }
@@ -2686,12 +2682,8 @@ impl PyNotesTextFrame {
             .set_notes_text(index, text)
             .map_err(|error| crate::rpptx_to_pyerr(py, error))?;
         if candidate
-            .to_bytes()
+            .saves_as(&presentation.inner)
             .map_err(|error| crate::rpptx_to_pyerr(py, error))?
-            == presentation
-                .inner
-                .to_bytes()
-                .map_err(|error| crate::rpptx_to_pyerr(py, error))?
         {
             return Ok(());
         }

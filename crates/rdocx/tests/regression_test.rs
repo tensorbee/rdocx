@@ -31242,7 +31242,7 @@ fn assert_raw_package_has_no_selector(bytes: &[u8], selector: &str) {
     for part in package.parts.values() {
         absent(part, selector);
         if part.starts_with(b"PK\x03\x04") {
-            let nested = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(part))
+            let nested = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(part.as_slice()))
                 .expect("nested package");
             absent(
                 &nested
@@ -31524,7 +31524,7 @@ fn redacted_package_preserves_unrelated_parts_and_relationships() {
         if !edited_parts.contains(part_name.as_str()) {
             assert_eq!(
                 after.get_part(part_name).unwrap(),
-                bytes,
+                bytes.as_slice(),
                 "untouched part changed: {part_name}"
             );
         }
@@ -38784,12 +38784,12 @@ fn f236_package_bytes_with_producer_literals(mut package: oxml_opc::OpcPackage) 
                     .any(|character| matches!(character, '\u{1}' | '\u{FFFE}'))
             })
         })
-        .map(|(name, data)| (name.trim_start_matches('/').to_owned(), data.clone()))
+        .map(|(name, data)| (name.trim_start_matches('/').to_owned(), data.to_vec()))
         .collect::<BTreeMap<_, _>>();
     for name in literal.keys() {
         package
             .parts
-            .insert(format!("/{name}"), b"<placeholder/>".to_vec());
+            .insert(format!("/{name}"), b"<placeholder/>".to_vec().into());
     }
     let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     for (name, data) in zip_entries(&f236_package_bytes(package)) {
@@ -48978,7 +48978,7 @@ fn fragment_import_remaps_note_companions_atomically() {
         package
             .parts
             .values()
-            .any(|bytes| bytes == &f_x204_picture_fixture(b"f276-note-image")[..])
+            .any(|bytes| bytes.as_slice() == &f_x204_picture_fixture(b"f276-note-image")[..])
     );
     let reopened = Document::from_bytes(&saved).unwrap();
     assert_eq!(reopened.footnotes().len(), 3);
@@ -49133,7 +49133,7 @@ fn full_story_fragment_import_covers_every_supported_owner_pair() {
                 .parts
                 .iter()
                 .find_map(|(name, bytes)| {
-                    (bytes == &f_x204_picture_fixture(image.as_bytes())).then_some(name)
+                    (**bytes == f_x204_picture_fixture(image.as_bytes())).then_some(name)
                 })
                 .unwrap();
             assert!(
@@ -49568,7 +49568,7 @@ fn fragment_import_rejects_integrity_bound_reachable_signature_atomically() {
     let image = package
         .parts
         .iter()
-        .find_map(|(name, bytes)| (bytes == b"signature graph owner").then(|| name.clone()))
+        .find_map(|(name, bytes)| (**bytes == b"signature graph owner").then(|| name.clone()))
         .unwrap();
     package.set_part(
         "/_xmlsignatures/reachable.xml",
@@ -60559,7 +60559,7 @@ fn comment_removal_preserves_selective_relocated_companions_and_opaque_parts() {
         ]
         .contains(&part.as_str())
         {
-            assert_eq!(saved.get_part(part).unwrap(), original, "{part}");
+            assert_eq!(saved.get_part(part).unwrap(), original.as_slice(), "{part}");
         }
     }
 }
@@ -405661,7 +405661,7 @@ fn fx261_media(bytes: &[u8]) -> Vec<Vec<u8>> {
         .parts
         .iter()
         .filter(|(name, _)| name.contains("/media/"))
-        .map(|(_, data)| data.clone())
+        .map(|(_, data)| data.to_vec())
         .collect::<Vec<_>>();
     payloads.sort();
     payloads

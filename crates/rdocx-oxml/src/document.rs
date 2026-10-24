@@ -3417,6 +3417,25 @@ impl CT_Body {
         paragraphs.into_iter()
     }
 
+    /// The number of paragraphs [`Self::paragraphs`] visits in the body
+    /// children before `index`.
+    #[doc(hidden)]
+    pub fn paragraph_count_before(&self, index: usize) -> usize {
+        let mut nested = Vec::new();
+        self.content[..index.min(self.content.len())]
+            .iter()
+            .map(|content| match content {
+                BodyContent::Paragraph(_) => 1,
+                BodyContent::ContentControl(sdt) => {
+                    nested.clear();
+                    sdt.collect_paragraphs(SdtOwner::Body, &mut nested);
+                    nested.len()
+                }
+                _ => 0,
+            })
+            .sum()
+    }
+
     /// Whether accepting every tracked change joins the body paragraph at
     /// `index` to the next body paragraph, as Word does when a paragraph mark
     /// is deleted or moved away (`w:del` or `w:moveFrom` in the mark `w:rPr`).
@@ -3736,18 +3755,23 @@ impl CT_Body {
     }
 
     pub fn to_xml<W: std::io::Write>(&self, writer: &mut Writer<W>) -> Result<()> {
+        self.write_marked(writer, &mut |_| {})
+    }
+
+    /// [`Self::to_xml`], showing `mark` the writer after the body's start
+    /// tag and after each child.
+    fn write_marked<W: std::io::Write>(
+        &self,
+        writer: &mut Writer<W>,
+        mark: &mut dyn FnMut(&Writer<W>),
+    ) -> Result<()> {
         admit_word_model(WordOwner::Body(self))?;
         writer.write_event(Event::Start(BytesStart::new("w:body")))?;
+        mark(writer);
 
         for item in &self.content {
-            match item {
-                BodyContent::Paragraph(p) => p.to_xml(writer)?,
-                BodyContent::Table(t) => t.to_xml(writer)?,
-                BodyContent::ContentControl(sdt) => sdt.to_xml(writer)?,
-                BodyContent::RawXml(raw) => {
-                    writer.get_mut().write_all(raw)?;
-                }
-            }
+            write_body_content(item, writer)?;
+            mark(writer);
         }
 
         if let Some(ref sect) = self.sect_pr {
@@ -3763,6 +3787,18 @@ impl Default for CT_Body {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn write_body_content<W: std::io::Write>(item: &BodyContent, writer: &mut Writer<W>) -> Result<()> {
+    match item {
+        BodyContent::Paragraph(p) => p.to_xml(writer)?,
+        BodyContent::Table(t) => t.to_xml(writer)?,
+        BodyContent::ContentControl(sdt) => sdt.to_xml(writer)?,
+        BodyContent::RawXml(raw) => {
+            writer.get_mut().write_all(raw)?;
+        }
+    }
+    Ok(())
 }
 
 /// `CT_Document` — The root document element.
@@ -3949,22 +3985,36 @@ impl CT_Document {
 
     /// Serialize to XML bytes.
     pub fn to_xml(&self) -> Result<Vec<u8>> {
+        self.write_part(None)
+    }
+
+    /// [`Self::to_xml`], and where the body's children are in its bytes:
+    /// the range between the body's start tag and its section properties or
+    /// end tag, and the range of each child there, one after the other.
+    #[doc(hidden)]
+    #[allow(clippy::type_complexity)] // The bytes, the children's range and each child's range.
+    pub fn to_xml_with_body_spans(
+        &self,
+    ) -> Result<(Vec<u8>, std::ops::Range<usize>, Vec<std::ops::Range<usize>>)> {
+        let mut marks = Vec::with_capacity(self.body.content.len() + 2);
+        let xml = self.write_part(Some(&mut marks))?;
+        // A `w14` declaration added to the root moves everything after it.
+        let shift = xml.len() - marks.pop().unwrap_or(xml.len());
+        let marks = marks
+            .into_iter()
+            .map(|mark| mark + shift)
+            .collect::<Vec<_>>();
+        let content = marks[0]..marks[marks.len() - 1];
+        let children = marks.windows(2).map(|pair| pair[0]..pair[1]).collect();
+        Ok((xml, content, children))
+    }
+
+    /// The part's bytes, with `marks`, when given, holding the offset after
+    /// the body's start tag and after each child, and then the length before
+    /// any `w14` declaration is added.
+    fn write_part(&self, mut marks: Option<&mut Vec<usize>>) -> Result<Vec<u8>> {
         self.validate_resource_limits()?;
-        let wp_ns = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
-        let wp_root_is_canonical = self
-            .extra_namespaces
-            .iter()
-            .find(|(name, _)| name == "xmlns:wp")
-            .is_none_or(|(_, namespace)| namespace == wp_ns);
-        let _binding_scope = root_binding_scope(
-            ROOT_R_BINDING
-                | ROOT_MC_BINDING
-                | if wp_root_is_canonical {
-                    ROOT_WP_BINDING
-                } else {
-                    0
-                },
-        );
+        let _binding_scope = self.root_binding_scope();
         let mut writer = Writer::new(Vec::new());
 
         writer.write_event(Event::Decl(BytesDecl::new(
@@ -3973,6 +4023,121 @@ impl CT_Document {
             Some("yes"),
         )))?;
 
+        writer.write_event(Event::Start(self.root_start()))?;
+
+        // Write background element if present
+        if let Some(ref bg) = self.background_xml {
+            writer.get_mut().extend_from_slice(bg);
+        }
+        for raw in &self.background_extra_xml {
+            writer.get_mut().extend_from_slice(raw);
+        }
+
+        match marks.as_deref_mut() {
+            Some(marks) => self.body.write_marked(&mut writer, &mut |writer| {
+                marks.push(writer.get_ref().len())
+            })?,
+            None => self.body.to_xml(&mut writer)?,
+        }
+        writer.write_event(Event::End(BytesEnd::new("w:document")))?;
+        if let Some(marks) = marks {
+            marks.push(writer.get_ref().len());
+        }
+
+        let mut xml = writer.into_inner();
+        declare_w14_on_part_root(&mut xml)?;
+        Ok(xml)
+    }
+
+    /// The bytes [`Self::to_xml`] writes before the first body child, up to
+    /// the body start, and after the last one, before it declares `w14` on
+    /// the root.
+    #[doc(hidden)]
+    pub fn body_frame_xml(&self) -> Result<(Vec<u8>, Vec<u8>)> {
+        let _binding_scope = self.root_binding_scope();
+        let mut writer = Writer::new(Vec::new());
+        writer.write_event(Event::Decl(BytesDecl::new(
+            "1.0",
+            Some("UTF-8"),
+            Some("yes"),
+        )))?;
+        writer.write_event(Event::Start(self.root_start()))?;
+        if let Some(ref bg) = self.background_xml {
+            writer.get_mut().extend_from_slice(bg);
+        }
+        for raw in &self.background_extra_xml {
+            writer.get_mut().extend_from_slice(raw);
+        }
+        writer.write_event(Event::Start(BytesStart::new("w:body")))?;
+        let head = writer.into_inner();
+        let mut writer = Writer::new(Vec::new());
+        if let Some(ref sect) = self.body.sect_pr {
+            sect.to_xml(&mut writer)?;
+        }
+        writer.write_event(Event::End(BytesEnd::new("w:body")))?;
+        writer.write_event(Event::End(BytesEnd::new("w:document")))?;
+        Ok((head, writer.into_inner()))
+    }
+
+    /// The bytes [`Self::to_xml`] writes for `item` among the body children,
+    /// after the admission it makes of the item there. The item need not
+    /// belong to the body.
+    #[doc(hidden)]
+    pub fn body_item_xml(&self, item: &BodyContent) -> Result<Vec<u8>> {
+        match item {
+            BodyContent::Paragraph(p) => admit_word_model(WordOwner::Paragraph(p))?,
+            BodyContent::Table(t) => admit_word_model(WordOwner::Table(t))?,
+            BodyContent::ContentControl(s) => admit_word_model(WordOwner::Control(s))?,
+            BodyContent::RawXml(_) => {}
+        }
+        let _binding_scope = self.root_binding_scope();
+        let mut writer = Writer::new(Vec::new());
+        write_body_content(item, &mut writer)?;
+        Ok(writer.into_inner())
+    }
+
+    /// Serialize `item` as the only child of this document's body, under the
+    /// part root and with the bytes [`Self::to_xml`] writes for it there.
+    ///
+    /// The item need not belong to the body. As in [`Self::to_xml`], the root
+    /// declares `w14` when the original root does or the written bytes use it,
+    /// so a root without `w14` here does not say whether the whole part has it.
+    #[doc(hidden)]
+    pub fn standalone_body_item_xml(&self, item: &BodyContent) -> Result<Vec<u8>> {
+        let _binding_scope = self.root_binding_scope();
+        let mut writer = Writer::new(Vec::new());
+        writer.write_event(Event::Start(self.root_start()))?;
+        writer.write_event(Event::Start(BytesStart::new("w:body")))?;
+        write_body_content(item, &mut writer)?;
+        writer.write_event(Event::End(BytesEnd::new("w:body")))?;
+        writer.write_event(Event::End(BytesEnd::new("w:document")))?;
+        let mut xml = writer.into_inner();
+        declare_w14_on_part_root(&mut xml)?;
+        Ok(xml)
+    }
+
+    /// The part-root guarantees the body is serialized under.
+    fn root_binding_scope(&self) -> crate::text::RootBindingScope {
+        let wp_ns = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
+        let wp_root_is_canonical = self
+            .extra_namespaces
+            .iter()
+            .find(|(name, _)| name == "xmlns:wp")
+            .is_none_or(|(_, namespace)| namespace == wp_ns);
+        root_binding_scope(
+            ROOT_R_BINDING
+                | ROOT_MC_BINDING
+                | if wp_root_is_canonical {
+                    ROOT_WP_BINDING
+                } else {
+                    0
+                },
+        )
+    }
+
+    /// The `w:document` start tag, before any `w14` declaration.
+    fn root_start(&self) -> BytesStart<'_> {
+        let wp_ns = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
         let mut doc_start = BytesStart::new("w:document");
         doc_start.push_attribute(("xmlns:w", W_NS));
         doc_start.push_attribute((
@@ -4001,24 +4166,7 @@ impl CT_Document {
         for (key, val) in self.extra_namespaces.iter().chain(&self.root_attributes) {
             doc_start.push_attribute((key.as_str(), val.as_str()));
         }
-
-        writer.write_event(Event::Start(doc_start))?;
-
-        // Write background element if present
-        if let Some(ref bg) = self.background_xml {
-            writer.get_mut().extend_from_slice(bg);
-        }
-        for raw in &self.background_extra_xml {
-            writer.get_mut().extend_from_slice(raw);
-        }
-
-        self.body.to_xml(&mut writer)?;
-
-        writer.write_event(Event::End(BytesEnd::new("w:document")))?;
-
-        let mut xml = writer.into_inner();
-        declare_w14_on_part_root(&mut xml)?;
-        Ok(xml)
+        doc_start
     }
 }
 

@@ -4972,7 +4972,7 @@ fn odt_supported_record(mut document: Document) -> OdtSupportedRecord {
         .parts
         .iter()
         .filter(|(name, _)| name.starts_with("/word/media/"))
-        .map(|(name, bytes)| (name.clone(), bytes.clone()))
+        .map(|(name, bytes)| (name.clone(), bytes.to_vec()))
         .collect();
     media.sort_by(|left, right| left.0.cmp(&right.0));
     OdtSupportedRecord {
@@ -5071,7 +5071,7 @@ fn odt_structural_record(mut document: Document) -> OdtStructuralRecord {
         .parts
         .iter()
         .filter(|(name, _)| name.starts_with("/word/media/"))
-        .map(|(name, bytes)| (name.clone(), bytes.clone()))
+        .map(|(name, bytes)| (name.clone(), bytes.to_vec()))
         .collect();
     media.sort_by(|left, right| left.0.cmp(&right.0));
     OdtStructuralRecord {

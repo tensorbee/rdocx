@@ -1873,6 +1873,12 @@ impl Field {
     }
 }
 
+// The fields this ignores, the source form, the run span and the nested
+// cached fields, can change the block's bytes and the runs it owns, so two
+// blocks that hold equal fields need not read or serialize the same. The
+// Python binding reads a body block holding a field again for that reason,
+// and staging and reopening keep no main part body child holding one by
+// value.
 impl PartialEq for Field {
     fn eq(&self, other: &Self) -> bool {
         self.instruction == other.instruction
@@ -2506,6 +2512,12 @@ pub struct BookmarkMarker {
     has_child_content: bool,
 }
 
+// The Python binding keeps the Word owners it read for a body block while
+// the block compares equal, and staging and reopening keep a main part body
+// child by value. `word_prefixes` is a read projection: the marker's XML is
+// kept elsewhere, so it changes no owner and no byte. Only
+// `refresh_bookmark_projection` reads it, to accept the Word prefixes of the
+// source when it parses the paragraph's own serialization again.
 impl PartialEq for BookmarkMarker {
     fn eq(&self, other: &Self) -> bool {
         self.start == other.start
