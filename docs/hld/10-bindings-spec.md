@@ -779,7 +779,11 @@ refuses adding, removing or changing physical section properties, including
 self-closing forms. Unchanged imported section XML, including opaque foreign
 attributes, is preserved. A temporary model failure on an admitted Empty
 section retains exact protected raw bytes and namespace meaning. Retained
-nested namespace owners require staged identity proof. A retained shadowed serializer prefix refuses that local publication
+nested namespace owners require staged identity proof, except a plain paragraph
+removal when every owner is a `w:sdt` whose declarations replay on the body.
+When that replay fails, or a shadowed serializer prefix is retained, `insert_paragraph`, `Paragraph.insert_paragraph_before`,
+`add_paragraph`, `add_heading`, `add_page_break`, `insert_table` and `add_table`
+refuse before any change, with the error a save would give. A retained shadowed serializer prefix refuses that local publication
 and leaves the package unchanged. PowerPoint `ShapeCollection.add_textbox`, `Shape.alt_text`, `Shape.left`,
 `FillFormat.solid` on a shape, and a stable `Shape.element.replace_xml` do the
 same for one slide child when the edit does not change relationships, connectors,

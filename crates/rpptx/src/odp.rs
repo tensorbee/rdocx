@@ -578,14 +578,17 @@ fn from_odp_with_limits(bytes: &[u8], limits: OdpLimits) -> Result<OdpReadResult
     }
     for (page_index, page) in pages.into_iter().enumerate() {
         presentation.add_slide(0)?;
-        presentation.slides[page_index]
+        Arc::make_mut(&mut presentation.slides[page_index])
             .slide
             .common_slide_data
             .shape_tree
             .children
             .clear();
         if let Some(name) = page.name {
-            presentation.slides[page_index].slide.common_slide_data.name = Some(name);
+            Arc::make_mut(&mut presentation.slides[page_index])
+                .slide
+                .common_slide_data
+                .name = Some(name);
         }
         for (object_index, object) in page.objects.into_iter().enumerate() {
             let path = format!("slides/{page_index}/objects/{object_index}");
@@ -1030,7 +1033,8 @@ fn attach_notes(presentation: &mut Presentation, slide_index: usize, text: &str)
             message: error.to_string(),
         })?,
     );
-    presentation.slides[slide_index].notes = Some(NotesRecord { part_name, notes });
+    Arc::make_mut(&mut presentation.slides[slide_index]).notes =
+        Some(NotesRecord { part_name, notes });
     Ok(())
 }
 
