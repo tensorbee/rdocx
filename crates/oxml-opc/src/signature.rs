@@ -1867,7 +1867,7 @@ mod tests {
             .unwrap();
         assert_eq!(report.signature_part, "/_xmlsignatures/sig8.xml");
         assert!(occupied.parts.contains_key("/_xmlsignatures/origin1.sigs"));
-        assert_eq!(occupied.parts["/_xmlsignatures/origin.sigs"], b"occupied");
+        assert_eq!(*occupied.parts["/_xmlsignatures/origin.sigs"], b"occupied");
         assert!(!occupied.parts.contains_key("/_xmlsignatures/sig7.xml"));
 
         let mut already_signed = unsigned_package();
@@ -2592,7 +2592,7 @@ mod tests {
     }
 
     fn mutate_signature_xml(package: &mut OpcPackage, mutate: impl FnOnce(String) -> String) {
-        let xml = String::from_utf8(package.parts["/_xmlsignatures/sig1.xml"].clone()).unwrap();
+        let xml = String::from_utf8(package.parts["/_xmlsignatures/sig1.xml"].to_vec()).unwrap();
         package.set_part("/_xmlsignatures/sig1.xml", mutate(xml).into_bytes());
     }
 }

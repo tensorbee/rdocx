@@ -1822,7 +1822,7 @@ impl Importer<'_> {
         }
         for (slide_index, section) in sections.into_iter().enumerate() {
             self.presentation.add_slide(0)?;
-            self.presentation.slides[slide_index]
+            Arc::make_mut(&mut self.presentation.slides[slide_index])
                 .slide
                 .common_slide_data
                 .shape_tree

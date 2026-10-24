@@ -1758,7 +1758,7 @@ fn scan_serialized_package(
         )?;
     }
     for (part_name, part) in &package.parts {
-        scan_bytes(part, selector, part_name)?;
+        scan_bytes(part.as_slice(), selector, part_name)?;
         if part.starts_with(b"PK\x03\x04") {
             if depth >= 1 {
                 return Err(Error::Other(format!(

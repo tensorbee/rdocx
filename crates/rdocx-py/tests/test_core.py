@@ -10821,3 +10821,1044 @@ def test_issue389_retained_paragraph_alias_never_publishes_unsavable_text():
     else:
         assert paragraph.text == 'new'
         assert rdocx.Document.from_bytes(doc.to_bytes()).paragraphs[0].text == 'new'
+
+
+def _issue407_document(root_w14):
+    import rdocx
+
+    w14 = "http://schemas.microsoft.com/office/word/2010/wordml"
+    body = "".join([
+        '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t>heading</w:t></w:r></w:p>',
+        '<w:p><w:r><w:t xml:space="preserve">see </w:t></w:r><w:hyperlink w:anchor="target"><w:r><w:t>target</w:t></w:r></w:hyperlink></w:p>',
+        '<w:p><w:bookmarkStart w:id="1" w:name="target"/><w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple><w:bookmarkEnd w:id="1"/></w:p>',
+        '<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>cell</w:t></w:r></w:p>'
+        '<w:tbl><w:tblGrid><w:gridCol w:w="1000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>nested</w:t></w:r></w:p></w:tc></w:tr></w:tbl>'
+        '<w:p/></w:tc></w:tr></w:tbl>',
+        '<w:sdt><w:sdtPr><w:alias w:val="block"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>block one</w:t></w:r></w:p><w:p><w:r><w:t>block two</w:t></w:r></w:p></w:sdtContent></w:sdt>',
+        *(f'<w:p><w:r><w:rPr><w:i/></w:rPr><w:t>{text}</w:t></w:r><w:r><w:tab/><w:t>tail</w:t></w:r></w:p>' for text in "abc"),
+        f'<w:p xmlns:w14="{w14}" w14:paraId="388B6825"><w:r><w:t>identified</w:t></w:r></w:p>',
+        '<w:p><w:r><w:t>last</w:t></w:r></w:p>',
+    ])
+    document = rdocx.Document()
+    document.add_paragraph("first")
+    document.section(0).header.add_paragraph("header text")
+    source = io.BytesIO(document.to_bytes())
+    output = io.BytesIO()
+    with zipfile.ZipFile(source) as source_zip, zipfile.ZipFile(output, "w") as result_zip:
+        for info in source_zip.infolist():
+            data = source_zip.read(info.filename)
+            if info.filename == "word/document.xml":
+                text = data.decode()
+                at = text.index("<w:sectPr")
+                text = text[:at] + body + text[at:]
+                if root_w14:
+                    text = text.replace("<w:document ", f'<w:document xmlns:w14="{w14}" ', 1)
+                data = text.encode()
+            result_zip.writestr(info, data)
+    return rdocx.Document.from_bytes(output.getvalue())
+
+
+@pytest.mark.parametrize("root_w14", [False, True])
+def test_issue407_plain_body_splices_keep_owner_lifetimes(root_w14):
+    import rdocx
+
+    doc = _issue407_document(root_w14)
+
+    def texts():
+        return [paragraph.text for paragraph in doc.paragraphs]
+
+    def read_all():
+        # Debug builds compare every direct read with the whole-source read.
+        for paragraph in doc.paragraphs:
+            assert paragraph.xml.startswith("<w:p")
+            for run in paragraph.runs:
+                assert run.xml.startswith("<w:r")
+        for table in doc.tables:
+            assert table.xml.startswith("<w:tbl")
+            for row in table.rows:
+                for cell in row.cells:
+                    assert cell.xml.startswith("<w:tc")
+
+    expected = ["first", "heading", "see target", "1", "block one", "block two",
+                "a\ttail", "b\ttail", "c\ttail", "identified", "last"]
+    assert texts() == expected
+    read_all()
+    # A read declares w14 when its root or its own bytes use it, never only
+    # because another paragraph does.
+    assert ("xmlns:w14" in doc.paragraphs[0].xml) == root_w14
+    assert "xmlns:w14" in doc.paragraphs[9].xml
+    edits = [
+        ("Document.insert_paragraph", lambda: doc.insert_paragraph(2, "inserted"), 2, "inserted"),
+        ("Document.insert_paragraph", lambda: doc.insert_paragraph(0, "zero"), 0, "zero"),
+        ("Document.remove_content", lambda: doc.remove_content(0), 0, None),
+        ("Document.insert_paragraph", lambda: doc.insert_paragraph(5, "before table", "Heading1"), 5, "before table"),
+        ("Document.insert_paragraph", lambda: doc.insert_paragraph(7, "before control"), 6, "before control"),
+        ("Document.remove_content", lambda: doc.remove_content(9), 9, None),
+        ("Document.insert_paragraph", lambda: doc.paragraphs[9].insert_paragraph_before("before b"), 9, "before b"),
+        ("Document.remove_content_range", lambda: doc.remove_content_range(10, 12), 10, None),
+        ("Document.insert_paragraph", lambda: doc.insert_paragraph(12, "end"), 12, "end"),
+    ]
+    for operation, edit, at, text in edits:
+        held = doc.paragraphs[0]
+        held_run = held.runs[0]
+        held_table = doc.tables[0]
+        before = len(expected)
+        result = edit()
+        if text is None:
+            removed = 2 if operation.endswith("range") else 1
+            del expected[at:at + removed]
+            assert result == (2 if removed == 2 else True)
+        else:
+            expected.insert(at, text)
+            assert result.text == text
+            assert result.xml.startswith("<w:p")
+        assert len(expected) != before
+        for stale in (lambda: held.text, lambda: held_run.text, lambda: held_table.xml):
+            with pytest.raises(rdocx.StaleElementError, match=operation):
+                stale()
+        assert texts() == expected
+        read_all()
+    held = doc.paragraphs[3]
+    held_table = doc.tables[0]
+    held_cell = held_table.cell(0, 0)
+    table = doc.insert_table(4, 2, 3)
+    assert len(table.rows) == 2 and table.cell(1, 2).text == ""
+    for stale in (lambda: held.text, lambda: held_table.xml, lambda: held_cell.text):
+        with pytest.raises(rdocx.StaleElementError, match="Document.insert_table"):
+            stale()
+    table.cell(1, 2).text = "new cell"
+    assert doc.tables[0].cell(1, 2).text == "new cell"
+    assert doc.tables[1].cell(0, 0).paragraphs[0].text == "cell"
+    assert texts() == expected
+    read_all()
+    held = doc.paragraphs[3]
+    held_table = doc.tables[1]
+    appended_table = doc.add_table(1, 2)
+    assert len(doc.tables) == 3 and appended_table.cell(0, 1).text == ""
+    assert held.text == expected[3] and held_table.xml.startswith("<w:tbl")
+    read_all()
+    held = doc.paragraphs[3]
+    held_run = held.runs[0]
+    appended = doc.add_paragraph("appended")
+    expected.append("appended")
+    # An append keeps paragraph owners, while runs keep the document epoch.
+    assert appended.text == "appended" and held.text == expected[3]
+    with pytest.raises(rdocx.StaleElementError, match="Document.add_paragraph"):
+        _ = held_run.xml
+    assert texts() == expected
+    read_all()
+    reopened = rdocx.Document.from_bytes(doc.to_bytes())
+    assert [paragraph.text for paragraph in reopened.paragraphs] == expected
+
+
+def _issue407_work():
+    from rdocx import _rdocx
+
+    work = getattr(_rdocx, "_word_whole_body_work", None)
+    if work is None:
+        pytest.skip("the whole-body work counters exist in debug builds only")
+    return work
+
+
+def _issue407_review_document(paragraphs):
+    """A body shaped like the python-docx review documents of the rdocx-skills scaling test: paragraphs of several
+    runs with a picture and a table after every 10th, two sections with a header, comments, then the snippets
+    python-docx appends, which declare `w` again: a tracked insertion, a block control and a repeating section whose
+    item paragraph no story route reaches."""
+    import rdocx
+
+    w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    w15 = 'xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"'
+    document = rdocx.Document()
+    for i in range(paragraphs):
+        paragraph = document.add_paragraph()
+        for k in range(3):
+            paragraph.add_run(f"run {k} of paragraph {i} ").bold = False
+        if i % 10 == 9:
+            paragraph.add_run("").add_picture(_one_pixel_png(), "pixel.png")
+            table = document.add_table(2, 2)
+            table.cell(0, 0).text = f"cell of table {i // 10}"
+    document.section(0).header.add_paragraph("header")
+    for k in range(2):
+        at = document.find_content_index(document.add_paragraph(f"commented {k}"))
+        document.add_comment(
+            rdocx.RunRange(
+                start=rdocx.RunPosition(body_index=at, run_index=0),
+                end=rdocx.RunPosition(body_index=at, run_index=0),
+            ),
+            author="Reviewer",
+            text=f"comment {k}",
+        )
+    tail = "".join([
+        f'<w:p><w:r><w:t xml:space="preserve">tracked </w:t></w:r><w:ins {w} w:id="901" w:author="Editor" '
+        'w:date="2026-01-01T00:00:00Z"><w:r><w:t>inserted</w:t></w:r></w:ins></w:p>',
+        f'<w:sdt {w}><w:sdtPr><w:tag w:val="probe0"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>control</w:t></w:r>'
+        '</w:p></w:sdtContent></w:sdt>',
+        '<w:p><w:r><w:t>spot</w:t></w:r></w:p>',
+        f'<w:sdt {w} {w15}><w:sdtPr><w:tag w:val="rows"/><w15:repeatingSection/></w:sdtPr><w:sdtContent><w:sdt>'
+        '<w:sdtPr><w15:repeatingSectionItem/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>row</w:t></w:r></w:p>'
+        '</w:sdtContent></w:sdt></w:sdtContent></w:sdt>',
+        '<w:p><w:r><w:t>after the rows</w:t></w:r></w:p>',
+        '<w:p><w:r><w:t>end</w:t></w:r></w:p>',
+    ])
+    source = io.BytesIO(document.to_bytes())
+    output = io.BytesIO()
+    with zipfile.ZipFile(source) as source_zip, zipfile.ZipFile(output, "w") as result_zip:
+        for info in source_zip.infolist():
+            data = source_zip.read(info.filename)
+            if info.filename == "word/document.xml":
+                text = data.decode()
+                at = text.rindex("<w:sectPr")
+                # The first section ends at the comments and keeps the header.
+                section = text[at:text.index("</w:sectPr>", at) + len("</w:sectPr>")]
+                text = text[:at] + f"<w:p><w:pPr>{section}</w:pPr></w:p>" + tail + text[at:]
+                data = text.encode()
+            result_zip.writestr(info, data)
+    return rdocx.Document.from_bytes(output.getvalue())
+
+
+@pytest.mark.parametrize("paragraphs", [20, 80])
+def test_issue407_review_shaped_edits_do_no_whole_body_work(paragraphs):
+    import rdocx
+
+    work = _issue407_work()
+    doc = _issue407_review_document(paragraphs)
+    texts = [paragraph.text for paragraph in doc.paragraphs]
+    assert texts[-6:] == ["tracked inserted", "control", "spot", "row", "after the rows", "end"]
+    assert len(doc.sections) == 2
+
+    def direct(call):
+        before = work()
+        result = call()
+        assert work() == before, (call, before, work())
+        return result
+
+    # Paragraphs inside content controls are not direct body children: they read the whole source.
+    for paragraph in doc.paragraphs[-10:] + doc.paragraphs[8:11]:
+        if paragraph.text in ("control", "row"):
+            continue
+        direct(lambda: paragraph.xml)
+        for run in paragraph.runs:
+            direct(lambda: run.xml)
+    for table in (doc.tables[0], doc.tables[-1]):
+        direct(lambda: table.xml)
+        direct(lambda: table.cell(0, 0).xml)
+    spot = doc.find_content_index(doc.paragraphs[-4])
+    tables = len(doc.tables)
+    direct(lambda: doc.insert_paragraph(spot, "inserted"))
+    assert direct(lambda: doc.remove_content(spot))
+    direct(lambda: doc.paragraphs[-2].insert_paragraph_before("before"))
+    direct(lambda: doc.insert_paragraph(spot, "x"))
+    assert direct(lambda: doc.remove_content_range(spot, spot + 2)) == 2
+    direct(lambda: doc.add_paragraph("appended"))
+    direct(lambda: doc.insert_table(spot, 2, 2))
+    direct(lambda: doc.add_table(1, 2))
+    assert [paragraph.text for paragraph in doc.paragraphs] == texts[:-4] + [
+        "row", "before", "after the rows", "end", "appended"]
+    assert len(doc.tables) == tables + 2
+    reopened = rdocx.Document.from_bytes(doc.to_bytes())
+    assert [paragraph.text for paragraph in reopened.paragraphs] == [paragraph.text for paragraph in doc.paragraphs]
+    xml = reopened.part_xml("/word/document.xml")
+    assert "<w15:repeatingSectionItem/>" in xml and 'w:val="probe0"' in xml and 'w:id="901"' in xml
+    assert len(reopened.sections) == 2 and len(reopened.tables) == len(doc.tables)
+
+
+_ISSUE407_W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_ISSUE407_ROWS = (
+    f'<w:sdt xmlns:w="{_ISSUE407_W}" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"><w:sdtPr>'
+    '<w:tag w:val="rows"/><w15:repeatingSection/></w:sdtPr><w:sdtContent><w:sdt><w:sdtPr><w15:repeatingSectionItem/>'
+    '</w:sdtPr><w:sdtContent><w:p><w:r><w:t>row</w:t></w:r></w:p></w:sdtContent></w:sdt></w:sdtContent></w:sdt>'
+)
+_ISSUE407_TWIN = ('<w:sdt xmlns:x="urn:x"><w:sdtPr><x:meta/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>twin</w:t></w:r>'
+                  '</w:p></w:sdtContent></w:sdt>')
+_ISSUE407_ALIAS = (f'<q:sdt xmlns:q="{_ISSUE407_W}"><q:sdtPr><q:tag q:val="t"/></q:sdtPr><q:sdtContent><q:p><q:r>'
+                   '<q:t>in q</q:t></q:r></q:p></q:sdtContent></q:sdt>')
+_ISSUE407_EDITS = {
+    "remove_content": lambda doc: doc.remove_content(1),
+    "remove_content_range": lambda doc: doc.remove_content_range(0, 2),
+    "replace_xml": lambda doc: doc.paragraphs[1].replace_xml(doc.paragraphs[1].xml.replace(">drop<", ">kept<")),
+    "insert_paragraph": lambda doc: doc.insert_paragraph(1, "inserted"),
+    "insert_paragraph_before": lambda doc: doc.paragraphs[1].insert_paragraph_before("before"),
+    "add_paragraph": lambda doc: doc.add_paragraph("appended"),
+    "insert_table": lambda doc: doc.insert_table(1, 1, 2),
+    "add_table": lambda doc: doc.add_table(1, 2),
+}
+
+
+@pytest.mark.parametrize("owners", ["twin_sdt", "alias_sdt", "twin_repeating_sections", "repeating_section"])
+@pytest.mark.parametrize("edit", sorted(_ISSUE407_EDITS))
+def test_issue407_nested_owner_body_edits_never_publish_unsavable_bytes(owners, edit):
+    import rdocx
+
+    # A save replays nested declarations by owner identity: twin owners, or an
+    # owner under an alias prefix, cannot be told apart once serialized.
+    tail = {"twin_sdt": _ISSUE407_TWIN + '<w:p><w:r><w:t>mid</w:t></w:r></w:p>' + _ISSUE407_TWIN,
+            "alias_sdt": _ISSUE407_ALIAS,
+            "twin_repeating_sections": _ISSUE407_ROWS + _ISSUE407_ROWS,
+            "repeating_section": _ISSUE407_ROWS}[owners]
+    doc = _replace_document_body(
+        rdocx.Document(),
+        '<w:p><w:r><w:t>keep</w:t></w:r></w:p><w:p><w:r><w:t>drop</w:t></w:r></w:p>' + tail,
+    )
+    before = doc.to_bytes()
+    texts = [paragraph.text for paragraph in doc.paragraphs]
+    # A replacement splices the staged source, so it saves without a replay.
+    refused = owners != "repeating_section" and edit != "replace_xml"
+    try:
+        _ISSUE407_EDITS[edit](doc)
+    except rdocx.RdocxError as error:
+        assert refused, error
+        assert "namespace owner" in str(error)
+        assert doc.to_bytes() == before
+        assert [paragraph.text for paragraph in doc.paragraphs] == texts
+    else:
+        assert not refused
+        saved = [paragraph.text for paragraph in doc.paragraphs]
+        assert saved != texts or edit.endswith("table")
+        reopened = rdocx.Document.from_bytes(doc.to_bytes())
+        assert [paragraph.text for paragraph in reopened.paragraphs] == saved
+        marker = {"twin_sdt": "<x:meta/>", "alias_sdt": "in q"}.get(owners, "<w15:repeatingSectionItem/>")
+        assert marker in reopened.part_xml("/word/document.xml")
+
+
+@pytest.mark.parametrize("root_w14", [False, True])
+def test_issue407_direct_routes_do_no_whole_body_work(root_w14):
+    import rdocx
+
+    work = _issue407_work()
+    doc = _issue407_document(root_w14)
+    # A comments part does not keep plain paragraph removal off its route.
+    doc.add_comment(
+        rdocx.RunRange(
+            start=rdocx.RunPosition(body_index=1, run_index=0),
+            end=rdocx.RunPosition(body_index=1, run_index=1),
+        ),
+        author="Ada",
+        text="review",
+    )
+
+    def direct(call):
+        before = work()
+        result = call()
+        assert work() == before, (call, before, work())
+        return result
+
+    for index in (0, 1, 2, 3, 6, 7, 8, 9, 10):
+        paragraph = doc.paragraphs[index]
+        direct(lambda: paragraph.xml)
+        for run in paragraph.runs:
+            direct(lambda: run.xml)
+    table = doc.tables[0]
+    direct(lambda: table.xml)
+    for row in table.rows:
+        for cell in row.cells:
+            direct(lambda: cell.xml)
+    direct(lambda: doc.insert_paragraph(2, "inserted"))
+    direct(lambda: doc.remove_content(2))
+    direct(lambda: doc.paragraphs[7].insert_paragraph_before("before"))
+    direct(lambda: doc.insert_paragraph(7, "x"))
+    assert direct(lambda: doc.remove_content_range(7, 9)) == 2
+    direct(lambda: doc.add_paragraph("appended"))
+    direct(lambda: doc.insert_table(4, 2, 2))
+    direct(lambda: doc.add_table(1, 2))
+    direct(lambda: doc.tables[0].cell(1, 1).xml)
+    assert [p.text for p in doc.paragraphs][-2:] == ["last", "appended"]
+    # The counters do see the whole-body routes. A staged edit reads the
+    # owner inventory by body block and story part, and a form publication
+    # rebuilds it from the whole document.
+    before = work()
+    _ = doc.paragraphs[4].xml
+    assert work()[1] > before[1]
+    item = next(it for it in doc.story_items if it.story.kind == "body" and it.kind == "paragraph")
+    doc.insert_content_control(rdocx.ContentLocation(item.story, item.kind, item.index_path), "block",
+                               "plain_text", tag="t")
+    before = work()
+    assert doc.bind_content_controls({"t": "value"}) == 1
+    assert work()[0] > before[0]
+
+
+def _word_piece_work():
+    from rdocx import _rdocx
+
+    work = getattr(_rdocx, "_word_piece_work", None)
+    if work is None:
+        pytest.skip("the owner piece counter exists in debug builds only")
+    return work
+
+
+def _word_piece_edits():
+    """Edits whose next owner inventory is read by body block and story part, each given the document and returning
+    the call that makes the edit."""
+    import rdocx
+
+    def paragraph(doc):
+        return next(p for p in reversed(list(doc.paragraphs)) if p.text.startswith("run 0 of paragraph"))
+
+    def table(doc):
+        return doc.tables[-1]
+
+    def runs(doc):
+        at = doc.find_content_index(paragraph(doc))
+        return rdocx.RunRange(start=rdocx.RunPosition(body_index=at, run_index=0),
+                              end=rdocx.RunPosition(body_index=at, run_index=1))
+
+    def comment(doc):
+        return next(c.id for c in doc.comments if c.text == "comment 0")
+
+    def chart(doc):
+        data = rdocx.CategoryChartData()
+        data.categories = ["a", "b"]
+        data.add_series("s", (1, 2))
+        after = paragraph(doc)
+        return lambda: doc.add_chart(rdocx.XL_CHART_TYPE.COLUMN_CLUSTERED, data, rdocx.Inches(4),
+                                     rdocx.Inches(3), after=after)
+
+    def settings(doc):
+        settings = doc.settings
+        return lambda: setattr(settings, "odd_and_even_pages_header_footer", True)
+
+    def setter(target, name, value):
+        def make(doc):
+            obj = target(doc)
+            return lambda: setattr(obj, name, value)
+        return make
+
+    def method(target, name, *args, **kwargs):
+        def make(doc):
+            obj = target(doc)
+            values = [value(doc) if callable(value) else value for value in args]
+            return lambda: getattr(obj, name)(*values, **kwargs)
+        return make
+
+    def document(doc):
+        return doc
+
+    return {
+        "Table.indent": setter(table, "indent", rdocx.Inches(0.2)),
+        "Table.set_borders": method(table, "set_borders", "single", size=8, color="000000"),
+        "Row.height": setter(lambda doc: table(doc).rows[0], "height", rdocx.Inches(0.5)),
+        "Cell.shading": setter(lambda doc: table(doc).cell(0, 0), "shading", rdocx.RGBColor(0x7B, 0x1E, 0x3A)),
+        "Cell.add_paragraph": method(lambda doc: table(doc).cell(0, 0), "add_paragraph", "x"),
+        "Paragraph.text": setter(paragraph, "text", "x"),
+        "Paragraph.add_run": method(paragraph, "add_run", "x"),
+        "Paragraph.add_hyperlink": method(paragraph, "add_hyperlink", "x", "https://example.com/a"),
+        "Paragraph.add_equation": method(paragraph, "add_equation", "x^2", format="latex"),
+        "Run.remove": method(lambda doc: paragraph(doc).runs[1], "remove"),
+        "Run.add_field": method(lambda doc: paragraph(doc).runs[0], "add_field", "PAGE", "1"),
+        "Document.split_run": method(document, "split_run", paragraph, 0, 3),
+        "Document.add_comment": method(document, "add_comment", runs, author="Reviewer", text="c",
+                                       date="2026-10-01T12:00:00Z"),
+        "Document.reply_to": method(document, "reply_to", comment, author="Author", text="r",
+                                    date="2026-10-01T12:00:00Z"),
+        "Document.resolve_comment": method(document, "resolve_comment", comment),
+        "Document.add_chart": chart,
+        "Document.set_text_watermark": method(document, "set_text_watermark", "DRAFT"),
+        "Document.set_note_policy": method(document, "set_note_policy", "footnote", start=2),
+        "Settings.odd_and_even_pages_header_footer": settings,
+    }
+
+
+_WORD_PIECE_DOCUMENTS = {}
+
+
+def _word_piece_document(paragraphs):
+    import rdocx
+
+    if paragraphs not in _WORD_PIECE_DOCUMENTS:
+        _WORD_PIECE_DOCUMENTS[paragraphs] = _issue407_review_document(paragraphs).to_bytes()
+    return rdocx.Document.from_bytes(_WORD_PIECE_DOCUMENTS[paragraphs])
+
+
+@pytest.mark.parametrize("edit", sorted(_word_piece_edits()))
+def test_word_owner_inventory_reads_only_what_an_edit_changes(edit):
+    import rdocx
+
+    # The owner inventory of an edit reads again only the body blocks and story parts the edit changed: as many in
+    # a body four times as large, and never the whole document. Debug builds check each inventory read by block
+    # and part against the rebuild.
+    work = _issue407_work()
+    pieces = _word_piece_work()
+    reads = []
+    for paragraphs in (20, 80):
+        doc = _word_piece_document(paragraphs)
+        call = _word_piece_edits()[edit](doc)
+        before = (work(), pieces())
+        call()
+        assert work() == before[0], (edit, paragraphs)
+        reads.append(pieces() - before[1])
+        reopened = rdocx.Document.from_bytes(doc.to_bytes())
+        assert [p.text for p in reopened.paragraphs] == [p.text for p in doc.paragraphs]
+    assert reads[0] == reads[1] <= 2, (edit, reads)
+
+
+_WORD_PIECE_BOX_DRAWING = (
+    '<w:drawing><wp:anchor xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+    'distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="1" behindDoc="0" locked="0" layoutInCell="1" '
+    'allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset>'
+    '</wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>'
+    '<wp:extent cx="914400" cy="914400"/><wp:effectExtent l="0" t="0" r="0" b="0"/><wp:wrapNone/>'
+    '<wp:docPr id="7" name="Box"/><wp:cNvGraphicFramePr/>'
+    '<a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData '
+    'uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp '
+    'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:cNvSpPr txBox="1"/>'
+    '<wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/></a:xfrm><a:prstGeom prst="rect">'
+    '<a:avLst/></a:prstGeom></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:t>{text}</w:t></w:r></w:p>'
+    '<w:tbl><w:tblGrid><w:gridCol w:w="1000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>boxed cell</w:t></w:r></w:p>'
+    '</w:tc></w:tr></w:tbl><w:p/></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic>'
+    '</wp:anchor></w:drawing>'
+)
+_WORD_PIECE_BOXED_TABLE = ('<w:tbl><w:tblGrid><w:gridCol w:w="1000"/></w:tblGrid><w:tr><w:tc><w:p><w:r>'
+                           '<w:t>boxed cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/>')
+# A bare DrawingML box, the box Word writes (a DrawingML choice and its VML fallback, both stories), and a table
+# whose cell holds a box. A table inside a box inside a table cell does not open, on main either.
+_WORD_PIECE_TEXT_BOXES = (
+    '<w:p><w:r>' + _WORD_PIECE_BOX_DRAWING + '</w:r></w:p>',
+    '<w:p><w:r><mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '
+    'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><mc:Choice Requires="wps">'
+    + _WORD_PIECE_BOX_DRAWING + '</mc:Choice><mc:Fallback><w:pict><v:rect xmlns:v="urn:schemas-microsoft-com:vml" '
+    'style="width:72pt;height:72pt"><v:textbox><w:txbxContent><w:p><w:r><w:t>{text} fallback</w:t></w:r></w:p>'
+    '</w:txbxContent></v:textbox></v:rect></w:pict></mc:Fallback></mc:AlternateContent></w:r></w:p>',
+    '<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r>'
+    + _WORD_PIECE_BOX_DRAWING.replace(_WORD_PIECE_BOXED_TABLE, "") + '</w:r></w:p></w:tc></w:tr></w:tbl>',
+)
+
+
+def _word_piece_text_box_document(paragraphs):
+    import rdocx
+
+    table = ('<w:tbl><w:tblGrid><w:gridCol w:w="1000"/><w:gridCol w:w="1000"/></w:tblGrid>'
+             + '<w:tr><w:tc><w:p><w:r><w:t>c</w:t></w:r></w:p></w:tc><w:tc><w:p/></w:tc></w:tr>' * 2 + '</w:tbl>')
+    body = [table]
+    for i in range(paragraphs):
+        body.append(f'<w:p><w:r><w:t>paragraph {i}</w:t></w:r></w:p>')
+        if i % 10 in (2, 4, 6):
+            body.append(_WORD_PIECE_TEXT_BOXES[i % 10 // 2 - 1].format(text=f"box {i}"))
+        if i % 10 == 9:
+            body.append(table)
+    return _replace_document_body(rdocx.Document(), "".join(body) + "<w:sectPr/>")
+
+
+def test_word_owner_inventory_reads_one_block_beside_text_boxes():
+    # Text box stories, and the table cells inside them, number across the main part as table cells do, so the
+    # inventory places them by offsets too and an edit reads only the block it changed.
+    work = _issue407_work()
+    pieces = _word_piece_work()
+    reads = []
+    for paragraphs in (20, 80):
+        doc = _word_piece_text_box_document(paragraphs)
+        edits = [
+            lambda: setattr(doc.paragraphs[-1], "text", "edited"),
+            lambda: setattr(doc.tables[-1].cell(0, 0), "width", 914400),
+            # Cell paragraphs route up to the first table cell of a text box, as on main.
+            lambda: doc.tables[0].cell(0, 1).add_paragraph("added"),
+        ]
+        for edit in edits:
+            before = (work(), pieces())
+            edit()
+            assert work() == before[0], paragraphs
+            reads.append((paragraphs, pieces() - before[1]))
+        xml = doc.part_xml("/word/document.xml")
+        assert all(text in xml for text in ("box 12", "box 14 fallback", "box 16", "boxed cell", "edited"))
+    assert [count for _, count in reads] == [1] * 6, reads
+
+
+def test_word_owner_inventory_reads_no_piece_for_a_part_read_twice():
+    import rdocx
+
+    # One part referenced as a header and as a footer is two story sources: the rebuild reads that inventory and
+    # the pieces are not read at all.
+    doc = rdocx.Document()
+    for i in range(12):
+        doc.add_paragraph(f"paragraph {i}")
+    doc.add_table(1, 2)
+    doc.section(0).header.add_paragraph("shared")
+    source = io.BytesIO(doc.to_bytes())
+    output = io.BytesIO()
+    with zipfile.ZipFile(source) as source_zip, zipfile.ZipFile(output, "w") as result_zip:
+        rels = source_zip.read("word/_rels/document.xml.rels").decode()
+        target = re.search(r'Type="[^"]*/header" Target="([^"]+)"', rels) or re.search(
+            r'Target="([^"]+)" Type="[^"]*/header"', rels)
+        for info in source_zip.infolist():
+            data = source_zip.read(info.filename)
+            if info.filename == "word/_rels/document.xml.rels":
+                footer = ('<Relationship Id="rIdSharedFooter" Type="http://schemas.openxmlformats.org/officeDocument/'
+                          f'2006/relationships/footer" Target="{target.group(1)}"/>')
+                data = data.decode().replace("</Relationships>", footer + "</Relationships>").encode()
+            if info.filename == "word/document.xml":
+                text = data.decode()
+                at = text.index("<w:headerReference")
+                text = text[:at] + '<w:footerReference w:type="default" r:id="rIdSharedFooter"/>' + text[at:]
+                data = text.encode()
+            result_zip.writestr(info, data)
+    work = _issue407_work()
+    pieces = _word_piece_work()
+    before = (work(), pieces())
+    doc = rdocx.Document.from_bytes(output.getvalue())
+    doc.paragraphs[3].text = "edited"
+    doc.tables[0].cell(0, 0).width = 914400
+    assert pieces() == before[1]
+    assert work()[0] >= before[0][0] + 3
+    assert rdocx.Document.from_bytes(doc.to_bytes()).paragraphs[3].text == "edited"
+
+
+_WORD_PIECE_SPLICES = {
+    "remove_content": lambda doc: doc.remove_content(0),
+    "remove_content_range": lambda doc: doc.remove_content_range(0, 2),
+    "insert_paragraph": lambda doc: doc.insert_paragraph(5, "inserted"),
+    "insert_paragraph_before": lambda doc: doc.paragraphs[3].insert_paragraph_before("before"),
+    "add_paragraph": lambda doc: doc.add_paragraph("appended"),
+    "insert_table": lambda doc: doc.insert_table(5, 2, 2),
+    "add_table": lambda doc: doc.add_table(1, 2),
+}
+
+
+@pytest.mark.parametrize("splice", sorted(_WORD_PIECE_SPLICES))
+def test_word_owner_pieces_follow_a_body_splice(splice):
+    import rdocx
+
+    # A body splice reads no piece and keeps the pieces in step with the body, so an edit of the last paragraph
+    # after it reads that paragraph's block alone. Debug builds check the inventory of that edit, which reuses the
+    # pieces the splice placed, against the rebuild.
+    work = _issue407_work()
+    pieces = _word_piece_work()
+    reads = []
+    for paragraphs in (20, 80):
+        doc = _word_piece_document(paragraphs)
+        before = (work(), pieces())
+        _WORD_PIECE_SPLICES[splice](doc)
+        assert (work(), pieces()) == before, splice
+        list(doc.paragraphs)[-1].text = "edited"
+        assert work() == before[0], splice
+        reads.append(pieces() - before[1])
+        reopened = rdocx.Document.from_bytes(doc.to_bytes())
+        assert [p.text for p in reopened.paragraphs] == [p.text for p in doc.paragraphs]
+    assert reads == [1, 1], (splice, reads)
+
+
+def test_word_owner_pieces_follow_a_tail_removal():
+    import rdocx
+
+    work = _issue407_work()
+    pieces = _word_piece_work()
+    for paragraphs in (20, 80):
+        doc = rdocx.Document()
+        for i in range(paragraphs):
+            doc.add_paragraph(f"paragraph {i}")
+            if i % 10 == 9:
+                doc.add_table(2, 2)
+        doc.add_paragraph("tail")
+        doc = rdocx.Document.from_bytes(doc.to_bytes())
+        before = (work(), pieces())
+        # The last body child is a plain paragraph, which the tail removal takes in place.
+        assert doc.remove_content(doc.find_content_index(list(doc.paragraphs)[-1]))
+        assert (work(), pieces()) == before
+        list(doc.paragraphs)[-1].text = "edited"
+        assert work() == before[0] and pieces() - before[1] == 1, paragraphs
+
+
+def _staging_work():
+    from rdocx import _rdocx
+
+    work = getattr(_rdocx, "_staging_work", None)
+    if work is None:
+        pytest.skip("the staging work counter exists in debug builds only")
+    return work
+
+
+_STAGING_DOCUMENTS = {}
+
+
+def _staging_document(paragraphs):
+    """The review-shaped document of the owner piece tests, with a font table and a numbering part, opened from
+    bytes."""
+    import rdocx
+
+    if paragraphs not in _STAGING_DOCUMENTS:
+        document = _issue407_review_document(paragraphs)
+        document.set_font(rdocx.FontDefinition("Seed"))
+        document.add_numbering_definition([rdocx.ListLevel(format="decimal", text="%1.")])
+        _STAGING_DOCUMENTS[paragraphs] = document.to_bytes()
+    return rdocx.Document.from_bytes(_STAGING_DOCUMENTS[paragraphs])
+
+
+def _staging_edits():
+    """Edits that stage a document or compare its saves and leave its main part as it was opened, or change only its
+    model, each given the document and a fresh k and returning the call that makes the edit."""
+    from pathlib import Path
+
+    import rdocx
+
+    font = (Path(__file__).resolve().parents[2] / "oxml-layout/fonts/Selawik-Regular.ttf").read_bytes()
+    license = rdocx.FontEmbeddingLicense(authorized=True, identity="SIL Open Font License 1.1")
+
+    def levels():
+        return [rdocx.ListLevel(format="decimal", text="%1.")]
+
+    def remove_font(doc, k):
+        doc.set_font(rdocx.FontDefinition(f"Gone {k}"))
+        return lambda: doc.remove_font(f"Gone {k}")
+
+    def add_numbering_instance(doc, k):
+        definition = doc.add_numbering_definition(levels())
+        return lambda: doc.add_numbering_instance(definition)
+
+    def link_style_to_numbering(doc, k):
+        style = doc.add_style(f"Probe style {k}", "paragraph").style_id
+        instance = doc.add_numbering_instance(doc.add_numbering_definition(levels()))
+        return lambda: doc.link_style_to_numbering(style, instance, 0)
+
+    return {
+        "Document.set_font": lambda doc, k: lambda: doc.set_font(rdocx.FontDefinition(f"Probe {k}")),
+        "Document.embed_font": lambda doc, k: lambda: doc.embed_font(
+            "Selawik", font, ("regular", "bold", "italic")[k], license=license),
+        "Document.remove_font": remove_font,
+        "Document.embed_true_type_fonts": lambda doc, k: lambda: setattr(doc, "embed_true_type_fonts", k != 1),
+        "Document.add_numbering_definition": lambda doc, k: lambda: doc.add_numbering_definition(levels()),
+        "Document.add_numbering_instance": add_numbering_instance,
+        "Document.link_style_to_numbering": link_style_to_numbering,
+        "Document.add_bullet_list_item": lambda doc, k: lambda: doc.add_bullet_list_item(f"item {k}"),
+        "Document.add_numbered_list_item": lambda doc, k: lambda: doc.add_numbered_list_item(f"item {k}"),
+    }
+
+
+@pytest.mark.parametrize("edit", sorted(_staging_edits()))
+def test_staging_reads_the_main_part_once_while_it_keeps_its_opened_bytes(edit):
+    # A document parses, scans and checks the main part it was opened with once for staging: the first edit reads
+    # it. Later edits that leave that part as it was, or change only its model, read none of it again, in a body of 20
+    # paragraphs as in one four times as large, and compare saves without writing a ZIP. Debug builds check every reuse
+    # against the whole work.
+    work = _staging_work()
+    make = _staging_edits()[edit]
+    counts = []
+    for paragraphs in (20, 80):
+        doc = _staging_document(paragraphs)
+        work()
+        make(doc, 0)()
+        first = list(work())
+        assert any(first), (paragraphs, first)
+        sample = []
+        for k in (1, 2):
+            call = make(doc, k)
+            work()
+            call()
+            sample.append(list(work()))
+        counts.append(sample)
+    assert counts[0] == counts[1], counts
+    if edit in ("Document.add_bullet_list_item", "Document.add_numbered_list_item"):
+        # A list item changes the model, which serializes and reads only the blocks it adds.
+        assert all(sample[:4] == [0] * 4 for sample in counts[0]), counts
+    else:
+        assert counts[0] == [[0] * 6, [0] * 6], counts
+
+
+def _reopen_work():
+    from rdocx import _rdocx
+
+    work = getattr(_rdocx, "_reopen_work", None)
+    if work is None:
+        pytest.skip("the reopen work counter exists in debug builds only")
+    return work
+
+
+def _main_part_keeping_edits():
+    """Edits whose commit leaves the main document part as the last commit left it, each given the document and
+    returning the call that makes the edit, or a document read again and that call: the calls of the rdocx-skills
+    scaling test that keep the main part. A local edit of the body leaves the main part to the next commit, so the
+    targets are made by commits, or read again."""
+    import rdocx
+
+    def paragraph(doc):
+        return next(p for p in reversed(list(doc.paragraphs)) if p.text.startswith("run 0 of paragraph"))
+
+    def footnote(doc):
+        return doc.add_footnote(paragraph(doc), "note")
+
+    def chart_legend(doc):
+        data = rdocx.CategoryChartData()
+        data.categories = ["a", "b"]
+        data.add_series("s", (1, 2))
+        doc.add_chart(rdocx.XL_CHART_TYPE.COLUMN_CLUSTERED, data, rdocx.Inches(4), rdocx.Inches(3))
+        doc = rdocx.Document.from_bytes(doc.to_bytes())
+        chart = doc.paragraphs[-1]
+        return doc, lambda: doc.set_chart_legend(chart, visible=True, position="b")
+
+    def watermark(doc):
+        section = doc.section(0)
+        section.set_text_watermark("DRAFT", width=rdocx.Inches(4), height=rdocx.Inches(1), font_size=rdocx.Pt(36))
+        return section
+
+    image = _one_pixel_png(b"\x00\x00\xff")
+    return {
+        "HeaderFooter.add_paragraph": lambda doc: (lambda header: lambda: header.add_paragraph("x"))(
+            doc.section(0).header),
+        "HeaderFooter.add_table": lambda doc: (lambda header: lambda: header.add_table(1, 1))(doc.section(0).header),
+        "FootnoteEndnote.add_paragraph": lambda doc: (lambda note: lambda: note.add_paragraph("x"))(footnote(doc)),
+        "FootnoteEndnote.add_table": lambda doc: (lambda note: lambda: note.add_table(1, 1))(footnote(doc)),
+        "SectionHandle.set_text_watermark": lambda doc: lambda: doc.section(0).set_text_watermark(
+            "COPY", width=rdocx.Inches(4), height=rdocx.Inches(1), font_size=rdocx.Pt(36)),
+        "SectionHandle.set_image_watermark": lambda doc: lambda: doc.section(0).set_image_watermark(
+            image, "mark.png", width=rdocx.Inches(2), height=rdocx.Inches(2)),
+        "SectionHandle.remove_watermark": lambda doc: watermark(doc).remove_watermark,
+        "Document.replace_image": lambda doc: (lambda rid: lambda: doc.replace_image(rid, image))(
+            doc.pictures()[-1].relationship_id),
+        "Document.replace_image_for_story": lambda doc: (lambda rid: lambda: doc.replace_image_for_story(
+            next(s for s in doc.stories if s.kind == "body"), rid, image))(doc.pictures()[-1].relationship_id),
+        "Document.add_custom_xml_store": lambda doc: lambda: doc.add_custom_xml_store(b"<data><v>1</v></data>"),
+        "Document.set_chart_legend": chart_legend,
+    }
+
+
+@pytest.mark.parametrize("edit", sorted(_main_part_keeping_edits()))
+def test_a_commit_that_keeps_the_main_part_reopens_without_reading_it(edit):
+    import rdocx
+
+    # A commit of a document read from bytes reopens its package in memory, as a write and a read of the ZIP would.
+    # With the main document part left as the last commit left it, the reopen parses none of it and scans none of it
+    # for identifiers: it scans as many bytes in a body four times as large. The staging of the first commit after an
+    # opening still parses the main part once, which this reopen counter does not count. Debug builds also reopen
+    # through the ZIP and assert the same document.
+    work = _reopen_work()
+    counts = []
+    for paragraphs in (20, 80):
+        doc = _word_piece_document(paragraphs)
+        made = _main_part_keeping_edits()[edit](doc)
+        doc, call = made if isinstance(made, tuple) else (doc, made)
+        work()
+        call()
+        counts.append(work())
+        reopened = rdocx.Document.from_bytes(doc.to_bytes())
+        assert [p.text for p in reopened.paragraphs] == [p.text for p in doc.paragraphs]
+    (zip_writes, main_parses, scanned), large = counts
+    assert zip_writes == main_parses == large[0] == large[1] == 0, (edit, counts)
+    # An identifier written into a changed part may take one more digit in the larger document. Scanning the main
+    # part again would add the tens of kilobytes its 60 more paragraphs hold.
+    assert abs(large[2] - scanned) <= 16, (edit, counts)
+
+
+def _main_body_block_scans():
+    from rdocx import _rdocx
+
+    scans = getattr(_rdocx, "_main_body_block_scans", None)
+    if scans is None:
+        pytest.skip("the body child scan counter exists in debug builds only")
+    return scans
+
+
+def _story_lookup_calls():
+    """Calls that address one item of the main part's stories, each given the document and returning the call."""
+    import rdocx
+
+    def paragraph(doc):
+        return next(p for p in reversed(list(doc.paragraphs)) if p.text.startswith("run 0 of paragraph"))
+
+    def item(doc, pick):
+        found = next(it for it in doc.story_items if it.story.kind == "body" and pick(it))
+        return rdocx.ContentLocation(found.story, found.kind, found.index_path)
+
+    def cell(doc):
+        return doc.tables[-1].cell(0, 0)
+
+    def move_comment(doc):
+        at = doc.find_content_index(paragraph(doc))
+        found = next(it for it in doc.story_items if it.story.kind == "body" and it.kind == "paragraph"
+                     and it.direct_body_index == at)
+        target = rdocx.StoryRunRange(start=rdocx.StoryRunPosition(item=found, run_index=0),
+                                     end=rdocx.StoryRunPosition(item=found, run_index=1))
+        comment = next(c.id for c in doc.comments if c.text == "comment 0")
+        return lambda: doc.move_comment(comment, target)
+
+    def picture_size(doc):
+        picture = doc.pictures()[-1]
+        return lambda: doc.set_picture_size(picture, rdocx.Inches(2), rdocx.Inches(2))
+
+    def control(doc):
+        location = item(doc, lambda it: it.kind == "content_control" and b'w:val="probe0"' in it.xml)
+        return lambda: doc.set_content_control_tag(location, "renamed")
+
+    def made(target, name, *args):
+        def make(doc):
+            obj = target(doc)
+            return lambda: getattr(obj, name)(*args)
+        return make
+
+    return {
+        "Cell.replace_text": made(cell, "replace_text", "cell", "omega"),
+        "Cell.add_table": made(cell, "add_table", 1, 1),
+        "Cell.add_picture": made(cell, "add_picture", _one_pixel_png(), "pixel.png"),
+        "Document.add_picture": lambda doc: lambda: doc.add_picture(_one_pixel_png(), "pixel.png"),
+        "Document.set_picture_size": picture_size,
+        "Document.move_comment": move_comment,
+        "Document.set_content_control_tag": control,
+        "Document.add_footnote": lambda doc: (lambda p: lambda: doc.add_footnote(p, "note"))(paragraph(doc)),
+    }
+
+
+@pytest.mark.parametrize("call", sorted(_story_lookup_calls()))
+def test_story_lookups_scan_only_the_body_children_an_edit_changed(call):
+    # Each story lookup of the main part reads its owners and items from the scans of the body children it keeps,
+    # and scans again only a child whose bytes changed: as many in a body four times as large. Debug builds check
+    # each lookup against the scans of the whole part.
+    scans = _main_body_block_scans()
+    counts = []
+    for paragraphs in (20, 80):
+        doc = _word_piece_document(paragraphs)
+        # The first lookups read every child once, for its owners and then its items.
+        assert doc.stories and doc.pictures()
+        make = _story_lookup_calls()[call](doc)
+        before = scans()
+        make()
+        counts.append(scans() - before)
+    # Each call scans again the children it changed, at least one, as many at both sizes.
+    assert 1 <= counts[0] == counts[1] <= 4, (call, counts)
+
+
+def _producer_document(paragraphs, root_prefix=None, run_sibling=None):
+    """The staging document with its main part as another producer may write it, which the model serializes
+    otherwise: a line break after the body start, the root named with `root_prefix` bound to the Word namespace when
+    given, and `run_sibling` after the first run of the body when given."""
+    import io
+    import zipfile
+
+    import rdocx
+
+    _staging_document(paragraphs)
+    written = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(_STAGING_DOCUMENTS[paragraphs])) as source, zipfile.ZipFile(written, "w") as copy:
+        for entry in source.infolist():
+            data = source.read(entry)
+            if entry.filename == "word/document.xml":
+                data = data.replace(b"<w:body>", b"<w:body>\n", 1)
+                if run_sibling:
+                    data = data.replace(b"</w:r>", b"</w:r>" + run_sibling, 1)
+                if root_prefix:
+                    namespace = b'="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+                    data = data.replace(b"<w:document ", b"<%s:document xmlns:%s%s " % (
+                        root_prefix.encode(), root_prefix.encode(), namespace), 1)
+                    data = data.replace(b"</w:document>", b"</%s:document>" % root_prefix.encode(), 1)
+            copy.writestr(entry, data)
+    return rdocx.Document.from_bytes(written.getvalue())
+
+
+def _block_edits():
+    """Edits that change the main part of a document and commit it, each given the document and a fresh k and
+    returning the call that makes the edit. The fragment imports, the scoped text replacements and the pictures edit
+    the main part as the package holds it, and are made on a document whose main part another producer wrote."""
+    import rdocx
+
+    def run_text(doc, k):
+        run = [paragraph for paragraph in doc.paragraphs if paragraph.text.startswith("end")][-1].runs[0]
+        return lambda: setattr(run, "text", f"end {k}")
+
+    def footnote(doc, k):
+        paragraph = [paragraph for paragraph in doc.paragraphs if paragraph.text == "spot"][-1]
+        return lambda: doc.add_footnote(paragraph, f"note {k}")
+
+    def import_fragment(doc, k):
+        source = rdocx.Document()
+        source.add_paragraph(f"imported {k}")
+        source.add_paragraph("second")
+        story = next(story for story in source.stories if story.kind == "body")
+        fragment = rdocx.DocumentFragment.from_range(
+            source, rdocx.ContentLocation(story, "paragraph", [0]), rdocx.ContentLocation(story, "paragraph", [1]))
+        body = next(story for story in doc.stories if story.kind == "body")
+        return lambda: doc.import_fragment(rdocx.ContentLocation.end(body), fragment)
+
+    def replace_text_at(doc, k):
+        index = doc.find_content_index(doc.add_paragraph(f"alpha {k}"))
+        item = next(item for item in doc.story_items if item.story.kind == "body" and item.kind == "paragraph"
+                    and item.direct_body_index == index)
+        return lambda: doc.replace_text_at(item, "alpha", "omega")
+
+    def cell_replace_text(doc, k):
+        cell = doc.tables[-1].cell(0, 0)
+        cell.text = f"alpha {k}"
+        return lambda: cell.replace_text("alpha", "omega")
+
+    return {
+        "Table.add_row": lambda doc, k: doc.tables[-1].add_row,
+        "Cell.text": lambda doc, k: lambda: setattr(doc.tables[-1].cell(0, 1), "text", f"cell {k}"),
+        "Run.text": run_text,
+        "Document.add_bullet_list_item": lambda doc, k: lambda: doc.add_bullet_list_item(f"item {k}"),
+        "Document.insert_section": lambda doc, k: lambda: doc.insert_section(len(doc.sections)),
+        "Document.insert_html": lambda doc, k: lambda: doc.insert_html(
+            f"<p>inserted {k}</p>", after=[paragraph for paragraph in doc.paragraphs if paragraph.text == "spot"][-1]),
+        "Document.add_footnote": footnote,
+        "Document.import_fragment": import_fragment,
+        "Paragraph.replace_text": lambda doc, k: (lambda paragraph: lambda: paragraph.replace_text("alpha", "omega"))(
+            doc.add_paragraph(f"alpha {k}")),
+        "Cell.replace_text": cell_replace_text,
+        "Document.replace_text_at": replace_text_at,
+        "Document.add_picture": lambda doc, k: lambda: doc.add_picture(
+            _one_pixel_png(bytes([k, k, k])), f"p{k}.png", 12700, 12700),
+        "Cell.add_picture": lambda doc, k: (lambda cell: lambda: cell.add_picture(
+            _one_pixel_png(bytes([k, k, k])), f"c{k}.png", 12700, 12700))(doc.tables[-1].cell(0, 0)),
+        "SectionHandle.set_page_border": lambda doc, k: lambda: doc.section(0).set_page_border(
+            ("top", "left", "bottom", "right")[k]),
+    }
+
+
+@pytest.mark.parametrize("edit", sorted(_block_edits()))
+def test_staging_writes_and_reads_only_the_main_part_blocks_an_edit_changes(edit):
+    # Staging serializes the main part from the blocks kept for the body children an edit leaves equal, and reads in
+    # their bytes what it read once: after two edits, a later one does none of the whole main part work and serializes
+    # and reads as many blocks in a body of 20 paragraphs as in one four times as large. The reopen of its commit
+    # parses none of the main part whole and scans for identifiers only the blocks no earlier reading parsed. Debug
+    # builds check every block read against the whole work, and every reopen against a read of the ZIP.
+    work = _staging_work()
+    reopen = _reopen_work()
+    make = _block_edits()[edit]
+    counts = []
+    reopens = []
+    for paragraphs in (20, 80):
+        producer = edit in ("Document.import_fragment", "Paragraph.replace_text", "Cell.replace_text",
+                            "Document.replace_text_at", "Document.add_picture", "Cell.add_picture")
+        doc = (_producer_document if producer else _staging_document)(paragraphs)
+        for k in (0, 1):
+            make(doc, k)()
+        sample = []
+        for k in (2, 3):
+            call = make(doc, k)
+            work()
+            reopen()
+            call()
+            sample.append(list(work()))
+            reopens.append(list(reopen()))
+        counts.append(sample)
+    # An import also reads the small document of its fragment whole and reopens its package, alike at both sizes.
+    imported = edit == "Document.import_fragment"
+    assert counts[0] == counts[1], counts
+    assert all(sample[:4] == [0] * 4 or imported for sample in counts[0]), counts
+    assert all(sample[:2] == [0, int(imported)] for sample in reopens), reopens
+    # An identifier written into a changed block may take one more digit in the larger document.
+    assert all(abs(large[2] - small[2]) <= 16 for small, large in zip(reopens[:2], reopens[2:])), reopens
+
+
+def test_a_fragment_imports_into_a_main_part_whose_root_has_another_word_prefix():
+    # A producer may name the root with another prefix bound to the Word namespace. A body child of such a main part
+    # read alone would be closed with w:document, so a fragment spliced into it parses the part whole, as before.
+    # Debug builds check every block read against the whole one.
+    import rdocx
+
+    doc = _producer_document(20, "x")
+    texts = [paragraph.text for paragraph in doc.paragraphs]
+    make = _block_edits()["Document.import_fragment"]
+    for k in range(3):
+        make(doc, k)()
+    assert [paragraph.text for paragraph in doc.paragraphs] == texts + [f"imported {k}" for k in range(3)]
+    reopened = rdocx.Document.from_bytes(doc.to_bytes())
+    assert [paragraph.text for paragraph in reopened.paragraphs] == [paragraph.text for paragraph in doc.paragraphs]
+
+
+def test_story_pictures_raise_where_the_relationship_rename_cannot_decode_the_main_part():
+    # A foreign attribute value holding an undefined entity, in one body child of a main part another producer wrote.
+    # Renaming the relationships of the part decodes every attribute value and raises on that one, so every story
+    # picture raises, at every call, though the children the rename reads hold no such value.
+    import rdocx
+
+    for add in (lambda doc, k: doc.add_picture(_one_pixel_png(bytes([k, k, k])), f"p{k}.png", 12700, 12700),
+                lambda doc, k: doc.tables[-1].cell(0, 0).add_picture(
+                    _one_pixel_png(bytes([k, k, k])), f"c{k}.png", 12700, 12700)):
+        doc = _producer_document(20, run_sibling=b'<x:foo xmlns:x="urn:x" x:a="&bogus;"/>')
+        for k in range(3):
+            with pytest.raises(rdocx.RdocxError, match="invalid story relationship id.*bogus"):
+                add(doc, k)

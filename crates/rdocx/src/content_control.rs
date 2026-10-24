@@ -2491,7 +2491,8 @@ fn index_elements(xml: &[u8]) -> Result<Vec<XmlElem>> {
                         "content control XML has an unmatched end element".to_owned(),
                     ));
                 };
-                let Some(elem) = elems.iter_mut().find(|elem| elem.id == id) else {
+                // Ids number the elements in the order they are pushed.
+                let Some(elem) = elems.get_mut(id) else {
                     return Err(Error::Other(
                         "content control XML lost an open element".to_owned(),
                     ));
@@ -2647,10 +2648,7 @@ fn collect_control_ids(xml: &[u8], used: &mut HashSet<i32>) -> Result<()> {
         if !(elem.word && elem.local == b"id") {
             continue;
         }
-        let Some(parent) = elem
-            .parent
-            .and_then(|id| elems.iter().find(|item| item.id == id))
-        else {
+        let Some(parent) = elem.parent.and_then(|id| elems.get(id)) else {
             continue;
         };
         if !(parent.word && parent.local == b"sdtPr") {

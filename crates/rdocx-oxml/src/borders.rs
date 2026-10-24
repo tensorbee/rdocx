@@ -422,6 +422,13 @@ pub struct CT_TabStop {
     pub source_occurrence: Option<usize>,
 }
 
+// The Python binding keeps the Word owners it read for a body block while
+// the block compares equal, and staging keeps the bytes of a main part body
+// child for an equal child. `source_occurrence` only orders `w:tabs`, which
+// no owner reads, but `merge_tabs_source` writes a tab's retained spelling
+// from it, so it can change the bytes, the fingerprint of a table cell or
+// text box story holding the paragraph, and the bytes staging keeps. Debug
+// builds check each kept serialization against a whole one.
 impl PartialEq for CT_TabStop {
     fn eq(&self, other: &Self) -> bool {
         self.val == other.val && self.pos == other.pos && self.leader == other.leader

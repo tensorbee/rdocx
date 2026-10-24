@@ -55,7 +55,62 @@ columns. Candidate revision matching indexes current owner routes and retains
 all admissible parent matches until descendant matching completes. Body-slot
 and projection fallback classes remain distinct because their pairwise match
 relation is not transitive. Earliest matching old ownership determines retained
-scopes. No historical owner registry or persistent source cache is introduced.
+scopes. No historical owner registry is introduced. The binding keeps the
+inventory by body block and story part, each piece with the value it was read
+from: a block, read from a main part whose body holds only that block, or a
+related part's bytes. The next inventory reuses a piece only where the
+document still holds an equal value. For a block that is the equality of
+`BodyContent`, which keeps its owners only while the manual equality of
+fields, tab stops and bookmark markers ignores nothing that changes them.
+Blocks keep their pieces over the common prefix and suffix of the body, and
+the blocks between are read again. Parts are compared one by one by their
+bytes. Block pieces are placed by offsets of body story items, table cell and
+text box stories, and tables. Another part root or namespace fact of the
+opened package reads every block again. A part read twice, and form and
+signing publications, use the whole-document inventory without reading a
+piece. So does a block that does not read as one direct body item, once read.
+The body story of a piece has no fingerprint, since that covers the whole
+body, and handles refresh a story before native use.
+A native story lookup in the main part addresses its item by body block. The
+document keeps the owners and body story items of each direct body child,
+scanned alone between the part's bytes before and after the children, and
+reuses a child's scan while its bytes and those around the children stay the
+same. Staging copies and the document a staged edit reopens share these scans,
+so a lookup after an edit scans only the children the edit changed, each alone,
+or all of them by one scan of the whole part when that reads fewer bytes, as on
+the first lookup. The scans keep a copy of each child's bytes for the life of
+the document. They also keep each child's value, the body child the model
+serialized the bytes from or the bytes parse to alone, and, found once when
+first needed, what staging reads in the child: the modeled owner spans, the
+relationship and drawing identifiers, the drawings, the paragraph numbering
+properties and the bookmark and drawing identifiers it defines. A body child
+equal to a kept child that holds no field serializes to the kept bytes, since
+a field compares equal to one whose bytes differ. Serialization, the replay of
+nested namespace owners, identifier canonicalization, the numbering references
+and a story source written back read and write only the children that differ,
+between the bytes the model writes around them. A story source spliced into the
+main part as the package holds it, as an import does, is read against the
+children that part was written from, or against the children of the opened
+part, read once with their values in the opening's parse, when its root is a
+`w:document` start tag, its body starts with a plain `<w:body>` and it holds
+section properties only as the body's last child.
+While the main part holds the
+bytes a flush wrote from the children, they are its provenance: whether it
+parses to the model is told by children that each parse back alone, and its
+nested namespace owners are found in their spans. The reopen of that flush
+parses the part as the bytes around the children with the value of each child
+that parses back alone and the parse alone of the others, and scans for
+identifiers only the children no earlier reading scanned. A scoped text
+replacement proves the span it edits in the part the package holds against the
+serialization child by child: both normalize alike where their children parse
+back to the model, and only the child that holds the span, and a child that
+holds a field or does not parse back, is normalized alone on each side. The
+retained source a story picture keeps is canonicalized in the children its
+relationship renames and drawing ids reach, and in its tail. Each falls back to
+the whole work where the children do not tell. Debug builds compare every child
+read with a read of the whole part, every flush, canonicalization and scoped
+proof with the whole work, and every reopen with a read of the ZIP. The scans
+keep a copy of the body model besides.
 Namespace scans retain a frame per element and copy inherited maps only when
 the element declares a namespace. Attribute validation and scope restoration
 retain their checked source semantics.
@@ -108,9 +163,12 @@ handles capture the new epoch. Other removals retain conservative reconciliation
 
 Word read projections are prepared with that same immutable current-owner
 inventory. The facade supplies batch body and cell-paragraph locations matching
-its existing single lookups. Missing or unsupported projections retain those
-lookups. Route hashes index candidate owners, with exact route comparison and
-first-match selection after hashing. Hash equality alone grants no authority.
+its existing single lookups, and the inventory by block and part gives them
+block by block. Missing or unsupported projections retain those lookups.
+Prepared handles and the edited paragraph's publication route bind through
+the same projections before those lookups. Route hashes index candidate
+owners, with exact route comparison and first-match selection after hashing.
+Hash equality alone grants no authority.
 Accepted paragraph text and table row/cell paragraph counts are derived read
 facts, never serialization sources. Full replacement and property relocation
 prepare fresh facts. Local plain XML prepares its new accepted text before
@@ -123,7 +181,13 @@ An admitted opaque Empty section that the paired parser cannot model remains
 protected by exact bytes and expanded namespace meaning. Only an unchanged
 instance may remain. Submitted and stored XML are not rewritten by comparison. Retained nested
 modeled namespace owners require staged identity reconciliation, even for
-benign aliases. A failed proof refuses before source publication.
+benign aliases, except for a plain paragraph removal when every retained owner
+is a `w:sdt` and their declarations replay on the body as a save serializes it.
+The removal adds or removes no `w:sdt` candidate of that replay, so it stays
+local. When the replay fails, or a serializer prefix is shadowed, the seven
+binding body insertions that 10-bindings-spec names refuse with the save's
+error before they change anything. The Rust API's insertions are not guarded.
+A failed proof refuses before source publication.
 
 Run tab and break edits prepare accepted paragraph text from the native candidate,
 validate its current run-to-paragraph owner and publish source and fact together.
@@ -319,6 +383,26 @@ drawing payloads are fixed occupants.
 Their values are found by expanded office relationship namespace, including
 bindings inherited by the document body, and are never remapped without a safe
 raw rewrite.
+
+A Word document keeps what its last opening parsed, shared with its staged
+copies: the package as opened, and, each found once when first needed, the
+main part parsed, its nested namespace owners, and the outcome of the checks
+that identifier canonicalization makes on a part with nothing to renumber.
+Staging uses them only while the main part holds the bytes it was opened with,
+compared by value. A flush compares the model with that parse. A main part
+whose model equals the parse and serializes as it did, whose relationships and
+section references all have preserved provenance, whose section references are
+in canonical order, and that holds no authored drawing or nested story
+relationship is not canonicalized again, and an error the checks found raises
+at the same call. Two documents opened from bytes compare their saves by
+rereading their staged packages in memory against the packages they were
+opened from, so no ZIP is written. A reopen keeps a new record. The record
+lives until the document is reopened, which in the binding is as long as the
+Python document lives, and keeps memory meanwhile: the main part parsed, about
+ten times the part's bytes, the part as the model serializes it, about its
+size, and the opened bytes of every part an edit has replaced since. A 6 MiB
+document.xml of 20000 paragraphs keeps about 68 MiB more after a first font
+edit.
 
 Story-scoped image and hyperlink operations resolve the normalized OPC owner
 from `StoryId`. Cells and text boxes inherit the containing part, while

@@ -1818,7 +1818,7 @@ impl Importer<'_> {
         let font_data = self.fonts.all_font_data();
         for (index, page) in pages.iter().enumerate() {
             presentation.add_slide(0)?;
-            presentation.slides[index]
+            Arc::make_mut(&mut presentation.slides[index])
                 .slide
                 .common_slide_data
                 .shape_tree
@@ -2072,7 +2072,7 @@ fn wrap_last_shape_in_affine_group(
             index: slide_index,
             slide_count,
         })?;
-    let tree = &mut slide.slide.common_slide_data.shape_tree;
+    let tree = &mut Arc::make_mut(slide).slide.common_slide_data.shape_tree;
     let id = ShapeIdAllocator::scan(tree).allocate();
     let child = tree
         .children
@@ -4929,7 +4929,7 @@ fn append_custom_path(
             index: slide_index,
             slide_count,
         })?;
-    let tree = &mut slide.slide.common_slide_data.shape_tree;
+    let tree = &mut Arc::make_mut(slide).slide.common_slide_data.shape_tree;
     let id = ShapeIdAllocator::scan(tree).allocate();
     let mut shape = CT_Shape::new_preset(
         id,
@@ -5042,7 +5042,7 @@ fn append_link_overlay(
         .or_default();
     let relationship_id = relationships.add_external(rel_types::HYPERLINK, uri);
     let (left, top, width, height) = rect_emu(rect)?;
-    let tree = &mut slide.slide.common_slide_data.shape_tree;
+    let tree = &mut Arc::make_mut(slide).slide.common_slide_data.shape_tree;
     let id = ShapeIdAllocator::scan(tree).allocate();
     let xml = format!(
         r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:nvSpPr><p:cNvPr id="{id}" name="PDF link {id}"><a:hlinkClick r:id="{relationship_id}"/></p:cNvPr><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="{}" y="{}"/><a:ext cx="{}" cy="{}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr></p:sp>"#,

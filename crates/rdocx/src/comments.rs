@@ -3942,12 +3942,13 @@ mod tests {
         let extended = r#"<w15:commentsEx xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"><w15:commentEx w15:paraId="1A000001" w15:done="0"/><w15:commentEx w15:paraId="1B000002" w15:paraIdParent="1A000001" w15:done="0"/><w15:commentEx w15:paraId="2A000002" w15:done="0"/><w15:commentEx w15:paraId="2B000001" w15:paraIdParent="2A000002" w15:done="0"/><w15:commentEx w15:paraId="3A000002" w15:done="1"/></w15:commentsEx>"#;
         let mut package =
             OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap())).unwrap();
-        package
-            .parts
-            .insert(DEFAULT_COMMENTS_PART.to_owned(), comments.into_bytes());
+        package.parts.insert(
+            DEFAULT_COMMENTS_PART.to_owned(),
+            comments.into_bytes().into(),
+        );
         package.parts.insert(
             DEFAULT_COMMENTS_EXTENDED_PART.to_owned(),
-            extended.as_bytes().to_vec(),
+            extended.as_bytes().to_vec().into(),
         );
         let mut bytes = std::io::Cursor::new(Vec::new());
         package.write_to(&mut bytes).unwrap();
