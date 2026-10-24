@@ -12391,7 +12391,7 @@ struct M21RecordedMovieSample {
 
 #[cfg(all(feature = "digital-signatures", feature = "render"))]
 const M21_CURRENT_MINIMAL_SOURCE_SHA256: &str =
-    "411f028c4b51c6aac0a0e2ae11bc63592a6d0947ab1a5f0d15116d19bfe766bc";
+    "4566e218cd5855162101dd6dec3101f68e90d3ae1323e5fe93cb63db00b0adc7";
 
 #[cfg(all(feature = "digital-signatures", feature = "render"))]
 const M21_LEGACY_UNSIGNED_SOURCE_SHA256: &str =
@@ -12635,7 +12635,7 @@ fn m21_assert_signature_surrogate(unsigned_bytes: &[u8], signed_bytes: &[u8]) {
         .collect::<Vec<_>>();
     signed_only_parts.sort_unstable();
     assert_eq!(signed_only_parts, signature_parts);
-    assert_eq!(signed.parts[signature_parts[0]], []);
+    assert!(signed.parts[signature_parts[0]].is_empty());
     assert!(!signed.parts[signature_parts[1]].is_empty());
     assert_eq!(
         unsigned.parts.len() + signature_parts.len(),
@@ -15435,7 +15435,7 @@ fn removing_shared_and_last_image_users_prunes_only_new_orphans() {
         shared
             .parts
             .iter()
-            .filter(|(part, bytes)| part.starts_with("/ppt/media/") && *bytes == &png)
+            .filter(|(part, bytes)| part.starts_with("/ppt/media/") && bytes.as_slice() == png)
             .count(),
         1
     );
@@ -15448,7 +15448,7 @@ fn removing_shared_and_last_image_users_prunes_only_new_orphans() {
         pruned
             .parts
             .iter()
-            .filter(|(part, bytes)| part.starts_with("/ppt/media/") && *bytes == &png)
+            .filter(|(part, bytes)| part.starts_with("/ppt/media/") && bytes.as_slice() == png)
             .count(),
         0
     );
@@ -19166,7 +19166,9 @@ fn duplicate_picture_bytes_share_one_media_part_across_slides() {
     let media = package
         .parts
         .iter()
-        .filter(|(part_name, bytes)| part_name.starts_with("/ppt/media/") && *bytes == &png)
+        .filter(|(part_name, bytes)| {
+            part_name.starts_with("/ppt/media/") && bytes.as_slice() == png
+        })
         .map(|(part_name, _)| part_name.clone())
         .collect::<Vec<_>>();
     assert_eq!(media.len(), 1);
@@ -19748,7 +19750,7 @@ fn picture_sniffs_bytes_when_extension_is_misleading() {
     let part = package
         .parts
         .iter()
-        .find(|(part_name, bytes)| part_name.starts_with("/ppt/media/") && *bytes == &png)
+        .find(|(part_name, bytes)| part_name.starts_with("/ppt/media/") && bytes.as_slice() == png)
         .map(|(part_name, _)| part_name)
         .unwrap();
     assert!(part.ends_with(".png"));
@@ -34977,7 +34979,7 @@ fn fx216_batch_jumps_map_existing_self_and_drop_only_unmapped_targets() {
         assert_eq!(destination.slide(2).unwrap().shapes().len(), 7);
         let saved = destination.to_bytes().unwrap();
         let package = open_opc(&saved, "mapped jumps and new image");
-        assert!(package.parts.values().any(|bytes| bytes == &new_image));
+        assert!(package.parts.values().any(|bytes| **bytes == new_image));
         let reopened = Presentation::from_bytes(&saved).unwrap();
         assert!(reopened.validate().is_empty());
     }

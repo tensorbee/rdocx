@@ -12165,6 +12165,210 @@ def test_issue389_local_edits_do_not_scale_with_unrelated_package():
             assert int(other.left) == 0
 
 
+def test_issue403_shape_edits_do_the_same_inventory_work_at_n_and_4n_slides():
+    """Debug builds count the owner inventory work of each edit: the owner
+    addresses walked, the survival proofs matched and the owners indexed.
+    An edit on the first slide does the same work whatever the number of later
+    slides, which only keep their inventory parts. Release builds do not count.
+    """
+    import rpptx
+    from rpptx import _rpptx
+    from rpptx.enum.shapes import MSO_SHAPE
+
+    inventory_work = getattr(_rpptx, "_inventory_work", None)
+    if inventory_work is None:
+        pytest.skip("release build: the inventory work counter is debug-only")
+
+    def work(slides):
+        presentation = rpptx.Presentation()
+        for _ in range(slides):
+            slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+            for _ in range(6):
+                slide.shapes.add_textbox(0, 0, 100, 100).text_frame.text = "before"
+            slide.shapes.add_table(3, 3, 0, 0, 900, 900)
+        slide = presentation.slides[0]
+        shapes = slide.shapes
+        table = shapes[6].table
+        counts = {}
+
+        def count(name, edit):
+            inventory_work()
+            edit()
+            counts[name] = inventory_work()
+
+        def replace_shape_text():
+            element = shapes[2].element
+            element.replace_xml(element.xml.replace(">before<", ">after<"))
+
+        count("ShapeCollection.add_shape", lambda: shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, 100, 100))
+        count("Paragraph.add_run", lambda: shapes[0].text_frame.paragraphs[0].add_run("run"))
+        count("TextFrame.add_paragraph", lambda: shapes[0].text_frame.add_paragraph())
+        count("Shape.text", lambda: setattr(shapes[1], "text", "after"))
+        count("TextFrame.text", lambda: setattr(shapes[3].text_frame, "text", "after"))
+        count("Cell.text", lambda: setattr(table.cell(1, 1), "text", "cell"))
+        count("RowCollection.add_row", lambda: table.rows.add_row())
+        count("Element.replace_xml (shape text)", replace_shape_text)
+        count("Slide.try_replace_text", lambda: slide.try_replace_text("before", "later"))
+        count("SlideCollection.add_slide", lambda: presentation.slides.add_slide(presentation.slide_layouts[6]))
+        return counts
+
+    small, large = work(3), work(12)
+    assert all(small.values()), small
+    assert large == small
+
+
+def test_issue403_package_edits_do_the_same_commit_work_at_n_and_4n_slides():
+    """Debug builds count the work of staging and reopening a package: the
+    parts parsed, the slide and notes parts serialized, the media hashed and
+    the packages written as a ZIP, and the owner inventory work. A
+    package-bound edit on the first slide of a deck read from bytes does the
+    same work whatever the number of later slides, and writes no ZIP.
+    Release builds do not count.
+    """
+    import io
+
+    import rpptx
+    from rpptx import _rpptx
+
+    commit_work = getattr(_rpptx, "_commit_work", None)
+    if commit_work is None:
+        pytest.skip("release build: the commit work counter is debug-only")
+    inventory_work = _rpptx._inventory_work
+
+    def work(slides):
+        built = rpptx.Presentation()
+        for index in range(slides):
+            slide = built.slides.add_slide(built.slide_layouts[6])
+            for _ in range(4):
+                slide.shapes.add_textbox(0, 0, 100, 100).text_frame.text = "before"
+            slide.shapes.add_table(2, 2, 0, 0, 900, 900)
+            slide.shapes.add_picture(io.BytesIO(_tiny_png(index, 0, 0)), 0, 0, 100, 100)
+            slide.notes_slide.notes_text_frame.text = "notes"
+        presentation = rpptx.Presentation.from_bytes(built.to_bytes())
+        slide = presentation.slides[0]
+        shapes = slide.shapes
+        counts = {}
+
+        def count(name, edit, inventory=True):
+            commit_work()
+            inventory_work()
+            edit()
+            counts[name] = (*commit_work(), inventory_work() if inventory else None)
+
+        count("CoreProperties.title", lambda: setattr(presentation.core_properties, "title", "edited"))
+        count("SlideTransition.type", lambda: setattr(slide.transition, "type", "fade"))
+        count("SlideTransition.duration", lambda: setattr(slide.transition, "duration", 1.5))
+        count("HeaderFooter.footer", lambda: setattr(slide.header_footer, "footer", "footer"))
+        count("HeaderFooter.slide_number", lambda: setattr(slide.header_footer, "slide_number", True))
+        count("NotesTextFrame.text", lambda: setattr(slide.notes_slide.notes_text_frame, "text", "edited"))
+        count("FillFormat.solid (table cell)", lambda: shapes[4].table.cell(0, 0).fill.solid())
+        count("Shape.replace_image", lambda: shapes[5].replace_image(io.BytesIO(_tiny_png(1, 2, 3))))
+        count("Shape.flip_h", lambda: setattr(shapes[0], "flip_h", True))
+        count("ShapeCollection.remove", lambda: shapes.remove(shapes[1]))
+        # Removing a slide moves the owners of every later slide to a new
+        # ordinal, so only its commit work is compared.
+        count(
+            "SlideCollection.remove",
+            lambda: presentation.slides.remove(presentation.slides[1]),
+            inventory=False,
+        )
+        return counts
+
+    small, large = work(3), work(12)
+    assert all(zip_writes == 0 for *_, zip_writes, _ in small.values()), small
+    assert large == small
+
+
+def _issue403_deck_with_other_slide_shapes(extra_shapes):
+    """Three slides with a text box each, the third rewritten by `extra_shapes`."""
+    import rpptx
+
+    built = rpptx.Presentation()
+    for _ in range(3):
+        slide = built.slides.add_slide(built.slide_layouts[6])
+        for _ in range(2):
+            slide.shapes.add_textbox(0, 0, 100, 100).text_frame.text = "t"
+    source = zipfile.ZipFile(io.BytesIO(built.to_bytes()))
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as target:
+        for info in source.infolist():
+            data = source.read(info.filename)
+            if info.filename == "ppt/slides/slide3.xml":
+                data = extra_shapes(data.decode()).encode()
+            target.writestr(info, data)
+    return output.getvalue()
+
+
+def _issue403_repeated_shape_ids(xml):
+    ids = re.findall(r'<p:cNvPr id="(\d+)"', xml)
+    return re.sub(
+        r'(<p:cNvPr id=")(\d+)(")',
+        lambda match: match.group(1) + (match.group(2) if match.group(2) == ids[0] else ids[1]) + match.group(3),
+        xml,
+    )
+
+
+def _issue403_alternate_content(inner_ids):
+    def edit(xml):
+        shapes = []
+        for inner in inner_ids:
+            shape = (
+                f'<p:sp><p:nvSpPr><p:cNvPr id="{inner}" name="AC {inner}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>'
+                "<p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>ac</a:t></a:r></a:p></p:txBody></p:sp>"
+            )
+            shapes.append(
+                '<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">'
+                f'<mc:Choice Requires="p14">{shape}</mc:Choice><mc:Fallback>{shape}</mc:Fallback>'
+                "</mc:AlternateContent>"
+            )
+        xml = xml.replace("</p:spTree>", "".join(shapes) + "</p:spTree>", 1)
+        return xml.replace(
+            "<p:sld ", '<p:sld xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main" ', 1
+        )
+
+    return edit
+
+
+@pytest.mark.parametrize(
+    "other_slide",
+    ["alternate content, distinct ids", "alternate content, one id", "repeated shape id"],
+)
+def test_issue403_footer_and_transition_edits_ignore_another_slide(other_slide):
+    """Transition and header and footer edits of slide 1 match the owners
+    of the slides they change only. Two `mc:AlternateContent` shapes or a
+    repeated shape ID on slide 3 used to refuse both families as an ambiguous
+    footer owner identity. Header and footer edits add placeholder shapes,
+    and every edit that adds or removes shapes, such as add_shape, still
+    refuses a deck where another slide repeats a shape ID."""
+    import rpptx
+    from rpptx.enum.shapes import MSO_SHAPE
+
+    extra = {
+        "alternate content, distinct ids": _issue403_alternate_content((50, 51)),
+        "alternate content, one id": _issue403_alternate_content((50, 50)),
+        "repeated shape id": _issue403_repeated_shape_ids,
+    }[other_slide]
+    data = _issue403_deck_with_other_slide_shapes(extra)
+    edits = {
+        "SlideTransition.type": lambda slide: setattr(slide.transition, "type", "fade"),
+        "SlideTransition.advance_after": lambda slide: setattr(slide.transition, "advance_after", 2.0),
+        "HeaderFooter.footer": lambda slide: setattr(slide.header_footer, "footer", "F"),
+        "HeaderFooter.slide_number": lambda slide: setattr(slide.header_footer, "slide_number", True),
+        "ShapeCollection.add_shape": lambda slide: slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, 10, 10),
+    }
+    for name, edit in edits.items():
+        presentation = rpptx.Presentation.from_bytes(data)
+        kept = presentation.slides[2].shapes[0]
+        structural = name.startswith(("HeaderFooter", "ShapeCollection"))
+        if other_slide == "repeated shape id" and structural:
+            with pytest.raises(ValueError, match="structural owner proof has an ambiguous shape id"):
+                edit(presentation.slides[0])
+            continue
+        edit(presentation.slides[0])
+        assert kept.text_frame.text == "t", name
+        assert len(rpptx.Presentation.from_bytes(presentation.to_bytes()).slides) == 3
+
+
 @pytest.mark.parametrize("kind", ["shape", "table", "cell", "body", "paragraph", "run", "slide", "layout", "master"])
 def test_issue389_element_publication_and_refusal_for_every_kind(kind):
     import rpptx

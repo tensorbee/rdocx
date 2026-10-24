@@ -1873,6 +1873,11 @@ impl Field {
     }
 }
 
+// The Python binding keeps the Word owners it read for a body block while
+// the block compares equal. The fields this ignores, the source form, the
+// run span and the nested cached fields, can change the block's bytes and
+// the runs it owns, so an edit that changes one of them must also change a
+// field compared here, or that inventory keeps stale owners.
 impl PartialEq for Field {
     fn eq(&self, other: &Self) -> bool {
         self.instruction == other.instruction
@@ -2506,6 +2511,9 @@ pub struct BookmarkMarker {
     has_child_content: bool,
 }
 
+// The Python binding keeps the Word owners it read for a body block while
+// the block compares equal. `word_prefixes` is a read projection: the
+// marker's XML is kept elsewhere, so it changes no owner.
 impl PartialEq for BookmarkMarker {
     fn eq(&self, other: &Self) -> bool {
         self.start == other.start

@@ -422,6 +422,10 @@ pub struct CT_TabStop {
     pub source_occurrence: Option<usize>,
 }
 
+// The Python binding keeps the Word owners it read for a body block while
+// the block compares equal. `source_occurrence` only orders `w:tabs`, which
+// no owner reads, but it can change the bytes and so the fingerprint of a
+// table cell or text box story holding the paragraph.
 impl PartialEq for CT_TabStop {
     fn eq(&self, other: &Self) -> bool {
         self.val == other.val && self.pos == other.pos && self.leader == other.leader

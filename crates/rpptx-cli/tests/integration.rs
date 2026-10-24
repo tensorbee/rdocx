@@ -2852,7 +2852,7 @@ fn notes_set_text_or_file_preserves_exact_text() {
                 Some(*text)
             );
             let package = OpcPackage::open(&output).unwrap();
-            let xml = String::from_utf8(package.parts["/ppt/notesSlides/notesSlide1.xml"].clone())
+            let xml = String::from_utf8(package.parts["/ppt/notesSlides/notesSlide1.xml"].to_vec())
                 .unwrap();
             assert!(xml.contains("urn:rdocx:test"));
             assert!(xml.contains("b=\"1\""));

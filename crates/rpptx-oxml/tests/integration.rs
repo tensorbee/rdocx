@@ -5087,7 +5087,7 @@ fn every_corpus_preserved_payload_is_identity_with_an_empty_map() {
             assert_eq!(
                 rewrite_rel_ids(raw, &HashMap::new())
                     .unwrap_or_else(|error| panic!("{} {part}: {error}", entry.path)),
-                *raw,
+                **raw,
                 "{} {part}",
                 entry.path
             );

@@ -55,7 +55,22 @@ columns. Candidate revision matching indexes current owner routes and retains
 all admissible parent matches until descendant matching completes. Body-slot
 and projection fallback classes remain distinct because their pairwise match
 relation is not transitive. Earliest matching old ownership determines retained
-scopes. No historical owner registry or persistent source cache is introduced.
+scopes. No historical owner registry is introduced. The binding keeps the
+inventory by body block and story part, each piece with the value it was read
+from: a block, read from a main part whose body holds only that block, or a
+related part's bytes. The next inventory reuses a piece only where the
+document still holds an equal value. For a block that is the equality of
+`BodyContent`, which keeps its owners only while the manual equality of
+fields, tab stops and bookmark markers ignores nothing that changes them.
+Blocks keep their pieces over the common prefix and suffix of the body, and
+the blocks between are read again. Parts are compared one by one by their
+bytes. Block pieces are placed by offsets of body story items, table cell and
+text box stories, and tables. Another part root or namespace fact of the
+opened package reads every block again. A part read twice, and form and
+signing publications, use the whole-document inventory without reading a
+piece. So does a block that does not read as one direct body item, once read.
+The body story of a piece has no fingerprint, since that covers the whole
+body, and handles refresh a story before native use.
 Namespace scans retain a frame per element and copy inherited maps only when
 the element declares a namespace. Attribute validation and scope restoration
 retain their checked source semantics.
@@ -108,9 +123,12 @@ handles capture the new epoch. Other removals retain conservative reconciliation
 
 Word read projections are prepared with that same immutable current-owner
 inventory. The facade supplies batch body and cell-paragraph locations matching
-its existing single lookups. Missing or unsupported projections retain those
-lookups. Route hashes index candidate owners, with exact route comparison and
-first-match selection after hashing. Hash equality alone grants no authority.
+its existing single lookups, and the inventory by block and part gives them
+block by block. Missing or unsupported projections retain those lookups.
+Prepared handles and the edited paragraph's publication route bind through
+the same projections before those lookups. Route hashes index candidate
+owners, with exact route comparison and first-match selection after hashing.
+Hash equality alone grants no authority.
 Accepted paragraph text and table row/cell paragraph counts are derived read
 facts, never serialization sources. Full replacement and property relocation
 prepare fresh facts. Local plain XML prepares its new accepted text before
@@ -123,7 +141,13 @@ An admitted opaque Empty section that the paired parser cannot model remains
 protected by exact bytes and expanded namespace meaning. Only an unchanged
 instance may remain. Submitted and stored XML are not rewritten by comparison. Retained nested
 modeled namespace owners require staged identity reconciliation, even for
-benign aliases. A failed proof refuses before source publication.
+benign aliases, except for a plain paragraph removal when every retained owner
+is a `w:sdt` and their declarations replay on the body as a save serializes it.
+The removal adds or removes no `w:sdt` candidate of that replay, so it stays
+local. When the replay fails, or a serializer prefix is shadowed, the seven
+binding body insertions that 10-bindings-spec names refuse with the save's
+error before they change anything. The Rust API's insertions are not guarded.
+A failed proof refuses before source publication.
 
 Run tab and break edits prepare accepted paragraph text from the native candidate,
 validate its current run-to-paragraph owner and publish source and fact together.
@@ -319,6 +343,26 @@ drawing payloads are fixed occupants.
 Their values are found by expanded office relationship namespace, including
 bindings inherited by the document body, and are never remapped without a safe
 raw rewrite.
+
+A Word document keeps what its last opening parsed, shared with its staged
+copies: the package as opened, and, each found once when first needed, the
+main part parsed, its nested namespace owners, and the outcome of the checks
+that identifier canonicalization makes on a part with nothing to renumber.
+Staging uses them only while the main part holds the bytes it was opened with,
+compared by value. A flush compares the model with that parse. A main part
+whose model equals the parse and serializes as it did, whose relationships and
+section references all have preserved provenance, whose section references are
+in canonical order, and that holds no authored drawing or nested story
+relationship is not canonicalized again, and an error the checks found raises
+at the same call. Two documents opened from bytes compare their saves by
+rereading their staged packages in memory against the packages they were
+opened from, so no ZIP is written. A reopen keeps a new record. The record
+lives until the document is reopened, which in the binding is as long as the
+Python document lives, and keeps memory meanwhile: the main part parsed, about
+ten times the part's bytes, the part as the model serializes it, about its
+size, and the opened bytes of every part an edit has replaced since. A 6 MiB
+document.xml of 20000 paragraphs keeps about 68 MiB more after a first font
+edit.
 
 Story-scoped image and hyperlink operations resolve the normalized OPC owner
 from `StoryId`. Cells and text boxes inherit the containing part, while
