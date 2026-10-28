@@ -3241,6 +3241,10 @@ Proposed serial execution order remains F-X271, F-X272, F-X273, then F-X274after
 
 The user subsequently authorized bounded mechanical Grok work, with Codex checking the result before integration and the required microscope. This supersedes the intake's earlier no-assignment instruction. The first delegated task is temporary archive retrieval/authentication only, with no repository writes or product implementation claim. Its first headless attempt declined command execution and supplies no evidence. Any successor result must be independently checked before adoption. Product/native/hosted gates remain pending.
 
+##### S96 implementation-time PR 427 successor
+
+The post-answer read-only refresh found PR427 rebased onto released main24af95d3, current head `c1e261ca63ebda5b7da1adec886ee40364a4e3de` and body SHA-256 `dc490c52d857c06751586bf2a945ee1ecb6cc81922b03c21cf40b0b3544c643d`, updated2026-10-28T06:43:32Z. Issue425 is unchanged. Product code/test/stub/HLD added/removed payloads are identical to the original intake. Only the donor README/archive measurement payloads differ, and those remain excluded. Preserve the original intake and failed observations as historical facts. F-X272's canonical plan records the successor identities and requires the running owner's acknowledgment without changing its Base or dirty work. No issue/PR closure or acceptance follows from this refresh.
+
 #### Sprint S97, Fillable PDF forms
 
 **Goal**: complete the existing Issue 381 feature before closing that issue. This is the three-story feature subset formerly scheduled in S96, not a new completed repair. Provisionally 10 to 13 developer-days plus final viewer/conformance qualification. It may exceed a normal sprint and requires design/capacity confirmation before claim.
