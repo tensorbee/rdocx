@@ -1839,6 +1839,15 @@ page identity. `PageFrame::page_number` is physical and
 `PageFrame::displayed_page_number` drives PAGE substitution plus first, even,
 and default header or footer selection.
 
+A header that reaches past the top margin moves the body down, as Word does.
+Each page measures the flow of the header it selects, from the header distance
+down, and starts its body band at the lower of that bottom and the top margin.
+A footer that reaches past the bottom margin ends the band above it the same
+way. Anchored drawings in either story sit apart from the flow and move
+nothing. A negative `w:top` or `w:bottom` is laid out at its absolute value and
+stays exact, so the header or footer may overlap the body. Headers, footers and
+page borders keep the section's own margins.
+
 **A paragraph's `w:sectPr` ends its section.** It governs that paragraph and
 every block since the previous break, and the body `w:sectPr` governs the
 blocks after the last one (ECMA-376 17.6.17 and 17.6.18).

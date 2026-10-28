@@ -12039,6 +12039,64 @@ def test_issue400_python_toc_rebuild_bounds_outline_entries_after_reopen(instruc
     assert entries(reopened) == expected
 
 
+@pytest.mark.parametrize("instruction", [r'TOC \o "1-2" \h', r'TOC \o "1-2" \h \u', r'TOC \u'])
+@pytest.mark.parametrize("merged", [False, True])
+def test_issue426_toc_rebuild_with_outline_switch_passes_a_vertical_merge(merged, instruction):
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("Title page")
+    document.add_heading("First section", level=1)
+    document.add_paragraph("Body text.")
+    table = document.add_table(3, 2, style="Table Grid")
+    for row in range(3):
+        for column in range(2):
+            table.cell(row, column).text = f"cell {row}{column}"
+    if merged:
+        table.set_cell_vertical_merge(0, 0, "restart")
+        table.set_cell_vertical_merge(1, 0, "continue")
+    document.add_heading("Second section", level=1)
+    document.insert_toc(1, max_level=2)
+    result = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(document.to_bytes())) as source, zipfile.ZipFile(result, "w") as out:
+        for member in source.infolist():
+            data = source.read(member.filename)
+            if member.filename == "word/document.xml":
+                data, count = re.subn(rb'(<w:instrText\b[^>]*>).*?(</w:instrText>)',
+                                      lambda match: match[1] + instruction.encode() + match[2], data, flags=re.S)
+                assert count == 1
+            out.writestr(member, data)
+    document = rdocx.Document.from_bytes(result.getvalue())
+
+    assert document.rebuild_toc().entry_count == 2
+    assert tuple(paragraph.text.split("\t")[0] for paragraph in document.paragraphs
+                 if (paragraph.style or "").upper().startswith("TOC")) == ("First section", "Second section")
+
+
+def test_issue424_body_starts_below_a_header_taller_than_the_top_margin():
+    import rdocx
+
+    def first_body_top(header_lines, top):
+        document = rdocx.Document()
+        document.update_section(0, margin_top=rdocx.Cm(top), header_distance=rdocx.Cm(1.27))
+        header = document.section(0).header
+        for index in range(header_lines):
+            header.add_paragraph(f"Header line {index + 1}")
+        for index in range(40):
+            document.add_paragraph(f"Body line {index + 1}.")
+        fragments = document.layout()
+        page = min(fragment.physical_page for fragment in fragments)
+        return min(fragment.bounds.y for fragment in fragments if fragment.physical_page == page)
+
+    top_margin = 2.0 / 2.54 * 72
+    header_distance = 1.27 / 2.54 * 72
+    # Five header lines of at least 12 points end below the 2 cm margin.
+    assert first_body_top(5, 2.0) >= header_distance + 5 * 12
+    # One line fits above the margin, and a negative margin is exact.
+    assert first_body_top(1, 2.0) == pytest.approx(top_margin, abs=0.1)
+    assert first_body_top(5, -2.0) == pytest.approx(top_margin, abs=0.1)
+
+
 @pytest.mark.parametrize("host", ["body", "cell", "nested", "header", "paired"])
 @pytest.mark.parametrize("operation", ["tab", "line", "page", "column"])
 def test_issue398_run_tabs_and_breaks_refresh_live_paragraph_text(host, operation):

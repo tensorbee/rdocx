@@ -408406,3 +408406,82 @@ fn body_range_across_table_includes_cell_text() {
     }
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+#[test]
+fn toc_outline_switch_rebuilds_past_cells_table_layout_drops() {
+    // tensorbee/rdocx#426: the paragraphs of a vertically merged continuation
+    // cell, and of a row the accepted view removes, reach no page. `\u` reads
+    // layout facts for every paragraph, and these had none, so the rebuild
+    // failed. They now add no entry under `\u`, even one styled as a heading.
+    let heading = r#"<w:pPr><w:pStyle w:val="Heading1"/></w:pPr>"#;
+    let rows = |dropped: &str, paragraph: &str| {
+        let (properties, row_properties) = match dropped {
+            "vertical merge" => ("<w:vMerge/>", ""),
+            _ => (
+                "",
+                r#"<w:trPr><w:del w:id="90" w:author="A" w:date="2026-01-01T00:00:00Z"/></w:trPr>"#,
+            ),
+        };
+        let first = if dropped == "vertical merge" {
+            r#"<w:vMerge w:val="restart"/>"#
+        } else {
+            ""
+        };
+        format!(
+            r#"<w:tr><w:tc><w:tcPr>{first}</w:tcPr><w:p><w:r><w:t>cell 00</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>cell 01</w:t></w:r></w:p></w:tc></w:tr><w:tr>{row_properties}<w:tc><w:tcPr>{properties}</w:tcPr><w:p>{paragraph}</w:p></w:tc><w:tc><w:p><w:r><w:t>cell 11</w:t></w:r></w:p></w:tc></w:tr>"#
+        )
+    };
+    for dropped in ["vertical merge", "deleted row"] {
+        for paragraph in [
+            "<w:r><w:t>cell 10</w:t></w:r>".to_owned(),
+            format!("{heading}<w:r><w:t>Dropped heading</w:t></w:r>"),
+        ] {
+            for instruction in [r#"TOC \o "1-2" \h \u"#, r"TOC \u", r#"TOC \o "1-2" \h"#] {
+                if paragraph.contains("Dropped heading") && !instruction.contains("\\u") {
+                    // Without `\u` the heading style alone selects the dropped
+                    // heading, which has no page to point to. That predates
+                    // this issue and is left as it is.
+                    continue;
+                }
+                let rows = rows(dropped, &paragraph);
+                let body = format!(
+                    r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>{instruction}</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>OLD TOC</w:t></w:r></w:p><w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p><w:p>{heading}<w:r><w:t>First section</w:t></w:r></w:p><w:tbl><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>{rows}</w:tbl><w:p>{heading}<w:r><w:t>Second section</w:t></w:r></w:p>"#
+                );
+                let mut document = document_with_field_parts(&wrap_word_body(&body), None, None);
+                document
+                    .set_style(
+                        StyleBuilder::paragraph("Heading1", "Heading 1").paragraph_properties(
+                            CT_PPr {
+                                outline_lvl: Some(0),
+                                ..Default::default()
+                            },
+                        ),
+                    )
+                    .unwrap();
+                let case = format!("{dropped}, {paragraph}, {instruction}");
+                let report = document
+                    .rebuild_toc()
+                    .unwrap_or_else(|error| panic!("{case}: {error}"));
+                assert_eq!(report.entry_count, 2, "{case}");
+                let entries = document
+                    .paragraphs()
+                    .into_iter()
+                    .filter(|paragraph| {
+                        paragraph
+                            .style_id()
+                            .is_some_and(|style| style.starts_with("TOC"))
+                    })
+                    .map(|paragraph| paragraph.text())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    entries
+                        .iter()
+                        .map(|entry| entry.split('\t').next().unwrap())
+                        .collect::<Vec<_>>(),
+                    ["First section", "Second section"],
+                    "{case}"
+                );
+            }
+        }
+    }
+}

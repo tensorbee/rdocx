@@ -24,7 +24,7 @@ use rdocx_oxml::revision::{CT_Revision, RevisionContent, RevisionKind};
 use rdocx_oxml::ruby::{CT_Ruby, ST_RubyAlign};
 use rdocx_oxml::shared::ST_HighlightColor;
 use rdocx_oxml::styles::CT_Styles;
-use rdocx_oxml::table::{CT_Row, CT_Tbl, CT_Tc, CellContent, ST_VerticalJc};
+use rdocx_oxml::table::{CT_Row, CT_Tbl, CT_Tc, CellContent, ST_VerticalJc, VMerge};
 use rdocx_oxml::text::{
     BookmarkMarker, BreakType, CT_P, CT_R, FieldArgument, FieldInstruction, RunContent,
     SpecialCharacter, hyperlink_revision_index,
@@ -220,6 +220,10 @@ pub(crate) struct SourceRegistry {
     story_owner_children: HashMap<WordStory, Vec<usize>>,
     revision_view: RevisionView,
     text_box_sources: HashMap<SourceNodeId, Vec<TextBoxSourceBinding>>,
+    /// Paragraphs table layout never lays out: the content of a vertically
+    /// merged continuation cell, and in the accepted view the rows accepting
+    /// every change removes.
+    dropped_by_tables: Vec<SourceNodeId>,
 }
 
 impl SourceRegistry {
@@ -238,6 +242,7 @@ impl SourceRegistry {
             story_owner_children: HashMap::new(),
             revision_view: input.revision_view,
             text_box_sources: HashMap::new(),
+            dropped_by_tables: Vec::new(),
         };
         registry.collect_story_body(body, &WordStory::Document);
         registry
@@ -419,6 +424,7 @@ impl SourceRegistry {
             story_owner_children: HashMap::new(),
             revision_view: input.revision_view,
             text_box_sources: HashMap::new(),
+            dropped_by_tables: Vec::new(),
         };
 
         for (body_index, content) in input.document.body.content.iter().enumerate() {
@@ -562,12 +568,49 @@ impl SourceRegistry {
 
     fn collect_table(&mut self, table: &CT_Tbl, story: &WordStory, prefix: &[usize]) {
         for (row, row_path) in table::layout_table_rows(table, prefix) {
+            let row_removed =
+                self.revision_view == RevisionView::Accepted && row.accepted_view_removes();
             for (cell, cell_path) in table::layout_row_cells(row, &row_path) {
+                let first = self.nodes.len();
                 for (content_index, content) in cell.content.iter().enumerate() {
                     let mut content_path = cell_path.clone();
                     content_path.push(content_index);
                     self.collect_cell_content(content, story, &content_path);
                 }
+                let continues_merge = cell
+                    .properties
+                    .as_ref()
+                    .and_then(|properties| properties.v_merge)
+                    == Some(VMerge::Continue);
+                if row_removed || continues_merge {
+                    // The cell's paragraphs were registered just now, in order.
+                    self.dropped_by_tables.extend(
+                        (first..self.nodes.len())
+                            .filter_map(|index| SourceNodeId::new(u32::try_from(index + 1).ok()?)),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Record the paragraphs table layout drops as unplaced navigation facts.
+    ///
+    /// Navigation keeps every registered paragraph, placed or not. These reach
+    /// no page and no outline, so they carry no outline level, and no style
+    /// that STYLEREF could select. Facts the layout recorded itself stay.
+    fn record_dropped_navigation(
+        &self,
+        navigation: &mut HashMap<SourceNodeId, crate::ParagraphNavigation>,
+    ) {
+        for node in &self.dropped_by_tables {
+            if let Some(facts) = self.navigation_sources.get(node) {
+                navigation
+                    .entry(*node)
+                    .or_insert_with(|| crate::ParagraphNavigation {
+                        level: None,
+                        style: None,
+                        ..facts.clone()
+                    });
             }
         }
     }
@@ -5320,6 +5363,9 @@ impl Engine {
         drop(restart_identity_memo);
         self.navigation_by_source
             .extend(num_state.take_navigation());
+        if let Some(registry) = sources {
+            registry.record_dropped_navigation(&mut self.navigation_by_source);
+        }
         if let Some(registry) = sources
             && input
                 .sequence_snapshot
@@ -25178,6 +25224,165 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /// Give the body section a default header of `lines` paragraphs.
+    fn with_tall_header(input: &mut LayoutInput, top: rdocx_oxml::units::Twips, lines: usize) {
+        use rdocx_oxml::header_footer::{CT_HdrFtr, HdrFtrRef, HdrFtrType};
+        let mut section = CT_SectPr::default_letter();
+        section.margin_top = Some(top);
+        section.header_refs.push(HdrFtrRef {
+            hdr_ftr_type: HdrFtrType::Default,
+            rel_id: "rIdHeader".into(),
+        });
+        input.document.body.sect_pr = Some(section);
+        let mut header = CT_HdrFtr::new();
+        for line in 1..=lines {
+            let mut paragraph = CT_P::new();
+            paragraph.add_run(&format!("Header line {line}"));
+            header.paragraphs.push(paragraph);
+        }
+        input.headers.insert("rIdHeader".into(), header);
+    }
+
+    #[test]
+    fn issue424_the_first_body_fragment_starts_below_a_header_taller_than_the_top_margin() {
+        // The issue's geometry: a 2 cm top margin, a 1.27 cm header distance
+        // and five header lines, which end well below the margin.
+        let mut input = make_input_with_text("Body line.");
+        with_tall_header(&mut input, rdocx_oxml::units::Twips(1134), 5);
+        let output = crate::layout_document_deterministic_with_provenance(&input)
+            .expect("layout with a header");
+        let fragment = output.body_layout_fragments(0).expect("body fragment")[0];
+        assert_eq!(fragment.physical_page, 1);
+        let mut header_baselines = Vec::new();
+        for element in compatibility_page_elements(&output.layout.pages[0]) {
+            match element {
+                PositionedElement::Text(run) if run.text.starts_with("Header") => {
+                    header_baselines.push(run.origin.y)
+                }
+                PositionedElement::MultilingualText(run)
+                    if run.logical_text.starts_with("Header") =>
+                {
+                    header_baselines.push(run.origin.y)
+                }
+                _ => {}
+            }
+        }
+        header_baselines.sort_by(f64::total_cmp);
+        assert_eq!(header_baselines.len(), 5);
+        let pitch = header_baselines[1] - header_baselines[0];
+        let last = header_baselines[4];
+        assert!(
+            fragment.y > last && fragment.y < last + pitch,
+            "the body starts right under the last header line at {last}, got {}",
+            fragment.y
+        );
+        assert!(fragment.y > 1134.0 / 20.0);
+
+        // A header that fits above the margin leaves the body on it.
+        let mut input = make_input_with_text("Body line.");
+        with_tall_header(&mut input, rdocx_oxml::units::Twips(1440), 1);
+        let output = crate::layout_document_deterministic_with_provenance(&input)
+            .expect("layout with a short header");
+        assert_eq!(output.body_layout_fragments(0).expect("body")[0].y, 72.0);
+
+        // A negative top margin is exact, so the tall header overlaps.
+        let mut input = make_input_with_text("Body line.");
+        with_tall_header(&mut input, rdocx_oxml::units::Twips(-1440), 8);
+        let output = crate::layout_document_deterministic_with_provenance(&input)
+            .expect("layout with an exact top margin");
+        assert_eq!(output.body_layout_fragments(0).expect("body")[0].y, 72.0);
+    }
+
+    #[test]
+    fn fitting_endnotes_keep_their_distance_below_a_body_moved_by_its_header() {
+        let measure = |header_lines: usize| {
+            let mut input = make_document_with_both_streams(2, 3);
+            if header_lines > 0 {
+                with_tall_header(&mut input, rdocx_oxml::units::Twips(1440), header_lines);
+            }
+            let output = Engine::new_deterministic()
+                .expect("bundled fonts load")
+                .layout(&input)
+                .expect("layout succeeds");
+            let page = output
+                .pages
+                .iter()
+                .find(|page| page_text(page).contains("ENDNOTETEXT"))
+                .expect("the endnote follows the body on its page");
+            let body = compatibility_page_elements(page)
+                .into_iter()
+                .filter_map(|element| match element {
+                    PositionedElement::Text(run) if run.text.contains("occupies") => {
+                        Some(run.origin.y)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let endnote = compatibility_page_elements(page)
+                .into_iter()
+                .find_map(|element| match element {
+                    PositionedElement::Text(run) if run.text.contains("ENDNOTETEXT") => {
+                        Some(run.origin.y)
+                    }
+                    _ => None,
+                })
+                .expect("endnote text");
+            let body_top = body.iter().copied().fold(f64::INFINITY, f64::min);
+            let body_bottom = body.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            (body_top, endnote - body_bottom)
+        };
+        let (plain_top, plain_gap) = measure(0);
+        let (moved_top, moved_gap) = measure(8);
+        assert!(
+            moved_top > plain_top,
+            "eight header lines move the body down"
+        );
+        assert!(
+            (moved_gap - plain_gap).abs() < 1e-9,
+            "the endnote follows the moved body as it follows a plain one: {moved_gap} and {plain_gap}"
+        );
+    }
+
+    #[test]
+    fn issue426_paragraphs_table_layout_drops_keep_unplaced_navigation_facts() {
+        // A vertically merged continuation cell and a row the accepted view
+        // removes are never laid out. Navigation still holds a fact for each
+        // of their paragraphs, unplaced, with no outline level and no style.
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Before</w:t></w:r></w:p><w:tbl><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>Kept</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Right</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Merged away</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Right below</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:trPr><w:del w:id="9" w:author="A" w:date="2026-01-01T00:00:00Z"/></w:trPr><w:tc><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Deleted row</w:t></w:r></w:p></w:tc><w:tc><w:p/></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+        let mut input = make_input_with_text("");
+        input.document = CT_Document::from_xml(xml).expect("document parses");
+        let output = crate::layout_document_deterministic_with_provenance(&input)
+            .expect("layout with sources");
+        let mut documented = 0;
+        for index in 1u32.. {
+            let Some(node) = SourceNodeId::new(index) else {
+                break;
+            };
+            let Some(path) = output.source_node(node) else {
+                break;
+            };
+            if path.story == WordStory::Document {
+                documented += 1;
+                assert!(
+                    output.paragraph_navigation_source(node).is_some(),
+                    "{path:?} has navigation facts"
+                );
+            }
+        }
+        assert_eq!(documented, 7);
+        let facts = |wanted: &str| {
+            output
+                .paragraph_navigation()
+                .find(|(_, _, _, text, ..)| *text == wanted)
+                .map(|(_, _, level, _, style, _, page)| (level, style.map(str::to_owned), page))
+                .expect("paragraph facts")
+        };
+        assert_eq!(facts("Before"), (Some(1), Some("Heading1".into()), Some(1)));
+        assert_eq!(facts("Kept"), (None, None, Some(1)));
+        assert_eq!(facts("Merged away"), (None, None, None));
+        assert_eq!(facts("Deleted row"), (None, None, None));
     }
 
     #[test]
