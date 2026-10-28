@@ -4371,6 +4371,81 @@ impl Default for CT_Document {
     }
 }
 
+/// Section source ownership mirrors the actual section readers, including raw subsets.
+pub(crate) fn source_modeled_attributes(
+    parent: &[u8],
+    local: &[u8],
+) -> Option<&'static [&'static [u8]]> {
+    Some(match (parent, local) {
+        (b"sectPr", b"pgSz") => {
+            crate::numbering::property_attributes(crate::numbering::PropertyKind::Paragraph, local)
+        }
+        (b"sectPr", b"pgMar") => {
+            crate::numbering::property_attributes(crate::numbering::PropertyKind::Paragraph, local)
+        }
+        (b"sectPr", b"headerReference" | b"footerReference") => &[b"type"],
+        (b"sectPr", b"type" | b"titlePg" | b"vAlign" | b"textDirection") => &[b"val"],
+        (b"sectPr", b"cols") => &[b"num", b"space", b"equalWidth", b"sep"],
+        (b"cols", b"col") => &[b"w", b"space"],
+        // This reader owns only start. Format/chapter metadata remains source-backed.
+        (b"sectPr", b"pgNumType") => &[b"start"],
+        (b"sectPr", b"paperSrc") => &[b"first", b"other"],
+        (b"sectPr", b"lnNumType") => &[b"countBy", b"start", b"distance", b"restart"],
+        (b"sectPr", b"docGrid") => &[b"type", b"linePitch", b"charSpace"],
+        (b"sectPr", b"footnotePr" | b"endnotePr" | b"sectPrChange") => &[],
+        _ => return None,
+    })
+}
+
+pub(crate) fn source_value_is_modeled(
+    parent: &[u8],
+    local: &[u8],
+    key: &[u8],
+    value: &str,
+) -> bool {
+    if parent != b"sectPr" {
+        return true;
+    }
+    if matches!(local, b"headerReference" | b"footerReference") && key == b"type" {
+        return HdrFtrType::from_str(value).to_str() == value;
+    }
+    if local == b"cols" && matches!(key, b"equalWidth" | b"sep") {
+        return crate::numbering::parse_on_off_token(value)
+            .is_some_and(|parsed| parsed == matches!(value, "1" | "true"));
+    }
+    if local == b"pgSz" && key == b"orient" {
+        return ST_PageOrientation::from_str(value).is_ok();
+    }
+    if local == b"vAlign" && key == b"val" {
+        return ST_VerticalJc::from_str(value).to_str() == value;
+    }
+    if local == b"type" && key == b"val" {
+        return ST_SectionType::from_str(value).is_ok();
+    }
+    if local == b"titlePg" && key == b"val" {
+        return crate::numbering::parse_on_off_token(value).is_some();
+    }
+    if local == b"docGrid" {
+        return match key {
+            b"type" => ST_DocGrid::from_str(value).is_some(),
+            b"linePitch" | b"charSpace" => value.parse::<i32>().is_ok(),
+            _ => false,
+        };
+    }
+    if local == b"paperSrc" {
+        return value.parse::<u32>().is_ok();
+    }
+    if local == b"lnNumType" {
+        return match key {
+            b"countBy" | b"start" => value.parse::<u32>().is_ok(),
+            b"distance" => value.parse::<i32>().is_ok(),
+            b"restart" => ST_LineNumberRestart::from_str(value).is_some(),
+            _ => false,
+        };
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

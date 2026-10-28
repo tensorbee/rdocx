@@ -39,7 +39,7 @@ pub enum RevisionContent {
 }
 
 /// A tracked revision whose captured subtree remains its serialization source.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 #[allow(non_camel_case_types)]
 pub struct CT_Revision {
     kind: RevisionKind,
@@ -52,6 +52,30 @@ pub struct CT_Revision {
     nested_revisions: Vec<(usize, CT_Revision)>,
     parse_word_prefixes: Vec<String>,
     require_author: bool,
+}
+
+impl PartialEq for CT_Revision {
+    fn eq(&self, other: &Self) -> bool {
+        if self.kind != other.kind
+            || self.id != other.id
+            || self.author != other.author
+            || self.timestamp != other.timestamp
+            || self.raw_xml != other.raw_xml
+            || self.content != other.content
+            || self.content_paragraph != other.content_paragraph
+            || self.nested_revisions != other.nested_revisions
+            || self.require_author != other.require_author
+        {
+            return false;
+        }
+        // Context enumeration order is parser bookkeeping, not revision identity.
+        // Keep complete entries and multiplicity without changing parser inputs.
+        let mut left = self.parse_word_prefixes.iter().collect::<Vec<_>>();
+        let mut right = other.parse_word_prefixes.iter().collect::<Vec<_>>();
+        left.sort_unstable();
+        right.sort_unstable();
+        left == right
+    }
 }
 
 impl CT_Revision {
@@ -953,6 +977,121 @@ mod tests {
     use super::*;
     use crate::namespace::W_NS;
     use crate::text::RunContent;
+
+    fn revision_identity_context() -> Vec<String> {
+        vec![
+            crate::numbering::namespace_binding("w", W_NS),
+            "w".to_owned(),
+            crate::numbering::namespace_binding("v", "urn:producer"),
+            crate::numbering::namespace_binding("", ""),
+        ]
+    }
+
+    #[test]
+    fn revision_identity_reordered_context_preserves_marker_and_nested_projection() {
+        let context = revision_identity_context();
+        let mut reordered = context.clone();
+        reordered.rotate_left(2);
+        let mut outcomes = Vec::new();
+        for (label, raw) in [
+            ("empty marker", br#"<w:ins w:id="7" w:author="Ada"/>"#.as_slice()),
+            ("nested projection", br#"<w:ins w:id="7" w:author="Ada"><w:r><w:t>kept</w:t><v:opaque v:flag="preserved"/></w:r><w:del w:id="8" w:author="Ben"><w:r><w:delText>old</w:delText></w:r></w:del></w:ins>"#.as_slice()),
+        ] {
+            let left = CT_Revision::from_raw(raw.to_vec(), &context).unwrap();
+            let right = CT_Revision::from_raw(raw.to_vec(), &reordered).unwrap();
+            assert_eq!(left.parse_word_prefixes, context);
+            assert_eq!(right.parse_word_prefixes, reordered);
+            assert_eq!(left.raw_xml, raw);
+            assert_eq!(right.raw_xml, raw);
+            let mut writer = Writer::new(Vec::new());
+            left.write_xml(&mut writer).unwrap();
+            assert_eq!(writer.into_inner(), raw);
+            if label == "nested projection" {
+                assert_eq!(left.nested_revisions().len(), 1);
+                assert_eq!(left.nested_revisions()[0].1.author(), "Ben");
+                assert_eq!(left.content_paragraph().unwrap().runs[0].text(), "kept");
+            }
+            outcomes.push((label, left == right));
+        }
+        assert!(outcomes.iter().all(|(_, equal)| *equal), "{outcomes:?}");
+    }
+
+    #[test]
+    fn revision_identity_keeps_complete_namespace_values_and_multiplicity() {
+        let context = revision_identity_context();
+        let raw = br#"<w:ins w:id="7" w:author="Ada"><w:r><w:t>kept</w:t><v:opaque v:flag="preserved"/></w:r></w:ins>"#;
+        let baseline = CT_Revision::from_raw(raw.to_vec(), &context).unwrap();
+        for namespace in ["urn:other-producer", W_NS] {
+            let mut changed = context.clone();
+            changed[2] = crate::numbering::namespace_binding("v", namespace);
+            if namespace == W_NS {
+                changed.push("v".to_owned());
+            }
+            let changed = CT_Revision::from_raw(raw.to_vec(), &changed).unwrap();
+            assert_eq!(changed.raw_xml, baseline.raw_xml);
+            assert_ne!(changed, baseline);
+        }
+        for default in [Some("urn:default"), None] {
+            let mut changed = context.clone();
+            changed.pop();
+            if let Some(default) = default {
+                changed.push(crate::numbering::namespace_binding("", default));
+            }
+            assert_ne!(
+                CT_Revision::from_raw(raw.to_vec(), &changed).unwrap(),
+                baseline
+            );
+        }
+        let mut duplicated = context.clone();
+        duplicated.push(context[2].clone());
+        assert_ne!(
+            CT_Revision::from_raw(raw.to_vec(), &duplicated).unwrap(),
+            baseline
+        );
+    }
+
+    #[test]
+    fn revision_identity_preserves_physical_projection_edit_and_parse_policy() {
+        let context = revision_identity_context();
+        let raw =
+            br#"<w:del w:id="7" w:author="Ada"><w:r><w:delText>old</w:delText></w:r></w:del>"#;
+        let baseline = CT_Revision::from_raw(raw.to_vec(), &context).unwrap();
+        let mut physical = baseline.clone();
+        physical
+            .physical_content_paragraph_mut()
+            .unwrap()
+            .unwrap()
+            .runs[0] = CT_R::new("physical");
+        assert_eq!(physical.raw_xml, baseline.raw_xml);
+        assert_eq!(physical.parse_word_prefixes, context);
+        assert_ne!(physical, baseline);
+        assert_ne!(
+            CT_Revision::from_raw_content(raw.to_vec(), &context).unwrap(),
+            baseline
+        );
+        let insertion = br#"<w:ins w:id="7" w:author="Ada"><w:r><w:t>kept</w:t><v:opaque v:flag="preserved"/></w:r></w:ins>"#;
+        let original = CT_Revision::from_raw(insertion.to_vec(), &context).unwrap();
+        let mut edited = original.clone();
+        assert!(
+            edited
+                .edit_accepted_paragraph(|paragraph| {
+                    paragraph.runs[0] = CT_R::new("edited");
+                    Ok(true)
+                })
+                .unwrap()
+        );
+        assert_eq!(edited.parse_word_prefixes, context);
+        assert_eq!(edited.content_paragraph().unwrap().runs[0].text(), "edited");
+        assert_ne!(edited, original);
+        assert_eq!(original.raw_xml, insertion);
+        let changed_opaque = String::from_utf8(insertion.to_vec())
+            .unwrap()
+            .replace("preserved", "changed");
+        assert_ne!(
+            CT_Revision::from_raw(changed_opaque.into_bytes(), &context).unwrap(),
+            original
+        );
+    }
 
     fn nested_insertions(depth: usize) -> Vec<u8> {
         let mut xml = format!(r#"<w:ins xmlns:w="{W_NS}" w:id="0" w:author="Ada">"#);

@@ -15990,6 +15990,70 @@ impl Default for CT_P {
     }
 }
 
+/// Source attribute ownership of modeled Word content leaves.
+pub(crate) fn source_modeled_attributes(
+    parent: &[u8],
+    local: &[u8],
+) -> Option<&'static [&'static [u8]]> {
+    Some(match (parent, local) {
+        (
+            b"r",
+            b"t"
+            | b"delText"
+            | b"instrText"
+            | b"delInstrText"
+            | b"tab"
+            | b"noBreakHyphen"
+            | b"softHyphen"
+            | b"lastRenderedPageBreak",
+        ) => &[],
+        (b"r", b"br") => &[b"type"],
+        (b"r", b"footnoteReference" | b"endnoteReference") => &[b"id", b"customMarkFollows"],
+        (b"r", b"commentReference") => &[b"id"],
+        (b"r", b"fldChar") => &[b"fldCharType", b"fldLock", b"dirty"],
+        (b"p" | b"hyperlink" | b"sdtContent", b"commentRangeStart" | b"commentRangeEnd") => {
+            &[b"id"]
+        }
+        (b"p" | b"hyperlink" | b"sdtContent", b"bookmarkStart") => &[b"id", b"name"],
+        (b"p" | b"hyperlink" | b"sdtContent", b"bookmarkEnd") => &[b"id"],
+        (b"p", b"hyperlink") => &[b"anchor", b"tooltip", b"docLocation"],
+        (b"p" | b"hyperlink" | b"sdtContent" | b"r", b"fldSimple") => {
+            &[b"instr", b"fldLock", b"dirty"]
+        }
+        _ => return None,
+    })
+}
+
+/// Values count as modeled only when the source reader actually retains their meaning.
+pub(crate) fn source_value_is_modeled(
+    parent: &[u8],
+    local: &[u8],
+    key: &[u8],
+    value: &str,
+) -> bool {
+    if parent == b"r" && local == b"br" && key == b"type" {
+        return matches!(value, "textWrapping" | "page" | "column");
+    }
+    if parent == b"r" && matches!(local, b"footnoteReference" | b"endnoteReference") {
+        if key == b"id" {
+            return value.parse::<i32>().is_ok();
+        }
+        if key == b"customMarkFollows" {
+            return parse_field_bool(value)
+                .is_some_and(|parsed| parsed == matches!(value, "1" | "true"));
+        }
+    }
+    if matches!(local, b"fldSimple" | b"fldChar") {
+        if matches!(key, b"dirty" | b"fldLock") {
+            return parse_field_bool(value).is_some();
+        }
+        if key == b"fldCharType" {
+            return matches!(value, "begin" | "separate" | "end");
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

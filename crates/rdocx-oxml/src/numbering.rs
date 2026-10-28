@@ -176,7 +176,7 @@ const SECT_PR_CHILDREN: &[&[u8]] = &[
 ];
 
 #[derive(Clone, Copy)]
-enum PropertyKind {
+pub(crate) enum PropertyKind {
     Paragraph,
     Run,
 }
@@ -936,7 +936,7 @@ fn level_raw_boundary(name: &[u8], current: usize, word_prefixes: &[String]) -> 
     }
 }
 
-fn parse_on_off_token(value: &str) -> Option<bool> {
+pub(crate) fn parse_on_off_token(value: &str) -> Option<bool> {
     match value {
         "true" | "1" | "on" => Some(true),
         "false" | "0" | "off" => Some(false),
@@ -1028,7 +1028,7 @@ fn is_relationship_property_attribute(name: &[u8], scope: &[String]) -> bool {
     })
 }
 
-fn property_attributes(kind: PropertyKind, local: &[u8]) -> &'static [&'static [u8]] {
+pub(crate) fn property_attributes(kind: PropertyKind, local: &[u8]) -> &'static [&'static [u8]] {
     match local {
         b"pStyle"
         | b"keepNext"

@@ -277,6 +277,33 @@ add-ins, or embedded applications. Binary DOC and Word 2003 XML are permanent
 non-goals. Exact authoring, reading, rendering, and preservation coverage lives
 in the [modern DOCX capability matrix](https://github.com/tensorbee/rdocx/blob/main/docs/hld/02-scope-and-non-goals.md#modern-docx-capability-matrix).
 
+Existing tracked changes can be preserved when their paragraph, table or block
+content control stays unchanged in both comparison inputs. Editing, moving or
+deleting one of those revision-bearing owners is refused with its location.
+Section properties that hold revisions must also stay unchanged in both inputs.
+Changing them is refused.
+This bounded preservation resembles Word Combine. Word Compare instead accepts
+existing revisions for its comparison baseline.
+
+For an unsupported edit, retain the original redline separately and make two
+independent copies. Resolve the earlier revisions in both copies using checked
+APIs, then compare the resolved inputs. Resolution removes the selected earlier
+markup, so this workaround does not preserve that markup in the new redline.
+For example, Python callers can use:
+
+```python
+left = rdocx.Document.from_bytes(original_redline.to_bytes())
+right = rdocx.Document.from_bytes(edited_redline.to_bytes())
+left.accept_revisions_by_author("Reviewer A")
+right.accept_revisions_by_author("Reviewer A")
+left.compare(right, "Reviewer B", "2026-10-27T13:00:00Z", granularity="word")
+```
+
+Use `accept_revision_id` for selected changes when several reviews share an
+author name. Rust exposes the same checked author and id operations. The CLI
+uses `rdocx revision accept --author` on each independent copy before comparison.
+Counts reported by `rdocx compare` include only newly created revisions.
+
 ## License
 
 Licensed under either of:

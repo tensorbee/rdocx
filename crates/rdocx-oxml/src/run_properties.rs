@@ -2026,6 +2026,96 @@ pub(crate) fn rpr_schema_slot(name: &[u8], word_prefixes: &[String]) -> Option<u
     (slot != RPR_END_SLOT && is_word_element(name, local, word_prefixes)).then_some(slot)
 }
 
+/// Attribute ownership of the full run-property reader. Numbering owns only a subset.
+pub(crate) fn source_modeled_attributes(
+    parent: &[u8],
+    local: &[u8],
+) -> Option<&'static [&'static [u8]]> {
+    if parent != b"rPr" {
+        return None;
+    }
+    rpr_schema_slot(local, &[String::new()])?;
+    let shared = crate::numbering::property_attributes(crate::numbering::PropertyKind::Run, local);
+    Some(match local {
+        b"rFonts" => &[
+            b"ascii",
+            b"hAnsi",
+            b"eastAsia",
+            b"cs",
+            b"asciiTheme",
+            b"hAnsiTheme",
+            b"eastAsiaTheme",
+            b"cstheme",
+            b"hint",
+        ],
+        b"color" => &[b"val", b"themeColor", b"themeTint", b"themeShade"],
+        b"shd" => crate::properties::source_shading_attributes(),
+        b"bdr" | b"border" => crate::properties::source_border_attributes(),
+        b"lang" => &[b"val", b"eastAsia", b"bidi"],
+        b"fitText" => &[b"val", b"id"],
+        b"eastAsianLayout" => &[
+            b"id",
+            b"combine",
+            b"combineBrackets",
+            b"vert",
+            b"vertCompress",
+        ],
+        b"ins" | b"del" | b"moveFrom" | b"moveTo" | b"rPrChange" => &[b"id", b"author", b"date"],
+        _ if !shared.is_empty() => shared,
+        _ => &[b"val"],
+    })
+}
+
+pub(crate) fn source_value_is_modeled(
+    parent: &[u8],
+    local: &[u8],
+    key: &[u8],
+    value: &str,
+) -> bool {
+    if parent != b"rPr" {
+        return true;
+    }
+    if key == b"val" {
+        if local == b"highlight" {
+            return ST_HighlightColor::from_str(value).is_ok();
+        }
+        if local == b"u" {
+            return ST_Underline::from_str(value).is_ok();
+        }
+        if matches!(
+            local,
+            b"b" | b"bCs"
+                | b"i"
+                | b"iCs"
+                | b"caps"
+                | b"smallCaps"
+                | b"strike"
+                | b"dstrike"
+                | b"outline"
+                | b"shadow"
+                | b"emboss"
+                | b"imprint"
+                | b"noProof"
+                | b"snapToGrid"
+                | b"vanish"
+                | b"webHidden"
+                | b"rtl"
+                | b"cs"
+                | b"specVanish"
+                | b"oMath"
+        ) {
+            return crate::numbering::parse_on_off_token(value).is_some();
+        }
+    }
+    if local == b"color" && matches!(key, b"themeTint" | b"themeShade") {
+        return parse_uchar_hex(value).is_some();
+    }
+    if local == b"eastAsianLayout" && matches!(key, b"combine" | b"vert" | b"vertCompress") {
+        return crate::numbering::parse_on_off_token(value).is_some();
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

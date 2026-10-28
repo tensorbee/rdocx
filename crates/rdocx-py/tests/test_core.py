@@ -2100,7 +2100,10 @@ def test_priority_word_operations_return_typed_snapshots_and_remain_atomic():
     reopened_redline = rdocx.Document.from_bytes(original.to_bytes())
     assert b"before" in _document_xml(reopened_redline)
     assert b"after" in _document_xml(reopened_redline)
-    with pytest.raises(rdocx.RdocxError, match="existing modeled revisions"):
+    with pytest.raises(
+        rdocx.RdocxError,
+        match=r"cannot replace body/paragraph\[0\] whole, because it holds an existing tracked revision",
+    ):
         reopened_redline.compare(
             edited, author="Ada", timestamp="2026-09-14T09:01:00Z"
         )
@@ -2375,6 +2378,145 @@ def test_compare_rejects_unknown_options_before_mutation():
     with pytest.raises(TypeError):
         original.compare(edited, "Ada", _COMPARE_TIMESTAMP, "word")
     assert live.text == "before"
+
+
+def test_issue425_compare_keeps_the_revisions_of_an_earlier_redline():
+    import rdocx
+
+    first = rdocx.Document()
+    first.add_paragraph("The first sentence stays. The second sentence changes once.")
+    first.add_paragraph("Another paragraph changes later.")
+    second = rdocx.Document.from_bytes(first.to_bytes())
+    second.paragraphs[0].replace_text("changes once", "changed once", expect=1)
+    redline = rdocx.Document.from_bytes(first.to_bytes())
+    redline.compare(second, "Reviewer A", "2026-10-27T12:00:00Z", granularity="word")
+    redline_bytes = redline.to_bytes()
+    assert [revision.author for revision in redline.revisions] == ["Reviewer A"] * 2
+
+    edited = rdocx.Document.from_bytes(redline_bytes)
+    edited.paragraphs[1].replace_text("changes later", "changed later", expect=1)
+    combined = rdocx.Document.from_bytes(redline_bytes)
+    assert (
+        combined.compare(
+            edited, "Reviewer B", "2026-10-27T13:00:00Z", granularity="word"
+        )
+        == ()
+    )
+    revisions = combined.revisions
+    assert [revision.author for revision in revisions] == ["Reviewer A"] * 2 + [
+        "Reviewer B"
+    ] * 2
+    assert len({revision.id for revision in revisions}) == 4
+    kept_paragraph = re.search(rb"<w:p\b.*?</w:p>", _document_xml(redline)).group(0)
+    assert b'w:author="Reviewer A"' in kept_paragraph
+    assert kept_paragraph in _document_xml(combined)
+    accepted = rdocx.Document.from_bytes(combined.to_bytes())
+    accepted.accept_revisions_by_author("Reviewer B")
+    assert [paragraph.text for paragraph in accepted.paragraphs] == [
+        paragraph.text for paragraph in edited.paragraphs
+    ]
+    rejected = rdocx.Document.from_bytes(combined.to_bytes())
+    rejected.reject_revisions_by_author("Reviewer B")
+    assert [paragraph.text for paragraph in rejected.paragraphs] == [
+        paragraph.text for paragraph in redline.paragraphs
+    ]
+
+    # An edit inside the paragraph that holds Reviewer A's revision refuses
+    # and leaves the document unchanged.
+    inside = rdocx.Document.from_bytes(redline_bytes)
+    inside.paragraphs[0].replace_text("first sentence", "opening sentence", expect=1)
+    refused = rdocx.Document.from_bytes(redline_bytes)
+    before = refused.to_bytes()
+    with pytest.raises(
+        rdocx.RdocxError,
+        match=r"^comparison cannot change body/paragraph\[0\], which holds an existing tracked revision: the edited document changes it$",
+    ):
+        refused.compare(inside, "Reviewer B", "2026-10-27T13:00:00Z", granularity="word")
+    assert refused.to_bytes() == before
+
+
+def test_issue425_compare_keeps_revisions_beside_a_new_comment():
+    import rdocx
+
+    first = rdocx.Document()
+    first.add_paragraph("The second sentence changes once.")
+    first.add_paragraph("Another paragraph.")
+    second = rdocx.Document.from_bytes(first.to_bytes())
+    second.paragraphs[0].replace_text("changes", "changed", expect=1)
+    redline = rdocx.Document.from_bytes(first.to_bytes())
+    redline.compare(second, "Reviewer A", "2026-10-27T12:00:00Z", granularity="word")
+    redline_bytes = redline.to_bytes()
+
+    edited = rdocx.Document.from_bytes(redline_bytes)
+    edited.add_comment(
+        rdocx.RunRange(
+            start=rdocx.RunPosition(body_index=1, run_index=0),
+            end=rdocx.RunPosition(body_index=1, run_index=1),
+        ),
+        author="Reviewer B",
+        text="Check this",
+    )
+    combined = rdocx.Document.from_bytes(redline_bytes)
+    assert combined.compare(edited, "Reviewer B", "2026-10-27T13:00:00Z") == ()
+    assert [comment.text for comment in combined.comments] == ["Check this"]
+    kept_paragraph = re.search(rb"<w:p\b.*?</w:p>", _document_xml(redline)).group(0)
+    assert kept_paragraph in _document_xml(combined)
+    for resolve, comments in [("accept", ["Check this"]), ("reject", [])]:
+        resolved = rdocx.Document.from_bytes(combined.to_bytes())
+        getattr(resolved, f"{resolve}_revisions_by_author")("Reviewer B")
+        assert [comment.text for comment in resolved.comments] == comments
+        assert [revision.author for revision in resolved.revisions] == ["Reviewer A"] * 2
+        assert kept_paragraph in _document_xml(resolved)
+
+    # A public adjacent comment may move a raw child's binding onto its own root.
+    namespace_failures = []
+    word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    old = b'<w:ins w:id="7" w:author="A"><w:r><w:t>old</w:t></w:r></w:ins>'
+    for properties in [
+        '<w:pPr xmlns:v="urn:producer"><v:opaque v:note="same"/></w:pPr>',
+        '<w:pPr><w:rPr xmlns:v="urn:producer"><v:opaque v:note="same"/></w:rPr></w:pPr>',
+        f'<w:pPr xmlns:q="{word}"><q:future q:note="same"/></w:pPr>',
+    ]:
+        seed = rdocx.Document()
+        seed.add_paragraph("Comment target")
+        seed.add_paragraph("Protected")
+        seed_bytes = seed.to_bytes()
+        with zipfile.ZipFile(io.BytesIO(seed_bytes)) as package:
+            xml = package.read("word/document.xml")
+            held = b"<w:p>" + properties.encode() + old + b"<w:r><w:t>Anchor.</w:t></w:r></w:p>"
+            paragraphs = list(re.finditer(rb"<w:p\b.*?</w:p>", xml))
+            span = paragraphs[1].span()
+            xml = xml[:span[0]] + held + xml[span[1]:]
+            output = io.BytesIO()
+            with zipfile.ZipFile(output, "w") as target:
+                for member in package.infolist():
+                    target.writestr(member, xml if member.filename == "word/document.xml" else package.read(member.filename))
+        original = rdocx.Document.from_bytes(output.getvalue())
+        edited = rdocx.Document.from_bytes(original.to_bytes())
+        edited.add_comment(rdocx.RunRange(start=rdocx.RunPosition(body_index=0, run_index=0), end=rdocx.RunPosition(body_index=0, run_index=1)), author="B", text="Check opaque")
+        edited = rdocx.Document.from_bytes(edited.to_bytes())
+        assert old in _document_xml(edited)
+        assert properties.encode() not in _document_xml(edited)
+        try:
+            original.compare(edited, "B", "2026-10-27T13:00:00Z")
+        except rdocx.RdocxError as error:
+            namespace_failures.append(f"{properties}: {error}")
+            continue
+        assert held in _document_xml(original)
+        for operation, expected_comments in [("accept", ["Check opaque"]), ("reject", [])]:
+            resolved = rdocx.Document.from_bytes(original.to_bytes())
+            expected = sum(revision.author == "B" for revision in resolved.revisions)
+            assert expected > 0
+            assert getattr(resolved, f"{operation}_revisions_by_author")("B") == expected
+            reopened = rdocx.Document.from_bytes(resolved.to_bytes())
+            reopened_xml = _document_xml(reopened)
+            assert properties.encode() in reopened_xml
+            assert old in reopened_xml
+            assert b"<w:t>Anchor.</w:t>" in reopened_xml
+            assert reopened_xml.count(b"<q:future " if "<q:future " in properties else b"<v:opaque ") == 1
+            assert [(revision.id, revision.author) for revision in reopened.revisions] == [(7, "A")]
+            assert [comment.text for comment in reopened.comments] == expected_comments
+    assert not namespace_failures, namespace_failures
 
 
 def test_issue_161_compare_carries_edited_side_comment_thread():
@@ -15251,3 +15393,69 @@ def test_fx268_picture_normalization_reuses_actual_checked_rounds(publisher, par
     assert staging[5] <= 3 * pieces + 20, staging
     assert picture.bytes == _one_pixel_png()
     assert len(rdocx.Document.from_bytes(document.to_bytes()).pictures()) == 1
+
+
+def test_issue425_noop_and_refusal_keep_live_handles_and_checked_workaround():
+    import rdocx
+
+    original = rdocx.Document()
+    original.add_paragraph("Reviewed once.")
+    original.add_paragraph("Later stays.")
+    first_edit = rdocx.Document.from_bytes(original.to_bytes())
+    first_edit.paragraphs[0].replace_text("once", "twice", expect=1)
+    original.compare(first_edit, "Alice", "2026-10-27T12:00:00Z", granularity="word")
+    redline = rdocx.Document.from_bytes(original.to_bytes())
+    before = redline.to_bytes()
+    held = redline.paragraphs[1]
+    held_run = held.runs[0]
+    assert redline.compare(rdocx.Document.from_bytes(before), "Bob", "2026-10-27T13:00:00Z", granularity="word") == ()
+    assert redline.to_bytes() == before
+    assert held.text == held_run.text == "Later stays."
+
+    edited = rdocx.Document.from_bytes(before)
+    edited.paragraphs[0].replace_text("twice", "thrice", expect=1)
+    with pytest.raises(rdocx.RdocxError, match="existing tracked revision"):
+        redline.compare(edited, "Bob", "2026-10-27T13:00:00Z", granularity="word")
+    assert redline.to_bytes() == before
+    assert held.text == held_run.text == "Later stays."
+
+    # Root metadata inside the protected paragraph is part of source identity.
+    def protected_property_bytes(value):
+        output = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(before)) as source, zipfile.ZipFile(output, "w") as target:
+            for member in source.infolist():
+                payload = source.read(member.filename)
+                if member.filename == "word/document.xml":
+                    payload = re.sub(
+                        rb"(<w:p\b[^>]*>)",
+                        lambda match: match.group(1) + (
+                            '<w:pPr xmlns:v="urn:producer" v:note="' + value
+                            + '"><w:jc w:val="left"/></w:pPr>'
+                        ).encode(),
+                        payload,
+                        count=1,
+                    )
+                target.writestr(member, payload)
+        return output.getvalue()
+
+    protected = rdocx.Document.from_bytes(protected_property_bytes("before"))
+    protected_before = protected.to_bytes()
+    protected_ids = [(revision.id, revision.author) for revision in protected.revisions]
+    protected_held = protected.paragraphs[1]
+    protected_run = protected_held.runs[0]
+    with pytest.raises(rdocx.RdocxError, match=r"body/paragraph\[0\].*existing tracked revision"):
+        protected.compare(
+            rdocx.Document.from_bytes(protected_property_bytes("after")),
+            "Bob", "2026-10-27T13:00:00Z", granularity="word",
+        )
+    assert protected.to_bytes() == protected_before
+    assert [(revision.id, revision.author) for revision in protected.revisions] == protected_ids
+    assert protected_held.text == protected_run.text == "Later stays."
+
+    left = rdocx.Document.from_bytes(before)
+    assert left.accept_revisions_by_author("Alice") == 2
+    assert edited.accept_revisions_by_author("Alice") == 2
+    left.compare(edited, "Bob", "2026-10-27T13:00:00Z", granularity="word")
+    assert [revision.author for revision in left.revisions] == ["Bob", "Bob"]
+    assert [revision.author for revision in redline.revisions] == ["Alice", "Alice"]
+    assert held.text == held_run.text == "Later stays."

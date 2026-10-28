@@ -1237,6 +1237,15 @@ class Document:
         content. With ``ignore_comments=True`` the result keeps this document's
         comments and anchors, and the comments of ``edited`` are not carried
         over. An unknown option value raises ``RdocxError``.
+
+        This document may already hold tracked changes, such as the redline of
+        an earlier comparison. A paragraph, table or content control that holds
+        one is kept byte for byte when ``edited`` holds it unchanged, and the
+        new revisions take ids that no compared story of either document
+        uses. Any other change to such a paragraph, table or content control
+        raises ``RdocxError`` with its location, and the document is left
+        unchanged. Section properties holding revisions must also stay
+        unchanged in both inputs. Changing them raises ``RdocxError``.
         """
     @property
     def comments(self) -> tuple[Comment, ...]: ...

@@ -3027,6 +3027,121 @@ impl Default for CT_Tbl {
     }
 }
 
+/// Modeled source attributes follow the concrete table/grid/row/cell readers.
+pub(crate) fn source_modeled_attributes(
+    parent: &[u8],
+    local: &[u8],
+) -> Option<&'static [&'static [u8]]> {
+    Some(match (parent, local) {
+        (
+            b"tblPr" | b"tblPrEx",
+            b"tblStyle"
+            | b"tblOverlap"
+            | b"bidiVisual"
+            | b"jc"
+            | b"tblCaption"
+            | b"tblDescription"
+            | b"tblStyleRowBandSize"
+            | b"tblStyleColBandSize",
+        ) => &[b"val"],
+        (b"tblPr" | b"tblPrEx", b"tblpPr") => &[
+            b"leftFromText",
+            b"rightFromText",
+            b"topFromText",
+            b"bottomFromText",
+            b"vertAnchor",
+            b"horzAnchor",
+            b"tblpX",
+            b"tblpXSpec",
+            b"tblpY",
+            b"tblpYSpec",
+        ],
+        (b"tblPr" | b"tblPrEx", b"tblW" | b"tblInd" | b"tblCellSpacing")
+        | (b"trPr", b"wBefore" | b"wAfter" | b"tblCellSpacing")
+        | (b"tcPr", b"tcW") => &[b"w", b"type"],
+        (b"tblPr" | b"tblPrEx", b"tblLayout") => &[b"type"],
+        (b"tblPr" | b"tblPrEx", b"tblLook") => &[
+            b"val",
+            b"firstRow",
+            b"lastRow",
+            b"firstColumn",
+            b"lastColumn",
+            b"noHBand",
+            b"noVBand",
+        ],
+        (b"tblPr" | b"tblPrEx", b"shd") | (b"tcPr", b"shd") => {
+            crate::properties::source_shading_attributes()
+        }
+        (b"tblPr" | b"tblPrEx", b"tblBorders" | b"tblCellMar" | b"tblPrChange")
+        | (b"tcPr", b"tcBorders" | b"tcMar") => &[],
+        (b"tblGrid", b"gridCol") => &[b"w"],
+        (b"trPr", b"trHeight") => &[b"val", b"hRule"],
+        (
+            b"trPr",
+            b"tblHeader" | b"jc" | b"gridBefore" | b"gridAfter" | b"hidden" | b"cnfStyle"
+            | b"cantSplit",
+        ) => &[b"val"],
+        (
+            b"tcPr",
+            b"gridSpan" | b"hMerge" | b"vMerge" | b"vAlign" | b"cnfStyle" | b"noWrap"
+            | b"textDirection",
+        ) => &[b"val"],
+        (b"tblCellMar" | b"tcMar", b"top" | b"left" | b"start" | b"bottom" | b"right" | b"end") => {
+            &[b"w", b"type"]
+        }
+        (
+            b"tblBorders" | b"tcBorders",
+            b"top" | b"left" | b"start" | b"bottom" | b"right" | b"end" | b"insideH" | b"insideV",
+        ) => crate::properties::source_border_attributes(),
+        _ => return None,
+    })
+}
+
+pub(crate) fn source_value_is_modeled(
+    parent: &[u8],
+    local: &[u8],
+    key: &[u8],
+    value: &str,
+) -> bool {
+    if parent == b"tcPr" && local == b"vAlign" && key == b"val" {
+        return ST_VerticalJc::from_str(value).to_str() == value;
+    }
+    if parent == b"tcPr" && local == b"vMerge" && key == b"val" {
+        return matches!(value, "restart" | "continue");
+    }
+    if key == b"val" && local == b"jc" && matches!(parent, b"tblPr" | b"tblPrEx" | b"trPr") {
+        return ST_Jc::from_str(value).is_ok();
+    }
+    if key == b"val" && local == b"tblOverlap" {
+        return ST_TblOverlap::parse(value).is_some();
+    }
+    if key == b"val"
+        && matches!(
+            (parent, local),
+            (b"tblPr" | b"tblPrEx", b"bidiVisual")
+                | (b"trPr", b"tblHeader" | b"hidden" | b"cantSplit")
+                | (b"tcPr", b"noWrap")
+        )
+    {
+        return parse_ooxml_bool(value).is_some();
+    }
+    if local == b"tblLook" && key != b"val" {
+        return parse_ooxml_bool(value).is_some();
+    }
+    if local == b"tblpPr" {
+        if matches!(key, b"horzAnchor" | b"vertAnchor") {
+            return ST_TblAnchor::parse(value).is_some();
+        }
+        if key == b"tblpXSpec" {
+            return AnchorAlignH::parse(value).is_some();
+        }
+        if key == b"tblpYSpec" {
+            return ST_YAlign::parse(value).is_some();
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

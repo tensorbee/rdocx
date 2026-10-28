@@ -2292,6 +2292,23 @@ fn raw_fragment_has_child_content(raw: &[u8]) -> bool {
     }
 }
 
+/// The actual sdtPr parser models only these property leaves/attributes.
+pub(crate) fn source_modeled_attributes(
+    parent: &[u8],
+    local: &[u8],
+) -> Option<&'static [&'static [u8]]> {
+    if parent != b"sdtPr" {
+        return None;
+    }
+    match local {
+        b"alias" | b"tag" | b"id" => Some(&[b"val"]),
+        b"dataBinding" => Some(&[b"prefixMappings", b"xpath", b"storeItemID"]),
+        // Type element attributes and payload are explicitly retained source state.
+        _ if SdtType::from_element(local).is_some() => Some(&[]),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use quick_xml::Reader;

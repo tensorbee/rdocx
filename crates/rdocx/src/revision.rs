@@ -194,6 +194,7 @@ enum RevisionScope<'a> {
     All,
     Author(&'a str),
     Id(i32),
+    Ids(&'a HashSet<i32>),
     DateRange { start: Instant, end: Instant },
 }
 
@@ -277,6 +278,16 @@ impl Document {
     /// Reject every modeled revision element carrying `id`.
     pub fn reject_revision_id(&mut self, id: i32) -> Result<usize> {
         self.resolve_revisions(Resolution::Reject, RevisionScope::Id(id))
+    }
+
+    /// Accept every modeled revision element whose `w:id` is in `ids`.
+    pub(crate) fn accept_revision_ids(&mut self, ids: &HashSet<i32>) -> Result<usize> {
+        self.resolve_revisions(Resolution::Accept, RevisionScope::Ids(ids))
+    }
+
+    /// Reject every modeled revision element whose `w:id` is in `ids`.
+    pub(crate) fn reject_revision_ids(&mut self, ids: &HashSet<i32>) -> Result<usize> {
+        self.resolve_revisions(Resolution::Reject, RevisionScope::Ids(ids))
     }
 
     fn resolve_revisions(
@@ -403,6 +414,18 @@ pub(crate) fn modeled_revision_count(source: &[u8]) -> Result<usize> {
         .count())
 }
 
+/// The modeled revision elements of one part in document order: the byte
+/// range of each element and its `w:id`. These are the elements that
+/// [`modeled_revision_count`] counts.
+pub(crate) fn modeled_revision_spans(source: &[u8]) -> Result<Vec<(Range<usize>, i32)>> {
+    let tree = XmlTree::parse(source)?;
+    Ok(tree
+        .elements
+        .iter()
+        .filter_map(|element| Some((element.start..element.end, element.revision.as_ref()?.id)))
+        .collect())
+}
+
 /// List the modeled revisions of one story part in document order.
 ///
 /// These are the elements that resolving the part counts. Each one belongs to
@@ -458,6 +481,7 @@ impl RevisionScope<'_> {
             Self::All => true,
             Self::Author(author) => metadata.author == *author,
             Self::Id(id) => metadata.id == *id,
+            Self::Ids(ids) => ids.contains(&metadata.id),
             Self::DateRange { start, end } => metadata
                 .timestamp
                 .as_deref()
@@ -469,11 +493,15 @@ impl RevisionScope<'_> {
 
 impl<'a> XmlTree<'a> {
     fn parse(source: &'a [u8]) -> Result<Self> {
+        Self::parse_in_scope(source, &NamespaceScope::new())
+    }
+
+    fn parse_in_scope(source: &'a [u8], inherited: &NamespaceScope) -> Result<Self> {
         let mut reader = Reader::from_reader(source);
         reader.config_mut().trim_text(false);
         let mut elements: Vec<XmlElement> = Vec::new();
         let mut stack = Vec::new();
-        let mut scopes = vec![NamespaceScope::new()];
+        let mut scopes = vec![inherited.clone()];
         let mut root = None;
         let mut buffer = Vec::new();
 
@@ -538,13 +566,88 @@ impl<'a> XmlTree<'a> {
         })
     }
 
+    fn direct_word_child(&self, index: usize, local: &str) -> Result<usize> {
+        self.elements[index]
+            .children
+            .iter()
+            .copied()
+            .find(|child| self.elements[*child].word && self.elements[*child].local == local)
+            .ok_or_else(|| Error::Other(format!("rendered properties have no direct Word {local}")))
+    }
+
+    fn source_scope(&self, index: usize) -> NamespaceDeclarations {
+        let mut ancestors = Vec::new();
+        let mut current = Some(index);
+        while let Some(index) = current {
+            ancestors.push(index);
+            current = self.elements[index].parent;
+        }
+        ancestors
+            .into_iter()
+            .rev()
+            .fold(Vec::new(), |scope, index| {
+                merged_namespaces(&scope, &self.elements[index].namespace_declarations)
+            })
+    }
+
+    /// Relocation preserves the source context, including prefixes used only
+    /// in opaque values. A child-local declaration wins over inherited context.
+    /// Identical source and destination bindings need no extra declaration.
+    fn relocation_namespaces(
+        &self,
+        index: usize,
+        destination: &[(String, String)],
+    ) -> NamespaceDeclarations {
+        let element = &self.elements[index];
+        let source = element
+            .parent
+            .map(|parent| self.source_scope(parent))
+            .unwrap_or_default();
+        let mut changed = source
+            .into_iter()
+            .filter(|(prefix, value)| {
+                prefix != "xml"
+                    && !element
+                        .namespace_declarations
+                        .iter()
+                        .any(|(name, _)| name == prefix)
+                    && !(prefix.is_empty()
+                        && value.is_empty()
+                        && !destination.iter().any(|(name, _)| name.is_empty()))
+                    && !destination
+                        .iter()
+                        .any(|(name, target)| name == prefix && target == value)
+            })
+            .collect::<Vec<_>>();
+        if !self
+            .source_scope(index)
+            .iter()
+            .any(|(prefix, _)| prefix.is_empty())
+            && destination
+                .iter()
+                .any(|(prefix, value)| prefix.is_empty() && !value.is_empty())
+        {
+            changed.push((String::new(), String::new()));
+        }
+        changed.sort();
+        changed
+    }
+
     fn render(
         &self,
         index: usize,
         state: &mut RenderState<'_>,
         convert_deleted_text: bool,
     ) -> Result<Vec<u8>> {
-        self.render_with_namespaces(index, state, convert_deleted_text, &[])
+        self.render_with_namespaces(
+            index,
+            state,
+            convert_deleted_text,
+            &self.elements[index]
+                .parent
+                .map(|parent| self.source_scope(parent))
+                .unwrap_or_default(),
+        )
     }
 
     fn render_with_namespaces(
@@ -552,33 +655,30 @@ impl<'a> XmlTree<'a> {
         index: usize,
         state: &mut RenderState<'_>,
         convert_deleted_text: bool,
-        promoted_namespaces: &[(String, String)],
+        destination: &[(String, String)],
     ) -> Result<Vec<u8>> {
         let element = &self.elements[index];
         if let Some(metadata) = &element.revision
             && state.scope.matches(metadata)
         {
             state.resolved.insert(index);
-            return self.render_selected_revision(index, metadata.kind, state, promoted_namespaces);
+            return self.render_selected_revision(index, metadata.kind, state, destination);
         }
 
         if matches!(state.resolution, Resolution::Reject) {
             let changes = self.selected_property_changes(index, state)?;
-            if let Some((change, prior)) = changes.first().copied() {
+            if let Some((_, prior)) = changes.first().copied() {
                 for (selected, _) in &changes {
                     state.resolved.insert(*selected);
                     self.validate_selected_descendants(*selected, state)?;
                 }
-                let namespaces = merged_namespaces(
-                    &merged_namespaces(promoted_namespaces, &element.namespace_declarations),
-                    &self.elements[change].namespace_declarations,
-                );
+
                 return self.render_rejected_property_owner(
                     index,
                     prior,
                     &changes,
                     state,
-                    &namespaces,
+                    destination,
                 );
             }
         }
@@ -593,18 +693,13 @@ impl<'a> XmlTree<'a> {
             removes_content(state.resolution, kind)
         }) {
             if element.local == "numPr" {
-                return self.render_rejected_numbering_owner(
-                    index,
-                    &markers,
-                    state,
-                    promoted_namespaces,
-                );
+                return self.render_rejected_numbering_owner(index, &markers, state, destination);
             }
             self.validate_selected_descendants(index, state)?;
             return Ok(Vec::new());
         }
 
-        self.render_ordinary(index, state, convert_deleted_text, promoted_namespaces)
+        self.render_ordinary(index, state, convert_deleted_text, destination)
     }
 
     fn render_selected_revision(
@@ -612,18 +707,15 @@ impl<'a> XmlTree<'a> {
         index: usize,
         kind: RevisionKind,
         state: &mut RenderState<'_>,
-        promoted_namespaces: &[(String, String)],
+        destination: &[(String, String)],
     ) -> Result<Vec<u8>> {
         if is_property_change(kind) {
             let prior = self.prior_property(index, kind)?;
             if matches!(state.resolution, Resolution::Accept) {
                 return Ok(Vec::new());
             }
-            let namespaces = merged_namespaces(
-                promoted_namespaces,
-                &self.elements[index].namespace_declarations,
-            );
-            return self.render_with_namespaces(prior, state, false, &namespaces);
+
+            return self.render_with_namespaces(prior, state, false, destination);
         }
 
         if self.is_contextual_marker(index) {
@@ -631,16 +723,12 @@ impl<'a> XmlTree<'a> {
         }
 
         if keeps_content(state.resolution, kind) {
-            let namespaces = merged_namespaces(
-                promoted_namespaces,
-                &self.elements[index].namespace_declarations,
-            );
             self.render_inner_with_namespaces(
                 index,
                 state,
                 matches!(state.resolution, Resolution::Reject)
                     && matches!(kind, RevisionKind::Deletion | RevisionKind::MoveFrom),
-                &namespaces,
+                destination,
             )
         } else {
             self.validate_selected_descendants(index, state)?;
@@ -653,9 +741,14 @@ impl<'a> XmlTree<'a> {
         index: usize,
         state: &mut RenderState<'_>,
         convert_deleted_text: bool,
-        promoted_namespaces: &[(String, String)],
+        destination: &[(String, String)],
     ) -> Result<Vec<u8>> {
         let element = &self.elements[index];
+        let declarations = self.relocation_namespaces(index, destination);
+        let current_scope = merged_namespaces(
+            &merged_namespaces(destination, &declarations),
+            &element.namespace_declarations,
+        );
         // Rejected deleted text reads as text again, and a deleted field
         // instruction as an instruction.
         let restored_local = match element.local.as_str() {
@@ -665,11 +758,8 @@ impl<'a> XmlTree<'a> {
         };
         if element.empty {
             let raw = &self.source[element.start..element.end];
-            let raw = inject_namespace_declarations(
-                raw,
-                &element.namespace_declarations,
-                promoted_namespaces,
-            );
+            let raw =
+                inject_namespace_declarations(raw, &element.namespace_declarations, &declarations);
             return Ok(match restored_local {
                 Some(local) => rename_element(&raw, &element.name, local),
                 None => raw,
@@ -683,12 +773,8 @@ impl<'a> XmlTree<'a> {
             && matches!(element.local.as_str(), "pPr" | "rPr" | "trPr" | "numPr")
             && (resolves_paragraph_property_change
                 || self.subtree_contains_selected_contextual_marker(index, state));
-        let inner = self.render_inner_with_namespaces(
-            index,
-            state,
-            convert_deleted_text,
-            promoted_namespaces,
-        )?;
+        let inner =
+            self.render_inner_with_namespaces(index, state, convert_deleted_text, &current_scope)?;
         if element.word && element.local == "tbl" && self.owned_rows_all_remove(index, state) {
             return Ok(Vec::new());
         }
@@ -711,7 +797,7 @@ impl<'a> XmlTree<'a> {
         let open = inject_namespace_declarations(
             &self.source[element.start..element.open_end],
             &element.namespace_declarations,
-            promoted_namespaces,
+            &declarations,
         );
         if let Some(local) = restored_local {
             output.extend_from_slice(&rename_element(&open, &element.name, local));
@@ -733,7 +819,7 @@ impl<'a> XmlTree<'a> {
         index: usize,
         state: &mut RenderState<'_>,
         convert_deleted_text: bool,
-        promoted_namespaces: &[(String, String)],
+        destination: &[(String, String)],
     ) -> Result<Vec<u8>> {
         let element = &self.elements[index];
         let mut output = Vec::new();
@@ -794,7 +880,11 @@ impl<'a> XmlTree<'a> {
                 if before_table {
                     self.validate_removed_paragraphs(&paragraphs, state)?;
                 } else {
-                    output.extend_from_slice(&self.render_merged_paragraphs(&paragraphs, state)?);
+                    output.extend_from_slice(&self.render_merged_paragraphs(
+                        &paragraphs,
+                        state,
+                        destination,
+                    )?);
                 }
                 cursor = self.elements[*siblings.last().expect("paragraph chain exists")].end;
                 child_index = next_index;
@@ -804,7 +894,7 @@ impl<'a> XmlTree<'a> {
                 child,
                 state,
                 convert_deleted_text,
-                promoted_namespaces,
+                destination,
             )?);
             cursor = child_element.end;
             child_index += 1;
@@ -846,16 +936,15 @@ impl<'a> XmlTree<'a> {
         prior: usize,
         selected: &[(usize, usize)],
         state: &mut RenderState<'_>,
-        promoted_namespaces: &[(String, String)],
+        destination: &[(String, String)],
     ) -> Result<Vec<u8>> {
-        let mut prior_xml =
-            self.render_with_namespaces(prior, state, false, promoted_namespaces)?;
-        if let Some((prior_mark, markers)) =
-            self.legacy_mark_markers(owner, prior, state, promoted_namespaces)?
+        let mut prior_xml = self.render_with_namespaces(prior, state, false, destination)?;
+        let prior_scope = rendered_namespace_scope(&prior_xml, destination, None)?;
+        if let Some(markers) =
+            self.legacy_mark_markers(owner, prior, state, &prior_xml, destination)?
             && !markers.is_empty()
         {
-            prior_xml =
-                insert_first_children(&prior_xml, &self.elements[prior_mark].name, &markers)?;
+            prior_xml = insert_first_children(&prior_xml, "rPr", &markers, destination)?;
         }
         let selected = selected
             .iter()
@@ -866,7 +955,7 @@ impl<'a> XmlTree<'a> {
             Some(prior),
             &selected,
             state,
-            promoted_namespaces,
+            &prior_scope,
         )?;
         let prior_element = &self.elements[prior];
         if prior_element.word
@@ -879,6 +968,17 @@ impl<'a> XmlTree<'a> {
                     .all(u8::is_ascii_whitespace))
         {
             return Ok(Vec::new());
+        }
+        if prior_element.word && prior_element.local == "rPr" && !retained.is_empty() {
+            let tree = XmlTree::parse_in_scope(&prior_xml, &prior_scope.iter().cloned().collect())?;
+            // Retained markers precede any still-unselected prior rPrChange.
+            if let Ok(change) = tree.direct_word_child(tree.root, "rPrChange") {
+                let at = tree.elements[change].start;
+                let mut output = prior_xml[..at].to_vec();
+                output.extend_from_slice(&retained);
+                output.extend_from_slice(&prior_xml[at..]);
+                return Ok(output);
+            }
         }
         append_children_to_element(&prior_xml, &retained)
     }
@@ -900,25 +1000,29 @@ impl<'a> XmlTree<'a> {
         owner: usize,
         selected: &[usize],
         state: &mut RenderState<'_>,
-        promoted_namespaces: &[(String, String)],
+        destination: &[(String, String)],
     ) -> Result<Vec<u8>> {
         let selected = selected.iter().copied().collect::<HashSet<_>>();
         for marker in &selected {
             state.resolved.insert(*marker);
             self.validate_selected_descendants(*marker, state)?;
         }
-        let retained = self.render_retained_owner_children(
-            owner,
-            None,
-            &selected,
-            state,
-            promoted_namespaces,
-        )?;
+        let element = &self.elements[owner];
+        let declarations = self.relocation_namespaces(owner, destination);
+        let current_scope = merged_namespaces(
+            &merged_namespaces(destination, &declarations),
+            &element.namespace_declarations,
+        );
+        let retained =
+            self.render_retained_owner_children(owner, None, &selected, state, &current_scope)?;
         if retained.is_empty() {
             return Ok(Vec::new());
         }
-        let element = &self.elements[owner];
-        let mut output = self.source[element.start..element.open_end].to_vec();
+        let mut output = inject_namespace_declarations(
+            &self.source[element.start..element.open_end],
+            &element.namespace_declarations,
+            &declarations,
+        );
         output.extend_from_slice(&retained);
         output.extend_from_slice(&self.source[element.close_start..element.end]);
         Ok(output)
@@ -936,8 +1040,9 @@ impl<'a> XmlTree<'a> {
         owner: usize,
         prior: usize,
         state: &mut RenderState<'_>,
-        promoted_namespaces: &[(String, String)],
-    ) -> Result<Option<(usize, Vec<u8>)>> {
+        prior_xml: &[u8],
+        destination: &[(String, String)],
+    ) -> Result<Option<Vec<u8>>> {
         let mark = |properties: usize| {
             self.elements[properties]
                 .children
@@ -949,13 +1054,10 @@ impl<'a> XmlTree<'a> {
         if !owner_element.word || owner_element.local != "pPr" {
             return Ok(None);
         }
-        let (Some(current), Some(prior_mark)) = (mark(owner), mark(prior)) else {
+        let (Some(current), Some(_)) = (mark(owner), mark(prior)) else {
             return Ok(None);
         };
-        let namespaces = merged_namespaces(
-            &merged_namespaces(promoted_namespaces, &owner_element.namespace_declarations),
-            &self.elements[current].namespace_declarations,
-        );
+        let namespaces = rendered_namespace_scope(prior_xml, destination, Some("rPr"))?;
         let mut markers = Vec::new();
         for child in &self.elements[current].children {
             let rendered = self.render_with_namespaces(*child, state, false, &namespaces)?;
@@ -984,7 +1086,7 @@ impl<'a> XmlTree<'a> {
                 _ => {}
             }
         }
-        Ok(Some((prior_mark, markers)))
+        Ok(Some(markers))
     }
 
     /// Render the children of a property owner that its rejected prior value
@@ -1001,23 +1103,17 @@ impl<'a> XmlTree<'a> {
         prior: Option<usize>,
         selected: &HashSet<usize>,
         state: &mut RenderState<'_>,
-        promoted_namespaces: &[(String, String)],
+        destination: &[(String, String)],
     ) -> Result<Vec<u8>> {
         let element = &self.elements[owner];
-        let child_namespaces =
-            merged_namespaces(promoted_namespaces, &element.namespace_declarations);
-        // A rejected paragraph mark `w:rPrChange` replaces the whole mark
-        // formatting, unmodelled children included, and keeps only its markers.
-        let replaces_mark = prior.is_some()
-            && element.word
-            && element.local == "rPr"
-            && element.parent.is_some_and(|parent| {
-                self.elements[parent].word && self.elements[parent].local == "pPr"
-            });
+        // A complete prior rPr replaces run or paragraph-mark formatting,
+        // including opaque children. Independently scoped revision markers
+        // remain current children and resolve through the normal selection.
+        let replaces_run_properties = prior.is_some() && element.word && element.local == "rPr";
         let mut output = Vec::new();
         for child in &element.children {
             let child_element = &self.elements[*child];
-            if replaces_mark && child_element.revision.is_none() {
+            if replaces_run_properties && child_element.revision.is_none() {
                 continue;
             }
             if let Some(prior) = prior
@@ -1036,7 +1132,7 @@ impl<'a> XmlTree<'a> {
                         *child,
                         state,
                         false,
-                        &child_namespaces,
+                        destination,
                     )?);
                 }
                 continue;
@@ -1051,7 +1147,7 @@ impl<'a> XmlTree<'a> {
                     *child,
                     state,
                     false,
-                    &child_namespaces,
+                    destination,
                 )?);
             }
         }
@@ -1320,18 +1416,33 @@ impl<'a> XmlTree<'a> {
         &self,
         paragraphs: &[usize],
         state: &mut RenderState<'_>,
+        destination: &[(String, String)],
     ) -> Result<Vec<u8>> {
         let current = paragraphs[0];
         let next = *paragraphs.last().expect("paragraph chain exists");
         let current_element = &self.elements[current];
         let next_element = &self.elements[next];
-        let mut output = self.source[current_element.start..current_element.open_end].to_vec();
+        let declarations = self.relocation_namespaces(current, destination);
+        let current_scope = merged_namespaces(
+            &merged_namespaces(destination, &declarations),
+            &current_element.namespace_declarations,
+        );
+        let mut output = inject_namespace_declarations(
+            &self.source[current_element.start..current_element.open_end],
+            &current_element.namespace_declarations,
+            &declarations,
+        );
         if let Some(properties) = next_element
             .children
             .iter()
             .find(|child| self.elements[**child].word && self.elements[**child].local == "pPr")
         {
-            output.extend_from_slice(&self.render(*properties, state, false)?);
+            output.extend_from_slice(&self.render_with_namespaces(
+                *properties,
+                state,
+                false,
+                &current_scope,
+            )?);
         }
         for paragraph in paragraphs {
             for child in &self.elements[*paragraph].children {
@@ -1341,13 +1452,34 @@ impl<'a> XmlTree<'a> {
                         self.validate_selected_descendants(*child, state)?;
                     }
                 } else {
-                    output.extend_from_slice(&self.render(*child, state, false)?);
+                    output.extend_from_slice(&self.render_with_namespaces(
+                        *child,
+                        state,
+                        false,
+                        &current_scope,
+                    )?);
                 }
             }
         }
         output.extend_from_slice(&self.source[current_element.close_start..current_element.end]);
         Ok(output)
     }
+}
+
+fn rendered_namespace_scope(
+    xml: &[u8],
+    destination: &[(String, String)],
+    local: Option<&str>,
+) -> Result<NamespaceDeclarations> {
+    if xml.is_empty() {
+        return Ok(destination.to_vec());
+    }
+    let tree = XmlTree::parse_in_scope(xml, &destination.iter().cloned().collect())?;
+    let index = match local {
+        Some(local) => tree.direct_word_child(tree.root, local)?,
+        None => tree.root,
+    };
+    Ok(merged_namespaces(destination, &tree.source_scope(index)))
 }
 
 fn push_element(
@@ -1497,35 +1629,27 @@ fn merged_namespaces(
     merged
 }
 
-/// Insert `children` first in the first element named `name`.
-fn insert_first_children(xml: &[u8], name: &str, children: &[u8]) -> Result<Vec<u8>> {
-    let tag = format!("<{name}");
-    let start = xml
-        .windows(tag.len() + 1)
-        .position(|window| {
-            window.starts_with(tag.as_bytes())
-                && matches!(
-                    window[tag.len()],
-                    b'>' | b'/' | b' ' | b'\t' | b'\n' | b'\r'
-                )
-        })
-        .ok_or_else(|| Error::Other(format!("prior properties have no {name}")))?;
-    let open_end = start
-        + xml[start..]
-            .iter()
-            .position(|byte| *byte == b'>')
-            .ok_or_else(|| Error::Other(format!("prior {name} has no end")))?;
-    let mut output = Vec::with_capacity(xml.len() + children.len() + name.len() + 3);
-    if xml[open_end - 1] == b'/' {
-        output.extend_from_slice(&xml[..open_end - 1]);
+/// Insert children at the actual direct Word property owner, keeping its QName.
+fn insert_first_children(
+    xml: &[u8],
+    local: &str,
+    children: &[u8],
+    destination: &[(String, String)],
+) -> Result<Vec<u8>> {
+    let tree = XmlTree::parse_in_scope(xml, &destination.iter().cloned().collect())?;
+    let index = tree.direct_word_child(tree.root, local)?;
+    let element = &tree.elements[index];
+    let mut output = Vec::with_capacity(xml.len() + children.len() + element.name.len() + 3);
+    if element.empty {
+        output.extend_from_slice(&xml[..element.open_end - 2]);
         output.push(b'>');
         output.extend_from_slice(children);
-        output.extend_from_slice(format!("</{name}>").as_bytes());
+        output.extend_from_slice(format!("</{}>", element.name).as_bytes());
     } else {
-        output.extend_from_slice(&xml[..=open_end]);
+        output.extend_from_slice(&xml[..element.open_end]);
         output.extend_from_slice(children);
     }
-    output.extend_from_slice(&xml[open_end + 1..]);
+    output.extend_from_slice(&xml[element.open_end..]);
     Ok(output)
 }
 

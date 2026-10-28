@@ -2217,6 +2217,83 @@ fn ppr_modeled_toggle_present(ppr: &CT_PPr, slot: u8) -> bool {
     }
 }
 
+/// Attribute ownership of the actual paragraph-property reader, not validator admission.
+pub(crate) fn source_modeled_attributes(
+    parent: &[u8],
+    local: &[u8],
+) -> Option<&'static [&'static [u8]]> {
+    if parent != b"pPr" {
+        return None;
+    }
+    ppr_modeled_slot(local, &[String::new()])?;
+    let shared =
+        crate::numbering::property_attributes(crate::numbering::PropertyKind::Paragraph, local);
+    Some(match local {
+        b"framePr" => &[
+            b"dropCap",
+            b"lines",
+            b"w",
+            b"h",
+            b"vSpace",
+            b"hSpace",
+            b"wrap",
+            b"hAnchor",
+            b"vAnchor",
+            b"x",
+            b"xAlign",
+            b"y",
+            b"yAlign",
+            b"hRule",
+            b"anchorLock",
+        ],
+        b"shd" => crate::properties::source_shading_attributes(),
+        b"numPr" | b"pBdr" | b"tabs" | b"rPr" | b"sectPr" | b"pPrChange" => &[],
+        _ if !shared.is_empty() => shared,
+        // Remaining modeled paragraph leaves are the current scalar/toggle fields.
+        _ => &[b"val"],
+    })
+}
+
+/// Permissive readers can discard unsupported values even for a recognized key.
+pub(crate) fn source_value_is_modeled(
+    parent: &[u8],
+    local: &[u8],
+    key: &[u8],
+    value: &str,
+) -> bool {
+    if parent == b"numPr" && key == b"val" && matches!(local, b"ilvl" | b"numId") {
+        return value.parse::<u32>().is_ok();
+    }
+    if parent != b"pPr" {
+        return true;
+    }
+    if key == b"val" {
+        if local == b"jc" {
+            return ST_Jc::from_str(value).is_ok();
+        }
+        if local == b"outlineLvl" {
+            return value.parse::<u32>().is_ok();
+        }
+        if ppr_toggle_slot(local, &[String::new()]).is_some()
+            || matches!(
+                local,
+                b"keepNext"
+                    | b"keepLines"
+                    | b"pageBreakBefore"
+                    | b"widowControl"
+                    | b"suppressAutoHyphens"
+            )
+        {
+            return crate::numbering::parse_on_off_token(value).is_some();
+        }
+    }
+    if local == b"spacing" && matches!(key, b"beforeAutospacing" | b"afterAutospacing") {
+        return crate::numbering::parse_on_off_token(value)
+            .is_some_and(|parsed| parsed == matches!(value, "1" | "true"));
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

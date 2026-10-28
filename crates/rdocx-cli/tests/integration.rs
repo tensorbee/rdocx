@@ -7397,3 +7397,295 @@ fn issue390_comment_resolution_preserves_unknown_state() {
     assert_eq!(value["comments"][0]["resolved"], json!(false));
     assert_eq!(value["comments"][0]["id"], json!(id));
 }
+
+#[test]
+fn issue425_compare_keeps_the_revisions_of_an_earlier_redline() {
+    let temp = TempWorkspace::new("issue425-compare-redline");
+    let first = temp.path.join("first.docx");
+    let second = temp.path.join("second.docx");
+    let redline = temp.path.join("redline.docx");
+    let edited = temp.path.join("edited.docx");
+    let refused = temp.path.join("refused.docx");
+    let combined = temp.path.join("combined.docx");
+    let refused_output = temp.path.join("refused-output.docx");
+    write_document(&first, &["Reviewed once.", "Edited later."]);
+    write_document(&second, &["Reviewed twice.", "Edited later."]);
+    let compare = |original: &Path, edited: &Path, author: &str, output: &Path| {
+        cli(&[
+            "compare",
+            path_text(original),
+            path_text(edited),
+            "--author",
+            author,
+            "--timestamp",
+            COMPARE_TIMESTAMP,
+            "--output",
+            path_text(output),
+            "--json",
+        ])
+    };
+    let first_review = compare(&first, &second, "Alice", &redline);
+    assert_success(&first_review, "first compare");
+    let edit_redline = |from: &str, to: &str, output: &Path| {
+        let mut package = OpcPackage::open(&redline).unwrap();
+        let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap())
+            .unwrap()
+            .replacen(from, to, 1);
+        package.set_part("/word/document.xml", xml.into_bytes());
+        package.save(output).unwrap();
+    };
+    edit_redline(">Edited later.<", ">Edited again.<", &edited);
+    edit_redline(">Reviewed twice.<", ">Reviewed thrice.<", &refused);
+
+    let second_review = compare(&redline, &edited, "Bob", &combined);
+    assert_success(&second_review, "second compare");
+    let record: Value = serde_json::from_slice(&second_review.stdout).unwrap();
+    assert_eq!(record["revisions"], json!(2));
+    assert_eq!(record["main_story_revisions"], json!(2));
+    let authors = Document::open(&combined)
+        .unwrap()
+        .revisions()
+        .iter()
+        .map(|revision| revision.author().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(authors, ["Alice", "Alice", "Bob", "Bob"]);
+    let alice = |path: &Path| {
+        let package = OpcPackage::open(path).unwrap();
+        let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap())
+            .unwrap()
+            .to_owned();
+        let mut reader = quick_xml::NsReader::from_str(&xml);
+        let mut depth = 0usize;
+        let mut selected = None;
+        loop {
+            let before = reader.buffer_position() as usize;
+            let (namespace, event) = reader.read_resolved_event().unwrap();
+            match event {
+                quick_xml::events::Event::Start(element) => {
+                    if selected.is_none()
+                        && element.local_name().as_ref() == b"p"
+                        && namespace
+                            == quick_xml::name::ResolveResult::Bound(quick_xml::name::Namespace(
+                                b"http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+                            ))
+                    {
+                        selected = Some((before, depth));
+                    }
+                    depth += 1;
+                }
+                quick_xml::events::Event::End(_) => {
+                    depth -= 1;
+                    if let Some((start, owner_depth)) = selected
+                        && depth == owner_depth
+                    {
+                        break xml[start..reader.buffer_position() as usize].to_owned();
+                    }
+                }
+                quick_xml::events::Event::Eof => panic!("missing first Word paragraph: {xml}"),
+                _ => {}
+            }
+        }
+    };
+    assert!(alice(&redline).contains(r#"w:author="Alice""#));
+    assert_eq!(alice(&combined), alice(&redline));
+
+    let human_output = temp.path.join("human.docx");
+    let human_review = cli(&[
+        "compare",
+        path_text(&redline),
+        path_text(&edited),
+        "--author",
+        "Bob",
+        "--timestamp",
+        COMPARE_TIMESTAMP,
+        "--output",
+        path_text(&human_output),
+    ]);
+    assert_success(&human_review, "human second compare");
+    assert!(
+        String::from_utf8_lossy(&human_review.stdout).contains("Created 2 revision element(s)")
+    );
+
+    let same_author = temp.path.join("same-author.docx");
+    let same_review = compare(&redline, &edited, "Alice", &same_author);
+    assert_success(&same_review, "same author second compare");
+    let same_record: Value = serde_json::from_slice(&same_review.stdout).unwrap();
+    assert_eq!(same_record["revisions"], json!(2));
+    assert_eq!(same_record["main_story_revisions"], json!(2));
+    assert_eq!(Document::open(&same_author).unwrap().revisions().len(), 4);
+
+    let unchanged = temp.path.join("unchanged.docx");
+    let no_review = compare(&redline, &redline, "Alice", &unchanged);
+    assert_success(&no_review, "identical redline compare");
+    let no_record: Value = serde_json::from_slice(&no_review.stdout).unwrap();
+    assert_eq!(no_record["revisions"], json!(0));
+    assert_eq!(no_record["main_story_revisions"], json!(0));
+    assert_eq!(alice(&unchanged), alice(&redline));
+
+    let failed = compare(&redline, &refused, "Bob", &refused_output);
+    assert!(!failed.status.success());
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        stderr.contains(
+            "comparison cannot replace body/paragraph[0] whole, because it holds an existing tracked revision"
+        ),
+        "{stderr}"
+    );
+    assert!(!refused_output.exists());
+
+    let property_original = temp.path.join("property-original.docx");
+    let property_edited = temp.path.join("property-edited.docx");
+    let property_output = temp.path.join("property-output.docx");
+    for (value, path) in [("before", &property_original), ("after", &property_edited)] {
+        let mut package = OpcPackage::open(&redline).unwrap();
+        let mut xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap())
+            .unwrap()
+            .to_owned();
+        let start = xml.find("<w:p").unwrap();
+        let at = start + xml[start..].find('>').unwrap() + 1;
+        xml.insert_str(
+            at,
+            &format!(
+                r#"<w:pPr xmlns:v="urn:producer" v:note="{value}"><w:jc w:val="left"/></w:pPr>"#
+            ),
+        );
+        package.set_part("/word/document.xml", xml.into_bytes());
+        package.save(path).unwrap();
+    }
+    let property_before = fs::read(&property_original).unwrap();
+    let property_edited_before = fs::read(&property_edited).unwrap();
+    let failed = compare(
+        &property_original,
+        &property_edited,
+        "Bob",
+        &property_output,
+    );
+    assert!(
+        !failed.status.success(),
+        "protected source edit succeeded, output_exists={}, stdout={}",
+        property_output.exists(),
+        String::from_utf8_lossy(&failed.stdout)
+    );
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("body/paragraph[0]"));
+    assert!(failed.stdout.is_empty());
+    assert!(!property_output.exists());
+    assert_eq!(fs::read(&property_original).unwrap(), property_before);
+    assert_eq!(fs::read(&property_edited).unwrap(), property_edited_before);
+
+    // The documented workaround resolves independent copies before comparison.
+    let preserved_redline = fs::read(&redline).unwrap();
+    let preserved_edited = fs::read(&refused).unwrap();
+    let resolved_original = temp.path.join("resolved-original.docx");
+    let resolved_edited = temp.path.join("resolved-edited.docx");
+    let workaround_output = temp.path.join("workaround-review.docx");
+    for (input, output) in [(&redline, &resolved_original), (&refused, &resolved_edited)] {
+        let resolved = cli(&[
+            "revision",
+            "accept",
+            path_text(input),
+            "--author",
+            "Alice",
+            "--output",
+            path_text(output),
+            "--json",
+        ]);
+        assert_success(&resolved, "checked workaround resolution");
+        assert!(
+            Document::open(output)
+                .unwrap()
+                .story_revisions()
+                .unwrap()
+                .is_empty()
+        );
+    }
+    let workaround = compare(
+        &resolved_original,
+        &resolved_edited,
+        "Bob",
+        &workaround_output,
+    );
+    assert_success(&workaround, "checked workaround compare");
+    let record: Value = serde_json::from_slice(&workaround.stdout).unwrap();
+    assert_eq!(record["revisions"], json!(2));
+    let mut accepted = Document::open(&workaround_output).unwrap();
+    assert_eq!(accepted.accept_all().unwrap(), 2);
+    assert!(accepted.text().contains("Reviewed thrice."));
+    assert!(!accepted.text().contains("Reviewed twice."));
+    let mut rejected = Document::open(&workaround_output).unwrap();
+    assert_eq!(rejected.reject_all().unwrap(), 2);
+    assert!(rejected.text().contains("Reviewed twice."));
+    assert!(!rejected.text().contains("Reviewed thrice."));
+    assert_eq!(fs::read(&redline).unwrap(), preserved_redline);
+    assert_eq!(fs::read(&refused).unwrap(), preserved_edited);
+}
+
+#[test]
+fn issue425_new_counts_keep_ignored_textbox_identity_separate_from_body() {
+    let temp = TempWorkspace::new("issue425-ignored-counts");
+    let original = temp.path.join("original.docx");
+    let edited = temp.path.join("edited.docx");
+    let output = temp.path.join("output.docx");
+    let human_output = temp.path.join("human.docx");
+    let held = format!(
+        r#"<w:txbxContent><w:p><w:ins w:id="0" w:author="Ada" w:date="{COMPARE_TIMESTAMP}"><w:r><w:t>held box</w:t></w:r></w:ins></w:p></w:txbxContent>"#
+    );
+    for (path, text) in [(&original, "before"), (&edited, "after")] {
+        write_document(path, &["seed"]);
+        let mut package = OpcPackage::open(path).unwrap();
+        let xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml"><w:body><w:p><w:r><w:t>{text}</w:t></w:r></w:p><w:p><w:r><w:pict><v:shape id="box" style="width:100pt;height:50pt"><v:textbox>{held}</v:textbox></v:shape></w:pict></w:r></w:p><w:sectPr/></w:body></w:document>"#
+        );
+        package.set_part("/word/document.xml", xml.into_bytes());
+        package.save(path).unwrap();
+    }
+    let original_bytes = fs::read(&original).unwrap();
+    let edited_bytes = fs::read(&edited).unwrap();
+    let run = |path: &Path, json_output: bool| {
+        let mut args = vec![
+            "compare",
+            path_text(&original),
+            path_text(&edited),
+            "--author",
+            "Ada",
+            "--timestamp",
+            COMPARE_TIMESTAMP,
+            "--ignore-story",
+            "text_box",
+            "--output",
+            path_text(path),
+        ];
+        if json_output {
+            args.push("--json");
+        }
+        cli(&args)
+    };
+    let json_result = run(&output, true);
+    let human_result = run(&human_output, false);
+    assert_success(&json_result, "ignored box JSON compare");
+    assert_success(&human_result, "ignored box human compare");
+    for path in [&output, &human_output] {
+        assert!(package_part_text(path, "/word/document.xml").contains(&held));
+        let revisions = Document::open(path).unwrap().story_revisions().unwrap();
+        assert_eq!(
+            revisions
+                .iter()
+                .filter(|r| r.story().kind() == rdocx::StoryKind::TextBox)
+                .count(),
+            1
+        );
+    }
+    assert_eq!(fs::read(&original).unwrap(), original_bytes);
+    assert_eq!(fs::read(&edited).unwrap(), edited_bytes);
+    let record: Value = serde_json::from_slice(&json_result.stdout).unwrap();
+    let human = String::from_utf8(human_result.stdout).unwrap();
+    assert_eq!(record["revisions"], json!(2));
+    assert_eq!(record["main_story_revisions"], json!(2));
+    assert!(
+        record["stories"]
+            == json!([{"kind":"body", "part_name":"/word/document.xml", "owner_index":0, "revisions":2}])
+            && human.contains("Created 2 revision element(s) in 1 story(ies)")
+            && human.contains("body\t/word/document.xml\t0\t2")
+            && !human.contains("text-box"),
+        "JSON={record}, human={human}"
+    );
+}

@@ -1419,8 +1419,57 @@ sidecars. A changed paragraph records its prior base properties in
 `w:rPr`, as Word's own Compare writes them. Unsupported formatting
 differences retain the original bytes and produce stable
 `ComparisonDiagnostic` values at the actual story path. Inputs
-with existing modeled revisions or differing story shells are rejected unless
-their story category is ignored. The root and owner start tags of a comment
+with differing story shells are rejected unless their story category is
+ignored. Inputs may hold existing modeled revisions, such as the redline of an
+earlier comparison. A story owner that holds one, a paragraph, table, or
+content control, or the story's own section properties, is kept with its
+original bytes when both inputs hold it unchanged. Any other change to it is
+refused with its story path and owner index: a change inside it, a deletion,
+insertion, or move of it, a revision that only one input holds there, and the
+paragraph-mark marker of a final paragraph change after it. Owners that hold
+no revision compare as before, and their new revisions take ids that no
+compared story of either input uses. Comparison transports the effective
+namespace scope when it analyzes a changed source owner or a descendant slice.
+Paragraph runs, field owners, table and control children, and paragraph-mark
+properties resolve Word names by namespace URI. An unchanged revision-bearing
+owner bypasses that closure and keeps its exact source bytes. Before raw copy,
+typed equality is supplemented by the lower layer's doc-hidden
+`properties::protected_source_residual` identity. Actual owning parsers classify
+modeled values, while complete source events retain omitted attributes, payloads,
+order, multiplicity and namespace context. Unsupported values on otherwise known
+keys remain source residuals. Known-only default omission does not shift residual
+owner slots. Opaque roots admit namespace declaration movement only after
+positive expanded root/attribute and effective-scope identity. Their encoded
+non-declaration attributes, root shape and all remaining opaque bytes stay
+significant, including descendant-local declarations and event order. Revision
+subtrees retain complete exact source identity. This admits modeled numeric and
+toggle canonicalization while refusing meaningful opaque edits to protected owners. Generated Word
+markup carries a local Word binding when a producer uses `w` for another
+namespace, without rebinding retained producer XML. Private comparison frames
+retain both input sides' actual property sources beside typed formatting
+precedence. Frames reference only live immutable parse owners, while owned
+pre-marker snapshots travel through final, moved and controlled paragraphs.
+Property deltas retain source root QNames, opaque attributes and complete
+child slots, including unknown children. Ordinary and final properties share
+that source authority. A complete prior run-property owner replaces formatting
+on rejection while independently selected revision markers keep their roles.
+Identical opaque siblings remain distinct. A private source-backed check
+reconciles metadata-bearing Empty and paired default property containers only
+with positive QName, opaque attribute, binding and reader-event identity.
+The shared revision renderer derives transported properties and children from their actual source
+ancestry and closes them against the output parent. Paragraph merging retains
+the first shell and last properties. Wrapper removal and property replacement
+use the same rule, preserving descendant shadowing and an absent default
+namespace while leaving unchanged-context bytes intact. Changed inherited
+bindings travel at actual relocation, including prefixes used only in opaque
+attribute values. Revision identity compares complete parser-context entries
+without depending on their enumeration order. It retains every binding and
+its multiplicity, the original stored parser order, captured revision XML,
+projected and nested content, metadata and parse policy.
+A comment package revision replaces every comment part whole, so it is
+refused when a comment holds a revision. This is closer to Word's Combine
+than to its Compare, which treats the existing revisions as accepted.
+The root and owner start tags of a comment
 or note story compare as namespace-resolved trees, so a part written again
 with other declarations, attribute order, or empty-element forms keeps its
 shell. Edited comment additions, removals, replies, resolved state, and dates
@@ -1475,8 +1524,10 @@ moved-in paragraph therefore
 records the original properties of the paragraph before it, and a deleted or
 moved-out one the edited properties of that paragraph.
 Comparison patches only owned source spans, preserves every unowned byte,
-stages the complete package, proves that acceptance matches the edited policy
-projection and rejection matches the original, then commits once.
+stages the complete package, proves that accepting the revisions it wrote
+matches the edited policy projection and rejecting them matches the original,
+proves that every existing revision of the original remains byte for byte,
+then commits once.
 Alignment leaves paragraph properties out so that a paragraph whose
 properties changed still matches, but the accept and reject projection adds
 the modeled properties of every paragraph of each story, including those in

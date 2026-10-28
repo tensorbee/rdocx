@@ -2862,12 +2862,17 @@ original for each. A message starts with a stable prefix,
 `formatting differs` for unsupported formatting and
 `content-control <name> differs` for a content control's metadata, where
 `<name>` is `tag`, `alias`, `lock`, `placeholder`, or `docPartGallery`.
-Comparison rejects existing modeled revisions and unsupported structural shell
-differences, a content control's type or data binding included, and it commits
-only after accepting and rejecting staged copies reproduce their respective
-package-wide modeled baselines. Those baselines read each paragraph as one
-sequence in document order: compared units, preserved raw children such as
-bookmarks, comment range markers, inline content controls, and hyperlink edges.
+Comparison rejects unsupported structural shell differences, a content
+control's type or data binding included. Inputs may hold existing modeled
+revisions. An owner that holds one in either input is kept byte for byte when
+both inputs hold it unchanged, and any other change to it is rejected with a
+message that names its story path and owner index. Comparison commits only
+after staged copies that accept and reject the revisions it wrote reproduce
+their respective package-wide modeled baselines, and only when the staged
+result still holds every existing revision of the original byte for byte.
+Those baselines read each paragraph as one sequence in document order:
+compared units, preserved raw children such as bookmarks, comment range
+markers, inline content controls, and hyperlink edges.
 A granular revision that splits a run therefore still reproduces a bookmark or
 comment range beside the edit, while a result that moves any of them relative
 to the text or to each other is refused. Ignored whitespace, fields, and comment
@@ -2889,7 +2894,19 @@ letters. Structural, opaque and formatting boundaries, fields, drawings and
 ignored units remain barriers. Default and explicit run granularity retain their
 existing output. Inside supported inline controls, retained raw children keep
 their physical text ownership on both sides through accept, reject and reopen.
-No new comparison option or public signature is introduced.
+No comparison option or existing public signature changes. The additive doc-hidden
+lower native `properties::protected_source_residual(xml, inherited_bindings)`
+bridge supplies opaque source identity to the facade. It adds no model field,
+authoring operation or Python/WASM method. Owning readers distinguish modeled
+values from omitted source metadata before protected-owner raw passthrough.
+Unknown Word and producer attributes, unsupported known-key values, full opaque
+events and effective bindings remain checked. Known numeric/toggle normalization
+and default-only node omission retain compatibility without hiding opaque edits.
+Raw-carrier closure may move namespace declarations onto an opaque root when its
+expanded name, non-declaration attributes, encoded values and effective scope
+agree. Its shape and exact remaining payload stay source-authoritative, as do
+sibling order/multiplicity and descendant-local shadows. Successful comparison
+still emits the original protected bytes.
 The native facade stages the main story from package-authoritative XML and
 preserves exact unchanged drawing wrappers even when sibling text in the same
 paragraph, table, cell, or control changes. Accepting and rejecting the result
@@ -2938,7 +2955,32 @@ typed inputs recover matching package drawing payloads before serialization.
 Complex fields map every physical source run to one modeled comparison owner,
 and sibling fields from one physical run share that owner. Text read out of a
 field's physical run is compared as its own runs, and the comparison source
-writes that span as one physical run per modeled run.
+writes that span as one physical run per modeled run. Inherited and local namespace
+bindings accompany source owners through nested paragraph, field, table and
+control analysis. Aliased Word names retain the same physical ownership, while
+foreign lookalikes stay opaque. Existing revision owners remain byte-identical,
+and newly generated Word fragments cannot capture a producer's foreign `w`
+binding. Main and related-story accept/reject operations share the same
+source/destination namespace relocation policy for all, author, id, id-set and
+date selection. Retained shells, properties and opaque children keep their
+expanded element and attribute names through merge, wrapper promotion and
+property replacement, with child-local declarations taking precedence.
+Comparison retains both raw property sides privately before adding markers,
+patches only supported Word property slots and keeps unsupported formatting
+left-biased. Source root metadata, opaque child order and own-section precedence
+survive comparison, selective resolution, save and reopen for paired and Empty
+metadata-bearing properties. The private projection checks source identity
+rather than confusing those container forms with a changed raw boundary.
+Complete prior run properties replace current formatting on rejection, while
+revision selection and marker order remain independent. Legal run splitting
+copies formatting to each resulting owner without duplicating a child inside
+one property owner. No public model or binding signature changes.
+Relocated source context also preserves namespace prefixes used only by values
+such as compatibility attributes, rather than inferring opaque value schemas. Revision value
+equality ignores only the enumeration order of complete parser-context entries.
+Stored context order and every other raw, projected, nested and policy field
+remain authoritative, so a comment beside an unchanged revised paragraph does
+not become an edit of that paragraph.
 It emits same-story moves and supported run, paragraph, table, and section
 property revisions. Diagnostic locations retain the actual story identity and
 stable owner path. `rdocx-cli compare` takes an explicit author, RFC 3339

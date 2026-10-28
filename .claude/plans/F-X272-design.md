@@ -49,7 +49,7 @@ For the refused cases, document a checked workaround in existing `README.md`, "H
 
 ## Dependency readiness
 
-F-X229, F-X230 and F-X245 are done in BACKLOG. F-X271 is an execution-order tooling prerequisite, not a new formal product dependency. Final native/installed evidence stays pending. Q-S96-01 is answered. No claim until all S96 designs close.
+F-X229, F-X230 and F-X245 are done in BACKLOG. F-X271 is an execution-order tooling prerequisite, not a new formal product dependency. Final native/installed evidence stays pending. Q-S96-01 is answered and all S96 designs are approved. F-X272 has passed local qualification and independent full microscope pass4 and has a validated final-acceptance handoff. F-X271 is integrated with hosted and final acceptance pending.
 
 ## Acceptance criteria
 
@@ -61,7 +61,7 @@ F-X229, F-X230 and F-X245 are done in BACKLOG. F-X271 is an execution-order tool
 | A4 | Changed/deleted/moved/inserted revised owner, final paragraph mark, changed revised section | Under the approved bounded policy, location-qualified refusal and no source/live-owner/output change | Rust/Python/CLI | Adapt `issue425_comparison_refuses_changes_that_touch_an_existing_revision`, add moved/table/control cases | Limitation and executable checked workaround, Q-S96-01 |
 | A5 | Existing revised comment plus comment graph change, ignored comments/stories | Whole comment replacement refuses if it would overwrite revisions, ignored sources follow current exclusions | Comparison/comment graph | Existing comment-package refusal plus ignored-story controls | Installed and combined graph acceptance |
 | A6 | Identical redline, no-op and late invalid input | Zero new counts, exact no-op, late refusal leaves original and output intact | CLI human/JSON, native, held Python handles | New-only count and late-failure controls | Current installed runtime and strict typing/stubs |
-| A7 | Unsupported edited revised owner | Documented limitation plus tested checked workaround, no preservation claim after resolving baseline | Existing `gaps.md`, public APIs and CLI help/stub docs | Execute public workaround on same input | Issue 425 alternative acceptance, Q-S96-01 approved |
+| A7 | Unsupported edited revised owner | Documented limitation plus tested checked workaround, no preservation claim after resolving baseline | Existing README boundaries and CLI comparison guidance, public APIs and help/stub docs | Execute public workaround on same input | Issue 425 alternative acceptance, Q-S96-01 approved |
 
 ## Test matrix
 
@@ -94,7 +94,7 @@ Final sprint: native all-story revision and author-filtered resolution, installe
 
 ## Risk routing
 
-Contributed acceptance adds pinned full issue/PR rows and omission mapping. Parser/serializer and XML preservation add alias/schema-order and opaque-byte controls. Compatibility, multi-consumer and cached projections add same-input native/binding/CLI and held/fresh/reopen comparisons. Public behavior/binding docs add final WASM compile, installed typing/stubs and affected archive dry-runs/size. External native oracle adds actual producer/tool/input/output identities. Metadata adoption adds affected final policy checks. No new generic, trait, module, crate or source file is planned.
+Contributed acceptance adds pinned full issue/PR rows and omission mapping. Parser/serializer and XML preservation add alias/schema-order and opaque-byte controls. Compatibility, multi-consumer and cached projections add same-input native/binding/CLI and held/fresh/reopen comparisons. Public behavior/binding docs add final WASM compile, installed typing/stubs and affected archive dry-runs/size. External native oracle adds actual producer/tool/input/output identities. Metadata adoption adds affected final policy checks. No new trait, module, crate or source file. The existing main-key and all-story revision count paths instantiate the concrete multiset helper with tuple and StoryRevision values today. The accept-new-id and reject-new-id closures are the two existing callback instantiations for captured postcondition resolution.
 
 ## Hash harness
 
@@ -103,12 +103,13 @@ Expected unchanged 49 hashes/7 pixels. New comparison behavior is a separately l
 ## Implementation checklist
 
 - [x] Resolve Q-S96-01 and close concrete workaround signatures before approval.
-- [ ] Reconcile own PR427 commits against current Base without donor measurements.
-- [ ] Guard all revised-owner mutations, preserve exact old bytes.
-- [ ] Prove newly allocated id postconditions and new-only CLI counts.
-- [ ] Cover all A-IDs and held/fresh/late-refusal controls locally.
-- [ ] Align public docs/stub/help and existing gaps record.
-- [ ] Update listed HLD intent, scoped gate, independent microscope, prepared handoff.
+- [x] Reconcile own PR427 commits against current Base without donor measurements.
+- [x] Guard all revised-owner mutations, preserve exact old bytes.
+- [x] Prove newly allocated id postconditions and new-only CLI counts.
+- [x] Cover all A-IDs and held/fresh/late-refusal controls locally.
+- [x] Align public docs/stub/help and existing README boundaries.
+- [x] Update listed HLD intent, scoped gate and independent microscope.
+- [x] Prepare the validated final-acceptance handoff.
 - [ ] Retain final native/installed/archives debt until actual integrated acceptance.
 
 ## Open questions
@@ -119,7 +120,7 @@ Expected unchanged 49 hashes/7 pixels. New comparison behavior is a separately l
 
 ## Contract closure
 
-Q-S96-01 is answered. No new public method or option proposed. Exact Python defaults and checked all-story author/id resolution signatures are transcribed above from current binding/stub and `revision.rs:251to278`. The executable workaround still needs actual local evidence during implementation. Documentation alone cannot assert a usable route. Compatibility source distinction is verified, native saved-artifact proof remains due.
+Q-S96-01 is answered. No new public comparison method or option is proposed. The additive doc-hidden lower native residual bridge is the explicit technical exception recorded below. Exact Python defaults and checked all-story author/id resolution signatures are transcribed above from current binding/stub and `revision.rs:251to278`. The checked workaround has actual local Rust, CLI and fresh authenticated Python evidence, including independent author-resolution copies followed by comparison and retention of the original redline. Historical and current source-qualified receipts are recorded below and in progress. Compatibility source distinction is verified. Final integrated and native saved-artifact oracle riders remain pending.
 
 ## Intake identity
 
@@ -133,6 +134,10 @@ The draft initially assumed a `gaps.md` file existed. Repository inventory shows
 
 Design closure on 2026-10-28: consumer map, observable A-IDs, discriminating cases, public signatures, imported states, HLD impact and local/final evidence were checked against current source. Q-S96-01 is answered in F-X272. Approvals follow provider contract order. No material user decision remains. Pending native/hosted/installed observations are retained final acceptance debt, not recorded passes.
 
+## Source-qualified namespace clarification
+
+The actual added aliased-main-root regression exposed the existing literal `w:body` extraction assumption after bounded revision preservation was implemented. Preserve that full input. Select the direct Word body by expanded namespace identity, carry document/body declarations to the existing owner-span wrapper and postcondition readers, and use the existing fragment namespace closure to add a missing canonical Word binding for generated markup. Existing producer bindings must never be overwritten. A foreign namespace body lookalike is a separate discriminator. Imported self-closing bodies retain their existing refusal boundary here. This concrete source-context correction stays in the existing comparison file and the approved A2/raw-preservation scope, with actual failure and successor results retained.
+
 ## Implementation-time contribution refresh
 
 Read-only refresh on 2026-10-28 after the user scope answer found PR 427 rebased onto released main `24af95d3d94c25e95f61a75e7e21f18fa95b6363`, with current head `c1e261ca63ebda5b7da1adec886ee40364a4e3de`. Its current body SHA-256 is `dc490c52d857c06751586bf2a945ee1ecb6cc81922b03c21cf40b0b3544c643d`, updated `2026-10-28T06:43:32Z`. Issue 425 body is unchanged. Historical initial pins above remain attributed to that intake.
@@ -140,6 +145,10 @@ Read-only refresh on 2026-10-28 after the user scope answer found PR 427 rebased
 The current four own commits are `56523be00a3c58b4b730717af99ce66e57911f88`, `e2796f0567d26c47688fdc8057d8cde21417ca06`, `9d0744301b604fdac003686d47690a67028a5100` and `c1e261ca63ebda5b7da1adec886ee40364a4e3de`. Comparing per-file added/removed payloads confirms all product code, tests, stub and HLD contribution changes are identical to the original pin. Changed README/archive measurements remain excluded and will be remeasured on the final union. The issue acceptance and Q-S96-01 decision are unchanged.
 
 Raw refreshed bodies/comments/PR metadata, commits and exact current diff are retained under `/private/tmp/rdocx-s96-run-refresh`. The running worker keeps Base `c8acc502b74f29ed7e9546939f17007709a9f22b` and its dirty implementation/evidence. Its owner must acknowledge this canonical pin revision before further implementation. No reset/rebase or source replacement is authorized by this factual refresh.
+
+## Namespace descendant implementation clarification
+
+The N1/N2 investigation is consumed for private source context, without changing bounded revision ownership. Actual effective namespace declarations accompany source owner fragments. Unchanged revision-bearing owners are emitted from their exact original slices. Source-capable descendant scanners resolve expanded child and parent names, and source closing boundaries come from the source reader. Child slices receive their parent scope through the existing namespace closure without rebinding producer declarations. Generated canonical Word markup is bound locally when an existing producer w binding prevents a missing-only part-root binding. No new public API, source file, module, crate or trait. The original plain aliased-root reproduction and foreign-body control remain separate. New discriminators cover mixed inherited aliases, an empty aliased paragraph, opaque foreign parents, changed unrevisioned aliased tables/controls and a producer w binding. All new cases require actual pre-next-repair RED before GREEN.
 
 ## Source relocation contract clarification
 
@@ -151,6 +160,12 @@ Local evidence adds the actual final-mark failure with inherited q properties an
 
 The existing HLD03/HLD10 work list remains unchanged and must describe this shared source authority. Namespace investigation pass 2 records the observed 12-test result, 11 passed and 1 failed, separately from source-traced challenges and prior setup/semantic failures. Full feature microscope and every final rider remain pending. Before implementation resumes, the running owner must acknowledge the canonical revision containing this clarification, preserve Base and dirty work, and reconcile this section into its annotated worker plan without resetting it.
 
+## Relocation context qualification
+
+The shared implementation transports changed inherited source bindings only at actual relocation and preserves child-local overrides. It does not infer namespace use only from element or attribute names, because compatibility attribute values also require scope. ECMA-376 Part3, fifth edition December2015, clauses7.2and7.4 require in-scope bindings for Ignorable and MustUnderstand prefixes. The primary archive is [ECMA Part3](https://ecma-international.org/wp-content/uploads/ECMA-376-3_5th_edition_december_2015.zip),741741bytes, SHA256 `42294159fbbbe9393ccadac95b859d7729cc68d908898bcbe31034dda059daa8`. Authenticated text and pin receipt are retained in the existing temp intake. Ordinary same-context output stays byte-identical.
+
+Direct Word-property destination selection and insertion both use actual direct expanded Word identity and the rendered fragment's external namespace scope, rather than the first lexical QName anywhere in opaque descendants. Local evidence and final readiness are recorded separately below when observed.
+
 ## Revision identity clarification
 
 Independent investigation pass 3 establishes N3, separate from N1 transport: an unrelated public comment edit removes redundant paragraph namespace declarations while retaining identical old revision bytes and effective bindings. `CT_Revision` equality currently mistakes private parser-context enumeration order for an owner change. The fresh authenticated Python observation is three passing cases and one semantic failure, retained with its original wheel/module identities. No actual revised-owner edit or new user decision is involved.
@@ -160,6 +175,27 @@ Repair only identity of `CT_Revision`'s complete private parser context in the e
 Add actual pre-repair low-level controls in existing carriers for empty, paired and nested/projected revision identity under reordered equivalent context, with unchanged raw bytes and parser input. Meaningful foreign/Word/default/undeclaration differences remain unequal. Preserve observable raw and projection differences. Add the matching native public comment reproduction, including original paragraph/revision bytes and comment graph after save/reopen and accept/reject of the new author. Rebuild and authenticate a successor wheel before rerunning the same four selected Python nodes. Preserve the failed predecessor and all historical observations.
 
 Scoped checks now include the affected `rdocx-oxml` crate, in addition to the existing changed native, CLI and binding crates. Refresh the affected bounded local tests, including all 22 prior namespace, relocation, ignore, refusal and workaround controls. HLD03/HLD10 remain the complete HLD work list. The running owner must acknowledge this canonical clarification and reconcile it into the annotated worker plan before implementation, without changing Base or resetting dirty work. Full microscope and every named final gate remain due.
+
+## Historical identity-only implementation handback
+
+The dirty worker remains on Base `c8acc502b74f29ed7e9546939f17007709a9f22b`. Canonical factual pin `59dc1f48`, relocation clarification `10d45b11` and identity clarification `0987372c` are acknowledged without reset/rebase or replacement of worker annotations. That identity-only predecessor was locally qualified for independent full microscope. Its listed evidence remains attributed to that historical producer. Subsequent full review and property-source remediation supersede its readiness status. Namespace investigations are design escalations, not a clean feature microscope.
+
+| Local observation | Actual result | Retained evidence under `/private/tmp/rdocx-s96-run-refresh` |
+|---|---|---|
+| Focused lower revision module | 20 passed, including actual pre-repair identity RED and namespace/projection/edit/policy controls | `fx272-identity-unit-{red,green}.log` |
+| Native regressions | 23 passed, preserving all prior 22 controls and public comment reproduction | `fx272-identity-corrected-frozen-native.log` |
+| CLI regression and documented workaround | 1 passed | `fx272-identity-corrected-frozen-cli.log` |
+| Changed-crate compile and lint | rdocx-oxml, rdocx, CLI and Python all-target checks and all-feature clippy passed | `fx272-identity-corrected-frozen-native-cli.json`, `fx272-identity-clippy.log` |
+| Formatting | Passed on frozen product source | `fx272-identity-corrected-frozen-fmt.log` |
+| Fresh installed Python 3.12 | Same four selected nodes passed, 643 deselected, 5.04 seconds | `fx272-identity-successor-python.json`, `fx272-identity-successor-python-green.log` |
+
+The successor dev wheel is semantic local evidence, not release-size or performance qualification. Complete product source manifests match before build, after build and after tests. Installed native bytes match the successor wheel member. The failed authenticated predecessor and all intermediate setup, compile, semantic and test-expectation failures remain preserved. Detailed artifact identities and original paragraph/comment graph assertions are in the existing progress record.
+
+Pending before completion: a different non-implementing agent's full feature microscope and structured handoff/integration. Final integrated acceptance still owes full workspace and complete Python 3.9/3.12 suites, strict mypy/stubtest, native all-story/author resolution, actual producer oracles and hosted jobs, 49 hashes/7 pixels, WASM, actual README examples, refreshed measurements, affected release archives and their size under 10 MiB, plus the plan's risk and metadata-policy riders. No ledger, commit, push, publication, native-parity or final acceptance claim is made by this worker.
+
+## Full microscope pass1 remediation checkpoint
+
+The earlier local handback is historical evidence for its named authenticated producer. Full microscope pass1 reports D1 and D2, with zero smells/nitpicks. D1 has actual CLI RED and fixed2/2GREEN using stable story coordinates. D2 has actual four-context token-boundary RED and a first repaired24-test result,23passed1failed: token parsing now succeeds, but an opaque rPr root attribute is lost after final property resolution. Root additionally observed a generated-row namespace failure on the authenticated predecessor, not yet qualified on the new candidate. Product writing stops for focused independent reassessment of property source authority and generated publishers. Current implementation is not locally ready for integration or acceptance. Exact receipts, source trace and write-stop are in the existing progress record.
 
 ## Property source and publication closure
 
@@ -173,6 +209,10 @@ The existing consumer map is extended by pass 4's cited publisher inventory. Loc
 
 D1's stable kind/part/owner count repair has actual local CLI evidence. N3's equality-only repair remains unchanged. Refresh only affected scoped evidence and build/authenticate a fresh successor wheel for changed native source before the same selected Python checks. HLD03/HLD10 remain the work list. Full microscope pass 2 and every final sprint rider remain pending. The implementing owner must acknowledge this canonical revision and reconcile this section into its annotated plan before resuming, preserving Base, dirty source and every historical observation.
 
+## Private live-source ownership invariant
+
+Raw lookup, when needed, is confined to an operation-local stack frame whose keys identify only the immutable original and edited typed parse owners borrowed by one compare_body call. Each frame is created from those actual raw bodies/spans/bindings and popped on every Result exit, before those owners can drop. Nested control/related body parsing pushes a separate frame and restores the still-live parent frame. No global registry, historical address entry or temporary cloned property is registered. Lookup occurs at the live-source boundary and copies owned source snapshots into accepted/rejected property sides before adding markers. Those owned snapshots, not later pointer lookups or tracked output, carry precedence through final/move/control publication.
+
 ## Property projection and resolution boundary
 
 Independent investigation pass 6 separates three actual boundaries. Rejecting a complete prior rPr duplicates a current opaque child inside the same run owner. Granular text comparison can legitimately copy formatting onto several resulting runs. A canonical paired-pPr unrelated-edit probe loses metadata before comparison is invoked. Preserve the failed receipts and these distinctions. No new public scope or user decision follows.
@@ -184,6 +224,28 @@ A private source-backed property projection may reconcile the parser's Empty ver
 Actual comparison, selective accept/reject, save and reopen must preserve paired and Empty property metadata, source namespaces and raw children. The additional later unrelated authoring-edit probe is exploratory differential evidence, not a new F-X272 capability. Its canonical paired-pPr baseline fails before comparison at the existing typed main-part serialization boundary in document.rs. Preserve and attribute that inherited limitation in the existing plan/progress and final report, without claiming it passed, pinning the bug as desirable behavior, or expanding this feature into a public CT_PPr model or general serializer repair. Compare any later-edit observation with the identical pre-comparison baseline. Newly introduced loss in the authorized comparison lifecycle remains blocking. Keep all required comparison lifecycle cases and separate the exploratory baseline from their gate.
 
 No new source file, public model/API, trait or parser for unknown attributes is authorized. Refresh affected scoped tests and fresh Python artifact qualification after correction, then require independent full microscope. HLD03/HLD10 and all final sprint obligations remain unchanged. The worker must acknowledge this canonical revision before resuming, preserving Base, dirty work and historical observations.
+
+## Historical property-publication remediation handback
+
+Base remains c8acc502 and canonical acknowledgments59dc1f48,10d45b11,0987372c,ade6458f and0e9ae23a are reconciled without reset/rebase. Full microscope pass1 findings D1/D2 have locally qualified remediation. N1 source/publication and N3 equality retain their separate invariants. The six independent investigations are historical escalations, not full microscope pass2.
+
+Current source uses bounded live input frames and owned original/edited property snapshots before markers. Complete source child slots preserve opaque order and namespace authority. Actual retained run children remain exact under equivalent source context, and genuinely fresh Word containers qualify at publication, including default-Run inline controls. Complete prior rPr replaces ordinary or paragraph-mark formatting while preserving scoped markers and intentional opaque sibling multiplicity. Empty/paired default-property projection positively checks source metadata and all reader event classes without changing public parser/model fields or generic XML equality. Paired and Empty comparison, selective resolution, save and reopen cases pass with actual source identity assertions.
+
+| Current focused observation | Actual result | Evidence under `/private/tmp/rdocx-s96-run-refresh` |
+|---|---|---|
+| Frozen native provider and comparison controls | 28 passed,2468filtered,8.90seconds | `fx272-pass6-publisher-final-native.log` |
+| Positive/negative source projection unit | 1 passed | `fx272-pass6-publisher-final-projection-unit.log` |
+| CLI counts, no-op, refusal and documented workaround | 2 passed | `fx272-pass6-publisher-final-cli.log` |
+| Four changed crates all-target check and all-target/all-feature clippy | Passed, denied warnings | `fx272-pass6-publisher-final-{check,clippy}.log` |
+| Formatting and source applicability | Passed, before/after source hashes identical | `fx272-pass6-publisher-final-native-cli.json` |
+| Unchanged lower revision identity unit evidence | 20 passed, exact lower source unchanged | `fx272-identity-unit-green.log` |
+| Fresh dev-wheel Python3.12, same four selected nodes | 4 passed,643deselected,5.95seconds | `fx272-property-successor-python.json` |
+
+The new wheel/native/import and complete before/build/after-test source identities are recorded in the existing progress file and artifact receipt. This semantic dev artifact does not qualify release size or performance. Earlier artifacts, actual semantic failures, setup/compiler failures and the intermediate test-only expectation failure remain immutable.
+
+The canonical paired-property unrelated authoring-edit loss remains separately attributed inherited exploratory evidence. The exact probe fails before comparison is invoked, and no general serializer or public-model repair was authorized. Its source and actual before/after XML remain under the evidence directory. It is not a failing normal feature gate or desirable pinned behavior. Required comparison lifecycle preservation remains blocking and has passed the current controls.
+
+Pending before integration readiness: a different non-implementing agent's full microscope pass2. Pending final integrated acceptance: complete workspace/native/hosted/installed Python3.9/3.12, strict typing/stubs,49hashes/7pixels,WASM,real README examples and measurements, affected release archives/size, producer oracles and all approved risk/metadata-policy riders. No commit, push, ledger update, self-microscope, release or final acceptance is claimed by this worker.
 
 ## Protected source identity clarification
 
@@ -206,3 +268,41 @@ Keep modeled-source classification at the owning lower layer. Reuse existing pro
 Associate residual data with actual owner ancestry and recognized property/content slots and occurrences, retaining opaque multiplicity and order. Known-only node/default omission must not shift another owner's residual identity. A source node with genuinely opaque attributes or nonempty metadata cannot disappear through the default reconciliation. Foreign lookalikes and value-only namespace dependencies remain opaque and source-qualified. The existing HeldRevisions physical scopes, section guard and ignored-story policy consume this one bridge before typed equality authorizes raw copy.
 
 Add actual current-source GREEN for both public predecessor compatibility routes, keeping exact original lexical spellings in emitted protected owners, new comment graphs and selective resolution/save/reopen. Add independent numeric/toggle and applicable already-supported default representation controls. Mixed-node tests combine known formatting normalization with unchanged opaque data, then change producer or unknown Word attributes to require refusal. Keep all17 refusal contexts, text-node metadata, opaque encoded values/events/bindings, whole-owner boundaries, benign namespace, ordinary-left-bias and ignored-story controls. New helper units must challenge modeled ownership and complete residual content. Refresh affected scoped lower/native/CLI/Python checks and authenticate a fresh successor wheel, then require full independent microscope pass 3. HLD03/HLD10 and final sprint obligations remain unchanged. The implementing owner must acknowledge this canonical revision before work resumes, preserving Base, dirty work and every prior observation.
+
+## Residual-source local qualification before full pass3
+
+Canonical d3a028e1 is acknowledged and implemented through the sole additive doc-hidden lower native bridge. Existing typed equality establishes modeled meaning, while parser-owned source residuals establish omitted metadata identity before protected raw passthrough. Owning value checks retain unsupported known-key values, unknown Word/producer attributes, opaque events, source association and effective bindings. No numbering behavior, public model, authoring API or Python/WASM method changed.
+
+Actual frozen local evidence is recorded in `fx272-residual-final-native-cli.json`: native30/30, lower88/88 including numbering/revision/residual units, positive source projection1/1, CLI2/2, four-crate all-target check, denied-warning all-target/all-feature clippy and fmt. Both exact public comment canonicalization routes pass while emitted protected owners retain original raw spellings and old7/A bytes. The17original source-refusal contexts, unsupported-known-value controls, opaque content metadata, namespace/ignored-source positives and ordinary nonheld left bias remain in the bounded batch. Genuine predecessor/current-source RED and failed setup/compile logs remain independently attributed in progress.
+
+Fresh dev successor qualification is actual4/4 on the same Python nodes, including the protected metadata refusal extension. Receipt `fx272-residual-successor-python.json` authenticates wheel SHA256 `541224310d3d7d2bcbc255f3e2d04a797ccc421ccdacbd2a4e5868df61f3ce0b`, wheel/imported native SHA256 `32560b83cdfeea04e23910b7b40fa31abe4f2c4ff91ca15f3e5190ccccef105a` and unchanged product manifest `ee557b98818464ca1fb6806e299e0ffdce250a8047042d4de8d12c7ad42d51a2` before build, after build and after tests. This dev artifact establishes focused semantics, without claiming final release/archive measurements.
+
+Local implementation is ready for a different agent's full independent microscope pass3. D2 resolution requires that review and is not self-certified. F-X272 remains in-progress, Base c8acc502 and dirty source/history preserved. All final integrated full-suite, native/hosted, installed Python3.9/3.12, typing/stub, WASM,49hash,7pixel, README/measurement, archive-size, oracle and risk riders remain pending. The inherited pre-comparison paired-property authoring limitation remains explicitly attributed and outside the bounded serializer scope. No final acceptance, integration, commit or ledger update is claimed.
+
+
+## Opaque-root namespace closure remediation
+
+Full microscope pass3 retains D2 at the residual unknown-root literal boundary. The existing canonical d3a028e1 benign namespace contract already admits public raw-carrier closure. This is a narrow implementation correction, without another API or scope change. Actual current native RED covers producer children in pPr and mark rPr, an unknown Word child and a whole-table caller. The same public adjacent-comment/save/reopen route fails all three Python shapes on authenticated native32560b83, while the lower opaque-root unit records the literal-blob difference. Distinct `fx272-opaque-root-*red*` logs preserve those actual observations.
+
+The lower scanner now positively records opaque-root expanded name, every non-declaration attribute identity and encoded value, effective scope and shape independently of root namespace declaration plumbing. All bytes after that opening remain untouched residual source, including inner events, descendant-local declarations and closing markup. Sibling association/order/multiplicity remains checked. Known lower ownership/value/default logic is unchanged. Revision subtrees keep entire literal source identity, and successful publication still emits the original protected raw owner. Updated local qualification is recorded below. Independent full microscope pass4 remains required before scoped integration readiness.
+
+
+## Opaque-root successor local qualification
+
+Actual repaired candidate passes all30prior native controls in `fx272-opaque-root-final-native.log`. The new test initially overconstrained a selectively rendered outer known paragraph shell. Its captured diagnostic proves exact properties, opaque child and old revision bytes survived while only redundant outer namespace declarations were added. The corrected new native case passes1/1 across all4contexts and both resolution directions in `fx272-opaque-root-qualified-native.log`. Immediate comparison output still requires the exact original whole held owner. Selective saved/reopened outputs require exact original properties/old revision bytes, independently read expanded opaque metadata and multiplicity, text and comment graph.
+
+`fx272-opaque-root-test-only-applicability.json` reconstructs the three historical source/test files by reversing only the later test assertions. All reconstructed hashes match the earlier receipt and all other inputs agree. No non-test implementation changed after that candidate. Prior30passes remain applicable without replay. Qualified receipt `fx272-opaque-root-qualified-native-cli.json` records lower89/89, projection1/1, CLI2/2, four-crate all-target check, denied-warning all-target/all-feature clippy and fmt, with final source/test inputs unchanged and actual CLI application authenticated.
+
+NEW dev successor wheel SHA256 `5f9dfbfc3c95156141ffb28217aa0e1661d5376cf466f11199f14abeae0d50de` and wheel/imported native SHA256 `ba936fc0610d59b71ec31b0d878ec8a136de73f441f84af146c2be77170049ad` are recorded in `fx272-opaque-root-successor-python.json`. Product manifest `db09bb8db0f0d27ea67de5ce9a63be2fcc7c99de61e67d7ff4fd20fbdae08ffd` agrees before build, after build and after tests. The SAME4Python nodes pass, including all3actual public namespace-move inputs, prior-redline/comment preservation, typed snapshots and atomic refusal/live-handle/checked workaround controls. Build and selected tests use a dev artifact, without release measurements or final installed qualification claims.
+
+Local implementation is ready for a different agent's full independent microscope pass4. D2 remains subject to that review. Base c8acc502, dirty source, old artifacts and every failed attempt remain preserved. All final integrated/native/hosted/full-installed/typing/WASM/hash/pixel/archive/README/measurement/oracle/risk riders and the attributed inherited authoring limitation remain explicit. No final acceptance, commits, push or ledger update is claimed.
+
+
+## Independent pass4 and preparation evidence
+
+Independent full microscope pass4 reports0defects,0smells,0nitpicks and approves scoped integration readiness. Root authenticated all241current source/test inputs,227product files, executed Rust binaries and embedded CLI application, shipped Python stub/init, fresh wheel and isolated native import in `fx272-opaque-root-root-auth.json`. Root then actually executed the current full named native selection31/31,2468filtered,7.73seconds, preserving source and executable identities in `fx272-opaque-root-root-current-native.json`. Binary SHA256 is `135efe500377b06fb878e827a8f50668be5ab859e6147835a75d96f3d132040c`. This supersedes historical shared-executable applicability ambiguity, without relabelling the earlier failed command.
+
+The durable independent review `.claude/reviews/F-X272-all-pass-4.md` records current source/artifact identities, all acceptance rows, local outcomes and final debt. Qualified lower89/projection1/CLI2/check/clippy/fmt and fresh SAME4Python observations remain applicable and are consumed without reruns. HLD03/HLD10 intent and all product inputs stay frozen after review. Preparation retains approved status, in-progress delivery records, the inherited unrelated-authoring limitation and every named final acceptance rider. The worker does not complete delivery or edit sprint ledgers.
+
+
+Prepared handoff `.claude/handoffs/F-X272-ready.md` names source producer `daba1a47c71e9fd1607a7b1fc5c1515514420092`, an ancestor of the metadata tip, with immutable Base c8acc502. Validator passes the sprint-final-acceptance checkpoint. No crates/HLD intent changes follow that producer. The plan stays approved and final delivery checks stay unticked pending actual integrated acceptance.

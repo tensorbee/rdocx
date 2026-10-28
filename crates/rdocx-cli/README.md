@@ -119,7 +119,26 @@ story of the original, where `KIND` is a Python `Story.kind` name: `body`,
 the `comment` story excludes only the comments part, so a pair whose comments
 differ needs `--ignore-comments`. An unknown granularity or story name is a
 usage error, a repeated story fails, and neither creates the output. The
-`--json` record states the options that ran.
+`--json` record states the options that ran. The original may already hold
+tracked changes. A paragraph, table or block content control holding one stays
+byte for byte when both inputs hold it unchanged. Editing, deleting, moving or
+inserting such an owner is refused with its location, without publishing output.
+Section properties holding revisions must also stay unchanged in both inputs.
+Changing them fails without publishing output.
+Reported counts include newly created revisions only, even when a new review
+uses an existing author's name.
+
+For an unsupported edit, retain the original redline separately. Resolve the
+prior revisions on two independent input copies, then compare those resolved
+copies. This removes the selected prior markup from the new baseline:
+
+```bash
+rdocx revision accept original-redline.docx --author "Reviewer A" --output original-resolved.docx
+rdocx revision accept edited-redline.docx --author "Reviewer A" --output edited-resolved.docx
+rdocx compare original-resolved.docx edited-resolved.docx --author "Reviewer B" --timestamp 2026-10-27T13:00:00Z --output second-review.docx
+```
+
+Use the existing `--id` selector when the same author has several reviews.
 
 Revision `list` reports every supported story and names the story of each
 revision. Revision `accept` and `reject` operate across every supported story
