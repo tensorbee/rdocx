@@ -2,7 +2,7 @@
 
 **Milestone**: X contribution and issue repair, ahead of the remaining M24 and AcroForm feature work.
 
-**Goal**: integrate the current contribution heads against released main, repair all acceptance rows of Issues 423 to 426, and restore the pinned CI oracle. All four contracts are approved. F-X271 is integrated with actual hosted acceptance pending. F-X272 is claimed by Codex for the second serial wave. The sprint clock started with F-X271 on 2026-10-28.
+**Goal**: integrate the current contribution heads against released main, repair all acceptance rows of Issues 423 to 426, and restore the pinned CI oracle. All four contracts are approved. F-X271 and F-X272 are integrated with final hosted/native acceptance pending. F-X273 is integrated at fca298cc and has passed its approved LOCAL provider implementation checkpoint, while its plan remains approved and final differential debt remains due. F-X274 is next and must start from a descendant of that integrated source. The sprint clock started with F-X271 on 2026-10-28.
 
 ## Spec references
 
@@ -20,7 +20,7 @@
 |------|-------|------|--------|-------|
 | F-X271 | Restore pinned viewer downloads and planning policy | M | in-progress | codex |
 | F-X272 | Preserve existing revisions during document comparison | L | in-progress | codex |
-| F-X273 | Repair header body clearance and complete TOC navigation | L | in-progress | codex |
+| F-X273 | Repair header body clearance and complete TOC navigation | L | done | - |
 | F-X274 | Honor section and field page-number formats | M | pending | - |
 
 ## Sequencing note
