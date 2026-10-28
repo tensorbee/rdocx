@@ -1359,7 +1359,7 @@ class SprintWorkflowTests(unittest.TestCase):
         )
         operative_viewer = "\n".join(self.operative_lines(viewer))
         for required in (
-            "https://download.documentfoundation.org/libreoffice/stable/26.2.5/mac/aarch64/LibreOffice_26.2.5_MacOS_aarch64.dmg",
+            "https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.5.2/mac/aarch64/LibreOffice_26.2.5.2_MacOS_aarch64.dmg",
             "c99fb4fe574437fc4cb820a4ca15271bca325920861f7139858b36d7f9df78ad",
             "shasum -a 256 --check",
             "hdiutil attach -readonly -nobrowse",
