@@ -1082,7 +1082,15 @@ product runtime behavior or the separate WASM runtime.
 The same two clean Ubuntu 24.04 jobs plus the Presentation and Word fidelity
 jobs install
 LibreOffice 26.2.5.2 from the official Linux x86-64 Debian archive before the
-oracle-dependent command. The archive SHA-256 is
+oracle-dependent command. Retrieval uses the exact old-release route at
+`https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.5.2/`,
+with the full four-component release in the archive filename. The macOS arm64
+Python job uses the corresponding old-release DMG, bounds its download at
+320 MiB before readonly mounting, and checks SHA-256
+`c99fb4fe574437fc4cb820a4ca15271bca325920861f7139858b36d7f9df78ad`.
+Both platforms require the same exact executable build identity. Archive
+authentication does not substitute for supported-target installation or actual
+source-qualified oracle jobs. The archive SHA-256 is
 `2f03bfb2ac9f33ea7c77331b4b7a23300fb0ed7443566046bf8b5bc51c1bed1e`.
 The installer streams under fixed download, member, and expanded-byte bounds,
 rejects unsafe entries and any populated `/opt/libreoffice26.2` prefix, then

@@ -36,9 +36,9 @@ Update only the existing roadmap policy's expected future set from 97/98/99 to 9
 
 | Surface or placement | Exact behavior and boundary examples | Primary source identity and location | Local discriminator or pending evidence |
 |---|---|---|---|
-| Linux bytes | SHA-256 `2f03bfb2ac9f33ea7c77331b4b7a23300fb0ed7443566046bf8b5bc51c1bed1e`, max 224 MiB | Retained source installer at Base `24af95d3`, official TDF26.2.5.2 archive | Actual bytes pending, wrong hash/oversize must refuse |
+| Linux bytes | SHA-256 `2f03bfb2ac9f33ea7c77331b4b7a23300fb0ed7443566046bf8b5bc51c1bed1e`, max 224 MiB | Retained source installer at Base `24af95d3`, official TDF26.2.5.2 archive | Authenticated 218075885 bytes with retained hash, runtime mismatch/oversize controls pass |
 | Linux extraction | At most 256 members, at most 256 MiB extracted, expected root and core/impress packages, regular files/directories only | Existing `safe_extract`, installer lines 73 to 123 | Traversal, link, missing package, count and size boundary controls |
-| macOS bytes | SHA-256 `c99fb4fe574437fc4cb820a4ca15271bca325920861f7139858b36d7f9df78ad`, proposed 320 MiB download cap | Retained CI source at Base `24af95d3`, official TDF26.2.5.2 archive | Actual bytes and macOS installed outcome pending |
+| macOS bytes | SHA-256 `c99fb4fe574437fc4cb820a4ca15271bca325920861f7139858b36d7f9df78ad`, proposed 320 MiB download cap | Retained CI source at Base `24af95d3`, official TDF26.2.5.2 archive | Authenticated 297407265 bytes with retained hash, actual hosted installed outcome pending |
 | executable | Exact `LibreOffice 26.2.5.2 cd7284b4cbbfeb507e630c1aac019f4157393acb` | Existing independently pinned Linux/CI identities | Version mismatch refuses before use |
 | roadmap | Story placements exactly once, future audited whole sprints 99/100/101 | Authorized S96 planning diff and unchanged audited F240 to 310 set | Current-Base stale-set RED, updated set GREEN, mutation controls |
 
@@ -91,21 +91,21 @@ Expected unchanged,49 hashes and 7 deterministic pixel cases. This tooling/polic
 
 ## Implementation checklist
 
-- [ ] Authenticate official archive bytes against both retained platform hashes.
-- [ ] Repair URLs without changing oracle identity or Linux bounds.
-- [ ] Add macOS retrieval bound and preserve readonly mount checks.
-- [ ] Repair only the outdated roadmap expectation, retain negative controls.
-- [ ] Run unique scoped checks and independent zero-finding microscope.
-- [ ] Update listed HLD intent before final gate.
+- [x] Authenticate official archive bytes against both retained platform hashes.
+- [x] Repair URLs without changing oracle identity or Linux bounds.
+- [x] Add macOS retrieval bound and preserve readonly mount checks.
+- [x] Repair only the outdated roadmap expectation, retain negative controls.
+- [x] Run unique scoped checks and independent zero-finding microscope.
+- [x] Update listed HLD intent before final gate.
 - [ ] Retain actual hosted acceptance as pending until observed.
 
 ## Open questions
 
-None requiring a user product choice. Archive authentication and supported-target CI are unavailable observations, not questions to waive.
+No unresolved user product choice. Both archive byte identities are authenticated. Supported-target installation, actual hosted CI and final sprint qualification remain pending observations, not questions to waive.
 
 ## Contract closure
 
-Existing callable installer signatures remain unchanged. Proposed 320 MiB macOS bound exceeds the historical 297407265 byte HEAD length and must be checked against actual bytes. No source is approved or started. Exact existing scoped test names are recorded above. Actual archive authentication is the first implementation checklist item and must pass before either replacement URL is adopted in source. Claiming may precede this read-only authentication step.
+Existing callable installer signatures remain unchanged. The implemented 320 MiB macOS bound exceeds the authenticated 297407265 byte archive size. Both replacement URLs were adopted only after actual bytes matched the retained hashes. Local implementation and the named scoped checks pass. The first microscope found no implementation defects and requested this S1 readiness-text correction. Independent follow-up microscope pass 2 reports 0 defects and 0 smells. Actual supported-target installation, hosted CI and final integrated sprint qualification remain pending.
 
 ## Intake identity
 
@@ -117,3 +117,11 @@ Read-only GitHub refresh on 2026-10-28 found no body or contribution-head change
   Contribution head `87f101bc8e688bd93d358b72bc69c28732e9dad6`.
 
 Design closure on 2026-10-28: consumer map, observable A-IDs, discriminating cases, public signatures, imported states, HLD impact and local/final evidence were checked against current source. Q-S96-01 is answered in F-X272. Approvals follow provider contract order. No material user decision remains. Pending native/hosted/installed observations are retained final acceptance debt, not recorded passes.
+
+## Local implementation evidence
+
+Worker Base `376a8cec`. Actual focused baseline child exit 1: retrieval-route and roadmap cases failed, runtime safety control passed. The same three named cases pass after the patch, child exit 0, 3 tests. Complete transcripts are `/private/tmp/rdocx-s96-run-refresh/fx271-local-red.log` and `fx271-local-green.log`. Runtime negative controls cover download hash/size, archive traversal/type/member/expanded-size/missing-package and exact executable identity. New macOS mutations reject unbounded retrieval, wrong checksum and writable mounting.
+
+Root authenticated both actual official archives under `/private/tmp/rdocx-s96-archive-auth`, with exact source/final URLs and receipts in `evidence.json`. Linux is 218075885 bytes and matches the retained hash. Its 46 members total 218024484 declared bytes, have the expected root, no unsafe/non-file entries and both required packages. Actual `safe_extract` succeeded with 42 Debian packages, without executing or installing them. macOS is 297407265 bytes and matches its retained hash. Grok attempts produced no usable authentication evidence and none is credited.
+
+Local `/verify --scoped F-X271` observations: the three named focused tests, `cargo fmt --all --check`, `python3 scripts/prose_check.py`, `python3 scripts/sync_agent_skills.py --check` and `git diff --check` pass. No Rust crate changed, so changed-crate lint is inapplicable. Independent microscope pass 2 is clean after the separate S1 documentation remediation. Actual hosted Linux/macOS installation and Test/MSRV/Word fidelity/rpptx Python/CI gate remain pending, as do the final full suite, hash49/pixels7, native/oracle and S96 installed/typing/packaging union. No final acceptance or dependency completion is claimed.

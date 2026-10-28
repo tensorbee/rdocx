@@ -1007,7 +1007,7 @@ class SprintWorkflowTests(unittest.TestCase):
             installer,
         )
         self.assertIn(
-            '"https://download.documentfoundation.org/libreoffice/stable/26.2.5/"',
+            '"https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.5.2/"',
             installer,
         )
         self.assertIn("MAX_DOWNLOAD_BYTES = 224 * 1024 * 1024", installer)
@@ -1061,6 +1061,18 @@ class SprintWorkflowTests(unittest.TestCase):
             self.assertNotIn("continue-on-error", install)
             self.assert_no_success_short_circuit(self.operative_lines(install))
         self.assertEqual(ci.count("python3 scripts/install_pinned_libreoffice.py"), 4)
+        binding = self.yaml_block(ci, "  python-bindings:")
+        mac_install = self.yaml_step(binding, "Install pinned LibreOffice 26.2.5.2")
+        for required in (
+            "https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.5.2/mac/aarch64/LibreOffice_26.2.5.2_MacOS_aarch64.dmg",
+            "--max-filesize 335544320",
+            "c99fb4fe574437fc4cb820a4ca15271bca325920861f7139858b36d7f9df78ad",
+            "hdiutil attach -readonly -nobrowse",
+            "LibreOffice 26.2.5.2 cd7284b4cbbfeb507e630c1aac019f4157393acb",
+        ):
+            self.assertIn(required, mac_install)
+        self.assertLess(mac_install.index("shasum -a 256 --check"), mac_install.index("hdiutil attach"))
+        self.assertNotIn("continue-on-error", mac_install)
 
     def assert_poppler_consumers_contract(self, ci: str) -> None:
         consumers = {
@@ -2016,6 +2028,17 @@ class SprintWorkflowTests(unittest.TestCase):
                     AssertionError
                 ):
                     self.assert_libreoffice_consumers_contract(mutated)
+
+        for label, mutated in {
+            "unbounded-macos-download": ci.replace("--max-filesize 335544320", ""),
+            "wrong-macos-checksum": ci.replace(
+                "c99fb4fe574437fc4cb820a4ca15271bca325920861f7139858b36d7f9df78ad",
+                "0" * 64,
+            ),
+            "writable-macos-mount": ci.replace("hdiutil attach -readonly", "hdiutil attach"),
+        }.items():
+            with self.subTest(macos_mutation=label), self.assertRaises(AssertionError):
+                self.assert_libreoffice_consumers_contract(mutated)
 
     def test_pinned_libreoffice_installer_enforces_runtime_guards(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -9009,7 +9032,7 @@ Pedro Assumpcao and the rdocx maintainers.
         self.assertTrue(all(len(value) == 1 for value in placements.values()))
         self.assertEqual(
             {sprint for value in placements.values() for sprint, _, _ in value},
-            {(number,) for number in set(range(70, 75)) | {86, 89, 90} | set(range(97, 100))}
+            {(number,) for number in set(range(70, 75)) | {86, 89, 90} | set(range(99, 102))}
             | {(95, 2), (95, 3), (95, 4)},
         )
 
