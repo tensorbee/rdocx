@@ -7689,3 +7689,148 @@ fn issue425_new_counts_keep_ignored_textbox_identity_separate_from_body() {
         "JSON={record}, human={human}"
     );
 }
+
+#[test]
+fn issue426_toc_cli_keeps_all_original_switch_controls_and_styled_omission() {
+    let temp = TempWorkspace::new("issue426-toc");
+    for (case, merged, outline, styled) in [
+        (0, false, false, false),
+        (1, false, true, false),
+        (2, true, false, false),
+        (3, true, true, false),
+        (4, true, false, true),
+    ] {
+        let input = temp.path.join(format!("input{case}.docx"));
+        let output = temp.path.join(format!("output{case}.docx"));
+        let mut document = fixture_document(&[]);
+        document
+            .set_style(
+                rdocx::StyleBuilder::paragraph("Heading1", "Heading 1").paragraph_properties(
+                    rdocx_oxml::properties::CT_PPr {
+                        outline_lvl: Some(0),
+                        ..Default::default()
+                    },
+                ),
+            )
+            .unwrap();
+        document.save(&input).unwrap();
+        let mut package = OpcPackage::open(&input).unwrap();
+        let first = if merged {
+            r#"<w:tcPr><w:vMerge w:val="restart"/></w:tcPr>"#
+        } else {
+            ""
+        };
+        let second = if merged {
+            "<w:tcPr><w:vMerge/></w:tcPr>"
+        } else {
+            ""
+        };
+        let style = if styled {
+            r#"<w:pPr><w:pStyle w:val="Heading1"/></w:pPr>"#
+        } else {
+            ""
+        };
+        let instruction = if outline {
+            r#"TOC \o "1-2" \h \u"#
+        } else {
+            r#"TOC \o "1-2" \h"#
+        };
+        let heading = |text: &str| {
+            format!(
+                r#"<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>"#
+            )
+        };
+        let body = format!(
+            r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>{instruction}</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>OLD TOC</w:t></w:r></w:p><w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>{}<w:tbl><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:tc>{first}<w:p><w:r><w:t>cell 00</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc>{second}<w:p>{style}<w:r><w:t>cell 10</w:t></w:r></w:p></w:tc></w:tr></w:tbl>{}"#,
+            heading("First section"),
+            heading("Second section")
+        );
+        package.set_part("/word/document.xml",format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}</w:body></w:document>"#).into_bytes());
+        package.save(&input).unwrap();
+        let before = fs::read(&input).unwrap();
+        let result = cli(&[
+            "toc",
+            "rebuild",
+            path_text(&input),
+            "--output",
+            path_text(&output),
+            "--json",
+        ]);
+        assert_success(&result, &format!("issue426 case{case}"));
+        let json: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(json["entry_count"], 2);
+        let mut reopened = Document::open(&output).unwrap();
+        let entries = reopened
+            .paragraphs()
+            .into_iter()
+            .filter(|p| p.style_id().is_some_and(|style| style.starts_with("TOC")))
+            .map(|p| p.text().split('\t').next().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, ["First section", "Second section"]);
+        assert_eq!(reopened.rebuild_toc().unwrap().entry_count, 2);
+        assert_eq!(fs::read(&input).unwrap(), before);
+    }
+}
+
+#[test]
+fn issue424_cli_layout_and_pdf_clear_five_spaced_normal_paragraphs_and_logo_table() {
+    let temp = TempWorkspace::new("issue424-logo");
+    let input = temp.path.join("logo.docx");
+    let pdf = temp.path.join("logo.pdf");
+    let mut document = fixture_document(&[]);
+    for index in 0..40 {
+        document.add_paragraph(&format!("Body line {index}"));
+    }
+    // Same one-pixel PNG used by the picture consumer control, constructed in source.
+    let png = [
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0,
+        0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0, 0x90, 0x77, 0x53, 0xde, 0, 0, 0, 0x0c, 0x49, 0x44,
+        0x41, 0x54, 8, 0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0, 0, 0, 2, 0, 1, 0xe2, 0x21, 0xbc, 0x33, 0,
+        0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+    document.set_header_image(
+        &png,
+        "logo.png",
+        rdocx::Length::cm(1.5),
+        rdocx::Length::cm(1.5),
+    );
+    document.section_properties_mut().margin_top = Some(rdocx_oxml::Twips(1134));
+    document.set_header_footer_distance(rdocx::Length::cm(1.27), rdocx::Length::cm(1.27));
+    document.save(&input).unwrap();
+    let mut package = OpcPackage::open(&input).unwrap();
+    let header = header_part_name(&input);
+    let source = String::from_utf8(package.get_part(&header).unwrap().to_vec()).unwrap();
+    let root = source.find("<w:hdr").unwrap();
+    let start = root + source[root..].find('>').unwrap() + 1;
+    let end = source.rfind("</w:hdr>").unwrap();
+    let paragraphs=(0..5).map(|i|format!(r#"<w:p><w:pPr><w:pStyle w:val="Normal"/><w:spacing w:after="160"/></w:pPr><w:r><w:t>Normal header paragraph {i}</w:t></w:r></w:p>"#)).collect::<String>();
+    let inner = format!(
+        r#"<w:tbl><w:tblGrid><w:gridCol w:w="2200"/><w:gridCol w:w="5000"/></w:tblGrid><w:tr><w:tc>{}</w:tc><w:tc><w:p><w:r><w:t>Organization descriptive logo table</w:t></w:r></w:p></w:tc></w:tr></w:tbl>{paragraphs}"#,
+        &source[start..end]
+    );
+    package.set_part(
+        &header,
+        format!("{}{inner}{}", &source[..start], &source[end..]).into_bytes(),
+    );
+    package.save(&input).unwrap();
+    let before = fs::read(&input).unwrap();
+    let result = cli(&["layout", path_text(&input), "--json"]);
+    assert_success(&result, "issue424 layout");
+    let json: Value = serde_json::from_slice(&result.stdout).unwrap();
+    let top = json["body_items"][0]["fragments"][0]["y"].as_f64().unwrap();
+    assert!(
+        top >= 36.0 + 1.5 / 2.54 * 72.0 + 5.0 * 12.0 + 5.0 * 8.0,
+        "actual full-header body top={top}"
+    );
+    let result = cli(&[
+        "convert",
+        path_text(&input),
+        "--to",
+        "pdf",
+        "--output",
+        path_text(&pdf),
+    ]);
+    assert_success(&result, "issue424 PDF");
+    assert!(fs::read(&pdf).unwrap().starts_with(b"%PDF-"));
+    assert_eq!(fs::read(&input).unwrap(), before);
+}

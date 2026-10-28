@@ -12181,6 +12181,119 @@ def test_issue400_python_toc_rebuild_bounds_outline_entries_after_reopen(instruc
     assert entries(reopened) == expected
 
 
+@pytest.mark.parametrize("instruction", [r'TOC \o "1-2" \h', r'TOC \o "1-2" \h \u', r'TOC \u', r'TOC \t "Heading 1,1" \h', r'TOC \h \u \z \t "Heading 1,1"'])
+@pytest.mark.parametrize("merged", [False, True])
+@pytest.mark.parametrize("styled", [False, True])
+def test_issue426_toc_rebuild_with_outline_switch_passes_a_vertical_merge(merged, instruction, styled):
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("Title page")
+    document.add_heading("First section", level=1)
+    document.add_paragraph("Body text.")
+    table = document.add_table(3, 2, style="Table Grid")
+    for row in range(3):
+        for column in range(2):
+            table.cell(row, column).text = f"cell {row}{column}"
+    if merged:
+        table.set_cell_vertical_merge(0, 0, "restart")
+        table.set_cell_vertical_merge(1, 0, "continue")
+    if styled:
+        table.cell(1, 0).paragraphs[0].style = "Heading1"
+    document.add_heading("Second section", level=1)
+    document.insert_toc(1, max_level=2)
+    result = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(document.to_bytes())) as source, zipfile.ZipFile(result, "w") as out:
+        for member in source.infolist():
+            data = source.read(member.filename)
+            if member.filename == "word/document.xml":
+                data, count = re.subn(rb'(<w:instrText\b[^>]*>).*?(</w:instrText>)',
+                                      lambda match: match[1] + instruction.encode() + match[2], data, flags=re.S)
+                assert count == 1
+            out.writestr(member, data)
+    document = rdocx.Document.from_bytes(result.getvalue())
+
+    expected = ("First section", "cell 10", "Second section") if styled and not merged else ("First section", "Second section")
+    assert document.rebuild_toc().entry_count == len(expected)
+    assert tuple(paragraph.text.split("\t")[0] for paragraph in document.paragraphs
+                 if (paragraph.style or "").upper().startswith("TOC")) == expected
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert reopened.rebuild_toc().entry_count == len(expected)
+
+
+def test_issue424_body_starts_below_a_header_taller_than_the_top_margin():
+    import rdocx
+
+    def first_body_top(header_lines, top, space_after=None):
+        document = rdocx.Document()
+        document.update_section(0, margin_top=rdocx.Cm(top), header_distance=rdocx.Cm(1.27))
+        header = document.section(0).header
+        for index in range(header_lines):
+            paragraph = header.add_paragraph(f"Header line {index + 1}")
+            if space_after is not None:
+                paragraph.paragraph_format.space_after = rdocx.Pt(space_after)
+        for index in range(40):
+            document.add_paragraph(f"Body line {index + 1}.")
+        fragments = document.layout()
+        page = min(fragment.physical_page for fragment in fragments)
+        return min(fragment.bounds.y for fragment in fragments if fragment.physical_page == page)
+
+    top_margin = 2.0 / 2.54 * 72
+    header_distance = 1.27 / 2.54 * 72
+    # Five header lines of at least 12 points end below the 2 cm margin.
+    assert first_body_top(5, 2.0) >= header_distance + 5 * 12
+    # The default 8-point after spacing makes one Normal paragraph cross
+    # this margin too. Explicit zero-after makes a real fitting short control.
+    assert first_body_top(1, 2.0) > top_margin
+    assert first_body_top(1, 2.0, space_after=0) == pytest.approx(top_margin, abs=0.1)
+    assert first_body_top(5, -2.0) == pytest.approx(top_margin, abs=0.1)
+
+
+def test_issue424_logo_table_and_same_owner_live_edits_match_fresh_layout():
+    import rdocx
+
+    document = rdocx.Document()
+    document.update_section(0, margin_top=rdocx.Cm(2), header_distance=rdocx.Cm(1.27))
+    table = document.section(0).header.add_table(1, 2)
+    document.section(0).header.tables[0].cell(0, 1).text = "Organization descriptive logo table"
+    for index in range(5):
+        paragraph = document.section(0).header.add_paragraph(f"Normal header paragraph {index}", style="Normal")
+        paragraph.paragraph_format.space_after = rdocx.Pt(8)
+    document.section(0).header.tables[0].cell(0, 0).add_picture(_one_pixel_png(), "logo.png", width=rdocx.Cm(1.5), height=rdocx.Cm(1.5))
+    for index in range(40):
+        document.add_paragraph(f"Body line {index}.")
+
+    def signature(doc):
+        return tuple((fragment.body_index, fragment.physical_page, fragment.displayed_page,
+                      fragment.bounds.x, fragment.bounds.y, fragment.bounds.width, fragment.bounds.height)
+                     for fragment in doc.layout())
+
+    initial = signature(document)
+    assert initial[0][4] >= 36 + 1.5 / 2.54 * 72 + 5 * 12 + 5 * 8
+    # The live cache control has an ordinary header owner. Build the logo
+    # fixture completely before inserting its relationship-bearing picture.
+    document = rdocx.Document()
+    document.update_section(0, margin_top=rdocx.Cm(2), header_distance=rdocx.Cm(1.27))
+    for index in range(5):
+        document.section(0).header.add_paragraph(f"Live header {index}").paragraph_format.space_after = rdocx.Pt(8)
+    for index in range(40):
+        document.add_paragraph(f"Body line {index}.")
+    initial = signature(document)
+    held = document.section(0).header.paragraphs[-1]
+    for change in range(3):
+        if change == 0:
+            held.paragraph_format.space_after = rdocx.Pt(32)
+        elif change == 1:
+            held.text = "Changed header owner text " * 120
+        else:
+            document.update_section(0, different_first_page=True)
+        warm = signature(document)
+        fresh = signature(rdocx.Document.from_bytes(document.to_bytes()))
+        assert warm == fresh
+        assert warm != initial
+    assert signature(document)[0][4] == pytest.approx(2 / 2.54 * 72, abs=0.1)
+
+
 @pytest.mark.parametrize("host", ["body", "cell", "nested", "header", "paired"])
 @pytest.mark.parametrize("operation", ["tab", "line", "page", "column"])
 def test_issue398_run_tabs_and_breaks_refresh_live_paragraph_text(host, operation):

@@ -328,6 +328,7 @@ impl WordSequenceSnapshot {
 /// Effective accepted paragraph facts from the production style cascade.
 #[derive(Debug, Clone)]
 pub(crate) struct ParagraphNavigation {
+    pub omitted_by_table: bool,
     pub level: Option<u32>,
     pub text: String,
     pub style: Option<String>,
@@ -488,6 +489,16 @@ impl WordLayoutResult {
             self.paragraph_numbering(node),
             self.paragraph_pages.get(&node).copied(),
         ))
+    }
+
+    /// Whether this result's actual table layout omitted a registered paragraph.
+    /// `None` means that this source has no qualified navigation facts.
+    #[doc(hidden)]
+    pub fn paragraph_omitted_by_table(&self, node: SourceNodeId) -> Option<bool> {
+        self.source_node(node)?;
+        self.navigation_by_source
+            .get(&node)
+            .map(|facts| facts.omitted_by_table)
     }
 
     /// Whether the effective paragraph explicitly suppresses its numbering.

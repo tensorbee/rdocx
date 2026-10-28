@@ -410702,3 +410702,175 @@ fn issue425_opaque_root_namespace_closure_keeps_public_comment_compatibility() {
     }
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+#[test]
+fn toc_outline_switch_rebuilds_past_cells_table_layout_drops() {
+    // tensorbee/rdocx#426: the paragraphs of a vertically merged continuation
+    // cell, and of a row the accepted view removes, reach no page. `\u` reads
+    // layout facts for every paragraph, and these had none, so the rebuild
+    // failed. They now add no entry under `\u`, even one styled as a heading.
+    let heading = r#"<w:pPr><w:pStyle w:val="Heading1"/></w:pPr>"#;
+    let rows = |dropped: &str, paragraph: &str| {
+        let (properties, row_properties) = match dropped {
+            "vertical merge" => ("<w:vMerge/>", ""),
+            _ => (
+                "",
+                r#"<w:trPr><w:del w:id="90" w:author="A" w:date="2026-01-01T00:00:00Z"/></w:trPr>"#,
+            ),
+        };
+        let first = if dropped == "vertical merge" {
+            r#"<w:vMerge w:val="restart"/>"#
+        } else {
+            ""
+        };
+        format!(
+            r#"<w:tr><w:tc><w:tcPr>{first}</w:tcPr><w:p><w:r><w:t>cell 00</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>cell 01</w:t></w:r></w:p></w:tc></w:tr><w:tr>{row_properties}<w:tc><w:tcPr>{properties}</w:tcPr><w:p>{paragraph}</w:p></w:tc><w:tc><w:p><w:r><w:t>cell 11</w:t></w:r></w:p></w:tc></w:tr>"#
+        )
+    };
+    let mut outcomes = Vec::new();
+    for dropped in ["vertical merge", "deleted row"] {
+        for paragraph in [
+            "<w:r><w:t>cell 10</w:t></w:r>".to_owned(),
+            format!("{heading}<w:r><w:t>Dropped heading</w:t></w:r>"),
+        ] {
+            for instruction in [
+                r#"TOC \o "1-2" \h \u"#,
+                r"TOC \u",
+                r#"TOC \o "1-2" \h"#,
+                r#"TOC \t "Heading 1,1" \h"#,
+                r#"TOC \h \u \z \t "Heading 1,1""#,
+            ] {
+                let rows = rows(dropped, &paragraph);
+                let body = format!(
+                    r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>{instruction}</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>OLD TOC</w:t></w:r></w:p><w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p><w:p>{heading}<w:r><w:t>First section</w:t></w:r></w:p><w:tbl><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>{rows}</w:tbl><w:p>{heading}<w:r><w:t>Second section</w:t></w:r></w:p>"#
+                );
+                let mut document = document_with_field_parts(&wrap_word_body(&body), None, None);
+                document
+                    .set_style(
+                        StyleBuilder::paragraph("Heading1", "Heading 1").paragraph_properties(
+                            CT_PPr {
+                                outline_lvl: Some(0),
+                                ..Default::default()
+                            },
+                        ),
+                    )
+                    .unwrap();
+                let case = format!("{dropped}, {paragraph}, {instruction}");
+                let before = document.to_bytes().unwrap();
+                let report = match document.rebuild_toc() {
+                    Ok(report) => report,
+                    Err(error) => {
+                        assert_eq!(
+                            document.to_bytes().unwrap(),
+                            before,
+                            "atomic refusal: {case}"
+                        );
+                        outcomes.push(format!("{case}: {error}"));
+                        continue;
+                    }
+                };
+                if report.entry_count != 2 {
+                    outcomes.push(format!(
+                        "{case}: expected2entries, got{}",
+                        report.entry_count
+                    ));
+                    continue;
+                }
+                let entries = document
+                    .paragraphs()
+                    .into_iter()
+                    .filter(|paragraph| {
+                        paragraph
+                            .style_id()
+                            .is_some_and(|style| style.starts_with("TOC"))
+                    })
+                    .map(|paragraph| paragraph.text())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    entries
+                        .iter()
+                        .map(|entry| entry.split('\t').next().unwrap())
+                        .collect::<Vec<_>>(),
+                    ["First section", "Second section"],
+                    "{case}"
+                );
+            }
+        }
+    }
+    assert!(outcomes.is_empty(), "{outcomes:#?}");
+}
+
+#[test]
+fn toc_table_omission_preserves_visible_nested_headings_and_adjacent_navigation() {
+    let heading = |text: &str| {
+        format!(
+            r#"<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>"#
+        )
+    };
+    let nested = |text: &str| {
+        format!(
+            r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>{}</w:tc></w:tr></w:tbl>"#,
+            heading(text)
+        )
+    };
+    let mut failures = Vec::new();
+    for instruction in [
+        r#"TOC \o "1-2" \h \u"#,
+        r#"TOC \o "1-2" \h"#,
+        r#"TOC \t "Heading 1,1" \h"#,
+        r#"TOC \h \u \z \t "Heading 1,1""#,
+    ] {
+        let body = format!(
+            r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>{instruction}</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>OLD TOC</w:t></w:r></w:p><w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p><w:tbl><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr>{}</w:tc><w:tc>{}</w:tc></w:tr><w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr>{}<w:sdt><w:sdtPr/><w:sdtContent>{}</w:sdtContent></w:sdt></w:tc><w:tc>{}</w:tc></w:tr></w:tbl><w:p><w:fldSimple w:instr="STYLEREF &quot;Heading 1&quot; \l"><w:r><w:t>OLD STYLE</w:t></w:r></w:fldSimple></w:p>"#,
+            heading("ROOT"),
+            nested("VISIBLE_NESTED"),
+            nested("OMITTED_NESTED"),
+            heading("OMITTED_CONTROL"),
+            heading("NEIGHBOR")
+        );
+        let mut document = document_with_field_parts(&wrap_word_body(&body), None, None);
+        document
+            .set_style(
+                StyleBuilder::paragraph("Heading1", "Heading 1").paragraph_properties(CT_PPr {
+                    outline_lvl: Some(0),
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        let before = document.to_bytes().unwrap();
+        if let Err(error) = document.rebuild_toc() {
+            assert_eq!(document.to_bytes().unwrap(), before);
+            failures.push(format!("{instruction}: {error}"));
+            continue;
+        }
+        let entries = document
+            .paragraphs()
+            .into_iter()
+            .filter(|paragraph| {
+                paragraph
+                    .style_id()
+                    .is_some_and(|style| style.starts_with("TOC"))
+            })
+            .map(|paragraph| paragraph.text().split('\t').next().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, ["ROOT", "VISIBLE_NESTED", "NEIGHBOR"]);
+        let outline = document.numbered_document_outline().unwrap();
+        assert_eq!(
+            outline
+                .iter()
+                .map(|node| node.text.as_str())
+                .collect::<Vec<_>>(),
+            ["ROOT", "VISIBLE_NESTED", "NEIGHBOR"]
+        );
+        let fields = document
+            .evaluate_fields(&FieldEvaluationContext::default())
+            .unwrap();
+        assert_eq!(
+            fields.last().unwrap().outcome,
+            FieldOutcome::Resolved("NEIGHBOR".into())
+        );
+        let mut reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.rebuild_toc().unwrap().entry_count, 3);
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+}

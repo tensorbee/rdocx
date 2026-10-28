@@ -9,6 +9,7 @@ use crate::block::{
 };
 use crate::table::{CellBlock, FloatingTable, TableRow};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[cfg(test)]
 use oxml_layout::TextDirection;
@@ -240,15 +241,411 @@ pub struct HeaderFooterContent {
     pub even_watermark: Option<oxml_layout::GroupElement>,
 }
 
+/// The header and footer variant Word selects for one page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoryVariant {
+    First,
+    Even,
+    Default,
+}
+
+impl HeaderFooterContent {
+    fn header(&self, variant: StoryVariant) -> &[ParagraphBlock] {
+        match variant {
+            StoryVariant::First => &self.first_header_blocks,
+            StoryVariant::Even => &self.even_header_blocks,
+            StoryVariant::Default => &self.header_blocks,
+        }
+    }
+
+    fn footer(&self, variant: StoryVariant) -> &[ParagraphBlock] {
+        match variant {
+            StoryVariant::First => &self.first_footer_blocks,
+            StoryVariant::Even => &self.even_footer_blocks,
+            StoryVariant::Default => &self.footer_blocks,
+        }
+    }
+
+    fn watermark(&self, variant: StoryVariant) -> Option<&oxml_layout::GroupElement> {
+        match variant {
+            StoryVariant::First => self.first_watermark.as_ref(),
+            StoryVariant::Even => self.even_watermark.as_ref(),
+            StoryVariant::Default => self.watermark.as_ref(),
+        }
+    }
+}
+
+/// Source-free placement policy beside the existing shaped story blocks.
+#[derive(Debug, Clone, Default)]
+pub(crate) enum HeaderFooterPlacement {
+    #[default]
+    Flow,
+    Frame {
+        properties: Box<rdocx_oxml::CT_FramePr>,
+        paragraphs: usize,
+    },
+    FrameContinuation,
+    TableRow {
+        table: Arc<crate::table::TableBlock>,
+        semantics: Arc<crate::block::TableSemantics>,
+        row: usize,
+    },
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct HeaderFooterBlockSemantics {
+    pub direction: oxml_layout::TextDirection,
+    pub border_gap: f64,
+    pub flow_gap: f64,
+    pub placement: HeaderFooterPlacement,
+}
+
+impl HeaderFooterBlockSemantics {
+    fn is_flow(&self) -> bool {
+        matches!(&self.placement, HeaderFooterPlacement::Flow)
+            || matches!(&self.placement, HeaderFooterPlacement::TableRow { table, .. } if table.floating.is_none())
+    }
+
+    pub(crate) fn retained_bytes(&self) -> usize {
+        let mut bytes = std::mem::size_of::<Self>();
+        if let HeaderFooterPlacement::Frame { properties, .. } = &self.placement {
+            bytes = bytes.saturating_add(std::mem::size_of_val(properties.as_ref()));
+            for value in [
+                &properties.drop_cap,
+                &properties.wrap,
+                &properties.h_anchor,
+                &properties.v_anchor,
+                &properties.x_align,
+                &properties.y_align,
+                &properties.h_rule,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                bytes = bytes.saturating_add(value.capacity());
+            }
+            bytes = bytes.saturating_add(
+                properties
+                    .extra_attributes
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<(String, String)>()),
+            );
+            for (name, value) in &properties.extra_attributes {
+                bytes = bytes
+                    .saturating_add(name.capacity())
+                    .saturating_add(value.capacity());
+            }
+        }
+        // Rich table stories are excluded by the existing retained-cache gate.
+        debug_assert!(!matches!(
+            self.placement,
+            HeaderFooterPlacement::TableRow { .. }
+        ));
+        bytes
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct HeaderFooterSemantics {
     // Each private entry carries direction and the priced interior frame gap.
-    pub header_directions: Vec<(oxml_layout::TextDirection, f64)>,
-    pub footer_directions: Vec<(oxml_layout::TextDirection, f64)>,
-    pub first_header_directions: Vec<(oxml_layout::TextDirection, f64)>,
-    pub first_footer_directions: Vec<(oxml_layout::TextDirection, f64)>,
-    pub even_header_directions: Vec<(oxml_layout::TextDirection, f64)>,
-    pub even_footer_directions: Vec<(oxml_layout::TextDirection, f64)>,
+    pub header_directions: Vec<HeaderFooterBlockSemantics>,
+    pub footer_directions: Vec<HeaderFooterBlockSemantics>,
+    pub first_header_directions: Vec<HeaderFooterBlockSemantics>,
+    pub first_footer_directions: Vec<HeaderFooterBlockSemantics>,
+    pub even_header_directions: Vec<HeaderFooterBlockSemantics>,
+    pub even_footer_directions: Vec<HeaderFooterBlockSemantics>,
+}
+
+impl HeaderFooterSemantics {
+    fn header(&self, variant: StoryVariant) -> &[HeaderFooterBlockSemantics] {
+        match variant {
+            StoryVariant::First => &self.first_header_directions,
+            StoryVariant::Even => &self.even_header_directions,
+            StoryVariant::Default => &self.header_directions,
+        }
+    }
+
+    fn footer(&self, variant: StoryVariant) -> &[HeaderFooterBlockSemantics] {
+        match variant {
+            StoryVariant::First => &self.first_footer_directions,
+            StoryVariant::Even => &self.even_footer_directions,
+            StoryVariant::Default => &self.footer_directions,
+        }
+    }
+}
+
+/// Height of a header or footer flow as `render_hf_blocks` stacks it.
+///
+/// Anchored drawings are positioned apart from the flow, so they add nothing.
+fn story_flow_height(
+    blocks: &[ParagraphBlock],
+    directions: Option<&[HeaderFooterBlockSemantics]>,
+) -> f64 {
+    let mut height = 0.0;
+    let mut after: f64 = 0.0;
+    for (index, block) in blocks.iter().enumerate() {
+        let facts = directions.and_then(|values| values.get(index));
+        if facts.is_some_and(|facts| !facts.is_flow()) {
+            continue;
+        }
+        height += facts.map_or_else(|| after.max(block.space_before), |facts| facts.flow_gap)
+            + block.content_height();
+        after = block.space_after;
+    }
+    height + after
+}
+
+/// One selected story at one demonstrated origin. The same prepared blocks and
+/// placements price the body band and paint the page. Cached source blocks stay
+/// immutable throughout candidate preparation.
+#[derive(Debug, Clone)]
+struct PreparedFurniture {
+    blocks: Vec<ParagraphBlock>,
+    before_lines: Vec<Vec<f64>>,
+    origin: f64,
+    height: f64,
+    starts: Vec<f64>,
+    placements: Vec<Option<Rect>>,
+    wraps: Vec<PlacedWrap>,
+}
+
+impl PreparedFurniture {
+    fn block_height(&self, index: usize) -> f64 {
+        self.blocks[index].content_height() + self.before_lines[index].iter().sum::<f64>()
+    }
+
+    fn state(&self) -> String {
+        format!(
+            "{:?}",
+            (
+                self.origin,
+                self.height,
+                &self.blocks,
+                &self.before_lines,
+                &self.starts,
+                &self.placements,
+                &self.wraps
+            )
+        )
+    }
+}
+
+fn locate_furniture(
+    blocks: Vec<ParagraphBlock>,
+    before_lines: Vec<Vec<f64>>,
+    facts: Option<&[HeaderFooterBlockSemantics]>,
+    geometry: &PageGeometry,
+    origin: f64,
+) -> PreparedFurniture {
+    let mut starts = vec![origin; blocks.len()];
+    let mut placements = vec![None; blocks.len()];
+    let mut wraps = Vec::new();
+    let mut floating_tables = Vec::new();
+    let mut y = origin;
+    let mut after: f64 = 0.0;
+    for (index, paragraph) in blocks.iter().enumerate() {
+        let entry = facts.and_then(|facts| facts.get(index));
+        match entry.map(|entry| &entry.placement) {
+            Some(HeaderFooterPlacement::Frame {
+                properties,
+                paragraphs,
+            }) => {
+                let end = index + paragraphs;
+                let frame_facts = &facts.expect("frame facts accompany blocks")[index..end];
+                let anchor_gap = facts
+                    .and_then(|facts| {
+                        facts[end..]
+                            .iter()
+                            .find(|facts| matches!(facts.placement, HeaderFooterPlacement::Flow))
+                    })
+                    .map_or(0.0, |facts| facts.flow_gap);
+                let rect = frame_rect(
+                    properties,
+                    &blocks[index..end],
+                    frame_facts,
+                    geometry,
+                    y + anchor_gap,
+                );
+                placements[index] = Some(rect);
+                wraps.push(PlacedWrap {
+                    rect,
+                    wrap: if matches!(properties.wrap.as_deref(), Some("none" | "notBeside")) {
+                        WrapType::TopAndBottom
+                    } else {
+                        WrapType::Square
+                    },
+                    dist_top: properties.v_space.map_or(0.0, |value| value.to_pt()),
+                    dist_bottom: properties.v_space.map_or(0.0, |value| value.to_pt()),
+                    dist_left: properties.h_space.map_or(0.0, |value| value.to_pt()),
+                    dist_right: properties.h_space.map_or(0.0, |value| value.to_pt()),
+                });
+                continue;
+            }
+            Some(HeaderFooterPlacement::FrameContinuation) => continue,
+            Some(HeaderFooterPlacement::TableRow { table, row, .. }) => {
+                let rect = if let Some(floating) = &table.floating {
+                    let placed = if *row == 0 {
+                        let mut placed = floating_wrap(
+                            floating,
+                            table.table_width,
+                            table.content_height(),
+                            geometry,
+                            geometry,
+                            y - geometry.margin_top,
+                        );
+                        settle_float(&mut placed, floating.overlap_allowed, &floating_tables);
+                        floating_tables.push((placed, floating.overlap_allowed));
+                        wraps.push(placed);
+                        placed
+                    } else {
+                        // Later rows share the last physical table's settled
+                        // whole rectangle. Drawings never enter this inventory.
+                        floating_tables
+                            .last()
+                            .expect("floating furniture starts at row0")
+                            .0
+                    };
+                    Rect {
+                        y: placed.rect.y
+                            + table.rows[..*row].iter().map(|row| row.height).sum::<f64>(),
+                        height: table.rows[*row].height,
+                        ..placed.rect
+                    }
+                } else {
+                    y += entry.expect("table entry").flow_gap;
+                    let rect = Rect {
+                        x: geometry.margin_left + table.table_indent,
+                        y,
+                        width: table.table_width,
+                        height: table.rows[*row].height,
+                    };
+                    y += rect.height;
+                    after = 0.0;
+                    rect
+                };
+                starts[index] = rect.y;
+                placements[index] = Some(rect);
+                continue;
+            }
+            Some(HeaderFooterPlacement::Flow) | None => {}
+        }
+        y += entry.map_or_else(|| after.max(paragraph.space_before), |entry| entry.flow_gap);
+        starts[index] = y;
+        for anchor in paragraph
+            .anchored
+            .iter()
+            .filter(|anchor| anchor.wrap != WrapType::None)
+        {
+            wraps.push(PlacedWrap {
+                rect: anchored_rect(
+                    anchor,
+                    geometry,
+                    geometry,
+                    y - geometry.margin_top,
+                    paragraph.indent_left,
+                ),
+                wrap: anchor.wrap,
+                dist_top: anchor.dist_top,
+                dist_bottom: anchor.dist_bottom,
+                dist_left: anchor.dist_left,
+                dist_right: anchor.dist_right,
+            });
+        }
+        y += paragraph.content_height() + before_lines[index].iter().sum::<f64>();
+        after = paragraph.space_after;
+    }
+    PreparedFurniture {
+        blocks,
+        before_lines,
+        origin,
+        height: y - origin + after,
+        starts,
+        placements,
+        wraps,
+    }
+}
+
+fn prepare_furniture(
+    original: &[ParagraphBlock],
+    facts: Option<&[HeaderFooterBlockSemantics]>,
+    geometry: &PageGeometry,
+    footer: bool,
+    fm: &FontManager,
+) -> Result<PreparedFurniture, String> {
+    let origin = if footer {
+        geometry.page_height - geometry.footer_distance - story_flow_height(original, facts)
+    } else {
+        geometry.header_distance
+    };
+    let mut previous = locate_furniture(
+        original.to_vec(),
+        vec![Vec::new(); original.len()],
+        facts,
+        geometry,
+        origin,
+    );
+    // The legacy public interface carries no private source placement metadata.
+    // Its existing positioned-furniture policy stays unchanged. Ordinary flow
+    // spacing and clearance still use this same priced result.
+    if facts.is_none() || previous.wraps.is_empty() {
+        return Ok(previous);
+    }
+    let mut seen = vec![previous.state()];
+    for _ in 0..32 {
+        let origin = if footer {
+            geometry.page_height - geometry.footer_distance - previous.height
+        } else {
+            geometry.header_distance
+        };
+        let obstacles = locate_furniture(
+            previous.blocks.clone(),
+            previous.before_lines.clone(),
+            facts,
+            geometry,
+            origin,
+        )
+        .wraps;
+        let mut blocks = original.to_vec();
+        let mut before_lines = vec![Vec::new(); original.len()];
+        let mut y = origin;
+        let mut after: f64 = 0.0;
+        for (index, source) in original.iter().enumerate() {
+            let entry = facts.and_then(|facts| facts.get(index));
+            if entry.is_some_and(|entry| !entry.is_flow()) {
+                continue;
+            }
+            y += entry.map_or_else(|| after.max(source.space_before), |entry| entry.flow_gap);
+            if entry.is_none_or(|entry| matches!(entry.placement, HeaderFooterPlacement::Flow))
+                && let Some(reflowed) = reflow_around_wraps(
+                    source,
+                    entry.map_or(oxml_layout::TextDirection::Auto, |entry| entry.direction),
+                    &obstacles,
+                    y - geometry.margin_top,
+                    geometry,
+                    fm,
+                    WrapReflowPolicy::Furniture,
+                )?
+            {
+                blocks[index] = reflowed.paragraph;
+                before_lines[index] = reflowed.before_lines;
+            }
+            y += blocks[index].content_height() + before_lines[index].iter().sum::<f64>();
+            after = source.space_after;
+        }
+        let current = locate_furniture(blocks, before_lines, facts, geometry, origin);
+        let state = current.state();
+        // This validates both the offered obstacles and the footer origin at
+        // the actual resulting line/placement state, not just equal heights.
+        if state == previous.state() {
+            return Ok(current);
+        }
+        if seen.contains(&state) {
+            return Err("positioned furniture preparation repeats a non-stable state".into());
+        }
+        seen.push(state);
+        previous = current;
+    }
+    Err("positioned furniture preparation did not stabilize within 32 candidates".into())
 }
 
 /// A section with its blocks, geometry, and header/footer content.
@@ -283,7 +680,15 @@ pub(crate) struct PaginationCheckpoint {
     pub next_header_page_number: usize,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct FurnitureFailure {
+    pub section: usize,
+    pub page: usize,
+    pub reason: String,
+}
+
 pub(crate) struct RecordedPagination {
+    pub furniture_failure: Option<FurnitureFailure>,
     pub pages: Vec<PageFrame>,
     pub outlines: Vec<OutlineEntry>,
     pub body_fragments: Vec<(usize, WordBodyLayoutFragment)>,
@@ -300,6 +705,7 @@ pub(crate) struct PageFlowSpace {
 }
 
 pub(crate) struct SharedPagination {
+    pub furniture_failure: Option<FurnitureFailure>,
     pub page_sections: Vec<crate::WordPageSection>,
     pub pages: Vec<PageFrame>,
     pub outlines: Vec<OutlineEntry>,
@@ -387,6 +793,7 @@ pub(crate) fn paginate_shared_sections(
     let media = media.media();
     if sections.is_empty() {
         return SharedPagination {
+            furniture_failure: None,
             page_sections: vec![crate::WordPageSection {
                 physical_page: 1,
                 displayed_page: 1,
@@ -419,15 +826,24 @@ pub(crate) fn paginate_shared_sections(
         if section.endnotes_at_section_end {
             endnotes_placed =
                 collect_endnote_refs(&result.pages, notes, section.geometry.content_width());
-            append_endnote_pages_at_document_end(
+            if let Err(failure) = append_endnote_pages_at_document_end(
                 &mut result.pages,
                 notes,
                 section.geometry.clone(),
                 result.last_flow_space,
                 &[],
-            );
+                Some(&EndnoteFurniture {
+                    section,
+                    section_index: 0,
+                    fm,
+                    media,
+                }),
+            ) {
+                result.furniture_failure.get_or_insert(failure);
+            }
         }
         return SharedPagination {
+            furniture_failure: result.furniture_failure,
             page_sections: result
                 .pages
                 .iter()
@@ -445,6 +861,7 @@ pub(crate) fn paginate_shared_sections(
         };
     }
 
+    let mut furniture_failure = None;
     let mut page_sections = Vec::new();
     let mut pages = Vec::new();
     let mut outlines = Vec::new();
@@ -485,6 +902,10 @@ pub(crate) fn paginate_shared_sections(
             section_page_number,
             (group_end > section_index + 1).then_some(&sections[section_index..group_end]),
         );
+        if let Some(mut failure) = result.furniture_failure.take() {
+            failure.section += section_index;
+            furniture_failure.get_or_insert(failure);
+        }
         let boundary = &sections[group_end - 1];
         let mut section_end_last_page = None;
         if boundary.endnotes_at_section_end {
@@ -511,7 +932,7 @@ pub(crate) fn paginate_shared_sections(
                 }
             }
             endnotes_placed.extend(&ordered);
-            result.last_flow_space = append_ordered_endnote_pages(
+            match append_ordered_endnote_pages(
                 &mut result.pages,
                 &ordered,
                 notes,
@@ -519,7 +940,18 @@ pub(crate) fn paginate_shared_sections(
                 0,
                 1,
                 result.last_flow_space,
-            );
+                Some(&EndnoteFurniture {
+                    section: boundary,
+                    section_index: group_end - 1,
+                    fm,
+                    media,
+                }),
+            ) {
+                Ok(space) => result.last_flow_space = space,
+                Err(failure) => {
+                    furniture_failure.get_or_insert(failure);
+                }
+            }
             section_end_last_page = result.pages.last().map(|page| page.page_number);
         }
         for (offset, member) in sections[section_index..group_end].iter().enumerate() {
@@ -577,6 +1009,7 @@ pub(crate) fn paginate_shared_sections(
         page.page_number = index + 1;
     }
     SharedPagination {
+        furniture_failure,
         page_sections,
         pages,
         outlines,
@@ -641,6 +1074,7 @@ pub(crate) fn paginate_shared_single_section_recorded(
         checkpoints.insert(0, checkpoint);
     }
     RecordedPagination {
+        furniture_failure: result.furniture_failure,
         pages: result.pages,
         outlines: result.outlines,
         body_fragments: result.body_fragments,
@@ -770,6 +1204,7 @@ fn floating_wrap(
     width: f64,
     height: f64,
     geometry: &PageGeometry,
+    written: &PageGeometry,
     para_top: f64,
 ) -> PlacedWrap {
     PlacedWrap {
@@ -779,7 +1214,14 @@ fn floating_wrap(
                 floating.off_h,
                 floating.align_h,
                 width,
-                geometry,
+                if matches!(
+                    floating.rel_h,
+                    ST_RelativeFromH::Column | ST_RelativeFromH::Character
+                ) {
+                    geometry
+                } else {
+                    written
+                },
                 0.0,
             ),
             y: resolve_anchor_v(
@@ -787,8 +1229,8 @@ fn floating_wrap(
                 floating.off_v,
                 floating.align_v,
                 height,
-                geometry,
-                para_top,
+                written,
+                geometry.margin_top + para_top - written.margin_top,
             ),
             width,
             height,
@@ -878,6 +1320,7 @@ fn paginate_with_media_recorded<B: LayoutBlockLike>(
 
 /// One pagination pass, and what it learned about paragraph-relative wraps.
 struct PassResult {
+    furniture_failure: Option<FurnitureFailure>,
     pages: Vec<PageFrame>,
     outlines: Vec<OutlineEntry>,
     body_fragments: Vec<(usize, WordBodyLayoutFragment)>,
@@ -923,6 +1366,7 @@ fn paginate_pass_from<B: LayoutBlockLike>(
 ) -> PassResult {
     if first_block_index >= blocks.len() && !is_first_page {
         return PassResult {
+            furniture_failure: None,
             pages: Vec::new(),
             outlines: Vec::new(),
             resolved: resolved_in.clone(),
@@ -1088,19 +1532,21 @@ fn paginate_pass_from<B: LayoutBlockLike>(
     }
 
     let resolved = std::mem::take(&mut pager.resolved_out);
-    let body_fragments = std::mem::take(&mut pager.body_fragments);
     let checkpoints = std::mem::take(&mut pager.checkpoints);
     let stopped_at = pager.stopped_at;
-    let (pages, outlines, last_flow_space) = if stopped_at.is_some() {
+    let (pages, outlines, last_flow_space, furniture_failure) = if stopped_at.is_some() {
         (
             std::mem::take(&mut pager.pages),
             std::mem::take(&mut pager.outlines),
             pager.page_flow_spaces.last().copied(),
+            pager.furniture_failure.take(),
         )
     } else {
         pager.flush()
     };
+    let body_fragments = std::mem::take(&mut pager.body_fragments);
     PassResult {
+        furniture_failure,
         pages,
         outlines,
         body_fragments,
@@ -1272,6 +1718,7 @@ fn paint_flowed_table_row(
         table_x,
         row_y,
         &pager.geometry,
+        &pager.furniture_geometry,
         pager.page_number,
         table.borders.as_ref(),
         table.bidi_visual,
@@ -1335,8 +1782,17 @@ struct Pager<'a> {
     /// The section as authored, before a page mirrors it or a track narrows it.
     section_geometry: PageGeometry,
     /// The page being built, mirrored for its displayed number, at full text
-    /// measure. Headers, footers and page furniture are drawn against this.
+    /// measure. Its top and bottom margins are moved clear of the header and
+    /// footer the page draws, so the body band and whatever is placed
+    /// against the text margins start from these.
     page_geometry: PageGeometry,
+    /// The same page with the section's own margins. Headers, footers and
+    /// page borders are drawn against this.
+    furniture_geometry: PageGeometry,
+    prepared_header: Option<PreparedFurniture>,
+    prepared_footer: Option<PreparedFurniture>,
+    pending_furniture_failure: Option<String>,
+    furniture_failure: Option<FurnitureFailure>,
     /// Column tracks of the page being built, left to right. Empty for a
     /// single-column section, which never leaves the untouched path.
     tracks: Vec<ColumnTrack>,
@@ -1439,6 +1895,11 @@ impl<'a> Pager<'a> {
             content_height: geometry.content_height(),
             section_geometry: geometry.clone(),
             page_geometry: geometry.clone(),
+            furniture_geometry: geometry.clone(),
+            prepared_header: None,
+            prepared_footer: None,
+            pending_furniture_failure: None,
+            furniture_failure: None,
             tracks: Vec::new(),
             track_index: 0,
             numbered_lines: Vec::new(),
@@ -1480,15 +1941,56 @@ impl<'a> Pager<'a> {
 
     /// Resolve the geometry of the page now being built.
     ///
-    /// A section that neither mirrors its margins nor declares column tracks
-    /// gets its own geometry back unchanged, which is the path every existing
-    /// document takes.
+    /// A section that neither mirrors its margins nor declares column tracks,
+    /// and whose header and footer stay within its margins, gets its own
+    /// geometry back unchanged, which is the path most documents take.
     fn begin_page(&mut self) {
         self.track_index = 0;
         let mut page = self.section_geometry.without_columns();
         if self.section_geometry.mirror_margins && self.header_page_number.is_multiple_of(2) {
             std::mem::swap(&mut page.margin_left, &mut page.margin_right);
         }
+        // A negative top or bottom margin is laid out at its absolute value.
+        page.margin_top = page.margin_top.abs();
+        page.margin_bottom = page.margin_bottom.abs();
+        self.furniture_geometry = page.clone();
+        self.prepared_header = None;
+        self.prepared_footer = None;
+        self.pending_furniture_failure = None;
+        if let Some(hf) = self.header_footer {
+            let variant = self.story_variant(hf);
+            for footer in [false, true] {
+                let blocks = if footer {
+                    hf.footer(variant)
+                } else {
+                    hf.header(variant)
+                };
+                let facts = self.header_footer_semantics.map(|facts| {
+                    if footer {
+                        facts.footer(variant)
+                    } else {
+                        facts.header(variant)
+                    }
+                });
+                match prepare_furniture(blocks, facts, &self.furniture_geometry, footer, self.fm) {
+                    Ok(prepared) => {
+                        if footer {
+                            self.prepared_footer = Some(prepared);
+                        } else {
+                            self.prepared_header = Some(prepared);
+                        }
+                    }
+                    Err(reason) => {
+                        self.pending_furniture_failure = Some(format!(
+                            "{}: {reason}",
+                            if footer { "footer" } else { "header" }
+                        ));
+                    }
+                }
+            }
+        }
+        self.clear_header_and_footer(&mut page);
+        self.content_height = page.content_height();
         let shift = page.margin_left - self.section_geometry.margin_left;
         self.tracks = self
             .section_geometry
@@ -1506,6 +2008,28 @@ impl<'a> Pager<'a> {
             self.next_line_number = numbering.start;
         }
         self.apply_active_track();
+    }
+
+    /// Move the body band of `page` clear of its header and footer.
+    ///
+    /// Word starts the body below a header that reaches past the top margin,
+    /// and ends it above a footer that reaches past the bottom margin. Only
+    /// the stories' flow counts, so an anchored drawing pushes nothing. A
+    /// negative `w:top` or `w:bottom` asks for that margin exactly, and the
+    /// header or footer may then overlap the body.
+    fn clear_header_and_footer(&self, page: &mut PageGeometry) {
+        if self.section_geometry.margin_top >= 0.0
+            && let Some(prepared) = &self.prepared_header
+            && prepared.height > 0.0
+        {
+            page.margin_top = page.margin_top.max(prepared.origin + prepared.height);
+        }
+        if self.section_geometry.margin_bottom >= 0.0
+            && let Some(prepared) = &self.prepared_footer
+            && prepared.height > 0.0
+        {
+            page.margin_bottom = page.margin_bottom.max(page.page_height - prepared.origin);
+        }
     }
 
     /// Narrow the body geometry to the active column track.
@@ -1820,26 +2344,13 @@ impl<'a> Pager<'a> {
             .iter()
             .filter(|a| a.wrap != WrapType::None)
             .map(|a| PlacedWrap {
-                rect: Rect {
-                    x: resolve_anchor_h(
-                        a.rel_h,
-                        a.off_h,
-                        a.align_h,
-                        a.width,
-                        &self.geometry,
-                        indent_left,
-                    ),
-                    y: resolve_anchor_v(
-                        a.rel_v,
-                        a.off_v,
-                        a.align_v,
-                        a.height,
-                        &self.geometry,
-                        para_top,
-                    ),
-                    width: a.width,
-                    height: a.height,
-                },
+                rect: anchored_rect(
+                    a,
+                    &self.furniture_geometry,
+                    &self.geometry,
+                    para_top,
+                    indent_left,
+                ),
                 wrap: a.wrap,
                 dist_top: a.dist_top,
                 dist_bottom: a.dist_bottom,
@@ -1903,6 +2414,7 @@ impl<'a> Pager<'a> {
                             table.table_width,
                             table.content_height(),
                             &self.geometry,
+                            &self.furniture_geometry,
                             0.0,
                         );
                         settle_float(&mut candidate, floating.overlap_allowed, &floats);
@@ -1954,28 +2466,13 @@ impl<'a> Pager<'a> {
         block_idx: usize,
     ) {
         for (anchor_idx, a) in anchored.iter().enumerate() {
-            let x = resolve_anchor_h(
-                a.rel_h,
-                a.off_h,
-                a.align_h,
-                a.width,
-                &self.geometry,
-                indent_left,
-            );
-            let y = resolve_anchor_v(
-                a.rel_v,
-                a.off_v,
-                a.align_v,
-                a.height,
+            let rect = anchored_rect(
+                a,
+                &self.furniture_geometry,
                 &self.geometry,
                 para_top,
+                indent_left,
             );
-            let rect = Rect {
-                x,
-                y,
-                width: a.width,
-                height: a.height,
-            };
 
             if a.wrap != WrapType::None {
                 let placed = PlacedWrap {
@@ -2022,7 +2519,14 @@ impl<'a> Pager<'a> {
     ) {
         let width = table.table_width;
         let height = table.content_height();
-        let mut placed = floating_wrap(floating, width, height, &self.geometry, para_top);
+        let mut placed = floating_wrap(
+            floating,
+            width,
+            height,
+            &self.geometry,
+            &self.furniture_geometry,
+            para_top,
+        );
         settle_float(&mut placed, floating.overlap_allowed, &self.page_floats);
 
         // A float that runs past the bottom of the body moves whole to the next
@@ -2040,7 +2544,14 @@ impl<'a> Pager<'a> {
             && placed.rect.y + height > self.geometry.margin_top + self.available_height() + 0.01
         {
             self.finish_page();
-            placed = floating_wrap(floating, width, height, &self.geometry, self.cursor_y);
+            placed = floating_wrap(
+                floating,
+                width,
+                height,
+                &self.geometry,
+                &self.furniture_geometry,
+                self.cursor_y,
+            );
             settle_float(&mut placed, floating.overlap_allowed, &self.page_floats);
         }
 
@@ -2060,6 +2571,7 @@ impl<'a> Pager<'a> {
                 placed.rect.x,
                 row_y,
                 &self.geometry,
+                &self.furniture_geometry,
                 self.page_number,
                 table.borders.as_ref(),
                 table.bidi_visual,
@@ -2363,6 +2875,17 @@ impl<'a> Pager<'a> {
         {
             translate_element_tree(element, 0.0, dy);
         }
+        // Fragments were captured during placement, including the section's
+        // final rotation. Publish the same aligned origin as painted content.
+        let (dx, dy) = self
+            .body_rotation_transform()
+            .map_or((0.0, dy), |transform| (transform.c * dy, transform.d * dy));
+        for (_, fragment) in &mut self.body_fragments {
+            if fragment.physical_page == self.page_number {
+                fragment.x += dx;
+                fragment.y += dy;
+            }
+        }
     }
 
     /// The transform a vertical section's body band is painted through.
@@ -2423,7 +2946,7 @@ impl<'a> Pager<'a> {
 
     /// The section's page border frame, for the page being built.
     fn page_border_elements(&self) -> Vec<PositionedElement> {
-        let Some(frame) = self.page_geometry.page_borders.as_ref() else {
+        let Some(frame) = self.furniture_geometry.page_borders.as_ref() else {
             return Vec::new();
         };
         let draws = match frame.display {
@@ -2434,7 +2957,7 @@ impl<'a> Pager<'a> {
         if !draws {
             return Vec::new();
         }
-        let geometry = &self.page_geometry;
+        let geometry = &self.furniture_geometry;
         let mut elements = Vec::new();
         match frame.offset_from {
             ST_PageBorderOffset::Text => {
@@ -2486,7 +3009,29 @@ impl<'a> Pager<'a> {
         elements
     }
 
+    /// The header and footer variant Word selects for the page being built.
+    ///
+    /// A title page takes its first variant and, when the document turns
+    /// even and odd headers on, an even displayed page takes its even
+    /// variant. A selected variant stays selected when it is blank.
+    fn story_variant(&self, hf: &HeaderFooterContent) -> StoryVariant {
+        if self.is_first_page && self.title_pg {
+            StoryVariant::First
+        } else if hf.even_headers_active && self.header_page_number.is_multiple_of(2) {
+            StoryVariant::Even
+        } else {
+            StoryVariant::Default
+        }
+    }
+
     fn finish_page(&mut self) {
+        if let Some(reason) = self.pending_furniture_failure.take() {
+            self.furniture_failure.get_or_insert(FurnitureFailure {
+                section: self.page_member.unwrap_or(self.active_member),
+                page: self.page_number,
+                reason,
+            });
+        }
         if self.advance_column_track() {
             return;
         }
@@ -2496,9 +3041,12 @@ impl<'a> Pager<'a> {
         self.draw_line_numbers();
         self.apply_vertical_alignment();
         self.apply_body_rotation();
+        // Endnotes that follow the body on this page are placed from the
+        // section's top margin, so the band's offset from it is added back.
+        let band_offset = self.page_geometry.margin_top - self.section_geometry.margin_top;
         self.page_flow_spaces.push(PageFlowSpace {
-            body_bottom: self.ink_bottom,
-            note_top: self.content_height - self.reserved_height(),
+            body_bottom: self.ink_bottom + band_offset,
+            note_top: self.content_height - self.reserved_height() + band_offset,
         });
         self.place_page_notes();
         let mut all_elements = Vec::new();
@@ -2515,17 +3063,10 @@ impl<'a> Pager<'a> {
             all_elements.append(&mut page_borders);
         }
 
-        if let Some(hf) = self.header_footer {
-            let watermark = if self.is_first_page && self.title_pg {
-                hf.first_watermark.as_ref()
-            } else if hf.even_headers_active && self.header_page_number.is_multiple_of(2) {
-                hf.even_watermark.as_ref()
-            } else {
-                hf.watermark.as_ref()
-            };
-            if let Some(watermark) = watermark {
-                all_elements.push(PositionedElement::Group(watermark.clone()));
-            }
+        if let Some(hf) = self.header_footer
+            && let Some(watermark) = hf.watermark(self.story_variant(hf))
+        {
+            all_elements.push(PositionedElement::Group(watermark.clone()));
         }
 
         // behindDoc drawings render underneath everything else on the page.
@@ -2534,88 +3075,41 @@ impl<'a> Pager<'a> {
         let mut furniture_behind = Vec::new();
         let mut furniture_front = Vec::new();
 
-        if let Some(hf) = self.header_footer {
-            // Choose header blocks: first-page or default
-            let header_blocks = if self.is_first_page && self.title_pg {
-                &hf.first_header_blocks
-            } else if hf.even_headers_active && self.header_page_number.is_multiple_of(2) {
-                &hf.even_header_blocks
-            } else {
-                &hf.header_blocks
-            };
-            let header_directions = self.header_footer_semantics.map(|semantics| {
-                if self.is_first_page && self.title_pg {
-                    semantics.first_header_directions.as_slice()
-                } else if hf.even_headers_active && self.header_page_number.is_multiple_of(2) {
-                    semantics.even_header_directions.as_slice()
-                } else {
-                    semantics.header_directions.as_slice()
-                }
-            });
-            if !header_blocks.is_empty() {
-                let header_y = self.page_geometry.header_distance;
-                render_hf_blocks(
-                    header_blocks,
-                    header_directions,
-                    &self.page_geometry,
-                    header_y,
-                    self.page_number,
-                    (
-                        &mut all_elements,
-                        &mut furniture_behind,
-                        &mut furniture_front,
-                    ),
-                    self.media,
-                );
-            }
+        if let (Some(hf), Some(prepared)) = (self.header_footer, &self.prepared_header) {
+            let variant = self.story_variant(hf);
+            render_hf_blocks(
+                prepared,
+                self.header_footer_semantics
+                    .map(|facts| facts.header(variant)),
+                &self.furniture_geometry,
+                self.page_number,
+                (
+                    &mut all_elements,
+                    &mut furniture_behind,
+                    &mut furniture_front,
+                ),
+                self.media,
+            );
         }
 
         self.draw_column_separators(&mut all_elements);
         all_elements.append(&mut self.elements);
 
-        if let Some(hf) = self.header_footer {
-            // Choose footer blocks: first-page or default
-            let footer_blocks = if self.is_first_page && self.title_pg {
-                &hf.first_footer_blocks
-            } else if hf.even_headers_active && self.header_page_number.is_multiple_of(2) {
-                &hf.even_footer_blocks
-            } else {
-                &hf.footer_blocks
-            };
-            let footer_directions = self.header_footer_semantics.map(|semantics| {
-                if self.is_first_page && self.title_pg {
-                    semantics.first_footer_directions.as_slice()
-                } else if hf.even_headers_active && self.header_page_number.is_multiple_of(2) {
-                    semantics.even_footer_directions.as_slice()
-                } else {
-                    semantics.footer_directions.as_slice()
-                }
-            });
-            if !footer_blocks.is_empty() {
-                let footer_height: f64 = footer_blocks
-                    .iter()
-                    .map(|b| b.content_height())
-                    .sum::<f64>()
-                    + footer_directions.map_or(0.0, |values| {
-                        values.iter().map(|value| value.1).sum::<f64>()
-                    });
-                let footer_y = self.page_geometry.page_height
-                    - self.page_geometry.footer_distance
-                    - footer_height;
-                render_hf_blocks(
-                    footer_blocks,
-                    footer_directions,
-                    &self.page_geometry,
-                    footer_y,
-                    self.page_number,
-                    (
-                        &mut all_elements,
-                        &mut furniture_behind,
-                        &mut furniture_front,
-                    ),
-                    self.media,
-                );
-            }
+        if let (Some(hf), Some(prepared)) = (self.header_footer, &self.prepared_footer) {
+            let variant = self.story_variant(hf);
+            render_hf_blocks(
+                prepared,
+                self.header_footer_semantics
+                    .map(|facts| facts.footer(variant)),
+                &self.furniture_geometry,
+                self.page_number,
+                (
+                    &mut all_elements,
+                    &mut furniture_behind,
+                    &mut furniture_front,
+                ),
+                self.media,
+            );
         }
 
         all_elements.splice(
@@ -2686,7 +3180,14 @@ impl<'a> Pager<'a> {
         }
     }
 
-    fn flush(mut self) -> (Vec<PageFrame>, Vec<OutlineEntry>, Option<PageFlowSpace>) {
+    fn flush(
+        &mut self,
+    ) -> (
+        Vec<PageFrame>,
+        Vec<OutlineEntry>,
+        Option<PageFlowSpace>,
+        Option<FurnitureFailure>,
+    ) {
         // Always create at least one page
         if self.has_content() || self.pages.is_empty() {
             self.finish_page_outright();
@@ -2711,7 +3212,12 @@ impl<'a> Pager<'a> {
             }
         }
         let last_flow_space = self.page_flow_spaces.last().copied();
-        (self.pages, self.outlines, last_flow_space)
+        (
+            std::mem::take(&mut self.pages),
+            std::mem::take(&mut self.outlines),
+            last_flow_space,
+            self.furniture_failure.take(),
+        )
     }
 }
 
@@ -3024,6 +3530,7 @@ fn draw_note(
         render_paragraph_lines(
             painted_lines,
             ParagraphView {
+                line_gaps: &[],
                 border_group_before: false,
                 block: &paragraph.block,
                 semantics: None,
@@ -3078,6 +3585,55 @@ fn draw_note(
 
 /// Append the document's endnotes as pages after the last body page.
 ///
+/// Final section source for fresh endnote pages. Reused body pages already own
+/// their prepared furniture. Continuations use the same Pager preparation and
+/// paint authority as body/footnote pages, with continued physical/display ids.
+pub(crate) struct EndnoteFurniture<'a> {
+    pub section: &'a SharedSection,
+    pub section_index: usize,
+    pub fm: &'a FontManager,
+    pub media: &'a HashMap<MediaId, ImageData>,
+}
+
+impl<'a> EndnoteFurniture<'a> {
+    fn page(
+        &self,
+        page: usize,
+        displayed: usize,
+        notes: &'a NoteRegistry,
+        resolved: &'a ResolvedWraps,
+    ) -> Result<Pager<'a>, FurnitureFailure> {
+        // Endnotes retain single-column upright top flow. Establish that
+        // context before Pager derives its effective band and transforms.
+        let mut geometry = self.section.geometry.without_columns();
+        geometry.vertical_alignment = None;
+        geometry.body_rotation = None;
+        let mut pager = Pager::new(
+            geometry,
+            self.section.header_footer.as_ref(),
+            self.section.header_footer_semantics.as_ref(),
+            self.section.title_pg,
+            self.section.footnotes_beneath_text,
+            self.media,
+            notes,
+            self.fm,
+            resolved,
+            page,
+            displayed,
+            false,
+            None,
+        );
+        if let Some(reason) = pager.pending_furniture_failure.take() {
+            return Err(FurnitureFailure {
+                section: self.section_index,
+                page,
+                reason,
+            });
+        }
+        Ok(pager)
+    }
+}
+
 /// Endnotes are flow content read at the end, not marginalia, so they start at
 /// the top of a fresh page and carry no separator rule. There is no body text
 /// on these pages for a rule to divide them from.
@@ -3106,7 +3662,7 @@ pub fn append_endnote_pages(
         });
     }
 
-    append_ordered_endnote_pages(pages, &ordered, notes, geometry, 0, 1, None);
+    let _ = append_ordered_endnote_pages(pages, &ordered, notes, geometry, 0, 1, None, None);
 }
 
 /// Flow document-end endnotes into the measured free band of the final body page.
@@ -3116,12 +3672,16 @@ pub(crate) fn append_endnote_pages_at_document_end(
     geometry: PageGeometry,
     flow_space: Option<PageFlowSpace>,
     excluded: &[NoteRef],
-) {
+    furniture: Option<&EndnoteFurniture<'_>>,
+) -> Result<(), FurnitureFailure> {
     let ordered = collect_endnote_refs(pages, notes, geometry.content_width())
         .into_iter()
         .filter(|reference| !excluded.contains(reference))
         .collect::<Vec<_>>();
-    append_ordered_endnote_pages(pages, &ordered, notes, geometry, 0, 1, flow_space);
+    append_ordered_endnote_pages(
+        pages, &ordered, notes, geometry, 0, 1, flow_space, furniture,
+    )?;
+    Ok(())
 }
 
 fn collect_endnote_refs(pages: &[PageFrame], notes: &NoteRegistry, width: f64) -> Vec<NoteRef> {
@@ -3153,7 +3713,8 @@ pub(crate) fn append_endnote_pages_for_references(
     preceding_page_count: usize,
     next_displayed_page_number: usize,
     flow_space: Option<PageFlowSpace>,
-) {
+    furniture: Option<&EndnoteFurniture<'_>>,
+) -> Result<(), FurnitureFailure> {
     let mut ordered = Vec::new();
     for &note in references {
         if note.stream == NoteStream::Endnote
@@ -3172,20 +3733,23 @@ pub(crate) fn append_endnote_pages_for_references(
         preceding_page_count,
         next_displayed_page_number,
         flow_space,
-    );
+        furniture,
+    )?;
+    Ok(())
 }
 
 fn append_ordered_endnote_pages(
     pages: &mut Vec<PageFrame>,
     ordered: &[NoteRef],
     notes: &NoteRegistry,
-    geometry: PageGeometry,
+    mut geometry: PageGeometry,
     preceding_page_count: usize,
     next_displayed_page_number: usize,
     flow_space: Option<PageFlowSpace>,
-) -> Option<PageFlowSpace> {
+    furniture: Option<&EndnoteFurniture<'_>>,
+) -> Result<Option<PageFlowSpace>, FurnitureFailure> {
     if ordered.is_empty() {
-        return flow_space;
+        return Ok(flow_space);
     }
 
     let authored_separator = notes.get_special(
@@ -3209,6 +3773,25 @@ fn append_ordered_endnote_pages(
                         <= space.note_top
                 })
     });
+    let mut page_number = pages.last().map_or(preceding_page_count + 1, |page| {
+        page.page_number + usize::from(!reuse_last)
+    });
+    let mut displayed_page_number = pages.last().map_or(next_displayed_page_number, |page| {
+        page.displayed_page_number
+            .saturating_add(usize::from(!reuse_last))
+    });
+    let authored_margin_top = geometry.margin_top;
+    let resolved = ResolvedWraps::new();
+    let mut current_pager = if reuse_last {
+        None
+    } else {
+        furniture
+            .map(|context| context.page(page_number, displayed_page_number, notes, &resolved))
+            .transpose()?
+    };
+    if let Some(pager) = &current_pager {
+        geometry = pager.geometry.clone();
+    }
     let mut content_height = if reuse_last {
         flow_space.map_or(geometry.content_height(), |space| space.note_top)
     } else {
@@ -3275,33 +3858,38 @@ fn append_ordered_endnote_pages(
         );
         cursor_y += separator_height + NOTE_SEPARATOR_OFFSET;
     }
-    let mut page_number = pages.last().map_or(preceding_page_count + 1, |page| {
-        page.page_number + usize::from(!reuse_last)
-    });
-    let mut displayed_page_number = pages.last().map_or(next_displayed_page_number, |page| {
-        page.displayed_page_number
-            .saturating_add(usize::from(!reuse_last))
-    });
     let mut reuse_pending = reuse_last;
 
-    let mut flush = |elements: &mut Vec<PositionedElement>, page_number: &mut usize| {
+    let page_width = geometry.page_width;
+    let page_height = geometry.page_height;
+    let mut flush = |elements: &mut Vec<PositionedElement>,
+                     page_number: &mut usize,
+                     displayed_page_number: &mut usize,
+                     current_pager: &mut Option<Pager<'_>>| {
         if reuse_pending {
             if let Some(page) = pages.last_mut() {
                 page.elements.append(elements);
             }
             reuse_pending = false;
+        } else if let Some(mut pager) = current_pager.take() {
+            pager.elements = std::mem::take(elements);
+            pager.has_content_flag = true;
+            pager.finish_page_outright();
+            if let Some(page) = pager.pages.into_iter().next() {
+                pages.push(page);
+            }
         } else {
             let mut page = PageFrame::new(
                 *page_number,
-                geometry.page_width,
-                geometry.page_height,
+                page_width,
+                page_height,
                 std::mem::take(elements),
             );
-            page.displayed_page_number = displayed_page_number;
+            page.displayed_page_number = *displayed_page_number;
             pages.push(page);
         }
         *page_number += 1;
-        displayed_page_number = displayed_page_number.saturating_add(1);
+        *displayed_page_number = displayed_page_number.saturating_add(1);
     };
 
     for &note_ref in ordered {
@@ -3343,8 +3931,21 @@ fn append_ordered_endnote_pages(
                 if cursor_y == 0.0 {
                     count = 1;
                 } else {
-                    flush(&mut elements, &mut page_number);
+                    flush(
+                        &mut elements,
+                        &mut page_number,
+                        &mut displayed_page_number,
+                        &mut current_pager,
+                    );
                     cursor_y = 0.0;
+                    current_pager = furniture
+                        .map(|context| {
+                            context.page(page_number, displayed_page_number, notes, &resolved)
+                        })
+                        .transpose()?;
+                    if let Some(pager) = &current_pager {
+                        geometry = pager.geometry.clone();
+                    }
                     content_height = geometry.content_height();
                     if let Some((special, special_render)) = notes.get_special(
                         NoteStream::Endnote,
@@ -3411,12 +4012,18 @@ fn append_ordered_endnote_pages(
     }
 
     if !elements.is_empty() {
-        flush(&mut elements, &mut page_number);
+        flush(
+            &mut elements,
+            &mut page_number,
+            &mut displayed_page_number,
+            &mut current_pager,
+        );
     }
-    Some(PageFlowSpace {
-        body_bottom: cursor_y,
-        note_top: content_height,
-    })
+    let offset = geometry.margin_top - authored_margin_top;
+    Ok(Some(PageFlowSpace {
+        body_bottom: cursor_y + offset,
+        note_top: content_height + offset,
+    }))
 }
 
 fn table_note_references(table: &crate::table::TableBlock) -> Vec<NoteRef> {
@@ -3529,6 +4136,7 @@ fn render_shape_text(
         render_paragraph_lines(
             &para.lines,
             ParagraphView {
+                line_gaps: &[],
                 border_group_before: false,
                 block: para,
                 semantics: None,
@@ -3633,6 +4241,129 @@ fn resolve_anchor_v(
     }
 }
 
+/// Body pagination retains its established two-pass approximation. Selected
+/// furniture must prove reservations against its final line bands before paint.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WrapReflowPolicy {
+    Body,
+    Furniture,
+}
+
+#[derive(Debug, PartialEq)]
+struct LineReservations {
+    offset_top: f64,
+    prefix: Vec<f64>,
+    suffix: Vec<f64>,
+    before_lines: Vec<f64>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn line_reservations(
+    para: &ParagraphBlock,
+    lines: &[LayoutLine],
+    wraps: &[PlacedWrap],
+    paragraph_top: f64,
+    top_band: f64,
+    geometry: &PageGeometry,
+    policy: WrapReflowPolicy,
+) -> LineReservations {
+    let mut offset_top: f64 = 0.0;
+    if policy == WrapReflowPolicy::Body {
+        for wrap in wraps
+            .iter()
+            .filter(|wrap| wrap.wrap == WrapType::TopAndBottom)
+        {
+            if wrap.keep_out_top() <= paragraph_top + 1.0 && wrap.keep_out_bottom() > paragraph_top
+            {
+                offset_top = offset_top.max(wrap.keep_out_bottom() - paragraph_top);
+            }
+        }
+    }
+    let text_left = geometry.margin_left + para.indent_left;
+    let text_right = geometry.page_width - geometry.margin_right - para.indent_right;
+    let mut prefix = Vec::new();
+    let mut suffix = Vec::new();
+    let mut before_lines = Vec::new();
+    let mut line_top = paragraph_top + offset_top + top_band;
+    // These are the owning line breaker's restored Word-height lines, without
+    // synthetic gaps. Earlier lines stay above a later object. Only a content
+    // band that intersects it advances to the next clear line position.
+    for (index, line) in lines.iter().enumerate() {
+        if policy == WrapReflowPolicy::Furniture {
+            let before = line_top;
+            // Every sweep moves below at least one newly reached obstacle.
+            // Reversed order and touching chains need at most this many sweeps.
+            for _ in 0..wraps.len() {
+                let previous = line_top;
+                for wrap in wraps
+                    .iter()
+                    .filter(|wrap| wrap.wrap == WrapType::TopAndBottom)
+                {
+                    if wrap.keep_out_top() < line_top + line.height
+                        && wrap.keep_out_bottom() > line_top
+                    {
+                        line_top = line_top.max(wrap.keep_out_bottom());
+                    }
+                }
+                if line_top == previous {
+                    break;
+                }
+            }
+            let gap = line_top - before;
+            if index == 0 {
+                offset_top = gap;
+            } else if gap > 0.0 {
+                before_lines.resize(index + 1, 0.0);
+                before_lines[index] = gap;
+            }
+        }
+        for wrap in wraps
+            .iter()
+            .filter(|wrap| wrap.wrap != WrapType::TopAndBottom)
+        {
+            if line_top + line.height <= wrap.keep_out_top() || line_top >= wrap.keep_out_bottom() {
+                continue;
+            }
+            let on_the_left = wrap.rect.x + wrap.rect.width / 2.0 < (text_left + text_right) / 2.0;
+            let reserve = if on_the_left {
+                (wrap.rect.x + wrap.rect.width + wrap.dist_right - text_left).max(0.0)
+            } else {
+                (text_right - (wrap.rect.x - wrap.dist_left)).max(0.0)
+            };
+            if reserve <= 0.0 {
+                continue;
+            }
+            let target = if on_the_left {
+                &mut prefix
+            } else {
+                &mut suffix
+            };
+            if target.len() <= index {
+                target.resize(index + 1, 0.0);
+            }
+            if policy == WrapReflowPolicy::Furniture {
+                // One side's keep-out envelope is a union, including tables
+                // whose existing policy explicitly permits overlap.
+                target[index] = f64::max(target[index], reserve);
+            } else {
+                target[index] += reserve;
+            }
+        }
+        line_top += line.height;
+    }
+    LineReservations {
+        offset_top,
+        prefix,
+        suffix,
+        before_lines,
+    }
+}
+
+struct WrapReflow {
+    paragraph: ParagraphBlock,
+    before_lines: Vec<f64>,
+}
+
 /// Re-break a paragraph so its text flows around the wrapping drawings that
 /// share its band of the page.
 ///
@@ -3646,12 +4377,22 @@ fn reflow_around_wraps(
     para_top: f64,
     geometry: &PageGeometry,
     fm: &FontManager,
-) -> Option<ParagraphBlock> {
-    let reflow = para.reflow.as_ref()?;
-    let reflow_items = reflow.items.as_slice();
+    policy: WrapReflowPolicy,
+) -> Result<Option<WrapReflow>, String> {
     if wraps.is_empty() {
-        return None;
+        return Ok(None);
     }
+    let top = geometry.margin_top + para_top;
+    if !wraps.iter().any(|wrap| {
+        wrap.keep_out_bottom() > top && wrap.keep_out_top() < top + para.content_height()
+    }) {
+        return Ok(None);
+    }
+    let reflow = para
+        .reflow
+        .as_ref()
+        .ok_or_else(|| "intersecting furniture flow has no retained line-break input".to_owned())?;
+    let reflow_items = reflow.items.as_slice();
 
     let mut lines = para.lines.clone();
     let (top_band, bottom_band) = para.borders.as_ref().map_or((0.0, 0.0), |borders| {
@@ -3671,66 +4412,31 @@ fn reflow_around_wraps(
         last.height -= bottom_band;
     }
     let mut offset_top = 0.0;
+    let mut line_gaps = Vec::new();
 
-    // Two passes. The first reserves against the paragraph as laid out, the
-    // second against the heights the first produced, which is what settles a
-    // drawing that only overlaps once the text has moved.
-    for _ in 0..2 {
-        let mut prefix: Vec<f64> = Vec::new();
-        let mut suffix: Vec<f64> = Vec::new();
-
-        // Vertical clearance is resolved first, because it moves the lines the
-        // horizontal reservations are then measured against.
-        let paragraph_top = geometry.margin_top + para_top;
-        let mut next_offset_top: f64 = 0.0;
-        for wrap in wraps.iter().filter(|w| w.wrap == WrapType::TopAndBottom) {
-            if wrap.keep_out_top() <= paragraph_top + 1.0 && wrap.keep_out_bottom() > paragraph_top
-            {
-                next_offset_top = next_offset_top.max(wrap.keep_out_bottom() - paragraph_top);
-            }
+    // Furniture has a separate per-paragraph32-rebreak work guard. It is
+    // distinct from the outer page's32 candidate preparations and does not
+    // claim a native or performance budget. Every rebreak uses original items.
+    let passes = if policy == WrapReflowPolicy::Furniture {
+        32
+    } else {
+        2
+    };
+    let mut seen = Vec::new();
+    let mut consistent = policy == WrapReflowPolicy::Body;
+    for pass in 0..passes {
+        let required = line_reservations(para, &lines, wraps, top, top_band, geometry, policy);
+        if required.prefix.is_empty()
+            && required.suffix.is_empty()
+            && required.offset_top == 0.0
+            && required.before_lines.is_empty()
+            && (policy == WrapReflowPolicy::Body || pass == 0)
+        {
+            return Ok(None);
         }
-
-        for wrap in wraps.iter().filter(|w| w.wrap != WrapType::TopAndBottom) {
-            // Square, and the outline wraps approximated as square.
-            let text_left = geometry.margin_left + para.indent_left;
-            let text_right = geometry.page_width - geometry.margin_right - para.indent_right;
-            let drawing_centre = wrap.rect.x + wrap.rect.width / 2.0;
-            let on_the_left = drawing_centre < (text_left + text_right) / 2.0;
-
-            let reserve = if on_the_left {
-                (wrap.rect.x + wrap.rect.width + wrap.dist_right - text_left).max(0.0)
-            } else {
-                (text_right - (wrap.rect.x - wrap.dist_left)).max(0.0)
-            };
-            if reserve <= 0.0 {
-                continue;
-            }
-
-            let mut line_top = geometry.margin_top + para_top + next_offset_top + top_band;
-            for (index, line) in lines.iter().enumerate() {
-                let line_bottom = line_top + line.height;
-                if line_bottom > wrap.keep_out_top() && line_top < wrap.keep_out_bottom() {
-                    let target = if on_the_left {
-                        &mut prefix
-                    } else {
-                        &mut suffix
-                    };
-                    if target.len() <= index {
-                        target.resize(index + 1, 0.0);
-                    }
-                    target[index] += reserve;
-                }
-                line_top = line_bottom;
-            }
-        }
-
-        if prefix.is_empty() && suffix.is_empty() && next_offset_top == 0.0 {
-            return None;
-        }
-
         let mut params = reflow.params.clone();
-        params.line_prefix_widths = prefix;
-        params.line_suffix_widths = suffix;
+        params.line_prefix_widths = required.prefix.clone();
+        params.line_suffix_widths = required.suffix.clone();
 
         let reflowed = if reflow_direction != oxml_layout::TextDirection::Auto
             || reflow_items.iter().any(|item| {
@@ -3747,9 +4453,8 @@ fn reflow_around_wraps(
         } else {
             break_into_lines(reflow_items, &params, fm)
         };
-        let Ok(mut reflowed) = reflowed else {
-            return None;
-        };
+        let mut reflowed =
+            reflowed.map_err(|error| format!("furniture line reflow failed: {error}"))?;
         // The re-break went through the generic line breaker, which knows
         // nothing about Word's line measure or the section grid, so both are
         // applied again over its result, as they were to the first break. It
@@ -3763,15 +4468,41 @@ fn reflow_around_wraps(
             fm,
             reflow.paragraph_mark,
         );
+        if policy == WrapReflowPolicy::Furniture {
+            let actual = line_reservations(para, &reflowed, wraps, top, top_band, geometry, policy);
+            // Positive final-band validation: exactly these reservations were
+            // supplied to the owning line breaker. Equal repeated output alone
+            // cannot certify a newly reached obstacle or transitive clearance.
+            if actual == required {
+                lines = reflowed;
+                offset_top = required.offset_top;
+                line_gaps = required.before_lines;
+                consistent = true;
+                break;
+            }
+            let state = format!("{reflowed:?}{actual:?}");
+            if seen.contains(&state) {
+                return Err("furniture line reservations repeat a non-stable state".into());
+            }
+            seen.push(state);
+        }
         lines = reflowed;
-        offset_top = next_offset_top;
+        offset_top = required.offset_top;
+    }
+    if !consistent {
+        return Err("furniture line reservations did not stabilize within32 rebreaks".into());
     }
 
     let mut adjusted = para.clone();
     adjusted.lines = lines;
     adjusted.content_offset_top = offset_top;
+    // Raw Word metrics stay unchanged. The prepared furniture owner carries
+    // proved later gaps separately to both occupied-band paint and pricing.
     adjusted.add_border_padding();
-    Some(adjusted)
+    Ok(Some(WrapReflow {
+        paragraph: adjusted,
+        before_lines: line_gaps,
+    }))
 }
 
 fn paginate_paragraph<B: LayoutBlockLike>(
@@ -3800,13 +4531,17 @@ fn paginate_paragraph<B: LayoutBlockLike>(
                     para_top,
                     &pager.geometry,
                     pager.fm,
+                    WrapReflowPolicy::Body,
                 )
+                .ok()
+                .flatten()
             })
             .flatten()
     };
-    let para = reflowed.as_ref().map_or(para, |block| ParagraphView {
+    let para = reflowed.as_ref().map_or(para, |reflowed| ParagraphView {
+        line_gaps: &reflowed.before_lines,
         border_group_before: para.border_group_before,
-        block,
+        block: &reflowed.paragraph,
         semantics: para.semantics,
         reflow_direction: para.reflow_direction,
         reflow_allowed: false,
@@ -4165,6 +4900,7 @@ fn render_para_split(
         };
         render_para_split(
             ParagraphView {
+                line_gaps: &[],
                 border_group_before: para.border_group_before,
                 block: &temp_para,
                 semantics: para.semantics,
@@ -4334,6 +5070,7 @@ fn render_paragraph_lines(
                 y: geometry.margin_top + y + top_padding,
                 width: geometry.content_width() - para.indent_left - para.indent_right,
                 height: lines.iter().map(|line| line.height).sum::<f64>()
+                    + para.line_gaps.iter().take(lines.len()).sum::<f64>()
                     - top_padding
                     - bottom_padding,
             },
@@ -4342,6 +5079,7 @@ fn render_paragraph_lines(
         );
     }
     for (index, framed_line) in lines.iter().enumerate() {
+        y += para.line_gaps.get(index).copied().unwrap_or(0.0);
         let top = if index == 0 { top_padding } else { 0.0 };
         let bottom = if index + 1 == lines.len() {
             bottom_padding
@@ -4767,7 +5505,7 @@ fn render_paragraph_lines(
             for (position, element) in text_positions.iter().copied().zip(logical_elements) {
                 elements[position] = element;
             }
-            y += line.height;
+            y += line.height + bottom;
             continue;
         }
         let mut leading = Vec::new();
@@ -5295,12 +6033,153 @@ fn render_change_bar_at(
     });
 }
 
-/// Render header/footer blocks.
-fn render_hf_blocks(
+fn frame_rect(
+    properties: &rdocx_oxml::CT_FramePr,
     blocks: &[ParagraphBlock],
-    directions: Option<&[(oxml_layout::TextDirection, f64)]>,
+    facts: &[HeaderFooterBlockSemantics],
     geometry: &PageGeometry,
-    start_y: f64,
+    anchor_top: f64,
+) -> Rect {
+    let width = properties
+        .w
+        .map(|value| value.to_pt())
+        .unwrap_or_else(|| {
+            blocks
+                .iter()
+                .flat_map(|block| &block.lines)
+                .map(|line| line.width)
+                .fold(0.0, f64::max)
+        })
+        .max(0.0);
+    let content_height = blocks
+        .iter()
+        .zip(facts)
+        .map(|(block, facts)| facts.flow_gap + block.content_height())
+        .sum::<f64>()
+        + blocks.last().map_or(0.0, |block| block.space_after);
+    let declared = properties.h.map_or(0.0, |value| value.to_pt());
+    // MS-OE376 2.1.48(e-h): Word's defaults differ from ECMA here.
+    // Imported attributes stay untouched. Zero height always means automatic.
+    let height = if declared == 0.0 {
+        content_height
+    } else {
+        match properties.h_rule.as_deref() {
+            Some("exact") => declared,
+            Some("atLeast") | None => declared.max(content_height),
+            _ => content_height,
+        }
+    };
+    let rel_h = match properties.h_anchor.as_deref() {
+        Some("margin") => ST_RelativeFromH::Margin,
+        None | Some("text" | "column") => ST_RelativeFromH::Column,
+        _ => ST_RelativeFromH::Page,
+    };
+    let rel_v = match properties.v_anchor.as_deref() {
+        Some("margin") => ST_RelativeFromV::Margin,
+        None | Some("text") => ST_RelativeFromV::Paragraph,
+        _ => ST_RelativeFromV::Page,
+    };
+    Rect {
+        x: resolve_anchor_h(
+            rel_h,
+            properties.x.map_or(0.0, |value| value.to_pt()),
+            properties.x_align.as_deref().and_then(AnchorAlignH::parse),
+            width,
+            geometry,
+            0.0,
+        ),
+        y: resolve_anchor_v(
+            rel_v,
+            properties.y.map_or(0.0, |value| value.to_pt()),
+            properties.y_align.as_deref().and_then(|value| match value {
+                "top" => Some(AnchorAlignV::Top),
+                "center" => Some(AnchorAlignV::Center),
+                "bottom" => Some(AnchorAlignV::Bottom),
+                "inside" => Some(AnchorAlignV::Inside),
+                "outside" => Some(AnchorAlignV::Outside),
+                _ => None,
+            }),
+            height,
+            geometry,
+            anchor_top - geometry.margin_top,
+        ),
+        width,
+        height,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_frame_blocks(
+    blocks: &[ParagraphBlock],
+    facts: &[HeaderFooterBlockSemantics],
+    rect: Rect,
+    geometry: &PageGeometry,
+    page_number: usize,
+    elements: &mut Vec<PositionedElement>,
+    behind: &mut Vec<PositionedElement>,
+    front: &mut Vec<PositionedElement>,
+    media: &HashMap<MediaId, ImageData>,
+) {
+    let frame = PageGeometry {
+        margin_left: rect.x,
+        margin_right: geometry.page_width - rect.x - rect.width,
+        margin_top: rect.y,
+        ..geometry.clone()
+    };
+    let mut children = Vec::new();
+    let mut y = 0.0;
+    for (paragraph, facts) in blocks.iter().zip(facts) {
+        y += facts.flow_gap;
+        place_cell_anchored(
+            &paragraph.anchored,
+            geometry,
+            &frame,
+            y,
+            paragraph.indent_left,
+            front,
+            behind,
+            media,
+        );
+        render_paragraph_lines(
+            &paragraph.lines,
+            ParagraphView {
+                line_gaps: &[],
+                border_group_before: false,
+                block: paragraph,
+                semantics: None,
+                reflow_direction: facts.direction,
+                reflow_allowed: true,
+            },
+            &frame,
+            y,
+            (true, true, facts.border_gap),
+            &mut children,
+            media,
+        );
+        render_change_bar(
+            paragraph,
+            rect.y + y - geometry.margin_top,
+            paragraph.content_height(),
+            geometry,
+            page_number,
+            &mut children,
+        );
+        y += paragraph.content_height();
+    }
+    elements.push(PositionedElement::Group(GroupElement {
+        transform: Transform::IDENTITY,
+        clip: None,
+        opacity: 1.0,
+        effects: Vec::new(),
+        children,
+    }));
+}
+
+/// Price and paint only real furniture flow. Positioned owners retain their page context.
+fn render_hf_blocks(
+    prepared: &PreparedFurniture,
+    directions: Option<&[HeaderFooterBlockSemantics]>,
+    geometry: &PageGeometry,
     page_number: usize,
     layers: (
         &mut Vec<PositionedElement>,
@@ -5310,17 +6189,64 @@ fn render_hf_blocks(
     media: &HashMap<MediaId, ImageData>,
 ) {
     let (elements, behind, front) = layers;
-    let mut y = start_y - geometry.margin_top; // Convert to relative
+    let blocks = &prepared.blocks;
     for (index, para) in blocks.iter().enumerate() {
-        let border_gap = directions
-            .and_then(|values| values.get(index))
-            .map_or(0.0, |value| value.1);
-        y += border_gap;
+        let facts = directions.and_then(|values| values.get(index));
+        let y = prepared.starts[index];
+        if let Some(facts) = facts {
+            match &facts.placement {
+                HeaderFooterPlacement::Frame { paragraphs, .. } => {
+                    let end = index + paragraphs;
+                    let frame_facts =
+                        &directions.expect("frame facts accompany blocks")[index..end];
+                    render_frame_blocks(
+                        &blocks[index..end],
+                        frame_facts,
+                        prepared.placements[index].expect("prepared frame"),
+                        geometry,
+                        page_number,
+                        elements,
+                        behind,
+                        front,
+                        media,
+                    );
+                    continue;
+                }
+                HeaderFooterPlacement::FrameContinuation => continue,
+                HeaderFooterPlacement::TableRow {
+                    table,
+                    semantics,
+                    row,
+                } => {
+                    let rect = prepared.placements[index].expect("prepared table row");
+                    render_table_row(
+                        &table.rows[*row],
+                        semantics.rows.get(*row),
+                        &table.col_widths,
+                        rect.x,
+                        rect.y,
+                        geometry,
+                        geometry,
+                        page_number,
+                        table.borders.as_ref(),
+                        table.bidi_visual,
+                        elements,
+                        behind,
+                        media,
+                        *row == 0,
+                        *row + 1 == table.rows.len(),
+                    );
+                    continue;
+                }
+                HeaderFooterPlacement::Flow => {}
+            }
+        }
+        let border_gap = facts.map_or(0.0, |facts| facts.border_gap);
         place_cell_anchored(
             &para.anchored,
             geometry,
             geometry,
-            y,
+            y - geometry.margin_top,
             para.indent_left,
             front,
             behind,
@@ -5329,30 +6255,28 @@ fn render_hf_blocks(
         render_paragraph_lines(
             &para.lines,
             ParagraphView {
+                line_gaps: &prepared.before_lines[index],
                 border_group_before: false,
                 block: para,
                 semantics: None,
-                reflow_direction: directions
-                    .and_then(|directions| directions.get(index))
-                    .map(|value| value.0)
-                    .unwrap_or(oxml_layout::TextDirection::Auto),
+                reflow_direction: facts
+                    .map_or(oxml_layout::TextDirection::Auto, |facts| facts.direction),
                 reflow_allowed: true,
             },
             geometry,
-            y,
+            y - geometry.margin_top,
             (true, true, border_gap),
             elements,
             media,
         );
         render_change_bar(
             para,
-            y,
-            para.content_height(),
+            y - geometry.margin_top,
+            prepared.block_height(index),
             geometry,
             page_number,
             elements,
         );
-        y += para.content_height();
     }
 }
 
@@ -5384,6 +6308,7 @@ pub(crate) fn story_table_rows(
                 &table.col_widths,
                 table.table_indent,
                 0.0,
+                &local_geometry,
                 &local_geometry,
                 1,
                 table.borders.as_ref(),
@@ -5444,6 +6369,7 @@ fn render_table_row(
     table_x: f64,
     row_y: f64,
     geometry: &PageGeometry,
+    written_geometry: &PageGeometry,
     page_number: usize,
     table_borders: Option<&rdocx_oxml::table::CT_TblBorders>,
     bidi: bool,
@@ -5564,6 +6490,7 @@ fn render_table_row(
                     render_paragraph_lines(
                         &paragraph.lines,
                         ParagraphView {
+                            line_gaps: &[],
                             border_group_before: semantics
                                 .is_some_and(|value| value.border_group_before),
                             block: paragraph,
@@ -5626,7 +6553,7 @@ fn render_table_row(
                     let furniture_geometry = upright_band.as_ref().unwrap_or(&cell_geometry);
                     place_cell_anchored(
                         &paragraph.anchored,
-                        geometry,
+                        written_geometry,
                         furniture_geometry,
                         furniture_y,
                         paragraph.indent_left,
@@ -5667,6 +6594,7 @@ fn render_table_row(
                             nested_x,
                             nested_y,
                             geometry,
+                            written_geometry,
                             page_number,
                             table.borders.as_ref(),
                             table.bidi_visual,
@@ -5738,6 +6666,39 @@ fn render_table_row(
     }
 }
 
+fn anchored_rect(
+    anchor: &AnchoredDrawing,
+    page: &PageGeometry,
+    paragraph: &PageGeometry,
+    top: f64,
+    indent: f64,
+) -> Rect {
+    let horizontal = match anchor.rel_h {
+        ST_RelativeFromH::Column | ST_RelativeFromH::Character => paragraph,
+        _ => page,
+    };
+    Rect {
+        x: resolve_anchor_h(
+            anchor.rel_h,
+            anchor.off_h,
+            anchor.align_h,
+            anchor.width,
+            horizontal,
+            indent,
+        ),
+        y: resolve_anchor_v(
+            anchor.rel_v,
+            anchor.off_v,
+            anchor.align_v,
+            anchor.height,
+            page,
+            paragraph.margin_top + top - page.margin_top,
+        ),
+        width: anchor.width,
+        height: anchor.height,
+    }
+}
+
 fn place_cell_anchored(
     anchors: &[AnchoredDrawing],
     page_geometry: &PageGeometry,
@@ -5749,32 +6710,13 @@ fn place_cell_anchored(
     media: &HashMap<MediaId, ImageData>,
 ) {
     for anchor in anchors {
-        let horizontal_geometry = match anchor.rel_h {
-            ST_RelativeFromH::Column | ST_RelativeFromH::Character => cell_geometry,
-            _ => page_geometry,
-        };
-        let x = resolve_anchor_h(
-            anchor.rel_h,
-            anchor.off_h,
-            anchor.align_h,
-            anchor.width,
-            horizontal_geometry,
+        let rect = anchored_rect(
+            anchor,
+            page_geometry,
+            cell_geometry,
+            paragraph_top,
             paragraph_indent,
         );
-        let y = resolve_anchor_v(
-            anchor.rel_v,
-            anchor.off_v,
-            anchor.align_v,
-            anchor.height,
-            page_geometry,
-            paragraph_top,
-        );
-        let rect = Rect {
-            x,
-            y,
-            width: anchor.width,
-            height: anchor.height,
-        };
         let mut produced = anchored_elements(anchor, rect, page_geometry, media);
         if anchor.behind_doc {
             behind_elements.append(&mut produced);
@@ -6404,7 +7346,10 @@ mod tests {
             0.0,
             &PageGeometry::default(),
             &fm,
+            WrapReflowPolicy::Body,
         )
+        .map(|result| result.map(|reflowed| reflowed.paragraph))
+        .unwrap()
         .expect("wrap overlaps the field line");
         let kinds = reflowed.lines[0]
             .items
@@ -6473,6 +7418,7 @@ mod tests {
         render_paragraph_lines(
             &paragraph.lines,
             ParagraphView {
+                line_gaps: &[],
                 border_group_before: false,
                 block: &paragraph,
                 semantics: None,
@@ -6566,6 +7512,7 @@ mod tests {
         render_paragraph_lines(
             &paragraph.lines,
             ParagraphView {
+                line_gaps: &[],
                 border_group_before: false,
                 block: &paragraph,
                 semantics: None,
@@ -6667,6 +7614,7 @@ mod tests {
             render_paragraph_lines(
                 &paragraph.lines,
                 ParagraphView {
+                    line_gaps: &[],
                     border_group_before: false,
                     block: &paragraph,
                     semantics: Some(&semantics),
@@ -6730,6 +7678,7 @@ mod tests {
             render_paragraph_lines(
                 &paragraph.lines,
                 ParagraphView {
+                    line_gaps: &[],
                     border_group_before: false,
                     block: &paragraph,
                     semantics: Some(&semantics),
@@ -6995,6 +7944,7 @@ mod tests {
         render_paragraph_lines(
             &paragraph.lines,
             ParagraphView {
+                line_gaps: &[],
                 border_group_before: false,
                 block: &paragraph,
                 semantics: Some(&semantics),
@@ -7126,6 +8076,7 @@ mod tests {
             render_paragraph_lines(
                 &paragraph.lines,
                 ParagraphView {
+                    line_gaps: &[],
                     border_group_before: false,
                     block: &paragraph,
                     semantics: None,
@@ -7241,6 +8192,7 @@ mod tests {
         render_paragraph_lines(
             &paragraph.lines,
             ParagraphView {
+                line_gaps: &[],
                 border_group_before: false,
                 block: &paragraph,
                 semantics: None,
@@ -7344,6 +8296,7 @@ mod tests {
         render_paragraph_lines(
             &paragraph.lines,
             ParagraphView {
+                line_gaps: &[],
                 border_group_before: false,
                 block: &paragraph,
                 semantics: None,
@@ -7404,6 +8357,7 @@ mod tests {
         render_paragraph_lines(
             &paragraph.lines,
             ParagraphView {
+                line_gaps: &[],
                 border_group_before: false,
                 block: &paragraph,
                 semantics: None,
@@ -8538,6 +9492,7 @@ mod tests {
             10.0,
             20.0,
             &PageGeometry::default(),
+            &PageGeometry::default(),
             0,
             None,
             false,
@@ -9126,6 +10081,424 @@ mod tests {
     }
 
     #[test]
+    fn issue424_furniture_clearance_keeps_decorated_text_and_hit_boxes_in_content_bands() {
+        let mut failures = Vec::new();
+        for (rich, with_source, bordered, footer) in [
+            (false, false, false, false),
+            (false, true, true, true),
+            (true, false, true, false),
+            (true, true, false, true),
+        ] {
+            let border = if bordered {
+                r#"<w:pBdr><w:top w:val="single" w:sz="8" w:space="2"/><w:bottom w:val="single" w:sz="8" w:space="2"/></w:pBdr>"#
+            } else {
+                ""
+            };
+            let rtl = if rich { "<w:rtl/>" } else { "" };
+            let content = if rich {
+                "אבגד flowword ".repeat(100)
+            } else {
+                "flowword ".repeat(100)
+            };
+            let body = format!(
+                r#"<w:p><w:pPr>{border}<w:spacing w:line="240" w:lineRule="exact"/></w:pPr><w:hyperlink r:id="link"><w:r><w:rPr>{rtl}<w:highlight w:val="yellow"/></w:rPr><w:t>{content}</w:t></w:r></w:hyperlink><w:fldSimple w:instr="PAGE"><w:r><w:t>0</w:t></w:r></w:fldSimple></w:p>"#
+            );
+            let mut input = fx233_input(&body);
+            input
+                .hyperlink_urls
+                .insert("link".into(), "https://example.com/clearance".into());
+            let rdocx_oxml::document::BodyContent::Paragraph(p) = &input.document.body.content[0]
+            else {
+                panic!("paragraph")
+            };
+            let mut fm = FontManager::new_deterministic().unwrap();
+            let node = oxml_layout::SourceNodeId::new(42).unwrap();
+            let paragraph = crate::engine::layout_paragraph_with_source(
+                p,
+                468.0,
+                &input.styles,
+                &input,
+                &MediaRegistry::new(&input.images),
+                &mut fm,
+                &mut crate::style_resolver::NumberingState::new(),
+                &mut Vec::new(),
+                with_source.then_some(node),
+            )
+            .unwrap();
+            let first_ascent = paragraph.lines[0].ascent;
+            let frame = |width: i32, y: i32, wrap: &str| HeaderFooterBlockSemantics {
+                placement: HeaderFooterPlacement::Frame {
+                    properties: Box::new(rdocx_oxml::CT_FramePr {
+                        w: Some(rdocx_oxml::Twips(width)),
+                        h: Some(rdocx_oxml::Twips(1200)),
+                        h_rule: Some("exact".into()),
+                        h_anchor: Some("margin".into()),
+                        v_anchor: Some(if footer { "text" } else { "page" }.into()),
+                        y: Some(rdocx_oxml::Twips(y)),
+                        wrap: Some(wrap.into()),
+                        ..Default::default()
+                    }),
+                    paragraphs: 1,
+                },
+                ..Default::default()
+            };
+            // A real narrow side reservation also exercises line rebreak and
+            // makes the later vertical gap distinct from an unchanged paragraph.
+            let facts = vec![
+                frame(100, if footer { 0 } else { 360 }, "around"),
+                frame(2400, if footer { 1040 } else { 1400 }, "notBeside"),
+                HeaderFooterBlockSemantics::default(),
+            ];
+            let original = vec![make_para(1, 12.0), make_para(1, 12.0), paragraph];
+            let before = format!("{original:?}");
+            let geometry = PageGeometry {
+                header_distance: 18.0,
+                footer_distance: 18.0,
+                ..Default::default()
+            };
+            let prepared =
+                prepare_furniture(&original, Some(&facts), &geometry, footer, &fm).unwrap();
+            let obstacle = prepared.placements[1].unwrap();
+            let mut elements = Vec::new();
+            let mut behind = Vec::new();
+            let mut front = Vec::new();
+            render_hf_blocks(
+                &prepared,
+                Some(&facts),
+                &geometry,
+                1,
+                (&mut elements, &mut behind, &mut front),
+                &HashMap::new(),
+            );
+            let mut glyphs = 0;
+            let mut multilingual = 0;
+            let mut highlights = 0;
+            let mut links = 0;
+            let mut fields = 0;
+            let mut first = None;
+            oxml_layout::walk(&elements, &mut |element, transform| {
+                let mut check_box = |kind: &str, rect: &Rect| {
+                    let rect = transform.transform_rect_bbox(*rect);
+                    if rect.height > 12.01
+                        || rect.y < obstacle.y + obstacle.height - 0.01
+                            && rect.y + rect.height > obstacle.y + 0.01
+                    {
+                        failures.push(format!("rich={rich},source={with_source},bordered={bordered},footer={footer}: {kind} spans skipped band: {rect:?} vs{obstacle:?}"));
+                    }
+                };
+                match element {
+                    PositionedElement::FilledRect { rect, color }
+                        if *color == Color::from_hex("FFFF00") =>
+                    {
+                        highlights += 1;
+                        check_box("highlight", rect);
+                    }
+                    PositionedElement::LinkAnnotation { rect, url } => {
+                        assert_eq!(url, "https://example.com/clearance");
+                        links += 1;
+                        check_box("link", rect);
+                    }
+                    PositionedElement::Text(run) => {
+                        glyphs += 1;
+                        first.get_or_insert(transform.apply(run.origin).y);
+                        if run.field_kind == Some(oxml_layout::FieldKind::Page) {
+                            fields += 1;
+                            if with_source {
+                                assert_eq!(run.field_source.unwrap().node, node);
+                            }
+                        } else if with_source {
+                            assert_eq!(run.source.unwrap().node, node);
+                        }
+                    }
+                    PositionedElement::MultilingualText(run) => {
+                        glyphs += 1;
+                        multilingual += 1;
+                        first.get_or_insert(transform.apply(run.origin).y);
+                        if run.field_kind == Some(oxml_layout::FieldKind::Page) {
+                            fields += 1;
+                            if with_source {
+                                assert_eq!(run.field_source.unwrap().node, node);
+                            }
+                        } else if with_source {
+                            assert_eq!(run.source.unwrap().node, node);
+                        }
+                    }
+                    _ => {}
+                }
+            });
+            assert!(
+                glyphs > 5 && highlights > 5 && links > 5 && fields == 1,
+                "actual decorated publishers must execute"
+            );
+            assert_eq!(multilingual > 0, rich);
+            if (first.unwrap() - prepared.origin - first_ascent).abs() > 0.01 {
+                failures.push(format!(
+                    "earlier baseline changed rich={rich},footer={footer}"
+                ));
+            }
+            assert_eq!(format!("{original:?}"), before);
+        }
+        assert!(
+            failures.is_empty(),
+            "{} occupied-band mismatches, first={:?}",
+            failures.len(),
+            failures.first()
+        );
+    }
+
+    #[test]
+    fn issue424_furniture_keeps_earlier_lines_and_prices_later_clearance_once() {
+        let mut failures = Vec::new();
+        for footer in [false, true] {
+            for (bordered, at_origin) in [(false, false), (true, false), (true, true)] {
+                let borders = if bordered {
+                    r#"<w:pBdr><w:top w:val="single" w:sz="8" w:space="2"/><w:bottom w:val="single" w:sz="8" w:space="2"/></w:pBdr>"#
+                } else {
+                    ""
+                };
+                let body = format!(
+                    r#"<w:p><w:pPr>{borders}<w:spacing w:after="160" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>{}</w:t></w:r></w:p><w:p><w:r><w:t>AFTER_WORD</w:t></w:r></w:p>"#,
+                    "flowword ".repeat(100)
+                );
+                let input = fx233_input(&body);
+                let mut fm = FontManager::new_deterministic().unwrap();
+                let mut shaped = Vec::new();
+                for item in &input.document.body.content {
+                    let rdocx_oxml::document::BodyContent::Paragraph(p) = item else {
+                        panic!("paragraph")
+                    };
+                    shaped.push(
+                        crate::engine::layout_paragraph(
+                            p,
+                            468.0,
+                            &input.styles,
+                            &input,
+                            &MediaRegistry::new(&input.images),
+                            &mut fm,
+                            &mut crate::style_resolver::NumberingState::new(),
+                            &mut Vec::new(),
+                        )
+                        .unwrap(),
+                    );
+                }
+                let natural_first = shaped[0].lines[0].ascent;
+                let original = vec![make_para(1, 12.0), shaped.remove(0), shaped.remove(0)];
+                let before = format!("{original:?}");
+                let facts = vec![
+                    HeaderFooterBlockSemantics {
+                        placement: HeaderFooterPlacement::Frame {
+                            properties: Box::new(rdocx_oxml::CT_FramePr {
+                                w: Some(rdocx_oxml::Twips(2400)),
+                                h: Some(rdocx_oxml::Twips(1200)),
+                                h_rule: Some("exact".into()),
+                                h_anchor: Some("margin".into()),
+                                v_anchor: Some(if footer { "text" } else { "page" }.into()),
+                                y: Some(rdocx_oxml::Twips(if at_origin {
+                                    if footer { 0 } else { 360 }
+                                } else if footer {
+                                    1040
+                                } else {
+                                    1400
+                                })),
+                                wrap: Some("notBeside".into()),
+                                ..Default::default()
+                            }),
+                            paragraphs: 1,
+                        },
+                        ..Default::default()
+                    },
+                    HeaderFooterBlockSemantics::default(),
+                    HeaderFooterBlockSemantics {
+                        flow_gap: 8.0,
+                        ..Default::default()
+                    },
+                ];
+                let geometry = PageGeometry {
+                    header_distance: 18.0,
+                    footer_distance: 18.0,
+                    ..Default::default()
+                };
+                let prepared =
+                    prepare_furniture(&original, Some(&facts), &geometry, footer, &fm).unwrap();
+                let mut elements = Vec::new();
+                let mut behind = Vec::new();
+                let mut front = Vec::new();
+                render_hf_blocks(
+                    &prepared,
+                    Some(&facts),
+                    &geometry,
+                    1,
+                    (&mut elements, &mut behind, &mut front),
+                    &HashMap::new(),
+                );
+                let obstacle = prepared.placements[0].unwrap();
+                let mut flow = Vec::new();
+                let mut following = Vec::new();
+                oxml_layout::walk(&elements, &mut |element, transform| {
+                    if let PositionedElement::Text(run) = element {
+                        if run.text.contains("flowword") {
+                            flow.push(transform.apply(run.origin));
+                        }
+                        if run.text.contains("AFTER_WORD") {
+                            following.push(transform.apply(run.origin));
+                        }
+                    }
+                });
+                let expected_first = if at_origin {
+                    obstacle.y + obstacle.height + natural_first - 3.0
+                } else {
+                    prepared.origin + natural_first
+                };
+                if (flow[0].y - expected_first).abs() > 0.01 {
+                    failures.push(format!("footer={footer},bordered={bordered},at_origin={at_origin}: first line expected{expected_first},actual{}",flow[0].y));
+                }
+                let plain_baseline = original[1].lines[1].ascent;
+                let mut above = 0;
+                let mut below = 0;
+                for point in &flow {
+                    let top = point.y - plain_baseline;
+                    if top + 12.0 <= obstacle.y + 0.01 {
+                        above += 1;
+                    }
+                    if top >= obstacle.y + obstacle.height - 0.01 {
+                        below += 1;
+                    }
+                    if top < obstacle.y + obstacle.height - 0.01 && top + 12.0 > obstacle.y + 0.01 {
+                        failures.push(format!("footer={footer},bordered={bordered}: content band{top}..{} intersects {obstacle:?}",top+12.0));
+                    }
+                }
+                if (!at_origin && above < 3) || (at_origin && above != 0) || below < 1 {
+                    failures.push(format!("footer={footer},bordered={bordered}: requires both earlier/later text, above={above},below={below}"));
+                }
+                if bordered {
+                    let mut horizontal = Vec::new();
+                    oxml_layout::walk(&elements, &mut |element, transform| {
+                        if let PositionedElement::Line { start, end, .. } = element
+                            && start.y == end.y
+                        {
+                            horizontal.push(transform.apply(*start).y);
+                        }
+                    });
+                    assert_eq!(horizontal.len(), 2);
+                    let bottom = horizontal.into_iter().fold(f64::NEG_INFINITY, f64::max);
+                    let expected = prepared.starts[1] + prepared.block_height(1) - 0.5;
+                    assert!(
+                        (bottom - expected).abs() < 0.01,
+                        "border prices later gaps once and first offset only at origin: bottom={bottom},expected={expected},at_origin={at_origin}"
+                    );
+                }
+                assert_eq!(following.len(), 1);
+                assert!(
+                    (prepared.starts[2] - prepared.starts[1] - prepared.block_height(1) - 8.0)
+                        .abs()
+                        < 0.01,
+                    "following paragraph prices prepared height and after spacing once"
+                );
+                assert!(
+                    (following[0].y - prepared.starts[2] - original[2].lines[0].ascent).abs()
+                        < 0.01
+                );
+                assert_eq!(
+                    prepared.blocks[1]
+                        .lines
+                        .iter()
+                        .map(|line| (line.height, line.ascent))
+                        .collect::<Vec<_>>(),
+                    original[1]
+                        .lines
+                        .iter()
+                        .map(|line| (line.height, line.ascent))
+                        .collect::<Vec<_>>(),
+                    "clearance must not rewrite raw Word line metrics"
+                );
+                assert_eq!(format!("{original:?}"), before);
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn issue424_furniture_narrowing_reserves_later_obstacles_in_complete_line_bands() {
+        let mut failures = Vec::new();
+        for words in [24, 30, 36] {
+            for footer in [false, true] {
+                let body = format!(
+                    r#"<w:p><w:pPr><w:spacing w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>{}</w:t></w:r></w:p>"#,
+                    "flowword ".repeat(words)
+                );
+                let input = fx233_input(&body);
+                let rdocx_oxml::document::BodyContent::Paragraph(source) =
+                    &input.document.body.content[0]
+                else {
+                    panic!("paragraph")
+                };
+                let mut fm = FontManager::new_deterministic().unwrap();
+                let paragraph = crate::engine::layout_paragraph(
+                    source,
+                    468.0,
+                    &input.styles,
+                    &input,
+                    &MediaRegistry::new(&input.images),
+                    &mut fm,
+                    &mut crate::style_resolver::NumberingState::new(),
+                    &mut Vec::new(),
+                )
+                .unwrap();
+                let original_lines = paragraph.lines.len();
+                let frame = |width: i32, x: i32, y: i32| HeaderFooterBlockSemantics {
+                    placement: HeaderFooterPlacement::Frame {
+                        properties: Box::new(rdocx_oxml::CT_FramePr {
+                            w: Some(rdocx_oxml::Twips(width)),
+                            h: Some(rdocx_oxml::Twips(1200)),
+                            h_rule: Some("exact".into()),
+                            h_anchor: Some("margin".into()),
+                            v_anchor: Some(if footer { "text" } else { "page" }.into()),
+                            x: Some(rdocx_oxml::Twips(x)),
+                            y: Some(rdocx_oxml::Twips(y)),
+                            wrap: Some("around".into()),
+                            ..Default::default()
+                        }),
+                        paragraphs: 1,
+                    },
+                    ..Default::default()
+                };
+                let facts = vec![
+                    frame(7200, 0, if footer { 0 } else { 360 }),
+                    frame(2160, 7200, if footer { 1440 } else { 1800 }),
+                    HeaderFooterBlockSemantics::default(),
+                ];
+                let source = vec![make_para(1, 12.0), make_para(1, 12.0), paragraph];
+                let before = format!("{source:?}");
+                let geometry = PageGeometry {
+                    header_distance: 18.0,
+                    footer_distance: 18.0,
+                    ..Default::default()
+                };
+                let prepared =
+                    prepare_furniture(&source, Some(&facts), &geometry, footer, &fm).unwrap();
+                let obstacle = prepared.placements[1].unwrap();
+                let mut y = prepared.starts[2] + prepared.blocks[2].content_offset_top;
+                let mut reached = false;
+                for (index, line) in prepared.blocks[2].lines.iter().enumerate() {
+                    if y + line.height > obstacle.y && y < obstacle.y + obstacle.height {
+                        reached = true;
+                        if line.indent_left + line.available_width > 360.0 + 0.01 {
+                            failures.push(format!("words={words},footer={footer},original={original_lines},final={},line{index} band{y}..{} reaches later obstacle{obstacle:?}, allowed right={}",prepared.blocks[2].lines.len(),y+line.height,line.indent_left+line.available_width));
+                        }
+                    }
+                    y += line.height;
+                }
+                assert!(
+                    reached,
+                    "must exercise growth into later obstacle, words={words},footer={footer}"
+                );
+                assert_eq!(format!("{source:?}"), before);
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
     fn fx233_short_wrap_reserves_the_actual_first_text_band_on_every_pass() {
         let mut fm = FontManager::new_deterministic().unwrap();
         let mut segment = directional_test_segment("Wrapped text", TextDirection::Auto, None, None);
@@ -9168,7 +10541,10 @@ mod tests {
             0.0,
             &geometry,
             &fm,
+            WrapReflowPolicy::Body,
         )
+        .map(|result| result.map(|reflowed| reflowed.paragraph))
+        .unwrap()
         .expect("short drawing intersects the padded first content band");
         assert_eq!(
             adjusted.lines[0].indent_left, 30.0,
@@ -9181,7 +10557,10 @@ mod tests {
             0.0,
             &geometry,
             &fm,
+            WrapReflowPolicy::Body,
         )
+        .map(|result| result.map(|reflowed| reflowed.paragraph))
+        .unwrap()
         .unwrap();
         assert_eq!(
             format!("{:?}", adjusted.lines),
@@ -9191,6 +10570,7 @@ mod tests {
         render_paragraph_lines(
             &adjusted.lines,
             ParagraphView {
+                line_gaps: &[],
                 block: &adjusted,
                 border_group_before: false,
                 semantics: None,
@@ -9221,8 +10601,11 @@ mod tests {
                 &[wrap],
                 0.0,
                 &geometry,
-                &fm
+                &fm,
+                WrapReflowPolicy::Body,
             )
+            .map(|result| result.map(|reflowed| reflowed.paragraph))
+            .unwrap()
             .is_none(),
             "unbordered first line does not intersect this drawing"
         );
@@ -9268,7 +10651,10 @@ mod tests {
             0.0,
             &PageGeometry::default(),
             &fm,
+            WrapReflowPolicy::Body,
         )
+        .map(|result| result.map(|reflowed| reflowed.paragraph))
+        .unwrap()
         .unwrap();
         let repeated = reflow_around_wraps(
             &adjusted,
@@ -9277,7 +10663,10 @@ mod tests {
             0.0,
             &PageGeometry::default(),
             &fm,
+            WrapReflowPolicy::Body,
         )
+        .map(|result| result.map(|reflowed| reflowed.paragraph))
+        .unwrap()
         .unwrap();
         assert_eq!(
             format!("{:?}", adjusted.lines),
@@ -9300,6 +10689,7 @@ mod tests {
         render_paragraph_lines(
             &paragraph.lines,
             ParagraphView {
+                line_gaps: &[],
                 border_group_before: false,
                 block: &paragraph,
                 semantics: None,

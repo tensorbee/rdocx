@@ -503,6 +503,17 @@ fn layout_table_inner(
     resolved_table.properties = Some(resolved_properties);
     let tbl = &resolved_table;
     let source_rows = accepted_table_rows(tbl, path, input);
+    if let Some(sources) = sources {
+        let kept = source_rows
+            .iter()
+            .map(|(_, path)| path)
+            .collect::<std::collections::HashSet<_>>();
+        for (_, row_path) in layout_table_rows(tbl, path) {
+            if !kept.contains(&row_path) {
+                sources.record_table_omission(story, &row_path, num_state);
+            }
+        }
+    }
     let bidi_visual = tbl
         .properties
         .as_ref()
@@ -736,6 +747,9 @@ fn layout_table_inner(
 
             // Layout cell content (paragraphs and nested tables)
             let (blocks, block_semantics) = if is_vmerge_continue {
+                if let Some(sources) = sources {
+                    sources.record_table_omission(story, cell_path, num_state);
+                }
                 (Vec::new(), Vec::new())
             } else {
                 layout_cell_content(
@@ -1743,7 +1757,11 @@ fn layout_cell_content(
                 }));
             }
             CellContent::Table(tbl)
-                if input.revision_view == RevisionView::Accepted && tbl.accepted_view_removes() => {
+                if input.revision_view == RevisionView::Accepted && tbl.accepted_view_removes() =>
+            {
+                if let Some(sources) = sources {
+                    sources.record_table_omission(story, &source_path, num_state);
+                }
             }
             CellContent::Table(tbl) => {
                 // Recursively lay out the nested table
@@ -1871,7 +1889,12 @@ fn layout_control_cell_content(
             }
             SdtContent::Table(table)
                 if input.revision_view == RevisionView::Accepted
-                    && table.accepted_view_removes() => {}
+                    && table.accepted_view_removes() =>
+            {
+                if let Some(sources) = sources {
+                    sources.record_table_omission(story, &source_path, num_state);
+                }
+            }
             SdtContent::Table(table) => {
                 let (nested, nested_semantics) = layout_table_inner(
                     table,

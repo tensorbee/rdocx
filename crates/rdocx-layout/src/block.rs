@@ -175,6 +175,7 @@ impl SharedLayoutBlock {
 
 #[derive(Clone, Copy)]
 pub(crate) struct ParagraphView<'a> {
+    pub line_gaps: &'a [f64],
     pub border_group_before: bool,
     pub block: &'a ParagraphBlock,
     pub semantics: Option<&'a ParagraphSemantics>,
@@ -191,6 +192,10 @@ impl Deref for ParagraphView<'_> {
 }
 
 impl ParagraphView<'_> {
+    pub fn content_height(self) -> f64 {
+        self.block.content_height() + self.line_gaps.iter().sum::<f64>()
+    }
+
     pub fn source_node(self) -> Option<Option<SourceNodeId>> {
         self.semantics.map(|semantics| semantics.source_node)
     }
@@ -250,6 +255,7 @@ impl LayoutBlockLike for LayoutBlock {
     fn paragraph(&self) -> Option<ParagraphView<'_>> {
         match self {
             Self::Paragraph(block) => Some(ParagraphView {
+                line_gaps: &[],
                 border_group_before: false,
                 block,
                 semantics: None,
@@ -287,6 +293,7 @@ impl LayoutBlockLike for SharedLayoutBlock {
             Self::Paragraph {
                 block, semantics, ..
             } => Some(ParagraphView {
+                line_gaps: &[],
                 border_group_before: semantics.border_group_before,
                 block,
                 semantics: Some(semantics),

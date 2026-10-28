@@ -1,7 +1,7 @@
 //! Layout engine orchestrator: ties all phases together.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -210,6 +210,7 @@ pub(crate) struct SourceRegistry {
     nodes: Vec<WordSourcePath>,
     navigation_sources: HashMap<SourceNodeId, crate::ParagraphNavigation>,
     ids: HashMap<WordSourcePath, SourceNodeId>,
+    navigation_paths: BTreeMap<(WordStory, Vec<usize>), SourceNodeId>,
     body_ids: Vec<Option<SourceNodeId>>,
     field_descendants: HashMap<FieldSource, Vec<u32>>,
     field_source_xml: HashMap<FieldSource, Vec<u8>>,
@@ -228,6 +229,7 @@ impl SourceRegistry {
             nodes: Vec::new(),
             navigation_sources: HashMap::new(),
             ids: HashMap::new(),
+            navigation_paths: BTreeMap::new(),
             body_ids: Vec::new(),
             field_descendants: HashMap::new(),
             field_source_xml: HashMap::new(),
@@ -347,6 +349,9 @@ impl SourceRegistry {
         for node in self.ids.values_mut() {
             *node = forward[node];
         }
+        for node in self.navigation_paths.values_mut() {
+            *node = forward[node];
+        }
         for node in self.body_ids.iter_mut().flatten() {
             *node = forward[node];
         }
@@ -409,6 +414,7 @@ impl SourceRegistry {
             nodes: Vec::new(),
             navigation_sources: HashMap::new(),
             ids: HashMap::new(),
+            navigation_paths: BTreeMap::new(),
             body_ids: Vec::with_capacity(input.document.body.content.len()),
             field_descendants: HashMap::new(),
             field_source_xml: HashMap::new(),
@@ -610,10 +616,33 @@ impl SourceRegistry {
         }
     }
 
+    pub(crate) fn record_table_omission(
+        &self,
+        story: &WordStory,
+        prefix: &[usize],
+        state: &mut NumberingState,
+    ) {
+        // Sorted physical paths bound each lookup to the omitted subtree.
+        for (_, node) in self
+            .navigation_paths
+            .range((story.clone(), prefix.to_vec())..)
+            .take_while(|((owner, children), _)| owner == story && children.starts_with(prefix))
+        {
+            if let Some(original) = self.navigation_sources.get(node) {
+                let mut facts = original.clone();
+                facts.omitted_by_table = true;
+                facts.level = None;
+                facts.style = None;
+                state.record_navigation(*node, facts);
+            }
+        }
+    }
+
     fn register_fields(&mut self, node: SourceNodeId, paragraph: &CT_P) {
         self.navigation_sources.insert(
             node,
             crate::ParagraphNavigation {
+                omitted_by_table: false,
                 level: None,
                 suppressed_numbering: false,
                 accepted_runs: project_paragraph_runs(paragraph, RevisionView::Accepted).len(),
@@ -831,6 +860,8 @@ impl SourceRegistry {
         }
         let id = self.insert_node(path.clone());
         self.register_fields(id, paragraph);
+        self.navigation_paths
+            .insert((path.story.clone(), path.children.clone()), id);
         self.ids.insert(path, id);
     }
 
@@ -3104,7 +3135,7 @@ struct HeaderFooterCacheKey {
 #[derive(Clone)]
 struct HeaderFooterVariantContent {
     blocks: Vec<ParagraphBlock>,
-    directions: Vec<(TextDirection, f64)>,
+    directions: Vec<paginator::HeaderFooterBlockSemantics>,
     watermark: Option<GroupElement>,
 }
 
@@ -4202,6 +4233,7 @@ impl Engine {
                         };
                         let mut facts = num_state.remove_navigation(source).unwrap_or_else(|| {
                             crate::ParagraphNavigation {
+                                omitted_by_table: false,
                                 level: None,
                                 suppressed_numbering: false,
                                 accepted_runs: 0,
@@ -4291,9 +4323,14 @@ impl Engine {
                 }
                 // Accepting every tracked change removes a table whose rows
                 // are all deleted, so it leaves no block or spacing behind.
-                MainStoryLayoutItem::Table(tbl, _)
+                MainStoryLayoutItem::Table(tbl, path)
                     if input.revision_view == RevisionView::Accepted
-                        && tbl.accepted_view_removes() => {}
+                        && tbl.accepted_view_removes() =>
+                {
+                    if let Some(registry) = sources.as_ref() {
+                        registry.record_table_omission(&WordStory::Document, &path, &mut num_state);
+                    }
+                }
                 MainStoryLayoutItem::Table(tbl, path) => {
                     let geometry = sect_pr_to_geometry(sect_pr_for_layout);
 
@@ -4576,6 +4613,14 @@ impl Engine {
                 restart_checkpoint,
                 tail_source.map(|(stop, _)| stop),
             );
+            if let Some(failure) = recorded.furniture_failure.take() {
+                return Err(LayoutError::Layout(format!(
+                    "section {} page {}: {}",
+                    failure.section + 1,
+                    failure.page,
+                    failure.reason
+                )));
+            }
             #[cfg(test)]
             {
                 self.page_layout_invocations = recorded.pages.len();
@@ -4592,7 +4637,21 @@ impl Engine {
                     restart_checkpoint.map_or(0, |checkpoint| checkpoint.page_count),
                     restart_checkpoint.map_or(1, |checkpoint| checkpoint.next_header_page_number),
                     recorded.last_flow_space,
-                );
+                    Some(&paginator::EndnoteFurniture {
+                        section: &sections[0],
+                        section_index: 0,
+                        fm: &self.font_manager,
+                        media: media.media(),
+                    }),
+                )
+                .map_err(|failure| {
+                    LayoutError::Layout(format!(
+                        "section {} page {}: {}",
+                        failure.section + 1,
+                        failure.page,
+                        failure.reason
+                    ))
+                })?;
             }
             for page in &mut recorded.pages {
                 mark_remaining_artifacts(&mut page.elements);
@@ -4695,6 +4754,14 @@ impl Engine {
         } else {
             let mut pagination =
                 paginator::paginate_shared_sections(&sections, &self.font_manager, &media, &notes);
+            if let Some(failure) = pagination.furniture_failure.take() {
+                return Err(LayoutError::Layout(format!(
+                    "section {} page {}: {}",
+                    failure.section + 1,
+                    failure.page,
+                    failure.reason
+                )));
+            }
             #[cfg(test)]
             {
                 self.page_layout_invocations = pagination.pages.len();
@@ -4713,7 +4780,24 @@ impl Engine {
                     final_geometry.clone(),
                     pagination.last_flow_space,
                     &pagination.endnotes_placed,
-                );
+                    sections
+                        .last()
+                        .map(|section| paginator::EndnoteFurniture {
+                            section,
+                            section_index: sections.len() - 1,
+                            fm: &self.font_manager,
+                            media: media.media(),
+                        })
+                        .as_ref(),
+                )
+                .map_err(|failure| {
+                    LayoutError::Layout(format!(
+                        "section {} page {}: {}",
+                        failure.section + 1,
+                        failure.page,
+                        failure.reason
+                    ))
+                })?;
             } else if !pagination.endnotes_placed.is_empty() {
                 paginator::append_endnote_pages_at_document_end(
                     &mut pagination.pages,
@@ -4721,13 +4805,49 @@ impl Engine {
                     final_geometry.clone(),
                     None,
                     &pagination.endnotes_placed,
-                );
+                    sections
+                        .last()
+                        .map(|section| paginator::EndnoteFurniture {
+                            section,
+                            section_index: sections.len() - 1,
+                            fm: &self.font_manager,
+                            media: media.media(),
+                        })
+                        .as_ref(),
+                )
+                .map_err(|failure| {
+                    LayoutError::Layout(format!(
+                        "section {} page {}: {}",
+                        failure.section + 1,
+                        failure.page,
+                        failure.reason
+                    ))
+                })?;
             } else {
-                paginator::append_endnote_pages(
+                paginator::append_endnote_pages_at_document_end(
                     &mut pagination.pages,
                     &notes,
                     final_geometry.clone(),
-                );
+                    None,
+                    &[],
+                    sections
+                        .last()
+                        .map(|section| paginator::EndnoteFurniture {
+                            section,
+                            section_index: sections.len() - 1,
+                            fm: &self.font_manager,
+                            media: media.media(),
+                        })
+                        .as_ref(),
+                )
+                .map_err(|failure| {
+                    LayoutError::Layout(format!(
+                        "section {} page {}: {}",
+                        failure.section + 1,
+                        failure.page,
+                        failure.reason
+                    ))
+                })?;
             }
             apply_page_background(&mut pagination.pages, input);
             for page in &mut pagination.pages {
@@ -5609,6 +5729,9 @@ impl Engine {
             self.font_manager
                 .replay_font_trace_events(&entry.font_trace)?;
             self.table_cache_hits += 1;
+            if let Some(sources) = sources {
+                record_cached_table_omissions(table, &entry.block, sources, story, path, numbering);
+            }
             return Ok(SharedLayoutBlock::Table {
                 block: Arc::clone(&entry.block),
                 semantics: table_semantics(
@@ -7472,8 +7595,16 @@ fn header_footer_cache_entry_bytes(
         .fold(0usize, usize::saturating_add);
     let direction_bytes = content
         .directions
-        .capacity()
-        .saturating_mul(std::mem::size_of::<(TextDirection, f64)>());
+        .iter()
+        .map(paginator::HeaderFooterBlockSemantics::retained_bytes)
+        .fold(0usize, usize::saturating_add)
+        .saturating_add(
+            content
+                .directions
+                .capacity()
+                .saturating_sub(content.directions.len())
+                .saturating_mul(std::mem::size_of::<paginator::HeaderFooterBlockSemantics>()),
+        );
     let diagnostic_bytes = diagnostics
         .capacity()
         .saturating_mul(std::mem::size_of::<Diagnostic>())
@@ -9194,6 +9325,37 @@ fn excluded_owner_for_source(input: &LayoutInput, source: SourceNodeId) -> bool 
     })
 }
 
+// Cache-safe tables have direct rows/cells and no removed revisions or controls.
+// Replay the returned layout's actual omission decisions against current source paths.
+fn record_cached_table_omissions(
+    source: &CT_Tbl,
+    block: &table::TableBlock,
+    sources: &SourceRegistry,
+    story: &WordStory,
+    path: &[usize],
+    state: &mut NumberingState,
+) {
+    for (ri, (row, laid_out)) in source.rows.iter().zip(&block.rows).enumerate() {
+        for (ci, (cell, placed)) in row.cells.iter().zip(&laid_out.cells).enumerate() {
+            let mut cell_path = path.to_vec();
+            cell_path.extend([ri, ci]);
+            if placed.is_vmerge_continue {
+                sources.record_table_omission(story, &cell_path, state);
+                continue;
+            }
+            for (index, (content, block)) in cell.content.iter().zip(&placed.blocks).enumerate() {
+                if let (CellContent::Table(source), table::CellBlock::Table(block)) =
+                    (content, block)
+                {
+                    let mut nested = cell_path.clone();
+                    nested.push(index);
+                    record_cached_table_omissions(source, block, sources, story, &nested, state);
+                }
+            }
+        }
+    }
+}
+
 fn record_table_navigation(
     table: &crate::table::TableBlock,
     semantics: &TableSemantics,
@@ -9484,6 +9646,7 @@ fn layout_paragraph_with_source_and_table(
         num_state.record_navigation(
             source,
             crate::ParagraphNavigation {
+                omitted_by_table: false,
                 level: heading_level,
                 text: heading_text.clone(),
                 style: (!cache_only)
@@ -12714,9 +12877,26 @@ fn layout_header_footer_variant_uncached(
                 } else {
                     sources.and_then(|sources| sources.id(&story, &path))
                 };
+                let mut properties = style_resolver::resolve_paragraph_properties(
+                    paragraph
+                        .properties
+                        .as_ref()
+                        .and_then(|properties| properties.style_id.as_deref()),
+                    styles,
+                );
+                if let Some(direct) = &paragraph.properties {
+                    properties.merge_from(direct);
+                }
+                let frame = properties
+                    .frame
+                    .filter(|frame| frame.drop_cap.as_deref().is_none_or(|kind| kind == "none"));
+                let measure = frame
+                    .as_ref()
+                    .and_then(|frame| frame.w)
+                    .map_or(width, |value| value.to_pt().max(1.0));
                 let (mut block, direction) = layout_paragraph_with_source_and_direction(
                     paragraph,
-                    width,
+                    measure,
                     styles,
                     input,
                     &part_media,
@@ -12731,7 +12911,16 @@ fn layout_header_footer_variant_uncached(
                     registry.bind_text_boxes(&mut block, source)?;
                 }
                 blocks.push(block);
-                directions.push((direction, 0.0));
+                directions.push(paginator::HeaderFooterBlockSemantics {
+                    direction,
+                    placement: frame.map_or(paginator::HeaderFooterPlacement::Flow, |properties| {
+                        paginator::HeaderFooterPlacement::Frame {
+                            properties,
+                            paragraphs: 1,
+                        }
+                    }),
+                    ..Default::default()
+                });
             }
             MainStoryLayoutItem::Table(table, path) => {
                 let (table, semantics) = table::layout_table_with_provenance(
@@ -12750,30 +12939,107 @@ fn layout_header_footer_variant_uncached(
                 )?;
                 let rows =
                     paginator::story_table_rows(&table, &semantics, &geometry, part_media.media());
-                directions.extend(std::iter::repeat_n((TextDirection::Auto, 0.0), rows.len()));
+                let table = Arc::new(table);
+                let semantics = Arc::new(semantics);
+                directions.extend((0..rows.len()).map(|row| {
+                    paginator::HeaderFooterBlockSemantics {
+                        placement: paginator::HeaderFooterPlacement::TableRow {
+                            table: Arc::clone(&table),
+                            semantics: Arc::clone(&semantics),
+                            row,
+                        },
+                        ..Default::default()
+                    }
+                }));
                 blocks.extend(rows);
             }
         }
     }
-    let groups = block::paragraph_border_groups(&blocks.iter().map(Some).collect::<Vec<_>>());
-    for index in 0..blocks.len() {
-        let (top, bottom) = groups[index];
-        if top {
-            directions[index].1 = if input.do_not_use_html_paragraph_auto_spacing {
-                blocks[index - 1].space_after + blocks[index].space_before
-            } else {
-                blocks[index - 1]
-                    .space_after
-                    .max(blocks[index].space_before)
+    let mut index = 0;
+    while index < blocks.len() {
+        if let paginator::HeaderFooterPlacement::Frame { properties, .. } =
+            &directions[index].placement
+        {
+            let properties = properties.clone();
+            let mut count = 1;
+            while index + count < blocks.len()
+                && matches!(&directions[index + count].placement, paginator::HeaderFooterPlacement::Frame { properties: next, .. } if *next == properties)
+            {
+                directions[index + count].placement =
+                    paginator::HeaderFooterPlacement::FrameContinuation;
+                count += 1;
+            }
+            directions[index].placement = paginator::HeaderFooterPlacement::Frame {
+                properties,
+                paragraphs: count,
             };
+            price_furniture_paragraphs(
+                &mut blocks[index..index + count],
+                &mut directions[index..index + count],
+                input.do_not_use_html_paragraph_auto_spacing,
+            );
+            index += count;
+        } else {
+            index += 1;
         }
-        blocks[index].remove_group_border_edges(top, bottom);
+    }
+    let ordinary = blocks
+        .iter()
+        .zip(&directions)
+        .map(|(block, facts)| {
+            matches!(facts.placement, paginator::HeaderFooterPlacement::Flow).then_some(block)
+        })
+        .collect::<Vec<_>>();
+    let groups = block::paragraph_border_groups(&ordinary);
+    let mut after: f64 = 0.0;
+    for index in 0..blocks.len() {
+        let flow = matches!(
+            &directions[index].placement,
+            paginator::HeaderFooterPlacement::Flow
+        ) || matches!(&directions[index].placement, paginator::HeaderFooterPlacement::TableRow { table, .. } if table.floating.is_none());
+        if !flow {
+            continue;
+        }
+        let gap = if input.do_not_use_html_paragraph_auto_spacing {
+            after + blocks[index].space_before
+        } else {
+            after.max(blocks[index].space_before)
+        };
+        directions[index].flow_gap = gap;
+        if matches!(
+            directions[index].placement,
+            paginator::HeaderFooterPlacement::Flow
+        ) {
+            directions[index].border_gap = if groups[index].0 { gap } else { 0.0 };
+            blocks[index].remove_group_border_edges(groups[index].0, groups[index].1);
+        }
+        after = blocks[index].space_after;
     }
     Ok(HeaderFooterVariantContent {
         blocks,
         directions,
         watermark,
     })
+}
+
+fn price_furniture_paragraphs(
+    blocks: &mut [ParagraphBlock],
+    facts: &mut [paginator::HeaderFooterBlockSemantics],
+    additive: bool,
+) {
+    let groups = block::paragraph_border_groups(&blocks.iter().map(Some).collect::<Vec<_>>());
+    let mut after: f64 = 0.0;
+    for (index, block) in blocks.iter_mut().enumerate() {
+        let gap = if additive {
+            after + block.space_before
+        } else {
+            after.max(block.space_before)
+        };
+        facts[index].flow_gap = gap;
+        facts[index].border_gap = if groups[index].0 { gap } else { 0.0 };
+        block.remove_group_border_edges(groups[index].0, groups[index].1);
+        after = block.space_after;
+    }
 }
 
 fn layout_watermark(
@@ -19569,7 +19835,11 @@ mod tests {
         .expect("real header cache container lays out")
         .expect("header content exists");
         assert_eq!(
-            semantics.first_header_directions,
+            semantics
+                .first_header_directions
+                .iter()
+                .map(|facts| (facts.direction, facts.border_gap))
+                .collect::<Vec<_>>(),
             [(TextDirection::RightToLeft, 0.0)],
             "the production header cache container retains its resolved paragraph base"
         );
@@ -27679,5 +27949,1507 @@ mod tests {
                 .unwrap()
                 .contains("xmlns:alias")
         );
+    }
+    /// Give the body section a default header of `lines` paragraphs.
+    fn with_tall_header(input: &mut LayoutInput, top: rdocx_oxml::units::Twips, lines: usize) {
+        use rdocx_oxml::header_footer::{CT_HdrFtr, HdrFtrRef, HdrFtrType};
+        let mut section = CT_SectPr::default_letter();
+        section.margin_top = Some(top);
+        section.header_refs.push(HdrFtrRef {
+            hdr_ftr_type: HdrFtrType::Default,
+            rel_id: "rIdHeader".into(),
+        });
+        input.document.body.sect_pr = Some(section);
+        let mut header = CT_HdrFtr::new();
+        for line in 1..=lines {
+            let mut paragraph = CT_P::new();
+            paragraph.add_run(&format!("Header line {line}"));
+            header.paragraphs.push(paragraph);
+        }
+        input.headers.insert("rIdHeader".into(), header);
+    }
+
+    #[test]
+    fn issue424_the_first_body_fragment_starts_below_a_header_taller_than_the_top_margin() {
+        // The issue's geometry: a 2 cm top margin, a 1.27 cm header distance
+        // and five header lines, which end well below the margin.
+        let mut input = make_input_with_text("Body line.");
+        with_tall_header(&mut input, rdocx_oxml::units::Twips(1134), 5);
+        let output = crate::layout_document_deterministic_with_provenance(&input)
+            .expect("layout with a header");
+        let fragment = output.body_layout_fragments(0).expect("body fragment")[0];
+        assert_eq!(fragment.physical_page, 1);
+        let mut header_baselines = Vec::new();
+        for element in compatibility_page_elements(&output.layout.pages[0]) {
+            match element {
+                PositionedElement::Text(run) if run.text.starts_with("Header") => {
+                    header_baselines.push(run.origin.y)
+                }
+                PositionedElement::MultilingualText(run)
+                    if run.logical_text.starts_with("Header") =>
+                {
+                    header_baselines.push(run.origin.y)
+                }
+                _ => {}
+            }
+        }
+        header_baselines.sort_by(f64::total_cmp);
+        assert_eq!(header_baselines.len(), 5);
+        let pitch = header_baselines[1] - header_baselines[0];
+        let last = header_baselines[4];
+        assert!(
+            fragment.y > last && fragment.y < last + pitch,
+            "the body starts right under the last header line at {last}, got {}",
+            fragment.y
+        );
+        assert!(fragment.y > 1134.0 / 20.0);
+
+        // A header that fits above the margin leaves the body on it.
+        let mut input = make_input_with_text("Body line.");
+        with_tall_header(&mut input, rdocx_oxml::units::Twips(1440), 1);
+        let output = crate::layout_document_deterministic_with_provenance(&input)
+            .expect("layout with a short header");
+        assert_eq!(output.body_layout_fragments(0).expect("body")[0].y, 72.0);
+
+        // A negative top margin is exact, so the tall header overlaps.
+        let mut input = make_input_with_text("Body line.");
+        with_tall_header(&mut input, rdocx_oxml::units::Twips(-1440), 8);
+        let output = crate::layout_document_deterministic_with_provenance(&input)
+            .expect("layout with an exact top margin");
+        assert_eq!(output.body_layout_fragments(0).expect("body")[0].y, 72.0);
+    }
+
+    #[test]
+    fn fitting_endnotes_keep_their_distance_below_a_body_moved_by_its_header() {
+        let measure = |header_lines: usize| {
+            let mut input = make_document_with_both_streams(2, 3);
+            if header_lines > 0 {
+                with_tall_header(&mut input, rdocx_oxml::units::Twips(1440), header_lines);
+            }
+            let output = Engine::new_deterministic()
+                .expect("bundled fonts load")
+                .layout(&input)
+                .expect("layout succeeds");
+            let page = output
+                .pages
+                .iter()
+                .find(|page| page_text(page).contains("ENDNOTETEXT"))
+                .expect("the endnote follows the body on its page");
+            let body = compatibility_page_elements(page)
+                .into_iter()
+                .filter_map(|element| match element {
+                    PositionedElement::Text(run) if run.text.contains("occupies") => {
+                        Some(run.origin.y)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let endnote = compatibility_page_elements(page)
+                .into_iter()
+                .find_map(|element| match element {
+                    PositionedElement::Text(run) if run.text.contains("ENDNOTETEXT") => {
+                        Some(run.origin.y)
+                    }
+                    _ => None,
+                })
+                .expect("endnote text");
+            let body_top = body.iter().copied().fold(f64::INFINITY, f64::min);
+            let body_bottom = body.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            (body_top, endnote - body_bottom)
+        };
+        let (plain_top, plain_gap) = measure(0);
+        let (moved_top, moved_gap) = measure(8);
+        assert!(
+            moved_top > plain_top,
+            "eight header lines move the body down"
+        );
+        assert!(
+            (moved_gap - plain_gap).abs() < 1e-9,
+            "the endnote follows the moved body as it follows a plain one: {moved_gap} and {plain_gap}"
+        );
+    }
+
+    #[test]
+    fn issue426_paragraphs_table_layout_drops_keep_unplaced_navigation_facts() {
+        // A vertically merged continuation cell and a row the accepted view
+        // removes are never laid out. Navigation still holds a fact for each
+        // of their paragraphs, unplaced, with no outline level and no style.
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Before</w:t></w:r></w:p><w:tbl><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>Kept</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Right</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Merged away</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Right below</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:trPr><w:del w:id="9" w:author="A" w:date="2026-01-01T00:00:00Z"/></w:trPr><w:tc><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Deleted row</w:t></w:r></w:p></w:tc><w:tc><w:p/></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+        let mut input = make_input_with_text("");
+        input.document = CT_Document::from_xml(xml).expect("document parses");
+        let output = crate::layout_document_deterministic_with_provenance(&input)
+            .expect("layout with sources");
+        let mut documented = 0;
+        for index in 1u32.. {
+            let Some(node) = SourceNodeId::new(index) else {
+                break;
+            };
+            let Some(path) = output.source_node(node) else {
+                break;
+            };
+            if path.story == WordStory::Document {
+                documented += 1;
+                assert!(
+                    output.paragraph_navigation_source(node).is_some(),
+                    "{path:?} has navigation facts"
+                );
+            }
+        }
+        assert_eq!(documented, 7);
+        let facts = |wanted: &str| {
+            output
+                .paragraph_navigation()
+                .find(|(_, _, _, text, ..)| *text == wanted)
+                .map(|(_, _, level, _, style, _, page)| (level, style.map(str::to_owned), page))
+                .expect("paragraph facts")
+        };
+        assert_eq!(facts("Before"), (Some(1), Some("Heading1".into()), Some(1)));
+        assert_eq!(facts("Kept"), (None, None, Some(1)));
+        assert_eq!(facts("Merged away").2, None);
+        assert_eq!(facts("Deleted row").2, None);
+    }
+
+    #[test]
+    fn issue424_spaced_furniture_is_measured_and_painted_once() {
+        let measure = |after: i32| {
+            let mut input = make_input_with_text("Body line.");
+            with_tall_header(&mut input, rdocx_oxml::units::Twips(1134), 5);
+            for paragraph in &mut input.headers.get_mut("rIdHeader").unwrap().paragraphs {
+                paragraph.properties = Some(CT_PPr {
+                    space_after: Some(rdocx_oxml::units::Twips(after)),
+                    ..Default::default()
+                });
+            }
+            let output = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+            let body = output.body_layout_fragments(0).unwrap()[0].y;
+            let baselines = compatibility_page_elements(&output.layout.pages[0])
+                .into_iter()
+                .filter_map(|element| match element {
+                    PositionedElement::Text(run) if run.text.starts_with("Header") => {
+                        Some(run.origin.y)
+                    }
+                    PositionedElement::MultilingualText(run)
+                        if run.logical_text.starts_with("Header") =>
+                    {
+                        Some(run.origin.y)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(baselines.len(), 5);
+            (body, baselines)
+        };
+        let (plain_body, plain) = measure(0);
+        let (spaced_body, spaced) = measure(160);
+        assert!(
+            ((spaced[4] - spaced[0]) - (plain[4] - plain[0]) - 32.0).abs() < 0.01,
+            "four inter-paragraph8pt gaps must paint once: {plain:?} and {spaced:?}"
+        );
+        assert!(
+            (spaced_body - plain_body - 40.0).abs() < 0.01,
+            "all five8pt after gaps must price once: {plain_body} and {spaced_body}"
+        );
+    }
+
+    fn issue424_furniture_input(header: &str, footer: &str) -> LayoutInput {
+        use rdocx_oxml::header_footer::{CT_HdrFtr, HdrFtrRef};
+        let mut input = make_input_with_text("BODY_MARK");
+        let mut section = CT_SectPr::default_letter();
+        section.margin_top = Some(rdocx_oxml::Twips(720));
+        section.margin_bottom = Some(rdocx_oxml::Twips(720));
+        section.header_distance = Some(rdocx_oxml::Twips(360));
+        section.footer_distance = Some(rdocx_oxml::Twips(360));
+        let namespaces = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape""#;
+        for (content, is_header, id) in [(header, true, "H"), (footer, false, "F")] {
+            if content.is_empty() {
+                continue;
+            }
+            let tag = if is_header { "hdr" } else { "ftr" };
+            let part = CT_HdrFtr::from_xml(
+                format!("<w:{tag} {namespaces}>{content}</w:{tag}>").as_bytes(),
+            )
+            .unwrap();
+            let body = CT_Document::from_xml(
+                format!("<w:document {namespaces}><w:body>{content}</w:body></w:document>")
+                    .as_bytes(),
+            )
+            .unwrap()
+            .body;
+            let story = if is_header {
+                WordStory::Header {
+                    relationship_id: id.into(),
+                }
+            } else {
+                WordStory::Footer {
+                    relationship_id: id.into(),
+                }
+            };
+            input.story_bodies.insert(story, body);
+            let reference = HdrFtrRef {
+                hdr_ftr_type: HdrFtrType::Default,
+                rel_id: id.into(),
+            };
+            if is_header {
+                input.headers.insert(id.into(), part);
+                section.header_refs.push(reference);
+            } else {
+                input.footers.insert(id.into(), part);
+                section.footer_refs.push(reference);
+            }
+        }
+        input.document.body.sect_pr = Some(section);
+        input
+    }
+
+    fn issue424_positioned_text(output: &crate::WordLayoutResult, prefix: &str) -> Vec<(f64, f64)> {
+        let mut result = Vec::new();
+        oxml_layout::walk(
+            &output.layout.pages[0].elements,
+            &mut |element, transform| {
+                let position = match element {
+                    PositionedElement::Text(run) if run.text.starts_with(prefix) => {
+                        Some(run.origin)
+                    }
+                    PositionedElement::MultilingualText(run)
+                        if run.logical_text.starts_with(prefix) =>
+                    {
+                        Some(run.origin)
+                    }
+                    _ => None,
+                };
+                if let Some(position) = position {
+                    let p = transform.apply(position);
+                    result.push((p.x, p.y));
+                }
+            },
+        );
+        result
+    }
+
+    #[test]
+    fn issue424_selected_blank_stories_and_zero_top_use_only_selected_flow() {
+        use rdocx_oxml::header_footer::HdrFtrRef;
+        let mut outcomes = Vec::new();
+        for (label, first, even) in [
+            ("default", false, false),
+            ("blank first", true, false),
+            ("blank even", false, true),
+        ] {
+            let mut input = make_input_with_text("BODY_MARK");
+            with_tall_header(&mut input, rdocx_oxml::Twips(0), 8);
+            let section = input.document.body.sect_pr.as_mut().unwrap();
+            section.title_pg = Some(first);
+            if even {
+                section.page_number = Some(rdocx_oxml::document::CT_PageNumberType::new(2));
+                // The facade materializes this blank-even marker from settings.
+                section.header_refs.push(HdrFtrRef {
+                    hdr_ftr_type: HdrFtrType::Even,
+                    rel_id: String::new(),
+                });
+            }
+            let output = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+            let body = output.body_layout_fragments(0).unwrap()[0].y;
+            let valid = if first || even {
+                body == 0.0 && issue424_positioned_text(&output, "Header").is_empty()
+            } else {
+                body > 36.0
+            };
+            if !valid {
+                outcomes.push(format!("{label}: body={body}"));
+            }
+        }
+        assert!(outcomes.is_empty(), "{outcomes:?}");
+    }
+
+    #[test]
+    fn issue424_tall_footer_reduces_body_band_and_negative_bottom_stays_exact() {
+        let footer = (0..8)
+            .map(|i| format!("<w:p><w:r><w:t>Footer{i}</w:t></w:r></w:p>"))
+            .collect::<String>();
+        let measure = |content: &str, bottom: i32| {
+            let mut input = issue424_furniture_input("", content);
+            input.document.body.sect_pr.as_mut().unwrap().margin_bottom =
+                Some(rdocx_oxml::Twips(bottom));
+            let BodyContent::Paragraph(p) = &mut input.document.body.content[0] else {
+                panic!("body");
+            };
+            p.runs[0] = CT_R::new(&"Body line. ".repeat(4000));
+            crate::layout_document_deterministic_with_provenance(&input).unwrap()
+        };
+        let plain = measure("", 720);
+        let positive = measure(&footer, 720);
+        let negative = measure(&footer, -720);
+        let fragment = |out: &crate::WordLayoutResult| out.body_layout_fragments(0).unwrap()[0];
+        assert!(
+            fragment(&positive).height < fragment(&plain).height,
+            "positive footer must reduce first-page body fit"
+        );
+        assert!(
+            (fragment(&negative).height - fragment(&plain).height).abs() < 0.01,
+            "negative margin uses its exact absolute distance"
+        );
+        let last = fragment(&positive).y + fragment(&positive).height;
+        assert!(
+            issue424_positioned_text(&positive, "Footer")[0].1 > last,
+            "footer starts beyond last body fragment"
+        );
+    }
+
+    #[test]
+    fn issue424_floating_furniture_table_uses_its_position_without_pricing_rows_as_flow() {
+        let table = |position: &str| {
+            format!(
+                r#"<w:tbl><w:tblPr>{position}<w:tblW w:w="2400" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:trPr><w:trHeight w:val="2400" w:hRule="exact"/></w:trPr><w:tc><w:p><w:r><w:t>FLOAT_TABLE</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#
+            )
+        };
+        let flow = crate::layout_document_deterministic_with_provenance(&issue424_furniture_input(
+            &table(""),
+            "",
+        ))
+        .unwrap();
+        let floating = table(
+            r#"<w:tblpPr w:horzAnchor="margin" w:vertAnchor="page" w:tblpX="480" w:tblpY="3600"/>"#,
+        );
+        let output = crate::layout_document_deterministic_with_provenance(
+            &issue424_furniture_input(&floating, ""),
+        )
+        .unwrap();
+        let at = issue424_positioned_text(&output, "FLOAT_TABLE");
+        assert_eq!(at.len(), 1);
+        assert!(
+            at[0].1 >= 180.0 && at[0].1 < 210.0,
+            "actual floating table page anchor: {at:?}"
+        );
+        assert_eq!(output.body_layout_fragments(0).unwrap()[0].y, 36.0);
+        assert!(
+            flow.body_layout_fragments(0).unwrap()[0].y >= 138.0,
+            "ordinary table consumes its120pt row once"
+        );
+    }
+
+    fn issue424_shape_anchor(relative: &str, offset: i64, color: &str, behind: u8) -> String {
+        format!(
+            r#"<w:r><w:drawing><wp:anchor behindDoc="{behind}"><wp:positionH relativeFrom="page"><wp:posOffset>1016000</wp:posOffset></wp:positionH><wp:positionV relativeFrom="{relative}"><wp:posOffset>{offset}</wp:posOffset></wp:positionV><wp:extent cx="127000" cy="127000"/><wp:wrapNone/><wp:docPr id="1" name="Frame anchor"/><a:graphic><a:graphicData><wps:wsp><wps:spPr><a:prstGeom prst="rect"/><a:solidFill><a:srgbClr val="{color}"/></a:solidFill></wps:spPr></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#
+        )
+    }
+
+    #[test]
+    fn issue424_adjacent_equal_frames_group_and_preserve_their_anchor_bases() {
+        let frame =
+            r#"<w:framePr w:w="3600" w:hAnchor="page" w:vAnchor="page" w:x="1200" w:y="3600"/>"#;
+        let header = format!(
+            r#"<w:p><w:pPr>{frame}</w:pPr><w:r><w:t>FRAME_A</w:t></w:r>{}{}</w:p><w:p><w:pPr>{frame}</w:pPr><w:r><w:t>FRAME_B</w:t></w:r></w:p>"#,
+            issue424_shape_anchor("page", 1524000, "112233", 1),
+            issue424_shape_anchor("paragraph", 63500, "445566", 0)
+        );
+        let output = crate::layout_document_deterministic_with_provenance(
+            &issue424_furniture_input(&header, ""),
+        )
+        .unwrap();
+        let a = issue424_positioned_text(&output, "FRAME_A");
+        let b = issue424_positioned_text(&output, "FRAME_B");
+        assert_eq!((a.len(), b.len()), (1, 1));
+        assert!(
+            a[0].1 >= 180.0 && a[0].1 < 210.0,
+            "frame page position: {a:?}"
+        );
+        assert!(
+            b[0].1 > a[0].1 + 5.0 && b[0].1 < a[0].1 + 30.0,
+            "equal frame paragraphs stack once: {a:?}, {b:?}"
+        );
+        assert_eq!(output.body_layout_fragments(0).unwrap()[0].y, 36.0);
+        let mut rectangles = Vec::new();
+        oxml_layout::walk(
+            &output.layout.pages[0].elements,
+            &mut |element, transform| {
+                if let PositionedElement::FilledRect { rect, color } = element
+                    && (*color == Color::from_hex("112233") || *color == Color::from_hex("445566"))
+                {
+                    rectangles.push((
+                        *color,
+                        transform
+                            .apply(Point {
+                                x: rect.x,
+                                y: rect.y,
+                            })
+                            .y,
+                    ));
+                }
+            },
+        );
+        assert_eq!(rectangles.len(), 2, "frame anchors occur exactly once");
+        assert!(
+            rectangles.contains(&(Color::from_hex("112233"), 120.0)),
+            "page anchor keeps written page basis: {rectangles:?}"
+        );
+        assert!(
+            rectangles.contains(&(Color::from_hex("445566"), 185.0)),
+            "paragraph anchor follows framed paragraph: {rectangles:?}"
+        );
+    }
+
+    #[test]
+    fn issue424_same_owner_spacing_text_and_variant_edits_match_cold_layout() {
+        let mut input = make_input_with_text("BODY_MARK");
+        with_tall_header(&mut input, rdocx_oxml::Twips(720), 5);
+        let owner = &input.headers["rIdHeader"].paragraphs[0] as *const CT_P;
+        let mut engine = Engine::new_deterministic().unwrap();
+        let initial = engine.layout(&input).unwrap();
+        for state in 0..3 {
+            match state {
+                0 => {
+                    input.headers.get_mut("rIdHeader").unwrap().paragraphs[0].properties =
+                        Some(CT_PPr {
+                            space_after: Some(rdocx_oxml::Twips(800)),
+                            ..Default::default()
+                        })
+                }
+                1 => {
+                    let p = &mut input.headers.get_mut("rIdHeader").unwrap().paragraphs[0];
+                    let RunContent::Text(text) = &mut p.runs[0].content[0] else {
+                        panic!("text");
+                    };
+                    text.text = "Header changed text ".repeat(50);
+                }
+                _ => input.document.body.sect_pr.as_mut().unwrap().title_pg = Some(true),
+            }
+            assert_eq!(
+                &input.headers["rIdHeader"].paragraphs[0] as *const CT_P,
+                owner
+            );
+            let warm = engine.layout(&input).unwrap();
+            let cold = Engine::new_deterministic().unwrap().layout(&input).unwrap();
+            assert_eq!(
+                format!("{:?}", warm.pages),
+                format!("{:?}", cold.pages),
+                "state{state}"
+            );
+            assert_eq!(
+                format!("{:?}", warm.outlines),
+                format!("{:?}", cold.outlines)
+            );
+            assert_ne!(
+                format!("{:?}", initial.pages),
+                format!("{:?}", warm.pages),
+                "edit must change actual positioned output, state{state}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue424_ordinary_frame_defaults_follow_documented_word_behavior() {
+        let position = |properties: &str| {
+            let header = format!(
+                r#"<w:p><w:pPr><w:framePr {properties}/></w:pPr><w:r><w:t>DEFAULT_FRAME</w:t></w:r></w:p><w:p><w:r><w:t>FLOW_TARGET</w:t></w:r></w:p>"#
+            );
+            let output = crate::layout_document_deterministic_with_provenance(
+                &issue424_furniture_input(&header, ""),
+            )
+            .unwrap();
+            issue424_positioned_text(&output, "DEFAULT_FRAME")
+        };
+        let mut failures = Vec::new();
+        for (label, original, explicit) in [
+            (
+                "omitted anchors",
+                r#"w:w="2400" w:x="480" w:y="120""#,
+                r#"w:w="2400" w:x="480" w:y="120" w:hAnchor="text" w:vAnchor="text""#,
+            ),
+            (
+                "nonzero omitted height rule",
+                r#"w:w="2400" w:h="1200" w:hAnchor="page" w:vAnchor="page" w:yAlign="bottom""#,
+                r#"w:w="2400" w:h="1200" w:hRule="atLeast" w:hAnchor="page" w:vAnchor="page" w:yAlign="bottom""#,
+            ),
+            (
+                "zero height exact",
+                r#"w:w="2400" w:h="0" w:hRule="exact" w:hAnchor="page" w:vAnchor="page" w:yAlign="bottom""#,
+                r#"w:w="2400" w:hRule="auto" w:hAnchor="page" w:vAnchor="page" w:yAlign="bottom""#,
+            ),
+        ] {
+            let actual = position(original);
+            let expected = position(explicit);
+            if actual != expected {
+                failures.push(format!("{label}: actual={actual:?}, expected={expected:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn issue424_drop_caps_keep_existing_fallback_outside_ordinary_frames() {
+        let plain =
+            "<w:p><w:r><w:t>CAP</w:t></w:r></w:p><w:p><w:r><w:t>FOLLOWING</w:t></w:r></w:p>";
+        let baseline = crate::layout_document_deterministic_with_provenance(
+            &issue424_furniture_input(plain, ""),
+        )
+        .unwrap();
+        for kind in ["drop", "margin"] {
+            let source = plain.replacen("<w:p>", &format!(r#"<w:p><w:pPr><w:framePr w:dropCap="{kind}" w:lines="3" w:hAnchor="page" w:vAnchor="page" w:y="3600"/></w:pPr>"#), 1);
+            let output = crate::layout_document_deterministic_with_provenance(
+                &issue424_furniture_input(&source, ""),
+            )
+            .unwrap();
+            assert_eq!(
+                issue424_positioned_text(&output, "CAP"),
+                issue424_positioned_text(&baseline, "CAP")
+            );
+            assert_eq!(
+                issue424_positioned_text(&output, "FOLLOWING"),
+                issue424_positioned_text(&baseline, "FOLLOWING")
+            );
+            assert_eq!(
+                output.body_layout_fragments(0).unwrap(),
+                baseline.body_layout_fragments(0).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn issue424_furniture_tables_settle_whole_owners_once_in_story_order() {
+        let table = |label: &str, overlap: &str, x: i32, rows: usize| {
+            let content=(0..rows).map(|row|format!(r#"<w:tr><w:trPr><w:trHeight w:val="600" w:hRule="exact"/></w:trPr><w:tc><w:p><w:r><w:t>{label}_{row}</w:t></w:r></w:p></w:tc></w:tr>"#)).collect::<String>();
+            format!(
+                r#"<w:tbl><w:tblPr><w:tblpPr w:horzAnchor="margin" w:vertAnchor="page" w:tblpX="{x}" w:tblpY="3600"/><w:tblW w:w="2400" w:type="dxa"/><w:tblOverlap w:val="{overlap}"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid>{content}</w:tbl>"#
+            )
+        };
+        let mut failures = Vec::new();
+        for footer in [false, true] {
+            for rows in [1, 2] {
+                for (left, right, x, separate) in [
+                    ("never", "overlap", 0, true),
+                    ("overlap", "never", 0, true),
+                    ("never", "never", 0, true),
+                    ("overlap", "overlap", 0, false),
+                    ("never", "never", 4000, false),
+                ] {
+                    let story = format!(
+                        "{}{}<w:p><w:r><w:t>FLOW_CONTROL</w:t></w:r></w:p>",
+                        table("TABLE_A", left, 0, rows),
+                        table("TABLE_B", right, x, rows)
+                    );
+                    let input = issue424_furniture_input(
+                        if footer { "" } else { &story },
+                        if footer { &story } else { "" },
+                    );
+                    let before = format!("{:?}", input);
+                    let output =
+                        crate::layout_document_deterministic_with_provenance(&input).unwrap();
+                    let first = issue424_positioned_text(&output, "TABLE_A_0");
+                    let second = issue424_positioned_text(&output, "TABLE_B_0");
+                    assert_eq!((first.len(), second.len()), (1, 1));
+                    let expected = if separate { 30.0 * rows as f64 } else { 0.0 };
+                    if ((second[0].1 - first[0].1) - expected).abs() > 0.01 {
+                        failures.push(format!("footer={footer},rows={rows},{left}/{right},x={x}: A={first:?},B={second:?},expected dy={expected}"));
+                    }
+                    if rows == 2 {
+                        for label in ["TABLE_A", "TABLE_B"] {
+                            let a = issue424_positioned_text(&output, &format!("{label}_0"));
+                            let b = issue424_positioned_text(&output, &format!("{label}_1"));
+                            assert_eq!(b.len(), 1);
+                            assert!(
+                                (b[0].1 - a[0].1 - 30.0).abs() < 0.01,
+                                "rows share one whole-table origin: {a:?},{b:?}"
+                            );
+                        }
+                    }
+                    assert_eq!(format!("{:?}", input), before);
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn issue424_furniture_clearance_follows_transitive_obstacles_at_final_origin() {
+        let flow = r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>FLOW_WORD</w:t></w:r></w:p>"#;
+        let plain = crate::layout_document_deterministic_with_provenance(
+            &issue424_furniture_input(flow, ""),
+        )
+        .unwrap();
+        let ascent = issue424_positioned_text(&plain, "FLOW_WORD")[0].1 - 18.0;
+        let frame_control = crate::layout_document_deterministic_with_provenance(
+            &issue424_furniture_input("<w:p><w:r><w:t>FRAME_CONTROL</w:t></w:r></w:p>", ""),
+        )
+        .unwrap();
+        let frame_ascent = issue424_positioned_text(&frame_control, "FRAME_CONTROL")[0].1 - 18.0;
+        let frame = |label: &str, y: i32, footer: bool| {
+            format!(
+                r#"<w:p><w:pPr><w:framePr w:w="2400" w:h="1200" w:hRule="exact" w:hAnchor="margin" w:vAnchor="{}" w:y="{y}" w:wrap="notBeside"/></w:pPr><w:r><w:t>{label}</w:t></w:r></w:p>"#,
+                if footer { "text" } else { "page" }
+            )
+        };
+        let mut failures = Vec::new();
+        for footer in [false, true] {
+            // Relative footer anchors make the same chain move with its own
+            // bottom-origin preparation, rather than an impossible fixed band.
+            for (second_y, expected_offset) in [(70, 112.0), (78, 120.0), (90, 60.0), (160, 60.0)] {
+                for reverse in [false, true] {
+                    let a = frame("FRAME_A", if footer { 0 } else { 360 }, footer);
+                    let b = frame(
+                        "FRAME_B",
+                        (if footer { second_y - 18 } else { second_y }) * 20,
+                        footer,
+                    );
+                    let story = if reverse {
+                        format!("{b}{a}{flow}")
+                    } else {
+                        format!("{a}{b}{flow}")
+                    };
+                    let input = issue424_furniture_input(
+                        if footer { "" } else { &story },
+                        if footer { &story } else { "" },
+                    );
+                    let before = format!("{:?}", input);
+                    let output =
+                        crate::layout_document_deterministic_with_provenance(&input).unwrap();
+                    let a = issue424_positioned_text(&output, "FRAME_A")[0].1 - frame_ascent;
+                    let b = issue424_positioned_text(&output, "FRAME_B")[0].1 - frame_ascent;
+                    let actual = issue424_positioned_text(&output, "FLOW_WORD")[0].1 - ascent;
+                    if (actual - a - expected_offset).abs() > 0.01 {
+                        failures.push(format!("footer={footer},reverse={reverse},B={second_y}: flow={actual},A={a},B={b},expected offset={expected_offset}"));
+                    }
+                    for (label, top) in [("A", a), ("B", b)] {
+                        if actual < top + 60.0 - 0.01 && actual + 12.0 > top + 0.01 {
+                            failures.push(format!("footer={footer},reverse={reverse},B={second_y}: final flow band{actual}..{} intersects {label}{top}..{}",actual+12.0,top+60.0));
+                        }
+                    }
+                    assert_eq!(format!("{:?}", input), before);
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn issue424_decorated_clearance_preserves_actual_field_substitution_and_story_placement() {
+        for (rich, footer, bordered) in [(false, false, true), (true, true, false)] {
+            let anchor = if footer { "text" } else { "page" };
+            let first = if footer { 0 } else { 360 };
+            let later = if footer { 1040 } else { 1400 };
+            let frames = format!(
+                r#"<w:p><w:pPr><w:framePr w:w="100" w:h="1200" w:hRule="exact" w:hAnchor="margin" w:vAnchor="{anchor}" w:y="{first}" w:wrap="around"/></w:pPr><w:r><w:t>SIDE_FRAME</w:t></w:r></w:p><w:p><w:pPr><w:framePr w:w="2400" w:h="1200" w:hRule="exact" w:hAnchor="margin" w:vAnchor="{anchor}" w:y="{later}" w:wrap="notBeside"/></w:pPr><w:r><w:t>LATER_FRAME</w:t></w:r></w:p>"#
+            );
+            let border = if bordered {
+                r#"<w:pBdr><w:top w:val="single" w:sz="8" w:space="2"/><w:bottom w:val="single" w:sz="8" w:space="2"/></w:pBdr>"#
+            } else {
+                ""
+            };
+            let rtl = if rich { "<w:rtl/>" } else { "" };
+            let words = if rich {
+                "אבגד flowword ".repeat(100)
+            } else {
+                "flowword ".repeat(100)
+            };
+            let flow = format!(
+                r#"<w:p><w:pPr>{border}<w:spacing w:line="240" w:lineRule="exact"/></w:pPr><w:hyperlink xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="link"><w:r><w:rPr>{rtl}<w:highlight w:val="yellow"/></w:rPr><w:t>{words}</w:t></w:r></w:hyperlink><w:fldSimple w:instr="PAGE"><w:r><w:t>0</w:t></w:r></w:fldSimple><w:r><w:t>/</w:t></w:r><w:fldSimple w:instr="NUMPAGES"><w:r><w:t>0</w:t></w:r></w:fldSimple></w:p>"#
+            );
+            let story = format!("{frames}{flow}");
+            let mut input = issue424_furniture_input(
+                if footer { "" } else { &story },
+                if footer { &story } else { "" },
+            );
+            input
+                .hyperlink_urls
+                .insert("link".into(), "https://example.com/clearance".into());
+            input.document.body.sect_pr.as_mut().unwrap().page_number =
+                Some(rdocx_oxml::document::CT_PageNumberType::new(27));
+            let before = format!("{input:?}");
+            let output = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+            assert_eq!(output.layout.pages.len(), 1);
+            let mut fields = Vec::new();
+            let mut boxes = Vec::new();
+            let mut multilingual = 0;
+            oxml_layout::walk(
+                &output.layout.pages[0].elements,
+                &mut |element, transform| match element {
+                    PositionedElement::Text(run) => {
+                        if let Some(kind) = run.field_kind {
+                            fields.push((kind, run.text.clone(), run.field_source.unwrap()));
+                        }
+                    }
+                    PositionedElement::MultilingualText(run) => {
+                        multilingual += 1;
+                        if let Some(kind) = run.field_kind {
+                            fields.push((
+                                kind,
+                                run.logical_text.clone(),
+                                run.field_source.unwrap(),
+                            ));
+                        }
+                    }
+                    PositionedElement::FilledRect { rect, color }
+                        if *color == Color::from_hex("FFFF00") =>
+                    {
+                        boxes.push(transform.transform_rect_bbox(*rect))
+                    }
+                    PositionedElement::LinkAnnotation { rect, url } => {
+                        assert_eq!(url, "https://example.com/clearance");
+                        boxes.push(transform.transform_rect_bbox(*rect));
+                    }
+                    _ => {}
+                },
+            );
+            assert_eq!(fields.len(), 2);
+            assert_eq!(multilingual > 0, rich);
+            assert!(
+                fields
+                    .iter()
+                    .any(|(kind, text, _)| *kind == oxml_layout::FieldKind::Page && text == "27")
+            );
+            assert!(fields.iter().any(|(kind,text,_)|*kind==oxml_layout::FieldKind::NumPages && text=="1"));
+            for (_, _, source) in fields {
+                let path = output.source_node(source.node).unwrap();
+                assert_eq!(path.children, vec![2]);
+                assert_eq!(
+                    path.story,
+                    if footer {
+                        WordStory::Footer {
+                            relationship_id: "F".into(),
+                        }
+                    } else {
+                        WordStory::Header {
+                            relationship_id: "H".into(),
+                        }
+                    }
+                );
+                assert!(
+                    output
+                        .field_placements()
+                        .iter()
+                        .any(|placed| placed.source == source
+                            && placed.physical_page == 1
+                            && placed.displayed_page == 27
+                            && placed.section_index == 0)
+                );
+            }
+            // Auto-height frame text has the same natural baseline as the
+            // ordinary control. Its60pt container defines the blocked band.
+            let control = crate::layout_document_deterministic_with_provenance(
+                &issue424_furniture_input("<w:p><w:r><w:t>CONTROL</w:t></w:r></w:p>", ""),
+            )
+            .unwrap();
+            let ascent = issue424_positioned_text(&control, "CONTROL")[0].1 - 18.0;
+            let top = issue424_positioned_text(&output, "LATER_FRAME")[0].1 - ascent;
+            assert!(boxes.len() > 10);
+            assert!(
+                boxes.iter().all(|rect| rect.height <= 12.01
+                    && (rect.y + rect.height <= top + 0.01 || rect.y >= top + 60.0 - 0.01)),
+                "actual substituted document occupied bands clear frame: rich={rich},footer={footer}"
+            );
+            assert_eq!(format!("{input:?}"), before);
+        }
+    }
+
+    #[test]
+    fn issue424_positioned_furniture_wraps_actual_flow_before_measurement() {
+        let text = format!("FLOW_ANCHOR {}", "text around furniture ".repeat(100));
+        let flow = format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>");
+        let baseline = crate::layout_document_deterministic_with_provenance(
+            &issue424_furniture_input(&flow, ""),
+        )
+        .unwrap();
+        let mut failures = Vec::new();
+        for (label, prefix, beside) in [
+            (
+                "frame around",
+                r#"<w:p><w:pPr><w:framePr w:w="2400" w:h="1200" w:hRule="exact" w:hAnchor="margin" w:vAnchor="page" w:y="360" w:wrap="around"/></w:pPr><w:r><w:t>POSITIONED</w:t></w:r></w:p>"#,
+                true,
+            ),
+            (
+                "frame notBeside",
+                r#"<w:p><w:pPr><w:framePr w:w="2400" w:h="1200" w:hRule="exact" w:hAnchor="margin" w:vAnchor="page" w:y="360" w:wrap="notBeside"/></w:pPr><w:r><w:t>POSITIONED</w:t></w:r></w:p>"#,
+                false,
+            ),
+            (
+                "floating table",
+                r#"<w:tbl><w:tblPr><w:tblpPr w:horzAnchor="margin" w:vertAnchor="page" w:tblpY="360"/><w:tblW w:w="2400" w:type="dxa"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid><w:tr><w:trPr><w:trHeight w:val="1200" w:hRule="exact"/></w:trPr><w:tc><w:p><w:r><w:t>POSITIONED</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+                true,
+            ),
+        ] {
+            let output = crate::layout_document_deterministic_with_provenance(
+                &issue424_furniture_input(&format!("{prefix}{flow}"), ""),
+            )
+            .unwrap();
+            let actual = issue424_positioned_text(&output, "FLOW_ANCHOR");
+            assert_eq!(actual.len(), 1);
+            let valid = if beside {
+                actual[0].0 >= 192.0
+            } else {
+                actual[0].1 >= 78.0
+            };
+            let body = output.body_layout_fragments(0).unwrap()[0].y;
+            let plain_body = baseline.body_layout_fragments(0).unwrap()[0].y;
+            if !valid || body <= plain_body {
+                failures.push(format!(
+                    "{label}: actual={actual:?}, body={body}, plain={plain_body}"
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn issue424_footer_wrapping_prepares_actual_bottom_anchored_flow() {
+        let flow = format!(
+            "<w:p><w:r><w:t>FOOTER_FLOW {}</w:t></w:r></w:p>",
+            "footer around positioned content ".repeat(35)
+        );
+        let plain = crate::layout_document_deterministic_with_provenance(
+            &issue424_furniture_input("", &flow),
+        )
+        .unwrap();
+        let mut failures = Vec::new();
+        for (label, anchors) in [
+            (
+                "page",
+                r#"w:hAnchor="margin" w:vAnchor="page" w:y="0" w:h="16000""#,
+            ),
+            (
+                "paragraph",
+                r#"w:hAnchor="text" w:vAnchor="text" w:h="1200""#,
+            ),
+        ] {
+            let footer = format!(
+                r#"<w:p><w:pPr><w:framePr w:w="2400" w:hRule="exact" w:wrap="around" {anchors}/></w:pPr><w:r><w:t>FOOTER_FRAME</w:t></w:r></w:p>{flow}"#
+            );
+            let output = crate::layout_document_deterministic_with_provenance(
+                &issue424_furniture_input("", &footer),
+            )
+            .unwrap();
+            let actual = issue424_positioned_text(&output, "FOOTER_FLOW");
+            let baseline = issue424_positioned_text(&plain, "FOOTER_FLOW");
+            let frame = issue424_positioned_text(&output, "FOOTER_FRAME");
+            if actual.len() != 1
+                || frame.len() != 1
+                || actual[0].0 < 192.0
+                || actual[0].1 >= baseline[0].1
+            {
+                failures.push(format!(
+                    "{label}: flow={actual:?}, plain={baseline:?}, frame={frame:?}"
+                ));
+            }
+            if label == "paragraph" && actual.len() == 1 && frame.len() == 1 {
+                assert!(
+                    (actual[0].1 - frame[0].1).abs() < 0.01,
+                    "same actual anchor after bottom preparation: {actual:?} {frame:?}"
+                );
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn issue424_repeating_footer_state_refuses_without_mutating_source_or_cache() {
+        let flow = "<w:p><w:r><w:t>CYCLE_FLOW</w:t></w:r></w:p>";
+        let plain_input = issue424_furniture_input("", flow);
+        let plain = crate::layout_document_deterministic_with_provenance(&plain_input).unwrap();
+        let baseline = issue424_positioned_text(&plain, "CYCLE_FLOW")[0].1;
+        let y = ((baseline - 10.0) * 20.0).round() as i32;
+        let footer = format!(
+            r#"<w:p><w:pPr><w:framePr w:w="2400" w:h="400" w:hRule="exact" w:hAnchor="margin" w:vAnchor="page" w:y="{y}" w:wrap="notBeside"/></w:pPr><w:r><w:t>CYCLE_FRAME</w:t></w:r></w:p>{flow}"#
+        );
+        let input = issue424_furniture_input("", &footer);
+        let before = format!("{:?}", input);
+        let mut engine = Engine::new_deterministic().unwrap();
+        let error = engine.layout(&input).unwrap_err().to_string();
+        assert!(
+            error.contains("section 1 page 1") && error.contains("repeats a non-stable state"),
+            "{error}"
+        );
+        assert_eq!(format!("{:?}", input), before);
+        let after = crate::layout_document_with_reusable_engine(&mut engine, &plain_input).unwrap();
+        assert_eq!(
+            format!("{:?}", after.layout.pages),
+            format!("{:?}", plain.layout.pages)
+        );
+    }
+
+    #[test]
+    fn issue424_border_group_and_multi_paragraph_cell_price_spacing_once() {
+        for table in [false, true] {
+            let build = |after: i32| {
+                let border = if table {
+                    ""
+                } else {
+                    r#"<w:pBdr><w:top w:val="single" w:sz="8" w:space="2"/><w:left w:val="single" w:sz="8" w:space="2"/><w:bottom w:val="single" w:sz="8" w:space="2"/><w:right w:val="single" w:sz="8" w:space="2"/><w:between w:val="single" w:sz="8"/></w:pBdr>"#
+                };
+                let paragraphs = (0..3).map(|i|format!(r#"<w:p><w:pPr>{border}<w:spacing w:after="{after}"/></w:pPr><w:r><w:t>GROUP_{i}</w:t></w:r></w:p>"#)).collect::<String>();
+                let header = if table {
+                    format!(
+                        r#"<w:tbl><w:tblGrid><w:gridCol w:w="5000"/></w:tblGrid><w:tr><w:tc>{paragraphs}</w:tc></w:tr></w:tbl>"#
+                    )
+                } else {
+                    paragraphs
+                };
+                crate::layout_document_deterministic_with_provenance(&issue424_furniture_input(
+                    &header, "",
+                ))
+                .unwrap()
+            };
+            let plain = build(0);
+            let spaced = build(160);
+            let span = |output: &crate::WordLayoutResult| {
+                issue424_positioned_text(output, "GROUP_2")[0].1
+                    - issue424_positioned_text(output, "GROUP_0")[0].1
+            };
+            assert!(
+                ((span(&spaced) - span(&plain)) - 16.0).abs() < 0.01,
+                "two interior gaps priced once, table={table}"
+            );
+            let body_delta = spaced.body_layout_fragments(0).unwrap()[0].y
+                - plain.body_layout_fragments(0).unwrap()[0].y;
+            assert!(
+                (body_delta - 24.0).abs() < 0.01,
+                "three after spaces priced once, table={table}, delta={body_delta}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue424_overflow_notes_keep_selected_furniture_and_cleared_band() {
+        let furniture = (0..5).map(|index|format!(r#"<w:p><w:pPr><w:spacing w:after="160"/></w:pPr><w:r><w:t>FURNITURE_{index}</w:t></w:r></w:p>"#)).collect::<String>();
+        let mut failures = Vec::new();
+        let mut ordinary_continuation = None;
+        for (endnote, direction, alignment) in [
+            (false, None, None),
+            (true, None, None),
+            (true, None, Some(rdocx_oxml::table::ST_VerticalJc::Center)),
+            (
+                true,
+                Some("tbRl"),
+                Some(rdocx_oxml::table::ST_VerticalJc::Bottom),
+            ),
+            (
+                true,
+                Some("btLr"),
+                Some(rdocx_oxml::table::ST_VerticalJc::Center),
+            ),
+        ] {
+            let noted = make_noted_document(3, &[0], 130, "OVERFLOW_NOTE", true);
+            let footer = format!(
+                r#"{}<w:p><w:fldSimple w:instr="PAGE"><w:r><w:t>0</w:t></w:r></w:fldSimple><w:r><w:t>/</w:t></w:r><w:fldSimple w:instr="NUMPAGES"><w:r><w:t>0</w:t></w:r></w:fldSimple></w:p>"#,
+                furniture.replace("FURNITURE", "FOOTER")
+            );
+            let mut input =
+                issue424_furniture_input(&furniture.replace("FURNITURE", "HEADER"), &footer);
+            input.document.body.sect_pr.as_mut().unwrap().page_number =
+                Some(rdocx_oxml::document::CT_PageNumberType::new(27));
+            input.document.body.content = noted.document.body.content;
+            if endnote {
+                for item in &mut input.document.body.content {
+                    if let BodyContent::Paragraph(p) = item {
+                        for run in &mut p.runs {
+                            for content in &mut run.content {
+                                if let RunContent::FootnoteRef { id, custom_mark } = content {
+                                    *content = RunContent::EndnoteRef {
+                                        id: *id,
+                                        custom_mark: custom_mark.clone(),
+                                    };
+                                }
+                            }
+                        }
+                    }
+                }
+                input.endnotes = noted.footnotes;
+            } else {
+                input.footnotes = noted.footnotes;
+            }
+            input.document.body.sect_pr.as_mut().unwrap().text_direction =
+                direction.map(str::to_owned);
+            input
+                .document
+                .body
+                .sect_pr
+                .as_mut()
+                .unwrap()
+                .vertical_alignment = alignment;
+            let output = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+            let mut note_count = 0;
+            let mut first_continuation = None;
+            for page in &output.layout.pages {
+                let mut headers = Vec::new();
+                let mut footers = Vec::new();
+                let mut notes = Vec::new();
+                oxml_layout::walk(&page.elements, &mut |element, transform| {
+                    if let PositionedElement::Text(run) = element {
+                        let point = transform.apply(run.origin);
+                        if run.text.contains("HEADER_4") {
+                            headers.push(point.y);
+                        }
+                        if run.text.contains("FOOTER_0") {
+                            footers.push(point.y);
+                        }
+                        if run.text.contains("OVERFLOW_NOTE") {
+                            notes.push(point.y);
+                            note_count += 1;
+                            if endnote && page.page_number > 1 && first_continuation.is_none() {
+                                first_continuation = Some((point.x, point.y));
+                            }
+                            if (transform.a - 1.0).abs() > 0.01
+                                || transform.b.abs() > 0.01
+                                || transform.c.abs() > 0.01
+                                || (transform.d - 1.0).abs() > 0.01
+                            {
+                                failures.push(format!("endnote={endnote}, direction={direction:?}, alignment={alignment:?}: note rotated with body: {transform:?}"));
+                            }
+                        }
+                    }
+                });
+                let mut page_fields = Vec::new();
+                oxml_layout::walk(&page.elements, &mut |element, _| {
+                    if let PositionedElement::Text(run) = element
+                        && (matches!(
+                            run.field_kind,
+                            Some(oxml_layout::FieldKind::Page | oxml_layout::FieldKind::NumPages)
+                        ))
+                    {
+                        page_fields.push((run.field_kind, run.text.clone(), run.field_source));
+                    }
+                });
+                assert!(
+                    page_fields.iter().any(|(kind, text, source)| *kind
+                        == Some(oxml_layout::FieldKind::Page)
+                        && *text == page.displayed_page_number.to_string()
+                        && source.is_some()),
+                    "actual PAGE with source: {page_fields:?}"
+                );
+                assert!(
+                    page_fields.iter().any(|(kind, text, source)| *kind
+                        == Some(oxml_layout::FieldKind::NumPages)
+                        && *text == output.layout.pages.len().to_string()
+                        && source.is_some()),
+                    "actual NUMPAGES with source: {page_fields:?}"
+                );
+                assert!(
+                    output
+                        .field_placements()
+                        .iter()
+                        .any(|placement| placement.physical_page == page.page_number
+                            && placement.displayed_page == page.displayed_page_number
+                            && placement.section_index == 0)
+                );
+                if notes.is_empty() {
+                    continue;
+                }
+                if headers.len() != 1 || footers.len() != 1 {
+                    failures.push(format!("endnote={endnote}, page{} missing selected furniture: header={headers:?}, footer={footers:?}",page.page_number));
+                    continue;
+                }
+                if notes
+                    .iter()
+                    .any(|y| *y <= headers[0] || *y >= footers[0] - 2.0)
+                {
+                    failures.push(format!("endnote={endnote}, page{} overlaps furniture: header={headers:?}, footer={footers:?}, notes={notes:?}",page.page_number));
+                }
+            }
+            assert_eq!(
+                note_count, 130,
+                "every note paragraph once, endnote={endnote}"
+            );
+            assert!(output.layout.pages.len() > 2);
+            if endnote {
+                if direction.is_none() && alignment.is_none() {
+                    ordinary_continuation = first_continuation;
+                } else {
+                    let expected = ordinary_continuation.expect("ordinary continuation control");
+                    let actual = first_continuation.expect("actual continuation");
+                    if (actual.0 - expected.0).abs() > 0.01 || (actual.1 - expected.1).abs() > 0.01
+                    {
+                        failures.push(format!("endnote top-flow direction={direction:?}, alignment={alignment:?}: actual={actual:?}, expected={expected:?}"));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn issue424_columns_vertical_alignment_and_line_numbers_use_effective_band() {
+        use rdocx_oxml::document::{CT_Columns, CT_LineNumber, ST_LineNumberRestart};
+        use rdocx_oxml::table::ST_VerticalJc;
+        let furniture = (0..5).map(|i|format!(r#"<w:p><w:pPr><w:spacing w:after="160"/></w:pPr><w:r><w:t>FURN_{i}</w:t></w:r></w:p>"#)).collect::<String>();
+        let input_for = |columns: bool, center: bool| {
+            let mut input = issue424_furniture_input(
+                &furniture.replace("FURN", "HEAD"),
+                &furniture.replace("FURN", "FOOT"),
+            );
+            input.document.body.content = (0..if columns { 100 } else { 1 })
+                .map(|i| {
+                    let mut p = CT_P::new();
+                    p.add_run(&format!("BODY_{i}"));
+                    BodyContent::Paragraph(Box::new(p))
+                })
+                .collect();
+            let section = input.document.body.sect_pr.as_mut().unwrap();
+            if columns {
+                section.columns = Some(CT_Columns {
+                    num: Some(2),
+                    space: Some(rdocx_oxml::Twips(720)),
+                    equal_width: Some(true),
+                    sep: Some(true),
+                    columns: Vec::new(),
+                });
+            }
+            if center {
+                section.vertical_alignment = Some(ST_VerticalJc::Center);
+            }
+            section.line_numbers = Some(Box::new(CT_LineNumber {
+                count_by: Some(1),
+                start: Some(1),
+                restart: Some(ST_LineNumberRestart::NewPage),
+                ..Default::default()
+            }));
+            input
+        };
+        let top =
+            crate::layout_document_deterministic_with_provenance(&input_for(false, false)).unwrap();
+        let centered =
+            crate::layout_document_deterministic_with_provenance(&input_for(false, true)).unwrap();
+        let top_fragment = &top.body_layout_fragments(0).unwrap()[0];
+        let center_fragment = &centered.body_layout_fragments(0).unwrap()[0];
+        let ascent = issue424_positioned_text(&top, "BODY_0")[0].1 - top_fragment.y;
+        let footer_top = issue424_positioned_text(&top, "FOOT_0")[0].1 - ascent;
+        let expected = top_fragment.y + (footer_top - top_fragment.y - top_fragment.height) / 2.0;
+        let painted = issue424_positioned_text(&centered, "BODY_0")[0].1 - ascent;
+        assert!(
+            (painted - expected).abs() < 0.01,
+            "painted center actual={painted}, expected={expected}"
+        );
+        assert!(
+            (center_fragment.y - painted).abs() < 0.01,
+            "fragment center actual={}, painted={painted}, expected={expected}",
+            center_fragment.y
+        );
+        assert_eq!(
+            issue424_positioned_text(&top, "HEAD_0"),
+            issue424_positioned_text(&centered, "HEAD_0")
+        );
+        assert_eq!(
+            issue424_positioned_text(&top, "FOOT_0"),
+            issue424_positioned_text(&centered, "FOOT_0")
+        );
+        let columns =
+            crate::layout_document_deterministic_with_provenance(&input_for(true, false)).unwrap();
+        let mut right = false;
+        for index in 0..100 {
+            for fragment in columns.body_layout_fragments(index).unwrap() {
+                assert!(
+                    fragment.y >= top_fragment.y - 0.01
+                        && fragment.y + fragment.height <= footer_top + 0.01,
+                    "column fragment outside effective band: {fragment:?}"
+                );
+                right |= fragment.x > 300.0;
+            }
+        }
+        assert!(right, "actual second column must be placed");
+        for page in &columns.layout.pages {
+            let mut body = Vec::new();
+            let mut numbers = Vec::new();
+            oxml_layout::walk(&page.elements, &mut |element, transform| {
+                if let PositionedElement::Text(run) = element {
+                    let y = transform.apply(run.origin).y;
+                    if run.text.starts_with("BODY_") {
+                        body.push(y);
+                    }
+                    if run.font_size == 9.0 && run.text.parse::<u32>().is_ok() {
+                        numbers.push(y);
+                    }
+                }
+            });
+            assert!(!numbers.is_empty());
+            assert!(
+                numbers
+                    .iter()
+                    .all(|y| body.iter().any(|other| (y - other).abs() < 0.01)),
+                "line numbers follow actual body baselines"
+            );
+        }
+    }
+
+    #[test]
+    fn issue424_aligned_rotated_fragments_follow_painted_displacement_and_live_edits() {
+        for direction in ["tbRl", "btLr"] {
+            let mut input = issue424_furniture_input(
+                "<w:p><w:r><w:t>HEADER</w:t></w:r></w:p>",
+                "<w:p><w:r><w:t>FOOTER</w:t></w:r></w:p>",
+            );
+            input.document.body.sect_pr.as_mut().unwrap().text_direction = Some(direction.into());
+            let top = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+            input
+                .document
+                .body
+                .sect_pr
+                .as_mut()
+                .unwrap()
+                .vertical_alignment = Some(rdocx_oxml::table::ST_VerticalJc::Center);
+            let mut engine = Engine::new_deterministic().unwrap();
+            let center = crate::layout_document_with_reusable_engine(&mut engine, &input).unwrap();
+            let a = &top.body_layout_fragments(0).unwrap()[0];
+            let b = &center.body_layout_fragments(0).unwrap()[0];
+            let ga = issue424_positioned_text(&top, "BODY_MARK")[0];
+            let gb = issue424_positioned_text(&center, "BODY_MARK")[0];
+            assert!(
+                ((b.x - a.x) - (gb.0 - ga.0)).abs() < 0.01
+                    && ((b.y - a.y) - (gb.1 - ga.1)).abs() < 0.01,
+                "rotated displacement must be applied once: {direction}, {a:?}, {b:?}, {ga:?}, {gb:?}"
+            );
+            assert!((b.x - a.x).abs() > 100.0, "must exercise rotated movement");
+            let BodyContent::Paragraph(p) = &mut input.document.body.content[0] else {
+                panic!("paragraph")
+            };
+            p.runs = vec![CT_R::new("BODY_MARK changed same-owner line")];
+            let warm = crate::layout_document_with_reusable_engine(&mut engine, &input).unwrap();
+            let cold = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+            assert_eq!(
+                format!("{:?}", warm.layout.pages),
+                format!("{:?}", cold.layout.pages)
+            );
+            assert_eq!(warm.body_layout_fragments(0), cold.body_layout_fragments(0));
+        }
+    }
+
+    #[test]
+    fn issue424_page_and_text_borders_keep_written_geometry_when_body_clears() {
+        use rdocx_oxml::document::{CT_PageBorders, ST_PageBorderOffset};
+        let header = (0..8)
+            .map(|_| "<w:p><w:r><w:t>HEADER</w:t></w:r></w:p>")
+            .collect::<String>();
+        for offset in [ST_PageBorderOffset::Page, ST_PageBorderOffset::Text] {
+            let mut edges = Vec::new();
+            let mut bodies = Vec::new();
+            for tall in [false, true] {
+                let mut input = issue424_furniture_input(if tall { &header } else { "" }, "");
+                let mut edge =
+                    rdocx_oxml::borders::CT_BorderEdge::new(rdocx_oxml::shared::ST_Border::Single);
+                edge.color = Some("246810".into());
+                edge.sz = Some(8);
+                edge.space = Some(3);
+                input.document.body.sect_pr.as_mut().unwrap().page_borders =
+                    Some(Box::new(CT_PageBorders {
+                        offset_from: Some(offset),
+                        top: Some(edge.clone()),
+                        bottom: Some(edge),
+                        ..Default::default()
+                    }));
+                let output = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+                let mut positions = Vec::new();
+                oxml_layout::walk(
+                    &output.layout.pages[0].elements,
+                    &mut |element, transform| {
+                        if let PositionedElement::Line {
+                            start, end, color, ..
+                        } = element
+                            && (*color == Color::from_hex("246810"))
+                        {
+                            positions.push((transform.apply(*start), transform.apply(*end)));
+                        }
+                    },
+                );
+                assert_eq!(positions.len(), 2);
+                edges.push(positions);
+                bodies.push(output.body_layout_fragments(0).unwrap()[0].y);
+            }
+            assert_eq!(
+                edges[0], edges[1],
+                "written border basis is independent of clearance"
+            );
+            assert!(bodies[1] > bodies[0]);
+        }
+    }
+
+    #[test]
+    fn issue424_body_and_nested_cell_anchors_keep_written_margin_reference() {
+        let namespaces = r#"xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape""#;
+        for cell in [false, true] {
+            let mut observed = Vec::new();
+            for tall in [false, true] {
+                let paragraph = format!(
+                    "<w:p><w:r><w:t>BODY_MARK</w:t></w:r>{}{}</w:p>",
+                    issue424_shape_anchor("margin", 63500, "112233", 1),
+                    issue424_shape_anchor("paragraph", 0, "445566", 0)
+                );
+                let body = if cell {
+                    format!(
+                        "<w:tbl><w:tblGrid><w:gridCol w:w=\"9360\"/></w:tblGrid><w:tr><w:tc>{paragraph}</w:tc></w:tr></w:tbl>"
+                    )
+                } else {
+                    paragraph
+                };
+                let mut input = make_input_with_text("");
+                with_tall_header(&mut input, rdocx_oxml::Twips(720), if tall { 8 } else { 0 });
+                input.document.body.content = CT_Document::from_xml(
+                    format!("<w:document {namespaces}><w:body>{body}</w:body></w:document>")
+                        .as_bytes(),
+                )
+                .unwrap()
+                .body
+                .content;
+                let output = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+                let text = issue424_positioned_text(&output, "BODY_MARK");
+                assert_eq!(text.len(), 1);
+                let mut anchors = Vec::new();
+                oxml_layout::walk(
+                    &output.layout.pages[0].elements,
+                    &mut |element, transform| {
+                        if let PositionedElement::FilledRect { rect, color } = element
+                            && (*color == Color::from_hex("112233")
+                                || *color == Color::from_hex("445566"))
+                        {
+                            anchors.push((
+                                *color,
+                                transform
+                                    .apply(Point {
+                                        x: rect.x,
+                                        y: rect.y,
+                                    })
+                                    .y,
+                            ));
+                        }
+                    },
+                );
+                assert_eq!(anchors.len(), 2);
+                let margin = anchors
+                    .iter()
+                    .find(|(color, _)| *color == Color::from_hex("112233"))
+                    .unwrap()
+                    .1;
+                let paragraph = anchors
+                    .iter()
+                    .find(|(color, _)| *color == Color::from_hex("445566"))
+                    .unwrap()
+                    .1;
+                assert_eq!(margin, 41.0, "cell={cell}, tall={tall}");
+                observed.push((text[0].1, paragraph));
+            }
+            assert!(observed[1].0 > observed[0].0);
+            assert!(
+                ((observed[1].1 - observed[0].1) - (observed[1].0 - observed[0].0)).abs() < 0.01,
+                "paragraph anchors track actual owner, cell={cell}: {observed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue426_nested_control_orphan_and_revision_views_keep_actual_table_facts() {
+        let nested = |text: &str| {
+            format!(
+                "<w:tbl><w:tblGrid><w:gridCol w:w=\"2000\"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
+            )
+        };
+        let body = format!(
+            r#"<w:tbl><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>ROOT</w:t></w:r></w:p></w:tc><w:tc>{}</w:tc></w:tr><w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr>{}<w:sdt><w:sdtPr/><w:sdtContent><w:p><w:r><w:t>OMITTED_CONTROL</w:t></w:r></w:p></w:sdtContent></w:sdt></w:tc><w:tc><w:p><w:r><w:t>NEIGHBOR</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:trPr><w:del w:id="9" w:author="A"/></w:trPr><w:tc><w:p><w:r><w:t>DELETED_ROW</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p><w:r><w:t>ORPHAN</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+            nested("VISIBLE_NESTED"),
+            nested("OMITTED_NESTED")
+        );
+        let mut failures = Vec::new();
+        for view in [RevisionView::Accepted, RevisionView::Tracked] {
+            let mut input = make_input_with_text("");
+            input.document = CT_Document::from_xml(format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}</w:body></w:document>"#).as_bytes()).unwrap();
+            input.revision_view = view;
+            let output = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+            for text in [
+                "ROOT",
+                "VISIBLE_NESTED",
+                "NEIGHBOR",
+                "OMITTED_NESTED",
+                "OMITTED_CONTROL",
+                "ORPHAN",
+                "DELETED_ROW",
+            ] {
+                let omitted = matches!(text, "OMITTED_NESTED" | "OMITTED_CONTROL" | "ORPHAN")
+                    || text == "DELETED_ROW" && view == RevisionView::Accepted;
+                match output
+                    .paragraph_navigation()
+                    .find(|(_, _, _, value, ..)| *value == text)
+                {
+                    Some((node, _, level, _, style, _, page)) => {
+                        assert_eq!(output.paragraph_omitted_by_table(node), Some(omitted));
+                        if omitted {
+                            assert_eq!(
+                                (level, style, page),
+                                (None, None, None),
+                                "{view:?}, {text}"
+                            );
+                        } else {
+                            assert!(page.is_some(), "{view:?}, {text}");
+                        }
+                    }
+                    None => failures.push(format!("{view:?}, {text}: missing actual navigation")),
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn issue426_cached_omission_and_ordinary_sources_match_fresh_physical_paths() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p><w:r><w:t>ORPHAN_CACHE</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:p><w:r><w:t>VISIBLE_CACHE</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+        let mut input = make_input_with_text("");
+        input.document = CT_Document::from_xml(xml).unwrap();
+        let mut engine = Engine::new_deterministic().unwrap();
+        crate::layout_document_with_reusable_engine(&mut engine, &input).unwrap();
+        let warm = crate::layout_document_with_reusable_engine(&mut engine, &input).unwrap();
+        let cold = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+        assert!(
+            engine.table_cache_counts().0 > 0,
+            "must exercise actual table cache hit"
+        );
+        for output in [&warm, &cold] {
+            for (node, _, _, text, ..) in output.paragraph_navigation() {
+                assert_eq!(
+                    output.paragraph_omitted_by_table(node),
+                    Some(text == "ORPHAN_CACHE")
+                );
+            }
+            assert_eq!(
+                output.paragraph_omitted_by_table(SourceNodeId::new(u32::MAX).unwrap()),
+                None
+            );
+            assert!(
+                output
+                    .paragraph_navigation()
+                    .any(|(_, _, _, text, _, _, page)| text == "ORPHAN_CACHE" && page.is_none())
+            );
+            assert!(
+                output
+                    .paragraph_navigation()
+                    .any(|(_, _, _, text, _, _, page)| text == "VISIBLE_CACHE" && page.is_some())
+            );
+        }
+        assert_eq!(
+            format!("{:?}", warm.layout.pages),
+            format!("{:?}", cold.layout.pages)
+        );
+        assert_eq!(
+            format!("{:?}", warm.paragraph_navigation().collect::<Vec<_>>()),
+            format!("{:?}", cold.paragraph_navigation().collect::<Vec<_>>())
+        );
+    }
+
+    #[test]
+    fn issue426_table_omission_keeps_navigation_source_stamp_refusal() {
+        let mut input = make_input_with_text("CURRENT");
+        input
+            .story_part_names
+            .insert(WordStory::Document, "/word/document.xml".into());
+        let mut snapshot = evaluate_sequence_fields(&input).unwrap();
+        snapshot
+            .set_navigation_exclusions(&input, Vec::new())
+            .unwrap();
+        input.sequence_snapshot = Some(Arc::new(snapshot));
+        assert!(crate::layout_document_deterministic_with_provenance(&input).is_ok());
+        let BodyContent::Paragraph(paragraph) = &mut input.document.body.content[0] else {
+            panic!("paragraph");
+        };
+        paragraph.runs[0] = CT_R::new("CHANGED");
+        let before = input.document.clone();
+        let error = crate::layout_document_deterministic_with_provenance(&input)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("stale navigation exclusion source stamp"),
+            "{error}"
+        );
+        assert_eq!(input.document, before);
     }
 }

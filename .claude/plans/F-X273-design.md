@@ -107,14 +107,17 @@ Variant refactor must be unchanged. Geometry and navigation are separate labelle
 
 ## Implementation checklist
 
-- [ ] Close primary semantics and predeclare native numeric tolerances.
-- [ ] Reconcile PR428 own commits after F-X272 without overwriting tests/measurements.
-- [ ] Keep variant refactor and each intentional behavior change separately labelled.
-- [ ] Price and paint the same complete selected flow.
-- [ ] Qualify floating owners, anchors, borders and notes without scope omissions.
-- [ ] Repair every source-qualified TOC selector and preserve freshness refusals.
-- [ ] Run local regressions/scoped gate/microscope and preserve final oracle debt.
-- [ ] Update listed HLD intent and authenticate provider ancestry before F-X274.
+- [x] Close primary source facts and predeclare native numeric tolerances.
+- [x] Reconcile PR428 own commits after F-X272 without overwriting tests or measurements.
+- [x] Keep unchanged variant refactor and intentional navigation and geometry separately labelled.
+- [x] Price and paint the same complete selected flow, with actual local controls.
+- [x] Implement floating owners, anchors, borders and notes with the named local controls.
+- [x] Repair every source-qualified TOC selector and preserve freshness refusals.
+- [x] Run local regressions and scoped checks, obtain clean independent pass2 and preserve final debt.
+- [x] Update the listed HLD08 implementation intent.
+- [ ] Complete native floating, anchor, border, note and numeric qualification in the final sprint union.
+- [ ] Authenticate integrated provider ancestry and execute the approved local provider checkpoint before F-X274 claim.
+- [ ] Pass every final acceptance rider in the approved test matrix and sprint gate.
 
 ## Open questions
 
@@ -122,7 +125,7 @@ No new material product choice is proposed. Native Word observations and primary
 
 ## Contract closure
 
-No public signature change or new source carrier planned. Consumer coverage, callable APIs and local/final evidence are mapped. Primary clauses and predeclared native tolerance are recorded. Native observations remain required final evidence rather than unmade design choices. F-X274 must not interpret provider design approval as completed implementation.
+The approved doc-hidden native omission query is implemented without changing the existing navigation tuple or authoring signatures. Concrete private carriers serve the mapped consumers. Consumer coverage, callable APIs and local/final evidence are mapped. Primary clauses and predeclared native tolerance are recorded. Native observations remain required final evidence rather than unmade design choices. F-X274 must not interpret provider design approval as completed implementation.
 
 ## Intake identity
 
@@ -181,3 +184,38 @@ A focused independent source advisory found no reusable bottom-anchored furnitur
 Use the existing fallible Engine layout route and LayoutError for a preparation that cannot establish consistency. Detect repeated states and stop after at most32 candidate preparations as an internal termination guard. The bound is not a native Word maximum, a performance acceptance budget or evidence of convergence. Each candidate starts from original blocks. A repeated state, exhausted bound or actual preparation failure returns an explicit section/page-qualified layout error. Never paint a guessed last candidate, silently drop wrapping or report a cycle as successful qualification. Preserve the public low-level pagination signatures and their existing positioned-furniture failure policy, since they carry no new private positioned-furniture metadata. The approved ordinary-flow clearance and spacing repair still reaches every applicable caller.
 
 Local controls must distinguish fixed-origin header preparation, footer height changed by page-relative wrapping, paragraph-relative placement, stable measured/painted reuse and repeated-state refusal without source mutation. Every named supported A3/A4 example must actually stabilize and pass. Refusal cannot satisfy those examples or waive final Word/pinned-LO qualification. This is a bounded implementation decision using the existing fallible layout boundary, without a new authoring operation or public API.
+
+
+## Pre-review local implementation evidence
+
+Base remains `564ad7f5d1d57a7828c721eba58cbe79da10aae3`. The unchanged private variant refactor is separately labelled at `3510ec5ee2c12f8aee9bc52e4434624532f160d8`, qualified by the same three before/after cache/variant controls and scoped check. Intentional geometry and navigation increments remain separate labels. Product input changes exclude the fifth archive-measurement donor commit.
+
+Actual Base RED is preserved under `/private/tmp/rdocx-s96-run-refresh`: initial lower7 gives4failures/3controls, native20selector contexts give16failures/4controls, authenticated predecessor Python7 gives3failures/4controls, and authenticated Base CLI7 gives4failed criteria/3controls. The CLI generator retains original five Normal paragraphs with8point after spacing and full descriptive table/1.5cm logo input at2cm top margin. All four original Issue426 merged/unmerged and outline/no-outline combinations remain, with a separate styled no-outline discriminator. Predecessor artifact identity is verified against Base product files, not represented as a current-source wheel.
+
+Pre-review local lower qualification is32/32GREEN in1.09seconds in `fx273-complete-lower-green.log`. It includes actual selected spacing, nonzero border groups, multi-paragraph cells, frames/defaults/drop-cap fallback/wrapping, footer stable-state/refusal, signed margins, written anchors/page-text borders, columns/alignment/line numbers, footnote/endnote overflow and physical/displayed field provenance, navigation/cache/source-stamp controls. Intermediate failed compiles, setup aborts, test-oracle mismatches and source repair failures remain attributed in the existing progress record. They are not relabelled as semantic passes.
+
+Pre-review local native5 and CLI2 pass, including original selector controls, styled omission, full logo/table layout/PDF and saved/reopened TOC. The same seven original source-built Base CLI inputs also pass against the authenticated current CLI, with unchanged inputs. Scoped all-target check, strict clippy, fmt, prose, adapter drift and whitespace pass. Receipts are `fx273-final-local.json` and `fx273-current-cli-original-green.json`.
+
+Fresh dev wheel SHA256 `e48be80e7e666b38341f0abd25ae268f05378d08fec5036534ae4dfbf5a9c175` installs into an isolated Python3.12 environment. Actual imported native SHA256 `b236a165dadd44330fca9c5058899ea658a66300b51a25d0f35f91d77cffbba8` matches its wheel payload. All227product paths match before build, after build and after tests, manifest `be5dff87779bb572e84a861abd786058fc74d4ec9c98a1a26f7ef3e23f936607`. Initial fresh22selection gives21passes and one incorrect short-fit assertion. Saved source confirms document defaults8point after spacing, so one Normal paragraph actually clears to58.490763rather than fitting within2cm. The corrected carrier retains that nonzero clearance and adds an explicit zero-after fitting control, with existing tall/negative controls unchanged. Only that test function changes and passes1/1on the same authenticated product. Applicable unchanged21plus corrected1qualify all22selected cases, not one22pass execution. `fx273-provider-corrected-consumer-auth.json` proves the prior source reconstruction hash and unchanged other test functions. The failed full attempt remains intact.
+
+HLD08 describes current implementation intent. This paragraph records the pre-review evidence stage. Subsequent clean independent pass2 and separate intentional labels are recorded in the preparation checkpoint below. Every final native Word/pinned LO/Poppler, full workspace/native, installed3.9/3.12, typing/WASM,49hash/7pixel, archive/README, risk and F-X272/F-X273/F-X274 union rider remains pending. This evidence is local provider readiness work and does not grant final acceptance.
+
+
+## Independent pass1 and investigated successor
+
+Full independent pass1 reports D1/D2, zero smells/nitpicks. D1 bypasses existing table-only overlap settlement. D2 repeats incomplete reservation output. Actual current-source RED contains12forbidden table overlaps, partial78point clearance inside a second70to130point object, and6later-line square reservations missing108points. Both-allows/disjoint and valid touch controls remain positive. A first whole-paragraph strict repair passes initial cases but later-line source-contract4fails. A second metric-encoding approach gives actual146highlight/link/rich occupied-band mismatches. Root designer and independent reviewer investigate before the successor, preserving both failures and actual source identities.
+
+The successor settles each physical table once and transports private line gaps separately from unchanged Word metrics. Every occupied-band consumer sees the moved origin, while border/changebar/following flow price gaps once. Strict final-band reservations are positively checked against line-break inputs, with a separate32rebreak work guard. Original page32candidate guard and cycle refusal remain. No body approximation rewrite or public model/API change occurs. Initial investigated5cases pass0.25seconds, followed by bounded43lower controls passing1.10seconds, including all previous32, all new D1/D2 cases, existing body/variant controls and actual Engine PAGE/NUMPAGES substitution with story placement. These are internal/source-contract observations, not native Word parity. The formatted investigated successor passes43/43lower controls in1.09seconds and current CLI2/2in5.67seconds, plus scoped all-target check, strict clippy, fmt, prose, adapter and whitespace gates. The seven immutable original Base CLI inputs also pass against the current authenticated application. Native5navigation observations are consumed as predecessor executions only: query/provider/test source is unchanged, inputs have no furniture or wraps, and body policy/empty-gap view behavior remains equivalent. Their original source/binary identities are preserved in `fx273-review1-final-local.json`, not relabelled as current execution.
+
+A NEW dev artifact passes the full current22Python selection in45.81seconds,647deselected. Wheel SHA256 `70e5dd68aa4a08f38d4e4d9f0c8a527b17ac0d0dd578900934706b039c5abf77` and isolated native SHA256 `1d84a2b936243efd7c20bdc2a3e826b4c046c96cc1d3933bd9ffe33b0bf26156` match. All227product paths remain exact before build, after build and after tests, manifest `377e3fc0d520b9bd37102053ead47947b223af4a2ba6fab873390ac5affcb7ef`. Selected Python source is unchanged during build/test. Receipts are `fx273-review1-provider-python.json` and `fx273-review1-final-local.json`. Root independently authenticates current source/local artifacts in `fx273-review1-root-auth-before-python.json`.
+
+At this historical successor stage, D1/D2 implementation and local observations were ready for independent full pass2. That later pass and the recorded labels are described in the prepared checkpoint below. Previous frozen receipts and failed attempts remain historical and applicable only to their named scope. All final sprint debt remains pending.
+
+
+## Prepared local handoff checkpoint
+
+Independent `.claude/reviews/F-X273-all-pass-2.md` reports0defects,0smells,0nitpicks against the complete frozen Base diff. Root read the full report and restored a preparation-only lease. Unchanged refactor `3510ec5ee2c12f8aee9bc52e4434624532f160d8`, intentional navigation `af193d6d` and intentional geometry `468f3f41` are separate coherent increments. Commit decomposition changes no reviewed product, test or HLD bytes. No passing gate or confirmation microscope is repeated.
+
+The actual current lower43, CLI2 and fresh Python22 observations remain qualified by `fx273-review1-final-local.json`, `fx273-review1-provider-python.json` and independent complete root authentication `fx273-review1-root-auth-complete-local.json`. Product227 manifest remains `377e3fc0d520b9bd37102053ead47947b223af4a2ba6fab873390ac5affcb7ef`. The five native navigation successes remain carried predecessor observations with original manifest `be5dff87779bb572e84a861abd786058fc74d4ec9c98a1a26f7ef3e23f936607` and binary `41ed749e6be619af5660242f08b4c708d5a0c696575aa81f775101e5423915cf`. Query, navigation provider and test source are unchanged, those inputs have no furniture or wraps, and body policy with empty-gap ParagraphView remains equivalent. They are not called current-source executions. Fresh wheel20TOC contexts provide current consumer coverage. Exact names and commands remain in the receipts.
+
+Preparation uses `sprint-final-acceptance`, keeps this plan approved and retains Base `564ad7f5d1d57a7828c721eba58cbe79da10aae3`. Actual native Word16.114 and pinned LibreOffice26.2.5.2/Poppler26.01.0, numeric/page/entry parity, full workspace/native and hosted gates, installed Python3.9/3.12, typing/stubs/WASM,49hashes/7pixels, genuine archives and10MiB ceiling, README measurements, supply chain/risk and F-X272/F-X273/F-X274 union remain pending. Geometry/navigation intentional deltas require actual final harness review. No baseline recording, final oracle pass or delivery completion is claimed. Root owns integration and the approved provider checkpoint before dependent claim. Progress remains live until root copies it.

@@ -10000,6 +10000,13 @@ fn discover_toc_sources(
             if paragraph_fully_owned {
                 continue;
             }
+            if evaluator
+                .numbering_source(sequence_nodes[paragraph_index])
+                .and_then(|node| numbering_layout.paragraph_omitted_by_table(node))
+                == Some(true)
+            {
+                continue;
+            }
             evaluator.register_paragraph_fields(paragraph, Some(sequence_nodes[paragraph_index]));
             let accepted_runs = accepted_toc_runs(paragraph);
             for (accepted_run_index, run) in accepted_runs.iter().enumerate() {

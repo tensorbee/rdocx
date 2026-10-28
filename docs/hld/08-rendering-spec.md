@@ -1847,6 +1847,62 @@ and the block is broken to that section's measure and grid. Word writes a
 section this way whether the break sits on its own empty paragraph or on the
 last paragraph of content.
 
+One private story variant selects header, footer and watermark together. A
+selected blank or missing first/even story stays blank. Each physical page
+prepares its selected furniture before calculating the body band. Paragraph
+spacing, border-group gaps and flowed table rows are priced once and painted
+from the same prepared blocks and placements. Nonnegative top and bottom
+margins, including zero, clear actual selected flow. A negative side uses its
+absolute written distance and permits overlap.
+
+Written, mirrored section geometry remains the reference for page and margin
+anchors, furniture and page/text borders. The effective body band controls
+body fit, columns, vertical alignment, line numbers and note reservations.
+Paragraph-relative anchors use their actual owner origin, including owners
+inside table cells and ordinary frames. Positioned tables, frames and drawings
+do not themselves consume flow height. Their wrap reservations can change the
+height of surrounding flow and therefore its clearance.
+
+Floating furniture tables use the existing within-page overlap policy. Each
+physical table settles once against prior tables in story order. Its whole
+settled rectangle supplies every row, wrap reservation and paint position.
+Drawings and ordinary frames do not enter the table-only overlap relation.
+
+Adjacent paragraphs with equal ordinary `framePr` values form one positioned
+group anchored to the first following non-frame paragraph. Frame content keeps
+its source and field identities and emits once. Omitted horizontal/vertical
+anchors follow documented Word text/text defaults rather than ECMA page/page
+defaults. A nonzero height with absent height rule uses Word's atLeast behavior,
+and zero height is automatic. Explicit values remain authoritative. Imported
+attributes are unchanged. Drop and margin drop-cap modes keep the existing
+unsupported fallback and do not enter ordinary positioned frame layout.
+
+Preparation always starts from original shaped source blocks. A footer accepts
+only a stable bottom origin and complete prepared line/obstacle/placement
+state. Repeated states and the internal 32-candidate work bound return a
+section/page-qualified layout error through the fallible engine. The work bound
+is termination protection, not proof of convergence. Furniture line reflow
+separately permits at most32 original-source rebreaks per paragraph. Required
+reservations recomputed from every resulting content band must match those
+supplied to the line breaker. Transitive top-and-bottom clearance advances only
+intersecting lines, retaining earlier text above a later object. Later gaps
+remain private beside raw Word-restored line metrics. A borrowed private paint
+view applies each gap to the content origin before glyphs, highlights, links,
+rich text and logical field reconstruction. The same gap totals price borders,
+change bars and following flow once. Body pagination retains its established
+two-pass approximation and failure policy. Failed reflow does not publish
+guessed last-candidate paint. The legacy low-level signatures and
+positioned-furniture failure policy remain compatible, while ordinary flow
+clearance and spacing use the shared pricing.
+
+Fresh endnote continuation pages use the same selected furniture preparation,
+effective band and painting as body/footnote pages, with continued physical and
+displayed numbers and original source/field identities. Endnotes retain their
+existing single-column top-flow policy. Reusing the final body page consumes its
+actual remaining band. Alignment moves current-page body fragments with the
+painted body, rotating the displacement vector for vertical sections. The
+final-page fragments are published after that alignment completes.
+
 Columns reach pagination. `sect_pr_to_geometry` resolves one track list per
 section, either equal-width tracks from `w:num` and `w:space` or explicit
 tracks from the `w:col` list when `w:equalWidth` is `0`. **A section that
@@ -2185,16 +2241,24 @@ diagnostic. Explicit ambiguous rebuilds retain their existing atomic refusal.
 This is not an empty successful source discovery or a new ordinary REF/SEQ
 policy. Snapshot equality includes the private status and invalidates caches.
 
-TOC selectors reuse the existing source-qualified navigation tuple. Explicit
-custom-style selection remains independent. Heading-style selection without
-u keeps its established rule, while u requires the qualified shared heading
-eligibility, including effective inherited or direct outline9 suppression.
-When a heading range is explicit, its lower and upper bounds also filter the
-outline-derived fallback. An outline-only instruction without that range keeps
-all admitted outline levels. Explicit custom-style assignments remain independent
-of this range, including their assigned TOC levels.
-An unavailable owner is an explicit refusal, not a fabricated suppression fact.
-No additional cascade, flag, counter or per-field source scan is introduced.
+TOC selectors reuse source-qualified navigation facts from actual layout.
+Every registered paragraph under a table decision retains its physical source
+path, including nested tables and valid controls. Actual accepted row/table
+removal and continuation-cell omission record unplaced facts with no heading
+level or style. Table cache hits replay the returned placement decision against
+fresh source paths. Ordinary and nested placed headings keep the existing
+effective-paragraph provider and page placement.
+
+The doc-hidden native `paragraph_omitted_by_table(SourceNodeId)` query returns
+Some(true) for actual table omissions, Some(false) for other qualified
+navigation, and None for missing or unknown qualification. TOC discovery checks
+this result before every style, outline and explicit selector. Missing facts
+remain subject to existing freshness/refusal rules. STYLEREF and numbered
+outline consume the same cleared eligibility, without invented pages or a
+second cascade. Explicit custom-style assignments remain independent among
+admitted sources. An explicit heading range also bounds outline-derived
+fallback, and outline-only selection keeps all admitted levels. Snapshot source
+stamps and atomic rebuild requirements remain unchanged.
 
 ## Word bookmark field pagination
 
