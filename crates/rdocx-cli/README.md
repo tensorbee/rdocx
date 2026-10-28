@@ -46,7 +46,7 @@ Signing publishes before reporting, so this error can leave a valid new output.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rdocx-cli | 111,071 compressed bytes, 516,134 member bytes, 8 members | 0.16.4 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rdocx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-28 |
+| Crates.io archive: rdocx-cli | 116,434 compressed bytes, 540,175 member bytes, 8 members | 0.16.4 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rdocx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-28 |
 
 ## Use it when
 

@@ -17,7 +17,7 @@ is an exact re-export of the shared fixed-output backend.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rdocx-pdf | 8,125 compressed bytes, 26,782 member bytes, 6 members | 0.16.4 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rdocx-pdf` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-28 |
+| Crates.io archive: rdocx-pdf | 8,118 compressed bytes, 26,782 member bytes, 6 members | 0.16.4 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rdocx-pdf` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-28 |
 
 ## Use it when
 

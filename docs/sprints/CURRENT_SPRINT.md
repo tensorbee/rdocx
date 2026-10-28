@@ -2,7 +2,7 @@
 
 **Milestone**: X contribution and issue repair, ahead of the remaining M24 and AcroForm feature work.
 
-**Goal**: integrate the current contribution heads against released main, repair all acceptance rows of Issues 423 to 426, and restore the pinned CI oracle. All four contracts are approved. F-X271 and F-X272 are integrated with final hosted/native acceptance pending. F-X273 is integrated at fca298cc and has passed its approved LOCAL provider implementation checkpoint, while its plan remains approved and final differential debt remains due. F-X274 is claimed by Codex for the final serial wave from a descendant of that integrated source. The sprint clock started with F-X271 on 2026-10-28.
+**Goal**: integrate the current contribution heads against released main, repair all acceptance rows of Issues 423 to 426, and restore the pinned CI oracle. All four approved implementations are integrated, with F-X274 at `932696b7` completing the serial waves. Individual local gates and independent microscopes passed. Final integrated, hosted and native acceptance remains pending. F-X273 passed its approved LOCAL provider implementation checkpoint at `fca298cc`, while its plan remains approved and final differential debt remains due. The sprint clock started with F-X271 on 2026-10-28.
 
 ## Spec references
 
@@ -27,17 +27,17 @@
 
 Restore pinned retrieval/policy with F-X271 first. Integrate the latest PR 427 own comparison commits in F-X272, then PR 428's separate refactor/geometry/navigation increments in F-X273. The two PRs are not stacked, but their current-main conflicts and shared regression/Python carriers require serial reconciliation. F-X274 fills the PAGE-format issue with no PR, after the F-X273 provider checkpoint. Do not overwrite current published versions, cache/owner invariants, tests or measurements with stale donor files.
 
-The complete intake, per-issue matrix, current PR SHAs/CI/reviews/overlaps, remaining donor gaps and final gate live in `SPRINT_PLAN.md`, Sprint S96. Both PR CI gates currently fail on pinned LibreOffice retrieval. No revised native/input/product evidence has been executed during this planning run. Design all four stories through the ordinary workflow before start or claim. The user authorized mechanical Grok assignments on2026-10-28. Codex must independently check their results before integration, including the required microscope. Grok has no product implementation claim during design.
+The complete intake, per-issue matrix, pinned PR SHAs/CI/reviews/overlaps, remaining donor gaps and final gate live in `SPRINT_PLAN.md`, Sprint S96. At intake, both PR CI gates failed on pinned LibreOffice retrieval. No revised native/input/product evidence was executed during that planning run. All four designs preceded implementation. The user authorized mechanical Grok assignments on2026-10-28. Codex must independently check their results before integration, including the required microscope. No Grok product implementation was integrated.
 
 ## Capacity and later work
 
 Provisional implementation 10 to 15 developer-days plus 2 final qualification days, total 12 to 17, exceeds a normal two-week sprint. This is explicitly extended and capped at these four coherent contracts. Native custody may block the estimate. Reassess before claim if design expands or the four-week escalation would be threatened. Do not delete acceptance rows to fit capacity.
 
-The old unopened S96 bundle is split into S97 AcroForms (F-X242/243/244, all Issue 381 criteria) and S98 native/bibliography recovery (F-X219/F-X192/F-X269, with design/custody reset). Old planned S97 through S110 become S99 through S112. Historical IDs, tags and completed records are unchanged. S95.4 remains closed. No feature work starts in this analysis.
+The old unopened S96 bundle is split into S97 AcroForms (F-X242/243/244, all Issue 381 criteria) and S98 native/bibliography recovery (F-X219/F-X192/F-X269, with design/custody reset). Old planned S97 through S110 become S99 through S112. Historical IDs, tags and completed records are unchanged. S95.4 remains closed. The intake analysis preceded feature implementation.
 
 ## Definition of done for this sprint
 
-- [ ] Approved complete designs, actual current-Base regressions and individual zero-finding microscopes for F-X271 through F-X274.
+- [x] Approved complete designs, actual current-Base regressions and individual zero-finding microscopes for F-X271 through F-X274.
 - [ ] Every Issue 423 to 426 matrix row has genuine source-qualified evidence, including disclosed PR 427/428 limits or an explicit accepted disposition. No automatic closure on PR merge.
 - [ ] Exact pinned CI/tool identities restored and actual integrated deciding CI gates green.
 - [ ] One integrated full verify/risk/oracle union, hash 49/pixels 7 with only separately labelled/reviewed intentional deltas, native Word header/footer/page-format and combined TOC/comparison/cache/reopen/render acceptance.
