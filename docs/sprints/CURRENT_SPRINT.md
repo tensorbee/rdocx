@@ -2,7 +2,7 @@
 
 **Milestone**: X contribution and issue repair, ahead of the remaining M24 and AcroForm feature work.
 
-**Goal**: integrate the current contribution heads against released main, repair all acceptance rows of Issues 423 to 426, and restore the pinned CI oracle. All four stories are pending and unowned, with design required before implementation. The sprint clock starts at the first `/start-feature`, which has not run.
+**Goal**: integrate the current contribution heads against released main, repair all acceptance rows of Issues 423 to 426, and restore the pinned CI oracle. All four contracts are approved. F-X271 is claimed by Codex for the first serial wave. The sprint clock starts at its first `/start-feature`.
 
 ## Spec references
 
@@ -18,7 +18,7 @@
 
 | F-ID | Title | Size | Status | Owner |
 |------|-------|------|--------|-------|
-| F-X271 | Restore pinned viewer downloads and planning policy | M | pending | - |
+| F-X271 | Restore pinned viewer downloads and planning policy | M | in-progress | codex |
 | F-X272 | Preserve existing revisions during document comparison | L | pending | - |
 | F-X273 | Repair header body clearance and complete TOC navigation | L | pending | - |
 | F-X274 | Honor section and field page-number formats | M | pending | - |
