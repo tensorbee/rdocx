@@ -7834,3 +7834,41 @@ fn issue424_cli_layout_and_pdf_clear_five_spaced_normal_paragraphs_and_logo_tabl
     assert!(fs::read(&pdf).unwrap().starts_with(b"%PDF-"));
     assert_eq!(fs::read(&input).unwrap(), before);
 }
+
+#[test]
+fn issue423_cli_update_formats_supported_pages_and_retains_unsupported_source() {
+    let temp = TempWorkspace::new("issue423-format");
+    for (fmt, instruction, expected, updated) in [
+        ("upperRoman", r"PAGE \* LOWER", "vii", 1),
+        ("future", r"PAGE \* Arabic", "STORED", 0),
+        ("decimal", "PAGE", "7", 1),
+    ] {
+        let input = temp.path.join(format!("{fmt}-input.docx"));
+        let output = temp.path.join(format!("{fmt}-output.docx"));
+        fixture_document(&[]).save(&input).unwrap();
+        let mut package = OpcPackage::open(&input).unwrap();
+        let source = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:fldSimple w:instr="{instruction}"><w:r><w:t>STORED</w:t></w:r></w:fldSimple></w:p><w:sectPr><w:pgNumType w:fmt="{fmt}" w:start="7"/></w:sectPr></w:body></w:document>"#
+        );
+        package.set_part("/word/document.xml", source.into_bytes());
+        package.save(&input).unwrap();
+        let before = fs::read(&input).unwrap();
+        let result = cli(&[
+            "fields",
+            "update",
+            path_text(&input),
+            "-o",
+            path_text(&output),
+            "--json",
+        ]);
+        assert_success(&result, "issue423 fields update");
+        let report = json_stdout(&result);
+        assert_eq!(report["page_fields"], updated);
+        let mut reopened = Document::open(&output).unwrap();
+        assert_eq!(reopened.paragraphs()[0].text(), expected);
+        let part = package_part_text(&output, "/word/document.xml");
+        assert!(part.contains(&format!(r#"w:fmt="{fmt}""#)));
+        assert_eq!(reopened.update_page_fields().unwrap(), updated as usize);
+        assert_eq!(fs::read(&input).unwrap(), before);
+    }
+}

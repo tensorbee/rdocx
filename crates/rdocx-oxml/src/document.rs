@@ -1539,6 +1539,14 @@ impl CT_SectPr {
     ) -> Result<Self> {
         let raw_owner_bindings =
             crate::text::bindings_outside_retained_root(owner_bindings, root, word_prefixes)?;
+        // A page-number raw owner is also read independently by layout. Preserve
+        // its actual inherited URI authority before section/part scope is lost.
+        // The established fixed writer supplies verified canonical w already.
+        let page_number_bindings =
+            merged_owner_bindings(&namespace_bindings(word_prefixes), owner_bindings)
+                .into_iter()
+                .filter(|(prefix, uri)| prefix != "w" || uri != W_NS)
+                .collect::<Vec<_>>();
         let mut sect = Self::empty();
         let mut change_raw_index = 0usize;
         let mut raw_position = (0usize, 0usize);
@@ -1565,7 +1573,7 @@ impl CT_SectPr {
                     } else if is_word_element(name.as_ref(), b"pgNumType", &prefixes) {
                         let raw = crate::text::raw_with_external_bindings(
                             &capture_empty_element(e)?,
-                            &raw_owner_bindings,
+                            &page_number_bindings,
                         )?;
                         if sect.page_number.is_none() {
                             sect.page_number =
@@ -1921,7 +1929,7 @@ impl CT_SectPr {
                     } else if is_word_element(name.as_ref(), b"pgNumType", &prefixes) {
                         let raw = crate::text::raw_with_external_bindings(
                             &capture_element(reader, e)?,
-                            &raw_owner_bindings,
+                            &page_number_bindings,
                         )?;
                         if sect.page_number.is_none() {
                             sect.page_number =
@@ -6883,5 +6891,179 @@ mod tests {
             .expect_err("item writer rejects");
         assert_eq!(frame.to_string(), full.to_string());
         assert_eq!(item.to_string(), full.to_string());
+    }
+
+    #[test]
+    fn issue423_page_number_capture_preserves_actual_namespace_authority() {
+        type PageNumberFacts = Vec<(String, Vec<(String, String, String)>)>;
+        fn facts(xml: &[u8]) -> PageNumberFacts {
+            use quick_xml::{name::ResolveResult, reader::NsReader};
+            let mut reader = NsReader::from_reader(xml);
+            let mut buffer = Vec::new();
+            let mut result = Vec::new();
+            loop {
+                match reader.read_event_into(&mut buffer).unwrap() {
+                    Event::Start(element) | Event::Empty(element)
+                        if element.local_name().as_ref() == b"pgNumType" =>
+                    {
+                        let uri = |ns: ResolveResult<'_>| match ns {
+                            ResolveResult::Bound(ns) => {
+                                String::from_utf8_lossy(ns.as_ref()).into_owned()
+                            }
+                            ResolveResult::Unbound => String::new(),
+                            ResolveResult::Unknown(prefix) => {
+                                format!("unbound:{}", String::from_utf8_lossy(&prefix))
+                            }
+                        };
+                        let mut attrs = element
+                            .attributes()
+                            .filter_map(|attribute| {
+                                let attribute = attribute.unwrap();
+                                let key = attribute.key.as_ref();
+                                if key == b"xmlns" || key.starts_with(b"xmlns:") {
+                                    return None;
+                                }
+                                Some((
+                                    uri(reader.resolver().resolve_attribute(attribute.key).0),
+                                    String::from_utf8_lossy(attribute.key.local_name().as_ref())
+                                        .into_owned(),
+                                    attribute
+                                        .decoded_and_normalized_value(
+                                            XmlVersion::Implicit1_0,
+                                            element.decoder(),
+                                        )
+                                        .unwrap()
+                                        .into_owned(),
+                                ))
+                            })
+                            .collect::<Vec<_>>();
+                        attrs.sort();
+                        result.push((
+                            uri(reader.resolver().resolve_element(element.name()).0),
+                            attrs,
+                        ));
+                    }
+                    Event::Eof => return result,
+                    _ => {}
+                }
+                buffer.clear();
+            }
+        }
+        let mut failures = Vec::new();
+        for paired in [false, true] {
+            for route in [
+                "fragment",
+                "part-root",
+                "section-root",
+                "default",
+                "local-shadow",
+            ] {
+                let first = if paired && route == "fragment" {
+                    "<q:pgNumType q:fmt='lowerRoman' q:start='7' w:fmt='upperLetter'></q:pgNumType>"
+                } else if paired {
+                    "<q:pgNumType q:fmt='lowerRoman' q:start='7' w:fmt='upperLetter'><v:payload v:keep='one&gt;two'/></q:pgNumType>"
+                } else {
+                    "<q:pgNumType q:fmt='lowerRoman' q:start='7' w:fmt='upperLetter'/>"
+                };
+                let duplicate =
+                    "<q:pgNumType q:fmt='decimal' q:start='99' w:fmt='producer-duplicate'/>";
+                let duplicate = if route == "fragment" { "" } else { duplicate };
+                let bindings =
+                    format!(r#"xmlns:q="{W_NS}" xmlns:w="urn:producer" xmlns:v="urn:opaque""#);
+                let section =
+                    format!("<q:sectPr {bindings} w:opaque='keep'>{first}{duplicate}</q:sectPr>");
+                let source = match route {
+                    "part-root" => format!("<q:document {bindings}><q:body><q:sectPr w:opaque='keep'>{first}{duplicate}</q:sectPr></q:body></q:document>"),
+                    "section-root" => format!(r#"<w:document xmlns:w="{W_NS}"><w:body>{section}</w:body></w:document>"#),
+                    "default" => format!("<document xmlns='{W_NS}' {bindings}><body><sectPr w:opaque='keep'>{first}{duplicate}</sectPr></body></document>").replace("<q:pgNumType", "<pgNumType").replace("</q:pgNumType>", "</pgNumType>"),
+                    "local-shadow" => format!("<w:document xmlns:w='{W_NS}' xmlns:q='{W_NS}' xmlns:v='urn:opaque'><w:body><w:sectPr v:opaque='keep'>{first}{duplicate}</w:sectPr></w:body></w:document>").replace("<q:pgNumType", "<q:pgNumType xmlns:w='urn:producer'"),
+                    _ => section,
+                };
+                let mut parsed = if route == "fragment" {
+                    CT_SectPr::from_xml_fragment_checked(source.as_bytes()).unwrap()
+                } else {
+                    CT_Document::from_xml(source.as_bytes())
+                        .unwrap()
+                        .body
+                        .sect_pr
+                        .unwrap()
+                };
+                let before = parsed.clone();
+                let mut writer = Writer::new(Vec::new());
+                parsed.to_xml(&mut writer).unwrap();
+                let saved_section = writer.into_inner();
+                let saved = [
+                    format!(r#"<w:document xmlns:w="{W_NS}"><w:body>"#).as_bytes(),
+                    saved_section.as_slice(),
+                    b"</w:body></w:document>",
+                ]
+                .concat();
+                if facts(source.as_bytes()) != facts(&saved) {
+                    failures.push(format!(
+                        "{route} paired={paired}: source={:?} saved={:?}",
+                        facts(source.as_bytes()),
+                        facts(&saved)
+                    ));
+                }
+                assert_eq!(parsed, before, "readonly writer changed source");
+                assert_eq!(parsed.page_number.as_ref().unwrap().start, Some(7));
+                if paired && route != "fragment" {
+                    assert!(
+                        String::from_utf8_lossy(&saved)
+                            .contains("<v:payload v:keep='one&gt;two'/>")
+                    );
+                }
+                parsed.page_number.as_mut().unwrap().start = Some(27);
+                let mut writer = Writer::new(Vec::new());
+                parsed.to_xml(&mut writer).unwrap();
+                let updated = [
+                    format!(r#"<w:document xmlns:w="{W_NS}"><w:body>"#).as_bytes(),
+                    writer.into_inner().as_slice(),
+                    b"</w:body></w:document>",
+                ]
+                .concat();
+                let reopened = CT_Document::from_xml(&updated).unwrap();
+                if reopened
+                    .body
+                    .sect_pr
+                    .as_ref()
+                    .and_then(|section| section.page_number.as_ref())
+                    .and_then(|number| number.start)
+                    != Some(27)
+                {
+                    failures.push(format!(
+                        "{route} paired={paired}: updated first owner failed reopen"
+                    ));
+                }
+                let retained = reopened
+                    .body
+                    .sect_pr
+                    .as_ref()
+                    .and_then(|section| section.page_number.as_ref())
+                    .and_then(|number| number.raw_xml.as_ref());
+                if !retained.is_some_and(|raw| String::from_utf8_lossy(raw).contains("upperLetter"))
+                {
+                    failures.push(format!("{route} paired={paired}: opaque producer fmt lost"));
+                }
+            }
+        }
+        let ordinary = format!(
+            r#"<w:document xmlns:w="{W_NS}"><w:body><w:sectPr><w:pgNumType w:fmt='lowerRoman' w:start='7'/></w:sectPr></w:body></w:document>"#
+        );
+        let parsed = CT_Document::from_xml(ordinary.as_bytes()).unwrap();
+        assert_eq!(
+            parsed
+                .body
+                .sect_pr
+                .as_ref()
+                .unwrap()
+                .page_number
+                .as_ref()
+                .unwrap()
+                .raw_xml
+                .as_deref(),
+            Some(b"<w:pgNumType w:fmt='lowerRoman' w:start='7'/>".as_slice())
+        );
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }

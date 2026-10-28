@@ -215,6 +215,7 @@ pub(crate) struct SourceRegistry {
     field_descendants: HashMap<FieldSource, Vec<u32>>,
     field_source_xml: HashMap<FieldSource, Vec<u8>>,
     field_source_contexts: HashMap<FieldSource, (String, bool, bool)>,
+    page_fields: HashMap<FieldSource, (FieldInstruction, String)>,
     styleref_requests: HashMap<FieldSource, FieldInstruction>,
     text_box_owner_indices: HashMap<WordStory, usize>,
     story_part_names: HashMap<WordStory, String>,
@@ -234,6 +235,7 @@ impl SourceRegistry {
             field_descendants: HashMap::new(),
             field_source_xml: HashMap::new(),
             field_source_contexts: HashMap::new(),
+            page_fields: HashMap::new(),
             styleref_requests: HashMap::new(),
             text_box_owner_indices: HashMap::new(),
             story_part_names: input.story_part_names.clone(),
@@ -391,6 +393,18 @@ impl SourceRegistry {
                 )
             })
             .collect();
+        self.page_fields = std::mem::take(&mut self.page_fields)
+            .into_iter()
+            .map(|(source, value)| {
+                (
+                    FieldSource {
+                        node: forward[&source.node],
+                        index: source.index,
+                    },
+                    value,
+                )
+            })
+            .collect();
         self.text_box_sources = std::mem::take(&mut self.text_box_sources)
             .into_iter()
             .map(|(owner, mut bindings)| {
@@ -419,6 +433,7 @@ impl SourceRegistry {
             field_descendants: HashMap::new(),
             field_source_xml: HashMap::new(),
             field_source_contexts: HashMap::new(),
+            page_fields: HashMap::new(),
             styleref_requests: HashMap::new(),
             text_box_owner_indices: HashMap::new(),
             story_part_names: input.story_part_names.clone(),
@@ -690,11 +705,23 @@ impl SourceRegistry {
             let locked = locked || field.locked() == Some(true);
             let instruction = field.effective_instruction();
             if !locked && !cached && supported_styleref(&instruction) {
-                registry.styleref_requests.insert(source, instruction);
+                registry
+                    .styleref_requests
+                    .insert(source, instruction.clone());
             }
             registry
                 .field_source_contexts
                 .insert(source, (field.effective_instruction_text(), locked, cached));
+            if matches!(
+                instruction.name.as_str(),
+                "PAGE" | "NUMPAGES" | "SECTION" | "SECTIONPAGES" | "PAGEREF"
+            ) {
+                registry.page_fields.insert(
+                    source,
+                    (instruction, field.effective_display().into_owned()),
+                );
+            }
+
             if retain_raw && let Ok(Some((source_xml, _))) = field.source_replacement() {
                 registry
                     .field_source_xml
@@ -925,6 +952,157 @@ pub fn format_numeric_field_general(
         };
     }
     Ok(output)
+}
+
+fn validate_page_field_instruction(
+    instruction: &FieldInstruction,
+) -> std::result::Result<(), String> {
+    let page_ref = instruction.name == "PAGEREF";
+    if !matches!(
+        instruction.name.as_str(),
+        "PAGE" | "NUMPAGES" | "SECTION" | "SECTIONPAGES" | "PAGEREF"
+    ) {
+        return Err("not a page-family field".into());
+    }
+    if !instruction.quotes_are_balanced() {
+        return Err(format!("field {} has unclosed quoting", instruction.name));
+    }
+    if instruction.arguments.len() != usize::from(page_ref)
+        || page_ref && !matches!(instruction.arguments.first(), Some(FieldArgument::Text(_)))
+    {
+        return Err(format!(
+            "field {} requires {} positional operands",
+            instruction.name,
+            usize::from(page_ref)
+        ));
+    }
+    for switch in &instruction.switches {
+        let format = matches!(switch.name.as_str(), "*" | "#");
+        if !format && !(page_ref && matches!(switch.name.as_str(), "h" | "p")) {
+            return Err(format!("unsupported switch \\{}", switch.name));
+        }
+        if format && !matches!(switch.argument, Some(FieldArgument::Text(_))) {
+            return Err(format!(
+                "field {} switch \\{} requires a text argument",
+                instruction.name, switch.name
+            ));
+        }
+        if !format && switch.argument.is_some() {
+            return Err(format!(
+                "field {} switch \\{} does not take an argument",
+                instruction.name, switch.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Shared bounded page-family policy for layout and saved-cache consumers.
+#[doc(hidden)]
+pub fn format_page_field_result(
+    instruction: &FieldInstruction,
+    value: usize,
+    section_format: Option<&str>,
+) -> std::result::Result<String, String> {
+    validate_page_field_instruction(instruction)?;
+    let section_format = section_format
+        .filter(|format| {
+            matches!(
+                *format,
+                "decimal" | "upperRoman" | "lowerRoman" | "upperLetter" | "lowerLetter"
+            )
+        })
+        .ok_or_else(|| "unsupported section page number format".to_owned())?;
+    let numeric_override = instruction.switches.iter().any(|switch| switch.name == "#" || switch.name == "*" && matches!(&switch.argument, Some(FieldArgument::Text(format)) if matches!(format.to_ascii_lowercase().as_str(), "arabic" | "roman" | "alphabetic" | "ordinal")));
+    let mut base = value.to_string();
+    if !numeric_override && section_format != "decimal" {
+        base = match section_format {
+            "upperRoman" => roman(parse_positive_integer(&base)?, true)?,
+            "lowerRoman" => roman(parse_positive_integer(&base)?, false)?,
+            "upperLetter" => page_alphabetic(parse_positive_integer(&base)?, true)?,
+            "lowerLetter" => page_alphabetic(parse_positive_integer(&base)?, false)?,
+            _ => unreachable!(),
+        };
+    }
+    format_numeric_field_display(instruction, base)
+}
+
+/// Read only the modeled first section-number owner using its retained bindings.
+/// Qualified absence is decimal. Unsupported chapter or unqualified source is None.
+/// Qualified unknown format tokens are retained for the shared formatter to diagnose.
+#[doc(hidden)]
+pub fn section_page_number_format(section: &CT_SectPr) -> Option<String> {
+    use quick_xml::{events::Event, name::ResolveResult, reader::NsReader};
+    if section.page_number.is_none() {
+        return Some("decimal".into());
+    }
+    // The existing writer owns canonical w and restores retained root bindings.
+    // Read its temporary output, not a child fragment divorced from that scope.
+    let mut writer = quick_xml::Writer::new(Vec::new());
+    // Only the modeled owner can authorize a format. Opaque duplicates and
+    // nested raw children never become fallback candidates in this read view.
+    let mut owner = section.clone();
+    let root_records = section
+        .extra_xml
+        .iter()
+        .zip(&section.extra_xml_positions)
+        .filter(|(raw, position)| CT_SectPr::raw_position_is_root_attributes(position, raw))
+        .map(|(raw, position)| (raw.clone(), position.clone()))
+        .collect::<Vec<_>>();
+    (owner.extra_xml, owner.extra_xml_positions) = root_records.into_iter().unzip();
+    owner.to_xml(&mut writer).ok()?;
+    let mut xml =
+        b"<pageSource xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">"
+            .to_vec();
+    xml.extend(writer.into_inner());
+    xml.extend_from_slice(b"</pageSource>");
+    let mut reader = NsReader::from_reader(xml.as_slice());
+    let mut buffer = Vec::new();
+    let mut depth = 0usize;
+    loop {
+        let event = reader.read_event_into(&mut buffer).ok()?;
+        let opens = matches!(&event, Event::Start(_));
+        match event {
+            Event::Start(element) | Event::Empty(element) => {
+                let is_word = |namespace: ResolveResult<'_>| matches!(namespace, ResolveResult::Bound(namespace) if namespace.as_ref() == b"http://schemas.openxmlformats.org/wordprocessingml/2006/main");
+                if depth == 2
+                    && element.local_name().as_ref() == b"pgNumType"
+                    && is_word(reader.resolver().resolve_element(element.name()).0)
+                {
+                    let mut format = "decimal".to_owned();
+                    for attribute in element.attributes() {
+                        let attribute = attribute.ok()?;
+                        if !is_word(reader.resolver().resolve_attribute(attribute.key).0) {
+                            continue;
+                        }
+                        match attribute.key.local_name().as_ref() {
+                            b"fmt" => {
+                                format = attribute
+                                    .decoded_and_normalized_value(
+                                        quick_xml::XmlVersion::Implicit1_0,
+                                        element.decoder(),
+                                    )
+                                    .ok()?
+                                    .into_owned()
+                            }
+                            b"chapStyle" | b"chapSep" => return None,
+                            _ => {}
+                        }
+                    }
+                    return Some(format);
+                }
+                if opens {
+                    depth += 1;
+                }
+            }
+            Event::End(_) => {
+                depth = depth.checked_sub(1)?;
+            }
+            Event::Eof => return None,
+            _ => {}
+        }
+        buffer.clear();
+    }
 }
 
 fn apply_general_format(value: &str, format: &str) -> std::result::Result<String, String> {
@@ -3500,12 +3678,20 @@ const fn arc_allocation_bytes<T>() -> usize {
     std::mem::size_of::<T>() + 2 * std::mem::size_of::<usize>()
 }
 
+// Source family/placement is independent of formatting support. Only an
+// unplaced bookmark target removes TargetPage qualification.
+struct PageFieldValue {
+    display: String,
+    target_unplaced: bool,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct FieldSubstitutionInputs {
     page_index: usize,
     page_number: usize,
     total_pages: usize,
     bookmark_pages: Vec<(usize, usize)>,
+    page_format_context: String,
     font_identity: Vec<FontId>,
     revision_view: RevisionView,
     revision_style: RevisionStyle,
@@ -5157,6 +5343,33 @@ impl Engine {
                 sequence_boundary
             })
             .collect::<Vec<_>>();
+        let mut section_formats = document_sections(&input.document)
+            .into_iter()
+            .map(section_page_number_format)
+            .collect::<Vec<_>>();
+        // Pagination supplies this same implicit final section when no body
+        // sectPr exists. It is qualified absence, not an unknown owner index.
+        if input.document.body.sect_pr.is_none() {
+            section_formats.push(Some("decimal".into()));
+        }
+        let mut section_pages = HashMap::<usize, std::collections::HashSet<usize>>::new();
+        for record in &self.last_page_sections {
+            section_pages
+                .entry(record.section_index)
+                .or_default()
+                .insert(record.physical_page);
+        }
+        let section_page_counts = section_pages
+            .into_iter()
+            .map(|(section, pages)| (section, pages.len()))
+            .collect::<HashMap<_, _>>();
+        let mut placements_by_page = HashMap::<usize, Vec<&crate::WordFieldPlacement>>::new();
+        for placement in &self.last_field_placements {
+            placements_by_page
+                .entry(placement.physical_page)
+                .or_default()
+                .push(placement);
+        }
         let mut substitution_inputs = Vec::with_capacity(pages.len());
         let mut reuse_result_pages = vec![false; pages.len()];
         for (page_index, page) in pages.iter_mut().enumerate() {
@@ -5173,11 +5386,87 @@ impl Engine {
                 substitution_inputs.push(None);
                 continue;
             }
+            let placements = placements_by_page
+                .get(&page.page_number)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let mut page_field_values = HashMap::new();
+            let mut format_context = Vec::new();
+            if let Some(sources) = sources {
+                for placement in placements {
+                    let Some((instruction, stored)) = sources.page_fields.get(&placement.source)
+                    else {
+                        continue;
+                    };
+                    let locked = sources
+                        .field_source_contexts
+                        .get(&placement.source)
+                        .is_some_and(|(_, locked, _)| *locked);
+                    let target = (instruction.name == "PAGEREF")
+                        .then(|| {
+                            field_text_argument(instruction, 0)
+                                .and_then(|name| page_ref_id(input, name))
+                                .and_then(|target| self.last_bookmark_pages.get(&target))
+                        })
+                        .flatten();
+                    let owner =
+                        target.map_or(placement.section_index, |target| target.section_index);
+                    let section_format = if matches!(instruction.name.as_str(), "PAGE" | "PAGEREF")
+                    {
+                        section_formats.get(owner).and_then(Option::as_deref)
+                    } else {
+                        Some("decimal")
+                    };
+                    let value = match instruction.name.as_str() {
+                        "PAGE" => Some(placement.displayed_page),
+                        "NUMPAGES" => Some(total_pages),
+                        "SECTION" => Some(placement.section_index + 1),
+                        "SECTIONPAGES" => Some(
+                            *section_page_counts
+                                .get(&placement.section_index)
+                                .unwrap_or(&0),
+                        ),
+                        "PAGEREF" => target.map(|target| target.displayed_page),
+                        _ => None,
+                    };
+                    format_context.push((placement.source.node.get(), placement.source.index, format!("{instruction:?}{owner:?}{section_format:?}{target:?}{locked:?}{value:?}{stored:?}")));
+                    let result = if locked {
+                        Err("locked owner".into())
+                    } else {
+                        value
+                            .ok_or_else(|| {
+                                "bookmark target is missing, ambiguous or unplaced".to_owned()
+                            })
+                            .and_then(|value| {
+                                format_page_field_result(instruction, value, section_format)
+                            })
+                    };
+                    let value = result.unwrap_or_else(|reason| {
+                        diagnostics.push(Diagnostic {
+                            message: format!(
+                                "{} field {:?} retained stored display: {reason}",
+                                instruction.name, placement.source
+                            ),
+                        });
+                        stored.clone()
+                    });
+                    page_field_values.insert(
+                        placement.source,
+                        PageFieldValue {
+                            display: value,
+                            target_unplaced: instruction.name == "PAGEREF" && target.is_none(),
+                        },
+                    );
+                }
+            }
+            format_context.sort_unstable();
+            let page_format_context = format!("{format_context:?}");
             let inputs = FieldSubstitutionInputs {
                 page_index,
                 page_number: page.displayed_page_number,
                 total_pages,
                 bookmark_pages: bookmark_identity.clone(),
+                page_format_context,
                 font_identity: font_trace.clone(),
                 revision_view: input.revision_view,
                 revision_style: input.revision_style,
@@ -5206,28 +5495,19 @@ impl Engine {
                 .iter()
                 .find(|record| record.physical_page == page.page_number)
                 .map_or(0, |record| record.section_index);
-            let section_pages = self
-                .last_page_sections
+            let section_pages = *section_page_counts.get(&section_index).unwrap_or(&0);
+            let field_sections = placements
                 .iter()
-                .filter(|record| record.section_index == section_index)
-                .map(|record| record.physical_page)
-                .collect::<std::collections::HashSet<_>>()
-                .len();
-            let field_sections = self
-                .last_field_placements
-                .iter()
-                .filter(|placement| placement.physical_page == page.page_number)
                 .map(|placement| {
-                    let count = self
-                        .last_page_sections
-                        .iter()
-                        .filter(|record| record.section_index == placement.section_index)
-                        .map(|record| record.physical_page)
-                        .collect::<std::collections::HashSet<_>>()
-                        .len();
                     (
                         placement.source,
-                        (placement.section_index + 1, count, placement.displayed_page),
+                        (
+                            placement.section_index + 1,
+                            *section_page_counts
+                                .get(&placement.section_index)
+                                .unwrap_or(&0),
+                            placement.displayed_page,
+                        ),
                     )
                 })
                 .collect();
@@ -5238,6 +5518,7 @@ impl Engine {
                 (section_index + 1, section_pages),
                 &field_sections,
                 &bookmark_pages,
+                &page_field_values,
                 input.sequence_snapshot.as_deref(),
                 sequence_boundaries[page_index],
                 &mut self.font_manager,
@@ -5412,6 +5693,7 @@ impl Engine {
             for inputs in candidate.substitution_inputs.iter_mut().flatten() {
                 inputs.bookmark_pages.shrink_to_fit();
                 inputs.font_identity.shrink_to_fit();
+                inputs.page_format_context.shrink_to_fit();
             }
             let bytes = if body_complete {
                 restart_cache_bytes(&candidate)
@@ -7240,6 +7522,7 @@ fn restart_cache_bytes(cache: &RestartCache) -> usize {
                         .capacity()
                         .saturating_mul(std::mem::size_of::<FontId>()),
                 )
+                .saturating_add(inputs.page_format_context.capacity())
         })
         .fold(0usize, usize::saturating_add);
     std::mem::size_of::<RestartCache>()
@@ -8553,6 +8836,7 @@ fn substitute_fields(
     section_values: (usize, usize),
     field_sections: &HashMap<FieldSource, (usize, usize, usize)>,
     bookmark_pages: &HashMap<usize, usize>,
+    page_field_values: &HashMap<FieldSource, PageFieldValue>,
     sequence: Option<&crate::WordSequenceSnapshot>,
     sequence_boundary: usize,
     fm: &mut FontManager,
@@ -8565,6 +8849,7 @@ fn substitute_fields(
         section_values,
         field_sections,
         bookmark_pages,
+        page_field_values,
         sequence,
         sequence_boundary,
         fm,
@@ -8771,6 +9056,7 @@ fn substitute_field_values(
     section_values: (usize, usize),
     field_sections: &HashMap<FieldSource, (usize, usize, usize)>,
     bookmark_pages: &HashMap<usize, usize>,
+    page_field_values: &HashMap<FieldSource, PageFieldValue>,
     sequence: Option<&crate::WordSequenceSnapshot>,
     sequence_boundary: usize,
     fm: &mut FontManager,
@@ -8787,26 +9073,40 @@ fn substitute_field_values(
                     .and_then(|source| field_sections.get(&source))
                     .copied()
                     .unwrap_or((section_values.0, section_values.1, page_number));
-                let value = match fk {
-                    FieldKind::Page => section_values.2.to_string(),
-                    FieldKind::NumPages => total_pages.to_string(),
-                    FieldKind::Section => section_values.0.to_string(),
-                    FieldKind::SectionPages => section_values.1.to_string(),
-                    FieldKind::TargetPage(target) => {
-                        let Some(page) = bookmark_pages.get(&target) else {
-                            run.field_kind = None;
-                            continue;
-                        };
-                        page.to_string()
-                    }
-                    FieldKind::Target(_) | FieldKind::SequenceContext(_) => continue,
-                    FieldKind::SequenceRepeat => {
-                        let Some(value) =
-                            sequence_repeat_display(sequence, run.field_source, sequence_boundary)
-                        else {
-                            continue;
-                        };
-                        value
+                let page_result = run
+                    .field_source
+                    .and_then(|source| page_field_values.get(&source));
+                if matches!(fk, FieldKind::TargetPage(_))
+                    && page_result.is_some_and(|value| value.target_unplaced)
+                {
+                    run.field_kind = None;
+                }
+                let value = if let Some(value) = page_result {
+                    value.display.clone()
+                } else {
+                    match fk {
+                        FieldKind::Page => section_values.2.to_string(),
+                        FieldKind::NumPages => total_pages.to_string(),
+                        FieldKind::Section => section_values.0.to_string(),
+                        FieldKind::SectionPages => section_values.1.to_string(),
+                        FieldKind::TargetPage(target) => {
+                            let Some(page) = bookmark_pages.get(&target) else {
+                                run.field_kind = None;
+                                continue;
+                            };
+                            page.to_string()
+                        }
+                        FieldKind::Target(_) | FieldKind::SequenceContext(_) => continue,
+                        FieldKind::SequenceRepeat => {
+                            let Some(value) = sequence_repeat_display(
+                                sequence,
+                                run.field_source,
+                                sequence_boundary,
+                            ) else {
+                                continue;
+                            };
+                            value
+                        }
                     }
                 };
                 if let Ok(shaped) = fm.shape_text(run.font_id, &value, run.font_size) {
@@ -8841,26 +9141,40 @@ fn substitute_field_values(
                     .and_then(|source| field_sections.get(&source))
                     .copied()
                     .unwrap_or((section_values.0, section_values.1, page_number));
-                let value = match fk {
-                    FieldKind::Page => section_values.2.to_string(),
-                    FieldKind::NumPages => total_pages.to_string(),
-                    FieldKind::Section => section_values.0.to_string(),
-                    FieldKind::SectionPages => section_values.1.to_string(),
-                    FieldKind::TargetPage(target) => {
-                        let Some(page) = bookmark_pages.get(&target) else {
-                            run.field_kind = None;
-                            continue;
-                        };
-                        page.to_string()
-                    }
-                    FieldKind::Target(_) | FieldKind::SequenceContext(_) => continue,
-                    FieldKind::SequenceRepeat => {
-                        let Some(value) =
-                            sequence_repeat_display(sequence, run.field_source, sequence_boundary)
-                        else {
-                            continue;
-                        };
-                        value
+                let page_result = run
+                    .field_source
+                    .and_then(|source| page_field_values.get(&source));
+                if matches!(fk, FieldKind::TargetPage(_))
+                    && page_result.is_some_and(|value| value.target_unplaced)
+                {
+                    run.field_kind = None;
+                }
+                let value = if let Some(value) = page_result {
+                    value.display.clone()
+                } else {
+                    match fk {
+                        FieldKind::Page => section_values.2.to_string(),
+                        FieldKind::NumPages => total_pages.to_string(),
+                        FieldKind::Section => section_values.0.to_string(),
+                        FieldKind::SectionPages => section_values.1.to_string(),
+                        FieldKind::TargetPage(target) => {
+                            let Some(page) = bookmark_pages.get(&target) else {
+                                run.field_kind = None;
+                                continue;
+                            };
+                            page.to_string()
+                        }
+                        FieldKind::Target(_) | FieldKind::SequenceContext(_) => continue,
+                        FieldKind::SequenceRepeat => {
+                            let Some(value) = sequence_repeat_display(
+                                sequence,
+                                run.field_source,
+                                sequence_boundary,
+                            ) else {
+                                continue;
+                            };
+                            value
+                        }
                     }
                 };
                 let segment = TextSegment {
@@ -8889,28 +9203,64 @@ fn substitute_field_values(
                     note: run.note,
                     note_reference_source: run.note_reference_source,
                 };
-                if let Ok(mut shaped) = fm.shape_multilingual_text(
+                if value.is_empty() {
+                    run.logical_text.clear();
+                    run.glyph_ids.clear();
+                    run.x_advances.clear();
+                    run.y_advances.clear();
+                    run.x_offsets.clear();
+                    run.y_offsets.clear();
+                    run.clusters.clear();
+                } else if let Ok(mut shaped) = fm.shape_multilingual_text(
                     segment,
                     run.language.as_deref(),
                     run.direction,
                     true,
-                ) && shaped.len() == 1
-                {
-                    let Some(shaped) = shaped.pop() else {
-                        continue;
-                    };
-                    run.font_id = shaped.font_id();
-                    run.glyph_ids = shaped.glyph_ids().to_vec();
-                    run.x_advances = shaped.x_advances().to_vec();
-                    run.y_advances = shaped.y_advances().to_vec();
-                    run.x_offsets = shaped.x_offsets().to_vec();
-                    run.y_offsets = shaped.y_offsets().to_vec();
-                    run.clusters = shaped.clusters().to_vec();
-                    run.logical_text = value;
-                    run.script = shaped.script();
-                    run.language = shaped.language().map(str::to_owned);
-                    run.direction = shaped.direction();
-                    run.bidi_level = shaped.bidi_level();
+                ) {
+                    let logical_base = run.logical_index;
+                    if shaped.len() == 1 {
+                        let span = shaped.pop().expect("one shaped span");
+                        apply_multilingual_field_span(run, &span, logical_base);
+                    } else {
+                        let natural_width = shaped.iter().map(|span| span.width()).sum::<f64>();
+                        if !natural_width.is_finite() {
+                            continue;
+                        }
+                        let items = shaped
+                            .into_iter()
+                            .map(InlineItem::MultilingualText)
+                            .collect::<Vec<_>>();
+                        let params = oxml_layout::LineBreakParams {
+                            available_width: natural_width.max(f64::EPSILON),
+                            wrap: false,
+                            ..Default::default()
+                        };
+                        // Reuse the existing bidi visual-order authority without
+                        // introducing paragraph-width alignment or another line.
+                        if let Ok(lines) =
+                            break_multilingual_into_lines(&items, &params, fm, run.direction)
+                            && let [line] = lines.as_slice()
+                        {
+                            let mut x = run.origin.x;
+                            let mut children = Vec::new();
+                            for item in &line.items {
+                                if let LineItem::MultilingualText(span) = item {
+                                    let mut child = run.clone();
+                                    apply_multilingual_field_span(&mut child, span, logical_base);
+                                    child.origin.x = x;
+                                    x += span.width();
+                                    children.push(PositionedElement::MultilingualText(child));
+                                }
+                            }
+                            *element = PositionedElement::Group(GroupElement {
+                                transform: Transform::IDENTITY,
+                                clip: None,
+                                opacity: 1.0,
+                                effects: Vec::new(),
+                                children,
+                            });
+                        }
+                    }
                 }
             }
             PositionedElement::Group(group) => substitute_fields(
@@ -8920,6 +9270,7 @@ fn substitute_field_values(
                 section_values,
                 field_sections,
                 bookmark_pages,
+                page_field_values,
                 sequence,
                 sequence_boundary,
                 fm,
@@ -8931,6 +9282,7 @@ fn substitute_field_values(
                 section_values,
                 field_sections,
                 bookmark_pages,
+                page_field_values,
                 sequence,
                 sequence_boundary,
                 fm,
@@ -8951,6 +9303,26 @@ fn substitute_field_values(
         PositionedElement::MarkedContent { children, .. } => !children.is_empty(),
         _ => true,
     });
+}
+
+fn apply_multilingual_field_span(
+    run: &mut oxml_layout::MultilingualGlyphRun,
+    span: &oxml_layout::MultilingualTextSegment,
+    logical_base: usize,
+) {
+    run.font_id = span.font_id();
+    run.glyph_ids = span.glyph_ids().to_vec();
+    run.x_advances = span.x_advances().to_vec();
+    run.y_advances = span.y_advances().to_vec();
+    run.x_offsets = span.x_offsets().to_vec();
+    run.y_offsets = span.y_offsets().to_vec();
+    run.clusters = span.clusters().to_vec();
+    run.logical_text = span.text().to_owned();
+    run.logical_index = logical_base + span.logical_index();
+    run.script = span.script();
+    run.language = span.language().map(str::to_owned);
+    run.direction = span.direction();
+    run.bidi_level = span.bidi_level();
 }
 
 fn mark_remaining_artifacts(elements: &mut Vec<PositionedElement>) {
@@ -10302,46 +10674,69 @@ fn layout_paragraph_with_source_and_table(
                             pending.extend(owner.nested_fields_in_source_order().into_iter().rev());
                         }
                     }
-                    let (computed_value, field_kind) = match instruction.name.as_str() {
-                        "PAGE" => (Some("99".to_owned()), Some(FieldKind::Page)),
-                        "NUMPAGES" => (Some("99".to_owned()), Some(FieldKind::NumPages)),
-                        "SECTION" => (Some("99".to_owned()), Some(FieldKind::Section)),
-                        "SECTIONPAGES" => (Some("99".to_owned()), Some(FieldKind::SectionPages)),
-                        "SEQ" => {
-                            let source = source_node
-                                .zip(field_indices.get(&std::ptr::from_ref(field)).copied())
-                                .map(|(node, index)| FieldSource { node, index });
-                            let result = source.and_then(|source| {
-                                input.sequence_snapshot.as_ref()?.field_value(source)
-                            });
-                            match result {
-                                Some(Ok(value)) => (Some(value.to_owned()), None),
-                                Some(Err(message)) => {
-                                    if source.is_some_and(|source| {
-                                        input.sequence_snapshot.as_ref().is_some_and(|snapshot| {
-                                            snapshot.repeat_requests.contains_key(&source)
-                                        })
-                                    }) {
-                                        (Some(String::new()), Some(FieldKind::SequenceRepeat))
-                                    } else {
-                                        diagnostics.push(Diagnostic {
-                                            message: message.to_owned(),
-                                        });
+                    let page_family = matches!(
+                        instruction.name.as_str(),
+                        "PAGE" | "NUMPAGES" | "SECTION" | "SECTIONPAGES" | "PAGEREF"
+                    );
+                    let (computed_value, field_kind) = if page_family
+                        && field.locked() == Some(true)
+                    {
+                        (None, None)
+                    } else if page_family
+                        && let Err(reason) = validate_page_field_instruction(&instruction)
+                    {
+                        diagnostics.push(Diagnostic {
+                            message: format!(
+                                "{} retained stored display: {reason}",
+                                instruction.name
+                            ),
+                        });
+                        (None, None)
+                    } else {
+                        match instruction.name.as_str() {
+                            "PAGE" => (Some("99".to_owned()), Some(FieldKind::Page)),
+                            "NUMPAGES" => (Some("99".to_owned()), Some(FieldKind::NumPages)),
+                            "SECTION" => (Some("99".to_owned()), Some(FieldKind::Section)),
+                            "SECTIONPAGES" => {
+                                (Some("99".to_owned()), Some(FieldKind::SectionPages))
+                            }
+                            "SEQ" => {
+                                let source = source_node
+                                    .zip(field_indices.get(&std::ptr::from_ref(field)).copied())
+                                    .map(|(node, index)| FieldSource { node, index });
+                                let result = source.and_then(|source| {
+                                    input.sequence_snapshot.as_ref()?.field_value(source)
+                                });
+                                match result {
+                                    Some(Ok(value)) => (Some(value.to_owned()), None),
+                                    Some(Err(message)) => {
+                                        if source.is_some_and(|source| {
+                                            input.sequence_snapshot.as_ref().is_some_and(
+                                                |snapshot| {
+                                                    snapshot.repeat_requests.contains_key(&source)
+                                                },
+                                            )
+                                        }) {
+                                            (Some(String::new()), Some(FieldKind::SequenceRepeat))
+                                        } else {
+                                            diagnostics.push(Diagnostic {
+                                                message: message.to_owned(),
+                                            });
+                                            (None, None)
+                                        }
+                                    }
+                                    None => {
+                                        diagnostics.push(Diagnostic { message: "SEQ retains its stored display without accepted source-qualified context".into() });
                                         (None, None)
                                     }
                                 }
-                                None => {
-                                    diagnostics.push(Diagnostic { message: "SEQ retains its stored display without accepted source-qualified context".into() });
-                                    (None, None)
-                                }
                             }
-                        }
-                        "REF" => {
-                            let Some(bookmark) = field_text_argument(&instruction, 0) else {
-                                continue;
-                            };
-                            if let Some(text) = bookmark_text(input, bookmark) {
-                                match numbered_ref_text(
+                            "REF" => {
+                                let Some(bookmark) = field_text_argument(&instruction, 0) else {
+                                    continue;
+                                };
+                                if let Some(text) = bookmark_text(input, bookmark) {
+                                    match numbered_ref_text(
                                     &instruction,
                                     bookmark,
                                     text,
@@ -10366,33 +10761,34 @@ fn layout_paragraph_with_source_and_table(
                                         (None, None)
                                     }
                                 }
-                            } else {
-                                diagnostics.push(Diagnostic {
+                                } else {
+                                    diagnostics.push(Diagnostic {
                                     message: format!(
                                         "REF target {bookmark} was not found, stored display retained"
                                     ),
                                 });
-                                (None, None)
+                                    (None, None)
+                                }
                             }
-                        }
-                        "PAGEREF" => {
-                            let Some(bookmark) = field_text_argument(&instruction, 0) else {
-                                continue;
-                            };
-                            if bookmark_text(input, bookmark).is_none() {
-                                diagnostics.push(Diagnostic {
+                            "PAGEREF" => {
+                                let Some(bookmark) = field_text_argument(&instruction, 0) else {
+                                    continue;
+                                };
+                                if bookmark_text(input, bookmark).is_none() {
+                                    diagnostics.push(Diagnostic {
                                     message: format!(
                                         "PAGEREF target {bookmark} was not found, stored display retained"
                                     ),
                                 });
-                                (None, None)
-                            } else if let Some(target) = page_ref_id(input, bookmark) {
-                                (Some("99".to_owned()), Some(FieldKind::TargetPage(target)))
-                            } else {
-                                (None, None)
+                                    (None, None)
+                                } else if let Some(target) = page_ref_id(input, bookmark) {
+                                    (Some("99".to_owned()), Some(FieldKind::TargetPage(target)))
+                                } else {
+                                    (None, None)
+                                }
                             }
+                            _ => (None, None),
                         }
-                        _ => (None, None),
                     };
                     let (computed_value, field_kind) = if field.locked() == Some(true) {
                         (None, None)
@@ -11144,7 +11540,7 @@ fn document_has_section_fields(input: &LayoutInput) -> bool {
     visit_input_paragraphs(input, &mut |paragraph| {
         found |= project_paragraph_runs(paragraph, input.revision_view).iter().any(|projected|
             projected.run.content.iter().any(|content| matches!(content, RunContent::Field(field)
-                if matches!(field.effective_instruction().name.as_str(), "SECTION" | "SECTIONPAGES"))));
+                if std::iter::once(field).chain(field.all_nested_fields_in_source_order()).any(|owner| matches!(owner.effective_instruction().name.as_str(), "PAGE" | "NUMPAGES" | "SECTION" | "SECTIONPAGES" | "PAGEREF")))));
     });
     found
 }
@@ -22033,7 +22429,7 @@ mod tests {
                 y_position: 0.0,
             });
         });
-        for nested in ["bookmark targets", "font identity"] {
+        for nested in ["bookmark targets", "font identity", "page format context"] {
             assert_capacity_rejected(&format!("{nested} capacity is charged"), |cache| {
                 cache
                     .substitution_inputs
@@ -22041,6 +22437,11 @@ mod tests {
                         page_index: 0,
                         page_number: 1,
                         total_pages: 1,
+                        page_format_context: if nested == "page format context" {
+                            String::with_capacity(over_limit::<u8>())
+                        } else {
+                            String::new()
+                        },
                         bookmark_pages: if nested == "bookmark targets" {
                             Vec::with_capacity(over_limit::<(usize, usize)>())
                         } else {
@@ -29451,5 +29852,629 @@ mod tests {
             "{error}"
         );
         assert_eq!(input.document, before);
+    }
+
+    fn issue423_input(numbering: &str, instruction: &str, rich: bool) -> LayoutInput {
+        let mut input = make_input_with_text("");
+        let rpr = if rich {
+            r#"<w:rPr><w:rtl/><w:lang w:bidi="ar-SA"/></w:rPr>"#
+        } else {
+            ""
+        };
+        let instruction = instruction.replace('&', "&amp;").replace('"', "&quot;");
+        input.document = rdocx_oxml::document::CT_Document::from_xml(format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:fldSimple w:instr="{instruction}"><w:r>{rpr}<w:t>STORED</w:t></w:r></w:fldSimple></w:p><w:sectPr>{numbering}</w:sectPr></w:body></w:document>"#
+        ).as_bytes()).unwrap();
+        if rich {
+            let xml = String::from_utf8(input.document.to_xml().unwrap())
+                .unwrap()
+                .replace("<w:p>", "<w:p><w:pPr><w:bidi/></w:pPr>");
+            input.document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+        }
+        assert!(
+            input
+                .document
+                .body
+                .sect_pr
+                .as_ref()
+                .unwrap()
+                .page_number
+                .is_some()
+        );
+        input
+    }
+
+    fn issue423_layout_text(layout: &LayoutResult) -> String {
+        let mut text = String::new();
+        for page in &layout.pages {
+            oxml_layout::walk(&page.elements, &mut |element, _| match element {
+                PositionedElement::Text(run) => text.push_str(&run.text),
+                PositionedElement::MultilingualText(run) => text.push_str(&run.logical_text),
+                _ => {}
+            });
+        }
+        text
+    }
+
+    #[test]
+    fn issue423_standalone_layout_uses_actual_section_and_instruction_in_plain_and_bidi_paragraphs()
+    {
+        let mut failures = Vec::new();
+        for rich in [false, true] {
+            for (fmt, start, instruction, expected) in [
+                ("lowerRoman", 7, "PAGE", "vii"),
+                ("upperLetter", 28, "PAGE", "BB"),
+                ("lowerRoman", 7, r"PAGE \* UPPER", "VII"),
+                ("lowerRoman", 7, r"PAGE \* Arabic", "7"),
+                ("future", 7, r"PAGE \* Arabic", "STORED"),
+                ("decimal", 7, r"PAGE \future", "STORED"),
+            ] {
+                let input = issue423_input(
+                    &format!(r#"<w:pgNumType w:fmt="{fmt}" w:start="{start}"/>"#),
+                    instruction,
+                    rich,
+                );
+                let before = input.document.clone();
+                let layout = Engine::new_deterministic().unwrap().layout(&input).unwrap();
+                let actual = issue423_layout_text(&layout);
+                if actual != expected {
+                    failures.push(format!(
+                        "rich={rich} {fmt}/{instruction}: {actual:?} != {expected:?}"
+                    ));
+                }
+                assert_eq!(input.document, before);
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn issue423_same_owner_format_and_switch_edits_invalidate_substitution_facts() {
+        let mut warm = Engine::new_deterministic().unwrap();
+        let mut input = issue423_input(
+            r#"<w:pgNumType w:fmt="lowerRoman" w:start="7"/>"#,
+            "PAGE",
+            false,
+        );
+        let mut failures = Vec::new();
+        for (fmt, instruction, expected) in [
+            ("lowerRoman", "PAGE", "vii"),
+            ("upperLetter", "PAGE", "G"),
+            ("upperLetter", r"PAGE \* LOWER", "g"),
+            ("decimal", "PAGE", "7"),
+        ] {
+            let replacement = issue423_input(
+                &format!(r#"<w:pgNumType w:fmt="{fmt}" w:start="7"/>"#),
+                instruction,
+                false,
+            );
+            input.document.body.sect_pr = replacement.document.body.sect_pr;
+            input.document.body.content = replacement.document.body.content;
+            let actual = issue423_layout_text(&warm.layout(&input).unwrap());
+            let cold =
+                issue423_layout_text(&Engine::new_deterministic().unwrap().layout(&input).unwrap());
+            if actual != expected || actual != cold {
+                failures.push(format!(
+                    "{fmt}/{instruction} warm={actual:?} cold={cold:?} wanted={expected:?}"
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn issue423_shared_formatter_keeps_stages_limits_and_qualified_absence() {
+        let parse = |raw: &str| Field::new(raw, "STORED").effective_instruction();
+        for (value, expected) in [(26, "Z"), (27, "AA"), (28, "BB"), (52, "ZZ"), (53, "AAA")] {
+            assert_eq!(
+                format_page_field_result(&parse("PAGE"), value, Some("upperLetter")).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            format_page_field_result(
+                &parse(r"PAGE \* LOWER \* MERGEFORMAT"),
+                7,
+                Some("upperRoman")
+            )
+            .unwrap(),
+            "vii"
+        );
+        assert_eq!(
+            format_page_field_result(&parse(r#"PAGE \# "000" \* UPPER"#), 7, Some("upperRoman"))
+                .unwrap(),
+            "007"
+        );
+        assert_eq!(
+            format_page_field_result(&parse("PAGE"), 3999, Some("upperRoman")).unwrap(),
+            "MMMCMXCIX"
+        );
+        assert!(format_page_field_result(&parse("PAGE"), 4000, Some("upperRoman")).is_err());
+        assert_eq!(
+            format_page_field_result(&parse("PAGE"), 106496, Some("upperLetter"))
+                .unwrap()
+                .len(),
+            4096
+        );
+        assert!(format_page_field_result(&parse("PAGE"), 106497, Some("upperLetter")).is_err());
+        for raw in [
+            r"PAGE \future",
+            r"PAGE \*",
+            r#"PAGE \* "roman"#,
+            "PAGE unexpected",
+            r"PAGEREF target extra",
+        ] {
+            assert!(
+                format_page_field_result(&parse(raw), 7, Some("decimal")).is_err(),
+                "{raw}"
+            );
+        }
+        for format in [None, Some("future")] {
+            assert!(format_page_field_result(&parse(r"PAGE \* Arabic"), 7, format).is_err());
+        }
+        for (numbering, expected) in [
+            (
+                r#"<q:pgNumType xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w="urn:producer" q:fmt="lowerRoman" w:fmt="upperLetter"/>"#,
+                Some("lowerRoman"),
+            ),
+            (
+                r#"<w:pgNumType xmlns:v="urn:producer" v:fmt="upperLetter"/>"#,
+                Some("decimal"),
+            ),
+            (
+                r#"<w:pgNumType w:fmt="lowerRoman" w:chapSep="hyphen"/>"#,
+                None,
+            ),
+        ] {
+            let input = issue423_input(numbering, "PAGE", false);
+            let before = input.document.clone();
+            assert_eq!(
+                section_page_number_format(input.document.body.sect_pr.as_ref().unwrap())
+                    .as_deref(),
+                expected,
+                "retained source {:?}",
+                input
+                    .document
+                    .body
+                    .sect_pr
+                    .as_ref()
+                    .unwrap()
+                    .page_number
+                    .as_ref()
+                    .unwrap()
+                    .raw_xml
+                    .as_ref()
+                    .map(|raw| String::from_utf8_lossy(raw))
+            );
+            assert_eq!(input.document, before);
+        }
+        assert_eq!(
+            section_page_number_format(&CT_SectPr::default_letter()).as_deref(),
+            Some("decimal")
+        );
+    }
+
+    #[test]
+    fn issue423_section_reader_reuses_owner_bindings_and_first_direct_numbering() {
+        for (xml, expected) in [
+            (
+                r#"<q:sectPr xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" q:opaque="keep"><q:pgNumType q:fmt="upperLetter" q:start="28"/></q:sectPr>"#,
+                "upperLetter",
+            ),
+            (
+                r#"<q:sectPr xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w="urn:producer" w:opaque="keep"><q:pgNumType q:fmt="lowerRoman" w:fmt="upperLetter"/></q:sectPr>"#,
+                "lowerRoman",
+            ),
+        ] {
+            let section = CT_SectPr::from_xml_fragment_checked(xml.as_bytes()).unwrap();
+            let before = section.clone();
+            assert_eq!(
+                section_page_number_format(&section).as_deref(),
+                Some(expected),
+                "{xml}"
+            );
+            assert_eq!(section, before);
+        }
+        let document = rdocx_oxml::document::CT_Document::from_xml(br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:sectPr><w:pgNumType w:fmt="lowerRoman"/><w:pgNumType w:fmt="decimal"/><w:sectPrChange w:id="3" w:author="A"><w:sectPr><w:pgNumType w:fmt="upperLetter"/></w:sectPr></w:sectPrChange></w:sectPr></w:body></w:document>"#).unwrap();
+        let section = document.body.sect_pr.unwrap();
+        assert_eq!(
+            section_page_number_format(&section).as_deref(),
+            Some("lowerRoman")
+        );
+        let mut malformed = section.clone();
+        malformed.page_number.as_mut().unwrap().raw_xml =
+            Some(br#"<v:pgNumType xmlns:v="urn:producer" v:fmt="upperRoman"/>"#.to_vec());
+        assert!(
+            section_page_number_format(&malformed).is_none(),
+            "a later qualified opaque duplicate cannot authorize an unqualified modeled owner"
+        );
+    }
+
+    #[test]
+    fn issue423_target_section_edits_reformat_pageref_without_changing_its_instruction() {
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:sectPr><w:pgNumType w:fmt="decimal" w:start="1"/></w:sectPr></w:pPr><w:fldSimple w:instr="PAGEREF target"><w:r><w:t>STORED</w:t></w:r></w:fldSimple></w:p><w:p><w:bookmarkStart w:id="1" w:name="target"/><w:r><w:t>TARGET</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p><w:sectPr><w:pgNumType w:fmt="upperRoman" w:start="7"/></w:sectPr></w:body></w:document>"#;
+        let mut input = make_input_with_text("");
+        let mut warm = Engine::new_deterministic().unwrap();
+        for (fmt, expected) in [
+            ("upperRoman", "VII"),
+            ("lowerLetter", "g"),
+            ("decimal", "7"),
+        ] {
+            input.document =
+                CT_Document::from_xml(xml.replace("upperRoman", fmt).as_bytes()).unwrap();
+            let before = input.document.clone();
+            let read = |layout: LayoutResult| {
+                let mut values = Vec::new();
+                for page in layout.pages {
+                    oxml_layout::walk(&page.elements, &mut |element, _| {
+                        if let PositionedElement::Text(run) = element
+                            && matches!(run.field_kind, Some(FieldKind::TargetPage(_)))
+                        {
+                            values.push(run.text.clone());
+                        }
+                    });
+                }
+                values
+            };
+            let actual = read(warm.layout(&input).unwrap());
+            assert_eq!(actual, [expected]);
+            assert_eq!(
+                actual,
+                read(Engine::new_deterministic().unwrap().layout(&input).unwrap())
+            );
+            assert_eq!(input.document, before);
+        }
+    }
+
+    #[test]
+    fn issue423_selected_header_variants_keep_format_context_on_warm_reuse() {
+        use rdocx_oxml::header_footer::{CT_HdrFtr, HdrFtrRef};
+        let mut input = make_input_with_text("Body one");
+        for text in ["Body two", "Body three"] {
+            let mut p = CT_P::new();
+            p.add_run(text);
+            p.properties = Some(CT_PPr {
+                page_break_before: Some(true),
+                ..Default::default()
+            });
+            input.document.body.add_paragraph(p);
+        }
+        let mut section = CT_SectPr::default_letter();
+        section.title_pg = Some(true);
+        for (kind, id, instruction) in [
+            (HdrFtrType::First, "first", "PAGE"),
+            (HdrFtrType::Even, "even", r"PAGE \* Arabic"),
+            (HdrFtrType::Default, "default", r"PAGE \* UPPER"),
+        ] {
+            let mut part = CT_HdrFtr::new();
+            let mut p = CT_P::new();
+            let mut r = CT_R::new("");
+            r.content
+                .push(RunContent::Field(Field::new(instruction, "STORED")));
+            p.runs.push(r);
+            part.paragraphs.push(p);
+            input.headers.insert(id.into(), part);
+            section.header_refs.push(HdrFtrRef {
+                hdr_ftr_type: kind,
+                rel_id: id.into(),
+            });
+        }
+        input.document.body.sect_pr = Some(section);
+        let before = input.headers.clone();
+        let mut warm = Engine::new_deterministic().unwrap();
+        for (fmt, expected) in [
+            ("lowerRoman", ["vii", "8", "IX"]),
+            ("upperLetter", ["G", "8", "I"]),
+        ] {
+            input.document.body.sect_pr.as_mut().unwrap().page_number = issue423_input(
+                &format!(r#"<w:pgNumType w:fmt="{fmt}" w:start="7"/>"#),
+                "PAGE",
+                false,
+            )
+            .document
+            .body
+            .sect_pr
+            .unwrap()
+            .page_number;
+            let read = |layout: LayoutResult| {
+                let mut values = Vec::new();
+                for page in layout.pages {
+                    oxml_layout::walk(&page.elements, &mut |element, _| {
+                        if let PositionedElement::Text(run) = element
+                            && run.field_kind == Some(FieldKind::Page)
+                        {
+                            values.push(run.text.clone());
+                        }
+                    });
+                }
+                values
+            };
+            let actual = read(warm.layout(&input).unwrap());
+            assert_eq!(actual, expected);
+            assert_eq!(
+                actual,
+                read(Engine::new_deterministic().unwrap().layout(&input).unwrap())
+            );
+            assert_eq!(input.headers, before);
+        }
+    }
+
+    #[test]
+    fn issue423_implicit_final_section_is_qualified_absence_not_unknown_source() {
+        for rich in [false, true] {
+            let mut input = issue423_input(
+                r#"<w:pgNumType w:fmt="lowerRoman" w:start="7"/>"#,
+                "PAGE",
+                rich,
+            );
+            input.document.body.sect_pr = None;
+            assert_eq!(
+                issue423_layout_text(&Engine::new_deterministic().unwrap().layout(&input).unwrap()),
+                "1"
+            );
+            let unknown =
+                issue423_input(r#"<w:pgNumType w:fmt="future" w:start="7"/>"#, "PAGE", rich);
+            assert_eq!(
+                issue423_layout_text(
+                    &Engine::new_deterministic()
+                        .unwrap()
+                        .layout(&unknown)
+                        .unwrap()
+                ),
+                "STORED"
+            );
+        }
+    }
+
+    #[test]
+    fn issue423_unsupported_mixed_script_stored_display_is_preserved() {
+        let mut input =
+            issue423_input(r#"<w:pgNumType w:fmt="future" w:start="7"/>"#, "PAGE", true);
+        let xml = String::from_utf8(input.document.to_xml().unwrap())
+            .unwrap()
+            .replace(">STORED<", ">Latin العربية<");
+        input.document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+        let before = input.document.clone();
+        let result = Engine::new_deterministic().unwrap().layout(&input).unwrap();
+        assert_eq!(issue423_layout_text(&result), "Latin العربية");
+        assert_eq!(input.document, before);
+    }
+
+    #[test]
+    fn issue423_direct_multilingual_consumer_preserves_zero_one_many_shaped_results() {
+        let mut failures = Vec::new();
+        let mut visual_order_checks = [0; 2];
+        for marked in [false, true] {
+            for (fmt, stored, expected) in [
+                ("lowerRoman", "STORED", "vii"),
+                ("future", "", ""),
+                ("future", "Latin العربية", "Latin العربية"),
+                ("future", "אב العربية", "אב العربية"),
+            ] {
+                let mut input = issue423_input(
+                    &format!(r#"<w:pgNumType w:fmt="{fmt}" w:start="7"/>"#),
+                    "PAGE",
+                    false,
+                );
+                input.document = CT_Document::from_xml(
+                    String::from_utf8(input.document.to_xml().unwrap())
+                        .unwrap()
+                        .replace(">STORED<", &format!(">{stored}<"))
+                        .as_bytes(),
+                )
+                .unwrap();
+                let registry = SourceRegistry::for_input(&input);
+                let (&source, (instruction, cached)) = registry.page_fields.iter().next().unwrap();
+                let result = format_page_field_result(
+                    instruction,
+                    7,
+                    section_page_number_format(input.document.body.sect_pr.as_ref().unwrap())
+                        .as_deref(),
+                );
+                let values = HashMap::from([(
+                    source,
+                    PageFieldValue {
+                        display: result.unwrap_or_else(|_| cached.clone()),
+                        target_unplaced: false,
+                    },
+                )]);
+                let mut fm = FontManager::new_deterministic().unwrap();
+                let font = fm.resolve_font(Some("Carlito"), false, false).unwrap();
+                let segment = TextSegment {
+                    text: "99".into(),
+                    direction: TextDirection::RightToLeft,
+                    source: Some(SourceSpan {
+                        node: source.node,
+                        char_start: 0,
+                        char_end: 2,
+                    }),
+                    font_id: font,
+                    font_size: 11.0,
+                    glyph_ids: Vec::new(),
+                    advances: Vec::new(),
+                    width: 0.0,
+                    ascent: 0.0,
+                    descent: 0.0,
+                    line_gap: 0.0,
+                    color: Color::BLACK,
+                    bold: false,
+                    italic: false,
+                    underline: None,
+                    strike: false,
+                    dstrike: false,
+                    highlight: None,
+                    baseline_offset: 0.0,
+                    hyperlink_url: None,
+                    field_kind: Some(FieldKind::Page),
+                    field_source: Some(source),
+                    note: Some(NoteRef {
+                        stream: NoteStream::Footnote,
+                        id: 7,
+                    }),
+                    note_reference_source: Some(SourceSpan {
+                        node: source.node,
+                        char_start: 0,
+                        char_end: 2,
+                    }),
+                };
+                let shaped = fm
+                    .shape_multilingual_text(
+                        segment,
+                        Some("ar-SA"),
+                        TextDirection::RightToLeft,
+                        true,
+                    )
+                    .unwrap();
+                assert_eq!(shaped.len(), 1);
+                let shaped = &shaped[0];
+                let carrier =
+                    PositionedElement::MultilingualText(oxml_layout::MultilingualGlyphRun {
+                        origin: Point { x: 12.0, y: 30.0 },
+                        font_id: shaped.font_id(),
+                        font_size: 11.0,
+                        glyph_ids: shaped.glyph_ids().to_vec(),
+                        x_advances: shaped.x_advances().to_vec(),
+                        y_advances: shaped.y_advances().to_vec(),
+                        x_offsets: shaped.x_offsets().to_vec(),
+                        y_offsets: shaped.y_offsets().to_vec(),
+                        clusters: shaped.clusters().to_vec(),
+                        logical_text: shaped.text().into(),
+                        logical_index: shaped.logical_index(),
+                        source: shaped.base().source,
+                        script: shaped.script(),
+                        language: shaped.language().map(str::to_owned),
+                        direction: shaped.direction(),
+                        bidi_level: shaped.bidi_level(),
+                        color: Color::BLACK,
+                        bold: false,
+                        italic: false,
+                        field_kind: Some(FieldKind::Page),
+                        field_source: Some(source),
+                        note: shaped.base().note,
+                        note_reference_source: shaped.base().note_reference_source,
+                    });
+                let mut elements = vec![if marked {
+                    PositionedElement::MarkedContent {
+                        structure: None,
+                        children: vec![carrier],
+                    }
+                } else {
+                    PositionedElement::Group(GroupElement {
+                        transform: Transform::IDENTITY,
+                        clip: None,
+                        opacity: 1.0,
+                        effects: Vec::new(),
+                        children: vec![carrier],
+                    })
+                }];
+                substitute_fields(
+                    &mut elements,
+                    7,
+                    9,
+                    (1, 3),
+                    &HashMap::new(),
+                    &HashMap::new(),
+                    &values,
+                    None,
+                    0,
+                    &mut fm,
+                );
+                let mut spans = Vec::new();
+                oxml_layout::walk(&elements, &mut |element, _| {
+                    if let PositionedElement::MultilingualText(run) = element {
+                        assert!(run.is_valid());
+                        assert_eq!(run.field_source, Some(source));
+                        assert_eq!(
+                            run.note,
+                            Some(NoteRef {
+                                stream: NoteStream::Footnote,
+                                id: 7
+                            })
+                        );
+                        assert_eq!(
+                            run.note_reference_source,
+                            Some(SourceSpan {
+                                node: source.node,
+                                char_start: 0,
+                                char_end: 2
+                            })
+                        );
+                        assert_eq!(run.field_kind, Some(FieldKind::Page));
+                        assert_eq!(
+                            run.source,
+                            Some(SourceSpan {
+                                node: source.node,
+                                char_start: 0,
+                                char_end: 2
+                            })
+                        );
+                        assert_eq!(run.origin.y, 30.0);
+                        spans.push((
+                            run.logical_index,
+                            run.logical_text.clone(),
+                            run.origin.x,
+                            run.x_advances.iter().sum::<f64>(),
+                        ));
+                    }
+                });
+                if stored == "אב العربية" {
+                    visual_order_checks[usize::from(marked)] += 1;
+                    let hebrew = spans
+                        .iter()
+                        .find(|(_, text, _, _)| text.contains("אב"))
+                        .unwrap();
+                    let arabic = spans
+                        .iter()
+                        .find(|(_, text, _, _)| text.contains("العربية"))
+                        .unwrap();
+                    assert!(
+                        arabic.2 < hebrew.2,
+                        "existing bidi visual order must place the Arabic span before the Hebrew span"
+                    );
+                }
+                let mut visual = spans.clone();
+                visual.sort_by(|a, b| a.2.total_cmp(&b.2));
+                for pair in visual.windows(2) {
+                    assert!(
+                        (pair[0].2 + pair[0].3 - pair[1].2).abs() < 1e-6,
+                        "natural adjacent spans must not overlap or invent a gap"
+                    );
+                }
+                spans.sort_by_key(|(logical, _, _, _)| *logical);
+                let actual = spans
+                    .into_iter()
+                    .map(|(_, text, _, _)| text)
+                    .collect::<String>();
+                if actual != expected {
+                    failures.push(format!("marked={marked} fmt={fmt} stored={stored:?} actual={actual:?} expected={expected:?}"));
+                }
+            }
+        }
+        assert_eq!(
+            visual_order_checks,
+            [1, 1],
+            "Group and MarkedContent must each exercise bidi visual order"
+        );
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn issue423_malformed_page_reference_keeps_stored_display_before_pagination() {
+        let mut failures = Vec::new();
+        for instruction in ["PAGEREF", r"PAGEREF \h", "PAGE unexpected", r"PAGE \future"] {
+            let input = issue423_input(
+                r#"<w:pgNumType w:fmt="decimal" w:start="7"/>"#,
+                instruction,
+                false,
+            );
+            let before = input.document.clone();
+            let result = Engine::new_deterministic().unwrap().layout(&input).unwrap();
+            let actual = issue423_layout_text(&result);
+            if actual != "STORED" {
+                failures.push(format!("{instruction}: {actual:?} != STORED"));
+            }
+            assert_eq!(input.document, before);
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 }

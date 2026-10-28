@@ -410874,3 +410874,126 @@ fn toc_table_omission_preserves_visible_nested_headings_and_adjacent_navigation(
     }
     assert!(failures.is_empty(), "{failures:?}");
 }
+
+#[test]
+fn issue423_page_and_pageref_share_policy_with_their_distinct_actual_owners() {
+    let body = r#"<w:p><w:pPr><w:sectPr><w:pgNumType w:fmt="lowerRoman" w:start="7"/></w:sectPr></w:pPr><w:fldSimple w:instr="PAGE \* UPPER"><w:r><w:t>old-page</w:t></w:r></w:fldSimple><w:fldSimple w:instr="PAGEREF destination"><w:r><w:t>old-ref</w:t></w:r></w:fldSimple></w:p><w:p><w:bookmarkStart w:id="1" w:name="destination"/><w:r><w:t>Target</w:t></w:r><w:bookmarkEnd w:id="1"/><w:fldSimple w:instr="PAGE"><w:r><w:t>old-second</w:t></w:r></w:fldSimple></w:p><w:sectPr><w:pgNumType w:fmt="decimal" w:start="42"/></w:sectPr>"#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+    let layout = document.layout_deterministic().unwrap();
+    assert_eq!(
+        layout
+            .bookmark_page_section("destination")
+            .unwrap()
+            .displayed_page,
+        42
+    );
+    let mut labels = Vec::new();
+    for page in &layout.layout.pages {
+        oxml_layout::walk(&page.elements, &mut |element, _| {
+            if let oxml_layout::PositionedElement::Text(run) = element
+                && matches!(
+                    run.field_kind,
+                    Some(oxml_layout::FieldKind::Page | oxml_layout::FieldKind::TargetPage(_))
+                )
+            {
+                labels.push(run.text.clone());
+            }
+        });
+    }
+    assert_eq!(labels, ["VII", "42", "42"]);
+    let report = document.update_layout_backed_fields().unwrap();
+    assert_eq!((report.page_fields, report.page_reference_fields), (2, 1));
+    assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+    let bytes = document.to_bytes().unwrap();
+    let mut reopened = Document::from_bytes(&bytes).unwrap();
+    let body = body_from_document(&mut reopened);
+    let caches = top_level_field_caches(body.content.iter().filter_map(|item| {
+        if let BodyContent::Paragraph(p) = item {
+            Some(p.as_ref())
+        } else {
+            None
+        }
+    }));
+    assert_eq!(
+        caches
+            .iter()
+            .map(|(_, text, _)| text.as_str())
+            .collect::<Vec<_>>(),
+        ["VII", "42", "42"]
+    );
+}
+
+#[test]
+fn issue423_generated_index_pages_use_the_target_section_formatter() {
+    let body = r#"<w:p><w:r><w:t>Alpha</w:t></w:r><w:fldSimple w:instr="XE &quot;Alpha&quot;"/></w:p><w:p><w:fldSimple w:instr="INDEX \z 1033"><w:r><w:t>old index</w:t></w:r></w:fldSimple></w:p><w:sectPr><w:pgNumType w:fmt="lowerRoman" w:start="7"/></w:sectPr>"#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+    let report = document.rebuild_generated_tables().unwrap();
+    assert_eq!(report.index_entries, 1);
+    assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+    let records = f281_cache_records(&document_xml(&mut document));
+    assert_eq!(records[0].1, ["Alpha, vii"]);
+    let bytes = document.to_bytes().unwrap();
+    let mut reopened = Document::from_bytes(&bytes).unwrap();
+    assert_eq!(
+        reopened.rebuild_generated_tables().unwrap().index_entries,
+        1
+    );
+    assert_eq!(
+        f281_cache_records(&document_xml(&mut reopened))[0].1,
+        ["Alpha, vii"]
+    );
+}
+
+#[test]
+fn issue423_implicit_final_section_defaults_only_for_the_actual_missing_owner() {
+    for (suffix, expected, updated) in [
+        ("", "1", 2),
+        (
+            r#"<w:sectPr><w:pgNumType w:fmt="future"/></w:sectPr>"#,
+            "STORED",
+            0,
+        ),
+    ] {
+        let body = format!(
+            r#"<w:p><w:fldSimple w:instr="PAGE"><w:r><w:t>STORED</w:t></w:r></w:fldSimple><w:fldSimple w:instr="PAGEREF target"><w:r><w:t>STORED</w:t></w:r></w:fldSimple><w:bookmarkStart w:id="1" w:name="target"/><w:r><w:t>TARGET</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>{suffix}"#
+        );
+        let mut document = document_with_field_parts(&wrap_word_body(&body), None, None);
+        let before = document.to_bytes().unwrap();
+        let report = document.update_layout_backed_fields().unwrap();
+        assert_eq!(report.updated_count(), updated);
+        let xml = document_xml(&mut document);
+        assert!(xml.contains(&format!("<w:t>{expected}</w:t>")));
+        if updated == 0 {
+            assert!(!report.diagnostics.is_empty());
+            assert_eq!(document.to_bytes().unwrap(), before);
+        }
+    }
+    let body = r#"<w:p><w:pPr><w:sectPr><w:pgNumType w:fmt="lowerRoman" w:start="7"/></w:sectPr></w:pPr><w:fldSimple w:instr="PAGE"><w:r><w:t>OLD</w:t></w:r></w:fldSimple><w:fldSimple w:instr="PAGEREF target"><w:r><w:t>OLD</w:t></w:r></w:fldSimple></w:p><w:p><w:bookmarkStart w:id="1" w:name="target"/><w:r><w:t>TARGET</w:t></w:r><w:bookmarkEnd w:id="1"/><w:fldSimple w:instr="PAGE"><w:r><w:t>OLD</w:t></w:r></w:fldSimple></w:p>"#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+    let layout = document.layout_deterministic().unwrap();
+    let target = layout.bookmark_page_section("target").unwrap();
+    assert_eq!(
+        (
+            target.physical_page,
+            target.displayed_page,
+            target.section_index
+        ),
+        (2, 8, 1)
+    );
+    assert_eq!(document.update_page_fields().unwrap(), 3);
+    let body = body_from_document(&mut document);
+    let caches = top_level_field_caches(body.content.iter().filter_map(|item| {
+        if let BodyContent::Paragraph(p) = item {
+            Some(p.as_ref())
+        } else {
+            None
+        }
+    }));
+    assert_eq!(
+        caches
+            .iter()
+            .map(|(_, value, _)| value.as_str())
+            .collect::<Vec<_>>(),
+        ["vii", "8", "8"]
+    );
+}

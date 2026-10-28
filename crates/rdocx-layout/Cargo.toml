@@ -25,4 +25,5 @@ oxml-chart = { workspace = true }
 oxml-drawing = { workspace = true }
 oxml-layout = { workspace = true, default-features = false }
 rdocx-oxml = { workspace = true }
+quick-xml = { workspace = true }
 ttf-parser = { workspace = true }

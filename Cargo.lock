@@ -1561,6 +1561,7 @@ dependencies = [
  "oxml-chart",
  "oxml-drawing",
  "oxml-layout",
+ "quick-xml",
  "rdocx-oxml",
  "ttf-parser",
 ]

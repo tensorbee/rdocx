@@ -108,13 +108,14 @@ Expected existing decimal cases unchanged. Roman/letter rendering is an intentio
 
 ## Implementation checklist
 
-- [ ] Close primary format/absence/rollover facts and shared provider semantics.
-- [ ] Approve provider design, then require actual F-X273 local completion/ancestry.
-- [ ] Implement concrete shared formatting/read policy in existing files.
-- [ ] Keep raw XML/namespace authority and dynamic saved-cache behavior.
-- [ ] Cover all A-IDs with discriminating source-qualified checks.
-- [ ] Align HLD/docs and local scoped gate, independent microscope, handoff.
-- [ ] Retain actual native/full-union debt until final acceptance.
+- [x] Close primary format/absence/rollover facts and shared provider semantics.
+- [x] Approve provider design, then require actual F-X273 local completion/ancestry.
+- [x] Implement concrete shared formatting/read policy in existing files.
+- [x] Keep raw XML/namespace authority and dynamic saved-cache behavior.
+- [x] Cover applicable local A-ID routes with discriminating source-qualified checks. Final native and integrated rows remain pending.
+- [x] Align HLD/docs and local scoped gate, complete independent microscope and prepare the structured handoff.
+- [x] Retain actual native/full-union debt until final acceptance.
+- [ ] Pass all named final native, integrated, installed, archive, WASM, hash/pixel and risk gates before delivery completion.
 
 ## Open questions
 
@@ -122,7 +123,7 @@ No new user product choice. Current dynamic header/footer cache retention is the
 
 ## Contract closure
 
-Proposed concrete helper signatures are defined once above, no authoring API. All existing public operations retain signatures. Imported/absent/unknown states and read/preserve/update behavior are mapped. Provider design is approved before this dependent design. Primary numeric and namespace source authority is recorded, and the concrete helper/caller map defines implementation. Actual provider completion and final native observations remain required.
+Implemented concrete helper signatures are defined once above, no authoring API. All existing public operations retain signatures. Imported/absent/unknown states and read/preserve/update behavior are mapped. Provider design is approved before this dependent design. Primary numeric and namespace source authority is recorded, and the concrete helper/caller map defines implementation. Actual F-X273 integration and approved local provider checkpoint precede immutable Base8cb33ef5. Final native observations remain required.
 
 ## Intake identity
 
@@ -169,3 +170,10 @@ Approve a narrow correction in the existing `crates/rdocx-oxml/src/document.rs` 
 The approved section-format helper may read the existing section writer's temporary output under its canonical Word envelope, honoring all retained owner and child-local scopes. It must positively identify the modeled direct owner, excluding nested sectPrChange and later opaque duplicates. A modeled but unqualified owner returns None and cannot fall through to another qualified child. An absent page-number model is qualified absence. Writer/parse errors remain unsupported. Reuse computed section-format facts per section and operation where practical instead of serializing an owner per field.
 
 Retain actual pure lower old-source RED before this correction, in addition to the earlier helper failures. Local controls cover direct fragment and full document import, part-root and section-root declarations, alias/default namespace, producer-w shadow and foreign attributes, Empty/Start, duplicate/nested exclusion, start mutation and source nonmutation. Verify preserved expanded names and opaque values after serialization/reopen, with ordinary canonical source unchanged. The existing parser/serializer, archive, WASM, source-qualified native, hash and full-risk union riders remain due. This factual capture repair introduces no new product choice or public surface. The owner acknowledges the revised contract while retaining the immutable claim Base and preserving the failed attempts.
+
+
+## Local implementation readiness
+
+Scoped implementation and HLD08/10 passed independent full microscope pass2 with0defects,0smells and0nitpicks. Preparation is for integration, not final acceptance. Actual current local observations are native19, lower16, pure page-number4 and CLI4 passing, plus scoped check, strict clippy, fmt, prose and adapter checks. The cfg-test alias-only lint repair is authenticated separately and does not change production inputs. The predecessor252-field control passed on its own retained source/binary. Its explicit supported sections and placed targets do not reach the later implicit-section or refusal-status repairs, and its original result is carried rather than presented as a successor execution.
+
+Fresh dev wheel and isolated native import are authenticated against all227 product inputs. Python selection initially observed51pass/1fail. The new footer test incorrectly required unchanged simple-field dirty metadata from the combined ordinary update. Authenticated predecessor and successor probes show identical footer bytes for each operation, including the exact pre-existing combined dirty/closure delta. A test-only correction passes1/1 on the same fresh artifact, with51 unchanged passes carried explicitly. Independent full microscope pass2 closed the test-evidence D1. Its focused successor1pass and changed-crate clippy/fmt/prose checks apply to a cfg-test-only delta, with original production artifact identities retained. Structured preparation follows the clean review. Every approved final sprint check remains pending. Progress retains commands, receipts and all failed histories.

@@ -1660,7 +1660,10 @@ equality or capacity check fails, pagination continues through the normal full
 path.
 
 The same restart record retains aligned pristine and field-substituted page
-pairs. PAGE, NUMPAGES, and PAGEREF pages bypass reshaping only when exact page
+pairs. Per-page substitution identity includes the actual instruction, stored
+display, lock, relevant owner and target section-format facts. Its owned context
+capacity is charged to the existing restart-cache byte limit. Unrelated source
+fields are not copied into every page's identity. PAGE, NUMPAGES, and PAGEREF pages bypass reshaping only when exact page
 content first recovers the retained pristine `Arc`, then page index, displayed
 page number, total-page count, sorted bookmark targets, font trace, revision
 view, and every substitution input compare equal. Field-free output shares its
@@ -1982,9 +1985,53 @@ A section without a restart continues after the preceding section's displayed
 last page. Overflow endnote pages continue after the final body page for fresh
 and restarted pagination, including a restarted final section. Pagination field
 values inside notes follow their unique body reference owner rather than the
-physical page that prints the note. PAGE uses its source section number format
-and PAGEREF uses the target section number format. Chapter style and chapter
-separator remain preserved without changing layout.
+physical page that prints the note. PAGE uses its actual source section number
+format and PAGEREF uses the qualified target section number format. Physical
+page identity, displayed integer and formatted text are separate facts.
+
+Layout substitution and eligible saved-cache updates share the doc-hidden
+`format_page_field_result` policy in the existing layout engine. The companion
+`section_page_number_format` reads the modeled first page-number owner through
+the section writer's temporary namespace context. Its read view retains the
+actual root attribute records and excludes opaque child fallback candidates.
+Qualified absence selects decimal, including the implicit final section that
+pagination supplies when body sectPr is absent. Unknown formats, chapter style or separator,
+unqualified modeled source and writer or reader errors retain stored display
+with diagnostics, including when an explicit override is present. A later opaque
+duplicate or a nested prior section never authorizes the modeled current owner.
+
+The supported section formats are decimal, lowerRoman, upperRoman, lowerLetter
+and upperLetter. Explicit numeral switches or numeric pictures override a
+supported section numeral style. Character-only switches and MERGEFORMAT or
+CHARFORMAT retain that base, with existing numeric-picture then ordered general
+format stages. Roman output is bounded to 1 through 3999. Alphabetic page fields
+repeat letters, so 26 is Z, 27 is AA, 28 is BB, 52 is ZZ and 53 is AAA, with a 4096 character
+bound. These are library support limits rather than native Word maxima. Ordinary
+NUMPAGES, SECTION and SECTIONPAGES defaults remain decimal.
+
+Page-number capture closes the actual URI-bearing inherited alias, default and
+producer bindings into its existing raw owner before source scope is lost.
+Both Empty and Start forms and opaque duplicates retain payload and source
+order. Verified ordinary canonical-w bytes stay unchanged. Producer-w bindings
+stay child-local when generated section attributes use a protected alias. Read,
+formatting and start edits do not rewrite format or opaque source metadata.
+
+Both ordinary and multilingual substitution consume the same per-placement
+formatted field values, including instruction and actual note-reference owner.
+Strict page-family instruction admission also runs before deferred placeholder
+selection, so a missing PAGEREF operand retains its stored display and diagnostic
+instead of disappearing before pagination. Locked owners keep their existing
+cache policy. The direct multilingual consumer preserves empty carrier metadata
+and publishes multiple shaped spans with existing visual bidi ordering at finite
+natural width and no wrap. It does not add a Word producer or body reflow path.
+Unsupported instructions or bounded formats restore the actual stored display,
+with a diagnostic, instead of publishing a synthetic placeholder as success.
+Only an actually unplaced PAGEREF target loses TargetPage qualification.
+Unsupported formatting retains the known source family and physical placement,
+alongside its stored display and diagnostic.
+Dynamic header/footer PAGE and NUMPAGES saved caches remain retained across
+page-only, layout-backed and combined updates, while rendering resolves each
+physical placement independently.
 
 Dynamic TOC entry materialization uses the section that owns the TOC field.
 When the effective entry style has no right tab, the generated paragraph adds
@@ -2270,6 +2317,11 @@ runs a second paginator. A range uses both checked bookmark endpoints, including
 the sequence context at each endpoint for chapter-prefixed INDEX entries.
 Caption selection uses TOC `c` or `a`, independently of its `s` page prefix.
 
+Generated INDEX, caption-selected TOC and TOA page labels use the same target
+section formatter. Their physical range ordering and sequence prefixes remain
+separate from the formatted label. Section-format facts are prepared once for
+each operation rather than serializing the section for every entry.
+
 INDEX hierarchy, repeated-page suppression, cross-reference punctuation,
 run-in entries, page emphasis and chapter separators follow the pinned en-US
 captures. Sorting is bounded to ASCII keys with case-sensitive grouping and
@@ -2428,9 +2480,10 @@ calling the deterministic bundled-font layout. The existing post-pagination
 pass remains the only page-target authority. Rebuild reads those displayed
 target values, materializes them into the owned TOC cache, reopens the final
 package, and discards the completed provisional layout. It does not estimate
-page numbers or run a second pagination algorithm. It accepts only stable
-decimal values within the produced page range and rejects a missing,
-inconsistent, or invalid target atomically. The Word layout result owns
+page numbers or run a second pagination algorithm. It qualifies the target's physical page through `bookmark_page_section` and
+checks the actual source instruction and shared formatted target label. Roman,
+letter and restarted labels are text, not physical page indices. Missing,
+stale, unsupported, inconsistent or unresolved targets refuse atomically. The Word layout result owns
 the result-local target-to-bookmark mapping. Facade substitution therefore
 uses the same accepted-revision projection and positioned table, row, cell,
 and content-control order as bookmark markers and PAGEREF layout. A revision

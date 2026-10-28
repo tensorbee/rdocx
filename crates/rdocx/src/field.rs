@@ -3195,6 +3195,7 @@ impl Document {
         use rdocx_layout::{SourceNodeId, WordSourcePath, WordStory};
 
         let placed = placed_page_fields(layout);
+        let section_formats = section_page_formats(&self.document);
         let mut updates = Vec::new();
         let mut report = LayoutBackedFieldUpdateReport::default();
 
@@ -3218,7 +3219,7 @@ impl Document {
             &main_paths,
             &placed,
             layout,
-            &self.document,
+            &section_formats,
             &mut updates,
             &mut report,
         );
@@ -3266,7 +3267,7 @@ impl Document {
                 &paths,
                 &placed,
                 layout,
-                &self.document,
+                &section_formats,
                 &mut updates,
                 &mut report,
             );
@@ -3294,6 +3295,7 @@ impl Document {
             }
         }
         let placed = placed_page_fields(layout);
+        let section_formats = section_page_formats(&self.document);
         let mut result = Vec::new();
         for source in self.text_box_cache_paragraphs()? {
             let crate::document::TextBoxCacheParagraph {
@@ -3346,7 +3348,7 @@ impl Document {
                 &[paths],
                 &placed,
                 layout,
-                &self.document,
+                &section_formats,
                 &mut updates,
                 report,
             );
@@ -12072,6 +12074,9 @@ fn reopen_staged_document(document: Document) -> Result<Document> {
 
 fn deterministic_toc_page_values(document: &Document) -> Result<HashMap<String, String>> {
     let layout = document.layout_deterministic()?;
+    let section_formats = section_page_formats(&document.document);
+    let input = document.build_layout_input()?;
+    let snapshot = rdocx_layout::engine::evaluate_sequence_fields(&input)?;
     let mut output = HashMap::new();
     let mut invalid_target = None;
     for page in &layout.layout.pages {
@@ -12080,10 +12085,34 @@ fn deterministic_toc_page_values(document: &Document) -> Result<HashMap<String, 
                 && let Some(oxml_layout::FieldKind::TargetPage(target)) = run.field_kind
                 && let Some(name) = layout.page_reference_name(target)
             {
-                let valid_page = run
-                    .text
-                    .parse::<usize>()
-                    .is_ok_and(|value| (1..=layout.layout.pages.len()).contains(&value));
+                let owner = layout.bookmark_page_section(name);
+                let instruction = run
+                    .field_source
+                    .and_then(|source| {
+                        layout
+                            .source_node(source.node)
+                            .and_then(|path| snapshot.source_id(path))
+                            .map(|node| oxml_layout::FieldSource {
+                                node,
+                                index: source.index,
+                            })
+                    })
+                    .and_then(|source| snapshot.source_field_context(source))
+                    .map(|(raw, _, _)| Field::new(raw, "").effective_instruction())
+                    .filter(|instruction| instruction.name == "PAGEREF");
+                let valid_page = owner
+                    .filter(|owner| (1..=layout.layout.pages.len()).contains(&owner.physical_page))
+                    .zip(instruction.as_ref())
+                    .is_some_and(|(owner, instruction)| {
+                        rdocx_layout::engine::format_page_field_result(
+                            instruction,
+                            owner.displayed_page,
+                            section_formats
+                                .get(owner.section_index)
+                                .and_then(Option::as_deref),
+                        )
+                        .is_ok_and(|expected| expected == run.text)
+                    });
                 if !valid_page
                     || output
                         .get(name)
@@ -16555,7 +16584,7 @@ fn push_page_field_updates(
     paths: &[Vec<rdocx_layout::WordSourcePath>],
     placed: &PlacedPageFields,
     layout: &rdocx_layout::WordLayoutResult,
-    document: &CT_Document,
+    section_formats: &[Option<String>],
     updates: &mut Vec<Option<CachedFieldUpdate>>,
     report: &mut LayoutBackedFieldUpdateReport,
 ) {
@@ -16668,19 +16697,25 @@ fn push_page_field_updates(
                 updates.push(None);
                 continue;
             };
-            let cached_result = page_field_result(
+            let cached_result = rdocx_layout::engine::format_page_field_result(
                 &instruction,
                 value,
                 if name == "PAGEREF" {
                     text_argument(&instruction, 0)
                         .and_then(|target| layout.bookmark_page_section(target))
-                        .and_then(|target| section_page_format(document, target.section_index))
+                        .and_then(|target| {
+                            section_formats
+                                .get(target.section_index)
+                                .and_then(Option::as_deref)
+                        })
                 } else if name == "PAGE" {
                     placement.and_then(|placement| {
-                        section_page_format(document, placement.section_index)
+                        section_formats
+                            .get(placement.section_index)
+                            .and_then(Option::as_deref)
                     })
                 } else {
-                    Some("decimal".into())
+                    Some("decimal")
                 },
             );
             match cached_result {
@@ -16709,86 +16744,15 @@ fn push_page_field_updates(
     }
 }
 
-fn page_field_result(
-    instruction: &FieldInstruction,
-    value: usize,
-    section_format: Option<String>,
-) -> std::result::Result<String, String> {
-    let decimal = value.to_string();
-    let section_format =
-        section_format.ok_or_else(|| "unsupported section page number format".to_owned())?;
-    let explicit_numeric = switch_text(instruction, "#").is_some()
-        || instruction.switches.iter().any(|switch| {
-            switch.name == "*"
-                && switch
-                    .argument
-                    .as_ref()
-                    .and_then(argument_text)
-                    .is_some_and(|value| {
-                        !matches!(
-                            value.to_ascii_lowercase().as_str(),
-                            "mergeformat" | "charformat"
-                        )
-                    })
-        });
-    if explicit_numeric {
-        return apply_formats(instruction, &decimal, None);
+fn section_page_formats(document: &CT_Document) -> Vec<Option<String>> {
+    let mut formats = rdocx_layout::engine::document_sections(document)
+        .into_iter()
+        .map(rdocx_layout::engine::section_page_number_format)
+        .collect::<Vec<_>>();
+    if document.body.sect_pr.is_none() {
+        formats.push(Some("decimal".into()));
     }
-    let value = if section_format == "decimal" {
-        decimal
-    } else {
-        let format = match section_format.as_str() {
-            "upperRoman" => "ROMAN",
-            "lowerRoman" => "roman",
-            "upperLetter" => "ALPHABETIC",
-            "lowerLetter" => "alphabetic",
-            _ => return Err("unsupported section page number format".into()),
-        };
-        let mut base = instruction.clone();
-        base.switches = vec![field_option_switch("*", Some(format.into()))];
-        rdocx_layout::engine::format_numeric_field_general(&base, &decimal)?
-    };
-    apply_formats(instruction, &value, None)
-}
-
-fn section_page_format(document: &CT_Document, index: usize) -> Option<String> {
-    let sections = rdocx_layout::engine::document_sections(document);
-    let section = sections.get(index).copied();
-    let Some(raw) = section
-        .and_then(|section| section.page_number.as_ref())
-        .and_then(|number| number.raw_xml.as_deref())
-    else {
-        return Some("decimal".into());
-    };
-    let mut reader = quick_xml::Reader::from_reader(raw);
-    let mut buffer = Vec::new();
-    loop {
-        match reader.read_event_into(&mut buffer) {
-            Ok(Event::Start(element) | Event::Empty(element)) => {
-                let mut format = "decimal".to_owned();
-                for attribute in element.attributes() {
-                    let attribute = attribute.ok()?;
-                    match attribute.key.local_name().as_ref() {
-                        b"fmt" => {
-                            format = attribute
-                                .decoded_and_normalized_value(
-                                    XmlVersion::Implicit1_0,
-                                    element.decoder(),
-                                )
-                                .ok()?
-                                .into_owned()
-                        }
-                        b"chapStyle" => return None,
-                        _ => {}
-                    }
-                }
-                return Some(format);
-            }
-            Ok(Event::Eof) | Err(_) => return None,
-            _ => {}
-        }
-        buffer.clear();
-    }
+    formats
 }
 
 #[derive(Clone, Copy)]
@@ -25801,6 +25765,7 @@ fn generated_render_table(
     snapshot: Option<&rdocx_layout::WordLayoutResult>,
     report: &mut GeneratedTablesReport,
 ) -> Result<Vec<u8>> {
+    let section_formats = section_page_formats(&document.document);
     let selected = sources
         .iter()
         .filter(|source| generated_source_matches(document, &owner.definition, source))
@@ -25811,6 +25776,7 @@ fn generated_render_table(
             sequence,
             cross_reference_separator,
         } => generated_render_index(
+            &section_formats,
             owner,
             &selected,
             options,
@@ -25819,9 +25785,14 @@ fn generated_render_table(
             snapshot,
             report,
         ),
-        GeneratedTableDefinition::Authorities(options) => {
-            generated_render_authorities(owner, &selected, options, snapshot, report)
-        }
+        GeneratedTableDefinition::Authorities(options) => generated_render_authorities(
+            &section_formats,
+            owner,
+            &selected,
+            options,
+            snapshot,
+            report,
+        ),
         GeneratedTableDefinition::Figures {
             options,
             sequence,
@@ -25842,6 +25813,7 @@ fn generated_render_table(
                 let label_end = paragraph.runs.len();
                 generated_append_separator(&mut paragraph, &options.entry_page_separator);
                 paragraph.runs.push(generated_page_run(
+                    &section_formats,
                     source,
                     None,
                     snapshot,
@@ -25927,6 +25899,7 @@ fn generated_write_paragraph(paragraph: &CT_P, output: &mut Vec<u8>) -> Result<(
 }
 
 fn generated_page_run(
+    section_formats: &[Option<String>],
     source: &GeneratedTableSource,
     last: Option<&str>,
     snapshot: Option<&rdocx_layout::WordLayoutResult>,
@@ -25970,9 +25943,21 @@ fn generated_page_run(
                 })
             })
             .transpose()?;
+        let label = rdocx_layout::engine::format_page_field_result(
+            &FieldInstruction::new(
+                "PAGEREF",
+                vec![FieldArgument::Text(target.into())],
+                Vec::new(),
+            )?,
+            page.displayed_page,
+            section_formats
+                .get(page.section_index)
+                .and_then(Option::as_deref),
+        )
+        .map_err(Error::Other)?;
         prefix.map_or_else(
-            || page.displayed_page.to_string(),
-            |prefix| format!("{prefix}{prefix_separator}{}", page.displayed_page),
+            || label.clone(),
+            |prefix| format!("{prefix}{prefix_separator}{label}"),
         )
     } else {
         "99".into()
@@ -26008,6 +25993,7 @@ fn generated_collation(left: &[String], right: &[String]) -> std::cmp::Ordering 
 }
 
 fn generated_append_pages(
+    section_formats: &[Option<String>],
     paragraph: &mut CT_P,
     occurrences: &[&GeneratedTableSource],
     page_separator: &str,
@@ -26071,11 +26057,19 @@ fn generated_append_pages(
             _ => (false, false),
         };
         paragraph.runs.push(generated_page_run(
-            source, None, snapshot, sequence, "-", bold, italic,
+            section_formats,
+            source,
+            None,
+            snapshot,
+            sequence,
+            "-",
+            bold,
+            italic,
         )?);
         if let Some(last) = &source.last_target {
             generated_append_separator(paragraph, range_separator);
             paragraph.runs.push(generated_page_run(
+                section_formats,
                 source,
                 Some(last),
                 snapshot,
@@ -26090,6 +26084,7 @@ fn generated_append_pages(
 }
 
 fn generated_render_index(
+    section_formats: &[Option<String>],
     owner: &GeneratedTableOwner,
     selected: &[&GeneratedTableSource],
     options: &IndexOptions,
@@ -26203,6 +26198,7 @@ fn generated_render_index(
         if !pages.is_empty() {
             generated_append_separator(&mut paragraph, &options.entry_page_separator);
             generated_append_pages(
+                section_formats,
                 &mut paragraph,
                 &pages,
                 &options.page_separator,
@@ -26233,6 +26229,7 @@ fn generated_render_index(
 }
 
 fn generated_render_authorities(
+    section_formats: &[Option<String>],
     owner: &GeneratedTableOwner,
     selected: &[&GeneratedTableSource],
     options: &TableOfAuthoritiesOptions,
@@ -26299,6 +26296,7 @@ fn generated_render_authorities(
         paragraph.runs.push(label);
         generated_append_separator(&mut paragraph, &options.entry_page_separator);
         generated_append_pages(
+            section_formats,
             &mut paragraph,
             occurrences,
             &options.page_separator,

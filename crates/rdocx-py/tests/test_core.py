@@ -15572,3 +15572,158 @@ def test_issue425_noop_and_refusal_keep_live_handles_and_checked_workaround():
     assert [revision.author for revision in left.revisions] == ["Bob", "Bob"]
     assert [revision.author for revision in redline.revisions] == ["Alice", "Alice"]
     assert held.text == held_run.text == "Later stays."
+
+
+
+def _issue423_page_source(numbering, instruction="PAGE", body=None):
+    import html
+    import rdocx
+
+    source = rdocx.Document()
+    source.add_paragraph("source")
+    if body is None:
+        body = ('<w:p><w:fldSimple w:instr="' + html.escape(instruction, quote=True)
+                + '"><w:r><w:t>STORED</w:t></w:r></w:fldSimple></w:p>')
+    document = _replace_document_body(source, body + '<w:sectPr>' + numbering + '</w:sectPr>')
+    assert b"pgNumType" in _document_xml(document), "fixture must retain its numbering source"
+    return document
+
+
+def _issue423_numbering_xml(document):
+    return re.search(rb'<(?:[A-Za-z]+:)?pgNumType\b[^>]*/>', _document_xml(document)).group()
+
+
+def _issue423_svg_text(document, page=0):
+    import xml.etree.ElementTree as ET
+
+    root = ET.fromstring(document.render_page_to_svg(page).svg)
+    return "".join(node.text or "" for node in root.iter("{http://www.w3.org/2000/svg}text"))
+
+
+@pytest.mark.parametrize("fmt,start,instruction,expected", [
+    ("lowerRoman", 7, "PAGE", "vii"),
+    ("upperRoman", 7, "PAGE", "VII"),
+    ("lowerLetter", 28, "PAGE", "bb"),
+    ("upperLetter", 53, "PAGE", "AAA"),
+    ("decimal", 7, "PAGE", "7"),
+    ("lowerRoman", 7, r"PAGE \* Arabic", "7"),
+    ("decimal", 7, r"PAGE \* roman", "vii"),
+    ("lowerRoman", 7, r"PAGE \* UPPER", "VII"),
+    ("upperRoman", 7, r"PAGE \* LOWER \* MERGEFORMAT", "vii"),
+    ("upperRoman", 7, r'PAGE \# "000"', "007"),
+    ("upperLetter", 26, "PAGE", "Z"),
+    ("upperLetter", 27, "PAGE", "AA"),
+    ("upperLetter", 52, "PAGE", "ZZ"),
+    ("upperRoman", 3999, "PAGE", "MMMCMXCIX"),
+])
+def test_issue423_page_format_render_and_cache_agree(fmt, start, instruction, expected):
+    import rdocx
+
+    numbering = f'<w:pgNumType w:fmt="{fmt}" w:start="{start}"/>'
+    document = _issue423_page_source(numbering, instruction)
+    before = _document_xml(document)
+    assert _issue423_svg_text(document) == expected
+    report = document.update_layout_backed_fields()
+    assert report.page_fields == 1 and not report.diagnostics
+    assert document.paragraphs[0].text == expected
+    assert _issue423_numbering_xml(document) == re.search(rb'<(?:[A-Za-z]+:)?pgNumType\b[^>]*/>', before).group()
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert reopened.paragraphs[0].text == expected
+    assert _issue423_svg_text(reopened) == expected
+
+
+@pytest.mark.parametrize("numbering,instruction,supported", [
+    ('<q:pgNumType xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w="urn:producer" q:fmt="lowerRoman" q:start="7" w:fmt="upperLetter"/>', "PAGE", "vii"),
+    ('<w:pgNumType xmlns:v="urn:producer" v:fmt="upperLetter" w:start="7"/>', "PAGE", "7"),
+    ('<w:pgNumType w:fmt="future" w:start="7"/>', r"PAGE \* Arabic", None),
+    ('<w:pgNumType w:fmt="lowerRoman" w:chapStyle="1" w:start="7"/>', r"PAGE \* Arabic", None),
+    ('<w:pgNumType w:fmt="lowerRoman" w:chapSep="hyphen" w:start="7"/>', "PAGE", None),
+    ('<w:pgNumType w:fmt="upperRoman" w:start="4000"/>', "PAGE", None),
+    ('<w:pgNumType w:fmt="upperLetter" w:start="106497"/>', "PAGE", None),
+    ('<w:pgNumType w:start="7"/>', r"PAGE \future", None),
+    ('<w:pgNumType w:start="7"/>', "PAGEREF", None),
+    ('<w:pgNumType w:start="7"/>', 'PAGE \\* "roman', None),
+])
+def test_issue423_qualified_or_unsupported_sources_preserve_display(numbering, instruction, supported):
+    import rdocx
+
+    document = _issue423_page_source(numbering, instruction)
+    before = _issue423_numbering_xml(document)
+    expected = supported or "STORED"
+    assert _issue423_svg_text(document) == expected
+    report = document.update_layout_backed_fields()
+    assert report.page_fields == int(supported is not None)
+    assert bool(report.diagnostics) == (supported is None)
+    assert document.paragraphs[0].text == expected
+    # The imported source owner stays untouched, including namespace shadows.
+    assert _issue423_numbering_xml(document) == before
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert _issue423_svg_text(reopened) == expected
+
+
+@pytest.mark.parametrize("fmt,start,label", [("lowerRoman", 7, "vii"), ("upperLetter", 28, "BB"), ("decimal", 42, "42")])
+def test_issue423_toc_labels_use_qualified_target_not_physical_index(fmt, start, label):
+    import rdocx
+
+    document = _issue423_page_source(f'<w:pgNumType w:fmt="{fmt}" w:start="{start}"/>', body='<w:p><w:r><w:t>Introduction</w:t></w:r></w:p>')
+    document.add_heading("Target", level=1)
+    document.insert_toc(1, max_level=1)
+    assert document.rebuild_toc().entry_count == 1
+    entries = [p.text for p in document.paragraphs if (p.style or "").upper().startswith("TOC")]
+    assert entries == ["Target\t" + label]
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert reopened.rebuild_toc().entry_count == 1
+    assert [p.text for p in reopened.paragraphs if (p.style or "").upper().startswith("TOC")] == entries
+
+
+
+def test_issue423_dynamic_footer_render_and_saved_cache_remain_distinct():
+    import xml.etree.ElementTree as ET
+    import rdocx
+
+    source = rdocx.Document()
+    source.section(0).footer.add_paragraph("Footer ").add_run("").add_field("PAGE", "STORED-FOOTER")
+    reference = re.search(rb'<w:footerReference\b[^>]*/>', _document_xml(source)).group().decode()
+    def section(fmt):
+        return ('<w:sectPr>' + reference + '<w:pgSz w:w="12240" w:h="15840"/>'
+                + f'<w:pgNumType w:fmt="{fmt}" w:start="1"/></w:sectPr>')
+    body = ('<w:p><w:r><w:t>One </w:t></w:r><w:fldSimple w:instr="PAGE"><w:r><w:t>STORED-BODY</w:t></w:r></w:fldSimple></w:p>'
+            + '<w:p><w:pPr><w:pageBreakBefore/>' + section("lowerRoman") + '</w:pPr><w:r><w:t>Two</w:t></w:r></w:p>'
+            + '<w:p><w:r><w:t>Three</w:t></w:r></w:p>'
+            + '<w:p><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>Four</w:t></w:r></w:p>' + section("decimal"))
+    original = _replace_document_body(source, body).to_bytes()
+    def footer_parts(data):
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            return {name: archive.read(name) for name in archive.namelist() if name.startswith("word/footer")}
+    def labels(document):
+        assert document.page_count() == 4
+        result = []
+        for page in range(4):
+            root = ET.fromstring(document.render_page_to_svg(page).svg)
+            result.append("".join(node.text or "" for node in root.iter("{http://www.w3.org/2000/svg}text")
+                                  if float(node.get("y", "0")) > 700))
+        return result
+    for operation in ("update_page_fields", "update_layout_backed_fields", "update_all_fields"):
+        document = rdocx.Document.from_bytes(original)
+        held = document.paragraphs[0]
+        assert labels(document) == ["Footer i", "Footer ii", "Footer 1", "Footer 2"]
+        report = getattr(document, operation)()
+        count = report if operation == "update_page_fields" else (report.layout.page_fields if operation == "update_all_fields" else report.page_fields)
+        assert count == 1
+        with pytest.raises(rdocx.StaleElementError):
+            _ = held.text
+        assert document.paragraphs[0].text == "One i"
+        saved = document.to_bytes()
+        expected_footers = footer_parts(original)
+        if operation == "update_all_fields":
+            # The ordinary phase marks deferred API-created simple fields dirty.
+            # Both predecessor and current producers emit this exact closure.
+            before = b'<w:fldSimple w:instr="PAGE">'
+            after = (b'<w:fldSimple xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+                     b' w:instr="PAGE" w:dirty="1">')
+            assert sum(xml.count(before) for xml in expected_footers.values()) == 1
+            expected_footers = {name: xml.replace(before, after) for name, xml in expected_footers.items()}
+        assert footer_parts(saved) == expected_footers
+        reopened = rdocx.Document.from_bytes(saved)
+        assert labels(reopened) == labels(document)
+        assert reopened.paragraphs[0].text == "One i"

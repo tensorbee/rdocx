@@ -3926,6 +3926,19 @@ fraction or leap second. Omission keeps now=None and unresolved date caches.
 Existing header/footer dynamic caches and unsupported-switch diagnostics stay
 visible. The input path supplies field filename context.
 
+Existing page-only, layout-backed and combined update signatures and binding
+defaults stay unchanged. Native cache updates, render substitution and generated
+page labels share the layout engine's concrete page-format policy and actual
+owner or target section. Character-only switches preserve supported section
+numeral style. Unknown section or chapter states, malformed instructions and
+bounded-format failures retain source display with diagnostics. A reused physical
+footer keeps its saved PAGE/NUMPAGES cache while each rendered placement gets its
+own formatted value. Held handles follow existing staged-publication lifetime
+rules, and saved/reopened reads retain that source/cache distinction. No page
+format setter, enum, Python or WASM method is added. The two additive doc-hidden
+native formatter/source helpers are implementation-facing providers.
+
+
 Word images extract uses physical picture occurrences and actual internal
 media identity, extracting each unique source part once in first-occurrence
 order. Flat generated image-000001 names derive extensions from bounded content
