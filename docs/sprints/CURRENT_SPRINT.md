@@ -20,7 +20,7 @@
 |------|-------|------|--------|-------|
 | F-X271 | Restore pinned viewer downloads and planning policy | M | in-progress | codex |
 | F-X272 | Preserve existing revisions during document comparison | L | in-progress | codex |
-| F-X273 | Repair header body clearance and complete TOC navigation | L | pending | - |
+| F-X273 | Repair header body clearance and complete TOC navigation | L | in-progress | codex |
 | F-X274 | Honor section and field page-number formats | M | pending | - |
 
 ## Sequencing note
