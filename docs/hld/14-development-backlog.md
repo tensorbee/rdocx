@@ -50,14 +50,14 @@ contracts require integrated gates at each sprint boundary.
 M23 closes the five-document from-scratch business-document boundary. M24 then
 classifies and closes the broader modern DOCX authoring surface before M19 may
 begin. The spreadsheet programme remains a business decision and proceeds only
-if F-184 confirms a material gap in the Rust ecosystem at S101.
+if F-184 confirms a material gap in the Rust ecosystem at S103.
 
 The stopping and compression choices are:
 
 - **Stop after M23.** S73 can generate the five private reference documents
   from `Document::new()` through public modeled APIs, with no base template,
   raw OOXML, or LibreOffice field-update pass.
-- **Stop after M24.** S99 provides the complete modern DOCX authoring boundary.
+- **Stop after M24.** S101 provides the complete modern DOCX authoring boundary.
   Every in-scope feature is authorable, readable, mutable, round-trip safe,
   rendered where applicable, and classified across the public bindings.
 - **Archive M19 at its decision gate.** F-184 may still find that the advanced
@@ -1604,7 +1604,7 @@ decision lands.
 OPC, DrawingML, the chart engine, the layout engine and the PDF backend all
 exist and are format-neutral, which lowers the cost of a third family. That is
 not sufficient reason to build one. F-184 must reassess the Rust ecosystem when
-S101 begins. M19 proceeds only if no credible maintained crate provides the
+S103 begins. M19 proceeds only if no credible maintained crate provides the
 combined lifecycle required here: open an existing advanced workbook, preserve
 what is not executed, edit typed features, recalculate formulas and local
 pivots, refresh a declared Power Query subset, automate it through an Office
@@ -1626,7 +1626,7 @@ render to PDF.
 
 ### F-184, Advanced spreadsheet go or no-go (S)
 The go or no-go decision record. Reassess the maintained Rust spreadsheet
-ecosystem at S101, state whether the combined lifecycle gap still exists, and
+ecosystem at S103, state whether the combined lifecycle gap still exists, and
 archive M19 if it does not. If it does, amend `02-scope-and-non-goals.md`, define
 the boundary between `oxml-sml` as chart support and `rxlsx` as a library, and
 publish the preserve, model, and execute classification for every advanced
@@ -1639,7 +1639,7 @@ CLI/Python workflow with rendering. Compare integration, installation,
 maintenance and release costs, including reuse behind a consistent facade.
 Evaluate the utility and limits of a reader/editor stage before calculation
 and pivots, retaining formula and pivot state with explicit stale-result
-diagnostics when edits cannot be recalculated. The existing S110 distribution
+diagnostics when edits cannot be recalculated. The existing S112 distribution
 boundary remains until a separate reviewed roadmap decision changes it.
 
 The reporter's [follow-up](https://github.com/tensorbee/rdocx/issues/281#issuecomment-6063901190)
@@ -1926,7 +1926,7 @@ element after a round trip.
 byte-identical, and an `isLgl` raw child stays before `suff` after parse and
 write.
 
-### External Word benchmark, S100
+### External Word benchmark, S102
 
 Issue 377 reports that `neurotic_docx_bench` scores `rdocx convert` against
 pinned Microsoft Word PDF exports. Its 2026-10-14 cohort ranks rdocx 0.16.0
@@ -2331,7 +2331,7 @@ documents only as anonymous, non-identifying capability families. The audit
 found no duplicate scope, missing owner, dangling dependency, dependency cycle,
 or scheduling conflict in F-243 through F-310. Their boundaries, sizes, and
 dependencies remain authoritative. The current plan places them in S71 through
-S75, S86, S89 through S91, S95.2 through S95.4, and S97 through S99.
+S75, S86, S89 through S91, S95.2 through S95.4, and S99 through S101.
 **Capability matrix owner**: `docs/hld/02-scope-and-non-goals.md`, "Modern DOCX
 capability matrix".
 **Test gate**: regression. Every in-scope matrix row has evidence, an owner
@@ -6736,7 +6736,7 @@ before sprint close.
 
 ### F-X192, Complete the remaining Word bibliography catalogue (L)
 
-Complete the unfinished Word bibliography catalogue scheduled for S96. F-282 delivers the native source-authoring foundation and its measured
+Complete the unfinished Word bibliography catalogue scheduled for S98. F-282 delivers the native source-authoring foundation and its measured
 formatter subset. This story owns the full pinned Word catalogue result
 contract, without claiming the existing subset establishes complete parity.
 
@@ -7019,7 +7019,7 @@ raise once, preserving explicit position shifts. Native typeface substitution
 and print-background preferences are reported separately from deterministic
 repository paint.
 
-The new DrawingML text watermark route admits only opacity 0.5 and refuses other requested values atomically. F-X219 retains the unfinished full-range DrawingML text opacity work in S96 under an explicit user-approved carry. Legacy VML text opacity and DrawingML image opacity remain unchanged.
+The new DrawingML text watermark route admits only opacity 0.5 and refuses other requested values atomically. F-X219 retains the unfinished full-range DrawingML text opacity work now scheduled in S98 after the original user-approved S96 carry. Legacy VML text opacity and DrawingML image opacity remain unchanged.
 
 **Depends on**: F-X206.
 **Test gate**: regression. Reproduce each missing operation or reported defect
@@ -7859,7 +7859,7 @@ Detached results carry text, owned assets and ordered diagnostics. Python string
 
 ### F-X219, Qualify full-range text watermark interoperability
 
-**Scheduling**: S96, explicitly carried unfinished from S95.11. No faithful shared
+**Scheduling**: S98 after the 2026-10-28 capacity reorganization. Originally carried unfinished from S95.11 to S96. No faithful shared
 Word and pinned LibreOffice representation was established. Preserve the0.5-only
 restriction and original failed endpoints. Reopen design before implementation.
 
@@ -8697,7 +8697,7 @@ Q24, answered by the user on 2026-10-25, is `Require all 79 flat-cost gates (Rec
 Candidate [PR415](https://github.com/tensorbee/rdocx/pull/415) at 2839e22c14f96aeaeab5245581b5681509774559, candidate [PR417](https://github.com/tensorbee/rdocx/pull/417) at bdf49f0005d1d15078b76b5da83c5f3e2b8cce12, and candidate [PR418](https://github.com/tensorbee/rdocx/pull/418) at dba496fcd8b4d482995a23ab81d27ad2bfcbf5e7 stay unmerged. They are not accepted code. The historical PR415 pin 0fbf3e96709198dbd01b9e810181109d106d9f68 remains the F-X266 record. Candidate [PR419](https://github.com/tensorbee/rdocx/pull/419) at 9916bcdc01bc4acc065ae45afa8bd8ae07a2d30c and candidate [PR420](https://github.com/tensorbee/rdocx/pull/420) at 37851676af3e82a0500c4743ef86da417950d2c3 are own increments on that chain. They stay unmerged and they are not accepted code. Actions run 40092396584 on the PR419 head failed Word fidelity because the LibreOffice 26.2.5.2 download hit TLS CERTIFICATE_VERIFY_FAILED before a comparison. That log is donor evidence only. A green PR420 check is not a PR419 pass. A later run 40103891571 on the same PR419 head concluded success, including Word fidelity job 120901503513 and CI gate job 120914750403. That later run stays donor evidence and is not local acceptance. Candidate [PR421](https://github.com/tensorbee/rdocx/pull/421) at ab038a21bb88a38d46c8f640587c3a20b57f6770 is the own increment after the PR420 head. It has 7 commits and 10 paths. Its own diff SHA-256 is 50c390ff8038d69b95d19510122ab51d2fd3c37b30f5b5d79a89dc610f805e35. It stays unmerged and it is not accepted code. Its checks were incomplete at cutoff 2026-10-24T17:02:28Z. Candidate [PR422](https://github.com/tensorbee/rdocx/pull/422) at cf7bf55edfab1e0617f6fe35810355cb02126018 is the own increment after that PR421 head. The chain is linear and has 5 commits. The compare is ahead by 5 and behind by 0. The merge base is the PR421 head. The 5 paths are `README.md`, `crates/rdocx-py/tests/test_core.py`, `crates/rdocx/src/document.rs`, `docs/hld/03-architecture.md`, and `scripts/readme_doctests.py`. The own diff is 60325 bytes and its SHA-256 is ee0a8ce239fafea714c7bc1a49601fab4f2c864c3931b8ff4c98c3fb9dce189c. Comments and reviews are 0. Nineteen donor check runs completed with success or skip conclusions, and the donor CI gate succeeded. The legacy combined status endpoint records pending. That field is literal and is not acceptance. The candidate stays unmerged and it is not accepted code. Final own-union fidelity stays mandatory.
 
 ### F-X269, Qualify PowerPoint shadow falloff and wipe paint domains
-**Sprint**: S96
+**Sprint**: S98
 **Size**: M
 **Depends on**: F-X267
 **Test gate**: regression
@@ -8715,3 +8715,40 @@ Pending. Native PowerPoint16.114.1 shadowed rectangle controls expose a static s
 Prepare the user's requested post-S95.4 Rust, CLI and Python releases within the retained Word0.16.x and shared/PowerPoint0.14.x lines. Select fresh absent0.16.4 and0.14.4 across the exact seven and fifteen Rust packages, matching Python distributions and remote tags. Preserve already published0.16.3/0.14.3 changelog sections exactly and place only S95.4 additions in the new family sections, with explicit approved Arc source-break migration and native, private-input and performance limits. Align current manifest carriers, internal pins, lockfile, package metadata, README evidence and current policy assertions without rewriting historical version controls or the separate nonpublished WASM boundary.
 
 Preparation adds no product API or algorithm. Require actual current-source22-package verified dryrun below10MiB, accurate README inventories/examples, actual build-only wheels.yml jobs and exact downloaded CLI/wheel/sdist qualification, host CLI version checks, Python3.9/3.12 installed priority calls and strict3.12 typing/stub checks. Existing product/native/performance/memory evidence remains applicable only through an explicit reviewed version-only source and consumer analysis. All eight product stories' final criteria, including Cell.add_picture, remain mandatory and block completion. A reviewed clean canonical sprint source-availability checkpoint may push only this sprint ref to run the named hosted build-only jobs, with publication jobs skipped. Only close-sprint merges. Subsequent release commands require fresh mutable preflights and separate approval at the exact reviewed main SHA, shared/PowerPoint first.
+
+
+### F-X271, Restore pinned viewer downloads and planning policy
+
+**Sprint**: S96
+**Size**: M
+**Depends on**: none
+**Test gate**: regression
+
+Restore the exact LibreOffice 26.2.5.2 oracle for Linux and macOS CI without upgrading the viewer, weakening TLS/checksums, skipping gates or silently changing executable identity. Current stable URLs return 404before Test, MSRV, Word fidelity and rpptx installed tests. Official old-release HEAD candidates return200but are not authenticated archives. Verify actual platform bytes, safe bounded extraction and executable version against retained independent pins before switching retrieval. Preserve failed CI logs. Reconcile the existing hard-coded roadmap policy with the authorized whole-number sprint shift, and keep metadata/classification policies meaningful. Scope is tooling/policy only. Source scripts and workflow changes belong to later implementation, not the analysis intake. Require current-head CI successors to run the previously blocked gates.
+
+### F-X272, Preserve existing revisions during document comparison
+
+**Sprint**: S96
+**Size**: L
+**Depends on**: F-X229, F-X230, F-X245
+**Test gate**: regression
+
+Finish every criterion of Issue 425 using the current own commits of PR 427, not its stale base or donor archive measurements. Preserve unchanged existing revision owners byte for byte, allocate new ids without collisions and add the new reviewer's changes elsewhere across body and related stories. CLI counts only newly created revisions, with binding/stub behavior aligned. Prove author-filtered accept/reject reconstruct both inputs while retaining the first review. Cover no-op, ignored stories/comments, tables/controls, headers, notes, section changes, comment graphs, moved/deleted owners and late atomic refusal. PR 427 still refuses changes to a revision-bearing owner. Implement those required cases or explicitly meet the issue's documented-limitation plus usable-workaround alternative before closure. The contribution calls this Combine-like preservation, while Word Compare uses accepted-view semantics. Verify that compatibility fact before approving the bounded policy. Ignored stories retain their current id-seeding exclusions, so do not claim global id uniqueness from compared-story allocation. No blanket Word Compare parity follows from the supplied positive. Preserve S95.4 physical/live-owner and package-cache invariants. Full native/installed and composition acceptance stays due.
+
+### F-X273, Repair header body clearance and complete TOC navigation
+
+**Sprint**: S96
+**Size**: L
+**Depends on**: F-283, F-X264
+**Test gate**: differential
+
+Finish Issues 424 and426 using PR 428 as partial input. Keep variant-selection refactoring, geometry behavior and navigation behavior separately labelled. Clear body layout against the actual selected header/footer extents, including paragraph spacing and the logo/table reproduction. Pin primary semantics and independently qualify positive/negative margins, first/even/default/blank variants, flow versus floating table/frame owners, anchors, borders and notes with Word. Pinned LO is additional evidence, not a replacement for promised native behavior. Preserve furniture geometry and recalculate body height, page count and TOC page targets. Give every physical source paragraph qualified navigation facts while distinguishing placed versus unplaced vertical-merge continuation/deleted-row content. Rebuild all supplied TOC switch combinations through Rust, Python and CLI without stale-fact bypass. Include placed headings, nested tables, styled unplaced headings and adjacent STYLEREF/outline consumers. The donor spacing mismatch and no-outline-switch styled-heading failure remain explicit incomplete acceptance until repaired or separately dispositioned. Run actual current-source native geometry/cache/PDF/PNG and combined comparison/page-format controls. Never close on the partial donor fixture alone.
+
+### F-X274, Honor section and field page-number formats
+
+**Sprint**: S96
+**Size**: M
+**Depends on**: F-X273
+**Test gate**: differential
+
+Resolve uncovered Issue 423without inventing a contribution or silently adding a public authoring API. Read preserved pgNumType format alongside restart values and use a common section/field formatting policy in layout, header/footer rendering and explicit page-field cache updates. Before design approval pin ECMA 17.6.12 and ordinary PAGE field-format switch precedence, explicit absence/unknown-format handling, roman bounds and alphabetic rollover. Qualify decimal, lower/upper roman, lower/upper letters, repeated section restarts, all selected header/footer variants and explicit switches. The original four-page file must display i,ii,1,2in native Word, saved/updated caches, library PDF text and CLI output. Preserve unknown XML, existing numeric conversion and default decimal behavior. Prove geometry and rebuilt TOC targets remain coherent with F-X273 after save/reopen. Unsupported imported states stay preserved and diagnostic, never guessed as successful parity.

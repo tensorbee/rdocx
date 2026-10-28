@@ -1,7 +1,7 @@
 # F-X219, Qualify full-range text watermark interoperability
 
 **Status**: draft
-**Sprint**: S96
+**Sprint**: S98
 **Size**: M
 **Depends on**: F-X201
 
@@ -54,7 +54,7 @@ Retain `/private/tmp/S91-F-X201-LO-opacity-endpoints-root-1/failed-endpoint-visu
 - docs/hld/12-testing-strategy.md
 - docs/hld/14-development-backlog.md
 
-Update implemented intent before microscope/final freeze, preserving pending native qualification explicitly and correcting current scheduling references to S96. Do not rewrite historical delivery entries.
+Update implemented intent before microscope/final freeze, preserving pending native qualification explicitly and correcting current scheduling references to S98. Do not rewrite historical delivery entries.
 
 ## Risk routing
 
@@ -76,4 +76,4 @@ Expected unchanged for the49 hash and7 deterministic pixel cases. A discovered i
 
 ## Open questions
 
-The user approved carrying this unfinished contract from S95.11 to S96. The bounded source investigation established no faithful shared representation. Repeated deferral triggers a design reset under WORKFLOW.md. This draft preserves the previous contract as input, not an approved implementation candidate. Before S96 implementation, identify a concrete evidence-supported approach and revise the test plan or obtain an explicit acceptance disposition. No product implementation, full-range support or native acceptance is claimed. Preserve the existing0.5-only restriction and failed endpoint evidence.
+The user approved carrying this unfinished contract from S95.11 to S96. The bounded source investigation established no faithful shared representation. Repeated deferral triggers a design reset under WORKFLOW.md. This draft preserves the previous contract as input, not an approved implementation candidate. The 2026-10-28 reorganization schedules recovery in S98. Before S98 implementation, identify a concrete evidence-supported approach and revise the test plan or obtain an explicit acceptance disposition. No product implementation, full-range support or native acceptance is claimed. Preserve the existing0.5-only restriction and failed endpoint evidence.

@@ -1258,3 +1258,10 @@ disposition, without replaying any producer. Policy aggregate is188 tests,
 actual final metadata/source correspondence. No release tag, publication or new
 version is part of this close. Fresh registry/publisher checks and separate final
 approval at the exact reviewed main SHA remain release obligations.
+
+
+## S96 planning reorganization, 2026-10-28
+
+Read-only GitHub intake at 2026-10-28T03:03:24.502962+00:00 finds2open PRs and 8 open issues. S95.4 is already closed and immutable. The unopened old S96 feature bundle has no started story. S96 now reserves four pending F-X271 through F-X274 repair contracts, estimated12 to 17 developer-days including the integrated gate, explicitly larger than a normal sprint. No implementation, completion, actual days or velocity credit is recorded.
+
+Old S96 splits into S97 AcroForms and S98 native/bibliography recovery to expose its prior19 to 21day estimate plus the unestimated F-X269 addition. Pending old S97 throughS110shift to S99 through S112. Historical allocations above retain their original identities. The existing draft F-X192/F-X219 contracts move current scheduling to S98without rewriting their old carry evidence. All issue381acceptance stays on F-X242/243/244. Issues 264/281/377 remain open conversations. No source, commit, remote state, tag or main merge changes in this planning run.

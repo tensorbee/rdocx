@@ -1,39 +1,47 @@
-# Current Sprint, S95.4
+# Current Sprint, S96
 
-**Milestone**: M24 Modern DOCX authoring completeness, with cross-cutting repairs and requested release preparation.
+**Milestone**: X contribution and issue repair, ahead of the remaining M24 and AcroForm feature work.
 
-**Goal**: compose legacy fields and modern forms, author offline mail-merge packages, repair admitted Word/PowerPoint preservation and cost defects, and prepare fresh Rust/CLI/Python patches. All nine contracts are complete at actual full source `c49bab8865ea93587879bed8702e5affd2c9904d`, with final delivery metadata and sprint review following that producer. No publication is authorized by completion.
+**Goal**: integrate the current contribution heads against released main, repair all acceptance rows of Issues 423 to 426, and restore the pinned CI oracle. All four stories are pending and unowned, with design required before implementation. The sprint clock starts at the first `/start-feature`, which has not run.
 
 ## Spec references
 
-The completed designs name the exact HLD intent files. Architecture, OPC ownership, bindings, deterministic/native qualification and backlog intent were updated before the full gate. Release preparation retains the user's0.16.x/0.14.x lines and the explicitly approved Rust Arc source break. Published0.16.3/0.14.3 history remains byte-exact and fresh0.16.4/0.14.4 carriers are prepared.
+- `docs/hld/03-architecture.md`, checked comparison/revision, physical owner and retained-source publication.
+- `docs/hld/04-opc-and-packaging.md`, preserved unmodelled XML, namespace/relationship ownership and atomic save/reopen.
+- `docs/hld/08-rendering-spec.md`, Word section geometry, furniture/body bands, pagination, page fields and navigation facts.
+- `docs/hld/10-bindings-spec.md`, native/Python/CLI comparison, field update and rendering contracts.
+- `docs/hld/12-testing-strategy.md`, deterministic product output, genuine native/oracle provenance and integrated acceptance.
+- `docs/hld/14-development-backlog.md`, F-X271 through F-X274 scope and exact test gates.
+- `docs/hld/15-build-and-toolchain.md`, pinned viewers, supported CI/configurations and archive bounds.
 
 ## The wave
 
 | F-ID | Title | Size | Status | Owner |
 |------|-------|------|--------|-------|
-| F-288 | Legacy form field creation | M | done | - |
-| F-289 | Modern Word form authoring | L | done | - |
-| F-290 | Mail-merge package and data-source authoring | M | done | - |
-| F-X264 | Repair Word defaults package inspection and comment projection | L | done | - |
-| F-X265 | Preserve fragment relationship targets and duplicate styles | M | done | - |
-| F-X266 | Bound Word body reads and structural edit cost | L | done | - |
-| F-X267 | Bound PowerPoint mutation cost across public publishers | L | done | - |
-| F-X268 | Bound Word owner inventory and unchanged package staging | L | done | - |
-| F-X270 | Prepare Word 0.16.4 and PowerPoint 0.14.4 patch releases | L | done | - |
+| F-X271 | Restore pinned viewer downloads and planning policy | M | pending | - |
+| F-X272 | Preserve existing revisions during document comparison | L | pending | - |
+| F-X273 | Repair header body clearance and complete TOC navigation | L | pending | - |
+| F-X274 | Honor section and field page-number formats | M | pending | - |
 
-## Sequencing and acceptance
+## Sequencing note
 
-The three genuine local provider-prefix completions were not counted as final delivery until this integrated acceptance. Every prepared worker was consumed. Root completed the final sole-writer repair and canonical release-preparation checkpoints without inventing a worker squash. Final ordinary native, installed, native Office, timing, memory, namespace, hash and packaging observations retain their actual producers and source applicability, as detailed in AS_BUILT. All79 required Word flat-cost gates pass, including the single admitted Cell successor, while individual residuals remain disclosed. All required PowerPoint and memory gates are qualified within their stated limits.
+Restore pinned retrieval/policy with F-X271 first. Integrate the latest PR 427 own comparison commits in F-X272, then PR 428's separate refactor/geometry/navigation increments in F-X273. The two PRs are not stacked, but their current-main conflicts and shared regression/Python carriers require serial reconciliation. F-X274 fills the PAGE-format issue with no PR, after the F-X273 provider checkpoint. Do not overwrite current published versions, cache/owner invariants, tests or measurements with stale donor files.
 
-Actual build-only run 40608035966 at c49 has27 successful deciding jobs and4 publication skips.26 unique artifacts and172 installed priority cases plus strict typing/stubs are qualified. Actual local c49 verifies22archives,21 README example sets and49 hashes. Final-state policy and metadata applicability checks follow these delivery edits. Earlier failed attempts and native version pins remain evidence. There are no carries. F-X269 remains pending in S96, and M24 continues.
+The complete intake, per-issue matrix, current PR SHAs/CI/reviews/overlaps, remaining donor gaps and final gate live in `SPRINT_PLAN.md`, Sprint S96. Both PR CI gates currently fail on pinned LibreOffice retrieval. No revised native/input/product evidence has been executed during this planning run. Design all four stories through the ordinary workflow before start or claim. The user authorized mechanical Grok assignments on2026-10-28. Codex must independently check their results before integration, including the required microscope. Grok has no product implementation claim during design.
+
+## Capacity and later work
+
+Provisional implementation 10 to 15 developer-days plus 2 final qualification days, total 12 to 17, exceeds a normal two-week sprint. This is explicitly extended and capped at these four coherent contracts. Native custody may block the estimate. Reassess before claim if design expands or the four-week escalation would be threatened. Do not delete acceptance rows to fit capacity.
+
+The old unopened S96 bundle is split into S97 AcroForms (F-X242/243/244, all Issue 381 criteria) and S98 native/bibliography recovery (F-X219/F-X192/F-X269, with design/custody reset). Old planned S97 through S110 become S99 through S112. Historical IDs, tags and completed records are unchanged. S95.4 remains closed. No feature work starts in this analysis.
 
 ## Definition of done for this sprint
 
-- [x] Complete all nine approved contracts, including exact source/artifact/native and performance/memory evidence.
-- [x] Keep all 49 hashes and applicable deterministic pixel baselines unchanged.
-- [x] Preserve published history, contributor credit, compatibility limits and the unavailable original404 boundary.
-- [x] Prepare exact seven-crate Word 0.16.4 and fifteen-crate shared/PowerPoint 0.14.4 families, six CLI and seven Python payloads each.
-- [x] Hold release tags, registry publication and release-bound comments for separate final approval after reviewed main closure.
-
-Per-feature actual effort remains unrecorded. Six worked dates measure calendar throughput, not developer-days. Historical scope judgments remain preserved without an invented additive capacity estimate.
+- [ ] Approved complete designs, actual current-Base regressions and individual zero-finding microscopes for F-X271 through F-X274.
+- [ ] Every Issue 423 to 426 matrix row has genuine source-qualified evidence, including disclosed PR 427/428 limits or an explicit accepted disposition. No automatic closure on PR merge.
+- [ ] Exact pinned CI/tool identities restored and actual integrated deciding CI gates green.
+- [ ] One integrated full verify/risk/oracle union, hash 49/pixels 7 with only separately labelled/reviewed intentional deltas, native Word header/footer/page-format and combined TOC/comparison/cache/reopen/render acceptance.
+- [ ] Current installed Python 3.9/3.12 suites and strict typing/stubs, affected CLI/WASM/archives/README and final metadata policies pass.
+- [ ] Fresh GitHub head/body/comment refresh before implementation and final reconciliation. Preserve all failed/old producers and authenticate successor inputs.
+- [ ] Keep Issues 264, 281 and 377 open. Issue 381 stays open for the full S97 AcroForm programme.
+- [ ] Only a later close-sprint may merge/tag main and reconcile PR/issue states after actual acceptance. Release remains separate.

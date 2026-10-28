@@ -40,8 +40,8 @@ regenerated, never hand-edited.
 | M22, Word depth | 12 | 12 | 0 | 0 |
 | M23, From-scratch business documents | 24 | 24 | 0 | 0 |
 | M24, Modern DOCX authoring completeness | 54 | 32 | 0 | 22 |
-| X, Cross-cutting | 284 | 274 | 0 | 6 |
-| **Total** | **615** | **556** | **0** | **55** |
+| X, Cross-cutting | 288 | 274 | 0 | 10 |
+| **Total** | **619** | **556** | **0** | **59** |
 <!-- AUTOGEN:backlog-summary END -->
 
 ## All F-IDs
@@ -369,27 +369,27 @@ regenerated, never hand-edited.
 <!-- AUTOGEN:backlog-M19 START -->
 | F-ID | Title | Sprint | Size | Status |
 |------|-------|--------|------|--------|
-| F-184 | Advanced spreadsheet go or no-go             | S101 | S | pending |
-| F-185 | Workbook and worksheet model                 | S101 | L | pending |
-| F-186 | Shared strings, styles and number formats    | S102 | L | pending |
-| F-187 | Reader                                       | S104 | L | pending |
-| F-188 | Writer                                       | S104 | L | pending |
-| F-189 | Formula parser                               | S102 | L | pending |
-| F-190 | Calculation engine                           | S105 | L | pending |
-| F-191 | Charts in spreadsheets                       | S105 | M | pending |
-| F-192 | Conditional formatting and data validation   | S105 | M | pending |
-| F-193 | Pivot cache and table model                  | S106 | L | pending |
-| F-194 | Sheet rendering                              | S110 | L | pending |
-| F-195 | rxlsx distribution                           | S110 | L | pending |
-| F-204 | Spreadsheet corpus and compatibility matrix | S101 | M | pending |
-| F-205 | Excel tables and structured references      | S102 | L | pending |
-| F-206 | Advanced worksheet objects                  | S103 | L | pending |
-| F-207 | Pivot recalculation engine                  | S106 | L | pending |
-| F-208 | Slicers, pivot charts, and Data Model boundary | S106 | L | pending |
-| F-209 | Power Query package and M language          | S107 | L | pending |
-| F-210 | Power Query execution and connectors        | S108 | L | pending |
-| F-211 | Office Scripts artifacts and ExcelScript surface | S109 | L | pending |
-| F-212 | Sandboxed Office Scripts runtime            | S109 | L | pending |
+| F-184 | Advanced spreadsheet go or no-go             | S103 | S | pending |
+| F-185 | Workbook and worksheet model                 | S103 | L | pending |
+| F-186 | Shared strings, styles and number formats    | S104 | L | pending |
+| F-187 | Reader                                       | S106 | L | pending |
+| F-188 | Writer                                       | S106 | L | pending |
+| F-189 | Formula parser                               | S104 | L | pending |
+| F-190 | Calculation engine                           | S107 | L | pending |
+| F-191 | Charts in spreadsheets                       | S107 | M | pending |
+| F-192 | Conditional formatting and data validation   | S107 | M | pending |
+| F-193 | Pivot cache and table model                  | S108 | L | pending |
+| F-194 | Sheet rendering                              | S112 | L | pending |
+| F-195 | rxlsx distribution                           | S112 | L | pending |
+| F-204 | Spreadsheet corpus and compatibility matrix | S103 | M | pending |
+| F-205 | Excel tables and structured references      | S104 | L | pending |
+| F-206 | Advanced worksheet objects                  | S105 | L | pending |
+| F-207 | Pivot recalculation engine                  | S108 | L | pending |
+| F-208 | Slicers, pivot charts, and Data Model boundary | S108 | L | pending |
+| F-209 | Power Query package and M language          | S109 | L | pending |
+| F-210 | Power Query execution and connectors        | S110 | L | pending |
+| F-211 | Office Scripts artifacts and ExcelScript surface | S111 | L | pending |
+| F-212 | Sandboxed Office Scripts runtime            | S111 | L | pending |
 <!-- AUTOGEN:backlog-M19 END -->
 
 ### M20, Fidelity at scale
@@ -404,12 +404,12 @@ regenerated, never hand-edited.
 | F-200 | Vertical and bidirectional text              | S58  | M | done |
 | F-201 | Large document performance                   | S57  | L | done |
 | F-202 | Incremental layout                           | S58  | L | done |
-| F-313 | External Word benchmark reproduction loop    | S100  | S | pending |
-| F-314 | Benchmark conversion failures and startup latency | S100 | M | pending |
-| F-315 | Word tracked-change markup print view        | S100  | L | pending |
-| F-316 | Word comment and revision balloon pane       | S100  | L | pending |
-| F-317 | Benchmark pagination and layout fidelity wave | S100 | L | pending |
-| F-318 | Benchmark release, adapter update and README badge | S100 | M | pending |
+| F-313 | External Word benchmark reproduction loop    | S102 | S | pending |
+| F-314 | Benchmark conversion failures and startup latency | S102 | M | pending |
+| F-315 | Word tracked-change markup print view        | S102 | L | pending |
+| F-316 | Word comment and revision balloon pane       | S102 | L | pending |
+| F-317 | Benchmark pagination and layout fidelity wave | S102 | L | pending |
+| F-318 | Benchmark release, adapter update and README badge | S102 | M | pending |
 <!-- AUTOGEN:backlog-M20 END -->
 
 ### M21, Presentation depth
@@ -521,28 +521,28 @@ regenerated, never hand-edited.
 | F-288 | Legacy form field creation | S95.4 | M | done |
 | F-289 | Modern Word form authoring | S95.4 | L | done |
 | F-290 | Mail-merge package and data-source authoring | S95.4 | M | done |
-| F-291 | Tracked insertion and deletion authoring | S97 | L | pending |
-| F-292 | Property revisions and move ranges | S97 | L | pending |
-| F-293 | Complete comments and modern comment metadata | S97 | L | pending |
-| F-294 | Permission ranges and protection integration | S97 | M | pending |
-| F-295 | Comparison output as complete revisions | S97 | L | pending |
-| F-296 | Collaboration identity and deterministic time policy | S97 | M | pending |
-| F-297 | Complete Word drawing anchor and effect authoring | S98 | L | pending |
-| F-298 | Shapes, text boxes, groups, and connectors in Word | S98 | L | pending |
-| F-299 | AlternateContent, VML, and SVG compatibility authoring | S98 | L | pending |
-| F-300 | Charts at arbitrary Word insertion points | S98 | M | pending |
-| F-301 | SmartArt and diagram authoring in Word | S98 | L | pending |
-| F-302 | Embedded objects, icons, and alternative-format parts | S98 | M | pending |
-| F-303 | Drawing and embedded-content layout completion | S98 | L | pending |
-| F-304 | Typed package extensibility facade | S99 | L | pending |
-| F-305 | Attached templates, web extensions, and task panes | S99 | L | pending |
-| F-306 | Executable compatibility attachment and signature rules | S99 | M | pending |
-| F-307 | Complete accessibility authoring and audit | S99 | L | pending |
-| F-308 | Fully modeled and losslessness diagnostics | S99 | L | pending |
-| F-309 | Strict, transitional, and repair-free conformance | S99 | L | pending |
-| F-310 | Determinism, resource limits, bindings, and stability gate | S99 | L | pending |
-| F-311 | Positioned paragraph frame placement | S99 | M | pending |
-| F-312 | Run visual effect render projection | S99 | L | pending |
+| F-291 | Tracked insertion and deletion authoring | S99 | L | pending |
+| F-292 | Property revisions and move ranges | S99 | L | pending |
+| F-293 | Complete comments and modern comment metadata | S99 | L | pending |
+| F-294 | Permission ranges and protection integration | S99 | M | pending |
+| F-295 | Comparison output as complete revisions | S99 | L | pending |
+| F-296 | Collaboration identity and deterministic time policy | S99 | M | pending |
+| F-297 | Complete Word drawing anchor and effect authoring | S100 | L | pending |
+| F-298 | Shapes, text boxes, groups, and connectors in Word | S100 | L | pending |
+| F-299 | AlternateContent, VML, and SVG compatibility authoring | S100 | L | pending |
+| F-300 | Charts at arbitrary Word insertion points | S100 | M | pending |
+| F-301 | SmartArt and diagram authoring in Word | S100 | L | pending |
+| F-302 | Embedded objects, icons, and alternative-format parts | S100 | M | pending |
+| F-303 | Drawing and embedded-content layout completion | S100 | L | pending |
+| F-304 | Typed package extensibility facade | S101 | L | pending |
+| F-305 | Attached templates, web extensions, and task panes | S101 | L | pending |
+| F-306 | Executable compatibility attachment and signature rules | S101 | M | pending |
+| F-307 | Complete accessibility authoring and audit | S101 | L | pending |
+| F-308 | Fully modeled and losslessness diagnostics | S101 | L | pending |
+| F-309 | Strict, transitional, and repair-free conformance | S101 | L | pending |
+| F-310 | Determinism, resource limits, bindings, and stability gate | S101 | L | pending |
+| F-311 | Positioned paragraph frame placement | S101 | M | pending |
+| F-312 | Run visual effect render projection | S101 | L | pending |
 <!-- AUTOGEN:backlog-M24 END -->
 
 ### X, Cross-cutting
@@ -754,7 +754,7 @@ HLD14 contract before adopting contributor changes.
 | F-X187 | Scoped paragraph and cell text replacement | S90 | M | done |
 | F-X188 | Preserve comment ownership when replacing or removing whole stories | S90 | L | done |
 | F-X190 | Preserve cached text in multi-run complex field story snapshots | S90 | M | done |
-| F-X192 | Complete the remaining Word bibliography catalogue | S96 | L | pending |
+| F-X192 | Complete the remaining Word bibliography catalogue | S98 | L | pending |
 | F-X191 | Ignore namespace declarations in numbering reader completeness | S90 | S | done |
 | F-X189 | Prepare Word 0.16.0 and PowerPoint 0.14.0 families | S90 | L | done |
 | F-X193 | Preserve semantic mark highlights through nested HTML runs | S91 | S | done |
@@ -787,7 +787,7 @@ HLD14 contract before adopting contributor changes.
 | F-X216 | Import complete slides and merge decks with source formatting | S91 | L | done |
 | F-X217 | Import HTML and Markdown through public Word surfaces | S91 | L | done |
 | F-X218 | Export presentations as semantic HTML and Markdown | S91 | L | done |
-| F-X219 | Qualify full-range text watermark interoperability | S96 | M | pending |
+| F-X219 | Qualify full-range text watermark interoperability | S98 | M | pending |
 | F-X220 | Embed fonts through both native and public package families | S91 | L | done |
 | F-X221 | Prepare Word 0.16.1 and PowerPoint 0.14.1 patch releases | S91 | L | done |
 | F-X222 | Restore linear Word story range inventory and empty owners | S91 | M | done |
@@ -810,9 +810,9 @@ HLD14 contract before adopting contributor changes.
 | F-X239 | python-pptx notes names and refusal of silent zero values | S94 | M | done |
 | F-X240 | Python and CLI signing and signature verification | S94 | M | done |
 | F-X241 | Python and CLI form reading and filling | S94 | M | done |
-| F-X242 | Form control geometry and AcroForm field model | S96 | L | pending |
-| F-X243 | Field appearance streams, full-font resources and conformance | S96 | L | pending |
-| F-X244 | Signature field, bindings and CLI option | S96 | M | pending |
+| F-X242 | Form control geometry and AcroForm field model | S97 | L | pending |
+| F-X243 | Field appearance streams, full-font resources and conformance | S97 | L | pending |
+| F-X244 | Signature field, bindings and CLI option | S97 | M | pending |
 | F-X245 | Preserve chart data changes in Word comparison | S93 | L | done |
 | F-X246 | Honor chart legend position and overlay during rendering | S93 | L | done |
 | F-X247 | Preserve the common LaTeX inputs reported in Issue365 | S94 | L | done |
@@ -837,6 +837,10 @@ HLD14 contract before adopting contributor changes.
 | F-X266 | Bound Word body reads and structural edit cost | S95.4 | L | done |
 | F-X267 | Bound PowerPoint mutation cost across public publishers | S95.4 | L | done |
 | F-X268 | Bound Word owner inventory and unchanged package staging | S95.4 | L | done |
-| F-X269 | Qualify PowerPoint shadow falloff and wipe paint domains | S96 | M | pending |
+| F-X269 | Qualify PowerPoint shadow falloff and wipe paint domains | S98 | M | pending |
 | F-X270 | Prepare Word 0.16.4 and PowerPoint 0.14.4 patch releases | S95.4 | L | done |
+| F-X271 | Restore pinned viewer downloads and planning policy | S96 | M | pending |
+| F-X272 | Preserve existing revisions during document comparison | S96 | L | pending |
+| F-X273 | Repair header body clearance and complete TOC navigation | S96 | L | pending |
+| F-X274 | Honor section and field page-number formats | S96 | M | pending |
 <!-- AUTOGEN:backlog-MX END -->

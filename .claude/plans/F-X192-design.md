@@ -1,14 +1,14 @@
 # F-X192, Complete the remaining Word bibliography catalogue
 
 **Status**: draft
-**Sprint**: S96
+**Sprint**: S98
 **Size**: L
 **Depends on**: F-282
 
 ## Recovery and scheduling
 
 The user explicitly carried this unfinished full contract from S95.2 to S96.
-It is not complete and S96 has not started. Reset the design before any later
+The 2026-10-28 reorganization now schedules recovery in S98. S96 is reserved for new contributions. It is not complete and implementation has not started. Reset the design before any later
 implementation, reassessing evidence custody, the actual comparator/runtime
 observation route and sprint capacity. F-282 remains done. The retained S95.2
 recovery analysis establishes neither reconstructed source nor full acceptance.
@@ -25,8 +25,8 @@ verdict.
 
 The retained recovery decision is
 `/private/tmp/S95.2-F192-recovery-decision-preflight-2.md`. It authorizes no
-Git repair. After the S96 recovery design is approved, use the normal serial
-`/start-feature F-X192` on canonical `sprint/s96`, without `--claimed`.
+Git repair. After the S98 recovery design is approved, use the normal serial
+`/start-feature F-X192` on canonical `sprint/s98`, without `--claimed`.
 Record a fresh actual current-source Base and scoped readiness in the existing
 canonical progress carrier. Keep the old worker inactive as history. Do not
 rename its branch, reuse its stale claim, create an owner alias or copy old

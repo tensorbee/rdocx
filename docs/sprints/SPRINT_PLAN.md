@@ -11,7 +11,7 @@ a zero-finding `/microscope`. Full verification and sprint review cover the
 final integrated result at closure. A formal dependency checkpoint completes
 a prerequisite from scoped evidence and focused integration checks.
 
-The active roadmap runs through S110, with earlier deferred cutover boundaries
+The active roadmap runs through S112, with earlier deferred cutover boundaries
 retained in place. The sizing rationale and compression options are in
 `docs/hld/14-development-backlog.md`.
 
@@ -3153,35 +3153,131 @@ Comments and reviews are 0. Nineteen donor check runs completed with success or 
 
 Codex root approved the refresh4 extension on 2026-10-25 after reading the reconciled four-file delta. The user answered Q24 the same day with `Require all 79 flat-cost gates (Recommended)`. The baseline is `d1f42516eb3747442fe4304a6331eab946dc9a0e`. The extension is the eighth mechanism on the same F-X268 story. It adds A11 and C8 and extends A10 counted work from 9 calls to 14. A10 stays independent of the timing gate. It adds no ninth story, no stable public API, no dependency, and no module. The current flat set is 79, which is 76 catalogue keys plus 3 XML reads, under the same bound of 100 at most 1.5 times 25 plus 5 ms. The six additions are `Paragraph.replace_text`, `Cell.replace_text`, `Document.replace_text_at`, `Document.add_picture`, `Cell.add_picture`, and `Document.add_hyperlink_to_story`. The historical Q23 set of 73 stays historical. The 5 linear calls stay, including the 2 that overlap the 79. The 252-call catalogue, the original 407 gate, and the F-X267 248-call run stay. Current residuals from the old trio are `Run.add_picture` and `Cell.merge`. The prior approved scope stays approved. The combined planning judgment is a provisional 12 to 21 developer-days. The 10 to 17 figure stays historical and is not added to the seven-story 27 to 41 figure. Eight stories stay. Formal dependencies stay F-X266 and F-X267. F-X268 stays serial after F-289 and F-290 and stays unclaimed. F-290 is unaffected. No story is marked done. Implementation has not started. No gate pass is claimed. This record is that Root approval. It is not a self-review.
 
-#### Sprint S96, Fillable PDF forms
+#### Sprint S96, Contribution and issue repair
 
-**Goal**: export Word form controls as fillable AcroForm fields with an empty
-signature field, behind an opt-in option, while PDF/A and PDF/UA output stay
-valid. F-X219 carries unfinished full-range text watermark interoperability,
-and F-X192 carries the full bibliography catalogue. Five stories provisionally
-total19 to21 developer-days. Both carried designs require reset and explicit
-capacity/technical reassessment before implementation. S96 remains unopened. The five-story estimate remains historical. F-X269 is an additional provisional M follow-up from independent S95.4 native observations. Its design and S96 capacity require reassessment before claim. It adds no S95.4 story or delivery credit.
+**Goal**: integrate the current contribution heads against released main, repair all acceptance rows of Issues 423 to 426, and restore the pinned CI oracle. No product story has started. This is an analysis-only intake, not approved implementation or a passing gate.
+
+| F-ID | Title | Size |
+|------|-------|------|
+| F-X271 | Restore pinned viewer downloads and planning policy | M |
+| F-X272 | Preserve existing revisions during document comparison | L |
+| F-X273 | Repair header body clearance and complete TOC navigation | L |
+| F-X274 | Honor section and field page-number formats | M |
+
+**Capacity**: provisional F-X271 1 to 2, F-X272 3 to 4, F-X273 4 to 6 and F-X274 2 to 3 developer-days, plus 2 integrated qualification days. Total 12 to 17 developer-days exceeds a normal ten-day sprint. This is explicitly an extended repair boundary of roughly three to four focused weeks, subject to native evidence availability. It admits no additional feature work. Reassess after design if the upper bound or four-calendar-week escalation is threatened. Never shorten an issue's acceptance to fit the estimate. Actual effort and completion are unrecorded.
+
+##### Authoritative GitHub intake
+
+Captured 2026-10-28T03:03:24.502962+00:00 against local and remote main `24af95d3d94c25e95f61a75e7e21f18fa95b6363`, after the published S95.4 close. There are 2 open PRs and 8 open issues. Full bodies and all 19 issue discussion comments were read. Current commits, changed-file lists, full diffs, reviews, inline comments, CI checks/statuses and failed logs were retrieved, with relevant source paths and failure causes inspected. This is intake analysis, not a completed code review. Both PRs are non-draft and have zero discussion comments, zero submitted reviews and zero inline review comments. They are not approved. Issues 264, 281 and 377 remain excluded conversations and must stay open. This snapshot supersedes old counts only for current intake, not historical sprint records.
+
+| PR | Reported base and current head | Current CI/review and ancestry | Coverage and adoption |
+|---|---|---|---|
+| [427](https://github.com/tensorbee/rdocx/pull/427) by hadim | `main` at reported base `a57be36578b1b419b87986b1accbcfca481277ce`, `hadim/rdocx:fix/425-compare-existing-revisions`, head `cc3473d0c05659167847a941e0c7eb2bbd7217f5` |4 own commits,116 behind current main.19 checks:11 success,5 failure,3 skipped. CI gate red. No reviews or comments. Legacy combined status literally pending. API reports mergeable true / blocked, but the current-main merge simulation conflicts | F-X272 covers Issue 425. Preserve the latest revision-count and stub-contract commits, not just its first commit. The donor archive measurement commit is not acceptance |
+| [428](https://github.com/tensorbee/rdocx/pull/428) by hadim | `main` at reported base `a57be36578b1b419b87986b1accbcfca481277ce`, `hadim/rdocx:fix/424-426-header-body-toc-vmerge`, head `87f101bc8e688bd93d358b72bc69c28732e9dad6` |5 own commits,116 behind current main.19 checks:11 success,5 failure,3 skipped. CI gate red. No reviews or comments. Legacy combined status literally pending. API reports mergeable true / blocked, but the current-main merge simulation conflicts | F-X273 partly covers Issue 424 and covers the supplied Issue 426 cases. Native geometry, paragraph spacing and omitted navigation cases remain due. Page-number formatting 423 is not fixed |
+
+Neither PR is stacked on the other. Their merge base is a57, and neither head contains the other. Both must be rebased or their own changes adapted onto current main, never replay the 116 integrated main commits as contribution code. PR 427 owns 3 behavior/test commits plus 1 archive commit. PR 428 owns 1 variant-selection refactor,1 header/footer behavior commit,1 navigation behavior commit,1 Python-test commit and 1 archive commit. Keep refactor and behavior changes separately labelled.
+
+Current-main simulations conflict for 427 in `README.md`, `crates/rdocx-cli/README.md`, `crates/rdocx/tests/regression_test.rs` and `scripts/readme_doctests.py`. For 428 they conflict in `README.md`, `crates/rdocx-layout/README.md`, the same regression carrier and measurement script. Between the two heads, conflicts occur in the top README, regression carrier and measurement script. Both also edit `crates/rdocx-py/tests/test_core.py`. Keep all current tests and append each contribution's discriminators. Do not choose one side wholesale. Current engine, CLI and binding files have additional integrated changes even where Git auto-merges, so semantic reconciliation remains mandatory. Keep the published0.16.4/0.14.4 carriers and current source authority. Remeasure only affected archives on the final clean union rather than copying donor0.16.3 measurements.
+
+##### Complete issue coverage and closure evidence
+
+| Open issue | Current PR coverage | Remaining work and required evidence | Owner / disposition |
+|---|---|---|---|
+| [423](https://github.com/tensorbee/rdocx/issues/423), PAGE formats | No open PR.428changes page geometry only | Read preserved `pgNumType` format as well as start. Format PAGE across sections, footer variants, rendering and `update_page_fields`, including explicit field switches. Prove decimal, both roman cases and both letter cases, restart/continue boundaries and multi-letter values. Pin field-switch precedence and unsupported-format behavior from primary sources before design approval. The supplied four-page PDF must read `i, ii, 1, 2`. Preserve unknown XML and unrelated decimal fields. Native Word, saved cache, PDF/text and PNG views must agree | F-X274, pending in S96 |
+| [424](https://github.com/tensorbee/rdocx/issues/424), tall headers |428 is partial. It clears the flow it currently draws but omits paragraph spacing. Its own spaced-header probe gives108.5 pt versus LO 157 pt | Complete actual header/footer flow extents, including the issue's logo/table case and paragraph spacing. Native Word must qualify positive/negative top and bottom margins, default/first/even variants, absent or blank selected variants, flow tables versus floating tables/frames, margin-relative anchors, borders, footnotes and endnotes. Keep furniture geometry separate from body clearance. Measure page counts and TOC page targets after clearance. Donor memory of ECMA or a different LO build is not Word evidence | F-X273, pending in S96. Do not close on overlap removal alone |
+| [425](https://github.com/tensorbee/rdocx/issues/425), existing revisions |427preserves unchanged revision-bearing owners and adds changes elsewhere. It still refuses changes to those owners | Preserve old revision XML, authors, dates, ids and locations in body, tables/controls, headers, notes and section properties. Allocate noncolliding new ids. CLI counts only newly created revisions. Resolve the new author's changes to both inputs while retaining the first author's revisions. Test identical/no-op, ignored stories/comments, changed comments, moved/deleted revision owners and late atomic refusal. PR 427 describes this preserved-redline behavior as Combine-like, not unrestricted Word Compare accepted-view semantics. Verify that distinction from native authority. Compared-story ids are seeded, while ignored-story exclusions retain their existing contract. For edits427 still refuses, implement support or explicitly satisfy the issue's documented-limitation/workaround alternative before closure. Do not equate bounded preservation with unrestricted Word Compare parity | F-X272, pending in S96 |
+| [426](https://github.com/tensorbee/rdocx/issues/426), TOC outline switch |428 adds unplaced facts for vertical-merge continuation cells and accepted-view deleted rows | Run all original merged/unmerged and `\o`, `\u`, `\t`, `\h`, `\z` combinations through Rust, Python and `rdocx toc rebuild`. Retain source identity for every paragraph and skip unplaced continuation/deleted-row content without weakening stale-fact checks. Include nested tables, genuine placed cell headings, styled unplaced headings and STYLEREF/numbered-outline consumers.428discloses a no-`\u` styled-heading failure. Repair it or leave that acceptance row explicitly open, rather than dropping headings indiscriminately. Combine with424 clearance and423 formatting for correct page targets | F-X273, pending in S96 |
+| [381](https://github.com/tensorbee/rdocx/issues/381), AcroForms | No PR. Its one existing comment assigns all three F-X242/243/244 contracts | See the complete381matrix below. Nothing in427/428supplies PDF widgets, appearances, fonts, conformance or signatures. It stays open until the full feature and native acceptance pass | F-X242, F-X243, F-X244, moved to S97, not silently called a repair |
+| [264](https://github.com/tensorbee/rdocx/issues/264), styles discussion | No PR. Read all 10 comments, including actual Word-style/parity requests and later status correction | Discussion continues on reusable formatting and real style semantics. No repair F-ID or closure is inferred from earlier partial style work | Excluded and open by user instruction |
+| [281](https://github.com/tensorbee/rdocx/issues/281), spreadsheets discussion | No PR. Read all 8 comments, including the contributor's loss-aware/shared-formula proposal | Preserve Google Sheets comments, unsupported XML, shared formulas and stale-result policy in the future F-184 decision. The latest comment still says M19 pending. Current planning moves that decision to S103 without approving the programme | Excluded and open by user instruction |
+| [377](https://github.com/tensorbee/rdocx/issues/377), benchmark discussion | No PR, no discussion comments. Full body read | External cohort/oracle/badge work remains the separately planned F-313 through F-318 programme at S102. No benchmark run or badge promise follows from this intake | Excluded and open by user instruction |
+
+Every row is pending or discussion-only. PR merge, donor tests, an internal agreement check or a prepared fixture cannot mark an issue complete. Keep original bodies/scripts and all omitted criteria. If an independently reproduced remaining criterion cannot be implemented within its contract, revise the plan and retain an explicit pending owner before closure.
+
+##### CI blockers and safe sequence
+
+Both current PR runs fail CI gate, Test, MSRV 1.93, Word fidelity and rpptx Python. The failed logs show the latter four stop while obtaining LibreOffice 26.2.5.2, before the affected test gates. Linux uses `scripts/install_pinned_libreoffice.py`, and macOS uses a literal URL in `.github/workflows/ci.yml`. Stable26.2.5 URLs return 404now. Read-only HEAD probes of the official26.2.5.2 archive candidates return 200 for Linux 218075885 bytes and macOS 297407265 bytes. Those headers do not prove archive hashes or installation. F-X271 must authenticate the existing exact release, expected executable identity and platform checksums, repair only the retrieval route, and prove bounded/safe extraction and mismatch refusal. Do not substitute latest LO, disable TLS/checksums, skip fidelity or call the red MSRV job a compiler regression. Runs [40582952383](https://github.com/tensorbee/rdocx/actions/runs/40582952383) and [40586210502](https://github.com/tensorbee/rdocx/actions/runs/40586210502) remain failed historical observations. Output stability passed on each donor head, not the new union. Supply chain, presentation fidelity and owner-corpus jobs were skipped and need an applicability disposition, not green credit.
+
+1. Design all four F-IDs, pin the issue/PR inputs and resolve API/native-authority questions. All are pending and no design is approved by this intake.
+2. F-X271 restores exact pinned oracle retrieval and updates the existing roadmap-policy test's hard-coded future sprint set to match this authorized schedule. It currently pins97to99and cannot accept the revised99to101range. The analysis run does not edit that Python source. The actual planning check confirms both capability policies pass and this roadmap assertion fails only on the old sprint set. The complete pending-placement audit separately passes. Actual supported-target installation and affected hosted gates remain due.
+3. Adapt PR 427's latest three substantive commits in F-X272, preserving new-only CLI counts, binding contract, prior source provenance, checked publication and S95.4 forms/live owners. Reconcile its four actual conflicts manually. No direct merge of the stale branch.
+4. Adapt PR 428's own refactor, header/footer correction, navigation correction and tests together in F-X273. Reconcile after427, keep the header behavior and navigation behavior in separate labelled commits, and finish every disclosed issue 424/426 gap. It is independent of427at source level, but serial integration avoids shared test/measurement ownership.
+5. Implement the uncovered Issue 423 in F-X274 after the geometry/navigation provider is locally qualified and complete. One section/page formatting policy must reach rendering and explicit cache updates. No new page-format authoring API is implied.
+6. Run the combined source-qualified gates once. One writer owns hash/pixel/corpus baselines and final archive measurements. Only then complete F-IDs, perform final sprint review and consider close-sprint. No main merge, PR closure, issue closure or release occurs in this analysis.
+
+##### Combined gate before any main or closure decision
+
+- Genuine current-Base RED then fixed GREEN for every supplied reproduction and every omitted criterion. Preserve original failure and distinct producer identities.
+- Unique scoped Rust/CLI/Python discriminators and zero-finding microscopes per F-ID. The integrated union includes all current main tests, not just the old donor counts.
+- One full native/workspace, no-default-font, clippy, formatting, WASM, documentation, supply-chain, current installed Python 3.9/3.12 runtime and typing/stub union under `/verify --full`, with affected earned riders. CI must be green on the actual integrated source after pinned tools are restored.
+- All 49 hash baselines and 7 deterministic pixel cases checked. Any intentional page geometry or field-text delta is its own labelled reviewed change. Preserve original baselines before the sole writer records a justified successor. Never use system fonts for a product baseline.
+- Fresh source-qualified native Word header/footer and page-format controls, plus pinned LibreOffice 26.2.5.2 and Poppler 26.01.0. Compare physical first/last body positions, furniture positions, field text, page count and rebuilt TOC targets across Rust, Python, CLI, saved/reopened DOCX and PDF/PNG. A donor LO26.2.6.3 probe is not this gate. Qualify declared border/anchor/floating-owner decisions with primary source and native evidence.
+- Existing tracked revisions survive comparison and author-filtered accept/reject in native and bindings. Error/no-op/late-failure controls retain bytes, live owners and output-file atomicity. Combine comparison over a merged table with tall header and roman/letter footers, then rebuild TOC, update fields, save/reopen and render.
+- Final current-state metadata/classification/live-owner policies, prose/adapters, affected README examples and genuine affected `.crate` verification/inventory below 10 MiB. Remeasure combined affected archives once. No donor package bytes or measurement claims are adopted.
+- Keep264/281/377 open. Close other issues only after every matrix criterion has actual evidence on reviewed/pushed main. A missing native result or explicit unsupported criterion remains open. Close superseded PRs only with specific contributor credit, integrated evidence and remaining-scope notes. Only close-sprint may merge/tag main. Publication requires a separate release preparation and final approval.
+
+Local immutable intake files are under `/private/tmp/rdocx-contribution-intake-20261028`, with snapshot, bodies, threads, diffs, commits, checks, failed logs, URL-header observations and inspection-only merge simulations. Each issue/PR source body SHA-256 is recorded below to detect revisions before implementation.
+
+- 264: updated `2026-10-18T15:50:57Z`, body SHA-256 `62195027ea4a6c7b5d5ba4c38da9187212cfb6a53e298c39041d63017da7fd78`.
+- 281: updated `2026-10-18T15:50:58Z`, body SHA-256 `e84e96bf29d4e1b115293afe7d7a7cd5c61ba43c4bc78c9367a6cb980e03ad52`.
+- 377: updated `2026-10-15T03:52:49Z`, body SHA-256 `6edb1d8691a011cb71fdd4ec48da7c6682d1905998b616a4914e1d648cd6e873`.
+- 381: updated `2026-10-15T19:26:15Z`, body SHA-256 `f7d9cbcf79f954046b4e0f7f4bf8da3d8ba8ee85559587dcf6cf6aa966eabcd6`.
+- 423: updated `2026-10-27T17:56:04Z`, body SHA-256 `a38f05c33ac3ec614982970cdf9dc08db53308deff619145f3fc326ce5cd56ca`.
+- 424: updated `2026-10-27T20:08:03Z`, body SHA-256 `c66665fffd68be5e4469d1557532f3cc30caadabf10f7b03b665a5683c4d9f83`.
+- 425: updated `2026-10-27T20:08:05Z`, body SHA-256 `3f4f9b5577506d36ec13cdb09f145d551cce7701e93f4fc53419f0a74f78d26b`.
+- 426: updated `2026-10-27T20:08:06Z`, body SHA-256 `36dff32b59ca3099e25d2b4e6a5a0e8d03624504fd47f2110aed4f5e1ab6bee7`.
+- 427: updated `2026-10-27T20:59:51Z`, body SHA-256 `5cef6bc8e0440076c8da5c46778ee22595c208f6698f367d2fbe9635208a46f4`.
+- 428: updated `2026-10-27T21:22:09Z`, body SHA-256 `635213f1f93940b66c2856d18a2d60caaf246d94419a40db90a1ec3b4e5aa5ba`.
+
+##### S96 run-sprint design checkpoint, 2026-10-28
+
+All four canonical designs are now approved under `.claude/plans/`, F-X271 through F-X274. The run proceeds to serial implementation with the existing Codex independent final reviewer selection. No feature is claimed or started, no implementation gate has run, and no completion evidence is claimed.
+
+A fresh read-only refresh of Issues423to426and PRs427/428found unchanged bodies and contribution heads. Exact body hashes and head identities are retained in the respective design plans. Raw refresh payloads, comments, PR reviews and commit lists are under `/private/tmp/rdocx-s96-run-refresh`. Official ECMA Part1 fifth-edition source was retrieved and hashed for primary margin/number-format clauses. This is source research, not native output acceptance.
+
+Q-S96-01 in F-X272 A4/A7 was answered by the user on 2026-10-28, selecting the recommended bounded preservation and tested checked workaround. The recommendation is bounded unchanged-owner revision preservation plus a tested checked resolution/comparison workaround for refused edits. Supporting edits within revision-bearing owners instead requires a revised scope and estimate. F-X273/F-X274 retain explicit factual primary/native qualification and contract-closure work. Design approval follows the source/contract closure checks and the user answer, without claiming native or hosted observations.
+
+Proposed serial execution order remains F-X271, F-X272, F-X273, then F-X274after the actual approved local provider checkpoint. Shared regression/Python carriers, semantic HLD sections, archive measurements and hash/pixel baselines are exclusive. No worker wave is launched before design closure.
+
+The user subsequently authorized bounded mechanical Grok work, with Codex checking the result before integration and the required microscope. This supersedes the intake's earlier no-assignment instruction. The first delegated task is temporary archive retrieval/authentication only, with no repository writes or product implementation claim. Its first headless attempt declined command execution and supplies no evidence. Any successor result must be independently checked before adoption. Product/native/hosted gates remain pending.
+
+#### Sprint S97, Fillable PDF forms
+
+**Goal**: complete the existing Issue 381 feature before closing that issue. This is the three-story feature subset formerly scheduled in S96, not a new completed repair. Provisionally 10 to 13 developer-days plus final viewer/conformance qualification. It may exceed a normal sprint and requires design/capacity confirmation before claim.
 
 | F-ID | Title | Size |
 |------|-------|------|
 | F-X242 | Form control geometry and AcroForm field model | L |
 | F-X243 | Field appearance streams, full-font resources and conformance | L |
 | F-X244 | Signature field, bindings and CLI option | M |
+
+Run F-X242, then F-X243, then F-X244. All dependencies and all Issue 381 rows must pass. S95.4 form creation/filling provides source inputs, not evidence that PDF widgets already exist.
+
+| Issue 381 criterion | Required observation before closure | Owner |
+|---|---|---|
+| Types and geometry | Plain/rich/legacy text map to `/Tx` with correct multiline state. Modern/legacy checkboxes map to `/Btn`. Lists and editable combos map to `/Ch`. Dates retain display format. Every laid-out rectangle and page is exact | F-X242, F-X243 |
+| Identity and values | Unique field names prefer tag, then alias, then legacy name. Tooltip uses alias/help. Current values are used, placeholders are excluded, duplicate/empty identifiers have defined deterministic behavior | F-X242 |
+| Empty signing slot | A declared marker creates an empty `/Sig` offered for signing in Acrobat Reader. Signing/PAdES remains outside scope | F-X244 |
+| Appearance and fonts | Every widget has `/AP`. No reliance on NeedAppearances. `/DR` fonts cover typed input beyond the visible page subset | F-X243 |
+| Conformance | Tagged widgets have `/Form` structure elements. PDF/A and PDF/UA checks pass with the option enabled | F-X243 |
+| API and unchanged output | Opt-in reaches Rust, Python and `rdocx convert`. With it off, output remains byte identical | F-X244 |
+| Automated and native acceptance | qpdf JSON or pypdf lists all names/types/current values/rectangles. Actual Acrobat Reader and Preview fill, save and reopen succeed. Reader offers the signature slot. Retain application/tool/version and input/output identity | F-X242, F-X243, F-X244 |
+
+No PR currently covers these rows. Keep Issue 381 open throughout partial story completion.
+
+#### Sprint S98, Deferred native and bibliography recovery
+
+**Goal**: reassess and finish the three unfinished evidence-heavy contracts removed from the overloaded old S96 feature bundle. All remain pending. No old result is recredited as current acceptance.
+
+| F-ID | Title | Size |
+|------|-------|------|
 | F-X219 | Qualify full-range text watermark interoperability | M |
 | F-X192 | Complete the remaining Word bibliography catalogue | L |
 | F-X269 | Qualify PowerPoint shadow falloff and wipe paint domains | M |
 
-Issue381 is accepted only when all three stories pass. F-X242 makes layout
-report each control's rectangle and maps text, rich text, checkbox,
-drop-down, combo box and date controls and legacy fields to field types and
-unique names. F-X243 writes an appearance stream for every widget, a field
-font that covers typed input, and `/Form` structure elements in tagged
-output. F-X244 adds the empty `/Sig` field and the option across Rust, Python
-and `rdocx convert`. Output without the option stays byte identical. Signing
-the PDF itself remains out of scope. The stories run in order because each
-builds on the previous field model.
+The original old-S96 five-story estimate 19 to 21 days excluded the later provisional F-X269 addition. It is historical and not a valid capacity promise for either successor. This split prevents that known overload from being hidden in S97. F-X192 and F-X219 require design resets, and F-X269 requires its first evidence-supported design. Their nominal 8 to 11 developer-days excludes unbounded recovery/native research. Establish demonstrable authority and revise estimates before starting the sprint clock. Missing comparator custody, no faithful watermark opacity representation or missing native paint authority is a blocker, not permission to weaken the contract or run speculative grids. Preserve the inactive historical workers and failed evidence. If the reset still exceeds normal capacity, split concrete approved delivery children before implementation, not after a false completion.
 
-#### Sprint S97, Collaboration authoring
+#### Sprint S99, Collaboration authoring
 
 **Goal**: create complete Word revisions, comments, permission ranges, and
 comparison results, with caller-controlled identity and time instead of
@@ -3203,7 +3299,7 @@ closes identity and clock inputs. The sprint gate covers Word differential
 results, accept and reject views, and byte-identical output in deterministic
 mode.
 
-#### Sprint S98, Drawings, diagrams, and embedded content
+#### Sprint S100, Drawings, diagrams, and embedded content
 
 **Goal**: complete the visible and packaged Word object surface across every
 valid insertion point without raw compatibility wrappers or executable payload
@@ -3223,7 +3319,7 @@ F-297 through F-302 build independent object families on the shared
 relationship model. F-303 is their integrated deterministic layout and render
 gate.
 
-#### Sprint S99, Package extensibility and modern DOCX end gate
+#### Sprint S101, Package extensibility and modern DOCX end gate
 
 **Goal**: close package extension, accessibility, conformance, determinism,
 resource, binding, documentation, and stability boundaries for modern DOCX
@@ -3249,7 +3345,7 @@ separate from completing this sprint.
 
 ### M20, Fidelity at scale, external Word benchmark
 
-#### Sprint S100, External Word benchmark fidelity
+#### Sprint S102, External Word benchmark fidelity
 
 **Goal**: measure Word PDF conversion against the external
 [`neurotic_docx_bench`](https://github.com/jandira-tech/neurotic_docx_bench)
@@ -3291,7 +3387,7 @@ fidelity waves follow from F-317's cluster list as separately planned work.
 
 ### M19, Advanced spreadsheets
 
-#### Sprint S101, Spreadsheet decision, corpus and core model
+#### Sprint S103, Spreadsheet decision, corpus and core model
 
 **Goal**: decide whether a material Rust ecosystem gap still exists, then build
 the ownership model only if that decision is affirmative.
@@ -3303,7 +3399,7 @@ the ownership model only if that decision is affirmative.
 | F-185 | Workbook and worksheet model | L |
 
 F-184 is a true go or no-go gate. It reassesses Calamine,
-`rust_xlsxwriter`, `umya-spreadsheet`, `xls`, and any credible successor at S101,
+`rust_xlsxwriter`, `umya-spreadsheet`, `xls`, and any credible successor at S103,
 then classifies each proposed feature as preserved, modeled and editable, or
 executable. If the ecosystem provides the complete required lifecycle by then,
 M19 is archived rather than implemented.
@@ -3312,8 +3408,8 @@ M19 is archived rather than implemented.
 for a unified CLI/Python workflow, template filling, preservation-safe edits
 and rendering. Include integration, installation and maintenance costs in
 F-184, including reuse of a maintained engine behind a consistent facade.
-S101 through S104 stage reading and loss-aware editing before calculation and
-pivots. Rendering and distribution retain the S110 boundary. An earlier
+S103 through S106 stage reading and loss-aware editing before calculation and
+pivots. Rendering and distribution retain the S112 boundary. An earlier
 distributable reader/editor requires a reviewed roadmap and release decision.
 
 The reporter's [follow-up](https://github.com/tensorbee/rdocx/issues/281#issuecomment-6063901190)
@@ -3342,7 +3438,7 @@ stories and any proposed reader/editor distribution boundary with that order
 before approving implementation. S90 records this direction without claiming
 that the conditional spreadsheet programme or an earlier release is approved.
 
-#### Sprint S102, Styles, tables and structured references
+#### Sprint S104, Styles, tables and structured references
 
 **Goal**: model the indexed formatting and structured data semantics that
 ordinary business workbooks rely on.
@@ -3357,7 +3453,7 @@ F-189 lands here because structured table references are part of the formula
 grammar rather than a string convention. The sprint does not yet calculate
 formulas.
 
-#### Sprint S103, Advanced worksheet objects
+#### Sprint S105, Advanced worksheet objects
 
 **Goal**: cover the visible and interactive worksheet surface before the
 streaming package boundary freezes it.
@@ -3370,7 +3466,7 @@ This includes comments, hyperlinks, rich text, drawings, grouping, panes,
 sparklines, page breaks, and modern image cells. External content stays offline
 unless an explicit bounded policy allows retrieval.
 
-#### Sprint S104, Streaming read and write
+#### Sprint S106, Streaming read and write
 
 **Goal**: prove that advanced workbooks remain bounded at the package boundary.
 
@@ -3383,7 +3479,7 @@ Both carry an asserted memory ceiling rather than a hoped-for one. A 100 MB
 fixture is the gate, not a smoke test. Unsupported package parts and
 relationships remain attached through unrelated typed edits.
 
-#### Sprint S105, Calculation and sheet features
+#### Sprint S107, Calculation and sheet features
 
 **Goal**: calculate ordinary and modern formulas, then expose the features that
 depend on their results.
@@ -3399,7 +3495,7 @@ including dynamic arrays, spill ranges, and structured references. Unsupported
 functions retain cached values with diagnostics. F-191 reuses `oxml-chart`
 rather than creating a spreadsheet-only chart engine.
 
-#### Sprint S106, Pivots and the Data Model boundary
+#### Sprint S108, Pivots and the Data Model boundary
 
 **Goal**: move PivotTables from opaque preservation to typed local refresh and
 define the boundary around proprietary analytical models.
@@ -3415,7 +3511,7 @@ and visible cells. Slicers and pivot charts follow that refresh. OLAP, Power
 Pivot, VertiPaq, and DAX state is preserved and inspectable but is not executed
 under this milestone.
 
-#### Sprint S107, Power Query language and package model
+#### Sprint S109, Power Query language and package model
 
 **Goal**: understand and evaluate M independently of external data access.
 
@@ -3428,7 +3524,7 @@ refresh metadata. The language boundary covers the pure transformations needed
 by the corpus before credentials, connectors, or network policy enter the
 runtime.
 
-#### Sprint S108, Power Query execution
+#### Sprint S110, Power Query execution
 
 **Goal**: refresh a bounded, useful connector set without weakening privacy or
 offline determinism.
@@ -3442,7 +3538,7 @@ privacy levels, source combination, timeouts, byte limits, caching, and query
 folding are explicit contracts. Proprietary and tenant-bound connectors remain
 preserved with diagnostics.
 
-#### Sprint S109, Office Scripts-compatible automation
+#### Sprint S111, Office Scripts-compatible automation
 
 **Goal**: automate the same workbook model through a versioned and sandboxed
 TypeScript surface.
@@ -3457,7 +3553,7 @@ not pretend to provide OneDrive, SharePoint, Power Automate, or Microsoft tenant
 identity. It does provide bounded workbook, range, table, chart, pivot, and
 query automation with atomic failure.
 
-#### Sprint S110, Rendering, distribution and advanced end gate
+#### Sprint S112, Rendering, distribution and advanced end gate
 
 **Goal**: close M19 as a headless advanced spreadsheet engine rather than a
 file-format crate.
@@ -3487,13 +3583,13 @@ at the fully verified SHA.
 | End of S64, M21 | Incubating `rpptx` family. Publish the stable family too only when the reviewed dependency diff requires new shared pins. | Collaboration, security, timing, media, SmartArt, ODP, handouts, HTML import, and PDF import form one complete presentation-depth boundary. |
 | End of S69, M22 | Stable `rdocx` family at v0.13.0 through F-X078. Publish the incubating shared family first only if a shared crate version or stable dependency pin moved. | OfficeMath, fields, dynamic TOC, automation, comparison, embedded content, and modern package variants complete the planned Word-depth boundary. |
 | End of S73, M23 | Stable `rdocx` family after the five-document public-API-only conformance gate passes. | This is the first boundary where the reference business documents can be authored from `Document::new()` without raw XML or a base template. |
-| End of S99, M24 | Stable `rdocx` family after the modern Word authoring capability matrix is closed. Publish the incubating shared family first only if a shared crate version or stable dependency pin moved. | This boundary completes the planned modern DOCX authoring surface, lossless extensibility, accessibility, strict-package, determinism, binding, and stability gates. |
-| End of S100, external benchmark | Stable `rdocx` family carrying the opt-in markup view and the benchmark fidelity fixes. Publish the incubating shared family first only if a shared crate version or stable dependency pin moved. | The benchmark maintainer reruns released versions only, so the measured gains need a published family behind them. |
-| End of S110, conditional M19 | The new `rxlsx` distribution family defined by F-195, plus only the existing families whose reviewed dependency pins moved. | F-195 is the first point where the conditional spreadsheet programme has a complete facade, CLI, WASM, Python, rendering, and advanced lifecycle gate. |
+| End of S101, M24 | Stable `rdocx` family after the modern Word authoring capability matrix is closed. Publish the incubating shared family first only if a shared crate version or stable dependency pin moved. | This boundary completes the planned modern DOCX authoring surface, lossless extensibility, accessibility, strict-package, determinism, binding, and stability gates. |
+| End of S102, external benchmark | Stable `rdocx` family carrying the opt-in markup view and the benchmark fidelity fixes. Publish the incubating shared family first only if a shared crate version or stable dependency pin moved. | The benchmark maintainer reruns released versions only, so the measured gains need a published family behind them. |
+| End of S112, conditional M19 | The new `rxlsx` distribution family defined by F-195, plus only the existing families whose reviewed dependency pins moved. | F-195 is the first point where the conditional spreadsheet programme has a complete facade, CLI, WASM, Python, rendering, and advanced lifecycle gate. |
 
 No intermediate sprint publishes merely because one subsystem compiles. A
 security fix may still justify a separately planned patch release, but ordinary
-feature work waits for the next boundary above. If F-184 archives M19, the S110
+feature work waits for the next boundary above. If F-184 archives M19, the S112
 boundary disappears with the programme and no spreadsheet release namespace is
 created.
 
