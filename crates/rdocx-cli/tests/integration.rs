@@ -4091,6 +4091,81 @@ fn compare_accept_and_reject_reproduce_each_input() {
     );
 }
 
+#[test]
+fn issue425_compare_keeps_the_revisions_of_an_earlier_redline() {
+    let temp = TempWorkspace::new("issue425-compare-redline");
+    let first = temp.path.join("first.docx");
+    let second = temp.path.join("second.docx");
+    let redline = temp.path.join("redline.docx");
+    let edited = temp.path.join("edited.docx");
+    let refused = temp.path.join("refused.docx");
+    let combined = temp.path.join("combined.docx");
+    let refused_output = temp.path.join("refused-output.docx");
+    write_document(&first, &["Reviewed once.", "Edited later."]);
+    write_document(&second, &["Reviewed twice.", "Edited later."]);
+    let compare = |original: &Path, edited: &Path, author: &str, output: &Path| {
+        cli(&[
+            "compare",
+            path_text(original),
+            path_text(edited),
+            "--author",
+            author,
+            "--timestamp",
+            COMPARE_TIMESTAMP,
+            "--output",
+            path_text(output),
+            "--json",
+        ])
+    };
+    let first_review = compare(&first, &second, "Alice", &redline);
+    assert_success(&first_review, "first compare");
+    let edit_redline = |from: &str, to: &str, output: &Path| {
+        let mut package = OpcPackage::open(&redline).unwrap();
+        let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap())
+            .unwrap()
+            .replacen(from, to, 1);
+        package.set_part("/word/document.xml", xml.into_bytes());
+        package.save(output).unwrap();
+    };
+    edit_redline(">Edited later.<", ">Edited again.<", &edited);
+    edit_redline(">Reviewed twice.<", ">Reviewed thrice.<", &refused);
+
+    let second_review = compare(&redline, &edited, "Bob", &combined);
+    assert_success(&second_review, "second compare");
+    let record: Value = serde_json::from_slice(&second_review.stdout).unwrap();
+    assert_eq!(record["revisions"], json!(2));
+    assert_eq!(record["main_story_revisions"], json!(2));
+    let authors = Document::open(&combined)
+        .unwrap()
+        .revisions()
+        .iter()
+        .map(|revision| revision.author().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(authors, ["Alice", "Alice", "Bob", "Bob"]);
+    let alice = |path: &Path| {
+        let package = OpcPackage::open(path).unwrap();
+        let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap())
+            .unwrap()
+            .to_owned();
+        let start = xml.find("<w:p>").unwrap();
+        let end = xml[start..].find("</w:p>").unwrap() + start + "</w:p>".len();
+        xml[start..end].to_owned()
+    };
+    assert!(alice(&redline).contains(r#"w:author="Alice""#));
+    assert_eq!(alice(&combined), alice(&redline));
+
+    let failed = compare(&redline, &refused, "Bob", &refused_output);
+    assert!(!failed.status.success());
+    let stderr = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        stderr.contains(
+            "comparison cannot replace body/paragraph[0] whole, because it holds an existing tracked revision"
+        ),
+        "{stderr}"
+    );
+    assert!(!refused_output.exists());
+}
+
 const COMPARE_TIMESTAMP: &str = "2026-09-29T12:00:00Z";
 
 #[test]

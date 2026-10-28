@@ -46,7 +46,7 @@ Signing publishes before reporting, so this error can leave a valid new output.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rdocx-cli | 111,071 compressed bytes, 516,134 member bytes, 8 members | 0.16.4 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rdocx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-28 |
+| Crates.io archive: rdocx-cli | 112,246 compressed bytes, 521,533 member bytes, 8 members | 0.16.4 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rdocx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-28 |
 
 ## Use it when
 
@@ -119,7 +119,11 @@ story of the original, where `KIND` is a Python `Story.kind` name: `body`,
 the `comment` story excludes only the comments part, so a pair whose comments
 differ needs `--ignore-comments`. An unknown granularity or story name is a
 usage error, a repeated story fails, and neither creates the output. The
-`--json` record states the options that ran.
+`--json` record states the options that ran. The original may already hold
+tracked changes, such as the redline of an earlier `compare`. A paragraph,
+table or content control that holds one is kept byte for byte when the edited
+file holds it unchanged, and any other change to it fails with its location
+and creates no output.
 
 Revision `list` reports every supported story and names the story of each
 revision. Revision `accept` and `reject` operate across every supported story

@@ -2862,12 +2862,17 @@ original for each. A message starts with a stable prefix,
 `formatting differs` for unsupported formatting and
 `content-control <name> differs` for a content control's metadata, where
 `<name>` is `tag`, `alias`, `lock`, `placeholder`, or `docPartGallery`.
-Comparison rejects existing modeled revisions and unsupported structural shell
-differences, a content control's type or data binding included, and it commits
-only after accepting and rejecting staged copies reproduce their respective
-package-wide modeled baselines. Those baselines read each paragraph as one
-sequence in document order: compared units, preserved raw children such as
-bookmarks, comment range markers, inline content controls, and hyperlink edges.
+Comparison rejects unsupported structural shell differences, a content
+control's type or data binding included. Inputs may hold existing modeled
+revisions. An owner that holds one in either input is kept byte for byte when
+both inputs hold it unchanged, and any other change to it is rejected with a
+message that names its story path and owner index. Comparison commits only
+after staged copies that accept and reject the revisions it wrote reproduce
+their respective package-wide modeled baselines, and only when the staged
+result still holds every existing revision of the original byte for byte.
+Those baselines read each paragraph as one sequence in document order:
+compared units, preserved raw children such as bookmarks, comment range
+markers, inline content controls, and hyperlink edges.
 A granular revision that splits a run therefore still reproduces a bookmark or
 comment range beside the edit, while a result that moves any of them relative
 to the text or to each other is refused. Ignored whitespace, fields, and comment

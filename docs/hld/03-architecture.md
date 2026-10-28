@@ -1419,8 +1419,19 @@ sidecars. A changed paragraph records its prior base properties in
 `w:rPr`, as Word's own Compare writes them. Unsupported formatting
 differences retain the original bytes and produce stable
 `ComparisonDiagnostic` values at the actual story path. Inputs
-with existing modeled revisions or differing story shells are rejected unless
-their story category is ignored. The root and owner start tags of a comment
+with differing story shells are rejected unless their story category is
+ignored. Inputs may hold existing modeled revisions, such as the redline of an
+earlier comparison. A story owner that holds one, a paragraph, table, or
+content control, or the story's own section properties, is kept with its
+original bytes when both inputs hold it unchanged. Any other change to it is
+refused with its story path and owner index: a change inside it, a deletion,
+insertion, or move of it, a revision that only one input holds there, and the
+paragraph-mark marker of a final paragraph change after it. Owners that hold
+no revision compare as before, and their new revisions take ids that no
+compared story of either input uses. A comment package revision replaces every comment part whole, so it is
+refused when a comment holds a revision. This is closer to Word's Combine
+than to its Compare, which treats the existing revisions as accepted.
+The root and owner start tags of a comment
 or note story compare as namespace-resolved trees, so a part written again
 with other declarations, attribute order, or empty-element forms keeps its
 shell. Edited comment additions, removals, replies, resolved state, and dates
@@ -1475,8 +1486,10 @@ moved-in paragraph therefore
 records the original properties of the paragraph before it, and a deleted or
 moved-out one the edited properties of that paragraph.
 Comparison patches only owned source spans, preserves every unowned byte,
-stages the complete package, proves that acceptance matches the edited policy
-projection and rejection matches the original, then commits once.
+stages the complete package, proves that accepting the revisions it wrote
+matches the edited policy projection and rejecting them matches the original,
+proves that every existing revision of the original remains byte for byte,
+then commits once.
 Alignment leaves paragraph properties out so that a paragraph whose
 properties changed still matches, but the accept and reject projection adds
 the modeled properties of every paragraph of each story, including those in

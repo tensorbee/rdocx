@@ -20,6 +20,7 @@ use rdocx::{
     CustomProperty, CustomPropertyValue, Document, FieldDateTime, FieldEvaluationContext,
     HdrFtrType, HeaderFooterKind, PictureOccurrence, RasterFormat, RasterOptions, RasterOutput,
     RevisionKind, RevisionStyle, RevisionView, RunRange, StoryId, StoryItemKind, StoryKind,
+    StoryRevision,
 };
 use rdocx_oxml::content_control::{CT_Sdt, SdtContent};
 use rdocx_oxml::document::{BodyContent, CT_Document};
@@ -1881,6 +1882,29 @@ fn comparison_options_json(options: &ComparisonOptions) -> Value {
     })
 }
 
+/// The items of `after` left once each key of `before` removes one item
+/// with an equal key.
+fn without_existing<T, K: Eq + std::hash::Hash>(
+    before: Vec<K>,
+    after: Vec<T>,
+    key: impl Fn(&T) -> K,
+) -> Vec<T> {
+    let mut existing = HashMap::<K, usize>::new();
+    for key in before {
+        *existing.entry(key).or_default() += 1;
+    }
+    after
+        .into_iter()
+        .filter(|item| match existing.get_mut(&key(item)) {
+            Some(count) if *count > 0 => {
+                *count -= 1;
+                false
+            }
+            _ => true,
+        })
+        .collect()
+}
+
 /// Create a tracked-changes document from an original and edited input.
 pub fn compare(
     original: &Path,
@@ -1893,9 +1917,39 @@ pub fn compare(
 ) -> Result<()> {
     let mut original_doc = Document::open(original)?;
     let edited_doc = Document::open(edited)?;
+    // The counts name the revisions this comparison created. The original
+    // may already hold revisions, which the result keeps as they are.
+    let main_keys = |document: &Document| {
+        document
+            .revisions()
+            .iter()
+            .map(|revision| {
+                (
+                    revision.id(),
+                    revision.author().to_owned(),
+                    revision.timestamp().map(str::to_owned),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let story_key = |revision: &StoryRevision| {
+        (
+            revision.story().part_name().to_owned(),
+            revision.id(),
+            revision.author().to_owned(),
+            revision.timestamp().map(str::to_owned),
+        )
+    };
+    let existing_main = main_keys(&original_doc);
+    let existing_stories = original_doc
+        .story_revisions()?
+        .iter()
+        .map(story_key)
+        .collect::<Vec<_>>();
     let diagnostics = original_doc.compare_with_options(&edited_doc, author, timestamp, options)?;
-    let main_story_revisions = original_doc.revisions().len();
-    let revisions = original_doc.story_revisions()?;
+    let main_story_revisions =
+        without_existing(existing_main, main_keys(&original_doc), Clone::clone).len();
+    let revisions = without_existing(existing_stories, original_doc.story_revisions()?, story_key);
     let mut stories = Vec::<(&StoryId, usize)>::new();
     for revision in &revisions {
         match stories

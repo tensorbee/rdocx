@@ -576,6 +576,9 @@ struct Metadata<'a> {
     timestamp: &'a str,
     options: &'a ComparisonOptions,
     ids: IdAllocator,
+    /// Whether an input holds a modeled revision, which the comparison
+    /// keeps only in owners that both inputs hold unchanged.
+    existing_revisions: bool,
 }
 
 struct IdAllocator {
@@ -760,6 +763,10 @@ impl Document {
             !comments_ignored && !comment_snapshots_match(&original_comments, &edited_comments)?;
         let mut original_stories = story_parts_with_options(&original, options)?;
         let mut edited_stories = story_parts_with_options(&edited, options)?;
+        // Existing revisions are kept where both inputs hold them unchanged,
+        // and every other change near them is refused at its owner.
+        let existing_revisions = contains_modeled_revisions(&original, &original_stories, options)?
+            || contains_modeled_revisions(&edited, &edited_stories, options)?;
         if comments_changed
             && let Some((left, right)) = original_stories
                 .iter()
@@ -789,34 +796,67 @@ impl Document {
                 )));
             }
         }
-        let compatible_comment_story = original_stories
+        let comment_stories = original_stories
             .iter()
             .find(|story| story.kind == ComparisonStoryKind::Comment)
             .zip(
                 edited_stories
                     .iter()
                     .find(|story| story.kind == ComparisonStoryKind::Comment),
+            );
+        let compare_comment_story = |left: &StoryPart, right: &StoryPart| {
+            compare_story_part(
+                story_xml(&original, left).unwrap_or_default(),
+                story_xml(&edited, right).unwrap_or_default(),
+                left,
+                &mut Metadata {
+                    author,
+                    timestamp,
+                    options,
+                    ids: IdAllocator::new(HashSet::new()),
+                    existing_revisions,
+                },
+                &mut Vec::new(),
             )
-            .is_some_and(|(left, right)| {
-                left == right
-                    && compare_story_part(
-                        story_xml(&original, left).unwrap_or_default(),
-                        story_xml(&edited, right).unwrap_or_default(),
-                        left,
-                        &mut Metadata {
-                            author,
-                            timestamp,
-                            options,
-                            ids: IdAllocator::new(HashSet::new()),
-                        },
-                        &mut Vec::new(),
-                    )
-                    .is_ok()
-            });
+        };
+        let compatible_comment_story = comment_stories.is_some_and(|(left, right)| {
+            left == right && compare_comment_story(left, right).is_ok()
+        });
         let snapshot_comments = comments_changed
             && (!compatible_comment_story
                 || !extended_comment_snapshots_match(&original_comments, &edited_comments)
                 || !comment_package_links_match(&original_comments, &edited_comments));
+        if snapshot_comments && existing_revisions {
+            // The comment package revision replaces every comment part whole,
+            // so it would rewrite the revisions a comment holds.
+            for (document, stories) in [(&original, &original_stories), (&edited, &edited_stories)]
+            {
+                for story in stories
+                    .iter()
+                    .filter(|story| story.kind == ComparisonStoryKind::Comment)
+                {
+                    if modeled_revision_count_with_options(story_xml(document, story)?, options)?
+                        > 0
+                    {
+                        let reason = match comment_stories {
+                            Some((left, right)) if left == right => compare_comment_story(
+                                left, right,
+                            )
+                            .err()
+                            .map_or_else(
+                                || "comments were added, removed, answered or resolved".to_owned(),
+                                |error| error.to_string(),
+                            ),
+                            _ => "the comment parts differ".to_owned(),
+                        };
+                        return Err(Error::Other(format!(
+                            "comparison cannot replace the comments of {} whole, because a comment holds an existing tracked revision: {reason}",
+                            story.part_name
+                        )));
+                    }
+                }
+            }
+        }
         if snapshot_comments {
             original_stories.retain(|story| story.kind != ComparisonStoryKind::Comment);
             edited_stories.retain(|story| story.kind != ComparisonStoryKind::Comment);
@@ -832,14 +872,6 @@ impl Document {
             &original_stories,
             &edited_stories,
         )?;
-        if contains_modeled_revisions(&original, &original_stories, options)?
-            || contains_modeled_revisions(&edited, &edited_stories, options)?
-        {
-            return Err(Error::Other(
-                "document comparison requires inputs without existing modeled revisions".to_owned(),
-            ));
-        }
-
         reject_cross_story_moves(&original, &edited, &original_stories, options)?;
 
         let original_xml = original
@@ -881,11 +913,13 @@ impl Document {
             )?);
             used_ids.extend(word_ids_with_options(story_xml(&edited, story)?, options)?);
         }
+        let input_ids = used_ids.clone();
         let mut metadata = Metadata {
             author,
             timestamp,
             options,
             ids: IdAllocator::new(used_ids),
+            existing_revisions,
         };
         let mut diagnostics = Vec::new();
         let tracked_body = if story_ignored(options, ComparisonStoryKind::Main) {
@@ -923,11 +957,20 @@ impl Document {
                     "comparison could not correlate main-story owners".to_owned(),
                 ));
             }
+            let held_original = HeldRevisions::of(
+                original_body,
+                &original_spans,
+                &original_bindings,
+                &metadata,
+            )?;
+            let held_edited =
+                HeldRevisions::of(edited_body, &edited_spans, &edited_bindings, &metadata)?;
             compare_body(
                 &original_document,
                 &edited_document,
                 "body",
                 Some((original_body, &original_spans)),
+                [&held_original, &held_edited],
                 &mut metadata,
                 &mut diagnostics,
             )?
@@ -1058,9 +1101,27 @@ impl Document {
             }
             Ok(())
         })?;
+        // The postconditions resolve only the revisions this comparison
+        // wrote, so a kept revision stays in both resolved copies and must
+        // match the input that holds it.
+        let new_ids = metadata
+            .ids
+            .used
+            .difference(&input_ids)
+            .copied()
+            .collect::<HashSet<_>>();
+        if existing_revisions {
+            refuse_changed_existing_revisions(
+                &original,
+                &candidate,
+                &original_stories,
+                options,
+                &new_ids,
+            )?;
+        }
         let accepted_body = resolved_package(
             &candidate,
-            Document::accept_all,
+            |document| document.accept_revision_ids(&new_ids),
             &original_stories,
             options,
             &text_box_markers,
@@ -1081,7 +1142,7 @@ impl Document {
         }
         if snapshot_comments {
             let mut accepted = candidate.clone_for_staging();
-            accepted.accept_all()?;
+            accepted.accept_revision_ids(&new_ids)?;
             if !comment_snapshots_match(&comment_snapshot(&accepted)?, &edited_comments)? {
                 return Err(Error::Other(
                     "comparison acceptance does not reproduce edited comments".to_owned(),
@@ -1090,7 +1151,7 @@ impl Document {
         }
         let rejected_package = resolved_package(
             &candidate,
-            Document::reject_all,
+            |document| document.reject_revision_ids(&new_ids),
             &original_stories,
             options,
             &text_box_markers,
@@ -1110,7 +1171,7 @@ impl Document {
         }
         if snapshot_comments {
             let mut rejected = candidate.clone_for_staging();
-            rejected.reject_all()?;
+            rejected.reject_revision_ids(&new_ids)?;
             if !comment_snapshots_match(&comment_snapshot(&rejected)?, &original_comments)? {
                 return Err(Error::Other(
                     "comparison rejection does not reproduce original comments".to_owned(),
@@ -2221,11 +2282,14 @@ fn compare_story_inner_impl(
             "comparison could not correlate related-story owners at {location}"
         )));
     }
+    let held_original = HeldRevisions::of(original, &original_spans, original_bindings, metadata)?;
+    let held_edited = HeldRevisions::of(edited, &edited_spans, edited_bindings, metadata)?;
     compare_body(
         &original_document,
         &edited_document,
         location,
         Some((original, &original_spans)),
+        [&held_original, &held_edited],
         metadata,
         diagnostics,
     )
@@ -2629,6 +2693,59 @@ fn element_inner_range_any_prefix(xml: &str, local: &str) -> Result<Range<usize>
 }
 
 fn story_document(inner: &str, namespace_bindings: &[(String, String)]) -> Result<CT_Document> {
+    let (xml, _) = story_wrapper(inner, namespace_bindings)?;
+    let xml = close_drawing_namespaces(xml, false)?;
+    CT_Document::from_xml(&xml).map_err(Into::into)
+}
+
+/// The owners of one side of a story that hold an existing modeled revision.
+#[derive(Default)]
+struct HeldRevisions {
+    /// One flag per owner, in the order of the story's content spans.
+    owners: Vec<bool>,
+    /// Whether the story's own section properties hold one.
+    section: bool,
+}
+
+impl HeldRevisions {
+    /// Find the owners of story content `inner`, split by `spans`, that hold
+    /// a modeled revision. A revision outside every owner is in the section
+    /// properties, the only other modeled child of a story. All flags are
+    /// clear when no input holds an existing revision.
+    fn of(
+        inner: &str,
+        spans: &[Range<usize>],
+        bindings: &[(String, String)],
+        metadata: &Metadata<'_>,
+    ) -> Result<Self> {
+        if !metadata.existing_revisions {
+            return Ok(Self::default());
+        }
+        let (xml, offset) = story_wrapper(inner, bindings)?;
+        let mut held = Self {
+            owners: vec![false; spans.len()],
+            section: false,
+        };
+        for (range, _) in crate::revision::modeled_revision_spans(&xml)? {
+            // The spans are in document order and do not overlap.
+            let start = range.start.saturating_sub(offset);
+            let index = spans.partition_point(|span| span.end <= start);
+            match spans.get(index).filter(|span| span.contains(&start)) {
+                Some(_) => held.owners[index] = true,
+                None => held.section = true,
+            }
+        }
+        Ok(held)
+    }
+
+    fn holds(&self, index: Option<usize>) -> bool {
+        index.is_some_and(|index| self.owners.get(index).copied().unwrap_or(false))
+    }
+}
+
+/// Wrap story content in a Word document and body that declare
+/// `namespace_bindings`, and return the wrapper with the offset of `inner`.
+fn story_wrapper(inner: &str, namespace_bindings: &[(String, String)]) -> Result<(Vec<u8>, usize)> {
     let mut writer = Writer::new(Vec::with_capacity(inner.len() + 256));
     let mut suffix = 0usize;
     let wrapper_prefix = loop {
@@ -2656,11 +2773,11 @@ fn story_document(inner: &str, namespace_bindings: &[(String, String)]) -> Resul
     }
     writer.write_event(Event::Start(document))?;
     writer.write_event(Event::Start(BytesStart::new(body_name.as_str())))?;
+    let offset = writer.get_ref().len();
     writer.get_mut().extend_from_slice(inner.as_bytes());
     writer.write_event(Event::End(BytesEnd::new(body_name.as_str())))?;
     writer.write_event(Event::End(BytesEnd::new(document_name.as_str())))?;
-    let xml = close_drawing_namespaces(writer.into_inner(), false)?;
-    CT_Document::from_xml(&xml).map_err(Into::into)
+    Ok((writer.into_inner(), offset))
 }
 
 fn comparison_input(document: &Document) -> Result<Document> {
@@ -3283,9 +3400,52 @@ fn comparison_text_box_markers(
     Ok(markers)
 }
 
+/// Refuse a redline that does not keep each existing revision of the
+/// original byte for byte, with its author, date and id, in every compared
+/// story. The revisions this comparison wrote carry `new_ids`, which no id of
+/// a compared story uses. Ignored stories and text boxes are not seeded and
+/// keep their original bytes, so they are left out here.
+fn refuse_changed_existing_revisions(
+    original: &Document,
+    candidate: &Document,
+    stories: &[StoryPart],
+    options: &ComparisonOptions,
+    new_ids: &HashSet<i32>,
+) -> Result<()> {
+    let mut parts = Vec::new();
+    if !story_ignored(options, ComparisonStoryKind::Main) {
+        parts.push(original.doc_part_name.clone());
+    }
+    parts.extend(stories.iter().map(|story| story.part_name.clone()));
+    for part in parts {
+        let revisions = |document: &Document| -> Result<Vec<Vec<u8>>> {
+            let xml = document
+                .package
+                .get_part(&part)
+                .ok_or_else(|| Error::Other(format!("missing comparison story part {part}")))?;
+            let xml = if story_ignored(options, ComparisonStoryKind::TextBox) {
+                without_text_box_subtrees(xml)?
+            } else {
+                xml.to_vec()
+            };
+            Ok(crate::revision::modeled_revision_spans(&xml)?
+                .into_iter()
+                .filter(|(_, id)| !new_ids.contains(id))
+                .map(|(range, _)| xml[range].to_vec())
+                .collect())
+        };
+        if revisions(original)? != revisions(candidate)? {
+            return Err(Error::Other(format!(
+                "comparison would change an existing tracked revision in {part}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn resolved_package(
     candidate: &Document,
-    resolve: fn(&mut Document) -> Result<usize>,
+    resolve: impl FnOnce(&mut Document) -> Result<usize>,
     stories: &[StoryPart],
     options: &ComparisonOptions,
     text_box_markers: &TextBoxMarkers,
@@ -3457,14 +3617,22 @@ fn normalize_relationship_id(id: &mut String, document: &Document, owner: &str) 
     Ok(())
 }
 
+/// Compare the owners of one story and return the tracked story content.
+///
+/// `held` names the owners of each side that hold an existing modeled
+/// revision. Such an owner is kept only when both sides hold it unchanged,
+/// and then its original bytes are emitted. Any other change that would
+/// revise, delete, insert or move it, or mark its paragraph mark, is refused.
 fn compare_body(
     original: &CT_Document,
     edited: &CT_Document,
     location: &str,
     original_source: Option<(&str, &[Range<usize>])>,
+    held: [&HeldRevisions; 2],
     metadata: &mut Metadata<'_>,
     diagnostics: &mut Vec<ComparisonDiagnostic>,
 ) -> Result<String> {
+    let [held_original, held_edited] = held;
     let original_signatures = original
         .body
         .content
@@ -3538,6 +3706,20 @@ fn compare_body(
         })
         .map(|(position, _)| position)
         .last();
+    // A final paragraph change marks the paragraph mark of an owner already
+    // emitted, which must not be one that holds an existing revision.
+    let refuse_held_mark = |position: Option<usize>| -> Result<()> {
+        let Some((left, right)) = position.map(|position| aligned[position]) else {
+            return Ok(());
+        };
+        if held_original.holds(left) || held_edited.holds(right) {
+            return Err(Error::Other(format!(
+                "comparison cannot mark the paragraph mark of {location}/paragraph[{}] for the final paragraph change after it, because that paragraph holds an existing tracked revision",
+                left.or(right).unwrap_or_default()
+            )));
+        }
+        Ok(())
+    };
     let mut output: Vec<(EmittedOwner, String)> = Vec::new();
     let mut trailing_merged = None;
     for (position, (original_index, edited_index)) in aligned.iter().copied().enumerate() {
@@ -3573,6 +3755,25 @@ fn compare_body(
                         body_content_xml(original_content)?
                     }
                 } else {
+                    let held_reason = match (
+                        held_original.holds(Some(left)),
+                        held_edited.holds(Some(right)),
+                    ) {
+                        (true, true) => Some("the edited document changes it"),
+                        (true, false) => Some(
+                            "the edited document does not hold the revision the original holds there",
+                        ),
+                        (false, true) => Some(
+                            "the edited document holds a tracked revision there that the original does not",
+                        ),
+                        (false, false) => None,
+                    };
+                    if let Some(reason) = held_reason {
+                        return Err(Error::Other(format!(
+                            "comparison cannot change {}, which holds an existing tracked revision: {reason}",
+                            body_location(location, original_content, left)
+                        )));
+                    }
                     let content_source =
                         original_source.and_then(|(source, spans)| source.get(spans[left].clone()));
                     compare_body_content(
@@ -3591,10 +3792,27 @@ fn compare_body(
             }
             (Some(left), None) => {
                 let content = &original.body.content[left];
+                if held_original.holds(Some(left)) {
+                    let place = body_location(location, content, left);
+                    return Err(Error::Other(if moves.original[left].is_some() {
+                        format!(
+                            "comparison cannot move {place}, which holds an existing tracked revision"
+                        )
+                    } else if carried.original.contains(&left) {
+                        format!(
+                            "comparison cannot replace {place} whole, because it holds an existing tracked revision"
+                        )
+                    } else {
+                        format!(
+                            "comparison cannot delete {place}, which holds an existing tracked revision"
+                        )
+                    }));
+                }
                 if let Some(id) = moves.original[left] {
                     if let BodyContent::Paragraph(paragraph) = content
                         && !next_takes_mark
                     {
+                        refuse_held_mark(output.len().checked_sub(1))?;
                         let merged =
                             mark_previous_paragraph_with_id(&mut output, "moveFrom", id, metadata)?;
                         output.push(final_paragraph(
@@ -3614,6 +3832,7 @@ fn compare_body(
                     && trailing_paragraph_delete_start.is_some_and(|start| position >= start)
                 {
                     if trailing_paragraph_delete_start == Some(position) {
+                        refuse_held_mark(previous_mark_position(&output, "del"))?;
                         trailing_merged = mark_previous_paragraph(&mut output, "del", metadata)?;
                     }
                     if next_takes_mark {
@@ -3633,6 +3852,7 @@ fn compare_body(
                 } else if let BodyContent::Paragraph(paragraph) = content
                     && !next_takes_mark
                 {
+                    refuse_held_mark(previous_mark_position(&output, "del"))?;
                     let merged = mark_previous_paragraph(&mut output, "del", metadata)?;
                     output.push(final_paragraph(paragraph, "del", None, merged, metadata)?);
                 } else {
@@ -3644,10 +3864,22 @@ fn compare_body(
             }
             (None, Some(right)) => {
                 let content = &edited.body.content[right];
+                if held_edited.holds(Some(right)) {
+                    let action = if moves.edited[right].is_some() {
+                        "move"
+                    } else {
+                        "insert"
+                    };
+                    return Err(Error::Other(format!(
+                        "comparison cannot {action} edited {}, which holds a tracked revision that the original does not hold there",
+                        body_location(location, content, right)
+                    )));
+                }
                 if let Some(id) = moves.edited[right] {
                     if let BodyContent::Paragraph(paragraph) = content
                         && !next_takes_mark
                     {
+                        refuse_held_mark(output.len().checked_sub(1))?;
                         let merged =
                             mark_previous_paragraph_with_id(&mut output, "moveTo", id, metadata)?;
                         output.push(final_paragraph(
@@ -3667,6 +3899,7 @@ fn compare_body(
                     && trailing_paragraph_insert_start.is_some_and(|start| position >= start)
                 {
                     if trailing_paragraph_insert_start == Some(position) {
+                        refuse_held_mark(previous_mark_position(&output, "ins"))?;
                         trailing_merged = mark_previous_paragraph(&mut output, "ins", metadata)?;
                     }
                     if next_takes_mark {
@@ -3686,6 +3919,7 @@ fn compare_body(
                 } else if let BodyContent::Paragraph(paragraph) = content
                     && !next_takes_mark
                 {
+                    refuse_held_mark(previous_mark_position(&output, "ins"))?;
                     let merged = mark_previous_paragraph(&mut output, "ins", metadata)?;
                     output.push(final_paragraph(paragraph, "ins", None, merged, metadata)?);
                 } else {
@@ -3708,6 +3942,13 @@ fn compare_body(
     } else {
         output.into_iter().map(|(_, xml)| xml).collect::<String>()
     };
+    if (held_original.section || held_edited.section)
+        && original.body.sect_pr != edited.body.sect_pr
+    {
+        return Err(Error::Other(format!(
+            "comparison cannot change the section properties of {location}, which hold an existing tracked revision"
+        )));
+    }
     let section_xml = section_properties_xml(
         original.body.sect_pr.as_ref(),
         edited.body.sect_pr.as_ref(),
@@ -3972,6 +4213,16 @@ fn next_kept_owner(
         })
 }
 
+/// The position in `output` of the owner whose paragraph mark
+/// [`mark_previous_paragraph`] marks for a final `kind` change.
+fn previous_mark_position(output: &[(EmittedOwner<'_>, String)], kind: &str) -> Option<usize> {
+    output.iter().rposition(|(owner, _)| match owner {
+        EmittedOwner::MarkedTable(marked) => *marked != kind,
+        EmittedOwner::Whitespace => false,
+        EmittedOwner::Paragraph { .. } | EmittedOwner::Other => true,
+    })
+}
+
 /// Mark the paragraph before a final inserted or deleted paragraph, and
 /// return its properties on the side that removes that mark, which
 /// [`final_paragraph`] gives the paragraph the two merge into.
@@ -3981,11 +4232,7 @@ fn mark_previous_paragraph<'a>(
     metadata: &mut Metadata<'_>,
 ) -> Result<Option<&'a CT_PPr>> {
     let Some((EmittedOwner::Paragraph { accepted, rejected }, paragraph)) =
-        output.iter_mut().rev().find(|(owner, _)| match owner {
-            EmittedOwner::MarkedTable(marked) => *marked != kind,
-            EmittedOwner::Whitespace => false,
-            EmittedOwner::Paragraph { .. } | EmittedOwner::Other => true,
-        })
+        previous_mark_position(output, kind).map(|position| &mut output[position])
     else {
         return Err(Error::Other(
             "comparison needs an adjacent paragraph for a final paragraph change".to_owned(),

@@ -2100,7 +2100,10 @@ def test_priority_word_operations_return_typed_snapshots_and_remain_atomic():
     reopened_redline = rdocx.Document.from_bytes(original.to_bytes())
     assert b"before" in _document_xml(reopened_redline)
     assert b"after" in _document_xml(reopened_redline)
-    with pytest.raises(rdocx.RdocxError, match="existing modeled revisions"):
+    with pytest.raises(
+        rdocx.RdocxError,
+        match=r"cannot replace body/paragraph\[0\] whole, because it holds an existing tracked revision",
+    ):
         reopened_redline.compare(
             edited, author="Ada", timestamp="2026-09-14T09:01:00Z"
         )
@@ -2375,6 +2378,95 @@ def test_compare_rejects_unknown_options_before_mutation():
     with pytest.raises(TypeError):
         original.compare(edited, "Ada", _COMPARE_TIMESTAMP, "word")
     assert live.text == "before"
+
+
+def test_issue425_compare_keeps_the_revisions_of_an_earlier_redline():
+    import rdocx
+
+    first = rdocx.Document()
+    first.add_paragraph("The first sentence stays. The second sentence changes once.")
+    first.add_paragraph("Another paragraph changes later.")
+    second = rdocx.Document.from_bytes(first.to_bytes())
+    second.paragraphs[0].replace_text("changes once", "changed once", expect=1)
+    redline = rdocx.Document.from_bytes(first.to_bytes())
+    redline.compare(second, "Reviewer A", "2026-10-27T12:00:00Z", granularity="word")
+    redline_bytes = redline.to_bytes()
+    assert [revision.author for revision in redline.revisions] == ["Reviewer A"] * 2
+
+    edited = rdocx.Document.from_bytes(redline_bytes)
+    edited.paragraphs[1].replace_text("changes later", "changed later", expect=1)
+    combined = rdocx.Document.from_bytes(redline_bytes)
+    assert (
+        combined.compare(
+            edited, "Reviewer B", "2026-10-27T13:00:00Z", granularity="word"
+        )
+        == ()
+    )
+    revisions = combined.revisions
+    assert [revision.author for revision in revisions] == ["Reviewer A"] * 2 + [
+        "Reviewer B"
+    ] * 2
+    assert len({revision.id for revision in revisions}) == 4
+    kept_paragraph = re.search(rb"<w:p\b.*?</w:p>", _document_xml(redline)).group(0)
+    assert b'w:author="Reviewer A"' in kept_paragraph
+    assert kept_paragraph in _document_xml(combined)
+    accepted = rdocx.Document.from_bytes(combined.to_bytes())
+    accepted.accept_revisions_by_author("Reviewer B")
+    assert [paragraph.text for paragraph in accepted.paragraphs] == [
+        paragraph.text for paragraph in edited.paragraphs
+    ]
+    rejected = rdocx.Document.from_bytes(combined.to_bytes())
+    rejected.reject_revisions_by_author("Reviewer B")
+    assert [paragraph.text for paragraph in rejected.paragraphs] == [
+        paragraph.text for paragraph in redline.paragraphs
+    ]
+
+    # An edit inside the paragraph that holds Reviewer A's revision refuses
+    # and leaves the document unchanged.
+    inside = rdocx.Document.from_bytes(redline_bytes)
+    inside.paragraphs[0].replace_text("first sentence", "opening sentence", expect=1)
+    refused = rdocx.Document.from_bytes(redline_bytes)
+    before = refused.to_bytes()
+    with pytest.raises(
+        rdocx.RdocxError,
+        match=r"^comparison cannot change body/paragraph\[0\], which holds an existing tracked revision: the edited document changes it$",
+    ):
+        refused.compare(inside, "Reviewer B", "2026-10-27T13:00:00Z", granularity="word")
+    assert refused.to_bytes() == before
+
+
+def test_issue425_compare_keeps_revisions_beside_a_new_comment():
+    import rdocx
+
+    first = rdocx.Document()
+    first.add_paragraph("The second sentence changes once.")
+    first.add_paragraph("Another paragraph.")
+    second = rdocx.Document.from_bytes(first.to_bytes())
+    second.paragraphs[0].replace_text("changes", "changed", expect=1)
+    redline = rdocx.Document.from_bytes(first.to_bytes())
+    redline.compare(second, "Reviewer A", "2026-10-27T12:00:00Z", granularity="word")
+    redline_bytes = redline.to_bytes()
+
+    edited = rdocx.Document.from_bytes(redline_bytes)
+    edited.add_comment(
+        rdocx.RunRange(
+            start=rdocx.RunPosition(body_index=1, run_index=0),
+            end=rdocx.RunPosition(body_index=1, run_index=1),
+        ),
+        author="Reviewer B",
+        text="Check this",
+    )
+    combined = rdocx.Document.from_bytes(redline_bytes)
+    assert combined.compare(edited, "Reviewer B", "2026-10-27T13:00:00Z") == ()
+    assert [comment.text for comment in combined.comments] == ["Check this"]
+    kept_paragraph = re.search(rb"<w:p\b.*?</w:p>", _document_xml(redline)).group(0)
+    assert kept_paragraph in _document_xml(combined)
+    for resolve, comments in [("accept", ["Check this"]), ("reject", [])]:
+        resolved = rdocx.Document.from_bytes(combined.to_bytes())
+        getattr(resolved, f"{resolve}_revisions_by_author")("Reviewer B")
+        assert [comment.text for comment in resolved.comments] == comments
+        assert [revision.author for revision in resolved.revisions] == ["Reviewer A"] * 2
+        assert kept_paragraph in _document_xml(resolved)
 
 
 def test_issue_161_compare_carries_edited_side_comment_thread():

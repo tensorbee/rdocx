@@ -408406,3 +408406,335 @@ fn body_range_across_table_includes_cell_text() {
     }
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+const ISSUE425_DEL: &str = r#"<w:del w:id="7" w:author="Reviewer A" w:date="2026-10-27T12:00:00Z"><w:r><w:delText>changes</w:delText></w:r></w:del>"#;
+const ISSUE425_INS: &str = r#"<w:ins w:id="8" w:author="Reviewer A" w:date="2026-10-27T12:00:00Z"><w:r><w:t>changed</w:t></w:r></w:ins>"#;
+const ISSUE425_HEADER_INS: &str = r#"<w:ins w:id="9" w:author="Reviewer A" w:date="2026-10-27T12:00:00Z"><w:r><w:t xml:space="preserve">reviewed </w:t></w:r></w:ins>"#;
+const ISSUE425_NOTE_DEL: &str = r#"<w:del w:id="10" w:author="Reviewer A" w:date="2026-10-27T12:00:00Z"><w:r><w:delText xml:space="preserve"> old</w:delText></w:r></w:del>"#;
+const ISSUE425_SECTION_CHANGE: &str = r#"<w:sectPrChange w:id="11" w:author="Reviewer A" w:date="2026-10-27T12:00:00Z"><w:sectPr><w:pgSz w:w="11906" w:h="16838"/></w:sectPr></w:sectPrChange>"#;
+
+/// The redline of a first reviewer: tracked changes in a body paragraph, a
+/// header paragraph, a footnote paragraph and the section properties, with
+/// one plain paragraph in each of those stories that the caller fills.
+fn issue425_redline(body: &str, header: &str, note: &str, page_width: u32) -> Vec<u8> {
+    let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let mut seed = Document::new();
+    let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(
+        seed.to_bytes().expect("serialize issue 425 seed"),
+    ))
+    .expect("open issue 425 seed");
+    let relationships = package.get_or_create_part_rels("/word/document.xml");
+    let header_id = relationships.add(oxml_opc::relationship::rel_types::HEADER, "header1.xml");
+    relationships.add(
+        oxml_opc::relationship::rel_types::FOOTNOTES,
+        "footnotes.xml",
+    );
+    package.set_part(
+        "/word/header1.xml",
+        format!(
+            r#"<w:hdr xmlns:w="{word}"><w:p><w:r><w:t xml:space="preserve">A </w:t></w:r>{ISSUE425_HEADER_INS}<w:r><w:t>header</w:t></w:r></w:p><w:p><w:r><w:t>{header}</w:t></w:r></w:p></w:hdr>"#
+        )
+        .into_bytes(),
+    );
+    package.set_part(
+        "/word/footnotes.xml",
+        format!(r#"<w:footnotes xmlns:w="{word}"><w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:separator/></w:r></w:p></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote><w:footnote w:id="1"><w:p><w:r><w:footnoteRef/></w:r>{ISSUE425_NOTE_DEL}<w:r><w:t xml:space="preserve"> note</w:t></w:r></w:p><w:p><w:r><w:t>{note}</w:t></w:r></w:p></w:footnote></w:footnotes>"#).into_bytes(),
+    );
+    for (part, content_type) in [
+        (
+            "/word/header1.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+        ),
+        (
+            "/word/footnotes.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml",
+        ),
+    ] {
+        package.content_types.add_override(part, content_type);
+    }
+    package.set_part(
+        "/word/document.xml",
+        format!(r#"<?xml version="1.0"?><w:document xmlns:w="{word}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t xml:space="preserve">The second sentence </w:t></w:r>{ISSUE425_DEL}{ISSUE425_INS}<w:r><w:t xml:space="preserve"> once.</w:t></w:r></w:p><w:p><w:r><w:t>{body}</w:t></w:r></w:p><w:p><w:r><w:t>Footnote here</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p><w:sectPr><w:headerReference w:type="default" r:id="{header_id}"/><w:pgSz w:w="{page_width}" w:h="15840"/>{ISSUE425_SECTION_CHANGE}</w:sectPr></w:body></w:document>"#).into_bytes(),
+    );
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package
+        .write_to(&mut bytes)
+        .expect("write issue 425 package");
+    bytes.into_inner()
+}
+
+/// The package `bytes` with `from` replaced by `to` in part `part`.
+fn issue425_with_part_edit(bytes: &[u8], part: &str, from: &str, to: &str) -> Vec<u8> {
+    let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+    let source = String::from_utf8(package.get_part(part).unwrap().to_vec()).unwrap();
+    assert_eq!(source.matches(from).count(), 1, "{from} in {source}");
+    package.set_part(part, source.replace(from, to).into_bytes());
+    let mut output = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut output).unwrap();
+    output.into_inner()
+}
+
+fn issue425_word_options() -> rdocx::ComparisonOptions {
+    rdocx::ComparisonOptions {
+        granularity: rdocx::ComparisonGranularity::Word,
+        ..rdocx::ComparisonOptions::default()
+    }
+}
+
+#[test]
+fn issue425_comparison_keeps_existing_revisions_and_tracks_changes_elsewhere() {
+    let original = issue425_redline(
+        "Another paragraph changes later.",
+        "Header one",
+        "Note one",
+        12240,
+    );
+    let edited = issue425_redline(
+        "Another paragraph changed later.",
+        "Header two",
+        "Note two",
+        12240,
+    );
+    let mut compared = Document::from_bytes(&original).unwrap();
+    let diagnostics = compared
+        .compare_with_options(
+            &Document::from_bytes(&edited).unwrap(),
+            "Reviewer B",
+            "2026-10-27T13:00:00Z",
+            &issue425_word_options(),
+        )
+        .unwrap();
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+    // Each existing revision is in the result byte for byte.
+    let body = comparison_part_xml(&mut compared, "/word/document.xml");
+    for kept in [ISSUE425_DEL, ISSUE425_INS, ISSUE425_SECTION_CHANGE] {
+        assert!(body.contains(kept), "{kept} in {body}");
+    }
+    let header = comparison_part_xml(&mut compared, "/word/header1.xml");
+    assert!(header.contains(ISSUE425_HEADER_INS), "{header}");
+    let notes = comparison_part_xml(&mut compared, "/word/footnotes.xml");
+    assert!(notes.contains(ISSUE425_NOTE_DEL), "{notes}");
+
+    // The new revisions are Reviewer B's, one word change in each story, and
+    // no id is shared.
+    let revisions = compared.story_revisions().unwrap();
+    let mut kept = revisions
+        .iter()
+        .filter(|revision| revision.author() == "Reviewer A")
+        .map(|revision| revision.id())
+        .collect::<Vec<_>>();
+    kept.sort_unstable();
+    assert_eq!(kept, [7, 8, 9, 10, 11]);
+    let new = revisions
+        .iter()
+        .filter(|revision| revision.author() == "Reviewer B")
+        .collect::<Vec<_>>();
+    assert_eq!(new.len(), 6, "{revisions:?}");
+    for kind in [StoryKind::Body, StoryKind::Header, StoryKind::Footnote] {
+        assert_eq!(
+            new.iter()
+                .filter(|revision| revision.story().kind() == kind)
+                .map(|revision| revision.kind())
+                .collect::<Vec<_>>(),
+            [RevisionKind::Deletion, RevisionKind::Insertion],
+            "{kind:?}"
+        );
+    }
+    let ids = revisions
+        .iter()
+        .map(|revision| revision.id())
+        .collect::<HashSet<_>>();
+    assert_eq!(ids.len(), revisions.len());
+
+    // Resolving Reviewer B's revisions gives each input back, with Reviewer
+    // A's revisions still in place.
+    let tracked = compared.to_bytes().unwrap();
+    for (accept, expected) in [(true, &edited), (false, &original)] {
+        let mut resolved = Document::from_bytes(&tracked).unwrap();
+        if accept {
+            resolved.accept_revisions_by_author("Reviewer B").unwrap();
+        } else {
+            resolved.reject_revisions_by_author("Reviewer B").unwrap();
+        }
+        assert!(
+            resolved
+                .compare_with_options(
+                    &Document::from_bytes(expected).unwrap(),
+                    "postcondition",
+                    "2026-10-27T14:00:00Z",
+                    &issue425_word_options(),
+                )
+                .unwrap()
+                .is_empty()
+        );
+        let left = resolved.story_revisions().unwrap();
+        assert_eq!(left.len(), 5);
+        assert!(
+            left.iter()
+                .all(|revision| revision.author() == "Reviewer A")
+        );
+    }
+}
+
+#[test]
+fn issue425_comparison_refuses_changes_that_touch_an_existing_revision() {
+    let refused = |original: &[u8], edited: &[u8]| -> String {
+        let mut compared = Document::from_bytes(original).unwrap();
+        let before = compared.to_bytes().unwrap();
+        let error = compared
+            .compare_with_options(
+                &Document::from_bytes(edited).unwrap(),
+                "Reviewer B",
+                "2026-10-27T13:00:00Z",
+                &issue425_word_options(),
+            )
+            .unwrap_err()
+            .to_string();
+        assert_eq!(compared.to_bytes().unwrap(), before, "{error}");
+        error
+    };
+    let original = issue425_redline("Stays.", "Header", "Note", 12240);
+    let held_paragraph = format!(
+        r#"<w:p><w:r><w:t xml:space="preserve">The second sentence </w:t></w:r>{ISSUE425_DEL}{ISSUE425_INS}<w:r><w:t xml:space="preserve"> once.</w:t></w:r></w:p>"#
+    );
+    let with_first_paragraph = |paragraph: &str| {
+        issue425_with_part_edit(&original, "/word/document.xml", &held_paragraph, paragraph)
+    };
+
+    // A change inside the paragraph that holds the revision.
+    let error = refused(
+        &original,
+        &with_first_paragraph(&held_paragraph.replace("The second", "The 2nd")),
+    );
+    assert_eq!(
+        error,
+        "comparison cannot change body/paragraph[0], which holds an existing tracked revision: the edited document changes it"
+    );
+
+    // The edited document accepted the revision.
+    let error = refused(
+        &original,
+        &with_first_paragraph(
+            r#"<w:p><w:r><w:t>The second sentence changed once.</w:t></w:r></w:p>"#,
+        ),
+    );
+    assert_eq!(
+        error,
+        "comparison cannot change body/paragraph[0], which holds an existing tracked revision: the edited document does not hold the revision the original holds there"
+    );
+
+    // Only the edited document holds a revision in that paragraph.
+    let error = refused(
+        &with_first_paragraph(
+            r#"<w:p><w:r><w:t>The second sentence changes once.</w:t></w:r></w:p>"#,
+        ),
+        &original,
+    );
+    assert_eq!(
+        error,
+        "comparison cannot change body/paragraph[0], which holds an existing tracked revision: the edited document holds a tracked revision there that the original does not"
+    );
+
+    // The paragraph that holds the revision is deleted.
+    let error = refused(&original, &with_first_paragraph(""));
+    assert_eq!(
+        error,
+        "comparison cannot delete body/paragraph[0], which holds an existing tracked revision"
+    );
+
+    // A change in the header paragraph and in the footnote paragraph that
+    // hold a revision.
+    let error = refused(
+        &original,
+        &issue425_with_part_edit(&original, "/word/header1.xml", ">header<", ">heading<"),
+    );
+    assert!(
+        error.contains(
+            "comparison cannot change header:/word/header1.xml/paragraph[0], which holds an existing tracked revision: the edited document changes it"
+        ),
+        "{error}"
+    );
+    let error = refused(
+        &original,
+        &issue425_with_part_edit(&original, "/word/footnotes.xml", "> note<", "> remark<"),
+    );
+    assert!(
+        error.contains(
+            "comparison cannot change footnotes:/word/footnotes.xml/footnote[2]/paragraph[0], which holds an existing tracked revision: the edited document changes it"
+        ),
+        "{error}"
+    );
+
+    // The section properties that hold a revision change.
+    let error = refused(
+        &original,
+        &issue425_redline("Stays.", "Header", "Note", 12000),
+    );
+    assert_eq!(
+        error,
+        "comparison cannot change the section properties of body, which hold an existing tracked revision"
+    );
+
+    // A final paragraph deletion would mark the mark of the paragraph before
+    // it, which holds the revision.
+    let mut redline = document_with_content_controls(&wrap_word_body(&format!(
+        "{held_paragraph}<w:p><w:r><w:t>Last.</w:t></w:r></w:p>"
+    )));
+    let mut shortened = document_with_content_controls(&wrap_word_body(&held_paragraph));
+    let error = refused(&redline.to_bytes().unwrap(), &shortened.to_bytes().unwrap());
+    assert_eq!(
+        error,
+        "comparison cannot mark the paragraph mark of body/paragraph[0] for the final paragraph change after it, because that paragraph holds an existing tracked revision"
+    );
+}
+
+#[test]
+fn issue425_comparison_refuses_a_comment_package_change_over_a_comment_revision() {
+    let comment_revision = r#"<w:ins w:id="5" w:author="Reviewer A" w:date="2026-10-27T12:00:00Z"><w:r><w:t xml:space="preserve">reviewed </w:t></w:r></w:ins>"#;
+    let mut seed = document_with_comparison_stories("same");
+    let original = issue425_with_part_edit(
+        &seed.to_bytes().unwrap(),
+        "/word/comments.xml",
+        "<w:p><w:r><w:t>same comment</w:t></w:r></w:p>",
+        &format!("<w:p>{comment_revision}<w:r><w:t>same comment</w:t></w:r></w:p>"),
+    );
+    let refused = |edited: &[u8]| -> String {
+        let mut compared = Document::from_bytes(&original).unwrap();
+        let before = compared.to_bytes().unwrap();
+        let error = compared
+            .compare(
+                &Document::from_bytes(edited).unwrap(),
+                "Reviewer B",
+                "2026-10-27T13:00:00Z",
+            )
+            .unwrap_err()
+            .to_string();
+        assert_eq!(compared.to_bytes().unwrap(), before, "{error}");
+        error
+    };
+
+    // A change in the comment that holds the revision.
+    let error = refused(&issue425_with_part_edit(
+        &original,
+        "/word/comments.xml",
+        ">same comment<",
+        ">other comment<",
+    ));
+    assert_eq!(
+        error,
+        "comparison cannot replace the comments of /word/comments.xml whole, because a comment holds an existing tracked revision: comparison failed in comments:/word/comments.xml/comment[0]: comparison cannot change comments:/word/comments.xml/comment[0]/paragraph[0], which holds an existing tracked revision: the edited document changes it"
+    );
+
+    // A new comment beside it, which only a comment package revision records.
+    let error = refused(&issue425_with_part_edit(
+        &original,
+        "/word/comments.xml",
+        "</w:comments>",
+        r#"<w:comment w:id="1" w:author="Reviewer B" w:date="2026-10-27T13:00:00Z"><w:p><w:r><w:t>new comment</w:t></w:r></w:p></w:comment></w:comments>"#,
+    ));
+    assert_eq!(
+        error,
+        "comparison cannot replace the comments of /word/comments.xml whole, because a comment holds an existing tracked revision: comments story shell count changed in /word/comments.xml"
+    );
+}

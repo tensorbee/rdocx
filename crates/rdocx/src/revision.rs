@@ -194,6 +194,7 @@ enum RevisionScope<'a> {
     All,
     Author(&'a str),
     Id(i32),
+    Ids(&'a HashSet<i32>),
     DateRange { start: Instant, end: Instant },
 }
 
@@ -277,6 +278,16 @@ impl Document {
     /// Reject every modeled revision element carrying `id`.
     pub fn reject_revision_id(&mut self, id: i32) -> Result<usize> {
         self.resolve_revisions(Resolution::Reject, RevisionScope::Id(id))
+    }
+
+    /// Accept every modeled revision element whose `w:id` is in `ids`.
+    pub(crate) fn accept_revision_ids(&mut self, ids: &HashSet<i32>) -> Result<usize> {
+        self.resolve_revisions(Resolution::Accept, RevisionScope::Ids(ids))
+    }
+
+    /// Reject every modeled revision element whose `w:id` is in `ids`.
+    pub(crate) fn reject_revision_ids(&mut self, ids: &HashSet<i32>) -> Result<usize> {
+        self.resolve_revisions(Resolution::Reject, RevisionScope::Ids(ids))
     }
 
     fn resolve_revisions(
@@ -403,6 +414,18 @@ pub(crate) fn modeled_revision_count(source: &[u8]) -> Result<usize> {
         .count())
 }
 
+/// The modeled revision elements of one part in document order: the byte
+/// range of each element and its `w:id`. These are the elements that
+/// [`modeled_revision_count`] counts.
+pub(crate) fn modeled_revision_spans(source: &[u8]) -> Result<Vec<(Range<usize>, i32)>> {
+    let tree = XmlTree::parse(source)?;
+    Ok(tree
+        .elements
+        .iter()
+        .filter_map(|element| Some((element.start..element.end, element.revision.as_ref()?.id)))
+        .collect())
+}
+
 /// List the modeled revisions of one story part in document order.
 ///
 /// These are the elements that resolving the part counts. Each one belongs to
@@ -458,6 +481,7 @@ impl RevisionScope<'_> {
             Self::All => true,
             Self::Author(author) => metadata.author == *author,
             Self::Id(id) => metadata.id == *id,
+            Self::Ids(ids) => ids.contains(&metadata.id),
             Self::DateRange { start, end } => metadata
                 .timestamp
                 .as_deref()

@@ -283,6 +283,12 @@ enum Command {
         command: RevisionCommand,
     },
     /// Create a tracked-changes document from an original and edited file
+    ///
+    /// The original may already hold tracked changes, such as the redline of
+    /// an earlier comparison. A paragraph, table or content control that
+    /// holds one is kept byte for byte when the edited file holds it
+    /// unchanged. Any other change to it fails with its location and creates
+    /// no output.
     Compare {
         /// Original DOCX file
         original: PathBuf,
