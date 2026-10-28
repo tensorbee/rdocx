@@ -1227,7 +1227,7 @@ an `rdocx` development dependency for the 150 dpi SSIM oracle only. It receives
 explicit layout fonts, never system fonts, and does not enter the runtime graph
 or generated `rdocx` archive.
 
-`pulldown-cmark` is pinned to `=0.13.4` in the existing `rdocx` facade.
+`pulldown-cmark` is pinned to `=0.13.5` in the existing `rdocx` facade.
 Default features are disabled and only the HTML renderer feature is enabled.
 Runtime parser options enable tables and strikethrough. Its optional pinned
 `pulldown-cmark-escape` renderer edge stays inside that facade graph. Python and

@@ -34,7 +34,7 @@ oxml-opc = { workspace = true }
 oxml-pdf = { workspace = true, default-features = false }
 oxml-sml = { workspace = true }
 quick-xml = { workspace = true }
-pulldown-cmark = { version = "=0.13.4", default-features = false, features = ["html"] }
+pulldown-cmark = { version = "=0.13.5", default-features = false, features = ["html"] }
 rdocx-oxml = { workspace = true }
 rdocx-layout = { workspace = true, default-features = false }
 rdocx-html = { workspace = true }
