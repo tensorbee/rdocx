@@ -22,7 +22,7 @@
 | F-X272 | Preserve existing revisions during document comparison | L | in-progress | codex |
 | F-X273 | Repair header body clearance and complete TOC navigation | L | done | - |
 | F-X274 | Honor section and field page-number formats | M | in-progress | codex |
-| F-X275 | Prepare Word 0.16.5 and PowerPoint 0.14.5 patch releases | L | pending | - |
+| F-X275 | Prepare Word 0.16.5 and PowerPoint 0.14.5 patch releases | L | in-progress | codex |
 
 ## Sequencing note
 

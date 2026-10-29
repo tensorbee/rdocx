@@ -18,7 +18,7 @@ The archive row is regenerated from the package that carries this README.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: oxml-media | 12,250 compressed bytes, 51,016 member bytes, 6 members | 0.14.4 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `oxml-media` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-28 |
+| Crates.io archive: oxml-media | 12,260 compressed bytes, 51,016 member bytes, 6 members | 0.14.5 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `oxml-media` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-29 |
 
 ## Use it when
 
@@ -41,4 +41,4 @@ let format = resolve(b"\x89PNG\r\n\x1a\n", "image.bin");
 assert_eq!(format, ImageFormat::Png);
 ```
 
-Add `oxml-media = "0.14.4"` to your dependencies. See the [API documentation](https://docs.rs/oxml-media) for supported formats and sizing functions.
+Add `oxml-media = "0.14.5"` to your dependencies. See the [API documentation](https://docs.rs/oxml-media) for supported formats and sizing functions.

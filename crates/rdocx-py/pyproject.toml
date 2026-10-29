@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "rdocx"
-version = "0.16.4"
+version = "0.16.5"
 requires-python = ">=3.9"
 description = "Native DOCX creation, editing, comparison, layout, and rendering for Python"
 dynamic = ["readme"]

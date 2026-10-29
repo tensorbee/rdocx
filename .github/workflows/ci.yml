@@ -466,7 +466,7 @@ jobs:
             )
           }
 
-          verify_package "$package_root/rdocx-wasm" "@tensorbee/rdocx-wasm" "0.16.4" "rdocx_wasm"
+          verify_package "$package_root/rdocx-wasm" "@tensorbee/rdocx-wasm" "0.16.5" "rdocx_wasm"
           verify_package "$package_root/rpptx-wasm" "@tensorbee/rpptx-wasm" "0.12.1" "rpptx_wasm"
 
   release-regressions:

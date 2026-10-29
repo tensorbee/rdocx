@@ -2,7 +2,7 @@
 name = "rpptx-py"
 description = "Native PPTX creation, editing, comments, notes, and rendering for Python"
 readme = "README.md"
-version = "0.14.4"
+version = "0.14.5"
 publish = false
 edition.workspace = true
 license.workspace = true

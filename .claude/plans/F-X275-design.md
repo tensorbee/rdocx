@@ -112,10 +112,10 @@ Recompute workflow and42/44priority inventory hashes from current source rather 
 
 ## Implementation checklist
 
-- [ ] Admit story in existing HLD/backlog/current sprint/plan/runstate and approve bounded contract.
-- [ ] Capture actual old-source carrier/history/inventory discriminators.
-- [ ] Align current carriers and notes, preserve .4history and old controls.
-- [ ] Update listed HLD current intent and obtain clean independent microscope.
+- [x] Admit story in existing HLD/backlog/current sprint/plan/runstate and approve bounded contract.
+- [x] Capture actual old-source carrier/history/inventory discriminators.
+- [x] Align current carriers and notes, preserve .4history and old controls.
+- [x] Update listed HLD current intent and obtain clean independent microscope.
 - [ ] Complete source checkpoint and actual hosted rehearsal/artifact qualification.
 - [ ] Accept actual final integrated union, explicit reuse and all four product contracts.
 - [ ] Reconcile final metadata once and complete preparation, publication still held.

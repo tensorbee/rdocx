@@ -1,5 +1,56 @@
 # Changelog
 
+## v0.16.5
+
+### Highlights
+
+Word0.16.5 improves section page numbering, header and footer clearance, TOC navigation through merged tables, and comparison of documents containing existing revisions. The seven Rust packages, CLI and Python distribution share this version. Comparison and imported-format limits remain explicit below.
+
+### Added
+
+Existing comparison operations can retain unchanged revision-bearing owners while recording another reviewer's changes elsewhere. Existing field-update and rendering operations support decimal, lower and upper roman, and lower and upper letter section page numbers without a new public page-format authoring API.
+
+### Fixed
+
+- apply section page-number formats and restart or continuation values across PAGE, PAGEREF, selected footer placements and explicit field updates. Preserve physical page identity separately from displayed numbers and formatted text. Addresses [#423](https://github.com/tensorbee/rdocx/issues/423).
+- clear body flow against the selected header and footer content, including paragraph spacing, tables and supported ordinary frames. Preserve written page geometry for margin-relative placement. Keep long-note fragments with their reference when space permits, retain authored note markers and special records, and advance note-only pages even when a continuation notice consumes their usable area. Addresses [#424](https://github.com/tensorbee/rdocx/issues/424) through a hardened equivalent of [PR428](https://github.com/tensorbee/rdocx/pull/428).
+- preserve existing revision XML on unchanged supported owners, allocate new compared-story revision IDs without collisions, and report only newly created revisions in CLI comparison counts. Unsupported edits refuse atomically with an owner location. Addresses the bounded preservation alternative in [#425](https://github.com/tensorbee/rdocx/issues/425) through a hardened equivalent of [PR427](https://github.com/tensorbee/rdocx/pull/427).
+- retain physical source navigation through vertically merged cells and accepted-view deleted rows. TOC rebuild skips proven omitted content across the supported selectors while keeping placed headings and stale-source checks. Addresses [#426](https://github.com/tensorbee/rdocx/issues/426) through the adapted navigation work in [PR428](https://github.com/tensorbee/rdocx/pull/428).
+- update pulldown-cmark to0.13.5 for RUSTSEC-2026-0414. The public Markdown importer continues to leave wikilinks disabled. This dependency update does not establish exposure through that disabled parser option.
+
+### Compatibility
+
+No public signature migration is required. Word packages now require shared OOXML0.14.5. Retaining old revisions is bounded owner preservation, rather than unrestricted native Word Compare behavior. Edits, moves or deletion touching a revision-bearing paragraph, whole table or block control, or changed revised section properties remain refused. For those cases, retain the original redline separately, resolve the relevant author or revision IDs on independent copies with the checked APIs, then compare those baselines. Resolving those copies discards the resolved tracked markup.
+
+Roman formatting remains bounded to1through3999 and alphabetic formatting to4096characters. Unsupported imported number formats and chapter-dependent numbering remain preserved and diagnostic. Native Word observations outside these bounds do not extend support. Imported notes without a source reference marker remain unmarked. Newly authored add_footnote content includes an explicit styled marker, matching the existing note creation operations. Ordinary frames exclude drop caps, and exact tbRl body corrections do not promise general vertical-text parity. General native Word layout equivalence is not claimed.
+
+### Contributors
+
+- [@set2374](https://github.com/set2374) reported the section PAGE-format behavior in [#423](https://github.com/tensorbee/rdocx/issues/423).
+- [@hadim](https://github.com/hadim) reported header clearance, existing-revision comparison and merged-cell TOC failures in [#424](https://github.com/tensorbee/rdocx/issues/424), [#425](https://github.com/tensorbee/rdocx/issues/425) and [#426](https://github.com/tensorbee/rdocx/issues/426), and supplied [PR427](https://github.com/tensorbee/rdocx/pull/427) and [PR428](https://github.com/tensorbee/rdocx/pull/428). Their reference implementations were adapted and hardened with additional owner, source, pagination and refusal checks.
+
+## rpptx-v0.14.5
+
+### Highlights
+
+PowerPoint0.14.5 aligns the fifteen shared OOXML and PowerPoint Rust packages, CLI and Python distribution for the post-S96 release. This family adds no new PowerPoint product feature in S96.
+
+### Added
+
+No new PowerPoint authoring or rendering API is included in this release.
+
+### Fixed
+
+No new PowerPoint-specific user-facing fix is included. Word comparison, page-number and layout repairs belong to the separate Word0.16.5 family.
+
+### Compatibility
+
+No public signature migration is required. The selected shared OOXML and PowerPoint packages and Python distribution use0.14.5 together. Existing rendering limitations remain. The separate unpublished rpptx-wasm carrier stays0.12.1, and npm publication is outside this release.
+
+### Contributors
+
+No new external PowerPoint issue or pull-request contribution is included in the reviewed S96 range. Credits in earlier published sections remain with their original releases.
+
 ## v0.16.4
 
 ### Highlights

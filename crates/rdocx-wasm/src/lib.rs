@@ -314,9 +314,9 @@ mod tests {
         let wasm_manifest = include_str!("../Cargo.toml");
 
         for dependency in [
-            "oxml-layout = { path = \"crates/oxml-layout\", version = \"0.14.4\", default-features = false }",
-            "rdocx = { path = \"crates/rdocx\", version = \"0.16.4\", default-features = false }",
-            "rdocx-layout = { path = \"crates/rdocx-layout\", version = \"0.16.4\", default-features = false }",
+            "oxml-layout = { path = \"crates/oxml-layout\", version = \"0.14.5\", default-features = false }",
+            "rdocx = { path = \"crates/rdocx\", version = \"0.16.5\", default-features = false }",
+            "rdocx-layout = { path = \"crates/rdocx-layout\", version = \"0.16.5\", default-features = false }",
         ] {
             assert!(
                 workspace_manifest.contains(dependency),
