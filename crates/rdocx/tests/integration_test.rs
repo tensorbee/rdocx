@@ -24738,9 +24738,25 @@ fn footnote_markers_restart_on_each_physical_page() {
         .collect::<Vec<_>>();
     assert_eq!(pages.len(), 2, "{text}");
     assert!(pages[0].contains("First page bodyB"), "{text}");
-    assert!(pages[0].contains("B\n    First page note"), "{text}");
     assert!(pages[1].contains("Second page bodyB"), "{text}");
-    assert!(pages[1].contains("B\n    Second page note"), "{text}");
+    // This source authors no note indent or tab. Observe labels and ownership
+    // without inventing a four-space paragraph displacement in PDF extraction.
+    for (page, expected) in pages.iter().zip([
+        &["First page bodyB", "B", "First page note"][..],
+        &[
+            "Page boundary",
+            "Second page bodyB",
+            "B",
+            "Second page note",
+        ][..],
+    ]) {
+        let actual: Vec<_> = page
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect();
+        assert_eq!(actual, expected, "{text}");
+    }
 }
 
 #[test]

@@ -29473,8 +29473,16 @@ mod tests {
                 r#"<w:tbl><w:tblPr><w:tblpPr w:horzAnchor="margin" w:vertAnchor="page" w:tblpX="{x}" w:tblpY="3600"/><w:tblW w:w="2400" w:type="dxa"/><w:tblOverlap w:val="{overlap}"/></w:tblPr><w:tblGrid><w:gridCol w:w="2400"/></w:tblGrid>{content}</w:tbl>"#
             )
         };
+        let flow_control = "<w:p><w:r><w:t>FLOW_CONTROL</w:t></w:r></w:p>";
         let mut failures = Vec::new();
         for footer in [false, true] {
+            let baseline_input = issue424_furniture_input(
+                if footer { "" } else { flow_control },
+                if footer { flow_control } else { "" },
+            );
+            let baseline =
+                crate::layout_document_deterministic_with_provenance(&baseline_input).unwrap();
+            let baseline_body = baseline.body_layout_fragments(0).unwrap()[0];
             for rows in [1, 2] {
                 for (left, right, x, separate) in [
                     ("never", "overlap", 0, true),
@@ -29484,7 +29492,7 @@ mod tests {
                     ("never", "never", 4000, false),
                 ] {
                     let story = format!(
-                        "{}{}<w:p><w:r><w:t>FLOW_CONTROL</w:t></w:r></w:p>",
+                        "{}{}{flow_control}",
                         table("TABLE_A", left, 0, rows),
                         table("TABLE_B", right, x, rows)
                     );
@@ -29495,6 +29503,15 @@ mod tests {
                     let before = format!("{:?}", input);
                     let output =
                         crate::layout_document_deterministic_with_provenance(&input).unwrap();
+                    // Preserve this fixture's ordinary inherited FLOW_CONTROL
+                    // spacing. Floating rows must not add body clearance to it.
+                    let body = output.body_layout_fragments(0).unwrap()[0];
+                    assert_eq!(output.layout.pages.len(), baseline.layout.pages.len());
+                    assert!(
+                        (body.x - baseline_body.x).abs() < 0.01
+                            && (body.y - baseline_body.y).abs() < 0.01,
+                        "footer={footer},rows={rows},{left}/{right},x={x}: body={body:?},flow-only={baseline_body:?}"
+                    );
                     let first = issue424_positioned_text(&output, "TABLE_A_0");
                     let second = issue424_positioned_text(&output, "TABLE_B_0");
                     assert_eq!((first.len(), second.len()), (1, 1));
@@ -30114,6 +30131,28 @@ mod tests {
             issue424_positioned_text(&top, "FOOT_0"),
             issue424_positioned_text(&centered, "FOOT_0")
         );
+        // Source-equivalent body-band-bottom native control: five exact 12 pt
+        // furniture lines at 18 pt leave the band 78..714 and a 12 pt body at 702.
+        // Word's BODY_MARK bbox top is 701.6088 pt. Bbox and line band remain
+        // distinct observations, rather than fitting either to LibreOffice.
+        let exact_furniture = (0..5).map(|_| r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>FURNITURE</w:t></w:r></w:p>"#).collect::<String>();
+        let mut bottom_input = issue424_furniture_input(&exact_furniture, &exact_furniture);
+        bottom_input.document.body.content = vec![BodyContent::Paragraph(Box::new(
+            CT_P::from_xml_fragment(br#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>BODY_MARK</w:t></w:r></w:p>"#).unwrap(),
+        ))];
+        bottom_input
+            .document
+            .body
+            .sect_pr
+            .as_mut()
+            .unwrap()
+            .vertical_alignment = Some(ST_VerticalJc::Bottom);
+        let bottom = crate::layout_document_deterministic_with_provenance(&bottom_input).unwrap();
+        let body = bottom.body_layout_fragments(0).unwrap()[0];
+        assert_eq!(bottom.layout.pages.len(), 1);
+        assert!((body.x - 72.0).abs() < 0.01);
+        assert!((body.y - 702.0).abs() < 0.01);
+        assert!((body.height - 12.0).abs() < 0.01);
         let columns =
             crate::layout_document_deterministic_with_provenance(&input_for(true, false)).unwrap();
         let mut right = false;

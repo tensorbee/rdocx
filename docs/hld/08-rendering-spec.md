@@ -1893,7 +1893,9 @@ section this way whether the break sits on its own empty paragraph or on the
 last paragraph of content.
 
 One private story variant selects header, footer and watermark together. A
-selected blank or missing first/even story stays blank. Each physical page
+selected blank or missing first/even story stays blank. Section-start parity
+and same-type inheritance follow ECMA-376 17.10.1, 17.10.5 and 17.10.6.
+Each physical page
 prepares its selected furniture before calculating the body band. Paragraph
 spacing, border-group gaps and flowed table rows are priced once and painted
 from the same prepared blocks and placements. Nonnegative top and bottom
@@ -1911,6 +1913,7 @@ height of surrounding flow and therefore its clearance.
 Floating furniture tables use the existing within-page overlap policy. Each
 physical table settles once against prior tables in story order. Its whole
 settled rectangle supplies every row, wrap reservation and paint position.
+Floating ownership and table-only overlap follow ECMA-376 17.4.56 and 17.4.57.
 Drawings and ordinary frames do not enter the table-only overlap relation.
 Same-story ordinary header/footer flow ignores paragraph-frame obstacles.
 Tables and drawings retain their own wrapping policy. Selected prepared frame
@@ -1932,6 +1935,16 @@ attributes and general body-frame/drop-cap semantics remain unchanged. A nonzero
 and zero height is automatic. Explicit values remain authoritative. Imported
 attributes are unchanged. Drop and margin drop-cap modes keep the existing
 unsupported fallback and do not enter ordinary positioned frame layout.
+
+Pinned LibreOffice 26.2.5.2 can position the main story differently for selected
+first/even stories, floating furniture tables, omitted frame anchors and
+Center/Bottom or exact tbRl body alignment. These controls retain the qualified
+Word behavior above, including effective-band composition with section
+alignment under ECMA-376 17.6.23. Their per-oracle numeric mismatches remain
+explicit compatibility limits. A source-supported disposition preserves the
+measurement and asserts the Word side, without fitting a LibreOffice offset or
+inferring its internal cause. Other furniture, font, paint and operation
+qualification remains separate, and unexplained mismatches remain blocking.
 
 Preparation always starts from original shaped source blocks. A footer accepts
 only a stable bottom origin and complete prepared line/obstacle/placement
