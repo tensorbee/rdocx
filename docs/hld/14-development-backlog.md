@@ -8752,3 +8752,15 @@ Finish Issues 424 and426 using PR 428 as partial input. Keep variant-selection r
 **Test gate**: differential
 
 Resolve uncovered Issue 423without inventing a contribution or silently adding a public authoring API. Read preserved pgNumType format alongside restart values and use a common section/field formatting policy in layout, header/footer rendering and explicit page-field cache updates. Before design approval pin ECMA 17.6.12 and ordinary PAGE field-format switch precedence, explicit absence/unknown-format handling, roman bounds and alphabetic rollover. Qualify decimal, lower/upper roman, lower/upper letters, repeated section restarts, all selected header/footer variants and explicit switches. The original four-page file must display i,ii,1,2in native Word, saved/updated caches, library PDF text and CLI output. Preserve unknown XML, existing numeric conversion and default decimal behavior. Prove geometry and rebuilt TOC targets remain coherent with F-X273 after save/reopen. Unsupported imported states stay preserved and diagnostic, never guessed as successful parity.
+
+### F-X275, Prepare Word 0.16.5 and PowerPoint 0.14.5 patch releases
+
+**Sprint**: S96
+**Size**: L
+**Depends on**: F-X270
+**Test gate**: release regression
+**Spec reference**: `10-bindings-spec.md`, Packaging and CI, and `15-build-and-toolchain.md`, Packaging and Release process.
+
+Prepare the user-requested post-S96 Rust, CLI and Python releases within Word0.16.x and shared/PowerPoint0.14.x. Fresh exact registries and origin tags show0.16.4/0.14.4 published and0.16.5/0.14.5 absent. Align current manifests, internal pins, lockfile, package identities, README evidence and current policy assertions. Preserve published notes and F-X270 history. Add family-only S96notes with authenticated credits and explicit supported/refused boundaries, without inventing PowerPoint product changes.
+
+Require the actual final-source22-package verified dryrun below10MiB, current README measurements, reviewed build-only wheels jobs and exact downloaded artifacts, host CLI identities, installed Python3.9/3.12priority calls and3.12typing/stubs. All F-X271through274final criteria remain mandatory in one common integrated union. Formal start dependency is the completed F-X270 machinery, without using a local checkpoint to waive F-X271actual hosted acceptance. The existing validated F-X271source-availability route may expose only the clean reviewed canonical sprint source for actual normal CI and build-only qualification. Publication is separate after close-sprint and requires final exact-main approval for each family, shared/PowerPoint first. No new product API, release machinery or npm publication is included.

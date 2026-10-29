@@ -3247,7 +3247,18 @@ The post-answer read-only refresh found PR427 rebased onto released main24af95d3
 
 The next-wave read-only refresh also found PR428 rebased onto released main24af95d3, current head `d3f71b6dcb0163793c7df0e40c0fb19ef12bf236`, updated2026-10-28T06:43:09Z. Its body SHA-256 remains `635213f1f93940b66c2856d18a2d60caaf246d94419a40db90a1ec3b4e5aa5ba`. Product, Python-test and HLD payloads are identical, with only one added blank line in the native regression payload. Changed donor README/archive measurements remain excluded. F-X273's approved plan records the exact five successor own commits, unchanged omissions and retained comparison receipt. This refresh changes neither F-X272's running contract nor F-X273's approved acceptance.
 
+##### User-added release preparation, 2026-10-29
+
+The user requests both0.16.xand0.14.xrelease lines at the end of S96. F-X275is admitted and its bounded design approved by root. Fresh exact24registry entries show .4occupied and .5absent, and .5origin tags are absent. Prepare Word0.16.5andshared/PowerPoint0.14.5, preserving published .4notes and F-X270completion. Its formal dependency is F-X270done. All F-X271through274final acceptance still gates sprint closure and release readiness, without a false hosted-CI-before-version dependency cycle.
+
+| F-ID | Title | Size |
+|------|-------|------|
+| F-X275 | Prepare Word 0.16.5 and PowerPoint 0.14.5 patch releases | L |
+
+The original12to17developer-day estimate and four-contract intake cap remain historical. User-authorized bounded release preparation adds provisional2to3developer-days, for14to20combined with one shared final qualification union. No product criterion is removed. All carrier, note, HLD and archive measurement edits precede the deciding versioned-source full gate, actual normal CI and build-only wheels rehearsal. Source availability uses only the actual validated F-X271canonical checkpoint. No second tracker, source-push exception, tag or publication is created. Both releases follow close-sprint under separate exact-main approvals, shared/PowerPoint first.
+
 #### Sprint S97, Fillable PDF forms
+
 
 **Goal**: complete the existing Issue 381 feature before closing that issue. This is the three-story feature subset formerly scheduled in S96, not a new completed repair. Provisionally 10 to 13 developer-days plus final viewer/conformance qualification. It may exceed a normal sprint and requires design/capacity confirmation before claim.
 

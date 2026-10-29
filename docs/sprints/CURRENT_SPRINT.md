@@ -22,6 +22,7 @@
 | F-X272 | Preserve existing revisions during document comparison | L | in-progress | codex |
 | F-X273 | Repair header body clearance and complete TOC navigation | L | done | - |
 | F-X274 | Honor section and field page-number formats | M | in-progress | codex |
+| F-X275 | Prepare Word 0.16.5 and PowerPoint 0.14.5 patch releases | L | pending | - |
 
 ## Sequencing note
 
@@ -31,7 +32,7 @@ The complete intake, per-issue matrix, pinned PR SHAs/CI/reviews/overlaps, remai
 
 ## Capacity and later work
 
-Provisional implementation 10 to 15 developer-days plus 2 final qualification days, total 12 to 17, exceeds a normal two-week sprint. This is explicitly extended and capped at these four coherent contracts. Native custody may block the estimate. Reassess before claim if design expands or the four-week escalation would be threatened. Do not delete acceptance rows to fit capacity.
+The original four-contract estimate was10to15implementation developer-days plus2qualification days, total12to17. On2026-10-29the user added bounded preparation of both release families through F-X275. Its provisional2to3additional developer-days give14to20combined, sharing one final qualification union. This remains an extended sprint. Native custody and hosted availability can block completion. Reassess against actual work and the four-week escalation, and do not delete acceptance rows to fit capacity. Publication and its exact-main approvals remain separate.
 
 The old unopened S96 bundle is split into S97 AcroForms (F-X242/243/244, all Issue 381 criteria) and S98 native/bibliography recovery (F-X219/F-X192/F-X269, with design/custody reset). Old planned S97 through S110 become S99 through S112. Historical IDs, tags and completed records are unchanged. S95.4 remains closed. The intake analysis preceded feature implementation.
 
@@ -42,6 +43,7 @@ The old unopened S96 bundle is split into S97 AcroForms (F-X242/243/244, all Iss
 - [ ] Exact pinned CI/tool identities restored and actual integrated deciding CI gates green.
 - [ ] One integrated full verify/risk/oracle union, hash 49/pixels 7 with only separately labelled/reviewed intentional deltas, native Word header/footer/page-format and combined TOC/comparison/cache/reopen/render acceptance.
 - [ ] Current installed Python 3.9/3.12 suites and strict typing/stubs, affected CLI/WASM/archives/README and final metadata policies pass.
+- [ ] F-X275prepares0.16.5/0.14.5with immutable published history, accurate credits, verified archives and actual build-only hosted artifacts. No publication before sprint close and separate final approvals.
 - [ ] Fresh GitHub head/body/comment refresh before implementation and final reconciliation. Preserve all failed/old producers and authenticate successor inputs.
 - [ ] Keep Issues 264, 281 and 377 open. Issue 381 stays open for the full S97 AcroForm programme.
 - [ ] Only a later close-sprint may merge/tag main and reconcile PR/issue states after actual acceptance. Release remains separate.

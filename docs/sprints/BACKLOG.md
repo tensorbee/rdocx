@@ -40,8 +40,8 @@ regenerated, never hand-edited.
 | M22, Word depth | 12 | 12 | 0 | 0 |
 | M23, From-scratch business documents | 24 | 24 | 0 | 0 |
 | M24, Modern DOCX authoring completeness | 54 | 32 | 0 | 22 |
-| X, Cross-cutting | 288 | 275 | 3 | 6 |
-| **Total** | **619** | **557** | **3** | **55** |
+| X, Cross-cutting | 289 | 275 | 3 | 7 |
+| **Total** | **620** | **557** | **3** | **56** |
 <!-- AUTOGEN:backlog-summary END -->
 
 ## All F-IDs
@@ -843,4 +843,5 @@ HLD14 contract before adopting contributor changes.
 | F-X272 | Preserve existing revisions during document comparison | S96 | L | in-progress |
 | F-X273 | Repair header body clearance and complete TOC navigation | S96 | L | done |
 | F-X274 | Honor section and field page-number formats | S96 | M | in-progress |
+| F-X275 | Prepare Word 0.16.5 and PowerPoint 0.14.5 patch releases | S96 | L | pending |
 <!-- AUTOGEN:backlog-MX END -->
