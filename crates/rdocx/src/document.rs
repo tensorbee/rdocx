@@ -33213,7 +33213,27 @@ impl Document {
             .max()
             .unwrap_or(1)
             + 1;
+        if candidate.style("FootnoteReference").is_none() {
+            candidate
+                .add_style(
+                    StyleBuilder::character("FootnoteReference", "footnote reference")
+                        .run_properties(CT_RPr {
+                            vert_align: Some("superscript".into()),
+                            ..Default::default()
+                        }),
+                )
+                .expect("an in-memory document can publish its note style");
+        }
         let mut p = CT_P::new();
+        let mut marker = CT_R::new("");
+        marker.properties = Some(CT_RPr {
+            style_id: Some("FootnoteReference".into()),
+            ..Default::default()
+        });
+        marker.content.clear();
+        marker.extra_xml.push(b"<w:footnoteRef/>".to_vec());
+        marker.extra_xml_positions.push(1);
+        p.runs.push(marker);
         p.add_run(text);
         candidate.footnotes.footnotes.push(CT_Footnote {
             id,
@@ -33298,7 +33318,7 @@ impl Document {
         });
         note_marker.content.clear();
         note_marker.extra_xml.push(b"<w:footnoteRef/>".to_vec());
-        note_marker.extra_xml_positions.push(0);
+        note_marker.extra_xml_positions.push(1);
         paragraph.runs.push(note_marker);
         paragraph.add_run(text);
         candidate
@@ -33406,7 +33426,7 @@ impl Document {
         });
         note_marker.content.clear();
         note_marker.extra_xml.push(b"<w:endnoteRef/>".to_vec());
-        note_marker.extra_xml_positions.push(0);
+        note_marker.extra_xml_positions.push(1);
         paragraph.runs.push(note_marker);
         paragraph.add_run(text);
         let note = rdocx_oxml::footnotes::CT_Footnote {

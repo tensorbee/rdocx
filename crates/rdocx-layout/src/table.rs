@@ -1750,6 +1750,7 @@ fn layout_cell_content(
                 }
                 blocks.push(CellBlock::Paragraph(block));
                 semantics.push(CellBlockSemantics::Paragraph(ParagraphSemantics {
+                    tb_rl_exact_baseline: None,
                     border_group_before: false,
                     source_node: source,
                     structure_id: None,
@@ -1881,6 +1882,7 @@ fn layout_control_cell_content(
                 }
                 blocks.push(CellBlock::Paragraph(block));
                 semantics.push(CellBlockSemantics::Paragraph(ParagraphSemantics {
+                    tb_rl_exact_baseline: None,
                     border_group_before: false,
                     source_node: source,
                     structure_id: None,

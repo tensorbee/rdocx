@@ -32,9 +32,27 @@ use rdocx_oxml::table::ST_VerticalJc;
 use crate::WordBodyLayoutFragment;
 use crate::input::{ImageData, MediaRegistry};
 use crate::notes::{
-    NOTE_INDENT, NOTE_SEPARATOR_OFFSET, NoteLayout, NoteRegistry, NoteRenderParagraph,
-    SEPARATOR_WIDTH_FRACTION,
+    NOTE_SEPARATOR_OFFSET, NoteLayout, NoteRegistry, NoteRenderParagraph, SEPARATOR_WIDTH_FRACTION,
 };
+
+/// Private source line ranges, shared by note prediction and publication.
+struct NoteFragmentPlan {
+    placed: Vec<(NoteRef, usize, usize, bool)>,
+    carried: Vec<(NoteRef, usize)>,
+    height: f64,
+    accepts_fresh: bool,
+}
+
+impl Default for NoteFragmentPlan {
+    fn default() -> Self {
+        Self {
+            placed: Vec::new(),
+            carried: Vec::new(),
+            height: 0.0,
+            accepts_fresh: true,
+        }
+    }
+}
 
 /// A wrapping drawing that has been placed on the page being built.
 #[derive(Debug, Clone, Copy)]
@@ -407,6 +425,8 @@ struct PreparedFurniture {
     starts: Vec<f64>,
     placements: Vec<Option<Rect>>,
     wraps: Vec<PlacedWrap>,
+    // Paragraph frames wrap main body, not ordinary flow in their own story.
+    body_frame_wraps: Vec<PlacedWrap>,
 }
 
 impl PreparedFurniture {
@@ -424,7 +444,8 @@ impl PreparedFurniture {
                 &self.before_lines,
                 &self.starts,
                 &self.placements,
-                &self.wraps
+                &self.wraps,
+                &self.body_frame_wraps
             )
         )
     }
@@ -440,6 +461,7 @@ fn locate_furniture(
     let mut starts = vec![origin; blocks.len()];
     let mut placements = vec![None; blocks.len()];
     let mut wraps = Vec::new();
+    let mut body_frame_wraps = Vec::new();
     let mut floating_tables = Vec::new();
     let mut y = origin;
     let mut after: f64 = 0.0;
@@ -467,7 +489,7 @@ fn locate_furniture(
                     y + anchor_gap,
                 );
                 placements[index] = Some(rect);
-                wraps.push(PlacedWrap {
+                body_frame_wraps.push(PlacedWrap {
                     rect,
                     wrap: if matches!(properties.wrap.as_deref(), Some("none" | "notBeside")) {
                         WrapType::TopAndBottom
@@ -562,6 +584,7 @@ fn locate_furniture(
         starts,
         placements,
         wraps,
+        body_frame_wraps,
     }
 }
 
@@ -660,6 +683,7 @@ pub struct Section {
 }
 
 pub(crate) struct SharedSection {
+    pub written_tb_rl_band: bool,
     pub modern_footnote_layout: bool,
     pub footnote_layout_like_word8: bool,
     pub continuous: bool,
@@ -815,6 +839,7 @@ pub(crate) fn paginate_shared_sections(
             section.header_footer_semantics.as_ref(),
             section.title_pg,
             section.footnotes_beneath_text,
+            section.written_tb_rl_band,
             fm,
             media,
             notes,
@@ -876,6 +901,7 @@ pub(crate) fn paginate_shared_sections(
         let mut group_end = section_index + 1;
         while group_end < sections.len()
             && sections[group_end].continuous
+            && section.written_tb_rl_band == sections[group_end].written_tb_rl_band
             && !sections[group_end - 1].endnotes_at_section_end
             && continuous_geometry_matches(&section.geometry, &sections[group_end].geometry)
         {
@@ -895,6 +921,7 @@ pub(crate) fn paginate_shared_sections(
             section.header_footer_semantics.as_ref(),
             section.title_pg,
             section.footnotes_beneath_text,
+            section.written_tb_rl_band,
             fm,
             media,
             notes,
@@ -1049,6 +1076,7 @@ pub(crate) fn paginate_shared_single_section_recorded(
         next_header_page_number: section.page_number_start.unwrap_or(1),
     });
     let context = PassContext {
+        written_tb_rl_band: section.written_tb_rl_band,
         geometry: section.geometry.clone(),
         header_footer: section.header_footer.as_ref(),
         header_footer_semantics: section.header_footer_semantics.as_ref(),
@@ -1262,6 +1290,7 @@ fn paginate_with_media<B: LayoutBlockLike>(
         header_footer_semantics,
         title_pg,
         false,
+        false,
         _fm,
         media,
         notes,
@@ -1280,6 +1309,7 @@ fn paginate_with_media_recorded<B: LayoutBlockLike>(
     header_footer_semantics: Option<&HeaderFooterSemantics>,
     title_pg: bool,
     footnotes_beneath_text: bool,
+    written_tb_rl_band: bool,
     _fm: &FontManager,
     media: &HashMap<MediaId, ImageData>,
     notes: &NoteRegistry,
@@ -1288,6 +1318,7 @@ fn paginate_with_media_recorded<B: LayoutBlockLike>(
     continuous_sections: Option<&[SharedSection]>,
 ) -> PassResult {
     let context = PassContext {
+        written_tb_rl_band,
         geometry,
         header_footer,
         header_footer_semantics,
@@ -1335,6 +1366,7 @@ struct PassResult {
 /// Built once and borrowed twice, so the eight-value argument list appears in
 /// one place rather than at each call.
 struct PassContext<'a> {
+    written_tb_rl_band: bool,
     geometry: PageGeometry,
     header_footer: Option<&'a HeaderFooterContent>,
     header_footer_semantics: Option<&'a HeaderFooterSemantics>,
@@ -1382,6 +1414,7 @@ fn paginate_pass_from<B: LayoutBlockLike>(
         context.header_footer_semantics,
         context.title_pg,
         context.footnotes_beneath_text,
+        context.written_tb_rl_band,
         context.media,
         context.notes,
         context.fm,
@@ -1767,6 +1800,7 @@ const LINE_NUMBER_FONT_SIZE: f64 = 9.0;
 
 /// Helper struct to track page state during pagination.
 struct Pager<'a> {
+    written_tb_rl_band: bool,
     pages: Vec<PageFrame>,
     elements: Vec<PositionedElement>,
     /// Anchored drawings marked behindDoc. Held apart from the normal element
@@ -1872,6 +1906,7 @@ impl<'a> Pager<'a> {
         header_footer_semantics: Option<&'a HeaderFooterSemantics>,
         title_pg: bool,
         footnotes_beneath_text: bool,
+        written_tb_rl_band: bool,
         media: &'a HashMap<MediaId, ImageData>,
         notes: &'a NoteRegistry,
         fm: &'a FontManager,
@@ -1886,6 +1921,7 @@ impl<'a> Pager<'a> {
             .as_ref()
             .map_or(1, |numbering| numbering.start);
         let mut pager = Pager {
+            written_tb_rl_band,
             pages: Vec::new(),
             elements: Vec::new(),
             behind_elements: Vec::new(),
@@ -1974,6 +2010,8 @@ impl<'a> Pager<'a> {
                 });
                 match prepare_furniture(blocks, facts, &self.furniture_geometry, footer, self.fm) {
                     Ok(prepared) => {
+                        self.page_wraps
+                            .extend_from_slice(&prepared.body_frame_wraps);
                         if footer {
                             self.prepared_footer = Some(prepared);
                         } else {
@@ -2018,6 +2056,9 @@ impl<'a> Pager<'a> {
     /// negative `w:top` or `w:bottom` asks for that margin exactly, and the
     /// header or footer may then overlap the body.
     fn clear_header_and_footer(&self, page: &mut PageGeometry) {
+        if self.written_tb_rl_band {
+            return;
+        }
         if self.section_geometry.margin_top >= 0.0
             && let Some(prepared) = &self.prepared_header
             && prepared.height > 0.0
@@ -2129,36 +2170,98 @@ impl<'a> Pager<'a> {
     ///
     /// Zero when there are none, so a page without notes keeps every point of
     /// its content height.
-    fn reserve_for(&self, carried: &[(NoteRef, usize)], fresh: &[NoteRef]) -> f64 {
+    /// One ordered plan owns both reference admission and committed splitting.
+    /// Short fresh notes retain whole-note movement. Intrinsically long notes
+    /// can start with a nonempty fragment beside their actual reference.
+    fn note_fragments(
+        &self,
+        carried: &[(NoteRef, usize)],
+        fresh: &[NoteRef],
+        body_height: f64,
+    ) -> NoteFragmentPlan {
+        let mut plan = NoteFragmentPlan::default();
         if carried.is_empty() && fresh.is_empty() {
-            return 0.0;
+            return plan;
         }
-        let carried_height: f64 = carried
-            .iter()
-            .filter_map(|(id, first)| {
-                self.notes
-                    .get(*id, self.geometry.content_width())
-                    .map(|note| note.height_from(*first))
-            })
-            .sum();
-        let fresh_height: f64 = fresh
-            .iter()
-            .filter_map(|id| {
-                self.notes
-                    .get(*id, self.geometry.content_width())
-                    .map(NoteLayout::height)
-            })
-            .sum();
         let record = if carried.is_empty() {
             NoteType::Separator
         } else {
             NoteType::ContinuationSeparator
         };
-        let separator_height = self
+        let width = self.geometry.content_width();
+        let separator = self
             .notes
-            .get_special(NoteStream::Footnote, record, self.geometry.content_width())
+            .get_special(NoteStream::Footnote, record, width)
             .map_or(0.0, |(note, _)| note.height());
-        NOTE_SEPARATOR_OFFSET + separator_height + carried_height + fresh_height
+        let notice = self
+            .notes
+            .get_special(NoteStream::Footnote, NoteType::ContinuationNotice, width)
+            .map_or(0.0, |(note, _)| note.height());
+        let overhead = NOTE_SEPARATOR_OFFSET + separator;
+        let fresh_capacity = (self.content_height - overhead).max(0.0);
+        let mut capacity = (fresh_capacity - body_height).max(0.0);
+        let queue = carried
+            .iter()
+            .map(|(id, first)| (*id, *first, true))
+            .chain(fresh.iter().map(|id| (*id, 0, false)))
+            .collect::<Vec<_>>();
+        let remaining = queue
+            .iter()
+            .filter_map(|(id, first, _)| {
+                self.notes
+                    .get(*id, width)
+                    .map(|note| note.height_from(*first))
+            })
+            .sum::<f64>();
+        let will_continue = remaining > capacity + 0.01;
+        if will_continue {
+            capacity = (capacity - notice).max(0.0);
+        }
+        let mut used = 0.0;
+        for (id, first, continued) in queue {
+            let Some(note) = self.notes.get(id, width) else {
+                continue;
+            };
+            let mut count = 0;
+            let short = !continued && note.height() <= fresh_capacity + 0.01;
+            if plan.carried.is_empty() && (!short || used + note.height() <= capacity + 0.01) {
+                for line in note.lines.iter().skip(first) {
+                    if used + line.height > capacity + 0.01 {
+                        // The usable area includes any continuation notice.
+                        // A line taller than that area overflows once on a
+                        // note-only page, never spins or drops the source line.
+                        if body_height == 0.0
+                            && count == 0
+                            && used == 0.0
+                            && line.height > capacity + 0.01
+                        {
+                            used += line.height;
+                            count = 1;
+                        }
+                        break;
+                    }
+                    used += line.height;
+                    count += 1;
+                }
+            }
+            if count > 0 {
+                plan.placed.push((id, first, count, continued));
+            }
+            if !continued && count == 0 && !note.lines.is_empty() {
+                plan.accepts_fresh = false;
+            }
+            if first + count < note.lines.len() {
+                plan.carried.push((id, first + count));
+            }
+        }
+        if !plan.placed.is_empty() {
+            plan.height = overhead + used + if plan.carried.is_empty() { 0.0 } else { notice };
+        }
+        plan
+    }
+
+    fn reserve_for(&self, carried: &[(NoteRef, usize)], fresh: &[NoteRef]) -> f64 {
+        self.note_fragments(carried, fresh, self.ink_bottom).height
     }
 
     /// The note area currently committed for the page being built.
@@ -2190,7 +2293,13 @@ impl<'a> Pager<'a> {
                 }
             }
         }
-        (self.content_height - self.reserve_for(&self.pending_notes, &fresh)).max(0.0)
+        let body_height = self.cursor_y + lines.iter().map(|line| line.height).sum::<f64>();
+        let plan = self.note_fragments(&self.pending_notes, &fresh, body_height);
+        if plan.accepts_fresh {
+            (self.content_height - plan.height).max(0.0)
+        } else {
+            0.0
+        }
     }
 
     /// Record the footnotes referenced by lines about to be placed.
@@ -2232,8 +2341,9 @@ impl<'a> Pager<'a> {
                 }
             }
 
-            let reserve = self.reserve_for(&self.pending_notes, &fresh);
-            if start_y + used + line.height > self.content_height - reserve + 0.01 {
+            let body_height = start_y + used + line.height;
+            let plan = self.note_fragments(&self.pending_notes, &fresh, body_height);
+            if !plan.accepts_fresh || body_height > self.content_height - plan.height + 0.01 {
                 let page_is_empty = !self.has_content() && used == 0.0 && index == 0;
                 if !page_is_empty {
                     return index;
@@ -2267,6 +2377,7 @@ impl<'a> Pager<'a> {
         self.is_first_page = self.page_number == first;
         self.footnotes_beneath_text = member.footnotes_beneath_text;
         self.section_geometry = member.geometry.clone();
+        self.written_tb_rl_band = member.written_tb_rl_band;
         let track = self.track_index;
         self.begin_page();
         self.track_index = track.min(self.tracks.len().saturating_sub(1));
@@ -2599,18 +2710,14 @@ impl<'a> Pager<'a> {
     /// Notes sit above the bottom margin and grow upward, so the body text
     /// above them was already kept clear by `available_height`.
     fn place_page_notes(&mut self) {
-        let mut queue: Vec<(NoteRef, usize, bool)> = self
-            .pending_notes
-            .drain(..)
-            .map(|(id, first)| (id, first, true))
-            .collect();
-        queue.extend(self.page_note_ids.drain(..).map(|id| (id, 0usize, false)));
-
-        if queue.is_empty() {
+        let plan = self.note_fragments(&self.pending_notes, &self.page_note_ids, self.ink_bottom);
+        let opens_with_continuation = !self.pending_notes.is_empty();
+        self.pending_notes = plan.carried;
+        self.page_note_ids.clear();
+        let placed = plan.placed;
+        if placed.is_empty() {
             return;
         }
-
-        let opens_with_continuation = queue[0].2;
         let special_record = if opens_with_continuation {
             NoteType::ContinuationSeparator
         } else {
@@ -2622,74 +2729,19 @@ impl<'a> Pager<'a> {
             self.geometry.content_width(),
         );
         let separator_height = authored_separator.map_or(0.0, |(note, _)| note.height());
-        let mut available =
-            (self.content_height - self.ink_bottom - NOTE_SEPARATOR_OFFSET - separator_height)
-                .max(0.0);
         let continuation_notice = self.notes.get_special(
             NoteStream::Footnote,
             NoteType::ContinuationNotice,
             self.geometry.content_width(),
         );
-        let remaining_height: f64 = queue
-            .iter()
-            .filter_map(|(id, first, _)| {
-                self.notes
-                    .get(*id, self.geometry.content_width())
-                    .map(|note| note.height_from(*first))
-            })
-            .sum();
-        if remaining_height > available + 0.01 {
-            available =
-                (available - continuation_notice.map_or(0.0, |(note, _)| note.height())).max(0.0);
-        }
-
-        // Decide how much of each note this page can hold.
-        let mut placed: Vec<(NoteRef, usize, usize, bool)> = Vec::new();
-        let mut used = 0.0;
-        let mut carried: Vec<(NoteRef, usize)> = Vec::new();
-
-        for (id, first, continued) in queue {
-            let Some(note) = self.notes.get(id, self.geometry.content_width()) else {
-                continue;
-            };
-            if !carried.is_empty() {
-                // An earlier note already ran out of room, so everything
-                // after it waits too, or the notes would be reordered.
-                carried.push((id, first));
-                continue;
-            }
-
-            let mut count = 0;
-            for line in note.lines.iter().skip(first) {
-                if used + line.height > available + 0.01 {
-                    break;
-                }
-                used += line.height;
-                count += 1;
-            }
-
-            if count > 0 {
-                placed.push((id, first, count, continued));
-            }
-            if first + count < note.lines.len() {
-                carried.push((id, first + count));
-            }
-        }
-
-        self.pending_notes = carried;
-
-        if placed.is_empty() {
-            return;
-        }
-
-        let total: f64 = placed
+        let total = placed
             .iter()
             .filter_map(|(id, first, count, _)| {
                 self.notes
                     .get(*id, self.geometry.content_width())
-                    .map(|n| n.height_of(*first, *count))
+                    .map(|note| note.height_of(*first, *count))
             })
-            .sum();
+            .sum::<f64>();
 
         let separator_y = if self.footnotes_beneath_text {
             self.geometry.margin_top + self.ink_bottom
@@ -2699,6 +2751,11 @@ impl<'a> Pager<'a> {
                 - total
                 - NOTE_SEPARATOR_OFFSET
                 - separator_height
+                - if self.pending_notes.is_empty() {
+                    0.0
+                } else {
+                    continuation_notice.map_or(0.0, |(note, _)| note.height())
+                }
         };
 
         // A page opening with carried content gets the full-width rule, which
@@ -2835,17 +2892,36 @@ impl<'a> Pager<'a> {
     ///
     /// A section without line numbering records nothing, so nothing else in
     /// the workspace pays for this.
-    fn record_numbered_lines(&mut self, lines: &[LayoutLine], top: f64) {
+    fn record_numbered_lines(
+        &mut self,
+        lines: &[LayoutLine],
+        paragraph: ParagraphView<'_>,
+        top: f64,
+        first_fragment: bool,
+    ) {
         if self.section_geometry.line_numbers.is_none() {
             return;
         }
         let track_x = self.geometry.margin_left;
         let mut y = top;
-        for line in lines {
-            self.numbered_lines.push(NumberedLine {
-                baseline: y + line.ascent,
-                track_x,
-            });
+        let top_padding = if first_fragment {
+            paragraph.borders.as_ref().map_or(0.0, |borders| {
+                crate::block::paragraph_border_padding(borders.top.as_ref())
+            })
+        } else {
+            0.0
+        };
+        for (index, line) in lines.iter().enumerate() {
+            y += paragraph.line_gaps.get(index).copied().unwrap_or(0.0);
+            let baseline =
+                if let Some(baseline) = paragraph_line_baseline(line, paragraph.baseline_policy) {
+                    // The painter removes framing from the content line before
+                    // applying the private baseline, then adds top padding once.
+                    y + if index == 0 { top_padding } else { 0.0 } + baseline
+                } else {
+                    y + line.ascent
+                };
+            self.numbered_lines.push(NumberedLine { baseline, track_x });
             y += line.height;
         }
     }
@@ -3500,7 +3576,7 @@ fn draw_note(
     let selected = first..first.saturating_add(count);
     let note_geometry = PageGeometry {
         margin_top: 0.0,
-        margin_left: geometry.margin_left + NOTE_INDENT,
+        margin_left: geometry.margin_left,
         ..geometry.without_columns()
     };
     let empty_media = HashMap::new();
@@ -3530,6 +3606,7 @@ fn draw_note(
         render_paragraph_lines(
             painted_lines,
             ParagraphView {
+                baseline_policy: None,
                 line_gaps: &[],
                 border_group_before: false,
                 block: &paragraph.block,
@@ -3614,6 +3691,7 @@ impl<'a> EndnoteFurniture<'a> {
             self.section.header_footer_semantics.as_ref(),
             self.section.title_pg,
             self.section.footnotes_beneath_text,
+            false,
             self.media,
             notes,
             self.fm,
@@ -4136,6 +4214,7 @@ fn render_shape_text(
         render_paragraph_lines(
             &para.lines,
             ParagraphView {
+                baseline_policy: None,
                 line_gaps: &[],
                 border_group_before: false,
                 block: para,
@@ -4512,6 +4591,13 @@ fn paginate_paragraph<B: LayoutBlockLike>(
     blocks: &[B],
     pager: &mut Pager,
 ) {
+    let para = ParagraphView {
+        baseline_policy: para
+            .semantics
+            .and_then(|semantics| semantics.tb_rl_exact_baseline)
+            .map(|(height, central)| (height, central, pager.fm)),
+        ..para
+    };
     let space_before = pager.space_before(para.space_before);
 
     // Flow the paragraph around anything floating in its band of the page,
@@ -4539,6 +4625,7 @@ fn paginate_paragraph<B: LayoutBlockLike>(
             .flatten()
     };
     let para = reflowed.as_ref().map_or(para, |reflowed| ParagraphView {
+        baseline_policy: para.baseline_policy,
         line_gaps: &reflowed.before_lines,
         border_group_before: para.border_group_before,
         block: &reflowed.paragraph,
@@ -4696,7 +4783,12 @@ fn paginate_paragraph<B: LayoutBlockLike>(
         &mut pager.elements,
         pager.media,
     );
-    pager.record_numbered_lines(&para.lines, pager.cursor_y + para.content_offset_top);
+    pager.record_numbered_lines(
+        &para.lines,
+        para,
+        pager.cursor_y + para.content_offset_top,
+        true,
+    );
     render_change_bar(
         para.block,
         pager.cursor_y,
@@ -4809,7 +4901,9 @@ fn render_para_split(
     );
     pager.record_numbered_lines(
         &para.lines[..split_at],
+        para,
         pager.cursor_y + para.content_offset_top,
+        true,
     );
     let first_height = para.content_offset_top
         + para.lines[..split_at]
@@ -4900,6 +4994,7 @@ fn render_para_split(
         };
         render_para_split(
             ParagraphView {
+                baseline_policy: para.baseline_policy,
                 line_gaps: &[],
                 border_group_before: para.border_group_before,
                 block: &temp_para,
@@ -4935,7 +5030,7 @@ fn render_para_split(
         &mut pager.elements,
         pager.media,
     );
-    pager.record_numbered_lines(remaining_lines, 0.0);
+    pager.record_numbered_lines(remaining_lines, para, 0.0, false);
     render_change_bar(
         para.block,
         0.0,
@@ -4952,6 +5047,63 @@ fn render_para_split(
     if ends_with_run_page_break {
         pager.trailing_run_page_break_before = Some(block_idx + 1);
     }
+}
+
+/// A rotated exact line keeps its raw advance and font metrics. This private
+/// paint baseline has separate line-height and actual face-metric authorities.
+/// Decorations and occupied container bands still use the restored line box.
+fn paragraph_line_baseline(
+    line: &LayoutLine,
+    policy: Option<(f64, bool, &FontManager)>,
+) -> Option<f64> {
+    let (height, central, fm) = policy?;
+    if !height.is_finite() || height <= 0.0 {
+        return None;
+    }
+    fn collect(item: &LineItem, fm: &FontManager, central: &mut Option<f64>, failed: &mut bool) {
+        let mut face = |font, size| match fm.metrics(font, size) {
+            Ok(metrics) => {
+                let value = (metrics.ascent - metrics.descent) / 2.0;
+                if value.is_finite() {
+                    *central = Some((*central).map_or(value, |prior| prior.max(value)));
+                } else {
+                    *failed = true;
+                }
+            }
+            Err(_) => *failed = true,
+        };
+        match item {
+            LineItem::Text(segment) | LineItem::Marker(segment) => {
+                face(segment.font_id, segment.font_size)
+            }
+            LineItem::MultilingualText(segment) => {
+                face(segment.base().font_id, segment.base().font_size)
+            }
+            LineItem::Tab {
+                leader: Some(segment),
+                ..
+            } => face(segment.font_id, segment.font_size),
+            LineItem::Group { group, .. } => {
+                oxml_layout::walk(&group.children, &mut |element, _| match element {
+                    PositionedElement::Text(run) => face(run.font_id, run.font_size),
+                    PositionedElement::MultilingualText(run) => face(run.font_id, run.font_size),
+                    _ => {}
+                })
+            }
+            LineItem::Figure { item, .. } => collect(item, fm, central, failed),
+            _ => {}
+        }
+    }
+    let mut central_metric = None;
+    let mut failed = false;
+    for item in &line.items {
+        collect(item, fm, &mut central_metric, &mut failed);
+    }
+    if failed {
+        return None;
+    }
+    let central_metric = central_metric?;
+    Some(0.8 * height + if central { central_metric } else { 0.0 })
 }
 
 /// Render paragraph lines as positioned elements.
@@ -5105,7 +5257,9 @@ fn render_paragraph_lines(
                 conditional_hyphen_visual_items(&line.items, &reflow.items, para.reflow_direction)
             })
             .unwrap_or_default();
-        let baseline_y = geometry.margin_top + y + line.ascent;
+        let baseline_y = geometry.margin_top
+            + y
+            + paragraph_line_baseline(line, para.baseline_policy).unwrap_or(line.ascent);
 
         // Compute x offset based on justification. Spaces that end the line
         // hang off its visual side, outside the aligned width.
@@ -5369,7 +5523,6 @@ fn render_paragraph_lines(
                 LineItem::Tab { width, leader, .. } => {
                     if let Some(leader_seg) = leader {
                         // Render the pre-shaped leader text
-                        let baseline_y = geometry.margin_top + y + line.ascent;
                         elements.push(PositionedElement::Text(GlyphRun {
                             origin: Point { x, y: baseline_y },
                             font_id: leader_seg.font_id,
@@ -6075,8 +6228,8 @@ fn frame_rect(
         _ => ST_RelativeFromH::Page,
     };
     let rel_v = match properties.v_anchor.as_deref() {
-        Some("margin") => ST_RelativeFromV::Margin,
-        None | Some("text") => ST_RelativeFromV::Paragraph,
+        None | Some("margin") => ST_RelativeFromV::Margin,
+        Some("text") => ST_RelativeFromV::Paragraph,
         _ => ST_RelativeFromV::Page,
     };
     Rect {
@@ -6143,6 +6296,7 @@ fn render_frame_blocks(
         render_paragraph_lines(
             &paragraph.lines,
             ParagraphView {
+                baseline_policy: None,
                 line_gaps: &[],
                 border_group_before: false,
                 block: paragraph,
@@ -6255,6 +6409,7 @@ fn render_hf_blocks(
         render_paragraph_lines(
             &para.lines,
             ParagraphView {
+                baseline_policy: None,
                 line_gaps: &prepared.before_lines[index],
                 border_group_before: false,
                 block: para,
@@ -6490,6 +6645,7 @@ fn render_table_row(
                     render_paragraph_lines(
                         &paragraph.lines,
                         ParagraphView {
+                            baseline_policy: None,
                             line_gaps: &[],
                             border_group_before: semantics
                                 .is_some_and(|value| value.border_group_before),
@@ -7418,6 +7574,7 @@ mod tests {
         render_paragraph_lines(
             &paragraph.lines,
             ParagraphView {
+                baseline_policy: None,
                 line_gaps: &[],
                 border_group_before: false,
                 block: &paragraph,
@@ -7512,6 +7669,7 @@ mod tests {
         render_paragraph_lines(
             &paragraph.lines,
             ParagraphView {
+                baseline_policy: None,
                 line_gaps: &[],
                 border_group_before: false,
                 block: &paragraph,
@@ -7605,6 +7763,7 @@ mod tests {
                 paragraph_mark: None,
             }));
             let semantics = ParagraphSemantics {
+                tb_rl_exact_baseline: None,
                 border_group_before: false,
                 source_node: Some(source_node),
                 structure_id: None,
@@ -7614,6 +7773,7 @@ mod tests {
             render_paragraph_lines(
                 &paragraph.lines,
                 ParagraphView {
+                    baseline_policy: None,
                     line_gaps: &[],
                     border_group_before: false,
                     block: &paragraph,
@@ -7669,6 +7829,7 @@ mod tests {
             let mut paragraph = make_para(1, 12.0);
             paragraph.lines[0].items = vec![LineItem::Text(marker)];
             let semantics = ParagraphSemantics {
+                tb_rl_exact_baseline: None,
                 border_group_before: false,
                 source_node: Some(rebound),
                 structure_id: None,
@@ -7678,6 +7839,7 @@ mod tests {
             render_paragraph_lines(
                 &paragraph.lines,
                 ParagraphView {
+                    baseline_policy: None,
                     line_gaps: &[],
                     border_group_before: false,
                     block: &paragraph,
@@ -7935,6 +8097,7 @@ mod tests {
             paragraph_mark: None,
         }));
         let semantics = ParagraphSemantics {
+            tb_rl_exact_baseline: None,
             border_group_before: false,
             source_node: Some(rebound),
             structure_id: None,
@@ -7944,6 +8107,7 @@ mod tests {
         render_paragraph_lines(
             &paragraph.lines,
             ParagraphView {
+                baseline_policy: None,
                 line_gaps: &[],
                 border_group_before: false,
                 block: &paragraph,
@@ -8076,6 +8240,7 @@ mod tests {
             render_paragraph_lines(
                 &paragraph.lines,
                 ParagraphView {
+                    baseline_policy: None,
                     line_gaps: &[],
                     border_group_before: false,
                     block: &paragraph,
@@ -8192,6 +8357,7 @@ mod tests {
         render_paragraph_lines(
             &paragraph.lines,
             ParagraphView {
+                baseline_policy: None,
                 line_gaps: &[],
                 border_group_before: false,
                 block: &paragraph,
@@ -8296,6 +8462,7 @@ mod tests {
         render_paragraph_lines(
             &paragraph.lines,
             ParagraphView {
+                baseline_policy: None,
                 line_gaps: &[],
                 border_group_before: false,
                 block: &paragraph,
@@ -8357,6 +8524,7 @@ mod tests {
         render_paragraph_lines(
             &paragraph.lines,
             ParagraphView {
+                baseline_policy: None,
                 line_gaps: &[],
                 border_group_before: false,
                 block: &paragraph,
@@ -9932,6 +10100,7 @@ mod tests {
         let shared = |block: Arc<ParagraphBlock>| SharedLayoutBlock::Paragraph {
             block,
             semantics: crate::block::ParagraphSemantics {
+                tb_rl_exact_baseline: None,
                 border_group_before: false,
                 source_node: None,
                 structure_id: None,
@@ -10080,6 +10249,379 @@ mod tests {
         }
     }
 
+    fn issue424_drawing_obstacles(
+        mut blocks: Vec<ParagraphBlock>,
+        mut facts: Vec<HeaderFooterBlockSemantics>,
+    ) -> (Vec<ParagraphBlock>, Vec<HeaderFooterBlockSemantics>) {
+        for (block, fact) in blocks.iter_mut().zip(&mut facts) {
+            let HeaderFooterPlacement::Frame { properties, .. } = &fact.placement else {
+                continue;
+            };
+            let drawing = AnchoredDrawing {
+                rotation_degrees: 0.0,
+                behind_doc: false,
+                rel_h: ST_RelativeFromH::Margin,
+                off_h: properties.x.map_or(0.0, |v| v.to_pt()),
+                rel_v: if properties.v_anchor.as_deref() == Some("text") {
+                    ST_RelativeFromV::Paragraph
+                } else {
+                    ST_RelativeFromV::Page
+                },
+                off_v: properties.y.map_or(0.0, |v| v.to_pt()),
+                width: properties.w.unwrap().to_pt(),
+                height: properties.h.unwrap().to_pt(),
+                wrap: if properties.wrap.as_deref() == Some("notBeside") {
+                    WrapType::TopAndBottom
+                } else {
+                    WrapType::Square
+                },
+                dist_top: 0.0,
+                dist_bottom: 0.0,
+                dist_left: 0.0,
+                dist_right: 0.0,
+                align_h: None,
+                align_v: None,
+                content: AnchoredContent::Shape {
+                    preset: ShapePreset::Rect,
+                    fill: None,
+                    text: Vec::new(),
+                },
+                alternate_text: None,
+                structure_id: None,
+            };
+            block.lines.clear();
+            block.anchored.push(drawing);
+            fact.placement = HeaderFooterPlacement::Flow;
+        }
+        (blocks, facts)
+    }
+
+    #[test]
+    fn issue424_tb_rl_baseline_keeps_reflow_metrics_decorations_groups_and_container_boxes_distinct()
+     {
+        for rich in [false, true] {
+            let rtl = if rich { "<w:rtl/>" } else { "" };
+            let text = if rich {
+                "אבגד flowword ".repeat(30)
+            } else {
+                "flowword ".repeat(30)
+            };
+            let body = format!(
+                r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:hyperlink r:id="link"><w:r><w:rPr>{rtl}<w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="32"/><w:position w:val="4"/><w:u w:val="single"/><w:strike/><w:highlight w:val="yellow"/></w:rPr><w:t>{text}</w:t></w:r></w:hyperlink><w:fldSimple w:instr="PAGE"><w:r><w:rPr><w:rFonts w:ascii="Arial"/><w:sz w:val="32"/></w:rPr><w:t>0</w:t></w:r></w:fldSimple></w:p>"#
+            );
+            let mut input = fx233_input(&body);
+            input
+                .hyperlink_urls
+                .insert("link".into(), "https://example.com/rotated".into());
+            let rdocx_oxml::BodyContent::Paragraph(source) = &input.document.body.content[0] else {
+                unreachable!()
+            };
+            let mut fm = FontManager::new_deterministic().unwrap();
+            let original = crate::engine::layout_paragraph_with_source(
+                source,
+                468.0,
+                &input.styles,
+                &input,
+                &MediaRegistry::new(&input.images),
+                &mut fm,
+                &mut crate::style_resolver::NumberingState::new(),
+                &mut Vec::new(),
+                None,
+            )
+            .unwrap();
+            let original_bytes = format!("{original:?}");
+            let geometry = PageGeometry::default();
+            let wraps = [PlacedWrap {
+                rect: Rect {
+                    x: 72.0,
+                    y: 82.0,
+                    width: 72.0,
+                    height: 24.0,
+                },
+                wrap: WrapType::Square,
+                dist_top: 0.0,
+                dist_bottom: 0.0,
+                dist_left: 0.0,
+                dist_right: 0.0,
+            }];
+            let reflow = reflow_around_wraps(
+                &original,
+                if rich {
+                    TextDirection::RightToLeft
+                } else {
+                    TextDirection::Auto
+                },
+                &wraps,
+                10.0,
+                &geometry,
+                &fm,
+                WrapReflowPolicy::Furniture,
+            )
+            .unwrap()
+            .unwrap();
+            let repeated = reflow_around_wraps(
+                &original,
+                if rich {
+                    TextDirection::RightToLeft
+                } else {
+                    TextDirection::Auto
+                },
+                &wraps,
+                10.0,
+                &geometry,
+                &fm,
+                WrapReflowPolicy::Furniture,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                format!("{:?}", reflow.paragraph.lines),
+                format!("{:?}", repeated.paragraph.lines)
+            );
+            assert_ne!(
+                format!("{:?}", original.lines),
+                format!("{:?}", reflow.paragraph.lines),
+                "must rebreak actual lines"
+            );
+            let raw = format!("{:?}", reflow.paragraph.lines);
+            let mut elements = Vec::new();
+            render_paragraph_lines(
+                &reflow.paragraph.lines,
+                ParagraphView {
+                    baseline_policy: Some((12.0, true, &fm)),
+                    line_gaps: &reflow.before_lines,
+                    border_group_before: false,
+                    block: &reflow.paragraph,
+                    semantics: None,
+                    reflow_direction: if rich {
+                        TextDirection::RightToLeft
+                    } else {
+                        TextDirection::Auto
+                    },
+                    reflow_allowed: false,
+                },
+                &geometry,
+                10.0,
+                (true, true, 0.0),
+                &mut elements,
+                &HashMap::new(),
+            );
+            let mut glyphs = 0;
+            let mut boxes = 0;
+            let mut fields = 0;
+            let mut decorations = 0;
+            let font = fm
+                .resolve_font_for_metrics(Some("Arial"), false, false)
+                .unwrap();
+            let metrics = fm.metrics(font, 16.0).unwrap();
+            let baseline = 0.8 * 12.0 + (metrics.ascent - metrics.descent) / 2.0;
+            let mut decorated_metrics = None;
+            for line in &reflow.paragraph.lines {
+                for item in &line.items {
+                    let segment = match item {
+                        LineItem::Text(segment) => Some(segment),
+                        LineItem::MultilingualText(segment) => Some(segment.base()),
+                        _ => None,
+                    };
+                    if let Some(segment) = segment.filter(|segment| segment.strike) {
+                        let observed = (segment.ascent, segment.descent);
+                        if let Some(previous) = decorated_metrics {
+                            assert_eq!(previous, observed, "fixture has uniform decorated metrics");
+                        } else {
+                            decorated_metrics = Some(observed);
+                        }
+                    }
+                }
+            }
+            let (strike_ascent, underline_descent) =
+                decorated_metrics.expect("actual raw decorated items");
+            oxml_layout::walk(&elements, &mut |element, transform| {
+                let run = match element {
+                    PositionedElement::Text(run) => {
+                        Some((run.origin, run.field_kind, run.text.as_str()))
+                    }
+                    PositionedElement::MultilingualText(run) => {
+                        Some((run.origin, run.field_kind, run.logical_text.as_str()))
+                    }
+                    _ => None,
+                };
+                if let Some((origin, field, text)) = run
+                    && !text.is_empty()
+                {
+                    glyphs += 1;
+                    let physical = transform.apply(origin);
+                    let authored_raise = if field.is_some() { 0.0 } else { 2.0 };
+                    let line = (physical.y - 82.0 - baseline + authored_raise) / 12.0;
+                    assert!(
+                        (line - line.round()).abs() < 0.001,
+                        "rich={rich}, text={text}, origin={physical:?}, baseline={baseline}"
+                    );
+                    if field == Some(oxml_layout::FieldKind::Page) {
+                        fields += 1;
+                    }
+                }
+                match element {
+                    PositionedElement::FilledRect { rect, .. }
+                    | PositionedElement::LinkAnnotation { rect, .. } => {
+                        boxes += 1;
+                        let rect = transform.transform_rect_bbox(*rect);
+                        assert!((rect.height - 12.0).abs() < 0.001);
+                        let line = (rect.y - 82.0) / 12.0;
+                        assert!(
+                            (line - line.round()).abs() < 0.001,
+                            "container remains the restored line band: {rect:?}"
+                        );
+                    }
+                    PositionedElement::Line { start, .. } => {
+                        decorations += 1;
+                        let y = transform.apply(*start).y;
+                        // Every underline/strike follows the moved glyph baseline,
+                        // including the authored2pt raise, rather than the raw ascent.
+                        let underline =
+                            (y - 82.0 - baseline + 2.0 - underline_descent * 0.3) / 12.0;
+                        let strike = (y - 82.0 - baseline + 2.0 + strike_ascent * 0.3) / 12.0;
+                        assert!(
+                            (underline - underline.round()).abs() < 0.001
+                                || (strike - strike.round()).abs() < 0.001,
+                            "rich={rich}, decoration y={y}, raw ascent={strike_ascent}, raw descent={underline_descent}"
+                        );
+                    }
+                    _ => {}
+                }
+            });
+            assert!(
+                glyphs > 10 && boxes > 10 && decorations > 10 && fields == 1,
+                "all actual paint consumers must execute: {glyphs}/{boxes}/{decorations}/{fields}"
+            );
+            assert_eq!(
+                raw,
+                format!("{:?}", reflow.paragraph.lines),
+                "painting preserves transient metrics"
+            );
+            assert_eq!(original_bytes, format!("{original:?}"));
+
+            // An actual nested MarkedContent/Group text carrier shares the same
+            // policy without replacing the child's font, size or local offset.
+            let glyph = elements
+                .iter()
+                .find_map(|e| match e {
+                    PositionedElement::Text(run) if !run.text.is_empty() => Some(run.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| {
+                    elements
+                        .iter()
+                        .find_map(|e| match e {
+                            PositionedElement::MultilingualText(run) => {
+                                Some(run.legacy_projection())
+                            }
+                            _ => None,
+                        })
+                        .unwrap()
+                });
+            let mut glyph = glyph;
+            glyph.origin = Point { x: 0.0, y: 8.0 };
+            let child_before = glyph.clone();
+            let mut grouped = original.clone();
+            grouped.lines[0].items = vec![LineItem::Group {
+                width: 30.0,
+                height: 12.0,
+                baseline: Some(10.0),
+                group: GroupElement {
+                    transform: Transform::IDENTITY,
+                    clip: None,
+                    opacity: 1.0,
+                    effects: Vec::new(),
+                    children: vec![PositionedElement::MarkedContent {
+                        structure: None,
+                        children: vec![PositionedElement::Text(glyph)],
+                    }],
+                },
+            }];
+            let group_raw = format!("{:?}", grouped.lines);
+            let mut painted = Vec::new();
+            render_paragraph_lines(
+                &grouped.lines[..1],
+                ParagraphView {
+                    baseline_policy: Some((12.0, true, &fm)),
+                    line_gaps: &[],
+                    border_group_before: false,
+                    block: &grouped,
+                    semantics: None,
+                    reflow_direction: TextDirection::Auto,
+                    reflow_allowed: false,
+                },
+                &geometry,
+                10.0,
+                (true, true, 0.0),
+                &mut painted,
+                &HashMap::new(),
+            );
+            let mut found = 0;
+            oxml_layout::walk(&painted, &mut |element, transform| {
+                if let PositionedElement::Text(run) = element {
+                    found += 1;
+                    assert_eq!(run, &child_before);
+                    assert!((transform.apply(run.origin).y - 82.0 - baseline + 2.0).abs() < 0.001);
+                }
+            });
+            assert_eq!(found, 1);
+            assert_eq!(group_raw, format!("{:?}", grouped.lines));
+
+            // A graphics-only line supplies no text-face metric authority.
+            // The text policy must retain its existing explicit group baseline.
+            let mut graphic = original.clone();
+            graphic.lines[0].ascent = 18.0;
+            graphic.lines[0].descent = 2.0;
+            graphic.lines[0].items = vec![LineItem::Group {
+                width: 20.0,
+                height: 20.0,
+                baseline: Some(18.0),
+                group: GroupElement {
+                    transform: Transform::IDENTITY,
+                    clip: None,
+                    opacity: 1.0,
+                    effects: Vec::new(),
+                    children: vec![PositionedElement::FilledRect {
+                        rect: Rect {
+                            x: 0.0,
+                            y: 0.0,
+                            width: 20.0,
+                            height: 20.0,
+                        },
+                        color: Color::BLACK,
+                    }],
+                },
+            }];
+            let mut graphic_paints = Vec::new();
+            for policy in [None, Some((12.0, true, &fm))] {
+                let mut painted = Vec::new();
+                render_paragraph_lines(
+                    &graphic.lines[..1],
+                    ParagraphView {
+                        baseline_policy: policy,
+                        line_gaps: &[],
+                        border_group_before: false,
+                        block: &graphic,
+                        semantics: None,
+                        reflow_direction: TextDirection::Auto,
+                        reflow_allowed: false,
+                    },
+                    &geometry,
+                    10.0,
+                    (true, true, 0.0),
+                    &mut painted,
+                    &HashMap::new(),
+                );
+                graphic_paints.push(format!("{painted:?}"));
+            }
+            assert_eq!(
+                graphic_paints[0], graphic_paints[1],
+                "a text baseline cannot move a carrier without qualified text metrics"
+            );
+        }
+    }
+
     #[test]
     fn issue424_furniture_clearance_keeps_decorated_text_and_hit_boxes_in_content_bands() {
         let mut failures = Vec::new();
@@ -10150,15 +10692,17 @@ mod tests {
                 HeaderFooterBlockSemantics::default(),
             ];
             let original = vec![make_para(1, 12.0), make_para(1, 12.0), paragraph];
-            let before = format!("{original:?}");
+
             let geometry = PageGeometry {
                 header_distance: 18.0,
                 footer_distance: 18.0,
                 ..Default::default()
             };
+            let (original, facts) = issue424_drawing_obstacles(original, facts);
+            let before = format!("{original:?}");
             let prepared =
                 prepare_furniture(&original, Some(&facts), &geometry, footer, &fm).unwrap();
-            let obstacle = prepared.placements[1].unwrap();
+            let obstacle = prepared.wraps[1].rect;
             let mut elements = Vec::new();
             let mut behind = Vec::new();
             let mut front = Vec::new();
@@ -10283,7 +10827,7 @@ mod tests {
                 }
                 let natural_first = shaped[0].lines[0].ascent;
                 let original = vec![make_para(1, 12.0), shaped.remove(0), shaped.remove(0)];
-                let before = format!("{original:?}");
+
                 let facts = vec![
                     HeaderFooterBlockSemantics {
                         placement: HeaderFooterPlacement::Frame {
@@ -10318,6 +10862,8 @@ mod tests {
                     footer_distance: 18.0,
                     ..Default::default()
                 };
+                let (original, facts) = issue424_drawing_obstacles(original, facts);
+                let before = format!("{original:?}");
                 let prepared =
                     prepare_furniture(&original, Some(&facts), &geometry, footer, &fm).unwrap();
                 let mut elements = Vec::new();
@@ -10331,7 +10877,7 @@ mod tests {
                     (&mut elements, &mut behind, &mut front),
                     &HashMap::new(),
                 );
-                let obstacle = prepared.placements[0].unwrap();
+                let obstacle = prepared.wraps[0].rect;
                 let mut flow = Vec::new();
                 let mut following = Vec::new();
                 oxml_layout::walk(&elements, &mut |element, transform| {
@@ -10468,15 +11014,17 @@ mod tests {
                     HeaderFooterBlockSemantics::default(),
                 ];
                 let source = vec![make_para(1, 12.0), make_para(1, 12.0), paragraph];
-                let before = format!("{source:?}");
+
                 let geometry = PageGeometry {
                     header_distance: 18.0,
                     footer_distance: 18.0,
                     ..Default::default()
                 };
+                let (source, facts) = issue424_drawing_obstacles(source, facts);
+                let before = format!("{source:?}");
                 let prepared =
                     prepare_furniture(&source, Some(&facts), &geometry, footer, &fm).unwrap();
-                let obstacle = prepared.placements[1].unwrap();
+                let obstacle = prepared.wraps[1].rect;
                 let mut y = prepared.starts[2] + prepared.blocks[2].content_offset_top;
                 let mut reached = false;
                 for (index, line) in prepared.blocks[2].lines.iter().enumerate() {
@@ -10570,6 +11118,7 @@ mod tests {
         render_paragraph_lines(
             &adjusted.lines,
             ParagraphView {
+                baseline_policy: None,
                 line_gaps: &[],
                 block: &adjusted,
                 border_group_before: false,
@@ -10689,6 +11238,7 @@ mod tests {
         render_paragraph_lines(
             &paragraph.lines,
             ParagraphView {
+                baseline_policy: None,
                 line_gaps: &[],
                 border_group_before: false,
                 block: &paragraph,
@@ -11068,6 +11618,7 @@ mod tests {
             None,
             false,
             false,
+            false,
             &media,
             &notes,
             &fm,
@@ -11115,6 +11666,7 @@ mod tests {
                 None,
                 false,
                 false,
+                false,
                 &media,
                 &notes,
                 &fm,
@@ -11148,6 +11700,7 @@ mod tests {
         ];
 
         let context = PassContext {
+            written_tb_rl_band: false,
             geometry: PageGeometry::default(),
             header_footer: None,
             header_footer_semantics: None,

@@ -109,6 +109,7 @@ pub enum LayoutBlock {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ParagraphSemantics {
+    pub tb_rl_exact_baseline: Option<(f64, bool)>,
     // Facing group edges are removed only on transient layout clones.
     pub border_group_before: bool,
     pub source_node: Option<SourceNodeId>,
@@ -175,6 +176,7 @@ impl SharedLayoutBlock {
 
 #[derive(Clone, Copy)]
 pub(crate) struct ParagraphView<'a> {
+    pub baseline_policy: Option<(f64, bool, &'a oxml_layout::FontManager)>,
     pub line_gaps: &'a [f64],
     pub border_group_before: bool,
     pub block: &'a ParagraphBlock,
@@ -255,6 +257,7 @@ impl LayoutBlockLike for LayoutBlock {
     fn paragraph(&self) -> Option<ParagraphView<'_>> {
         match self {
             Self::Paragraph(block) => Some(ParagraphView {
+                baseline_policy: None,
                 line_gaps: &[],
                 border_group_before: false,
                 block,
@@ -293,6 +296,7 @@ impl LayoutBlockLike for SharedLayoutBlock {
             Self::Paragraph {
                 block, semantics, ..
             } => Some(ParagraphView {
+                baseline_policy: None,
                 line_gaps: &[],
                 border_group_before: semantics.border_group_before,
                 block,

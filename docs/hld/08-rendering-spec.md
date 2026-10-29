@@ -961,6 +961,29 @@ fills one band, so its column tracks are dropped and
 the two would transpose each track about its own centre while the page rotates
 about one, which is a wrong picture rather than a missing one.
 
+For a main-body section whose source direction is exactly `tbRl`, the physical
+body band retains the written margins before transposition and section vertical
+alignment. Selected ordinary header/footer flow does not replace that rotated
+band with the horizontal furniture-cleared band. The same-angle `tbRlV` source,
+other orientations and table-cell rotation retain their existing policies.
+
+Main-body `tbRl` paragraphs with positive exact line spacing carry a private
+baseline policy resolved through styles, numbering and direct properties.
+Explicit baseline alignment uses 0.8 times the exact line height. Absent, auto
+and center alignment add half the sum of actual face ascent and signed descent,
+scaled to the actual run size. A graphics-only line or unavailable face metrics
+retain the existing baseline rather than supplying an unqualified text offset.
+Raw cached and transient line advances,
+font metrics, font identity and authored baseline offsets remain unchanged.
+The separate baseline is applied when painting each fresh or reflowed line,
+including rich text, field substitutions and nested text groups. Body line
+numbers use the same baseline and price top border padding once. Underline and
+strike positions follow that same baseline. Highlight, link and fragment boxes
+retain the actual line container band. Wrapping reservations price that same raw
+line-height band before and after rebreaking, without accumulating a baseline
+adjustment. Upright notes and furniture do not inherit this body policy. These
+bounded rules do not qualify general mixed-font or other vertical contexts.
+
 Right-to-left tables reverse visual column placement without changing logical
 cell ownership. Both grammars satisfy that sentence. The DrawingML `a:tbl`
 reverses inside the slide renderer. A WordprocessingML `w:bidiVisual` table
@@ -1541,7 +1564,13 @@ engines compare the changed theme and font bytes in their full context.
 A normal note keeps its package ID as its layout lookup key. The visible
 footnote and endnote labels are assigned independently from the first body
 reference to each note in projected document order. The same label shapes the
-body superscript and the marker beside the note. Reordering the note part does
+body superscript and an actual authored note-body marker. Qualified raw
+footnoteRef and endnoteRef events render at their source run boundary using
+resolved run styles. Imported marker absence remains absence. Literal custom
+marks remain ordinary source text and render once. New native footnote and
+endnote constructors publish explicit matching styled markers, including the
+legacy add_footnote constructor. Older imported packages are interpreted from
+their actual source, without guessing their creating API. Reordering the note part does
 not renumber either marker. A removed note leaves the remaining IDs stable
 while the displayed sequence closes the gap. The effective document and
 section policy selects decimal, Roman, or alphabetic labels, a one-based start,
@@ -1553,7 +1582,20 @@ at the section end follow that section's final body content. Document-end
 endnotes begin in the measured free band of the final body page and carry to a
 later page if needed. Footnotes reserve space on each reference page, either
 at the page bottom or beneath the body under the effective policy. Authored
-separator content replaces the synthetic rule. A carried note uses its
+separator content replaces the synthetic rule. Separator-only raw mark events
+are visible content, including their resolved paragraph metrics. A present
+empty authored record stays distinct from an absent record. Notes use full
+section width with resolved paragraph indents and tabs for both measurement
+and paint. Private current-note context is restored after success or error,
+without turning a note-body marker into a body reference.
+
+Prediction and committed note splitting consume one ordered source line-range
+plan. A short fresh note that fits a fresh effective page retains whole-note
+movement. An intrinsically long note may start beside its placed reference
+with a nonempty first fragment. Carried notes precede fresh notes, with selected
+separator and continuation-notice costs included once. A single line exceeding
+the usable note area after notice costs overflows once on a note-only page rather than losing
+source or repeating without progress. A carried note uses its
 continuation separator at the next page and its continuation notice at the
 page from which content continues. The pinned Word for Mac 16.113.2 build
 shows both document-end notes on the final body page, section-end notes after
@@ -1870,12 +1912,23 @@ Floating furniture tables use the existing within-page overlap policy. Each
 physical table settles once against prior tables in story order. Its whole
 settled rectangle supplies every row, wrap reservation and paint position.
 Drawings and ordinary frames do not enter the table-only overlap relation.
+Same-story ordinary header/footer flow ignores paragraph-frame obstacles.
+Tables and drawings retain their own wrapping policy. Selected prepared frame
+rectangles reserve actual intersecting main-body bands through the existing
+body wrap policy. Paint and body obstacles share one physical rectangle on
+written page geometry, including footer and selected first/even/default stories.
+Touching and disjoint bands do not reserve body text. Floating frame paint
+never becomes ordinary furniture flow height.
 
 Adjacent paragraphs with equal ordinary `framePr` values form one positioned
 group anchored to the first following non-frame paragraph. Frame content keeps
-its source and field identities and emits once. Omitted horizontal/vertical
-anchors follow documented Word text/text defaults rather than ECMA page/page
-defaults. A nonzero height with absent height rule uses Word's atLeast behavior,
+its source and field identities and emits once. Ordinary header/footer frames
+retain authored vertical-anchor presence. In this qualified furniture context,
+Word16.114 observations resolve an omitted vertical anchor on the written
+margin basis, while explicit text uses its actual following story paragraph.
+The documented generic MS-OE376 text default does not predict that observed
+context. Omitted horizontal anchors use the text/column basis. Imported
+attributes and general body-frame/drop-cap semantics remain unchanged. A nonzero height with absent height rule uses Word's atLeast behavior,
 and zero height is automatic. Explicit values remain authoritative. Imported
 attributes are unchanged. Drop and margin drop-cap modes keep the existing
 unsupported fallback and do not enter ordinary positioned frame layout.

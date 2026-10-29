@@ -4477,6 +4477,76 @@ impl Engine {
                         registry.bind_text_boxes(paragraph, Some(source))?;
                     }
 
+                    if sect_pr_for_layout.text_direction.as_deref() == Some("tbRl") {
+                        let direct = para.properties.as_ref();
+                        let mut effective = style_resolver::resolve_paragraph_properties(
+                            direct.and_then(|p| p.style_id.as_deref()),
+                            styles,
+                        );
+                        let num_id = direct.and_then(|p| p.num_id).or(effective.num_id);
+                        let level = direct
+                            .and_then(|p| p.num_ilvl)
+                            .or(effective.num_ilvl)
+                            .unwrap_or(0);
+                        if let (Some(id), Some(numbering)) = (num_id, input.numbering.as_ref())
+                            && let Some(properties) =
+                                style_resolver::level_paragraph_properties(id, level, numbering)
+                        {
+                            merge_direct_ppr(&mut effective, properties);
+                        }
+                        if let Some(direct) = direct {
+                            merge_direct_ppr(&mut effective, direct);
+                        }
+                        let policy = (effective.line_rule.as_deref() == Some("exact"))
+                            .then_some(effective.line_spacing)
+                            .flatten()
+                            .filter(|height| height.0 > 0)
+                            .and_then(|height| match effective.text_alignment.as_deref() {
+                                None | Some("auto" | "center") => Some((height.to_pt(), true)),
+                                Some("baseline") => Some((height.to_pt(), false)),
+                                _ => None,
+                            });
+                        if let Some(policy) = policy {
+                            block = match block {
+                                SharedLayoutBlock::Paragraph {
+                                    block,
+                                    mut semantics,
+                                    body_index,
+                                } => {
+                                    semantics.tb_rl_exact_baseline = Some(policy);
+                                    SharedLayoutBlock::Paragraph {
+                                        block,
+                                        semantics,
+                                        body_index,
+                                    }
+                                }
+                                SharedLayoutBlock::Owned {
+                                    block,
+                                    border_group_before,
+                                    reflow_direction,
+                                    body_index,
+                                } => {
+                                    let LayoutBlock::Paragraph(paragraph) = *block else {
+                                        unreachable!()
+                                    };
+                                    let structure_id = paragraph.structure_id;
+                                    SharedLayoutBlock::Paragraph {
+                                        block: Arc::new(paragraph),
+                                        semantics: ParagraphSemantics {
+                                            border_group_before,
+                                            source_node: source,
+                                            structure_id,
+                                            reflow_direction,
+                                            tb_rl_exact_baseline: Some(policy),
+                                        },
+                                        body_index,
+                                    }
+                                }
+                                SharedLayoutBlock::Table { .. } => unreachable!(),
+                            };
+                        }
+                    }
+
                     if let Some(source) = source {
                         let paragraph = match &block {
                             SharedLayoutBlock::Owned { block, .. } => match block.as_ref() {
@@ -4540,6 +4610,7 @@ impl Engine {
                             });
                         block::collapse_shared_border_groups(&mut current_blocks);
                         sections.push(paginator::SharedSection {
+                            written_tb_rl_band: sect_pr.text_direction.as_deref() == Some("tbRl"),
                             continuous: sect_pr.section_type
                                 == Some(rdocx_oxml::shared::ST_SectionType::Continuous),
                             blocks: std::mem::take(&mut current_blocks),
@@ -4643,6 +4714,7 @@ impl Engine {
             });
         block::collapse_shared_border_groups(&mut current_blocks);
         sections.push(paginator::SharedSection {
+            written_tb_rl_band: final_sect_pr.text_direction.as_deref() == Some("tbRl"),
             continuous: final_sect_pr.section_type
                 == Some(rdocx_oxml::shared::ST_SectionType::Continuous),
             blocks: current_blocks,
@@ -5946,6 +6018,7 @@ impl Engine {
             return Ok(SharedLayoutBlock::Paragraph {
                 block: Arc::clone(&entry.block),
                 semantics: ParagraphSemantics {
+                    tb_rl_exact_baseline: None,
                     border_group_before: false,
                     source_node,
                     structure_id: None,
@@ -6001,6 +6074,7 @@ impl Engine {
             return Ok(SharedLayoutBlock::Paragraph {
                 block,
                 semantics: ParagraphSemantics {
+                    tb_rl_exact_baseline: None,
                     border_group_before: false,
                     source_node,
                     structure_id: None,
@@ -6804,6 +6878,7 @@ fn table_semantics(
                                     table::CellBlock::Paragraph(_),
                                     CellBlockSemantics::Paragraph(retained),
                                 ) => CellBlockSemantics::Paragraph(ParagraphSemantics {
+                                    tb_rl_exact_baseline: None,
                                     border_group_before: retained.border_group_before,
                                     source_node: sources
                                         .and_then(|sources| sources.id(story, &source_path)),
@@ -10529,7 +10604,95 @@ fn layout_paragraph_with_source_and_table(
 
         let run_inline_start = inline_items.len();
         let content_char_starts = projected_content_char_starts(run);
-        for (content_index, content) in run.content.iter().enumerate() {
+        let note_events = if num_state.note_body_context.is_some() {
+            crate::notes::run_note_events(run)?
+        } else {
+            Vec::new()
+        };
+        for (content_index, content) in run
+            .content
+            .iter()
+            .map(Some)
+            .chain(std::iter::once(None))
+            .enumerate()
+        {
+            for (_, event) in note_events
+                .iter()
+                .filter(|(position, _)| *position == content_index)
+            {
+                if matches!(event.as_str(), "separator" | "continuationSeparator") {
+                    let width = available_width
+                        * if event == "continuationSeparator" {
+                            1.0
+                        } else {
+                            crate::notes::SEPARATOR_WIDTH_FRACTION
+                        };
+                    inline_items.push(InlineItem::Group {
+                        width,
+                        height: 0.0,
+                        baseline: None,
+                        group: GroupElement {
+                            transform: Transform::IDENTITY,
+                            clip: None,
+                            opacity: 1.0,
+                            effects: Vec::new(),
+                            children: vec![PositionedElement::Line {
+                                start: Point { x: 0.0, y: 0.0 },
+                                end: Point { x: width, y: 0.0 },
+                                width: 0.5,
+                                color,
+                                dash_pattern: None,
+                            }],
+                        },
+                    });
+                } else if let Some(note) = num_state.note_body_context
+                    && ((note.stream == NoteStream::Footnote && event == "footnoteRef")
+                        || (note.stream == NoteStream::Endnote && event == "endnoteRef"))
+                {
+                    let text = num_state.note_label(note);
+                    let (size, rise) = if matches!(
+                        effective_rpr.vert_align.as_deref(),
+                        Some("superscript" | "subscript")
+                    ) {
+                        (font_size, baseline_offset)
+                    } else {
+                        (font_size * 0.58, font_size * 0.33 + baseline_offset)
+                    };
+                    let marker_font =
+                        fm.resolve_font_for_text(font_family.as_deref(), bold, italic, &text)?;
+                    let shaped = fm.shape_text(marker_font, &text, size)?;
+                    let marker_metrics = fm.metrics(marker_font, size)?;
+                    inline_items.push(InlineItem::Text(TextSegment {
+                        text,
+                        direction: TextDirection::Auto,
+                        source: None,
+                        font_id: marker_font,
+                        font_size: size,
+                        glyph_ids: shaped.glyph_ids,
+                        advances: shaped.advances,
+                        width: shaped.width,
+                        ascent: marker_metrics.ascent,
+                        descent: marker_metrics.descent,
+                        line_gap: 0.0,
+                        color,
+                        bold,
+                        italic,
+                        underline,
+                        strike,
+                        dstrike,
+                        highlight,
+                        baseline_offset: rise,
+                        hyperlink_url: current_hyperlink_url.clone(),
+                        field_kind: None,
+                        field_source: None,
+                        note: None,
+                        note_reference_source: None,
+                    }));
+                }
+            }
+            let Some(content) = content else {
+                break;
+            };
             let content_char_start = projected_run_start + content_char_starts[content_index];
             match content {
                 RunContent::Text(ct_text) | RunContent::DeletedText(ct_text) => {
@@ -12518,6 +12681,9 @@ fn merge_direct_ppr(effective: &mut CT_PPr, direct: &CT_PPr) {
     }
     if direct.line_spacing.is_some() {
         effective.line_spacing = direct.line_spacing;
+    }
+    if direct.text_alignment.is_some() {
+        effective.text_alignment = direct.text_alignment.clone();
     }
     if direct.line_rule.is_some() {
         effective.line_rule = direct.line_rule.clone();
@@ -21954,9 +22120,31 @@ mod tests {
                 .saturating_add(1);
             assert_eq!(page.page_number, index + 1);
             assert_eq!(page.displayed_page_number, expected);
+            let note_owner = result
+                .pages
+                .iter()
+                .find_map(|owner_page| {
+                    let mut owns = false;
+                    oxml_layout::walk(&owner_page.elements, &mut |element, _| {
+                        if let PositionedElement::Text(run) = element
+                            && run
+                                .note
+                                .is_some_and(|note| note.stream == NoteStream::Endnote)
+                        {
+                            owns = true;
+                        }
+                    });
+                    owns.then_some(owner_page.displayed_page_number)
+                })
+                .expect("actual body reference owner");
+            assert_ne!(
+                note_owner, page.displayed_page_number,
+                "printed page differs from its note's body owner"
+            );
             assert!(
-                rendered_text(page).contains(&format!("ENDNOTE_PAGE={expected}")),
-                "PAGE substitution must use the continued displayed number"
+                rendered_text(page).contains(&format!("ENDNOTE_PAGE={note_owner}")),
+                "PAGE uses actual note reference owner, printed continuation keeps {expected}: {}",
+                rendered_text(page)
             );
         };
 
@@ -25052,6 +25240,19 @@ mod tests {
 
     /// Build a document whose single body paragraph references footnote 1, and
     /// whose footnote 1 is one paragraph made of `note_runs` separate runs.
+    fn authored_note_fixture(note_runs: &[&str], stream: NoteStream) -> CT_P {
+        let marker = if stream == NoteStream::Footnote {
+            "footnoteRef"
+        } else {
+            "endnoteRef"
+        };
+        let mut note=CT_P::from_xml_fragment(format!(r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:pPr><w:tabs><w:tab w:val="left" w:pos="240"/></w:tabs><w:ind w:left="240" w:hanging="240"/></w:pPr><w:r><w:{marker}/></w:r><w:r><w:tab/></w:r></w:p>"#).as_bytes()).unwrap();
+        for text in note_runs {
+            note.add_run(text);
+        }
+        note
+    }
+
     fn make_input_with_footnote(note_runs: &[&str]) -> LayoutInput {
         use rdocx_oxml::footnotes::{CT_Footnote, CT_Footnotes, NoteType};
         use rdocx_oxml::text::CT_R;
@@ -25067,10 +25268,8 @@ mod tests {
         body.runs.push(marker_run);
         doc.body.add_paragraph(body);
 
-        let mut note = CT_P::new();
-        for text in note_runs {
-            note.add_run(text);
-        }
+        // Historical hanging/tab placement is now explicit source.
+        let note = authored_note_fixture(note_runs, NoteStream::Footnote);
 
         LayoutInput {
             sequence_snapshot: None,
@@ -25123,7 +25322,7 @@ mod tests {
             ind_right: Some(rdocx_oxml::units::Twips(8_500)),
             ..Default::default()
         });
-        note.runs[0].properties = Some(rdocx_oxml::properties::CT_RPr {
+        note.runs.last_mut().unwrap().properties = Some(rdocx_oxml::properties::CT_RPr {
             language: Some("en-US".to_owned()),
             ..Default::default()
         });
@@ -25257,7 +25456,7 @@ mod tests {
             body.runs.push(marker_run);
             doc.body.add_paragraph(body);
 
-            let mut note = CT_P::new();
+            let mut note = CT_P::from_xml_fragment(br#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:r><w:footnoteRef/></w:r></w:p>"#).unwrap();
             note.add_run("Alpha");
             if with_tab {
                 let mut tab_run = CT_R::new("");
@@ -25397,15 +25596,15 @@ mod tests {
             entries.push(CT_Footnote {
                 id: 0,
                 note_type: NoteType::ContinuationSeparator,
-                paragraphs: vec![CT_P::new()],
+                paragraphs: vec![CT_P::from_xml_fragment(br#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:r><w:continuationSeparator/></w:r></w:p>"#).unwrap()],
             });
         }
         entries.push(CT_Footnote {
             id: 1,
             note_type: NoteType::Normal,
             paragraphs: (0..note_paras)
-                .map(|_| {
-                    let mut p = CT_P::new();
+                .map(|index| {
+                    let mut p = if index==0 {CT_P::from_xml_fragment(br#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:r><w:footnoteRef/></w:r></w:p>"#).unwrap()}else{CT_P::new()};
                     p.add_run(note_text);
                     p
                 })
@@ -25448,47 +25647,50 @@ mod tests {
         }
     }
 
-    /// Split a page into the glyphs drawn above the note separator and those
-    /// drawn below it. Notes are emitted after body content, so the separator
-    /// is the boundary.
-    fn split_at_separator(
-        page: &oxml_layout::output::PageFrame,
-    ) -> Option<(f64, Vec<f64>, Vec<String>)> {
-        let elements = compatibility_page_elements(page);
-        let separator_index = elements.iter().position(|element| {
+    // Observe note paint in source emission order, including authored special
+    // records carried by translated groups. Do not flatten other test families.
+    fn note_paint(page: &PageFrame) -> Vec<(PositionedElement, Transform)> {
+        let mut elements = Vec::new();
+        oxml_layout::walk(&page.elements, &mut |element, transform| {
+            elements.push((element.clone(), *transform));
+        });
+        elements
+    }
+
+    /// The separator is the paint-order boundary between body and note text.
+    fn split_at_separator(page: &PageFrame) -> Option<(f64, Vec<f64>, Vec<String>)> {
+        let elements = note_paint(page);
+        let separator_index = elements.iter().position(|(element, _)| {
             matches!(element, PositionedElement::Line { width, .. } if (*width - 0.5).abs() < 0.001)
         })?;
-        let PositionedElement::Line { start, end, .. } = elements[separator_index] else {
+        let (PositionedElement::Line { start, end, .. }, transform) = &elements[separator_index]
+        else {
             return None;
         };
-        let separator_y = start.y;
-        let separator_width = end.x - start.x;
-
-        let body_ys: Vec<f64> = elements[..separator_index]
+        let separator_width = transform.apply(*end).x - transform.apply(*start).x;
+        let body_ys = elements[..separator_index]
             .iter()
-            .filter_map(|element| match element {
-                PositionedElement::Text(run) => Some(run.origin.y),
+            .filter_map(|(element, transform)| match element {
+                PositionedElement::Text(run) => Some(transform.apply(run.origin).y),
                 _ => None,
             })
             .collect();
-        let note_text: Vec<String> = elements[separator_index + 1..]
+        let note_text = elements[separator_index + 1..]
             .iter()
-            .filter_map(|element| match element {
+            .filter_map(|(element, _)| match element {
                 PositionedElement::Text(run) => Some(run.text.clone()),
                 _ => None,
             })
             .collect();
-
-        let _ = separator_y;
         Some((separator_width, body_ys, note_text))
     }
 
-    fn separator_y_of(page: &oxml_layout::output::PageFrame) -> Option<f64> {
-        compatibility_page_elements(page)
+    fn separator_y_of(page: &PageFrame) -> Option<f64> {
+        note_paint(page)
             .into_iter()
-            .find_map(|element| match element {
-                PositionedElement::Line { start, width, .. } if (*width - 0.5).abs() < 0.001 => {
-                    Some(start.y)
+            .find_map(|(element, transform)| match element {
+                PositionedElement::Line { start, width, .. } if (width - 0.5).abs() < 0.001 => {
+                    Some(transform.apply(start).y)
                 }
                 _ => None,
             })
@@ -25541,9 +25743,54 @@ mod tests {
     #[test]
     fn a_note_taller_than_its_remaining_space_continues_on_the_next_page() {
         // 120 note paragraphs exceed a single page, so the note has to break.
-        let input = make_noted_document(30, &[25], 120, "Note paragraph line.", true);
+        let mut input = make_noted_document(30, &[25], 120, "Note paragraph line.", true);
+        let note = input
+            .footnotes
+            .as_mut()
+            .unwrap()
+            .footnotes
+            .iter_mut()
+            .find(|note| note.id == 1)
+            .unwrap();
+        for (index, paragraph) in note.paragraphs.iter_mut().enumerate() {
+            *paragraph.runs.last_mut().unwrap() = CT_R::new(&format!("NOTE_INVENTORY_{index:03}"));
+        }
         let mut engine = Engine::new();
         let output = engine.layout(&input).expect("layout succeeds");
+
+        // Inventory note content independently of separator recognition.
+        let inventory: Vec<_> = output
+            .pages
+            .iter()
+            .map(|page| {
+                note_paint(page)
+                    .into_iter()
+                    .filter_map(|(element, _)| match element {
+                        PositionedElement::Text(run) if run.text.starts_with("NOTE_INVENTORY_") => {
+                            Some(run.text)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(
+            inventory.iter().flatten().cloned().collect::<Vec<_>>(),
+            (0..120)
+                .map(|i| format!("NOTE_INVENTORY_{i:03}"))
+                .collect::<Vec<_>>()
+        );
+        assert!(inventory.iter().filter(|text| !text.is_empty()).count() >= 2);
+        let markers: Vec<_> = output
+            .pages
+            .iter()
+            .map(|page| {
+                split_at_separator(page).map_or(0, |(_, _, text)| {
+                    text.iter().filter(|text| text.as_str() == "1").count()
+                })
+            })
+            .collect();
+        assert_eq!(markers.iter().sum::<usize>(), 1, "{markers:?}");
 
         let note_pages: Vec<usize> = output
             .pages
@@ -25573,6 +25820,52 @@ mod tests {
             0,
             "a continuation does not repeat the marker, got {second:?}"
         );
+    }
+
+    #[test]
+    fn continued_note_notice_never_prevents_source_progress() {
+        use rdocx_oxml::footnotes::{CT_Footnote, NoteType};
+        for notice_height in [12, 100] {
+            let mut input = make_noted_document(1, &[0], 0, "", false);
+            let section = input.document.body.sect_pr.as_mut().unwrap();
+            section.page_height = Some(rdocx_oxml::Twips(4880));
+            section.margin_top = Some(rdocx_oxml::Twips(1440));
+            section.margin_bottom = Some(rdocx_oxml::Twips(1440));
+            let paragraph = |label: &str, height: i32| {
+                CT_P::from_xml_fragment(format!(r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:pPr><w:spacing w:before="0" w:after="0" w:line="{}" w:lineRule="exact"/></w:pPr><w:r><w:t>{label}</w:t></w:r></w:p>"#, height * 20).as_bytes()).unwrap()
+            };
+            let notes = input.footnotes.as_mut().unwrap();
+            notes.footnotes[0].paragraphs = vec![
+                paragraph("NOTICE_NOTE_000", 90),
+                paragraph("NOTICE_NOTE_001", 12),
+            ];
+            notes.footnotes.push(CT_Footnote {
+                id: -2,
+                note_type: NoteType::ContinuationNotice,
+                paragraphs: vec![paragraph("CONTINUATION_NOTICE", notice_height)],
+            });
+            let mut engine = Engine::new_deterministic().unwrap();
+            let output = engine
+                .layout(&input)
+                .expect("note-only pages make progress");
+            assert!(output.pages.len() > 1 && output.pages.len() <= 4);
+            let inventory: Vec<_> = output
+                .pages
+                .iter()
+                .flat_map(|page| note_paint(page))
+                .filter_map(|(element, _)| match element {
+                    PositionedElement::Text(run) if run.text.starts_with("NOTICE_NOTE_") => {
+                        Some(run.text)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                inventory,
+                ["NOTICE_NOTE_000", "NOTICE_NOTE_001"],
+                "notice height {notice_height}"
+            );
+        }
     }
 
     #[test]
@@ -26661,8 +26954,14 @@ mod tests {
         use rdocx_oxml::units::Twips;
 
         let note_of = |id: i32| {
-            let mut note = CT_P::new();
-            note.add_run(NOTE_PROSE);
+            let note = authored_note_fixture(
+                &[NOTE_PROSE],
+                if endnotes_instead {
+                    NoteStream::Endnote
+                } else {
+                    NoteStream::Footnote
+                },
+            );
             CT_Footnote {
                 id,
                 note_type: NoteType::Normal,
@@ -28667,6 +28966,56 @@ mod tests {
         input
     }
 
+    // Strict furniture reservation tests use real anchored drawings. Paragraph
+    // frames have a different consumer: they reserve main body, not their own
+    // furniture flow. Keep their old authored extents as drawing test inputs.
+    fn issue424_drawing_furniture_input(header: &str, footer: &str) -> LayoutInput {
+        let convert = |story: &str| {
+            if story.is_empty() {
+                return String::new();
+            }
+            let mut doc=CT_Document::from_xml(format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{story}</w:body></w:document>"#).as_bytes()).unwrap();
+            let mut pending = Vec::new();
+            let mut output = String::new();
+            for item in &mut doc.body.content {
+                let BodyContent::Paragraph(paragraph) = item else {
+                    panic!("drawing fixture paragraphs");
+                };
+                if let Some(frame) = paragraph.properties.as_mut().and_then(|p| p.frame.take()) {
+                    let mut writer = quick_xml::Writer::new(Vec::new());
+                    paragraph.to_xml(&mut writer).unwrap();
+                    let content = String::from_utf8(writer.into_inner()).unwrap();
+                    let width = frame.w.unwrap().0 * 635;
+                    let height = frame.h.unwrap().0 * 635;
+                    let y = frame.y.map_or(0, |v| v.0) * 635;
+                    let x = frame.x.map_or(0, |v| v.0) * 635;
+                    let vertical = if frame.v_anchor.as_deref() == Some("text") {
+                        "paragraph"
+                    } else {
+                        "page"
+                    };
+                    let wrap = if frame.wrap.as_deref() == Some("notBeside") {
+                        "<wp:wrapTopAndBottom/>"
+                    } else {
+                        "<wp:wrapSquare wrapText=\"bothSides\"/>"
+                    };
+                    let raw = format!(
+                        r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:r><w:drawing><wp:anchor distT="0" distB="0" distL="0" distR="0" simplePos="0" relativeHeight="0" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:posOffset>{x}</wp:posOffset></wp:positionH><wp:positionV relativeFrom="{vertical}"><wp:posOffset>{y}</wp:posOffset></wp:positionV><wp:extent cx="{width}" cy="{height}"/>{wrap}<wp:docPr id="1" name="strict obstacle"/><wp:cNvGraphicFramePr/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{width}" cy="{height}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/></wps:spPr><wps:txbx><w:txbxContent>{content}</w:txbxContent></wps:txbx><wps:bodyPr lIns="0" tIns="0" rIns="0" bIns="0"><a:noAutofit/></wps:bodyPr></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r></w:p>"#
+                    );
+                    pending.extend(CT_P::from_xml_fragment(raw.as_bytes()).unwrap().runs);
+                } else {
+                    paragraph.runs.splice(0..0, pending.drain(..));
+                    let mut writer = quick_xml::Writer::new(Vec::new());
+                    paragraph.to_xml(&mut writer).unwrap();
+                    output.push_str(&String::from_utf8(writer.into_inner()).unwrap());
+                }
+            }
+            assert!(pending.is_empty(), "obstacles need a real flow owner");
+            output
+        };
+        issue424_furniture_input(&convert(header), &convert(footer))
+    }
+
     fn issue424_positioned_text(output: &crate::WordLayoutResult, prefix: &str) -> Vec<(f64, f64)> {
         let mut result = Vec::new();
         oxml_layout::walk(
@@ -28917,9 +29266,9 @@ mod tests {
         let mut failures = Vec::new();
         for (label, original, explicit) in [
             (
-                "omitted anchors",
+                "omitted furniture anchors",
                 r#"w:w="2400" w:x="480" w:y="120""#,
-                r#"w:w="2400" w:x="480" w:y="120" w:hAnchor="text" w:vAnchor="text""#,
+                r#"w:w="2400" w:x="480" w:y="120" w:hAnchor="text" w:vAnchor="margin""#,
             ),
             (
                 "nonzero omitted height rule",
@@ -28936,6 +29285,152 @@ mod tests {
             let expected = position(explicit);
             if actual != expected {
                 failures.push(format!("{label}: actual={actual:?}, expected={expected:?}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn issue424_native_long_note_uses_source_width_markers_separators_and_first_fragment() {
+        use rdocx_oxml::footnotes::{CT_Footnote, CT_Footnotes, NoteType};
+        let p = |text: &str| {
+            format!(
+                r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>"#
+            )
+        };
+        let header = (0..5)
+            .map(|i| p(&format!("HEAD_{i:02}")))
+            .collect::<String>();
+        let footer = (0..5)
+            .map(|i| p(&format!("FOOT_{i:02}")))
+            .collect::<String>();
+        let mut input = issue424_furniture_input(&header, &footer);
+        let parse = |xml: &str| {
+            CT_P::from_xml_fragment(format!(r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{xml}</w:p>"#).as_bytes()).unwrap()
+        };
+        let body = CT_Document::from_xml(format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{}<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>NOTE_REFERENCE</w:t></w:r><w:r><w:footnoteReference w:id="1"/></w:r></w:p></w:body></w:document>"#,p("BODY_MARK")).as_bytes()).unwrap();
+        input.document.body.content = body.body.content;
+        input.footnotes=Some(CT_Footnotes { footnotes: vec![
+            CT_Footnote{id:-1,note_type:NoteType::Separator,paragraphs:vec![parse("<w:r><w:separator/></w:r>")]},
+            CT_Footnote{id:0,note_type:NoteType::ContinuationSeparator,paragraphs:vec![parse("<w:r><w:continuationSeparator/></w:r>")]},
+            CT_Footnote{id:1,note_type:NoteType::Normal,paragraphs:(0..130).map(|i| {
+                let doc=CT_Document::from_xml(format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{}</w:body></w:document>"#,p(&format!("NOTE_{i:03}"))).as_bytes()).unwrap();
+                let BodyContent::Paragraph(p)=doc.body.content.into_iter().next().unwrap() else {panic!("paragraph")};*p
+            }).collect()},
+        ]});
+        // Separator paragraphs inherit the same12pt source spacing as Normal.
+        for style in &mut input.styles.styles {
+            if style.style_id == "Normal" {
+                style.ppr = Some(rdocx_oxml::properties::CT_PPr {
+                    space_before: Some(rdocx_oxml::Twips(0)),
+                    space_after: Some(rdocx_oxml::Twips(0)),
+                    line_spacing: Some(rdocx_oxml::Twips(240)),
+                    line_rule: Some("exact".into()),
+                    ..Default::default()
+                });
+            }
+        }
+        let before = format!("{input:?}");
+        let output = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+        let mut ranges = Vec::new();
+        let mut references = Vec::new();
+        let mut extra_markers = 0;
+        for (page_index, page) in output.layout.pages.iter().enumerate() {
+            let mut notes = Vec::new();
+            oxml_layout::walk(&page.elements, &mut |element, transform| {
+                if let PositionedElement::Text(run) = element {
+                    if run.text.starts_with("NOTE_") && run.text != "NOTE_REFERENCE" {
+                        notes.push((run.text.clone(), transform.apply(run.origin)));
+                    }
+                    if run.text == "NOTE_REFERENCE" {
+                        references.push(page_index);
+                    }
+                    if run.text == "1" && run.note.is_none() {
+                        extra_markers += 1;
+                    }
+                }
+            });
+            ranges.push(notes);
+        }
+        assert_eq!(output.layout.pages.len(), 3, "{ranges:?}");
+        assert_eq!(references, vec![0]);
+        assert_eq!(
+            ranges.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![49, 51, 30]
+        );
+        assert_eq!(extra_markers, 0, "source contains no note-body mark");
+        let names = ranges
+            .iter()
+            .flatten()
+            .map(|(text, _)| text.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            (0..130).map(|i| format!("NOTE_{i:03}")).collect::<Vec<_>>()
+        );
+        for (_, position) in ranges.iter().flatten() {
+            assert!((position.x - 72.0).abs() < 0.01, "{position:?}");
+        }
+        let header_ascent = issue424_positioned_text(&output, "HEAD_00")[0].1 - 18.0;
+        assert!(
+            (ranges[0][0].1.y - header_ascent - 126.0).abs() < 0.01,
+            "first note starts at its derived band"
+        );
+        assert!(
+            (ranges[2].last().unwrap().1.y - header_ascent - 702.0).abs() < 0.01,
+            "last note finishes at its derived band"
+        );
+        assert_eq!(format!("{input:?}"), before);
+    }
+
+    #[test]
+    fn issue424_native_frame_story_eligibility_and_authored_vertical_presence() {
+        let flow = r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>FLOW_TARGET</w:t></w:r></w:p>"#;
+        let mut failures = Vec::new();
+        for footer in [false, true] {
+            let plain =
+                crate::layout_document_deterministic_with_provenance(&issue424_furniture_input(
+                    if footer { "" } else { flow },
+                    if footer { flow } else { "" },
+                ))
+                .unwrap();
+            let flow_position = issue424_positioned_text(&plain, "FLOW_TARGET")[0];
+            let origin = if footer { 774.0 - 12.0 } else { 18.0 };
+            let ascent = flow_position.1 - origin;
+            for (anchor, y, top, body_x) in [
+                ("", 120, 42.0, 216.0),
+                (r#"w:vAnchor="margin""#, 120, 42.0, 216.0),
+                (r#"w:vAnchor="page""#, 120, 6.0, 72.0),
+                (r#"w:vAnchor="text""#, 120, origin + 6.0, 72.0),
+                (r#"w:vAnchor="text""#, 100, origin + 5.0, 72.0),
+                (
+                    r#"w:vAnchor="text""#,
+                    140,
+                    origin + 7.0,
+                    if footer { 72.0 } else { 216.0 },
+                ),
+            ] {
+                let frame = format!(
+                    r#"<w:p><w:pPr><w:framePr w:w="2400" w:hAnchor="text" w:x="480" w:y="{y}" {anchor}/><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>DEFAULT_FRAME</w:t></w:r></w:p>{flow}"#
+                );
+                let input = issue424_furniture_input(
+                    if footer { "" } else { &frame },
+                    if footer { &frame } else { "" },
+                );
+                let before = format!("{input:?}");
+                let output = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+                let actual_flow = issue424_positioned_text(&output, "FLOW_TARGET")[0];
+                let actual_frame = issue424_positioned_text(&output, "DEFAULT_FRAME")[0];
+                let body = issue424_positioned_text(&output, "BODY_MARK")[0];
+                if (actual_flow.0 - flow_position.0).abs() > 0.01
+                    || (actual_flow.1 - flow_position.1).abs() > 0.01
+                    || (actual_frame.0 - 96.0).abs() > 0.01
+                    || (actual_frame.1 - ascent - top).abs() > 0.01
+                    || (body.0 - body_x).abs() > 0.01
+                {
+                    failures.push(format!("footer={footer} anchor={anchor} y={y}:flow={actual_flow:?},frame={actual_frame:?},body={body:?},top={top},ascent={ascent}"));
+                }
+                assert_eq!(format!("{input:?}"), before);
             }
         }
         assert!(failures.is_empty(), "{failures:?}");
@@ -29029,12 +29524,12 @@ mod tests {
     fn issue424_furniture_clearance_follows_transitive_obstacles_at_final_origin() {
         let flow = r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>FLOW_WORD</w:t></w:r></w:p>"#;
         let plain = crate::layout_document_deterministic_with_provenance(
-            &issue424_furniture_input(flow, ""),
+            &issue424_drawing_furniture_input(flow, ""),
         )
         .unwrap();
         let ascent = issue424_positioned_text(&plain, "FLOW_WORD")[0].1 - 18.0;
         let frame_control = crate::layout_document_deterministic_with_provenance(
-            &issue424_furniture_input("<w:p><w:r><w:t>FRAME_CONTROL</w:t></w:r></w:p>", ""),
+            &issue424_drawing_furniture_input("<w:p><w:r><w:t>FRAME_CONTROL</w:t></w:r></w:p>", ""),
         )
         .unwrap();
         let frame_ascent = issue424_positioned_text(&frame_control, "FRAME_CONTROL")[0].1 - 18.0;
@@ -29061,7 +29556,7 @@ mod tests {
                     } else {
                         format!("{a}{b}{flow}")
                     };
-                    let input = issue424_furniture_input(
+                    let input = issue424_drawing_furniture_input(
                         if footer { "" } else { &story },
                         if footer { &story } else { "" },
                     );
@@ -29110,7 +29605,7 @@ mod tests {
                 r#"<w:p><w:pPr>{border}<w:spacing w:line="240" w:lineRule="exact"/></w:pPr><w:hyperlink xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="link"><w:r><w:rPr>{rtl}<w:highlight w:val="yellow"/></w:rPr><w:t>{words}</w:t></w:r></w:hyperlink><w:fldSimple w:instr="PAGE"><w:r><w:t>0</w:t></w:r></w:fldSimple><w:r><w:t>/</w:t></w:r><w:fldSimple w:instr="NUMPAGES"><w:r><w:t>0</w:t></w:r></w:fldSimple></w:p>"#
             );
             let story = format!("{frames}{flow}");
-            let mut input = issue424_furniture_input(
+            let mut input = issue424_drawing_furniture_input(
                 if footer { "" } else { &story },
                 if footer { &story } else { "" },
             );
@@ -29165,7 +29660,7 @@ mod tests {
             assert!(fields.iter().any(|(kind,text,_)|*kind==oxml_layout::FieldKind::NumPages && text=="1"));
             for (_, _, source) in fields {
                 let path = output.source_node(source.node).unwrap();
-                assert_eq!(path.children, vec![2]);
+                assert_eq!(path.children, vec![0]);
                 assert_eq!(
                     path.story,
                     if footer {
@@ -29191,7 +29686,7 @@ mod tests {
             // Auto-height frame text has the same natural baseline as the
             // ordinary control. Its60pt container defines the blocked band.
             let control = crate::layout_document_deterministic_with_provenance(
-                &issue424_furniture_input("<w:p><w:r><w:t>CONTROL</w:t></w:r></w:p>", ""),
+                &issue424_drawing_furniture_input("<w:p><w:r><w:t>CONTROL</w:t></w:r></w:p>", ""),
             )
             .unwrap();
             let ascent = issue424_positioned_text(&control, "CONTROL")[0].1 - 18.0;
@@ -29238,14 +29733,23 @@ mod tests {
             .unwrap();
             let actual = issue424_positioned_text(&output, "FLOW_ANCHOR");
             assert_eq!(actual.len(), 1);
-            let valid = if beside {
+            let is_frame = label.starts_with("frame");
+            let valid = if is_frame {
+                actual == issue424_positioned_text(&baseline, "FLOW_ANCHOR")
+            } else if beside {
                 actual[0].0 >= 192.0
             } else {
                 actual[0].1 >= 78.0
             };
             let body = output.body_layout_fragments(0).unwrap()[0].y;
             let plain_body = baseline.body_layout_fragments(0).unwrap()[0].y;
-            if !valid || body <= plain_body {
+            if !valid
+                || if is_frame {
+                    (body - plain_body).abs() > 0.01
+                } else {
+                    body <= plain_body
+                }
+            {
                 failures.push(format!(
                     "{label}: actual={actual:?}, body={body}, plain={plain_body}"
                 ));
@@ -29285,11 +29789,7 @@ mod tests {
             let actual = issue424_positioned_text(&output, "FOOTER_FLOW");
             let baseline = issue424_positioned_text(&plain, "FOOTER_FLOW");
             let frame = issue424_positioned_text(&output, "FOOTER_FRAME");
-            if actual.len() != 1
-                || frame.len() != 1
-                || actual[0].0 < 192.0
-                || actual[0].1 >= baseline[0].1
-            {
+            if actual.len() != 1 || frame.len() != 1 || actual != baseline {
                 failures.push(format!(
                     "{label}: flow={actual:?}, plain={baseline:?}, frame={frame:?}"
                 ));
@@ -29307,14 +29807,14 @@ mod tests {
     #[test]
     fn issue424_repeating_footer_state_refuses_without_mutating_source_or_cache() {
         let flow = "<w:p><w:r><w:t>CYCLE_FLOW</w:t></w:r></w:p>";
-        let plain_input = issue424_furniture_input("", flow);
+        let plain_input = issue424_drawing_furniture_input("", flow);
         let plain = crate::layout_document_deterministic_with_provenance(&plain_input).unwrap();
         let baseline = issue424_positioned_text(&plain, "CYCLE_FLOW")[0].1;
         let y = ((baseline - 10.0) * 20.0).round() as i32;
         let footer = format!(
             r#"<w:p><w:pPr><w:framePr w:w="2400" w:h="400" w:hRule="exact" w:hAnchor="margin" w:vAnchor="page" w:y="{y}" w:wrap="notBeside"/></w:pPr><w:r><w:t>CYCLE_FRAME</w:t></w:r></w:p>{flow}"#
         );
-        let input = issue424_furniture_input("", &footer);
+        let input = issue424_drawing_furniture_input("", &footer);
         let before = format!("{:?}", input);
         let mut engine = Engine::new_deterministic().unwrap();
         let error = engine.layout(&input).unwrap_err().to_string();
@@ -29391,7 +29891,19 @@ mod tests {
                 Some(rdocx_oxml::table::ST_VerticalJc::Center),
             ),
         ] {
-            let noted = make_noted_document(3, &[0], 130, "OVERFLOW_NOTE", true);
+            let mut noted = make_noted_document(3, &[0], 130, "OVERFLOW_NOTE", true);
+            let normal = noted
+                .footnotes
+                .as_mut()
+                .unwrap()
+                .footnotes
+                .iter_mut()
+                .find(|note| note.id == 1)
+                .unwrap();
+            for (ordinal, paragraph) in normal.paragraphs.iter_mut().enumerate() {
+                *paragraph.runs.last_mut().unwrap() =
+                    CT_R::new(&format!("OVERFLOW_NOTE_{ordinal:03}"));
+            }
             let footer = format!(
                 r#"{}<w:p><w:fldSimple w:instr="PAGE"><w:r><w:t>0</w:t></w:r></w:fldSimple><w:r><w:t>/</w:t></w:r><w:fldSimple w:instr="NUMPAGES"><w:r><w:t>0</w:t></w:r></w:fldSimple></w:p>"#,
                 furniture.replace("FURNITURE", "FOOTER")
@@ -29446,9 +29958,17 @@ mod tests {
                             footers.push(point.y);
                         }
                         if run.text.contains("OVERFLOW_NOTE") {
+                            let first_note_on_page = notes.is_empty();
                             notes.push(point.y);
                             note_count += 1;
-                            if endnote && page.page_number > 1 && first_continuation.is_none() {
+                            // Starting a note on a new page selects a different
+                            // special record from carrying an existing note.
+                            if endnote
+                                && page.page_number > 1
+                                && first_note_on_page
+                                && run.text != "OVERFLOW_NOTE_000"
+                                && first_continuation.is_none()
+                            {
                                 first_continuation = Some((point.x, point.y));
                             }
                             if (transform.a - 1.0).abs() > 0.01
@@ -29630,6 +30150,226 @@ mod tests {
                 "line numbers follow actual body baselines"
             );
         }
+    }
+
+    #[test]
+    fn issue424_native_tb_rl_exact_body_uses_written_band_and_separate_baseline_policy() {
+        let furniture = (0..5).map(|_| r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>FURNITURE</w:t></w:r></w:p>"#).collect::<String>();
+        let mut failures = Vec::new();
+        for alignment in ["", "auto", "center", "baseline"] {
+            for (line_height, font_size) in [(12, 11), (24, 11), (12, 16)] {
+                for vertical in [
+                    rdocx_oxml::table::ST_VerticalJc::Top,
+                    rdocx_oxml::table::ST_VerticalJc::Center,
+                    rdocx_oxml::table::ST_VerticalJc::Bottom,
+                ] {
+                    for stories in [0, 1, 2] {
+                        let mut input = issue424_furniture_input(
+                            if stories > 0 { &furniture } else { "" },
+                            if stories == 2 { &furniture } else { "" },
+                        );
+                        let section = input.document.body.sect_pr.as_mut().unwrap();
+                        section.text_direction = Some("tbRl".into());
+                        section.vertical_alignment = Some(vertical);
+                        let xml = format!(
+                            r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:pPr><w:spacing w:before="0" w:after="0" w:line="{}" w:lineRule="exact"/><w:textAlignment w:val="{alignment}"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="{}"/></w:rPr><w:t>BODY_MARK</w:t></w:r></w:p>"#,
+                            line_height * 20,
+                            font_size * 2
+                        );
+                        let xml = if alignment.is_empty() {
+                            xml.replace(r#"<w:textAlignment w:val=""/>"#, "")
+                        } else {
+                            xml
+                        };
+                        input.document.body.content = vec![BodyContent::Paragraph(Box::new(
+                            CT_P::from_xml_fragment(xml.as_bytes()).unwrap(),
+                        ))];
+                        let before = format!("{input:?}");
+                        let mut engine = Engine::new_deterministic().unwrap();
+                        let output =
+                            crate::layout_document_with_reusable_engine(&mut engine, &input)
+                                .unwrap();
+                        let font = engine
+                            .font_manager
+                            .resolve_font_for_metrics(Some("Arial"), false, false)
+                            .unwrap();
+                        let metrics = engine.font_manager.metrics(font, font_size as f64).unwrap();
+                        let baseline = 0.8 * line_height as f64
+                            + if alignment == "baseline" {
+                                0.0
+                            } else {
+                                (metrics.ascent - metrics.descent) / 2.0
+                            };
+                        let fragment = output.body_layout_fragments(0).unwrap()[0];
+                        let position = issue424_positioned_text(&output, "BODY_MARK")[0];
+                        let expected_x = fragment.x + fragment.width - baseline;
+                        // Independently retained Word16.114 paired control offsets.
+                        let native = 0.8 * line_height as f64
+                            + if alignment == "baseline" {
+                                0.0
+                            } else if font_size == 16 {
+                                5.76
+                            } else {
+                                3.84
+                            };
+                        assert!((baseline - native).abs() < 0.5);
+                        if (position.0 - expected_x).abs() > 0.01
+                            || (position.1 - 36.0).abs() > 0.01
+                            || output.layout.pages.len() != 1
+                        {
+                            failures.push(format!("{alignment}/{line_height}/{font_size}/{vertical:?}/{stories}: {position:?}, fragment={fragment:?}, expected_x={expected_x}"));
+                        }
+                        assert_eq!(format!("{input:?}"), before);
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} failures: {failures:?}",
+            failures.len()
+        );
+    }
+
+    #[test]
+    fn issue424_rotated_line_numbers_follow_the_actual_body_baseline_with_border_padding() {
+        use rdocx_oxml::document::CT_LineNumber;
+
+        for font_size in [11, 16] {
+            for bordered in [false, true] {
+                let mut input = issue424_furniture_input("", "");
+                let section = input.document.body.sect_pr.as_mut().unwrap();
+                section.text_direction = Some("tbRl".into());
+                section.line_numbers = Some(Box::new(CT_LineNumber {
+                    count_by: Some(1),
+                    start: Some(1),
+                    ..Default::default()
+                }));
+                let border = if bordered {
+                    r#"<w:pBdr><w:top w:val="single" w:sz="8" w:space="3"/></w:pBdr>"#
+                } else {
+                    ""
+                };
+                let xml = format!(
+                    r#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:pPr>{border}<w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="{}"/></w:rPr><w:t>BODY_MARK</w:t></w:r></w:p>"#,
+                    font_size * 2
+                );
+                input.document.body.content = vec![BodyContent::Paragraph(Box::new(
+                    CT_P::from_xml_fragment(xml.as_bytes()).unwrap(),
+                ))];
+                let mut engine = Engine::new_deterministic().unwrap();
+                let output = engine.layout(&input).unwrap();
+                let mut body = None;
+                let mut number = None;
+                oxml_layout::walk(&output.pages[0].elements, &mut |element, transform| {
+                    if let PositionedElement::Text(run) = element {
+                        if run.text == "BODY_MARK" {
+                            body = Some(transform.apply(run.origin).x);
+                        } else if run.text == "1" && run.source.is_none() {
+                            number = Some(transform.apply(run.origin).x);
+                        }
+                    }
+                });
+                assert!(
+                    (body.expect("body glyph") - number.expect("line number")).abs() < 0.001,
+                    "font={font_size}, bordered={bordered}: body={body:?}, number={number:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn issue424_tb_rl_policy_keeps_equal_width_orientation_cache_and_inherited_alignment_current() {
+        let header = (0..5).map(|_| r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>HEADER</w:t></w:r></w:p>"#).collect::<String>();
+        let mut input = issue424_furniture_input(&header, "");
+        input.document.body.sect_pr.as_mut().unwrap().page_height = Some(rdocx_oxml::Twips(10800));
+        let paragraph = CT_P::from_xml_fragment(br#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/></w:rPr><w:t>BODY_MARK</w:t></w:r></w:p>"#).unwrap();
+        input.document.body.content = vec![BodyContent::Paragraph(Box::new(paragraph))];
+        let mut probe = CT_P::new();
+        probe.add_run("CACHE_PROBE_INITIAL");
+        input.document.body.add_paragraph(probe);
+        let mut engine = Engine::new_deterministic().unwrap();
+        let mut raw = None;
+        let mut observed = HashMap::new();
+        let mut reused = 0;
+        for (iteration, direction) in ["lrTb", "tbRl", "tbRlV", "tbRl", "lrTb"]
+            .into_iter()
+            .enumerate()
+        {
+            input.document.body.sect_pr.as_mut().unwrap().text_direction = Some(direction.into());
+            let warm = crate::layout_document_with_reusable_engine(&mut engine, &input).unwrap();
+            let cold = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+            assert_eq!(
+                format!("{:?}", warm.layout.pages),
+                format!("{:?}", cold.layout.pages)
+            );
+            assert_eq!(warm.body_layout_fragments(0), cold.body_layout_fragments(0));
+            let cached = engine
+                .paragraph_cache
+                .iter()
+                .find(|entry| entry.key.paragraph.text() == "BODY_MARK")
+                .unwrap();
+            assert_eq!(cached.key.content_width_bits, 468.0_f64.to_bits());
+            let lines = format!("{:?}", cached.block.lines);
+            if let Some(raw) = &raw {
+                assert_eq!(
+                    &lines, raw,
+                    "orientation must preserve raw cached line metrics"
+                );
+            } else {
+                raw = Some(lines);
+            }
+            observed.insert(direction, issue424_positioned_text(&warm, "BODY_MARK")[0]);
+            // Section changes conservatively invalidate the existing context.
+            // Edit only a neighboring paragraph within each context to prove
+            // actual reuse of the unchanged, equal-measure body block.
+            let before_hits = engine.paragraph_cache_counts().0;
+            set_body_paragraph_text(&mut input, 1, &format!("CACHE_PROBE_{iteration}"));
+            let reused_warm =
+                crate::layout_document_with_reusable_engine(&mut engine, &input).unwrap();
+            let reused_cold = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+            assert_eq!(
+                format!("{:?}", reused_warm.layout.pages),
+                format!("{:?}", reused_cold.layout.pages)
+            );
+            let new_hits = engine.paragraph_cache_counts().0 - before_hits;
+            assert!(new_hits > 0, "unchanged paragraph must actually reuse");
+            reused += new_hits;
+        }
+        assert!(
+            reused >= 5,
+            "equal measure must exercise actual paragraph reuse"
+        );
+        assert!((observed["tbRl"].1 - 36.0).abs() < 0.01);
+        assert!(
+            (observed["tbRlV"].1 - 78.0).abs() < 0.01,
+            "same angle is not exact source eligibility"
+        );
+        assert!((observed["tbRl"].0 - observed["tbRlV"].0).abs() > 1.0);
+
+        input.document.body.sect_pr.as_mut().unwrap().text_direction = Some("tbRl".into());
+        let mut inherited = Vec::new();
+        for alignment in ["baseline", "center"] {
+            let defaults = input
+                .styles
+                .doc_defaults
+                .as_mut()
+                .unwrap()
+                .ppr
+                .get_or_insert_with(Default::default);
+            defaults.text_alignment = Some(alignment.into());
+            let warm = crate::layout_document_with_reusable_engine(&mut engine, &input).unwrap();
+            let cold = crate::layout_document_deterministic_with_provenance(&input).unwrap();
+            assert_eq!(
+                format!("{:?}", warm.layout.pages),
+                format!("{:?}", cold.layout.pages)
+            );
+            inherited.push(issue424_positioned_text(&warm, "BODY_MARK")[0].0);
+        }
+        assert!(
+            (inherited[0] - inherited[1] - 3.8134765625).abs() < 0.01,
+            "inherited auto/center remains distinct from baseline: {inherited:?}"
+        );
     }
 
     #[test]

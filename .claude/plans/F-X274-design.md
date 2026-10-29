@@ -219,3 +219,8 @@ The initial new native TOC stage failed because the test used outline-only input
 All original final debt remains due. Root owns review, integration commits and final acceptance. This lease creates no commit, push, tracker, ledger or second handoff.
 
 Independent full microscope pass3 reports0defects,0smells and0nitpicks for the complete F274Base implementation plus A1amendment. Root read the full report and authenticated source and retained binaries. This closes local review only. Final native geometry/font, new installed bindings, full workspace, archives, deterministic corpora and hosted gates remain pending.
+
+
+## Inherited note PAGE test reconciliation
+
+During approved F-X273 final note remediation, the unchanged lower test endnote_pages_continue_restarted_display_numbers_and_page_fields fails on both the current candidate and authenticated predecessor artifact f69c4acda2786f76dcd7e9ea5d841a1be632d15406d554fffbaf1072d0a7a013. Its expectation incorrectly equates a note field with the printed overflow page. Existing HLD08 and the approved provider distinguish printed continuation sequence from unique body-reference ownership. Root authorizes a test-only reconciliation that derives PAGE from the actual body reference, keeps printed physical/displayed continuation and warm/fresh equality checks, and proves the two values differ. No F-X274 product semantics change. Actual predecessor failure and setup126 remain retained under f273-endnote-page-owner-predecessor*. Final union and independent review remain pending.

@@ -36481,3 +36481,119 @@ fn checked_body_insertions_refuse_unsavable_namespace_owners_atomically() {
     }));
     assert!(panicked.is_err(), "legacy insert still panics past the end");
 }
+
+#[test]
+fn issue424_note_authoring_marker_source_survives_save_reopen_and_imported_absence() {
+    let mut document = Document::new();
+    document.add_paragraph("BODY");
+    let old = document.add_footnote("OLD_API_NOTE");
+    document.paragraph_mut(0).unwrap().add_footnote_ref(old);
+    let location = document.paragraph_story_location(0).unwrap().unwrap();
+    document
+        .create_footnote(&location, "CREATE_FOOT_NOTE")
+        .unwrap();
+    let location = document.paragraph_story_location(0).unwrap().unwrap();
+    document
+        .create_endnote(&location, "CREATE_END_NOTE")
+        .unwrap();
+    let location = document.paragraph_story_location(0).unwrap().unwrap();
+    document
+        .create_footnote_with_mark(&location, "CUSTOM_NOTE", "*")
+        .unwrap();
+    let bytes = document.to_bytes().unwrap();
+    let package = OpcPackage::from_reader(std::io::Cursor::new(bytes.clone())).unwrap();
+    let notes =
+        String::from_utf8(package.get_part("/word/footnotes.xml").unwrap().to_vec()).unwrap();
+    let endnotes =
+        String::from_utf8(package.get_part("/word/endnotes.xml").unwrap().to_vec()).unwrap();
+    assert_eq!(notes.matches("<w:footnoteRef").count(), 2, "{notes}");
+    assert_eq!(endnotes.matches("<w:endnoteRef").count(), 1, "{endnotes}");
+    assert!(notes.contains("FootnoteReference"));
+    assert!(endnotes.contains("EndnoteReference"));
+    for xml in [&notes, &endnotes] {
+        use quick_xml::{events::Event, name::ResolveResult, reader::NsReader};
+        let mut reader = NsReader::from_reader(xml.as_bytes());
+        let mut owners: Vec<(String, bool, bool)> = Vec::new();
+        loop {
+            let event = reader.read_event().unwrap();
+            if let Event::Start(element) | Event::Empty(element) = &event {
+                let word = matches!(reader.resolver().resolve_element(element.name()).0,ResolveResult::Bound(uri) if uri.as_ref()==b"http://schemas.openxmlformats.org/wordprocessingml/2006/main");
+                let local = String::from_utf8_lossy(element.local_name().as_ref()).into_owned();
+                if let Some((parent, parent_word, has_properties)) = owners.last_mut()
+                    && *parent_word
+                    && parent == "r"
+                    && word
+                {
+                    if local == "rPr" {
+                        *has_properties = true;
+                    }
+                    if matches!(local.as_str(), "footnoteRef" | "endnoteRef") {
+                        assert!(
+                            *has_properties,
+                            "authored note marker must follow matching rPr: {xml}"
+                        );
+                    }
+                }
+                if matches!(event, Event::Start(_)) {
+                    owners.push((local, word, false));
+                }
+            }
+            match event {
+                Event::End(_) => {
+                    owners.pop();
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+        }
+    }
+    let reopened = Document::from_bytes(&bytes).unwrap();
+    let output = reopened.layout_deterministic().unwrap();
+    let mut marker_labels = Vec::new();
+    let mut text = String::new();
+    for page in &output.layout.pages {
+        oxml_layout::walk(&page.elements, &mut |element, _| {
+            if let oxml_layout::PositionedElement::Text(run) = element {
+                text.push_str(&run.text);
+                if run.note.is_none() && matches!(run.text.as_str(), "1" | "2" | "*") {
+                    marker_labels.push(run.text.clone());
+                }
+            }
+        });
+    }
+    assert_eq!(
+        marker_labels.iter().filter(|s| s.as_str() == "*").count(),
+        1,
+        "{marker_labels:?}"
+    );
+    for label in [
+        "OLD_API_NOTE",
+        "CREATE_FOOT_NOTE",
+        "CREATE_END_NOTE",
+        "CUSTOM_NOTE",
+    ] {
+        assert!(text.contains(label), "{text}");
+    }
+    // Older/imported packages with no actual note-body mark stay unmarked.
+    let mut imported_package = OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+    imported_package.set_part(
+        "/word/footnotes.xml",
+        notes.replace("<w:footnoteRef/>", "").into_bytes(),
+    );
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    imported_package.write_to(&mut buffer).unwrap();
+    let imported = Document::from_bytes(buffer.get_ref()).unwrap();
+    let result = imported.layout_deterministic().unwrap();
+    let mut bodyless_numbers = 0;
+    for page in &result.layout.pages {
+        oxml_layout::walk(&page.elements, &mut |element, _| {
+            if let oxml_layout::PositionedElement::Text(run) = element
+                && run.note.is_none()
+                && matches!(run.text.as_str(), "1" | "2")
+            {
+                bodyless_numbers += 1;
+            }
+        });
+    }
+    assert_eq!(bodyless_numbers, 1, "only the actual endnote mark remains");
+}

@@ -217,6 +217,8 @@ pub struct NumberingState {
     resolved_by_bookmark: HashMap<String, (SourceNodeId, ResolvedNumbering)>,
     main_story_sources: HashSet<SourceNodeId>,
     note_labels: HashMap<NoteRef, String>,
+    // Set only while shaping an actual note story. Never a body reference.
+    pub(crate) note_body_context: Option<NoteRef>,
 }
 
 impl Default for NumberingState {
@@ -238,6 +240,7 @@ impl NumberingState {
             resolved_by_bookmark: HashMap::new(),
             main_story_sources: HashSet::new(),
             note_labels: HashMap::new(),
+            note_body_context: None,
         }
     }
 
@@ -437,6 +440,7 @@ impl NumberingState {
             resolved_by_bookmark: self.resolved_by_bookmark.clone(),
             main_story_sources: self.main_story_sources.clone(),
             note_labels: self.note_labels.clone(),
+            note_body_context: self.note_body_context,
         }
     }
 
