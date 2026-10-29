@@ -15727,3 +15727,36 @@ def test_issue423_dynamic_footer_render_and_saved_cache_remain_distinct():
         reopened = rdocx.Document.from_bytes(saved)
         assert labels(reopened) == labels(document)
         assert reopened.paragraphs[0].text == "One i"
+
+
+@pytest.mark.parametrize("later,expected", [
+    ('<w:pgNumType w:fmt="decimal" w:start="27"/>', "27"),
+    ('<w:pgNumType w:fmt="decimal"/>', "12"),
+    ('<w:pgNumType w:start="27"/>', "xxvii"),
+    ('<w:pgNumType/>', "xii"),
+    ('<w:pgNumType w:fmt="decimal" w:start="bad"/>', "STORED"),
+])
+def test_issue423_duplicate_numbering_render_cache_and_reopen_share_explicit_overlay(later, expected):
+    import rdocx
+
+    numbering = '<w:pgNumType w:fmt="lowerRoman" w:start="12"/>' + later
+    document = _issue423_page_source(numbering)
+    before = _document_xml(document)
+    owner_xml = re.findall(rb'<w:pgNumType\b[^>]*/>', before)
+    assert len(owner_xml) == 2
+    held = document.paragraphs[0]
+    assert _issue423_svg_text(document) == expected
+    report = document.update_layout_backed_fields()
+    assert report.page_fields == int(expected != "STORED")
+    assert bool(report.diagnostics) == (expected == "STORED")
+    if expected == "STORED":
+        assert held.text == "STORED"
+    else:
+        with pytest.raises(rdocx.StaleElementError):
+            _ = held.text
+    assert document.paragraphs[0].text == expected
+    assert re.findall(rb'<w:pgNumType\b[^>]*/>', _document_xml(document)) == owner_xml
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert _issue423_svg_text(reopened) == expected
+    assert reopened.paragraphs[0].text == expected
+    assert re.findall(rb'<w:pgNumType\b[^>]*/>', _document_xml(reopened)) == owner_xml

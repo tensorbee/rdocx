@@ -2492,7 +2492,14 @@ member of `oxml-layout`'s `TextSegment`, `GlyphRun`, and
 `MultilingualGlyphRun` is a pre-1.0 source break for native struct literals.
 
 Native immutable layout snapshots expose page_sections, field_placements and
-bookmark_page_section while preserving bookmark_page compatibility. WordStory
+bookmark_page_section while preserving bookmark_page compatibility. Layout,
+eligible saved caches and generated page labels share the same effective
+imported numbering facts. Qualified direct duplicate numbering overlays only
+explicit format and start attributes, without changing first-owner model
+getters, authoring or retained source. Unknown or chapter state is not rescued
+by a later supported value. Invalid later start or unqualified source retains
+stored display and diagnostics with the existing modeled-start compatibility
+fallback. Dynamic physical footer caches remain retained. WordStory
 has a physical text-box variant with actual OPC part and logical owner path.
 Hidden ordered cached-field segment, section inventory and physical text-box owner
 accessors support checked staging. The hidden Field.cached_display_owner_is_locked

@@ -1006,12 +1006,7 @@ pub fn format_page_field_result(
 ) -> std::result::Result<String, String> {
     validate_page_field_instruction(instruction)?;
     let section_format = section_format
-        .filter(|format| {
-            matches!(
-                *format,
-                "decimal" | "upperRoman" | "lowerRoman" | "upperLetter" | "lowerLetter"
-            )
-        })
+        .filter(|format| supported_section_page_number_format(format))
         .ok_or_else(|| "unsupported section page number format".to_owned())?;
     let numeric_override = instruction.switches.iter().any(|switch| switch.name == "#" || switch.name == "*" && matches!(&switch.argument, Some(FieldArgument::Text(format)) if matches!(format.to_ascii_lowercase().as_str(), "arabic" | "roman" | "alphabetic" | "ordinal")));
     let mut base = value.to_string();
@@ -1027,20 +1022,44 @@ pub fn format_page_field_result(
     format_numeric_field_display(instruction, base)
 }
 
-/// Read only the modeled first section-number owner using its retained bindings.
+/// Read effective imported numbering after qualifying the modeled first owner.
 /// Qualified absence is decimal. Unsupported chapter or unqualified source is None.
-/// Qualified unknown format tokens are retained for the shared formatter to diagnose.
+/// Direct Word duplicates overlay explicit attributes without changing the model.
 #[doc(hidden)]
 pub fn section_page_number_format(section: &CT_SectPr) -> Option<String> {
-    use quick_xml::{events::Event, name::ResolveResult, reader::NsReader};
+    effective_section_page_number(section).format
+}
+
+struct EffectiveSectionPageNumber {
+    start: Option<usize>,
+    format: Option<String>,
+}
+
+fn supported_section_page_number_format(format: &str) -> bool {
+    matches!(
+        format,
+        "decimal" | "upperRoman" | "lowerRoman" | "upperLetter" | "lowerLetter"
+    )
+}
+
+fn effective_section_page_number(section: &CT_SectPr) -> EffectiveSectionPageNumber {
+    let start = section
+        .page_number
+        .as_ref()
+        .and_then(|number| number.start)
+        .map(|value| value as usize);
+    let unsupported = || EffectiveSectionPageNumber {
+        start,
+        format: None,
+    };
     if section.page_number.is_none() {
-        return Some("decimal".into());
+        return EffectiveSectionPageNumber {
+            start: None,
+            format: Some("decimal".into()),
+        };
     }
-    // The existing writer owns canonical w and restores retained root bindings.
-    // Read its temporary output, not a child fragment divorced from that scope.
-    let mut writer = quick_xml::Writer::new(Vec::new());
-    // Only the modeled owner can authorize a format. Opaque duplicates and
-    // nested raw children never become fallback candidates in this read view.
+    // Positively admit the actual modeled owner before any opaque duplicate can
+    // contribute. The writer owns canonical w and retained root binding records.
     let mut owner = section.clone();
     let root_records = section
         .extra_xml
@@ -1050,7 +1069,22 @@ pub fn section_page_number_format(section: &CT_SectPr) -> Option<String> {
         .map(|(raw, position)| (raw.clone(), position.clone()))
         .collect::<Vec<_>>();
     (owner.extra_xml, owner.extra_xml_positions) = root_records.into_iter().unzip();
-    owner.to_xml(&mut writer).ok()?;
+    if read_effective_section_page_number(&owner, start).is_none() {
+        return unsupported();
+    }
+    // This is an analysis-only projection of the current writer output. Typed
+    // getters and writes still address the first owner. Invalid later state
+    // discards the entire recovery and retains the legacy start as compatibility.
+    read_effective_section_page_number(section, start).unwrap_or_else(unsupported)
+}
+
+fn read_effective_section_page_number(
+    section: &CT_SectPr,
+    modeled_start: Option<usize>,
+) -> Option<EffectiveSectionPageNumber> {
+    use quick_xml::{events::Event, name::ResolveResult, reader::NsReader};
+    let mut writer = quick_xml::Writer::new(Vec::new());
+    section.to_xml(&mut writer).ok()?;
     let mut xml =
         b"<pageSource xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">"
             .to_vec();
@@ -1059,37 +1093,67 @@ pub fn section_page_number_format(section: &CT_SectPr) -> Option<String> {
     let mut reader = NsReader::from_reader(xml.as_slice());
     let mut buffer = Vec::new();
     let mut depth = 0usize;
+    let mut owners = 0usize;
+    let mut start = modeled_start;
+    let mut format = "decimal".to_owned();
+    let mut unsupported_format = None;
     loop {
         let event = reader.read_event_into(&mut buffer).ok()?;
         let opens = matches!(&event, Event::Start(_));
         match event {
             Event::Start(element) | Event::Empty(element) => {
-                let is_word = |namespace: ResolveResult<'_>| matches!(namespace, ResolveResult::Bound(namespace) if namespace.as_ref() == b"http://schemas.openxmlformats.org/wordprocessingml/2006/main");
-                if depth == 2
-                    && element.local_name().as_ref() == b"pgNumType"
-                    && is_word(reader.resolver().resolve_element(element.name()).0)
-                {
-                    let mut format = "decimal".to_owned();
-                    for attribute in element.attributes() {
-                        let attribute = attribute.ok()?;
-                        if !is_word(reader.resolver().resolve_attribute(attribute.key).0) {
-                            continue;
-                        }
-                        match attribute.key.local_name().as_ref() {
-                            b"fmt" => {
-                                format = attribute
-                                    .decoded_and_normalized_value(
-                                        quick_xml::XmlVersion::Implicit1_0,
-                                        element.decoder(),
-                                    )
-                                    .ok()?
-                                    .into_owned()
+                if depth == 2 && element.local_name().as_ref() == b"pgNumType" {
+                    let namespace = reader.resolver().resolve_element(element.name()).0;
+                    if matches!(namespace, ResolveResult::Unknown(_)) {
+                        return None;
+                    }
+                    if matches!(namespace, ResolveResult::Bound(namespace) if namespace.as_ref() == b"http://schemas.openxmlformats.org/wordprocessingml/2006/main")
+                    {
+                        owners += 1;
+                        for attribute in element.attributes() {
+                            let attribute = attribute.ok()?;
+                            if attribute.key.as_ref() == b"xmlns"
+                                || attribute.key.as_ref().starts_with(b"xmlns:")
+                            {
+                                continue;
                             }
-                            b"chapStyle" | b"chapSep" => return None,
-                            _ => {}
+                            let namespace = reader.resolver().resolve_attribute(attribute.key).0;
+                            if matches!(namespace, ResolveResult::Unknown(_)) {
+                                return None;
+                            }
+                            if !matches!(namespace, ResolveResult::Bound(namespace) if namespace.as_ref() == b"http://schemas.openxmlformats.org/wordprocessingml/2006/main")
+                            {
+                                continue;
+                            }
+                            match attribute.key.local_name().as_ref() {
+                                b"fmt" => {
+                                    format = attribute
+                                        .decoded_and_normalized_value(
+                                            quick_xml::XmlVersion::Implicit1_0,
+                                            element.decoder(),
+                                        )
+                                        .ok()?
+                                        .into_owned();
+                                    if !supported_section_page_number_format(&format)
+                                        && unsupported_format.is_none()
+                                    {
+                                        unsupported_format = Some(format.clone());
+                                    }
+                                }
+                                b"start" if owners > 1 => {
+                                    let value = attribute
+                                        .decoded_and_normalized_value(
+                                            quick_xml::XmlVersion::Implicit1_0,
+                                            element.decoder(),
+                                        )
+                                        .ok()?;
+                                    start = Some(value.parse::<u32>().ok()? as usize);
+                                }
+                                b"chapStyle" | b"chapSep" => return None,
+                                _ => {}
+                            }
                         }
                     }
-                    return Some(format);
                 }
                 if opens {
                     depth += 1;
@@ -1098,7 +1162,12 @@ pub fn section_page_number_format(section: &CT_SectPr) -> Option<String> {
             Event::End(_) => {
                 depth = depth.checked_sub(1)?;
             }
-            Event::Eof => return None,
+            Event::Eof => {
+                return (owners > 0).then(|| EffectiveSectionPageNumber {
+                    start,
+                    format: Some(unsupported_format.unwrap_or(format)),
+                });
+            }
             _ => {}
         }
         buffer.clear();
@@ -12773,11 +12842,7 @@ fn section_page_geometry(
 }
 
 fn section_page_number_start(sect_pr: &CT_SectPr) -> Option<usize> {
-    sect_pr
-        .page_number
-        .as_ref()?
-        .start
-        .map(|value| value as usize)
+    effective_section_page_number(sect_pr).start
 }
 
 fn xml_local_name(name: &[u8]) -> &[u8] {
@@ -30055,7 +30120,7 @@ mod tests {
     }
 
     #[test]
-    fn issue423_section_reader_reuses_owner_bindings_and_first_direct_numbering() {
+    fn issue423_section_reader_qualifies_first_owner_before_effective_direct_overlay() {
         for (xml, expected) in [
             (
                 r#"<q:sectPr xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" q:opaque="keep"><q:pgNumType q:fmt="upperLetter" q:start="28"/></q:sectPr>"#,
@@ -30079,7 +30144,7 @@ mod tests {
         let section = document.body.sect_pr.unwrap();
         assert_eq!(
             section_page_number_format(&section).as_deref(),
-            Some("lowerRoman")
+            Some("decimal")
         );
         let mut malformed = section.clone();
         malformed.page_number.as_mut().unwrap().raw_xml =
@@ -30088,6 +30153,268 @@ mod tests {
             section_page_number_format(&malformed).is_none(),
             "a later qualified opaque duplicate cannot authorize an unqualified modeled owner"
         );
+    }
+
+    #[test]
+    fn issue423_duplicate_numbering_attribute_overlay_matches_native_controls() {
+        let first = r#"<w:pgNumType w:fmt="lowerRoman" w:start="12"/>"#;
+        let mut failures = Vec::new();
+        for (name, numbering, start, format, text) in [
+            (
+                "conflict",
+                format!(r#"{first}<w:pgNumType w:fmt="decimal" w:start="27"/>"#),
+                27,
+                "decimal",
+                "27",
+            ),
+            (
+                "format-only",
+                format!(r#"{first}<w:pgNumType w:fmt="decimal"/>"#),
+                12,
+                "decimal",
+                "12",
+            ),
+            (
+                "start-only",
+                format!(r#"{first}<w:pgNumType w:start="27"></w:pgNumType>"#),
+                27,
+                "lowerRoman",
+                "xxvii",
+            ),
+            (
+                "empty",
+                format!("{first}<w:pgNumType/>"),
+                12,
+                "lowerRoman",
+                "xii",
+            ),
+            (
+                "proper-position",
+                format!(r#"{first}<w:pgNumType w:fmt="decimal" w:start="27"/><w:cols/>"#),
+                27,
+                "decimal",
+                "27",
+            ),
+            (
+                "original-order",
+                format!(r#"<w:cols/>{first}<w:pgNumType w:fmt="decimal" w:start="27"/>"#),
+                27,
+                "decimal",
+                "27",
+            ),
+            (
+                "alias-shadow",
+                format!(
+                    r#"{first}<q:pgNumType xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w="urn:producer" q:fmt="upperLetter" q:start="28" w:fmt="future" w:start="99"/>"#
+                ),
+                28,
+                "upperLetter",
+                "BB",
+            ),
+            (
+                "default",
+                format!(
+                    r#"{first}<pgNumType xmlns="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" q:fmt="decimal" q:start="53"/>"#
+                ),
+                53,
+                "decimal",
+                "53",
+            ),
+            (
+                "no-namespace",
+                format!(
+                    r#"{first}<pgNumType xmlns="" fmt="decimal" start="99"/><w:pgNumType fmt="decimal" start="99"/>"#
+                ),
+                12,
+                "lowerRoman",
+                "xii",
+            ),
+            (
+                "unknown-opaque-outside-numbering",
+                format!(
+                    r#"{first}<missing:opaque missing:note="keep"/><w:sectPrChange w:id="3" w:author="A"><w:sectPr><missing:pgNumType missing:fmt="future"/></w:sectPr></w:sectPrChange>"#
+                ),
+                12,
+                "lowerRoman",
+                "xii",
+            ),
+            (
+                "foreign-nested",
+                format!(
+                    r#"{first}<v:pgNumType xmlns:v="urn:producer" v:fmt="decimal" v:start="99"/><w:sectPrChange w:id="3" w:author="A"><w:sectPr><w:pgNumType w:fmt="decimal" w:start="99"/></w:sectPr></w:sectPrChange>"#
+                ),
+                12,
+                "lowerRoman",
+                "xii",
+            ),
+            (
+                "triple",
+                format!(r#"{first}<w:pgNumType w:fmt="decimal"/><w:pgNumType w:start="53"/>"#),
+                53,
+                "decimal",
+                "53",
+            ),
+            (
+                "zero",
+                format!(r#"{first}<w:pgNumType w:fmt="decimal" w:start="0"/>"#),
+                0,
+                "decimal",
+                "0",
+            ),
+        ] {
+            let input = issue423_input(&numbering, "PAGE", false);
+            let section = input.document.body.sect_pr.as_ref().unwrap();
+            let before = input.document.clone();
+            let bytes = input.document.to_xml().unwrap();
+            let actual_start = section_page_number_start(section);
+            let actual_format = section_page_number_format(section);
+            let actual_text =
+                issue423_layout_text(&Engine::new_deterministic().unwrap().layout(&input).unwrap());
+            if actual_start != Some(start)
+                || actual_format.as_deref() != Some(format)
+                || actual_text != text
+            {
+                failures.push(format!("{name}: start={actual_start:?}, format={actual_format:?}, text={actual_text:?}, wanted={start}/{format}/{text}"));
+            }
+            assert_eq!(section.page_number.as_ref().unwrap().start, Some(12));
+            assert_eq!(input.document, before);
+            assert_eq!(input.document.to_xml().unwrap(), bytes);
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn issue423_duplicate_numbering_refuses_partial_or_unsupported_recovery() {
+        let mut failures = Vec::new();
+        for (name, first, later) in [
+            (
+                "invalid-start",
+                r#"w:fmt="lowerRoman" w:start="12""#,
+                r#"<w:pgNumType w:fmt="decimal" w:start="bad"/>"#,
+            ),
+            (
+                "overflow-start",
+                r#"w:fmt="lowerRoman" w:start="12""#,
+                r#"<w:pgNumType w:fmt="decimal" w:start="4294967296"/>"#,
+            ),
+            (
+                "unbound-attribute",
+                r#"w:fmt="lowerRoman" w:start="12""#,
+                r#"<w:pgNumType missing:fmt="decimal" w:start="27"/>"#,
+            ),
+            (
+                "unbound-element",
+                r#"w:fmt="lowerRoman" w:start="12""#,
+                r#"<missing:pgNumType w:fmt="decimal" w:start="27"/>"#,
+            ),
+            (
+                "last-unknown",
+                r#"w:fmt="lowerRoman" w:start="12""#,
+                r#"<w:pgNumType w:fmt="future" w:start="27"/>"#,
+            ),
+            (
+                "first-unknown",
+                r#"w:fmt="future" w:start="12""#,
+                r#"<w:pgNumType w:fmt="decimal" w:start="27"/>"#,
+            ),
+            (
+                "first-chapter",
+                r#"w:fmt="lowerRoman" w:start="12" w:chapStyle="1""#,
+                r#"<w:pgNumType w:fmt="decimal" w:start="27"/>"#,
+            ),
+            (
+                "later-chapter",
+                r#"w:fmt="lowerRoman" w:start="12""#,
+                r#"<w:pgNumType w:chapSep="hyphen" w:start="27"/>"#,
+            ),
+        ] {
+            let input = issue423_input(
+                &format!("<w:pgNumType {first}/>{later}"),
+                r"PAGE \* Arabic",
+                false,
+            );
+            let section = input.document.body.sect_pr.as_ref().unwrap();
+            let before = input.document.clone();
+            let format = section_page_number_format(section);
+            if matches!(
+                name,
+                "invalid-start" | "overflow-start" | "unbound-attribute" | "unbound-element"
+            ) {
+                assert_eq!(
+                    section_page_number_start(section),
+                    Some(12),
+                    "{name} compatibility fallback"
+                );
+            }
+            let actual =
+                issue423_layout_text(&Engine::new_deterministic().unwrap().layout(&input).unwrap());
+            if format_page_field_result(
+                &Field::new(r"PAGE \* Arabic", "STORED").effective_instruction(),
+                12,
+                format.as_deref(),
+            )
+            .is_ok()
+                || actual != "STORED"
+            {
+                failures.push(format!("{name}: format={format:?}, actual={actual:?}"));
+            }
+            assert_eq!(input.document, before);
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn issue423_duplicate_numbering_authored_start_and_warm_source_edits_agree() {
+        let mut warm = Engine::new_deterministic().unwrap();
+        let mut failures = Vec::new();
+        for (later, expected) in [
+            (r#"<w:pgNumType w:fmt="decimal"/>"#, "19"),
+            (r#"<w:pgNumType w:fmt="decimal" w:start="27"/>"#, "27"),
+            (r#"<w:pgNumType w:fmt="upperLetter" w:start="28"/>"#, "BB"),
+            (r#"<w:pgNumType w:fmt="lowerRoman"/>"#, "xix"),
+        ] {
+            let mut input = issue423_input(
+                &format!(r#"<w:pgNumType w:fmt="lowerRoman" w:start="12"/>{later}"#),
+                "PAGE",
+                false,
+            );
+            input
+                .document
+                .body
+                .sect_pr
+                .as_mut()
+                .unwrap()
+                .page_number
+                .as_mut()
+                .unwrap()
+                .start = Some(19);
+            let before = input.document.clone();
+            let actual = issue423_layout_text(&warm.layout(&input).unwrap());
+            let cold =
+                issue423_layout_text(&Engine::new_deterministic().unwrap().layout(&input).unwrap());
+            let bytes = input.document.to_xml().unwrap();
+            let mut reopened = input.clone();
+            reopened.document = CT_Document::from_xml(&bytes).unwrap();
+            let after_reopen = issue423_layout_text(&warm.layout(&reopened).unwrap());
+            if actual != expected || cold != expected || after_reopen != expected {
+                failures.push(format!("{later}: warm={actual:?}, cold={cold:?}, reopened={after_reopen:?}, expected={expected}"));
+            }
+            assert_eq!(input.document, before);
+            assert_eq!(
+                reopened
+                    .document
+                    .body
+                    .sect_pr
+                    .as_ref()
+                    .unwrap()
+                    .page_number
+                    .as_ref()
+                    .unwrap()
+                    .start,
+                Some(19)
+            );
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]

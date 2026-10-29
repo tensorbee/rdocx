@@ -410997,3 +410997,53 @@ fn issue423_implicit_final_section_defaults_only_for_the_actual_missing_owner() 
         ["vii", "8", "8"]
     );
 }
+
+#[test]
+fn issue423_duplicate_numbering_page_pageref_toc_cache_and_source_agree() {
+    let body = r#"<w:p><w:pPr><w:sectPr><w:pgNumType w:fmt="decimal" w:start="1"/></w:sectPr></w:pPr><w:fldSimple w:instr="PAGE"><w:r><w:t>old-page</w:t></w:r></w:fldSimple><w:fldSimple w:instr="PAGEREF destination"><w:r><w:t>old-ref</w:t></w:r></w:fldSimple></w:p><w:p><w:pPr><w:pStyle w:val="Heading1"/><w:outlineLvl w:val="0"/></w:pPr><w:bookmarkStart w:id="1" w:name="destination"/><w:r><w:t>Target</w:t></w:r><w:bookmarkEnd w:id="1"/><w:fldSimple w:instr="PAGE"><w:r><w:t>old-second</w:t></w:r></w:fldSimple></w:p><w:sectPr><w:pgNumType w:fmt="lowerRoman" w:start="12"/><w:pgNumType w:fmt="decimal" w:start="27"/></w:sectPr>"#;
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+    let source = document.section_properties_xml(1).unwrap();
+    let layout = document.layout_deterministic().unwrap();
+    let target = layout.bookmark_page_section("destination").unwrap();
+    assert_eq!(
+        (
+            target.physical_page,
+            target.displayed_page,
+            target.section_index
+        ),
+        (2, 27, 1)
+    );
+    let mut labels = Vec::new();
+    for page in &layout.layout.pages {
+        oxml_layout::walk(&page.elements, &mut |element, _| {
+            if let oxml_layout::PositionedElement::Text(run) = element
+                && matches!(
+                    run.field_kind,
+                    Some(oxml_layout::FieldKind::Page | oxml_layout::FieldKind::TargetPage(_))
+                )
+            {
+                labels.push(run.text.clone());
+            }
+        });
+    }
+    assert_eq!(labels, ["1", "27", "27"]);
+    let report = document.update_layout_backed_fields().unwrap();
+    assert_eq!((report.page_fields, report.page_reference_fields), (2, 1));
+    assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+    assert_eq!(document.section_properties_xml(1).unwrap(), source);
+    document.insert_toc(0, 1).unwrap();
+    assert_eq!(document.rebuild_toc().unwrap().entry_count, 1);
+    let xml = document_xml(&mut document);
+    assert!(xml.contains("27"), "{xml}");
+    let mut reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+    assert_eq!(reopened.section_properties_xml(1).unwrap(), source);
+    assert_eq!(reopened.rebuild_toc().unwrap().entry_count, 1);
+    let xml = document_xml(&mut reopened);
+    let records = f281_cache_records(&xml);
+    assert!(
+        records.iter().any(|(_, entries)| entries
+            .iter()
+            .any(|entry| entry.starts_with("Target") && entry.ends_with("27"))),
+        "{records:?}"
+    );
+}

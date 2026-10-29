@@ -7872,3 +7872,51 @@ fn issue423_cli_update_formats_supported_pages_and_retains_unsupported_source() 
         assert_eq!(fs::read(&input).unwrap(), before);
     }
 }
+
+#[test]
+fn issue423_cli_duplicate_numbering_overlay_preserves_source_and_refusals() {
+    let temp = TempWorkspace::new("issue423-overlay");
+    for (name, later, expected, updated) in [
+        (
+            "both",
+            r#"<w:pgNumType w:fmt="decimal" w:start="27"/>"#,
+            "27",
+            1,
+        ),
+        ("format", r#"<w:pgNumType w:fmt="decimal"/>"#, "12", 1),
+        ("start", r#"<w:pgNumType w:start="27"/>"#, "xxvii", 1),
+        ("empty", "<w:pgNumType/>", "xii", 1),
+        (
+            "invalid",
+            r#"<w:pgNumType w:fmt="decimal" w:start="bad"/>"#,
+            "STORED",
+            0,
+        ),
+    ] {
+        let input = temp.path.join(format!("{name}-input.docx"));
+        let output = temp.path.join(format!("{name}-output.docx"));
+        fixture_document(&[]).save(&input).unwrap();
+        let mut package = OpcPackage::open(&input).unwrap();
+        let numbering = format!(r#"<w:pgNumType w:fmt="lowerRoman" w:start="12"/>{later}"#);
+        let source = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:fldSimple w:instr="PAGE"><w:r><w:t>STORED</w:t></w:r></w:fldSimple></w:p><w:sectPr>{numbering}</w:sectPr></w:body></w:document>"#
+        );
+        package.set_part("/word/document.xml", source.into_bytes());
+        package.save(&input).unwrap();
+        let before = fs::read(&input).unwrap();
+        let result = cli(&[
+            "fields",
+            "update",
+            path_text(&input),
+            "-o",
+            path_text(&output),
+            "--json",
+        ]);
+        assert_success(&result, name);
+        assert_eq!(json_stdout(&result)["page_fields"], updated);
+        let reopened = Document::open(&output).unwrap();
+        assert_eq!(reopened.paragraphs()[0].text(), expected, "{name}");
+        assert!(package_part_text(&output, "/word/document.xml").contains(&numbering));
+        assert_eq!(fs::read(&input).unwrap(), before);
+    }
+}

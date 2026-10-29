@@ -104,9 +104,17 @@ Parser/serializer adds namespace-qualified imported variants and exact opaque-by
 
 ## Hash harness
 
+The approved A1 remediation intentionally changes effective numbering for the
+native-qualified direct duplicate sources. Exact original output changes from
+i,ii,i,ii to i,ii,1,2. Explicit later format/start overlays produce the five
+recorded native discriminator sequences, without changing model ownership or
+retained source. These are declared behavior deltas, not automatic permission
+to replace corpus baselines. Every actual corpus delta still requires its
+source-qualified expected-output account at the final gate.
+
 Expected existing decimal cases unchanged. Roman/letter rendering is an intentional separately labelled behavior change. Namespace-capture corrections may intentionally add only the inherited alias/default or producer binding closure required to preserve expanded page-number and opaque-attribute identity. Ordinary canonical-w source stays unchanged. Any resulting source/output delta must trace to the qualified capture case and receive the same final combined review, never automatic baseline replacement. Any 49 hash/7 pixel delta must map to inspected section/field inputs and reviewed expected text/geometry before a successor baseline is recorded. F-X273 owns the baseline resource in this serial sequence, with one final combined account.
 
-## Implementation checklist
+## Initial integrated implementation checklist
 
 - [x] Close primary format/absence/rollover facts and shared provider semantics.
 - [x] Approve provider design, then require actual F-X273 local completion/ancestry.
@@ -172,7 +180,7 @@ The approved section-format helper may read the existing section writer's tempor
 Retain actual pure lower old-source RED before this correction, in addition to the earlier helper failures. Local controls cover direct fragment and full document import, part-root and section-root declarations, alias/default namespace, producer-w shadow and foreign attributes, Empty/Start, duplicate/nested exclusion, start mutation and source nonmutation. Verify preserved expanded names and opaque values after serialization/reopen, with ordinary canonical source unchanged. The existing parser/serializer, archive, WASM, source-qualified native, hash and full-risk union riders remain due. This factual capture repair introduces no new product choice or public surface. The owner acknowledges the revised contract while retaining the immutable claim Base and preserving the failed attempts.
 
 
-## Local implementation readiness
+## Prior integrated implementation readiness
 
 Scoped implementation and HLD08/10 passed independent full microscope pass2 with0defects,0smells and0nitpicks. Preparation is for integration, not final acceptance. Actual current local observations are native19, lower16, pure page-number4 and CLI4 passing, plus scoped check, strict clippy, fmt, prose and adapter checks. The cfg-test alias-only lint repair is authenticated separately and does not change production inputs. The predecessor252-field control passed on its own retained source/binary. Its explicit supported sections and placed targets do not reach the later implicit-section or refusal-status repairs, and its original result is carried rather than presented as a successor execution.
 
@@ -187,8 +195,27 @@ Five bounded independent controls prove explicit-attribute overlay in this impor
 
 Authorize one private effective-numbering record/provider in existing engine.rs. Keep both existing doc-hidden public helper signatures unchanged. First positively qualify the modeled numbering owner under its actual retained namespace bindings. Only after that admission, fold the serialized section's direct Word pgNumType attributes in source order. A later explicit Word fmt or start independently replaces that attribute. Omitted attributes and an empty element keep the accumulated value. Use the same provider for section start and format, so physical/displayed arithmetic, PAGE/PAGEREF placement, eligible saved caches, TOC and generated navigation receive one effective policy.
 
-Preserve first-owner typed model, getters, setters, parser capture, duplicate order and raw source bytes exactly. This projection changes neither serialization nor authoring authority. Ignore positively bound foreign lookalikes and nested sectPrChange, do not borrow a qualified duplicate after an unqualified modeled owner, and never match attributes by local name alone. Preserve qualified absence as decimal and no restart. Parse an explicit later start as u32 with the existing conversion, including existing zero behavior, without clamping or widening the supported domain. Invalid/overflow later start, unbound namespace or read failure must discard partial recovery, retain stored display/source and refuse format qualification while using the legacy modeled-start compatibility fallback. Preserve existing single-owner compatibility behavior. Chapter composition remains unsupported. Do not rescue an earlier unsupported format through a later supported token without native qualification. No new public API, file, module, dependency, enum or general serializer repair is authorized.
+Preserve first-owner typed model, getters, setters, parser capture, duplicate order and raw source bytes exactly. This projection changes neither serialization nor authoring authority. Ignore positively foreign lookalikes, including explicit no-namespace elements and unprefixed attributes, and nested sectPrChange, do not borrow a qualified duplicate after an unqualified modeled owner, and never match attributes by local name alone. Preserve qualified absence as decimal and no restart. Parse an explicit later start as u32 with the existing conversion, including existing zero behavior, without clamping or widening the supported domain. Invalid/overflow later start, an undeclared prefix in a consumed numbering element or attribute, or a read failure must discard partial recovery, retain stored display/source and refuse format qualification while using the legacy modeled-start compatibility fallback. Preserve existing single-owner compatibility behavior. Chapter composition remains unsupported. Do not rescue an earlier unsupported format through a later supported token without native qualification. No new public API, file, module, dependency, enum or general serializer repair is authorized.
 
 Keep the lower parser regression expecting first start12 and preserved duplicate order unchanged. Explicitly revise the existing layout-reader duplicate-format expectation under this documented effective projection rather than deleting the discriminator. Add bounded existing-carrier controls for the actual original and five attribute combinations, aliases/default namespaces/shadows, nested and foreign exclusions, unqualified modeled owner, invalid later start, sticky unsupported state, authored first start with later omitted versus explicit start, warm held/fresh/reopened mutation, and same-input PAGE/PAGEREF/TOC/cache/render/CLI/Python agreement. Actual prior A1 output is RED. New-source focused GREEN and independent microscope precede final qualification. HLD08and10 remain the complete impact list.
 
 Root designer approves this evidence-driven A1 refinement to fulfill the existing exact-original acceptance criterion. Independent source investigation by the implementing owner mapped both format and restart consumers and rejected a disproven whole-last hypothesis. The final independent implementation microscope must inspect the complete amendment diff. Existing final native, installed, archive, hash/pixel, hosted and full union gates remain required, with no baseline or criterion waived.
+
+
+## A1 remediation local evidence and pending final qualification
+
+The canonical implementation starts from55f5d9d5a45712bda00d7472dfc2ad0855e9d5d1 under approved amendment4f0f8368, retaining original feature Base8cb33ef5. Current-source semantic RED is actual lower9pass/4fail, native3pass/1fail and CLI1pass/1fail. Freshly built current old-provider CLI also reproduces the exact original failure and four nonempty duplicate failures on unchanged native input hashes. The empty duplicate is a positive control, not a claimed failure.
+
+One private engine provider now shares qualified explicit-attribute overlay between restart and format. Model/getter/authoring/serialized source remain unchanged. HLD08/10 intent is updated. Current executed lower13 and native4 all pass, with exact retained executables/source identities in fx274-a1-frozen-current-named.json. CLI2 pass and actual current CLI matches exact original plus allfive native label sequences on four pages each, inputs unchanged, in fx274-a1-cli-originals-green/receipt.json. Scoped check, strict three-crate clippy, fmt, prose, adapter and whitespace checks pass. These are bounded local observations, not a successful complete workspace or geometry/native/font union.
+
+The initial new native TOC stage failed because the test used outline-only input with style-based insert_toc, generating an empty same-paragraph result. Source/API trace and test-only Heading1 correction are retained, without changing the product or weakening assertions. A prior edit-script assertion failed before writing source, and its accidentally continued old-source check receives no candidate credit. Exact logs and failed producer identities remain historical. No product repair-invariant failure was observed. New five-node Python overlay/cache/reopen/held cases are added to the existing carrier and remain pending the final fresh installed wheel, with no local wheel reuse or binding execution claimed.
+
+- [x] Record actual original and five current-source discriminator outcomes before repair.
+- [x] Implement the approved private shared effective numbering policy and HLD08/10 intent.
+- [x] Pass bounded current lower/native/CLI and scoped static checks, preserving failures.
+- [x] Obtain the separately invoked independent microscope for this A1 amendment.
+- [ ] Qualify the final fresh installed wheel and every remaining native/full/archive/hash/risk gate.
+
+All original final debt remains due. Root owns review, integration commits and final acceptance. This lease creates no commit, push, tracker, ledger or second handoff.
+
+Independent full microscope pass3 reports0defects,0smells and0nitpicks for the complete F274Base implementation plus A1amendment. Root read the full report and authenticated source and retained binaries. This closes local review only. Final native geometry/font, new installed bindings, full workspace, archives, deterministic corpora and hosted gates remain pending.

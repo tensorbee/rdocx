@@ -1991,14 +1991,25 @@ page identity, displayed integer and formatted text are separate facts.
 
 Layout substitution and eligible saved-cache updates share the doc-hidden
 `format_page_field_result` policy in the existing layout engine. The companion
-`section_page_number_format` reads the modeled first page-number owner through
-the section writer's temporary namespace context. Its read view retains the
-actual root attribute records and excludes opaque child fallback candidates.
-Qualified absence selects decimal, including the implicit final section that
-pagination supplies when body sectPr is absent. Unknown formats, chapter style or separator,
-unqualified modeled source and writer or reader errors retain stored display
-with diagnostics, including when an explicit override is present. A later opaque
-duplicate or a nested prior section never authorizes the modeled current owner.
+`section_page_number_format` and restart projection share one private effective
+numbering provider. It positively qualifies the modeled first owner through
+the section writer's retained namespace context before admitting direct Word
+numbering duplicates. For the imported duplicate recovery qualified against
+Word, later explicit format and start attributes independently replace those
+values, while omitted attributes and empty elements retain prior values.
+The model, getters, authoring and serialized source keep first-owner authority
+and exact opaque duplicate order. Nested prior sections and bound foreign
+lookalikes, explicit no-namespace lookalikes and unprefixed attributes do not
+participate. An unqualified modeled owner cannot borrow a
+later qualified duplicate. Unknown formats remain unsupported even if a later
+token is supported, and chapter state remains unsupported. Invalid later
+start, an undeclared prefix on consumed numbering or reader failure discards
+partial recovery, retains
+stored display with diagnostics and uses the legacy modeled start for
+compatibility pagination. Explicit later starts use the existing u32 domain
+and zero behavior. Single-owner compatibility remains unchanged.
+Qualified absence selects decimal and no restart, including the implicit final
+section that pagination supplies when body sectPr is absent.
 
 The supported section formats are decimal, lowerRoman, upperRoman, lowerLetter
 and upperLetter. Explicit numeral switches or numeric pictures override a
