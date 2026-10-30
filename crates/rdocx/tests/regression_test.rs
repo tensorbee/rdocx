@@ -14110,6 +14110,37 @@ fn toc_rebuild_rejects_an_unresolved_page_target_atomically() {
     let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
     let before = document.to_bytes().unwrap();
 
+    // A heading that layout positively omits is no longer a TOC source.
+    let report = document.rebuild_toc().unwrap();
+    assert_eq!(report.entry_count, 0);
+    assert_eq!(report.bookmark_count, 0);
+    let rebuilt = document.to_bytes().unwrap();
+    assert_ne!(rebuilt, before);
+    let mut reopened = Document::from_bytes(&rebuilt).unwrap();
+    let xml = document_xml(&mut reopened);
+    assert!(xml.contains("Unlaid continuation"));
+    assert!(xml.contains(r#"<w:vMerge w:val="continue""#));
+    assert!(!xml.contains("_Toc1"));
+    assert_eq!(reopened.rebuild_toc().unwrap().entry_count, 0);
+
+    // Keep an eligible, placed heading, but omit the cell containing the TOC
+    // display. Its generated PAGEREF then has no positioned page value.
+    let body = r#"
+        <w:tbl><w:tblGrid><w:gridCol w:w="8000"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:vMerge w:val="continue"/></w:tcPr>
+        <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText>TOC \o &quot;1-1&quot; \h</w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r></w:p>
+        <w:p><w:r><w:t>old</w:t></w:r></w:p>
+        <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+        </w:tc></w:tr></w:tbl>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Eligible heading</w:t></w:r></w:p>
+    "#;
+    let visible_body = body.replace(r#"<w:vMerge w:val="continue"/>"#, "");
+    let mut visible = document_with_field_parts(&wrap_word_body(&visible_body), None, None);
+    let report = visible.rebuild_toc().unwrap();
+    assert_eq!(report.entry_count, 1);
+    assert_eq!(report.bookmark_count, 1);
+
+    let mut document = document_with_field_parts(&wrap_word_body(body), None, None);
+    let before = document.to_bytes().unwrap();
     let error = document.rebuild_toc().unwrap_err();
     assert_eq!(
         error.to_string(),
@@ -18970,6 +19001,111 @@ fn document_xml(document: &mut Document) -> String {
         oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(document.to_bytes().unwrap()))
             .unwrap();
     String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap()
+}
+
+/// Structural assertions ignore only redundant namespace declarations on
+/// modeled Word containers. This view never feeds document operations or raw-byte
+/// preservation assertions. Foreign roots, local shadows, values and payload
+/// bytes stay exact.
+fn comparison_structure_xml(xml: &str) -> String {
+    let mut reader = XmlReader::from_str(xml);
+    let mut scopes = vec![BTreeMap::<String, String>::new()];
+    let mut removals = Vec::new();
+    let mut opaque = vec![false];
+    loop {
+        let event = reader.read_event().unwrap();
+        match event {
+            XmlEvent::Start(ref element) | XmlEvent::Empty(ref element) => {
+                let parent = scopes.last().unwrap();
+                let mut scope = parent.clone();
+                let mut declarations = Vec::new();
+                for attribute in element.attributes() {
+                    let attribute = attribute.unwrap();
+                    let name = std::str::from_utf8(attribute.key.as_ref()).unwrap();
+                    let prefix = if name == "xmlns" {
+                        ""
+                    } else if let Some(prefix) = name.strip_prefix("xmlns:") {
+                        prefix
+                    } else {
+                        continue;
+                    };
+                    let value = attribute
+                        .decoded_and_normalized_value(
+                            quick_xml::XmlVersion::Implicit1_0,
+                            element.decoder(),
+                        )
+                        .unwrap()
+                        .into_owned();
+                    scope.insert(prefix.to_owned(), value.clone());
+                    if parent.get(prefix) == Some(&value) {
+                        let start =
+                            attribute.key.as_ref().as_ptr() as usize - xml.as_ptr() as usize;
+                        let end = attribute.value.as_ptr() as usize - xml.as_ptr() as usize
+                            + attribute.value.len()
+                            + 1;
+                        assert!(start > 0 && xml.as_bytes()[start - 1].is_ascii_whitespace());
+                        declarations.push(start - 1..end);
+                    }
+                }
+                let name = std::str::from_utf8(element.name().as_ref())
+                    .unwrap()
+                    .to_owned();
+                let (prefix, local) = name.split_once(':').unwrap_or(("", &name));
+                let modeled = scope.get(prefix).is_some_and(|uri| uri == W_NS)
+                    && matches!(
+                        local,
+                        "document"
+                            | "body"
+                            | "hdr"
+                            | "ftr"
+                            | "p"
+                            | "pPr"
+                            | "r"
+                            | "rPr"
+                            | "t"
+                            | "delText"
+                            | "tbl"
+                            | "tblPr"
+                            | "tblGrid"
+                            | "tr"
+                            | "trPr"
+                            | "tc"
+                            | "tcPr"
+                            | "sdt"
+                            | "sdtContent"
+                            | "sdtPr"
+                            | "ins"
+                            | "del"
+                            | "pPrChange"
+                            | "rPrChange"
+                            | "sectPr"
+                            | "b"
+                            | "i"
+                            | "spacing"
+                            | "jc"
+                    );
+                let preserved = *opaque.last().unwrap() || !modeled;
+                if !preserved {
+                    removals.extend(declarations);
+                }
+                if matches!(event, XmlEvent::Start(_)) {
+                    scopes.push(scope);
+                    opaque.push(preserved);
+                }
+            }
+            XmlEvent::End(_) => {
+                scopes.pop().unwrap();
+                opaque.pop().unwrap();
+            }
+            XmlEvent::Eof => break,
+            _ => {}
+        }
+    }
+    let mut output = xml.to_owned();
+    for range in removals.into_iter().rev() {
+        output.replace_range(range, "");
+    }
+    output
 }
 
 #[test]
@@ -24588,7 +24724,7 @@ fn comparison_revises_an_empty_paragraph() {
             let label = format!("{granularity:?} {text:?} {property}");
             let original = build(text, unchanged);
             let edited = build(text, format);
-            let xml = compare_and_resolve(&original, &edited, &options);
+            let xml = comparison_structure_xml(&compare_and_resolve(&original, &edited, &options));
             let tracked = format!(
                 r#"<w:p><w:pPr>{property}<w:pPrChange w:id="0" w:author="Ada" w:date="2026-09-30T09:30:00Z"><w:pPr/></w:pPrChange></w:pPr>"#
             );
@@ -24619,8 +24755,11 @@ fn comparison_revises_an_empty_paragraph() {
             edited.add_paragraph("typed");
             edited.add_paragraph("Body.");
             format(&mut edited.paragraph_mut(0).unwrap());
-            let xml =
-                compare_and_resolve(&build("", unchanged), &edited.to_bytes().unwrap(), &options);
+            let xml = comparison_structure_xml(&compare_and_resolve(
+                &build("", unchanged),
+                &edited.to_bytes().unwrap(),
+                &options,
+            ));
             assert!(
                 xml.contains(r#"<w:ins w:id="#) && !xml.contains("<w:p/>"),
                 "{granularity:?}: {xml}"
@@ -24675,7 +24814,8 @@ fn comparison_revises_an_empty_header_paragraph() {
                 &options,
             )
             .unwrap_or_else(|error| panic!("{granularity:?}: {error}"));
-        let header = comparison_part_xml(&mut compared, "/word/header1.xml");
+        let header =
+            comparison_structure_xml(&comparison_part_xml(&mut compared, "/word/header1.xml"));
         assert!(
             header.contains(
                 r#"<w:p><w:pPr><w:spacing w:after="0"/><w:pPrChange w:id="0" w:author="Ada" w:date="2026-09-30T09:30:00Z"><w:pPr/></w:pPrChange></w:pPr></w:p>"#
@@ -24697,9 +24837,9 @@ fn comparison_revises_an_empty_header_paragraph() {
                     .is_empty()
             );
             assert_eq!(
-                comparison_part_xml(&mut resolved, "/word/header1.xml")
+                comparison_structure_xml(&comparison_part_xml(&mut resolved, "/word/header1.xml"))
                     .contains(r#"<w:spacing w:after="0"/>"#),
-                comparison_part_xml(&mut wanted, "/word/header1.xml")
+                comparison_structure_xml(&comparison_part_xml(&mut wanted, "/word/header1.xml"))
                     .contains(r#"<w:spacing w:after="0"/>"#),
                 "{granularity:?}"
             );
@@ -24767,7 +24907,7 @@ fn comparison_deletes_several_final_paragraphs() {
             },
         ] {
             let (original, edited) = (bytes(&original), bytes(&edited));
-            let xml = compare_and_resolve(&original, &edited, &options);
+            let xml = comparison_structure_xml(&compare_and_resolve(&original, &edited, &options));
             // The mark of the kept paragraph carries the deletion, and no
             // paragraph mark is deleted twice.
             let kept = &xml[xml.find("<w:p>").unwrap()..];
@@ -25013,12 +25153,298 @@ fn comparison_carries_bookmarks_and_whole_fields_in_whole_paragraph_changes() {
                     || xml.contains("<w:moveTo "),
                 "{name}: {xml}"
             );
+            // Validate the actual qualified child role that the previous
+            // modeled lifecycle checks could not distinguish.
+            let mut reader = quick_xml::NsReader::from_str(&xml);
+            let mut owners = Vec::new();
+            loop {
+                let (namespace, event) = reader.read_resolved_event().unwrap();
+                let word = matches!(namespace, quick_xml::name::ResolveResult::Bound(quick_xml::name::Namespace(uri)) if uri == b"http://schemas.openxmlformats.org/wordprocessingml/2006/main");
+                let empty = matches!(event, quick_xml::events::Event::Empty(_));
+                match event {
+                    quick_xml::events::Event::Start(element)
+                    | quick_xml::events::Event::Empty(element) => {
+                        if word && element.local_name().as_ref() == b"fldSimple" {
+                            assert!(
+                                !owners.last().is_some_and(|owner: &Vec<u8>| matches!(
+                                    owner.as_slice(),
+                                    b"ins" | b"del" | b"moveFrom" | b"moveTo"
+                                )),
+                                "{name}: {xml}"
+                            );
+                        }
+                        // Empty elements have no later end event.
+                        if !empty {
+                            owners.push(if word {
+                                element.local_name().as_ref().to_vec()
+                            } else {
+                                Vec::new()
+                            });
+                        }
+                    }
+                    quick_xml::events::Event::End(_) => {
+                        owners.pop();
+                    }
+                    quick_xml::events::Event::Eof => break,
+                    _ => {}
+                }
+            }
             // Each side keeps its complex fields whole, so a field ended in
             // an unchanged paragraph is deleted and inserted with it.
             assert_eq!(
                 xml.matches(r#"w:fldCharType="begin""#).count(),
                 xml.matches(r#"w:fldCharType="end""#).count(),
                 "{name}: {xml}"
+            );
+        }
+    }
+}
+
+#[test]
+fn comparison_carried_fields_compose_source_final_move_and_control_owners() {
+    let plain = "<w:p><w:r><w:t>Alpha</w:t></w:r></w:p>";
+    let last = "<w:p><w:r><w:t>Omega</w:t></w:r></w:p>";
+    let field = |result: &str| {
+        format!(
+            r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>TOC</w:instrText><w:fldChar w:fldCharType="separate"/></w:r>{result}<w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#
+        )
+    };
+    let simple = r#"<w:fldSimple w:instr="PAGEREF target"><w:r><w:t>1</w:t></w:r></w:fldSimple>"#;
+    let single = field(simple);
+    let control = |content: &str| {
+        format!(
+            "<w:sdt><w:sdtPr><w:tag w:val=\"carrier\"/></w:sdtPr><w:sdtContent>{content}</w:sdtContent></w:sdt>"
+        )
+    };
+    let alias = String::from(
+        r#"<q:fldSimple xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w="urn:producer" q:instr=" PAGEREF target " q:dirty="off" q:fldLock="0" w:note="root-kept"><q:fldData>QUJD</q:fldData><q:r><q:t w:note="leaf-kept">1</q:t></q:r></q:fldSimple>"#,
+    );
+    let nested = format!(
+        "<w:fldSimple w:instr=\"QUOTE\"><w:r><w:t>before</w:t></w:r>{simple}{}</w:fldSimple>",
+        control(simple)
+    );
+    let linked = format!("<w:hyperlink w:anchor=\"target\">{simple}</w:hyperlink>");
+    let opaque = r#"<w:r xmlns:x="urn:opaque"><x:fldSimple x:note="untouched"><w:t>opaque</w:t><w:fldChar w:fldCharType="end"/></x:fldSimple><w:t>visible</w:t></w:r>"#;
+    let cases = [
+        (
+            "final",
+            format!("{plain}{last}"),
+            format!("{plain}{last}{single}"),
+            true,
+        ),
+        (
+            "move",
+            format!("{single}{plain}{last}"),
+            format!("{plain}{last}{single}"),
+            true,
+        ),
+        (
+            "block control",
+            format!("{}{last}", control(plain)),
+            format!("{}{last}", control(&format!("{plain}{single}"))),
+            true,
+        ),
+        (
+            "alias metadata",
+            format!("{plain}{last}"),
+            format!("{plain}{}{last}", field(&alias)),
+            true,
+        ),
+        (
+            "nested control",
+            format!("{plain}{last}"),
+            format!("{plain}{}{last}", field(&nested)),
+            true,
+        ),
+        (
+            "opaque hyperlink field",
+            format!("{plain}{last}"),
+            format!("{plain}{}{last}", field(&linked)),
+            false,
+        ),
+        (
+            "opaque marker",
+            format!("{plain}{last}"),
+            format!("{plain}{}{last}", field(&format!("{opaque}{simple}"))),
+            true,
+        ),
+    ];
+    for (label, original, edited, typed) in cases {
+        let original_bytes = document_with_content_controls(&wrap_word_body(&original))
+            .to_bytes()
+            .unwrap();
+        let edited_bytes = document_with_content_controls(&wrap_word_body(&edited))
+            .to_bytes()
+            .unwrap();
+        let mut compared = Document::from_bytes(&original_bytes).unwrap();
+        let edited_doc = Document::from_bytes(&edited_bytes).unwrap();
+        compared
+            .compare(&edited_doc, "D3", "2026-10-30T12:00:00Z")
+            .unwrap_or_else(|error| panic!("{label}: {error}"));
+        let listed = compared.story_revisions().unwrap();
+        assert!(!listed.is_empty(), "{label}");
+        let ids = listed
+            .iter()
+            .map(|revision| revision.id())
+            .collect::<std::collections::HashSet<_>>();
+        let tracked = compared.to_bytes().unwrap();
+        for accept in [true, false] {
+            let mut resolved = Document::from_bytes(&tracked).unwrap();
+            let count = if accept {
+                resolved.accept_revisions_by_author("D3")
+            } else {
+                resolved.reject_revisions_by_author("D3")
+            }
+            .unwrap_or_else(|error| panic!("{label}/{accept}: {error}"));
+            assert_eq!(count, listed.len(), "{label}/{accept}");
+            assert!(
+                resolved.story_revisions().unwrap().is_empty(),
+                "{label}/{accept}"
+            );
+            let expected = if accept {
+                &edited_bytes
+            } else {
+                &original_bytes
+            };
+            let expected = Document::from_bytes(expected).unwrap();
+            assert_eq!(resolved.text(), expected.text(), "{label}/{accept}");
+            assert!(
+                resolved
+                    .compare(&expected, "postcondition", "2026-10-30T12:01:00Z")
+                    .unwrap()
+                    .is_empty(),
+                "{label}/{accept}"
+            );
+            let xml = document_xml(&mut resolved);
+            if accept && label == "alias metadata" {
+                for fact in [
+                    "root-kept",
+                    "leaf-kept",
+                    "QUJD",
+                    "q:dirty=\"off\"",
+                    "q:fldLock=\"0\"",
+                ] {
+                    assert!(xml.contains(fact), "{label}: {fact}: {xml}");
+                }
+            }
+            if accept && label == "opaque marker" {
+                assert!(xml.contains("<x:fldSimple x:note=\"untouched\"><w:t>opaque</w:t><w:fldChar w:fldCharType=\"end\"/></x:fldSimple>"), "{xml}");
+            }
+            if accept && label != "block control" {
+                let body = body_from_document(&mut resolved);
+                let mut child = Vec::new();
+                for paragraph in body.paragraphs() {
+                    for run in &paragraph.runs {
+                        for content in &run.content {
+                            if let rdocx_oxml::text::RunContent::Field(field) = content {
+                                child.extend(field.all_nested_fields_in_source_order());
+                            }
+                        }
+                    }
+                }
+                let mut observed = 0;
+                while let Some(field) = child.pop() {
+                    if field.effective_instruction().name == "PAGEREF" {
+                        observed += 1;
+                        assert!(!field.is_complex(), "{label}");
+                        assert_eq!(field.cached_result, "1", "{label}");
+                    }
+                    child.extend(field.all_nested_fields_in_source_order());
+                }
+                if typed {
+                    assert!(observed > 0, "{label}: modeled PAGEREF child missing");
+                } else {
+                    assert_eq!(observed, 0, "opaque hyperlink child was promoted");
+                    assert!(xml.contains("PAGEREF target"), "{xml}");
+                    assert!(xml.contains(">1<"), "{xml}");
+                }
+            }
+        }
+        if label == "move" {
+            assert!(
+                listed
+                    .iter()
+                    .any(|revision| revision.kind() == rdocx::RevisionKind::MoveTo),
+                "{listed:?}"
+            );
+            for id in ids {
+                let mut selected = Document::from_bytes(&tracked).unwrap();
+                let expected = listed.iter().filter(|revision| revision.id() == id).count();
+                let count = selected
+                    .accept_revision_id(id)
+                    .unwrap_or_else(|error| panic!("{label}/id{id}: {error}"));
+                assert_eq!(count, expected);
+            }
+        }
+    }
+}
+
+#[test]
+fn comparison_carried_fields_keep_atomic_story_snapshots_and_resolution() {
+    let pict = r#"<w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:shape id="D4Box"><v:textbox><w:txbxContent><w:p><w:fldSimple w:instr="PAGE"><w:r><w:t>box</w:t></w:r></w:fldSimple></w:p></w:txbxContent></v:textbox></v:shape></w:pict>"#;
+    let atomic = r#"<w:sdt><w:sdtPr/><w:sdtContent><w:fldSimple w:instr="PAGE"><w:r><w:t>atomic</w:t></w:r></w:fldSimple></w:sdtContent></w:sdt>"#;
+    let begin = r#"<w:r><w:fldChar w:fldCharType="begin"/><w:instrText>TOC</w:instrText><w:fldChar w:fldCharType="separate"/>"#;
+    let body = r#"<w:fldSimple w:instr="PAGE"><w:r><w:t>body</w:t></w:r></w:fldSimple><w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
+    for (label, original, edited) in [
+        (
+            "textbox",
+            format!("<w:p><w:r><w:t>plain</w:t></w:r><w:r>{pict}</w:r></w:p>"),
+            format!("<w:p>{begin}{pict}</w:r>{body}</w:p>"),
+        ),
+        (
+            "atomic control",
+            format!("<w:p><w:r><w:t>plain</w:t></w:r>{atomic}</w:p>"),
+            format!("<w:p>{begin}</w:r>{body}{atomic}</w:p>"),
+        ),
+    ] {
+        let original = document_with_content_controls(&wrap_word_body(&original))
+            .to_bytes()
+            .unwrap();
+        let edited = document_with_content_controls(&wrap_word_body(&edited))
+            .to_bytes()
+            .unwrap();
+        let mut compared = Document::from_bytes(&original).unwrap();
+        compared
+            .compare(
+                &Document::from_bytes(&edited).unwrap(),
+                "Scope",
+                "2026-10-30T12:00:00Z",
+            )
+            .unwrap_or_else(|error| panic!("{label}: {error}"));
+        compared
+            .standalone_story_item_snapshots()
+            .unwrap_or_else(|error| panic!("{label}: {error}"));
+        let revisions = compared.story_revisions().unwrap().len();
+        let tracked = compared.to_bytes().unwrap();
+        for accept in [true, false] {
+            let mut resolved = Document::from_bytes(&tracked).unwrap();
+            let count = if accept {
+                resolved.accept_revisions_by_author("Scope")
+            } else {
+                resolved.reject_revisions_by_author("Scope")
+            }
+            .unwrap_or_else(|error| panic!("{label}/{accept}: {error}"));
+            assert_eq!(count, revisions);
+            assert!(resolved.story_revisions().unwrap().is_empty());
+            resolved.standalone_story_item_snapshots().unwrap();
+            let expected = if accept { &edited } else { &original };
+            let expected = Document::from_bytes(expected).unwrap();
+            assert_eq!(resolved.text(), expected.text(), "{label}/{accept}");
+            assert!(
+                resolved
+                    .compare(&expected, "postcondition", "2026-10-30T12:01:00Z")
+                    .unwrap()
+                    .is_empty(),
+                "{label}/{accept}"
+            );
+            let xml = document_xml(&mut resolved);
+            assert_eq!(
+                xml.matches("<w:fldSimple ").count(),
+                if accept { 2 } else { 1 }
+            );
+            assert_eq!(
+                xml.matches("<w:fldChar ").count(),
+                if accept { 3 } else { 0 }
             );
         }
     }
@@ -25905,20 +26331,20 @@ fn comparison_reports_formatting_inside_matched_table_rows() {
     );
     assert!(!compared.revisions().is_empty());
     let tracked_bytes = compared.to_bytes().unwrap();
-    let tracked = document_xml(&mut compared);
+    let tracked = comparison_structure_xml(&document_xml(&mut compared));
     assert!(tracked.contains("<w:pPrChange"), "{tracked}");
     assert!(tracked.contains("<w:rPrChange"), "{tracked}");
 
     let mut accepted = Document::from_bytes(&tracked_bytes).unwrap();
     accepted.accept_all().unwrap();
-    let accepted = document_xml(&mut accepted);
+    let accepted = comparison_structure_xml(&document_xml(&mut accepted));
     assert!(accepted.contains(r#"<w:jc w:val="right"/>"#), "{accepted}");
     assert!(accepted.contains("<w:i/>"), "{accepted}");
     assert!(accepted.contains(r#"w:fill="FF0000""#), "{accepted}");
 
     let mut rejected = Document::from_bytes(&tracked_bytes).unwrap();
     rejected.reject_all().unwrap();
-    let rejected = document_xml(&mut rejected);
+    let rejected = comparison_structure_xml(&document_xml(&mut rejected));
     assert!(rejected.contains(r#"<w:jc w:val="left"/>"#), "{rejected}");
     assert!(rejected.contains("<w:b/>"), "{rejected}");
     assert!(rejected.contains(r#"w:fill="FF0000""#), "{rejected}");
@@ -26265,7 +26691,7 @@ fn whole_row_markers_target_the_outer_row_properties() {
     compared
         .compare(&table, "Ada", "2026-08-21T09:30:00Z")
         .unwrap();
-    let tracked = document_xml(&mut compared);
+    let tracked = comparison_structure_xml(&document_xml(&mut compared));
     let marker = tracked.find("<w:ins").unwrap();
     let outer_cell = tracked.find("<w:tc>").unwrap();
     let nested_properties = tracked.find("<w:tblHeader/>").unwrap();
@@ -26301,7 +26727,7 @@ fn whole_row_markers_target_the_outer_row_properties() {
     deletion
         .compare(&anchor, "Ada", "2026-08-21T09:30:00Z")
         .unwrap();
-    let tracked = document_xml(&mut deletion);
+    let tracked = comparison_structure_xml(&document_xml(&mut deletion));
     assert!(tracked.find("<w:del").unwrap() < tracked.find("<w:tc>").unwrap());
     let mut accepted = Document::from_bytes(&deletion.to_bytes().unwrap()).unwrap();
     accepted.accept_all().unwrap();
@@ -26374,7 +26800,7 @@ fn table_row_insertions_stay_inside_table_schema_boundaries() {
         compared
             .compare(&edited, "Ada", "2026-08-21T09:30:00Z")
             .unwrap();
-        let tracked = document_xml(&mut compared);
+        let tracked = comparison_structure_xml(&document_xml(&mut compared));
         let table_start = tracked.find("<w:tbl>").unwrap();
         let table_end = tracked.find("</w:tbl>").unwrap();
         let inserted_row = tracked
@@ -26605,7 +27031,7 @@ fn control_block_replacement_keeps_whitespace_before_the_replacement() {
         .unwrap();
     let mut accepted = Document::from_bytes(&compared.to_bytes().unwrap()).unwrap();
     accepted.accept_all().unwrap();
-    let accepted_xml = document_xml(&mut accepted);
+    let accepted_xml = comparison_structure_xml(&document_xml(&mut accepted));
     assert!(accepted_xml.contains(before), "{accepted_xml:?}");
     assert!(accepted_xml.contains(between), "{accepted_xml:?}");
     assert!(accepted_xml.find(before).unwrap() < accepted_xml.find("<w:tbl>").unwrap());
@@ -26619,7 +27045,7 @@ fn control_block_replacement_keeps_whitespace_before_the_replacement() {
 
     let mut rejected = Document::from_bytes(&compared.to_bytes().unwrap()).unwrap();
     rejected.reject_all().unwrap();
-    let rejected_xml = document_xml(&mut rejected);
+    let rejected_xml = comparison_structure_xml(&document_xml(&mut rejected));
     assert!(rejected_xml.find(before).unwrap() < rejected_xml.find("<w:p>").unwrap());
     assert!(
         rejected
@@ -29180,10 +29606,13 @@ fn full_story_comparison_matches_pinned_word_records() {
         .expect("field instruction comparison");
     let instruction = comparison_part_xml(&mut original, "/word/header1.xml");
     assert_eq!(
-        instruction.matches("<w:fldSimple").count(),
+        instruction.matches("w:fldCharType=\"begin\"").count(),
         2,
         "{instruction}"
     );
+    assert_eq!(instruction.matches("w:fldCharType=\"separate\"").count(), 2);
+    assert_eq!(instruction.matches("w:fldCharType=\"end\"").count(), 2);
+    assert!(!instruction.contains("<w:fldSimple"), "{instruction}");
     let bytes = original
         .to_bytes()
         .expect("serialize instruction comparison");
@@ -29290,15 +29719,29 @@ fn run_property_changes_preserve_original_unmodelled_children_and_report_the_dif
     );
 
     let tracked_bytes = original.to_bytes().expect("serialize tracked comparison");
-    let tracked = comparison_part_xml(&mut original, "/word/header1.xml");
+    let tracked =
+        comparison_structure_xml(&comparison_part_xml(&mut original, "/word/header1.xml"));
     assert!(tracked.contains("<w:i/>"), "{tracked}");
     assert!(tracked.contains("<w:rPrChange"), "{tracked}");
-    assert_eq!(tracked.matches(original_raw).count(), 1, "{tracked}");
+    assert_eq!(tracked.matches(original_raw).count(), 2, "{tracked}");
+    let change_start = tracked.find("<w:rPrChange ").unwrap();
+    let change_end = tracked[change_start..].find("</w:rPrChange>").unwrap() + change_start;
+    let prior = &tracked[change_start..change_end];
+    assert_eq!(prior.matches(original_raw).count(), 1, "{prior}");
+    assert!(prior.contains("<w:rPr><w:b/>"), "{prior}");
+    assert!(
+        prior.contains(r#"w:id="0" w:author="Word" w:date="2026-09-04T09:00:00Z""#),
+        "{prior}"
+    );
+    let current = &tracked[..change_start];
+    assert_eq!(current.matches(original_raw).count(), 1, "{current}");
+    assert!(current.contains("<w:rPr><w:i/>"), "{current}");
     assert!(!tracked.contains(edited_raw), "{tracked}");
 
     let mut accepted = Document::from_bytes(&tracked_bytes).expect("open accepted copy");
     accepted.accept_all().expect("accept run property change");
-    let accepted = comparison_part_xml(&mut accepted, "/word/header1.xml");
+    let accepted =
+        comparison_structure_xml(&comparison_part_xml(&mut accepted, "/word/header1.xml"));
     assert!(accepted.contains("<w:i/>"), "{accepted}");
     assert!(!accepted.contains("<w:b/>"), "{accepted}");
     assert_eq!(accepted.matches(original_raw).count(), 1, "{accepted}");
@@ -29306,7 +29749,8 @@ fn run_property_changes_preserve_original_unmodelled_children_and_report_the_dif
 
     let mut rejected = Document::from_bytes(&tracked_bytes).expect("open rejected copy");
     rejected.reject_all().expect("reject run property change");
-    let rejected = comparison_part_xml(&mut rejected, "/word/header1.xml");
+    let rejected =
+        comparison_structure_xml(&comparison_part_xml(&mut rejected, "/word/header1.xml"));
     assert!(rejected.contains("<w:b/>"), "{rejected}");
     assert!(!rejected.contains("<w:i/>"), "{rejected}");
     assert_eq!(rejected.matches(original_raw).count(), 1, "{rejected}");
@@ -32834,14 +33278,14 @@ fn word_grouping_applies_inside_an_inline_control() {
             r#"<w:p><w:sdt><w:sdtPr><w:tag w:val="kept"/></w:sdtPr><w:sdtContent><w:r><w:t xml:space="preserve">{text}</w:t></w:r></w:sdtContent></w:sdt></w:p>"#
         )
     };
-    let xml = granular_redline(
+    let xml = comparison_structure_xml(&granular_redline(
         &control("red green and blue yellow"),
         &control("cyan magenta and black white"),
         &rdocx::ComparisonOptions {
             granularity: rdocx::ComparisonGranularity::Word,
             ..Default::default()
         },
-    );
+    ));
     assert_eq!(
         tracked_paragraph_markup(&xml).0,
         "[-red green and blue yellow-]{+cyan magenta and black white+}"
@@ -32970,7 +33414,7 @@ fn granular_insertions_stay_inside_leading_and_empty_paragraph_owners() {
             )
             .unwrap();
         let bytes = tracked.to_bytes().unwrap();
-        let xml = document_xml(&mut tracked);
+        let xml = comparison_structure_xml(&document_xml(&mut tracked));
         let paragraph = &xml[xml.find("<w:p>").unwrap()..xml.find("</w:p>").unwrap() + 6];
         assert!(paragraph.contains("<w:ins "), "{xml}");
         assert_eq!(xml.matches("<w:ins ").count(), 1, "{xml}");
@@ -33042,6 +33486,9 @@ fn marked_paragraphs(xml: &str) -> Vec<String> {
         let mut attributes = element
             .attributes()
             .flatten()
+            .filter(|attribute| {
+                attribute.key.as_ref() != b"xmlns" && !attribute.key.as_ref().starts_with(b"xmlns:")
+            })
             .map(|attribute| {
                 format!(
                     "{}={}",
@@ -33209,8 +33656,9 @@ fn granular_comparison_keeps_markers_and_controls_in_document_order() {
         let edited_xml = wrap_word_body(&format!("<w:p>{edited_body}</w:p>"));
         let mut original = document_with_content_controls(&original_xml);
         let mut edited = document_with_content_controls(&edited_xml);
-        let original_marks = marked_paragraphs(&document_xml(&mut original));
-        let edited_marks = marked_paragraphs(&document_xml(&mut edited));
+        let original_marks =
+            marked_paragraphs(&comparison_structure_xml(&document_xml(&mut original)));
+        let edited_marks = marked_paragraphs(&comparison_structure_xml(&document_xml(&mut edited)));
         for options in marker_comparison_options() {
             let mut tracked = document_with_content_controls(&original_xml);
             tracked
@@ -33220,14 +33668,14 @@ fn granular_comparison_keeps_markers_and_controls_in_document_order() {
             let mut accepted = Document::from_bytes(&bytes).unwrap();
             accepted.accept_all().unwrap();
             assert_eq!(
-                marked_paragraphs(&document_xml(&mut accepted)),
+                marked_paragraphs(&comparison_structure_xml(&document_xml(&mut accepted))),
                 edited_marks,
                 "{name} {options:?}"
             );
             let mut rejected = Document::from_bytes(&bytes).unwrap();
             rejected.reject_all().unwrap();
             assert_eq!(
-                marked_paragraphs(&document_xml(&mut rejected)),
+                marked_paragraphs(&comparison_structure_xml(&document_xml(&mut rejected))),
                 original_marks,
                 "{name} {options:?}"
             );
@@ -33515,7 +33963,7 @@ fn granular_edits_beside_a_shell_move_its_boundaries() {
             assert!(diagnostics.is_empty(), "{diagnostics:?}");
             assert!(resolved.revisions().is_empty(), "{expected_xml}");
         }
-        document_xml(&mut tracked)
+        comparison_structure_xml(&document_xml(&mut tracked))
     };
     let cases = [
         // Word writes an inserted word in a run of its own, other producers
@@ -40847,6 +41295,7 @@ mod compare_producer_noise {
                     ..Default::default()
                 },
             );
+            let tracked = comparison_structure_xml(&tracked);
             assert_eq!(kinds, changed, "{granularity:?}");
             assert!(!tracked.contains("<w:t> </w:t>"), "{tracked}");
             assert!(
@@ -46728,7 +47177,10 @@ fn issue_255_table_added_or_removed_with_final_control_paragraph_compares() {
     };
     // Inserted content carries no indentation, so whitespace is not compared.
     let resolved_body = |document: &mut Document| {
-        let mut body = body_from_document(document);
+        let mut body =
+            CT_Document::from_xml(comparison_structure_xml(&document_xml(document)).as_bytes())
+                .unwrap()
+                .body;
         for content in &mut body.content {
             if let BodyContent::ContentControl(control) = content {
                 control.content.retain(|child| {
@@ -46801,7 +47253,9 @@ fn issue_255_redline_marks_follow_schema_order() {
         let package =
             oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(original.to_bytes().unwrap()))
                 .unwrap();
-        String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap()
+        comparison_structure_xml(
+            std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap(),
+        )
     }
     // The XML of paragraph "a" up to its text.
     fn paragraph_a(xml: &str) -> &str {
@@ -47062,7 +47516,10 @@ fn paragraph_inserted_or_deleted_before_a_table_in_a_control_compares() {
     };
     // Inserted content carries no indentation, so whitespace is not compared.
     let resolved_body = |document: &mut Document| {
-        let mut body = body_from_document(document);
+        let mut body =
+            CT_Document::from_xml(comparison_structure_xml(&document_xml(document)).as_bytes())
+                .unwrap()
+                .body;
         for content in &mut body.content {
             if let BodyContent::ContentControl(control) = content {
                 control.content.retain(|child| {
@@ -47200,7 +47657,9 @@ fn paragraph_deleted_before_a_table_carries_its_own_mark() {
     let package =
         oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(compared.to_bytes().unwrap()))
             .unwrap();
-    let xml = String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    let xml = comparison_structure_xml(
+        std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap(),
+    );
     let paragraph = |text: &str| {
         let at = xml.find(text).expect("paragraph text");
         &xml[xml[..at].rfind("<w:p>").expect("paragraph start")..at]
@@ -47239,8 +47698,9 @@ fn table_edited_beside_a_deleted_paragraph_compares_in_place() {
         let package =
             oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(compared.to_bytes().unwrap()))
                 .unwrap();
-        let xml =
-            String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+        let xml = comparison_structure_xml(
+            std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap(),
+        );
         assert_eq!(xml.matches("<w:tbl>").count(), 1, "{xml}");
         let table = &xml[xml.find("<w:tbl>").unwrap()..xml.find("</w:tbl>").unwrap()];
         assert!(!table.contains("<w:trPr>"), "{xml}");
@@ -47516,7 +47976,7 @@ fn compared_paragraph_properties_track_the_mark_formatting_apart() {
             "2026-10-01T12:00:00Z",
         )
         .expect("compare");
-    let xml = document_xml(&mut compared);
+    let xml = comparison_structure_xml(&document_xml(&mut compared));
     assert!(
         xml.contains(concat!(
             r#"<w:pPr><w:jc w:val="right"/><w:rPr><w:rPrChange w:id="0" w:author="Reviewer" w:date="2026-10-01T12:00:00Z"><w:rPr><w:b/></w:rPr></w:rPrChange></w:rPr>"#,
@@ -47579,7 +48039,8 @@ fn final_paragraph_properties(
 
 /// Redline XML with the revision ids, author and date left out.
 fn without_revision_metadata(xml: &str) -> String {
-    let mut output = xml.replace(r#" w:author="Reviewer" w:date="2026-09-30T12:00:00Z""#, "");
+    let mut output = comparison_structure_xml(xml)
+        .replace(r#" w:author="Reviewer" w:date="2026-09-30T12:00:00Z""#, "");
     while let Some(start) = output.find(r#" w:id=""#) {
         let end = output[start + 7..].find('"').expect("closed id") + start + 8;
         output.replace_range(start..end, "");
@@ -47663,7 +48124,7 @@ fn final_paragraph_change_keeps_paragraph_properties_of_both_versions() {
                 },
             )
             .expect("compare");
-        let xml = document_xml(&mut compared);
+        let xml = comparison_structure_xml(&document_xml(&mut compared));
         without_revision_metadata(
             &xml[xml.find("<w:body>").unwrap()..xml.find("</w:body>").unwrap()],
         )
@@ -411046,4 +411507,674 @@ fn issue423_duplicate_numbering_page_pageref_toc_cache_and_source_agree() {
             .any(|entry| entry.starts_with("Target") && entry.ends_with("27"))),
         "{records:?}"
     );
+}
+
+#[test]
+fn issue425_shared_physical_field_runs_keep_distinct_property_sources() {
+    for (prefix, bindings) in [
+        (
+            "w",
+            format!(r#"xmlns:w="{W_NS}" xmlns:x="urn:field-property""#),
+        ),
+        (
+            "q",
+            format!(r#"xmlns:q="{W_NS}" xmlns:w="urn:producer" xmlns:x="urn:field-property""#),
+        ),
+    ] {
+        let properties = |label: &str| {
+            format!(r#"<{prefix}:rPr x:note="{label} > metadata"><{prefix}:b/></{prefix}:rPr>"#)
+        };
+        let field = format!(
+            r#"<{prefix}:r>{}<{prefix}:t>before </{prefix}:t><{prefix}:fldChar {prefix}:fldCharType="begin"/><{prefix}:instrText> PAGE </{prefix}:instrText><{prefix}:fldChar {prefix}:fldCharType="separate"/><{prefix}:t>1</{prefix}:t></{prefix}:r><{prefix}:r>{}<{prefix}:fldChar {prefix}:fldCharType="end"/><{prefix}:t> middle </{prefix}:t><{prefix}:fldChar {prefix}:fldCharType="begin"/><{prefix}:instrText> NUMPAGES </{prefix}:instrText><{prefix}:fldChar {prefix}:fldCharType="separate"/></{prefix}:r><{prefix}:r>{}<{prefix}:t>9</{prefix}:t><{prefix}:fldChar {prefix}:fldCharType="end"/><{prefix}:t> after</{prefix}:t></{prefix}:r>"#,
+            properties("first"),
+            properties("middle"),
+            properties("last"),
+        );
+        let document = |tail: &str| {
+            document_with_content_controls(&format!(
+                r#"<{prefix}:document {bindings}><{prefix}:body><{prefix}:p>{field}</{prefix}:p><{prefix}:p><{prefix}:r><{prefix}:t>{tail}</{prefix}:t></{prefix}:r></{prefix}:p></{prefix}:body></{prefix}:document>"#
+            ))
+        };
+        let mut compared = document("old");
+        let before = compared.to_bytes().unwrap();
+        compared
+            .compare(&document("new"), "B", "2026-10-29T00:00:00Z")
+            .unwrap();
+        let tracked = compared.to_bytes().unwrap();
+        for accept in [true, false] {
+            let mut resolved = Document::from_bytes(&tracked).unwrap();
+            if accept {
+                resolved.accept_all().unwrap();
+            } else {
+                resolved.reject_all().unwrap();
+            }
+            let xml = document_xml(&mut resolved);
+            for label in ["first", "middle", "last"] {
+                assert!(
+                    xml.contains(&properties(label)),
+                    "{prefix} accept={accept}: {xml}"
+                );
+            }
+            assert_eq!(resolved.paragraphs()[0].text(), "before 1 middle 9 after");
+            assert_eq!(
+                resolved.paragraphs()[1].text(),
+                if accept { "new" } else { "old" }
+            );
+        }
+        assert!(!before.is_empty());
+    }
+}
+
+#[test]
+fn issue425_structure_observer_retains_namespace_shadows_and_opaque_bytes() {
+    let word = W_NS;
+    let source = format!(
+        r#"<w:document xmlns:w="{word}" xmlns:x="urn:opaque"><w:body><w:p xmlns:w="{word}" x:value="w:p"><w:r><x:p xmlns:w="{word}"><w:r xmlns:w="{word}">opaque</w:r></x:p></w:r><w:p xmlns:w="urn:producer" w:value="keep"/></w:p></w:body></w:document>"#
+    );
+    let observed = comparison_structure_xml(&source);
+    assert!(observed.contains(r#"<w:p x:value="w:p">"#));
+    assert!(observed.contains(&format!(
+        r#"<x:p xmlns:w="{word}"><w:r xmlns:w="{word}">opaque</w:r></x:p>"#
+    )));
+    assert!(observed.contains(r#"<w:p xmlns:w="urn:producer" w:value="keep"/>"#));
+    let source = format!(
+        r#"<q:document xmlns:q="{word}" xmlns:w="urn:producer"><q:body><q:p xmlns:q="{word}" xmlns:w="{word}" w:value="meaningful"/></q:body></q:document>"#
+    );
+    let observed = comparison_structure_xml(&source);
+    assert!(observed.contains(&format!(r#"<q:p xmlns:w="{word}" w:value="meaningful"/>"#)));
+}
+
+fn issue425_occurrence_fixture(owner: &str, run: &str) -> (Document, &'static str) {
+    let paragraph = format!("<w:p>{run}</w:p>");
+    let anchor = "<w:p><w:r><w:t>Anchor.</w:t></w:r></w:p>";
+    match owner {
+        "header" => (
+            document_with_comparison_header(&paragraph),
+            "/word/header1.xml",
+        ),
+        "note" => {
+            let mut document = document_with_comparison_stories("same");
+            let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(
+                document.to_bytes().unwrap(),
+            ))
+            .unwrap();
+            package.set_part("/word/footnotes.xml", format!(r#"<w:footnotes xmlns:w="{W_NS}"><w:footnote w:id="1">{paragraph}</w:footnote></w:footnotes>"#).into_bytes());
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            package.write_to(&mut bytes).unwrap();
+            (
+                Document::from_bytes(bytes.get_ref()).unwrap(),
+                "/word/footnotes.xml",
+            )
+        }
+        _ => {
+            let body = match owner {
+                "control" => format!(
+                    "<w:p><w:sdt><w:sdtPr/><w:sdtContent>{run}</w:sdtContent></w:sdt></w:p>{anchor}"
+                ),
+                "table" => format!(
+                    "<w:tbl><w:tblPr/><w:tblGrid/><w:tr><w:tc>{paragraph}</w:tc></w:tr></w:tbl>{anchor}"
+                ),
+                "textbox" => format!(
+                    r#"<w:p><w:r><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml" style="width:100pt;height:50pt"><v:textbox><w:txbxContent>{paragraph}</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>{anchor}"#
+                ),
+                _ => format!("{paragraph}{anchor}"),
+            };
+            (
+                document_with_content_controls(&wrap_word_body(&body)),
+                "/word/document.xml",
+            )
+        }
+    }
+}
+
+fn issue425_occurrence_bytes(xml: &str) -> Vec<String> {
+    let mut reader = quick_xml::reader::NsReader::from_str(xml);
+    let mut output = Vec::new();
+    loop {
+        let before = reader.buffer_position() as usize;
+        let (namespace, event) = reader.read_resolved_event().unwrap();
+        let selected = matches!(namespace, quick_xml::name::ResolveResult::Bound(uri) if (uri.as_ref() == b"urn:opaque" || uri.as_ref() == W_NS.as_bytes()));
+        match event {
+            XmlEvent::Start(element) if selected && element.local_name().as_ref() == b"opaque" => {
+                reader.read_to_end(element.name()).unwrap();
+                output.push(xml[before..reader.buffer_position() as usize].to_owned());
+            }
+            XmlEvent::Empty(element) if selected && element.local_name().as_ref() == b"opaque" => {
+                output.push(xml[before..reader.buffer_position() as usize].to_owned())
+            }
+            XmlEvent::Eof => return output,
+            _ => {}
+        }
+    }
+}
+
+fn issue425_check_occurrence_roles(
+    owner: &str,
+    original_run: &str,
+    edited_run: &str,
+    original_occurrences: &[String],
+    edited_occurrences: &[String],
+    options: &rdocx::ComparisonOptions,
+) -> Result<(), String> {
+    let (mut original, part) = issue425_occurrence_fixture(owner, original_run);
+    let (mut edited, _) = issue425_occurrence_fixture(owner, edited_run);
+    let original_bytes = original.to_bytes().unwrap();
+    let edited_bytes = edited.to_bytes().unwrap();
+    if let Err(error) =
+        original.compare_with_options(&edited, "Occurrence", "2026-10-01T12:00:00Z", options)
+    {
+        assert_eq!(
+            original.to_bytes().unwrap(),
+            original_bytes,
+            "refusal must stay atomic"
+        );
+        return Err(error.to_string());
+    }
+    let tracked = original.to_bytes().unwrap();
+    let mut failures = Vec::new();
+    for (accept, expected_bytes, expected_occurrences) in [
+        (true, edited_bytes.as_slice(), edited_occurrences),
+        (false, original_bytes.as_slice(), original_occurrences),
+    ] {
+        let mut resolved = Document::from_bytes(&tracked).unwrap();
+        if accept {
+            resolved.accept_all().unwrap();
+        } else {
+            resolved.reject_all().unwrap();
+        }
+        let saved = resolved.to_bytes().unwrap();
+        let mut reopened = Document::from_bytes(&saved).unwrap();
+        assert!(reopened.revisions().is_empty());
+        let actual = comparison_part_xml(&mut reopened, part);
+        if issue425_occurrence_bytes(&actual) != expected_occurrences {
+            failures.push(format!(
+                "{owner} accept={accept} {options:?}: occurrence mismatch {actual}"
+            ));
+        }
+        let expected = Document::from_bytes(expected_bytes).unwrap();
+        assert_eq!(reopened.text(), expected.text());
+        // Both current and complete prior formatting have two intentional equal
+        // opaque siblings. Every surviving rPr retains both, even after splitting.
+        let mut reader = quick_xml::reader::NsReader::from_str(&actual);
+        let mut property = None;
+        let mut depth = 0usize;
+        let mut count = 0;
+        let mut style = false;
+        loop {
+            let (namespace, event) = reader.read_resolved_event().unwrap();
+            let word = matches!(&namespace, quick_xml::name::ResolveResult::Bound(uri) if uri.as_ref() == W_NS.as_bytes());
+            let opaque = matches!(&namespace, quick_xml::name::ResolveResult::Bound(uri) if uri.as_ref() == b"urn:opaque");
+            match event {
+                XmlEvent::Start(element) | XmlEvent::Empty(element) => {
+                    let local = element.local_name();
+                    if word && local.as_ref() == b"rPr" {
+                        property = Some(depth);
+                        count = 0;
+                        style = false;
+                    }
+                    if property.is_some() {
+                        if opaque && local.as_ref() == b"format" {
+                            count += 1;
+                        }
+                        if word
+                            && local.as_ref()
+                                == if accept && !options.ignore_formatting {
+                                    b"i"
+                                } else {
+                                    b"b"
+                                }
+                        {
+                            style = true;
+                        }
+                    }
+                    // Empty events do not contribute an ancestor level.
+                    let raw_end = reader.buffer_position() as usize;
+                    if !actual[..raw_end].ends_with("/>") {
+                        depth += 1;
+                    } else if property == Some(depth) && word && local.as_ref() == b"rPr" {
+                        property = None;
+                    }
+                }
+                XmlEvent::End(_) => {
+                    depth -= 1;
+                    if property == Some(depth) {
+                        if count > 0 && (count != 2 || !style) {
+                            failures.push(format!(
+                                "{owner} accept={accept} {options:?}: formatting role count={count} style={style}: {actual}"
+                            ));
+                        }
+                        property = None;
+                    }
+                }
+                XmlEvent::Eof => break,
+                _ => {}
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("\n"))
+    }
+}
+
+#[test]
+fn issue425_raw_occurrences_keep_order_and_multiplicity() {
+    let a = "<x:opaque/>".to_owned();
+    let b = format!(r#"<x:opaque xmlns:w="{W_NS}" xmlns:x="urn:opaque"/>"#);
+    let mut failures = Vec::new();
+    for order in [
+        vec![a.clone(), b.clone()],
+        vec![b.clone(), a.clone()],
+        vec![a.clone(), a.clone(), b.clone()],
+        vec![a.clone(), b.clone(), b.clone()],
+    ] {
+        for owner in ["body", "control", "table", "header", "note", "textbox"] {
+            for ignore_formatting in [false, true] {
+                let run = |text: &str, style: &str, payload: &[String]| {
+                    format!(
+                        r#"<w:r xmlns:x="urn:opaque" x:owner="source"><w:rPr x:mark="keep"><w:{style}/><x:format/><x:format/></w:rPr><w:t>{text}</w:t>{}</w:r>"#,
+                        payload.concat()
+                    )
+                };
+                let options = rdocx::ComparisonOptions {
+                    ignore_formatting,
+                    ..Default::default()
+                };
+                if let Err(error) = issue425_check_occurrence_roles(
+                    owner,
+                    &run("Old.", "b", &order),
+                    &run("New.", "i", &order),
+                    &order,
+                    &order,
+                    &options,
+                ) {
+                    failures.push(format!(
+                        "{owner} ignore={ignore_formatting} {order:?}: {error}"
+                    ));
+                }
+            }
+        }
+    }
+    let namespace_cases = [
+        (
+            "q",
+            format!(r#"xmlns:q="{W_NS}" xmlns:w="urn:producer" xmlns:x="urn:opaque""#),
+            r#"<x:opaque w:note="w:token"/>"#.to_owned(),
+            format!(
+                r#"<x:opaque xmlns:q="{W_NS}" xmlns:w="urn:producer" xmlns:x="urn:opaque" w:note="w:token"/>"#
+            ),
+        ),
+        (
+            "w",
+            r#"xmlns:x="urn:opaque""#.to_owned(),
+            r#"<w:opaque x:note="w:token"/>"#.to_owned(),
+            format!(r#"<w:opaque xmlns:w="{W_NS}" xmlns:x="urn:opaque" x:note="w:token"/>"#),
+        ),
+        (
+            "w",
+            r#"xmlns:x="urn:opaque""#.to_owned(),
+            r#"<opaque xmlns="urn:opaque" x:note="w:token"/>"#.to_owned(),
+            format!(
+                r#"<opaque xmlns="urn:opaque" xmlns:w="{W_NS}" xmlns:x="urn:opaque" x:note="w:token"/>"#
+            ),
+        ),
+    ];
+    for (prefix, bindings, a, b) in namespace_cases {
+        for owner in ["body", "control"] {
+            for granularity in [
+                rdocx::ComparisonGranularity::Run,
+                rdocx::ComparisonGranularity::Word,
+                rdocx::ComparisonGranularity::Character,
+            ] {
+                let payload = vec![a.clone(), b.clone(), b.clone()];
+                let run = |text, style| {
+                    format!(
+                        r#"<{prefix}:r {bindings} x:owner="source"><{prefix}:rPr x:mark="keep"><{prefix}:{style}/><x:format/><x:format/></{prefix}:rPr><{prefix}:t>{text}</{prefix}:t>{}</{prefix}:r>"#,
+                        payload.concat()
+                    )
+                };
+                let options = rdocx::ComparisonOptions {
+                    granularity,
+                    ..Default::default()
+                };
+                if let Err(error) = issue425_check_occurrence_roles(
+                    owner,
+                    &run("Old.", "b"),
+                    &run("New.", "i"),
+                    &payload,
+                    &payload,
+                    &options,
+                ) {
+                    failures.push(format!(
+                        "namespace {prefix} {owner} {granularity:?}: {error}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn issue425_fragmented_raw_occurrences_keep_later_only_source_slots() {
+    let a = "<x:opaque/>".to_owned();
+    let b = format!(r#"<x:opaque xmlns:w="{W_NS}" xmlns:x="urn:opaque"/>"#);
+    let mut failures = Vec::new();
+    for granularity in [
+        rdocx::ComparisonGranularity::Word,
+        rdocx::ComparisonGranularity::Character,
+    ] {
+        for owner in ["body", "control"] {
+            for differing_roles in [false, true] {
+                let original = vec![a.clone(), b.clone()];
+                let edited = if differing_roles {
+                    vec![b.clone(), b.clone()]
+                } else {
+                    original.clone()
+                };
+                let run = |text: &str, style: &str, payload: &[String]| {
+                    format!(
+                        r#"<w:r xmlns:x="urn:opaque" x:owner="source"><w:rPr x:mark="keep"><w:{style}/><x:format/><x:format/></w:rPr><w:t xml:space="preserve">{text} </w:t>{}<w:t xml:space="preserve"> long stable anchor </w:t>{}</w:r>"#,
+                        payload[0], payload[1]
+                    )
+                };
+                let options = rdocx::ComparisonOptions {
+                    granularity,
+                    ..Default::default()
+                };
+                if let Err(error) = issue425_check_occurrence_roles(
+                    owner,
+                    &run("red green", "b", &original),
+                    &run("cyan magenta", "i", &edited),
+                    &original,
+                    &edited,
+                    &options,
+                ) {
+                    failures.push(format!(
+                        "{owner} {granularity:?} differing={differing_roles}: {error}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn issue425_paired_textbox_formatting_policy_preserves_noop_and_resolutions() {
+    let options = rdocx::ComparisonOptions {
+        ignore_formatting: true,
+        ..Default::default()
+    };
+    let mut failures = Vec::new();
+    for edited_text in ["Old.", "New."] {
+        let (mut original, part) = issue425_occurrence_fixture(
+            "textbox",
+            "<w:r><w:rPr><w:b/></w:rPr><w:t>Old.</w:t></w:r>",
+        );
+        let (edited, _) = issue425_occurrence_fixture(
+            "textbox",
+            &format!("<w:r><w:rPr><w:i/></w:rPr><w:t>{edited_text}</w:t></w:r>"),
+        );
+        let before = original.to_bytes().unwrap();
+        let before_xml = comparison_part_xml(&mut original, part);
+        if let Err(error) =
+            original.compare_with_options(&edited, "Policy", "2026-10-01T12:00:00Z", &options)
+        {
+            failures.push(format!("{edited_text}: comparison {error}"));
+            assert_eq!(original.to_bytes().unwrap(), before);
+            continue;
+        }
+        let records = original.revisions();
+        let count = records.len();
+        drop(records);
+        if edited_text == "Old." {
+            if count != 0 || comparison_part_xml(&mut original, part) != before_xml {
+                failures.push(format!(
+                    "formatting-only must retain exact owner and zero records, actual {count}"
+                ));
+            }
+        } else if count != 2 {
+            failures.push(format!(
+                "text replacement must keep outer pair, actual {count}"
+            ));
+        }
+        let tracked = original.to_bytes().unwrap();
+        for accept in [true, false] {
+            let mut resolved = Document::from_bytes(&tracked).unwrap();
+            if accept {
+                resolved.accept_all().unwrap();
+            } else {
+                resolved.reject_all().unwrap();
+            }
+            let saved = resolved.to_bytes().unwrap();
+            let mut reopened = Document::from_bytes(&saved).unwrap();
+            let xml = comparison_part_xml(&mut reopened, part);
+            let expected = if accept { edited_text } else { "Old." };
+            if !xml.contains(&format!(">{expected}</w:t>"))
+                || !xml.contains("<w:b")
+                || xml.contains("<w:i/")
+            {
+                failures.push(format!("text={edited_text} accept={accept}: original inner bold and intended text missing: {xml}"));
+            }
+            assert!(reopened.revisions().is_empty());
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn issue425_paired_textbox_policy_keeps_host_changes_and_publishers() {
+    let host = |text: &str, style: &str, width: usize, opaque: &str| {
+        format!(
+            r#"<w:r><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml" xmlns:x="urn:opaque" x:host="{opaque}" style="width:{width}pt;height:50pt"><v:textbox><w:txbxContent><w:p><w:r><w:rPr><w:{style}/></w:rPr><w:t>{text}</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r>"#
+        )
+    };
+    let mut failures = Vec::new();
+    for owner in ["body", "control", "table", "header", "note"] {
+        for granularity in [
+            rdocx::ComparisonGranularity::Run,
+            rdocx::ComparisonGranularity::Word,
+            rdocx::ComparisonGranularity::Character,
+        ] {
+            let options = rdocx::ComparisonOptions {
+                ignore_formatting: true,
+                granularity,
+                ..Default::default()
+            };
+            let (mut original, part) =
+                issue425_occurrence_fixture(owner, &host("Old.", "b", 100, "same"));
+            let (edited, _) = issue425_occurrence_fixture(owner, &host("New.", "i", 100, "same"));
+            if let Err(error) =
+                original.compare_with_options(&edited, "Policy", "2026-10-01T12:00:00Z", &options)
+            {
+                failures.push(format!("{owner} {granularity:?}: {error}"));
+                continue;
+            }
+            let tracked = original.to_bytes().unwrap();
+            for accept in [true, false] {
+                let mut resolved = Document::from_bytes(&tracked).unwrap();
+                if accept {
+                    resolved.accept_all().unwrap();
+                } else {
+                    resolved.reject_all().unwrap();
+                }
+                let mut reopened = Document::from_bytes(&resolved.to_bytes().unwrap()).unwrap();
+                let xml = comparison_part_xml(&mut reopened, part);
+                let expected = if accept { "New." } else { "Old." };
+                if issue425_observe_bold_textbox(&xml, &[expected]).is_err()
+                    || !xml.contains("<w:b")
+                    || xml.contains("<w:i/")
+                {
+                    failures.push(format!("{owner} {granularity:?} accept={accept}: {xml}"));
+                }
+            }
+        }
+    }
+    // Equal visible text must not suppress edited geometry or opaque host data.
+    for (width, opaque) in [(120, "same"), (100, "changed")] {
+        let (mut original, part) =
+            issue425_occurrence_fixture("body", &host("Old.", "b", 100, "same"));
+        let (edited, _) = issue425_occurrence_fixture("body", &host("Old.", "i", width, opaque));
+        let options = rdocx::ComparisonOptions {
+            ignore_formatting: true,
+            ..Default::default()
+        };
+        if let Err(error) =
+            original.compare_with_options(&edited, "Policy", "2026-10-01T12:00:00Z", &options)
+        {
+            failures.push(format!("width={width} opaque={opaque}: {error}"));
+            continue;
+        }
+        assert_eq!(original.revisions().len(), 2);
+        let tracked = original.to_bytes().unwrap();
+        for accept in [true, false] {
+            let mut resolved = Document::from_bytes(&tracked).unwrap();
+            if accept {
+                resolved.accept_all().unwrap();
+            } else {
+                resolved.reject_all().unwrap();
+            }
+            let xml = comparison_part_xml(&mut resolved, part);
+            assert!(xml.contains(&format!("width:{}pt", if accept { width } else { 100 })));
+            assert!(xml.contains(&format!(
+                "x:host=\"{}\"",
+                if accept { opaque } else { "same" }
+            )));
+            assert!(xml.contains("<w:b"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+// Independent test observer. It parses qualified source and does not call comparison policy.
+fn issue425_observe_bold_textbox(xml: &str, expected: &[&str]) -> Result<(), String> {
+    use quick_xml::{NsReader, events::Event, name::ResolveResult};
+    const WORD: &[u8] = b"http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let mut reader = NsReader::from_str(xml);
+    let mut stack = Vec::<(bool, String)>::new();
+    let mut boxes = 0usize;
+    let mut box_depth = None;
+    let mut paragraphs = Vec::<String>::new();
+    let mut paragraph = String::new();
+    let mut run_text = String::new();
+    let mut bold = false;
+    let mut italic = false;
+    loop {
+        let (namespace, event) = reader
+            .read_resolved_event()
+            .map_err(|error| error.to_string())?;
+        let word = matches!(namespace, ResolveResult::Bound(uri) if uri.as_ref()==WORD);
+        let empty = matches!(event, Event::Empty(_));
+        match event {
+            Event::Start(element) | Event::Empty(element) => {
+                let local = String::from_utf8_lossy(element.local_name().as_ref()).into_owned();
+                if word && local == "txbxContent" {
+                    if box_depth.is_some() {
+                        return Err("nested observer textbox is ambiguous".into());
+                    }
+                    boxes += 1;
+                    box_depth = Some(stack.len());
+                }
+                if box_depth.is_some() && word {
+                    match local.as_str() {
+                        "p" => paragraph.clear(),
+                        "r" => {
+                            run_text.clear();
+                            bold = false;
+                            italic = false;
+                        }
+                        "b" | "i"
+                            if stack
+                                .last()
+                                .is_some_and(|(word, local)| *word && local == "rPr") =>
+                        {
+                            let mut enabled = true;
+                            for attribute in element.attributes() {
+                                let attribute = attribute.map_err(|error| error.to_string())?;
+                                let (uri, name) =
+                                    reader.resolver().resolve_attribute(attribute.key);
+                                if matches!(uri,ResolveResult::Bound(uri) if uri.as_ref()==WORD)
+                                    && name.as_ref() == b"val"
+                                {
+                                    enabled = !matches!(
+                                        attribute.value.as_ref(),
+                                        b"0" | b"false" | b"off"
+                                    );
+                                }
+                            }
+                            if local == "b" {
+                                bold = enabled;
+                            } else {
+                                italic = enabled;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if !empty {
+                    stack.push((word, local));
+                }
+            }
+            Event::Text(text)
+                if box_depth.is_some()
+                    && stack
+                        .last()
+                        .is_some_and(|(word, local)| *word && local == "t") =>
+            {
+                let decoded = text.decode().map_err(|error| error.to_string())?;
+                let text =
+                    quick_xml::escape::unescape(&decoded).map_err(|error| error.to_string())?;
+                paragraph.push_str(&text);
+                run_text.push_str(&text);
+            }
+            Event::CData(text)
+                if box_depth.is_some()
+                    && stack
+                        .last()
+                        .is_some_and(|(word, local)| *word && local == "t") =>
+            {
+                let text = text.decode().map_err(|error| error.to_string())?;
+                paragraph.push_str(&text);
+                run_text.push_str(&text);
+            }
+            Event::End(_) => {
+                let (word, local) = stack.pop().ok_or("unbalanced observer input")?;
+                if box_depth.is_some() && word {
+                    match local.as_str() {
+                        "r" if !run_text.is_empty() && (!bold || italic) => {
+                            return Err(format!(
+                                "text run {run_text:?} has bold={bold}, italic={italic}"
+                            ));
+                        }
+                        "p" => paragraphs.push(paragraph.clone()),
+                        "txbxContent" => box_depth = None,
+                        _ => {}
+                    }
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    if boxes != 1 || paragraphs != expected {
+        return Err(format!(
+            "textbox count={boxes}, paragraphs={paragraphs:?}, expected={expected:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn issue425_textbox_semantic_observer_rejects_wrong_text_missing_bold_and_italic() {
+    let xml = r#"<q:txbxContent xmlns:q="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w="urn:producer"><q:p><q:r><q:rPr><q:b/></q:rPr><q:t>N</q:t><q:t>ew</q:t></q:r><q:r><q:rPr><q:b/></q:rPr><q:t>.</q:t></q:r></q:p></q:txbxContent>"#;
+    assert!(issue425_observe_bold_textbox(xml, &["New."]).is_ok());
+    assert!(issue425_observe_bold_textbox(&xml.replace(">ew<", ">ow<"), &["New."]).is_err());
+    assert!(issue425_observe_bold_textbox(&xml.replacen("<q:b/>", "", 1), &["New."]).is_err());
+    assert!(
+        issue425_observe_bold_textbox(&xml.replacen("<q:b/>", "<q:b/><q:i/>", 1), &["New."])
+            .is_err()
+    );
+    assert!(issue425_observe_bold_textbox(&xml.replace("<q:b/>", "<w:b/>"), &["New."]).is_err());
 }

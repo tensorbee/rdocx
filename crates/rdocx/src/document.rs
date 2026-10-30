@@ -2308,6 +2308,18 @@ fn paragraph_has_typed_visible_content(paragraph: &CT_P) -> bool {
                     return true;
                 }
                 RunContent::Field(field) => {
+                    match field.cached_result_owner_projection() {
+                        Ok(Some(owner)) => {
+                            if paragraph_has_typed_visible_content(&owner) {
+                                return true;
+                            }
+                            continue;
+                        }
+                        // Visibility is conservative on an invalid pending edit.
+                        // Checked publication separately propagates its error.
+                        Err(_) => return true,
+                        Ok(None) => {}
+                    }
                     if let Some(runs) = field.cached_result_runs() {
                         // A consistent owned result may contain only deleted text.
                         // Its public string cache remains a text extraction projection.
@@ -8193,10 +8205,10 @@ pub(crate) struct TextBoxCacheParagraph {
 }
 
 #[derive(Clone)]
-struct StoryOwnerSpan {
-    kind: StoryKind,
+pub(crate) struct StoryOwnerSpan {
+    pub(crate) kind: StoryKind,
     owner_index: usize,
-    full: Range<usize>,
+    pub(crate) full: Range<usize>,
     fingerprint: u64,
 }
 
@@ -13982,6 +13994,23 @@ pub(crate) fn close_content_fragment_namespaces(
     closed.extend_from_slice(&xml[..insertion]);
     closed.extend_from_slice(&declarations);
     closed.extend_from_slice(&xml[insertion..]);
+    #[cfg(test)]
+    if std::env::var_os("RDOCX_DESTINATION_REPAIR_DIAGNOSTICS").is_some()
+        && !existing.contains("mc")
+        && scope.contains_key("mc")
+        && [
+            b"NewCell".as_slice(),
+            b"OldCell".as_slice(),
+            b"KEEP".as_slice(),
+        ]
+        .iter()
+        .any(|value| xml.windows(value.len()).any(|window| window == *value))
+    {
+        eprintln!(
+            "DESTINATION_MC_CLOSURE {}",
+            serde_json::json!({"thread":std::thread::current().name(),"input":String::from_utf8_lossy(xml),"output":String::from_utf8_lossy(&closed),"scope":scope,"backtrace":std::backtrace::Backtrace::force_capture().to_string()})
+        );
+    }
     Ok(closed)
 }
 
@@ -14720,7 +14749,13 @@ fn validate_element_owner_relationships(
                     match content {
                         RunContent::Field(field) => {
                             field.validate_for_attachment()?;
-                            if let Some(runs) = field.cached_result_runs() {
+                            if let Some(owner) = field.cached_result_owner_projection()? {
+                                validate_element_owner_relationships(
+                                    document,
+                                    story,
+                                    WordXmlOwner::Paragraph(&owner),
+                                )?;
+                            } else if let Some(runs) = field.cached_result_runs() {
                                 pending.extend(runs.iter().map(WordXmlOwner::Run));
                             }
                         }
@@ -16677,9 +16712,15 @@ enum ComplexFieldMarker {
     End,
 }
 
+struct StoryFieldRun {
+    range: Range<usize>,
+    parent_start: Option<usize>,
+}
+
 struct ComplexFieldScan {
     marker_start: usize,
     run_start: usize,
+    run_parent_start: Option<usize>,
     ancestors: Vec<usize>,
     separators: usize,
     instruction: String,
@@ -16721,17 +16762,19 @@ fn complex_field_marker(
     Ok(None)
 }
 
-fn story_enclosing_run_range(
+fn story_enclosing_run_source(
     xml: &[u8],
     stack: &[XmlElementFrame],
-) -> Result<Option<Range<usize>>> {
-    let Some(start) = stack.iter().rev().find_map(|frame| {
-        (!frame.opaque && frame.namespace == StoryNamespace::Word && frame.local_name == b"r")
-            .then_some(frame.full_start)
+) -> Result<Option<StoryFieldRun>> {
+    let Some((index, frame)) = stack.iter().enumerate().rev().find(|(_, frame)| {
+        !frame.opaque && frame.namespace == StoryNamespace::Word && frame.local_name == b"r"
     }) else {
         return Ok(None);
     };
-    Ok(Some(start..story_element_end(xml, start)?))
+    Ok(Some(StoryFieldRun {
+        range: frame.full_start..story_element_end(xml, frame.full_start)?,
+        parent_start: index.checked_sub(1).map(|parent| stack[parent].full_start),
+    }))
 }
 
 fn complex_field_scan_context(stack: &[XmlElementFrame]) -> bool {
@@ -16748,15 +16791,15 @@ fn scan_complex_field_marker(
     marker: Option<ComplexFieldMarker>,
     before: usize,
     after: usize,
-    run_start: usize,
-    run_end: usize,
+    run: StoryFieldRun,
 ) {
     match marker {
         Some(ComplexFieldMarker::Begin) => {
             let ancestors = fields.iter().map(|field| field.marker_start).collect();
             fields.push(ComplexFieldScan {
                 marker_start: before,
-                run_start,
+                run_start: run.range.start,
+                run_parent_start: run.parent_start,
                 ancestors,
                 separators: 0,
                 instruction: String::new(),
@@ -16785,11 +16828,14 @@ fn scan_complex_field_marker(
                     parent.leading_nested = true;
                 }
             }
-            if accepted {
+            // A first-to-last run excerpt is a balanced sibling sequence only
+            // under the same physical parent. This is typed eligibility, not
+            // intrinsic field validity or a reason to poison an outer field.
+            if accepted && field.run_parent_start == run.parent_start {
                 items.push(StoryItemSpan {
                     kind: StoryItemKind::Field,
                     full: field.marker_start..after,
-                    scan: field.run_start..run_end,
+                    scan: field.run_start..run.range.end,
                     direct_owner_child: false,
                     complex_field: true,
                     complex_ancestors: field.ancestors,
@@ -16962,7 +17008,7 @@ fn accepted_story_text_visible(stack: &[XmlElementFrame]) -> bool {
     })
 }
 
-fn scan_story_owners(xml: &[u8], root_kind: StoryKind) -> Result<Vec<StoryOwnerSpan>> {
+pub(crate) fn scan_story_owners(xml: &[u8], root_kind: StoryKind) -> Result<Vec<StoryOwnerSpan>> {
     scan_story_owners_with_special(xml, root_kind, false)
 }
 
@@ -17708,6 +17754,69 @@ fn typed_complex_field_candidate_is_admitted(
     Ok(sources.iter().any(|source| source == &isolated))
 }
 
+#[cfg(test)]
+#[test]
+fn typed_complex_fields_keep_physical_revision_parent_context() {
+    fn open(body: &str) -> Document {
+        let mut template = Document::new();
+        let part = template.doc_part_name.clone();
+        template.package.set_part(
+            &part,
+            format!(
+                r#"<w:document xmlns:w="{WORD_NAMESPACE}"><w:body>{body}</w:body></w:document>"#
+            )
+            .into_bytes(),
+        );
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        template.package.write_to(&mut bytes).unwrap();
+        Document::from_bytes(bytes.get_ref()).unwrap()
+    }
+    let field_count = |document: &Document| {
+        let stories = document.stories().unwrap();
+        let body = stories
+            .iter()
+            .find(|story| story.kind() == StoryKind::Body)
+            .unwrap();
+        document
+            .story_items(body)
+            .unwrap()
+            .iter()
+            .filter(|item| item.kind() == StoryItemKind::Field)
+            .count()
+    };
+    let begin = r#"<w:r><w:fldChar w:fldCharType="begin"/><w:instrText>PAGE</w:instrText><w:fldChar w:fldCharType="separate"/></w:r>"#;
+    let cache = "<w:r><w:t>cache</w:t></w:r>";
+    let end = r#"<w:r><w:fldChar w:fldCharType="end"/></w:r>"#;
+    let revision =
+        |content: &str| format!(r#"<w:ins w:id="7" w:author="Context">{content}</w:ins>"#);
+    let direct = open(&format!("<w:p>{begin}{cache}{end}</w:p>"));
+    assert_eq!(field_count(&direct), 1);
+    for same_parent in [true, false] {
+        // Equal revision metadata does not make two physical wrappers one owner.
+        let content = if same_parent {
+            revision(&format!("{begin}{cache}{end}"))
+        } else {
+            format!("{}{}", revision(&format!("{begin}{cache}")), revision(end))
+        };
+        let mut document = open(&format!("<w:p>{content}</w:p>"));
+        let before = document.to_bytes().unwrap();
+        assert_eq!(field_count(&document), usize::from(same_parent));
+        document.standalone_story_item_snapshots().unwrap();
+        assert_eq!(document.to_bytes().unwrap(), before);
+        for accept in [true, false] {
+            let mut resolved = Document::from_bytes(&before).unwrap();
+            let count = if accept {
+                resolved.accept_revisions_by_author("Context")
+            } else {
+                resolved.reject_revisions_by_author("Context")
+            }
+            .unwrap();
+            assert_eq!(count, if same_parent { 1 } else { 2 });
+            assert_eq!(field_count(&resolved), usize::from(accept));
+        }
+    }
+}
+
 fn scan_story_control_paragraphs(xml: &[u8], control: &StoryItemSpan) -> Result<Vec<Range<usize>>> {
     let empty_word_prefixes = Arc::new(Vec::new());
     let mut reader = NsReader::from_reader(xml);
@@ -17981,7 +18090,7 @@ fn scan_story_items(
                     && is_word
                     && local_name.as_slice() == b"fldChar"
                     && complex_field_scan_context(&stack)
-                    && let Some(run) = story_enclosing_run_range(xml, &stack)?
+                    && let Some(run) = story_enclosing_run_source(xml, &stack)?
                 {
                     let marker = complex_field_marker(&reader, &element)?;
                     if let Some(ranges) = template_field_ranges.as_mut() {
@@ -18004,8 +18113,7 @@ fn scan_story_items(
                         marker,
                         before,
                         after,
-                        run.start,
-                        run.end,
+                        run,
                     );
                 }
                 let inherited = stack
@@ -18072,7 +18180,7 @@ fn scan_story_items(
                     && is_word
                     && local_name.as_ref() == b"fldChar"
                     && complex_field_scan_context(&stack)
-                    && let Some(run) = story_enclosing_run_range(xml, &stack)?
+                    && let Some(run) = story_enclosing_run_source(xml, &stack)?
                 {
                     let marker = complex_field_marker(&reader, &element)?;
                     if let Some(ranges) = template_field_ranges.as_mut() {
@@ -18095,8 +18203,7 @@ fn scan_story_items(
                         marker,
                         before,
                         after,
-                        run.start,
-                        run.end,
+                        run,
                     );
                 }
                 if let Some(kind) = kind {
@@ -22428,6 +22535,43 @@ impl Document {
         if let Some(glossary) = &self.glossary {
             glossary.validate_resource_limits()?;
         }
+        let mut field_error = None;
+        let mut preflight = |paragraph: &CT_P| {
+            if field_error.is_some() {
+                return;
+            }
+            for run in paragraph.source_runs() {
+                for content in &run.content {
+                    if let rdocx_oxml::text::RunContent::Field(field) = content
+                        && let Err(error) = crate::field::preflight_current_field(field)
+                    {
+                        field_error = Some(error);
+                        return;
+                    }
+                }
+            }
+        };
+        visit_body_paragraphs(&self.document.body.content, false, &mut preflight);
+        for note in &self.footnotes.footnotes {
+            for paragraph in &note.paragraphs {
+                preflight(paragraph);
+            }
+        }
+        if let Some(comments) = &self.comments {
+            for comment in &comments.comments {
+                for paragraph in &comment.paragraphs {
+                    preflight(paragraph);
+                }
+            }
+        }
+        if let Some(glossary) = &self.glossary {
+            for part in &glossary.doc_parts {
+                visit_body_paragraphs(&part.body.content, false, &mut preflight);
+            }
+        }
+        if let Some(error) = field_error {
+            return Err(error);
+        }
         // Header/footer and endnote parts are source-owned OPC bytes here,
         // not recursive cached models. Their independent parsers and writers
         // admit owners when those parts are projected or edited.
@@ -24817,13 +24961,14 @@ impl Document {
         if let Some(class) = self.package_class_for_path(path)? {
             return self.save_as_package_class(path, class);
         }
-        let mut candidate = self.clone_for_staging();
-        candidate.prepare_staged_output()?;
-        crate::embedded::persist_invalidated_package_signature(
-            &mut candidate.package,
-            candidate.package_signatures_invalidated,
-        )?;
+        let (mut candidate, normalized) = self.staged_current_output()?;
+        if normalized {
+            candidate = candidate.reopen_prepared_staged()?;
+        }
         candidate.package.save(path)?;
+        if normalized {
+            *self = candidate;
+        }
         Ok(())
     }
 
@@ -24875,35 +25020,100 @@ impl Document {
             .map(|parsed| &parsed.package)
     }
 
-    fn saved_package(&self) -> Result<OpcPackage> {
-        #[cfg(test)]
-        eprintln!("FX211_SAVE_STAGE resource-before");
+    fn prepare_current_field_models(&mut self) -> Result<bool> {
+        let mut changed = false;
+        let mut error = None;
+        let mut normalize = |paragraph: &mut CT_P| {
+            if error.is_some() {
+                return;
+            }
+            let result = (|| -> Result<()> {
+                for path in paragraph.accepted_run_paths() {
+                    let run = paragraph.accepted_run(&path).ok_or_else(|| {
+                        Error::Other("current Field publication path is stale".into())
+                    })?;
+                    let mut fields = Vec::new();
+                    for (slot, content) in run.content.iter().enumerate() {
+                        if let rdocx_oxml::text::RunContent::Field(field) = content {
+                            let current = crate::field::prepared_current_field(field)?;
+                            if field != &current {
+                                fields.push((slot, current));
+                            }
+                        }
+                    }
+                    if fields.is_empty() {
+                        continue;
+                    }
+                    let mut replacement = run.clone();
+                    for (slot, field) in fields {
+                        replacement.content[slot] = rdocx_oxml::text::RunContent::Field(field);
+                    }
+                    if !paragraph.replace_accepted_run(&path, replacement)? {
+                        return Err(Error::Other(
+                            "current Field publication owner disappeared".into(),
+                        ));
+                    }
+                    changed = true;
+                }
+                Ok(())
+            })();
+            if let Err(failure) = result {
+                error = Some(failure);
+            }
+        };
+        visit_body_paragraphs_mut(&mut self.document.body.content, &mut normalize);
+        for note in &mut self.footnotes.footnotes {
+            for paragraph in &mut note.paragraphs {
+                normalize(paragraph);
+            }
+        }
+        if let Some(comments) = &mut self.comments {
+            for comment in &mut comments.comments {
+                for paragraph in &mut comment.paragraphs {
+                    normalize(paragraph);
+                }
+            }
+        }
+        if let Some(glossary) = &mut self.glossary {
+            for part in &mut glossary.doc_parts {
+                visit_body_paragraphs_mut(&mut part.body.content, &mut normalize);
+            }
+        }
+        if let Some(error) = error {
+            return Err(error);
+        }
+        Ok(changed)
+    }
+
+    fn staged_current_output(&self) -> Result<(Self, bool)> {
         self.validate_model_resource_limits()?;
-        #[cfg(test)]
-        eprintln!("FX211_SAVE_STAGE resource-after");
-        #[cfg(test)]
-        eprintln!("FX211_SAVE_STAGE clone-before");
         let mut candidate = self.clone_for_staging();
-        #[cfg(test)]
-        eprintln!("FX211_SAVE_STAGE clone-after");
-        #[cfg(test)]
-        eprintln!("FX211_SAVE_STAGE prepare-before");
-        candidate.prepare_staged_output()?;
-        #[cfg(test)]
-        eprintln!("FX211_SAVE_STAGE prepare-after");
+        let normalized = candidate.prepare_staged_output()?;
         crate::embedded::persist_invalidated_package_signature(
             &mut candidate.package,
             candidate.package_signatures_invalidated,
         )?;
-        Ok(candidate.package)
+        Ok((candidate, normalized))
     }
 
-    /// Save the document to a byte vector.
+    fn saved_package(&self) -> Result<OpcPackage> {
+        Ok(self.staged_current_output()?.0.package)
+    }
+
+    /// Save the document to a byte vector. Successful checked publication also
+    /// installs normalized current owners for subsequent borrowed readers.
     pub fn to_bytes(&mut self) -> Result<Vec<u8>> {
+        let (mut candidate, normalized) = self.staged_current_output()?;
+        if normalized {
+            candidate = candidate.reopen_prepared_staged()?;
+        }
         let mut buf = std::io::Cursor::new(Vec::new());
-        self.saved_package()?.write_to(&mut buf)?;
+        candidate.package.write_to(&mut buf)?;
         let bytes = buf.into_inner();
         note_staging_work(|work| work.zip_written += bytes.len());
+        if normalized {
+            *self = candidate;
+        }
         Ok(bytes)
     }
 
@@ -24976,7 +25186,8 @@ impl Document {
         Ok(encrypted)
     }
 
-    pub(crate) fn prepare_staged_package(&mut self) -> Result<()> {
+    pub(crate) fn prepare_staged_package(&mut self) -> Result<bool> {
+        let normalized = self.prepare_current_field_models()?;
         #[cfg(test)]
         eprintln!("FX211_PREPARE_STAGE preflight-before");
         self.preflight_flush_required_bundles()?;
@@ -25014,7 +25225,7 @@ impl Document {
         let result = self.flush_to_package();
         #[cfg(test)]
         eprintln!("FX211_PREPARE_STAGE flush-after");
-        result
+        result.map(|()| normalized)
     }
 
     /// Stage every public output. A comments model that no longer matches its
@@ -25022,7 +25233,7 @@ impl Document {
     /// unchanged comments part keeps its producer bytes, as styles and the
     /// other modelled parts do, so a save without a comment edit neither
     /// rewrites it nor invalidates a package signature over it.
-    pub(crate) fn prepare_staged_output(&mut self) -> Result<()> {
+    pub(crate) fn prepare_staged_output(&mut self) -> Result<bool> {
         if let (Some(comments), Some(part_name)) = (&self.comments, &self.comments_part_name) {
             self.comments_dirty |= self
                 .package
@@ -77588,6 +77799,116 @@ mod watermark_tests {
 #[cfg(test)]
 mod reader_fact_tests {
     use super::*;
+
+    #[test]
+    fn issue425_ordered_result_live_readers_follow_checked_publication() {
+        let xml = format!(
+            r#"<w:document xmlns:w="{}"><w:body><w:p><w:fldSimple w:instr=" OUTER "><w:ins w:id="7" w:author="Prior"><w:sdt><w:sdtPr/><w:sdtContent><w:fldSimple w:instr=" INNER "><w:r><w:t>old</w:t></w:r></w:fldSimple></w:sdtContent></w:sdt></w:ins><w:del w:id="9" w:author="Prior"><w:r><w:delText>deleted</w:delText></w:r></w:del></w:fldSimple></w:p></w:body></w:document>"#,
+            rdocx_oxml::namespace::W_NS
+        );
+        let mut document = Document::new();
+        document.document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+        let baseline = document.to_bytes().unwrap();
+        let baseline_opened = Document::from_bytes(&baseline).unwrap();
+        assert_eq!(
+            baseline_opened
+                .revisions()
+                .iter()
+                .map(|revision| revision.id())
+                .collect::<Vec<_>>(),
+            [7, 9]
+        );
+        let BodyContent::Paragraph(paragraph) = &mut document.document.body.content[0] else {
+            panic!("paragraph")
+        };
+        let rdocx_oxml::text::RunContent::Field(field) = &mut paragraph.runs[0].content[0] else {
+            panic!("outer field")
+        };
+        field.cached_field_mut(0).unwrap().cached_result = "current".into();
+        assert_eq!(
+            field.cached_result, "old",
+            "lower assignments remain pending before checked publication"
+        );
+        let published = document.to_bytes().unwrap();
+        for current in [&document, &Document::from_bytes(&published).unwrap()] {
+            let revisions = current.revisions();
+            assert_eq!(
+                revisions
+                    .iter()
+                    .map(|revision| revision.id())
+                    .collect::<Vec<_>>(),
+                [7, 9]
+            );
+            let insertion = revisions
+                .iter()
+                .find(|revision| revision.id() == 7)
+                .unwrap();
+            assert_eq!(insertion.insertion_paragraph().unwrap().text(), "current");
+            assert!(
+                revisions
+                    .iter()
+                    .find(|revision| revision.id() == 9)
+                    .unwrap()
+                    .insertion_paragraph()
+                    .is_none()
+            );
+            let wrappers = current.document.revisions();
+            let insertion = wrappers
+                .into_iter()
+                .find(|revision| revision.id() == 7)
+                .unwrap();
+            assert_eq!(
+                insertion.content_paragraph().unwrap().accepted_text(),
+                "current"
+            );
+            assert!(
+                std::str::from_utf8(&current.document.to_xml().unwrap())
+                    .unwrap()
+                    .contains("current")
+            );
+        }
+        let part_before = document
+            .package
+            .get_part(&document.doc_part_name)
+            .unwrap()
+            .to_vec();
+        let BodyContent::Paragraph(paragraph) = &mut document.document.body.content[0] else {
+            panic!("paragraph")
+        };
+        let rdocx_oxml::text::RunContent::Field(field) = &mut paragraph.runs[0].content[0] else {
+            panic!("outer field")
+        };
+        field.cached_field_mut(0).unwrap().set_locked(Some(true));
+        field.cached_result = "refused".into();
+        assert!(document.to_bytes().is_err());
+        assert_eq!(
+            document.package.get_part(&document.doc_part_name).unwrap(),
+            part_before
+        );
+        let BodyContent::Paragraph(paragraph) = &document.document.body.content[0] else {
+            panic!("paragraph")
+        };
+        let rdocx_oxml::text::RunContent::Field(field) = &paragraph.runs[0].content[0] else {
+            panic!("outer field")
+        };
+        assert_eq!(field.cached_result, "refused");
+        assert_eq!(
+            field.cached_fields_in_source_order()[0].cached_result,
+            "current"
+        );
+
+        let unsupported = r#"<w:fldSimple w:instr=" QUOTE &quot;unfinished "><w:r><w:t>stored</w:t></w:r></w:fldSimple>"#;
+        let mut preserved = Document::new();
+        preserved.document = CT_Document::from_xml(format!(r#"<w:document xmlns:w="{}"><w:body><w:p>{unsupported}</w:p></w:body></w:document>"#, rdocx_oxml::namespace::W_NS).as_bytes()).unwrap();
+        let bytes = preserved.to_bytes().unwrap();
+        let reopened = Document::from_bytes(&bytes).unwrap();
+        assert!(
+            std::str::from_utf8(reopened.package.get_part(&reopened.doc_part_name).unwrap())
+                .unwrap()
+                .contains(unsupported),
+            "unchanged imported unsupported instructions retain exact source authority"
+        );
+    }
 
     #[test]
     fn revision_reader_exposes_tracked_insertion_paragraph_items() {

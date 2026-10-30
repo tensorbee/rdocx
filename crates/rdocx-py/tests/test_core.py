@@ -15495,13 +15495,33 @@ def test_fx268_picture_normalization_reuses_actual_checked_rounds(publisher, par
     picture = owner.add_picture(_one_pixel_png(), 'rounds.png')
     work = counter()
     staging = _rdocx._staging_work()
-    assert work['producer.seed_eligible'][0] == pieces, work
-    assert work['left.seed_used'][0] == pieces, work
-    assert work['pair.fixed_used'][0] == pieces, work
-    for name in ['left.read1', 'right.read1', 'right.read2', 'right.write1', 'right.write2']:
-        assert work.get(name, [0, 0]) == [0, 0] or work.get(name, [0, 0]) == (0, 0), work
-    for name in ['left.read2', 'left.write1', 'left.write2']:
-        assert work[name][0] == pieces and work[name][1] > 0, work
+    if 'producer_current.compare_true' in work:
+        # These inputs qualify the complete actual-source and writer proof. It
+        # returns before the separate seeded two-round normalization route.
+        assert work['producer_current.compare_true'][0] == 1, work
+        assert work['producer_current.writer_true'][0] == 1, work
+        assert work['producer_current.admitted_children'][0] == pieces, work
+        assert all(values[1] > 0 for values in (
+            work['producer_current.compare_true'],
+            work['producer_current.writer_true'],
+            work['producer_current.admitted_children'],
+        )), work
+        assert not any(name.startswith(('producer.', 'left.', 'right.', 'pair.'))
+                       for name in work), work
+        reads = work['source_read.child_parse'][0]
+        assert pieces <= reads <= 3 * pieces + 5, work
+        for name in ['source_read.child_write', 'source_read.shell_parse',
+                     'source_read.emptied_write', 'source_read.shell_write']:
+            assert work[name][0] == reads and work[name][1] > 0, work
+    else:
+        assert work['producer_current.compare_false'][0] == 1, work
+        assert work['producer.seed_eligible'][0] == pieces, work
+        assert work['left.seed_used'][0] == pieces, work
+        assert work['pair.fixed_used'][0] == pieces, work
+        for name in ['left.read1', 'right.read1', 'right.read2', 'right.write1', 'right.write2']:
+            assert name not in work or work[name] in ([0, 0], (0, 0)), work
+        for name in ['left.read2', 'left.write1', 'left.write2']:
+            assert work[name][0] == pieces and work[name][1] > 0, work
     assert staging[0] == 0, f'whole-parse fallback hid producer work: {staging}'
     assert staging[5] <= 3 * pieces + 20, staging
     assert picture.bytes == _one_pixel_png()
@@ -15572,6 +15592,31 @@ def test_issue425_noop_and_refusal_keep_live_handles_and_checked_workaround():
     assert [revision.author for revision in left.revisions] == ["Bob", "Bob"]
     assert [revision.author for revision in redline.revisions] == ["Alice", "Alice"]
     assert held.text == held_run.text == "Later stays."
+
+
+    # A source-proved ignored-formatting textbox edit is a real no-op.
+    def textbox(style):
+        seed = rdocx.Document()
+        seed.add_paragraph("seed")
+        body = (
+            '<w:p><w:r><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml" '
+            'style="width:100pt;height:50pt"><v:textbox><w:txbxContent><w:p><w:r>'
+            '<w:rPr><w:' + style + '/></w:rPr><w:t>Stable.</w:t></w:r></w:p>'
+            '</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>'
+            '<w:p><w:r><w:t>Live anchor.</w:t></w:r></w:p>'
+        )
+        return _replace_document_body(seed, body)
+
+    textbox_original = textbox("b")
+    textbox_before = textbox_original.to_bytes()
+    textbox_held = textbox_original.paragraphs[1]
+    textbox_run = textbox_held.runs[0]
+    assert textbox_original.compare(
+        textbox("i"), "Bob", "2026-10-27T13:00:00Z", ignore_formatting=True,
+    ) == ()
+    assert textbox_original.to_bytes() == textbox_before
+    assert not textbox_original.revisions
+    assert textbox_held.text == textbox_run.text == "Live anchor."
 
 
 

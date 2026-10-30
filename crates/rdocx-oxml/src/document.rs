@@ -43,9 +43,14 @@ struct WordAdmissionFrame {
     mc_capture_depth: Option<usize>,
     qualified_drawing_depth: Option<usize>,
     control: bool,
+    ordered_field_charged: bool,
     cost: usize,
     table_depth: usize,
     local: Vec<u8>,
+    fact_start: usize,
+    copy_fact: bool,
+    copy_depth: usize,
+    copy_scope_bytes: usize,
 }
 
 fn restore_namespace_depths(
@@ -112,7 +117,18 @@ pub(crate) fn admitted_word_child(parent: &[u8], child: &[u8]) -> bool {
         // The actual owner-specific SdtOwner predicate decides content below.
         b"sdtContent" => true,
         b"hyperlink" => matches!(child, b"r" | b"ins" | b"del" | b"moveFrom" | b"moveTo"),
-        b"fldSimple" | b"rt" | b"rubyBase" => child == b"r",
+        b"fldSimple" => matches!(
+            child,
+            b"r" | b"fldSimple"
+                | b"hyperlink"
+                | b"sdt"
+                | b"ins"
+                | b"del"
+                | b"moveFrom"
+                | b"moveTo"
+                | b"ruby"
+        ),
+        b"rt" | b"rubyBase" => child == b"r",
         b"ruby" => matches!(child, b"rt" | b"rubyBase"),
         b"ins" | b"del" | b"moveFrom" | b"moveTo" => matches!(
             child,
@@ -145,11 +161,22 @@ pub(crate) enum WordOwner<'a> {
     Anchor(&'a crate::drawing::CT_Anchor),
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static ORDERED_DIAGNOSTIC_FIELD_GUARD_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) fn admit_word_model(root: WordOwner<'_>) -> Result<()> {
     use crate::content_control::SdtContent;
     use crate::table::CellContent;
     use crate::text::RunContent;
     let mut pending = vec![(root, 0usize, 0usize)];
+    // Canonical result/revision paragraphs are shared by immutable secondary
+    // read caches. Visit an allocation again only for a stricter physical path.
+    // This retains both independent owner and table limits without expanding
+    // the same shared subtree once for each cached ancestor copy.
+    let mut paragraphs = std::collections::HashMap::<usize, Vec<(usize, usize)>>::new();
+    let mut fields = std::collections::HashMap::<usize, Vec<(usize, usize)>>::new();
     while let Some((owner, cost, table_depth)) = pending.pop() {
         let mut push = |child| pending.push((child, cost, table_depth));
         match owner {
@@ -164,6 +191,18 @@ pub(crate) fn admit_word_model(root: WordOwner<'_>) -> Result<()> {
                 }
             }
             WordOwner::Paragraph(p) => {
+                let paths = paragraphs
+                    .entry(std::ptr::from_ref(p) as usize)
+                    .or_default();
+                if paths.iter().any(|(prior_cost, prior_depth)| {
+                    *prior_cost >= cost && *prior_depth >= table_depth
+                }) {
+                    continue;
+                }
+                paths.retain(|(prior_cost, prior_depth)| {
+                    *prior_cost > cost || *prior_depth > table_depth
+                });
+                paths.push((cost, table_depth));
                 for run in &p.runs {
                     push(WordOwner::Run(run));
                 }
@@ -241,8 +280,31 @@ pub(crate) fn admit_word_model(root: WordOwner<'_>) -> Result<()> {
                 }
             }
             WordOwner::Field(field) => {
+                let cost = word_owner_cost(cost, usize::from(field.has_ordered_result_owner()))?;
+                // Current Field clones may diverge while sharing an immutable
+                // original source. Memo only actual Field addresses, retaining
+                // every nondominated physical cost/table-depth path.
+                let paths = fields
+                    .entry(std::ptr::from_ref(field) as usize)
+                    .or_default();
+                if paths.iter().any(|(prior_cost, prior_depth)| {
+                    *prior_cost >= cost && *prior_depth >= table_depth
+                }) {
+                    continue;
+                }
+                paths.retain(|(prior_cost, prior_depth)| {
+                    *prior_cost > cost || *prior_depth > table_depth
+                });
+                paths.push((cost, table_depth));
+                #[cfg(test)]
+                ORDERED_DIAGNOSTIC_FIELD_GUARD_VISITS.set(
+                    ORDERED_DIAGNOSTIC_FIELD_GUARD_VISITS
+                        .get()
+                        .checked_add(1)
+                        .expect("Field guard visit overflow"),
+                );
                 for child in field.resource_owner_children() {
-                    push(child);
+                    pending.push((child, cost, table_depth));
                 }
             }
             WordOwner::Revision(revision) => {
@@ -290,16 +352,39 @@ pub(crate) fn admit_word_xml(
     xml: &[u8],
     prefixes: &[String],
     consumed_owner: Option<&[u8]>,
-) -> Result<()> {
+) -> Result<(usize, usize)> {
     debug_assert!(consumed_owner.is_none_or(|owner| matches!(owner, b"p" | b"r")));
     // The wrapper supplies only the inherited bindings the actual reader
     // already uses. Declarations in the input still shadow this scope.
+    let context_bytes = prefixes
+        .iter()
+        .try_fold(0usize, |sum, prefix| sum.checked_add(prefix.len()))
+        .ok_or_else(|| OxmlError::InvalidValue("Word source context byte overflow".into()))?;
     let mut bindings = namespace_bindings(prefixes);
+    // Context multiplicity belongs to revision identity, not XML attributes
+    // on this synthetic envelope. Keep the last identical binding so repeated
+    // metadata cannot move an earlier binding past a conflicting later one.
+    // Conflicting pairs and the stored input context remain untouched.
+    let mut seen = std::collections::HashSet::new();
+    bindings.reverse();
+    bindings.retain(|binding| seen.insert(binding.clone()));
+    bindings.reverse();
     for prefix in prefixes.iter().filter(|prefix| !prefix.starts_with('\0')) {
         if !bindings.iter().any(|(name, _)| name == prefix) {
             bindings.push((prefix.clone(), W_NS.to_owned()));
         }
     }
+    let effective_context_bytes = bindings
+        .iter()
+        .try_fold(0usize, |sum, (prefix, namespace)| {
+            let marker = if namespace == W_NS { prefix.len() } else { 0 };
+            sum.checked_add(prefix.len())
+                .and_then(|sum| sum.checked_add(namespace.len()))
+                .and_then(|sum| sum.checked_add(2))
+                .and_then(|sum| sum.checked_add(marker))
+        })
+        .ok_or_else(|| OxmlError::InvalidValue("Word effective context byte overflow".into()))?;
+    let duplicate_context_bytes = context_bytes.saturating_sub(effective_context_bytes);
     let mut source = b"<rdocxAdmission".to_vec();
     for (prefix, namespace) in bindings {
         source.extend_from_slice(b" xmlns");
@@ -318,10 +403,13 @@ pub(crate) fn admit_word_xml(
     let mut stack: Vec<WordAdmissionFrame> = Vec::new();
     let mut controls = 0usize;
     let mut path_cost = 0usize;
+    let mut copy_nodes = 0usize;
+    let mut copy_bytes = 0usize;
     let mut namespace_depths: std::collections::HashMap<Vec<u8>, WordNamespaceBinding> =
         std::collections::HashMap::new();
     let mut buffer = Vec::new();
     loop {
+        let fact_start = reader.buffer_position() as usize;
         let event = reader.read_event_into(&mut buffer)?;
         match event {
             Event::Start(ref element) | Event::Empty(ref element) => {
@@ -572,6 +660,31 @@ pub(crate) fn admit_word_xml(
                 let textbox = matches!(event, Event::Start(_))
                     && admitted
                     && (typed_anchor_body || typed_vml_body);
+                // A field gains an ordered owner only when an admitted result
+                // revision/control is encountered. Pure old field chains keep
+                // their previous admission limit. Stop at a real run/body slot.
+                if admitted
+                    && anchor_depth.is_none()
+                    && word
+                    && matches!(
+                        local.as_ref(),
+                        b"sdt" | b"ins" | b"del" | b"moveFrom" | b"moveTo"
+                    )
+                {
+                    for frame in stack.iter_mut().rev() {
+                        if !frame.admitted
+                            || !frame.word
+                            || matches!(frame.local.as_slice(), b"r" | b"p" | b"body" | b"tc")
+                        {
+                            break;
+                        }
+                        if frame.local == b"fldSimple" && !frame.ordered_field_charged {
+                            path_cost = word_owner_cost(path_cost, 1)?;
+                            frame.cost += 1;
+                            frame.ordered_field_charged = true;
+                        }
+                    }
+                }
                 let cost = usize::from(control) + 16 * usize::from(textbox);
                 if control && controls == 256 {
                     return Err(OxmlError::InvalidValue(
@@ -594,6 +707,65 @@ pub(crate) fn admit_word_xml(
                     } else {
                         table_depth
                     };
+                let copy_depth = stack.last().map_or(0usize, |frame| frame.copy_depth);
+                let copy_owner = admitted
+                    && word
+                    && matches!(
+                        local.as_ref(),
+                        b"p" | b"r"
+                            | b"fldSimple"
+                            | b"sdt"
+                            | b"ins"
+                            | b"del"
+                            | b"moveFrom"
+                            | b"moveTo"
+                            | b"tbl"
+                            | b"tr"
+                            | b"tc"
+                    );
+                // A retained opaque child is one physical fact. Its descendants
+                // do not become separate modeled-copy owners through this budget.
+                let copy_fact =
+                    copy_owner || stack.last().is_some_and(|frame| frame.admitted) && !admitted;
+                let copy_scope_bytes = namespace_depths
+                    .iter()
+                    .try_fold(0usize, |sum, (prefix, binding)| {
+                        let marker = if decoded_namespace_is(&binding.uri, W_NS) {
+                            prefix.len()
+                        } else {
+                            0
+                        };
+                        sum.checked_add(prefix.len())
+                            .and_then(|sum| sum.checked_add(binding.uri.len()))
+                            .and_then(|sum| sum.checked_add(2))
+                            .and_then(|sum| sum.checked_add(marker))
+                    })
+                    .ok_or_else(|| {
+                        OxmlError::InvalidValue("Word local copy context overflow".into())
+                    })?;
+                let next_copy_depth =
+                    copy_depth
+                        .checked_add(usize::from(copy_owner))
+                        .ok_or_else(|| {
+                            OxmlError::InvalidValue("Word source-copy ownership overflow".into())
+                        })?;
+                if copy_fact && matches!(event, Event::Empty(_)) {
+                    let visits = copy_depth.checked_add(1).ok_or_else(|| {
+                        OxmlError::InvalidValue("Word source-copy visit overflow".into())
+                    })?;
+                    copy_nodes = copy_nodes.checked_add(visits).ok_or_else(|| {
+                        OxmlError::InvalidValue("Word source-copy visit overflow".into())
+                    })?;
+                    let bytes = (reader.buffer_position() as usize - fact_start)
+                        .checked_add(copy_scope_bytes)
+                        .and_then(|bytes| bytes.checked_mul(visits))
+                        .ok_or_else(|| {
+                            OxmlError::InvalidValue("Word source-copy byte overflow".into())
+                        })?;
+                    copy_bytes = copy_bytes.checked_add(bytes).ok_or_else(|| {
+                        OxmlError::InvalidValue("Word source-copy byte overflow".into())
+                    })?;
+                }
                 if matches!(event, Event::Start(_)) {
                     let owner = if !admitted || anchor_depth.is_some() {
                         None
@@ -609,9 +781,9 @@ pub(crate) fn admit_word_xml(
                             b"tr" => Some(SdtOwner::Row),
                             b"tc" => Some(SdtOwner::Cell),
                             b"sdt" => Some(parent_owner.unwrap_or(SdtOwner::Standalone)),
-                            b"sdtContent" | b"ins" | b"del" | b"moveFrom" | b"moveTo" => {
-                                parent_owner
-                            }
+                            b"sdtContent" => parent_owner,
+                            b"ins" | b"del" | b"moveFrom" | b"moveTo" => parent_owner
+                                .or_else(|| (stack.len() == 1).then_some(SdtOwner::Inline)),
                             _ => None,
                         }
                     } else if namespace_uri == crate::namespace::MC_NS.as_bytes() {
@@ -620,7 +792,12 @@ pub(crate) fn admit_word_xml(
                         None
                     };
                     stack.push(WordAdmissionFrame {
+                        fact_start,
+                        copy_fact,
+                        copy_depth: next_copy_depth,
+                        copy_scope_bytes,
                         control,
+                        ordered_field_charged: false,
                         admitted,
                         word,
                         legacy_run_prefix: admitted.then_some(legacy_run_prefix).flatten(),
@@ -646,6 +823,27 @@ pub(crate) fn admit_word_xml(
             }
             Event::End(_) => {
                 if let Some(frame) = stack.pop() {
+                    if frame.copy_fact {
+                        let visits = stack
+                            .last()
+                            .map_or(0usize, |parent| parent.copy_depth)
+                            .checked_add(1)
+                            .ok_or_else(|| {
+                                OxmlError::InvalidValue("Word source-copy visit overflow".into())
+                            })?;
+                        copy_nodes = copy_nodes.checked_add(visits).ok_or_else(|| {
+                            OxmlError::InvalidValue("Word source-copy visit overflow".into())
+                        })?;
+                        let bytes = (reader.buffer_position() as usize - frame.fact_start)
+                            .checked_add(frame.copy_scope_bytes)
+                            .and_then(|bytes| bytes.checked_mul(visits))
+                            .ok_or_else(|| {
+                                OxmlError::InvalidValue("Word source-copy byte overflow".into())
+                            })?;
+                        copy_bytes = copy_bytes.checked_add(bytes).ok_or_else(|| {
+                            OxmlError::InvalidValue("Word source-copy byte overflow".into())
+                        })?;
+                    }
                     controls -= usize::from(frame.control);
                     path_cost -= frame.cost;
                     restore_namespace_depths(&mut namespace_depths, frame.namespace_undo);
@@ -656,7 +854,13 @@ pub(crate) fn admit_word_xml(
         }
         buffer.clear();
     }
-    Ok(())
+    let context_work = copy_nodes
+        .checked_mul(duplicate_context_bytes)
+        .ok_or_else(|| OxmlError::InvalidValue("Word source-copy context overflow".into()))?;
+    copy_bytes = copy_bytes
+        .checked_add(context_work)
+        .ok_or_else(|| OxmlError::InvalidValue("Word source-copy context overflow".into()))?;
+    Ok((copy_nodes, copy_bytes))
 }
 
 /// Public reader entrypoints begin after the owning start event. Reconstruct
@@ -709,12 +913,13 @@ pub(crate) fn admit_word_reader(
                     source.extend_from_slice(name.as_ref());
                     source.push(b'>');
                     source.extend_from_slice(&xml[..(reader.buffer_position() - offset) as usize]);
-                    return admit_word_xml(&source, prefixes, None);
+                    return admit_word_xml(&source, prefixes, None).map(|_| ());
                 }
                 // Legacy CT_P/CT_R callers provide a typed operation but no
                 // start event or namespace scope. Admit its actual children
                 // under that concrete role, retaining their real bindings.
-                return admit_word_xml(&xml[..(before - offset) as usize], prefixes, Some(owner));
+                return admit_word_xml(&xml[..(before - offset) as usize], prefixes, Some(owner))
+                    .map(|_| ());
             }
             Event::Eof => {
                 return Err(OxmlError::InvalidValue(

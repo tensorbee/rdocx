@@ -15,6 +15,7 @@ const WORD_NS: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/m
 
 type NamespaceScope = HashMap<String, String>;
 type NamespaceDeclarations = Vec<(String, String)>;
+type ResolvedStoryLeaves = (Vec<u8>, usize, Vec<Option<Range<usize>>>);
 
 /// Whether a tracked revision takes its text out of the accepted view, as a
 /// deletion or a move away does. The exporters leave that text out.
@@ -80,6 +81,12 @@ impl RevisionRef<'_> {
     /// This retains runs, hyperlinks, fields, and preserved XML in their
     /// original inline order. Non-insertion revisions return `None`.
     pub fn insertion_paragraph(&self) -> Option<ParagraphRef<'_>> {
+        if !matches!(
+            self.inner.kind(),
+            RevisionKind::Insertion | RevisionKind::MoveTo
+        ) {
+            return None;
+        }
         self.inner
             .content_paragraph()
             .map(|inner| ParagraphRef { inner })
@@ -184,13 +191,13 @@ impl StoryRevision {
 }
 
 #[derive(Clone, Copy)]
-enum Resolution {
+pub(crate) enum Resolution {
     Accept,
     Reject,
 }
 
 #[derive(Clone)]
-enum RevisionScope<'a> {
+pub(crate) enum RevisionScope<'a> {
     All,
     Author(&'a str),
     Id(i32),
@@ -220,6 +227,7 @@ struct XmlElement {
     children: Vec<usize>,
     revision: Option<RevisionMetadata>,
     namespace_declarations: NamespaceDeclarations,
+    field_marker: Option<String>,
 }
 
 struct XmlTree<'a> {
@@ -235,6 +243,21 @@ struct RenderState<'a> {
     /// True while rendering content that the resolution removes, such as a
     /// removed row. Its paragraph marks need no merge partner.
     discarded: bool,
+    leaf_elements: Vec<usize>,
+    leaf_ranges: Vec<Option<Range<usize>>>,
+    leaf_updates: Vec<usize>,
+    retiring_simple_fields: HashSet<usize>,
+}
+
+impl RenderState<'_> {
+    fn shift_leaves(&mut self, from: usize, offset: usize) {
+        for &index in &self.leaf_updates[from..] {
+            if let Some(range) = &mut self.leaf_ranges[index] {
+                range.start += offset;
+                range.end += offset;
+            }
+        }
+    }
 }
 
 impl Document {
@@ -313,7 +336,12 @@ impl Document {
             scope: scope.clone(),
             resolved: HashSet::new(),
             discarded: false,
+            leaf_elements: Vec::new(),
+            leaf_ranges: Vec::new(),
+            leaf_updates: Vec::new(),
+            retiring_simple_fields: HashSet::new(),
         };
+        state.retiring_simple_fields = tree.carried_simple_field_retirements(&state)?;
         let mut output = Vec::with_capacity(source.len());
         output.extend_from_slice(&source[..tree.elements[tree.root].start]);
         output.extend_from_slice(&tree.render(tree.root, &mut state, false)?);
@@ -386,23 +414,317 @@ impl Document {
     }
 }
 
-fn resolve_story_xml(
+pub(crate) fn resolve_story_xml(
     source: &[u8],
     resolution: Resolution,
     scope: RevisionScope<'_>,
 ) -> Result<(Vec<u8>, usize)> {
+    let (output, count, _) = resolve_story_xml_with_leaf_ranges(source, resolution, scope, &[])?;
+    Ok((output, count))
+}
+
+/// Transport positively associated whole text leaves through the actual resolver.
+/// Indices are local source occurrences. No output correspondence is discovered.
+pub(crate) fn resolve_story_xml_with_leaf_ranges(
+    source: &[u8],
+    resolution: Resolution,
+    scope: RevisionScope<'_>,
+    leaves: &[Range<usize>],
+) -> Result<ResolvedStoryLeaves> {
     let tree = XmlTree::parse(source)?;
+    let mut selected = Vec::with_capacity(leaves.len());
+    let mut previous_end = 0;
+    for range in leaves {
+        if range.start >= range.end || range.end > source.len() || range.start < previous_end {
+            return Err(Error::Other(
+                "invalid or overlapping comparison leaf ranges".into(),
+            ));
+        }
+        let index = tree
+            .elements
+            .iter()
+            .position(|element| element.start == range.start && element.end == range.end)
+            .ok_or_else(|| {
+                Error::Other("comparison leaf range is not a whole source element".into())
+            })?;
+        let element = &tree.elements[index];
+        if !element.word
+            || !matches!(element.local.as_str(), "t" | "delText")
+            || !element.children.is_empty()
+            || !element.parent.is_some_and(|parent| {
+                tree.elements[parent].word && tree.elements[parent].local == "r"
+            })
+        {
+            return Err(Error::Other(
+                "comparison range has no qualified text-leaf owner".into(),
+            ));
+        }
+        selected.push(index);
+        previous_end = range.end;
+    }
+    render_with_source_ranges(&tree, resolution, scope, selected)
+}
+
+/// Transport a positively proved complete field publication, using the actual
+/// renderer's ordinary-element hooks after descendant and namespace changes.
+pub(crate) fn resolve_story_xml_with_publication_roots(
+    source: &[u8],
+    resolution: Resolution,
+    scope: RevisionScope<'_>,
+    publication: i32,
+    roots: &[Range<usize>],
+) -> Result<ResolvedStoryLeaves> {
+    let tree = XmlTree::parse(source)?;
+    let mut selected = Vec::with_capacity(roots.len());
+    let mut previous = 0usize;
+    let mut parent = None;
+    for range in roots {
+        if range.start >= range.end || range.end > source.len() || range.start < previous {
+            return Err(Error::Other(
+                "invalid or overlapping publication roots".into(),
+            ));
+        }
+        let index = tree
+            .elements
+            .iter()
+            .position(|element| element.start == range.start && element.end == range.end)
+            .ok_or_else(|| {
+                Error::Other("publication root is not a complete actual element".into())
+            })?;
+        let element = &tree.elements[index];
+        if !element.word
+            || !matches!(
+                element.local.as_str(),
+                "r" | "sdt"
+                    | "customXml"
+                    | "smartTag"
+                    | "dir"
+                    | "bdo"
+                    | "proofErr"
+                    | "permStart"
+                    | "permEnd"
+                    | "bookmarkStart"
+                    | "bookmarkEnd"
+                    | "commentRangeStart"
+                    | "commentRangeEnd"
+                    | "moveFromRangeStart"
+                    | "moveFromRangeEnd"
+                    | "moveToRangeStart"
+                    | "moveToRangeEnd"
+                    | "customXmlInsRangeStart"
+                    | "customXmlInsRangeEnd"
+                    | "customXmlDelRangeStart"
+                    | "customXmlDelRangeEnd"
+                    | "customXmlMoveFromRangeStart"
+                    | "customXmlMoveFromRangeEnd"
+                    | "customXmlMoveToRangeStart"
+                    | "customXmlMoveToRangeEnd"
+            )
+        {
+            return Err(Error::Other(
+                "publication root has no qualified ordinary run-content owner".into(),
+            ));
+        }
+        let actual_parent = element
+            .parent
+            .ok_or_else(|| Error::Other("publication root lacks a revision owner".into()))?;
+        if parent.is_some_and(|parent| parent != actual_parent) {
+            return Err(Error::Other(
+                "publication roots cross actual revision owners".into(),
+            ));
+        }
+        let metadata = tree.elements[actual_parent]
+            .revision
+            .as_ref()
+            .ok_or_else(|| Error::Other("publication parent is not a modeled revision".into()))?;
+        if metadata.id != publication
+            || !scope.matches(metadata)
+            || !keeps_content(resolution, metadata.kind)
+            || !matches!(
+                metadata.kind,
+                RevisionKind::Insertion | RevisionKind::Deletion
+            )
+        {
+            return Err(Error::Other(
+                "publication root belongs to another or discarded revision".into(),
+            ));
+        }
+        parent = Some(actual_parent);
+        selected.push(index);
+        previous = range.end;
+    }
+    let parent =
+        parent.ok_or_else(|| Error::Other("field publication has no actual roots".into()))?;
+    if selected != tree.elements[parent].children {
+        return Err(Error::Other(
+            "publication root coverage omits or duplicates an actual member".into(),
+        ));
+    }
+    let trivia = |bytes: &[u8]| {
+        bytes
+            .iter()
+            .all(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+    };
+    let mut cursor = tree.elements[parent].open_end;
+    for index in &selected {
+        let element = &tree.elements[*index];
+        if !trivia(&source[cursor..element.start]) {
+            return Err(Error::Other(
+                "publication root gaps contain independent source".into(),
+            ));
+        }
+        cursor = element.end;
+    }
+    if !trivia(&source[cursor..tree.elements[parent].close_start]) {
+        return Err(Error::Other(
+            "publication has independent trailing source".into(),
+        ));
+    }
+    fn marker(tree: &XmlTree<'_>, index: usize) -> Result<String> {
+        let element = &tree.elements[index];
+        let scope = tree
+            .source_scope(index)
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+        let mut reader = Reader::from_reader(&tree.source[element.start..element.end]);
+        let (Event::Start(root) | Event::Empty(root)) = reader.read_event().map_err(xml_error)?
+        else {
+            return Err(Error::Other("field marker is missing".into()));
+        };
+        let mut kind = None;
+        for attribute in root.attributes() {
+            let attribute = attribute.map_err(|error| Error::Other(error.to_string()))?;
+            let key = std::str::from_utf8(attribute.key.as_ref())
+                .map_err(|error| Error::Other(error.to_string()))?;
+            if let Some((prefix, local)) = key.split_once(':')
+                && scope.get(prefix).is_some_and(|uri| uri == WORD_NS)
+                && local == "fldCharType"
+            {
+                if kind.is_some() {
+                    return Err(Error::Other("duplicate qualified field marker kind".into()));
+                }
+                kind = Some(
+                    attribute
+                        .decoded_and_normalized_value(XmlVersion::Implicit1_0, root.decoder())
+                        .map_err(xml_error)?
+                        .into_owned(),
+                );
+            }
+        }
+        kind.ok_or_else(|| Error::Other("field marker lacks a qualified kind".into()))
+    }
+    fn edge(tree: &XmlTree<'_>, run: usize, marker: usize, begin: bool) -> bool {
+        let element = &tree.elements[run];
+        let properties = element
+            .children
+            .iter()
+            .filter(|index| tree.elements[**index].word && tree.elements[**index].local == "rPr")
+            .copied()
+            .collect::<Vec<_>>();
+        if properties.len() > 1
+            || properties
+                .first()
+                .is_some_and(|property| element.children.first() != Some(property))
+        {
+            return false;
+        }
+        let material = &element.children[usize::from(!properties.is_empty())..];
+        if (begin && material.first() != Some(&marker))
+            || (!begin && material.last() != Some(&marker))
+        {
+            return false;
+        }
+        let boundary = if begin {
+            properties
+                .first()
+                .map_or(element.open_end, |index| tree.elements[*index].end)
+                ..tree.elements[marker].start
+        } else {
+            tree.elements[marker].end..element.close_start
+        };
+        tree.source[boundary]
+            .iter()
+            .all(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+    }
+    let mut depth = 0usize;
+    let mut separate = false;
+    for (slot, run) in selected.iter().copied().enumerate() {
+        if tree.elements[run].local != "r" {
+            continue;
+        }
+        for child in tree.elements[run].children.iter().copied() {
+            if !tree.elements[child].word || tree.elements[child].local != "fldChar" {
+                continue;
+            }
+            match marker(&tree, child)?.as_str() {
+                "begin" => {
+                    if depth == 0 && (slot != 0 || !edge(&tree, run, child, true)) {
+                        return Err(Error::Other(
+                            "publication begins with a shared or partial field run".into(),
+                        ));
+                    }
+                    depth = depth
+                        .checked_add(1)
+                        .ok_or_else(|| Error::Other("publication field depth overflow".into()))?;
+                }
+                "separate" if depth == 1 => {
+                    if separate {
+                        return Err(Error::Other(
+                            "publication has an ambiguous separate run".into(),
+                        ));
+                    }
+                    separate = true;
+                }
+                "separate" if depth > 1 => {}
+                "end" if depth > 0 => {
+                    if depth == 1 && (slot + 1 != selected.len() || !edge(&tree, run, child, false))
+                    {
+                        return Err(Error::Other(
+                            "publication ends with a shared or partial field run".into(),
+                        ));
+                    }
+                    depth -= 1;
+                }
+                _ => {
+                    return Err(Error::Other(
+                        "publication field markers are unbalanced".into(),
+                    ));
+                }
+            }
+        }
+    }
+    if depth != 0 || !separate {
+        return Err(Error::Other(
+            "publication lacks one complete actual complex field".into(),
+        ));
+    }
+    render_with_source_ranges(&tree, resolution, scope, selected)
+}
+
+fn render_with_source_ranges(
+    tree: &XmlTree<'_>,
+    resolution: Resolution,
+    scope: RevisionScope<'_>,
+    selected: Vec<usize>,
+) -> Result<ResolvedStoryLeaves> {
     let mut state = RenderState {
         resolution,
         scope,
         resolved: HashSet::new(),
         discarded: false,
+        leaf_ranges: vec![None; selected.len()],
+        leaf_elements: selected,
+        leaf_updates: Vec::new(),
+        retiring_simple_fields: HashSet::new(),
     };
-    let mut output = Vec::with_capacity(source.len());
-    output.extend_from_slice(&source[..tree.elements[tree.root].start]);
-    output.extend_from_slice(&tree.render(tree.root, &mut state, false)?);
-    output.extend_from_slice(&source[tree.elements[tree.root].end..]);
-    Ok((output, state.resolved.len()))
+    state.retiring_simple_fields = tree.carried_simple_field_retirements(&state)?;
+    let mut output = Vec::with_capacity(tree.source.len());
+    output.extend_from_slice(&tree.source[..tree.elements[tree.root].start]);
+    let root = tree.render(tree.root, &mut state, false)?;
+    state.shift_leaves(0, output.len());
+    output.extend_from_slice(&root);
+    output.extend_from_slice(&tree.source[tree.elements[tree.root].end..]);
+    Ok((output, state.resolved.len(), state.leaf_ranges))
 }
 
 pub(crate) fn modeled_revision_count(source: &[u8]) -> Result<usize> {
@@ -491,7 +813,663 @@ impl RevisionScope<'_> {
     }
 }
 
+/// Track actual paragraph-content owners without moving a simple field or
+/// hyperlink into the narrower run-revision grammar. The adaptor supplies only
+/// the caller's paragraph root and canonical writer binding, not a new resolver root.
+pub(crate) fn tracked_paragraph_children(
+    source: &str,
+    deleted: bool,
+    inside_hyperlink: bool,
+    wrap: &mut impl FnMut(&str) -> Result<String>,
+) -> Result<String> {
+    struct Frame {
+        owner: usize,
+        next: usize,
+        cursor: usize,
+        groups: Vec<(String, bool)>,
+        hyperlink: bool,
+        output_start: usize,
+    }
+    fn flush(
+        groups: &mut Vec<(String, bool)>,
+        output: &mut String,
+        wrap: &mut impl FnMut(&str) -> Result<String>,
+    ) -> Result<()> {
+        if groups.len() > 1
+            && let Some((markers, false)) = groups.pop_if(|(_, content)| !*content)
+            && let Some((group, _)) = groups.last_mut()
+        {
+            group.push_str(&markers);
+        }
+        for (group, _) in groups.drain(..) {
+            output.push_str(&wrap(&group)?);
+        }
+        Ok(())
+    }
+    let opening = format!("<w:document xmlns:w=\"{WORD_NS}\"><w:body>");
+    let input = format!("{opening}{source}</w:body></w:document>");
+    let tree = XmlTree::parse(input.as_bytes())?;
+    let body = tree.direct_word_child(tree.root, "body")?;
+    let [paragraph] = tree.elements[body].children.as_slice() else {
+        return Err(Error::Other(
+            "whole-paragraph publication needs one actual paragraph".into(),
+        ));
+    };
+    if !tree.elements[*paragraph].word || tree.elements[*paragraph].local != "p" {
+        return Err(Error::Other(
+            "whole-paragraph publication root is not Word p".into(),
+        ));
+    }
+    let publication_frames = tree.paragraph_publication_frames(body);
+    // Source-only paragraph grammar. This does not promote preserved lower
+    // hyperlink/control payloads into typed Field or borrowed revision owners.
+    let mut inline_source = vec![false; tree.elements.len()];
+    let mut hyperlink_source = vec![false; tree.elements.len()];
+    for (index, element) in tree.elements.iter().enumerate() {
+        inline_source[index] = index == *paragraph
+            || element.word
+                && element.parent.is_some_and(|parent| {
+                    inline_source[parent]
+                        && match tree.elements[parent].local.as_str() {
+                            "p" | "fldSimple" | "hyperlink" | "sdtContent" => matches!(
+                                element.local.as_str(),
+                                "r" | "fldSimple" | "hyperlink" | "sdt"
+                            ),
+                            "sdt" => element.local == "sdtContent",
+                            _ => false,
+                        }
+                });
+        hyperlink_source[index] = inline_source[index]
+            && (element.local == "hyperlink"
+                || element
+                    .parent
+                    .is_some_and(|parent| hyperlink_source[parent]));
+    }
+    let mut frames = vec![Frame {
+        owner: *paragraph,
+        next: 0,
+        cursor: tree.elements[*paragraph].open_end,
+        groups: Vec::new(),
+        hyperlink: inside_hyperlink,
+        output_start: 0,
+    }];
+    let mut output = String::new();
+    while let Some(frame) = frames.last_mut() {
+        let owner = &tree.elements[frame.owner];
+        let Some(child_index) = owner.children.get(frame.next).copied() else {
+            if frame.cursor < owner.close_start {
+                frame
+                    .groups
+                    .push((input[frame.cursor..owner.close_start].to_owned(), false));
+            }
+            flush(&mut frame.groups, &mut output, wrap)?;
+            if frame.owner != *paragraph {
+                if owner.local == "hyperlink" && output.len() == frame.output_start {
+                    return Err(Error::Other(
+                        "comparison cannot track a whole paragraph's empty hyperlink".into(),
+                    ));
+                }
+                output.push_str(&input[owner.close_start..owner.end]);
+            }
+            frames.pop();
+            continue;
+        };
+        frame.next += 1;
+        let child = &tree.elements[child_index];
+        if frame.cursor < child.start {
+            frame
+                .groups
+                .push((input[frame.cursor..child.start].to_owned(), false));
+        }
+        frame.cursor = child.end;
+        if publication_frames[child_index] {
+            if child.local == "hyperlink" && frame.hyperlink {
+                return Err(Error::Other(
+                    "comparison cannot track nested hyperlinks in a whole paragraph".into(),
+                ));
+            }
+            flush(&mut frame.groups, &mut output, wrap)?;
+            if child.empty {
+                if child.local == "hyperlink" {
+                    return Err(Error::Other(
+                        "comparison cannot track a whole paragraph's empty hyperlink".into(),
+                    ));
+                }
+                output.push_str(&input[child.start..child.end]);
+                continue;
+            }
+            output.push_str(&input[child.start..child.open_end]);
+            let mut next = 0;
+            let mut cursor = child.open_end;
+            if child.local == "fldSimple" {
+                let data = child
+                    .children
+                    .iter()
+                    .copied()
+                    .filter(|index| {
+                        tree.elements[*index].word && tree.elements[*index].local == "fldData"
+                    })
+                    .collect::<Vec<_>>();
+                if data.len() > 1
+                    || data
+                        .first()
+                        .is_some_and(|index| child.children.first() != Some(index))
+                {
+                    return Err(Error::Other(
+                        "whole-field source has ambiguous or late fldData".into(),
+                    ));
+                }
+                if let Some(data) = data.first() {
+                    cursor = tree.elements[*data].end;
+                    output.push_str(&input[child.open_end..cursor]);
+                    next = 1;
+                }
+            }
+            let hyperlink = frame.hyperlink || child.local == "hyperlink";
+            let output_start = output.len();
+            frames.push(Frame {
+                owner: child_index,
+                next,
+                cursor,
+                groups: Vec::new(),
+                hyperlink,
+                output_start,
+            });
+            continue;
+        }
+        let end = tree
+            .elements
+            .partition_point(|element| element.start < child.end);
+        let mut renames = Vec::new();
+        for index in child_index..end {
+            let element = &tree.elements[index];
+            if inline_source[index]
+                && element.local == "hyperlink"
+                && (frame.hyperlink
+                    || element
+                        .parent
+                        .is_some_and(|parent| hyperlink_source[parent]))
+            {
+                return Err(Error::Other(
+                    "comparison cannot track nested hyperlinks in a whole paragraph".into(),
+                ));
+            }
+            if deleted
+                && element.word
+                && matches!(element.local.as_str(), "t" | "instrText")
+                && element.parent.is_some_and(|parent| {
+                    inline_source[parent]
+                        && tree.elements[parent].modeled
+                        && tree.elements[parent].word
+                        && tree.elements[parent].local == "r"
+                })
+            {
+                renames.push(index);
+            }
+        }
+        let mut raw = input[child.start..child.end].to_owned();
+        for index in renames.into_iter().rev() {
+            let leaf = &tree.elements[index];
+            let local = if leaf.local == "t" {
+                "delText"
+            } else {
+                "delInstrText"
+            };
+            let mut renamed =
+                rename_element(&tree.source[leaf.start..leaf.open_end], &leaf.name, local);
+            if !leaf.empty {
+                renamed.extend_from_slice(&tree.source[leaf.open_end..leaf.close_start]);
+                renamed.extend_from_slice(&rename_element(
+                    &tree.source[leaf.close_start..leaf.end],
+                    &leaf.name,
+                    local,
+                ));
+            }
+            raw.replace_range(
+                leaf.start - child.start..leaf.end - child.start,
+                std::str::from_utf8(&renamed).map_err(|error| Error::Other(error.to_string()))?,
+            );
+        }
+        let mut destination = tree.source_scope(frame.owner);
+        destination.retain(|(prefix, _)| prefix != "w");
+        destination.push(("w".to_owned(), WORD_NS.to_owned()));
+        let declarations = tree.relocation_namespaces(child_index, &destination);
+        // Descendant edits leave this atomic owner's opening unchanged. Close
+        // its namespace scope on that tag before appending the edited remainder.
+        let opening_len = child.open_end - child.start;
+        let mut closed = inject_namespace_declarations(
+            &raw.as_bytes()[..opening_len],
+            &child.namespace_declarations,
+            &declarations,
+        );
+        closed.extend_from_slice(&raw.as_bytes()[opening_len..]);
+        raw = String::from_utf8(closed).map_err(|error| Error::Other(error.to_string()))?;
+        let marker = child.word
+            && matches!(
+                child.local.as_str(),
+                "bookmarkStart"
+                    | "bookmarkEnd"
+                    | "commentRangeStart"
+                    | "commentRangeEnd"
+                    | "proofErr"
+            );
+        if let Some((group, content)) = frame.groups.last_mut()
+            && !*content
+        {
+            group.push_str(&raw);
+            *content = !marker;
+        } else {
+            frame.groups.push((raw, !marker));
+        }
+    }
+    Ok(output)
+}
+
+#[derive(Default)]
+struct CarriedField {
+    markers: [Option<usize>; 3],
+    edge_runs: [usize; 2],
+    parent: Option<usize>,
+    domain: usize,
+    domain_end: usize,
+    simple_fields: Vec<usize>,
+    valid: bool,
+}
+
+type CarriedFieldSources = (Vec<CarriedField>, Vec<(usize, Option<usize>)>);
+
+/// The coarse source events used to grow a comparison's paragraph range.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum FieldEvent {
+    Begin,
+    End,
+    Owner,
+}
+
+pub(crate) fn paragraph_field_events(paragraph: &CT_P) -> Result<Vec<FieldEvent>> {
+    let mut source = format!("<w:document xmlns:w=\"{WORD_NS}\"><w:body>").into_bytes();
+    paragraph.to_xml(&mut quick_xml::Writer::new(&mut source))?;
+    source.extend_from_slice(b"</w:body></w:document>");
+    let tree = XmlTree::parse(&source)?;
+    let body = tree.direct_word_child(tree.root, "body")?;
+    let paragraph = tree.direct_word_child(body, "p")?;
+    Ok(tree.paragraph_field_events(paragraph))
+}
+
+/// The actual paragraph source must establish carriage before its publisher may
+/// leave simple/hyperlink shells outside the selected run wrappers.
+pub(crate) fn validate_carried_paragraph_fields(paragraphs: &[&CT_P]) -> Result<()> {
+    let mut source = format!("<w:document xmlns:w=\"{WORD_NS}\"><w:body>").into_bytes();
+    for paragraph in paragraphs {
+        paragraph.to_xml(&mut quick_xml::Writer::new(&mut source))?;
+    }
+    source.extend_from_slice(b"</w:body></w:document>");
+    let tree = XmlTree::parse(&source)?;
+    let body = tree.direct_word_child(tree.root, "body")?;
+    let publication_frames = tree.paragraph_publication_frames(body);
+    let (fields, owners) = tree.carried_field_sources()?;
+    for (index, owner) in owners {
+        if publication_frames[index]
+            && owner.is_none_or(|index| {
+                !fields[index].valid || fields[index].markers.iter().any(Option::is_none)
+            })
+        {
+            return Err(Error::Other(
+                "whole-paragraph field owner lacks a qualified complete source carrier".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl<'a> XmlTree<'a> {
+    /// Exactly the shells left outside run revisions by paragraph publication.
+    /// Every other child, including an SDT or opaque drawing, stays atomic.
+    fn paragraph_publication_frames(&self, body: usize) -> Vec<bool> {
+        let mut frames = vec![false; self.elements.len()];
+        for (index, element) in self.elements.iter().enumerate() {
+            frames[index] = element.modeled
+                && element.word
+                && match element.local.as_str() {
+                    "p" => element.parent == Some(body),
+                    "fldSimple" | "hyperlink" => {
+                        element.parent.is_some_and(|parent| frames[parent])
+                    }
+                    _ => false,
+                };
+        }
+        frames
+    }
+
+    /// Consecutive paragraphs share a structural domain. A nested paragraph,
+    /// including an independently modeled textbox, starts its own domain.
+    fn paragraph_source_domains(&self) -> (Vec<Option<usize>>, HashMap<usize, usize>) {
+        let count = self.elements.len();
+        let mut stories = vec![None; count];
+        let mut next_domain = count;
+        let mut domain_ends = HashMap::new();
+        for parent in &self.elements {
+            let mut domain = None;
+            for child in &parent.children {
+                let element = &self.elements[*child];
+                if element.modeled && element.word && element.local == "p" {
+                    let current = *domain.get_or_insert_with(|| {
+                        next_domain += 1;
+                        next_domain
+                    });
+                    stories[*child] = Some(current);
+                    domain_ends.insert(current, element.end);
+                } else {
+                    domain = None;
+                }
+            }
+        }
+        for (index, element) in self.elements.iter().enumerate() {
+            if stories[index].is_none() {
+                stories[index] = element.parent.and_then(|parent| stories[parent]);
+            }
+        }
+        (stories, domain_ends)
+    }
+
+    fn field_marker_run(&self, index: usize) -> Option<usize> {
+        let element = &self.elements[index];
+        if !element.word || element.local != "fldChar" {
+            return None;
+        }
+        element.parent.filter(|parent| {
+            let parent = &self.elements[*parent];
+            parent.modeled && parent.word && parent.local == "r"
+        })
+    }
+
+    fn paragraph_field_events(&self, paragraph: usize) -> Vec<FieldEvent> {
+        let (stories, _) = self.paragraph_source_domains();
+        let mut events = Vec::new();
+        for (index, element) in self.elements.iter().enumerate() {
+            if stories[index] != stories[paragraph] {
+                continue;
+            }
+            if element.parent == Some(paragraph)
+                && element.modeled
+                && element.word
+                && matches!(element.local.as_str(), "fldSimple" | "hyperlink")
+            {
+                events.push(FieldEvent::Owner);
+            } else if self.field_marker_run(index).is_some() {
+                match element.field_marker.as_deref() {
+                    Some("begin") => events.push(FieldEvent::Begin),
+                    Some("end") => events.push(FieldEvent::End),
+                    _ => {}
+                }
+            }
+        }
+        events
+    }
+
+    /// Inventory actual qualified marker occurrences once. Inline owners can
+    /// establish marker domains inside the same structural paragraph domain.
+    fn carried_field_sources(&self) -> Result<CarriedFieldSources> {
+        let count = self.elements.len();
+        let (stories, mut domain_ends) = self.paragraph_source_domains();
+        let mut domains = vec![None; count];
+        let mut fields = Vec::<CarriedField>::new();
+        let mut story_fields = HashMap::<usize, Vec<usize>>::new();
+        let mut owners = Vec::new();
+        for (index, element) in self.elements.iter().enumerate() {
+            domains[index] = if element.modeled && element.word && element.local == "p" {
+                stories[index]
+            } else {
+                element.parent.and_then(|parent| domains[parent])
+            };
+            let Some(story) = stories[index] else {
+                continue;
+            };
+            let active = story_fields.entry(story).or_default();
+            while active
+                .last()
+                .is_some_and(|field| fields[*field].domain_end <= element.start)
+            {
+                fields[active.pop().expect("active field")].valid = false;
+            }
+            if element.modeled
+                && element.word
+                && matches!(element.local.as_str(), "fldSimple" | "hyperlink")
+            {
+                let owner = active.last().copied();
+                owners.push((index, owner));
+                if element.local == "fldSimple"
+                    && let Some(owner) = owner
+                {
+                    fields[owner].simple_fields.push(index);
+                }
+                domains[index] = Some(index);
+                domain_ends.insert(index, element.end);
+            } else if element.modeled
+                && element.word
+                && element.local == "sdtContent"
+                && inline_field_control_owner(&self.elements, index)
+            {
+                domains[index] = Some(index);
+                domain_ends.insert(index, element.end);
+            }
+            let Some(run) = self.field_marker_run(index) else {
+                continue;
+            };
+            let Some(domain) = domains[run] else {
+                continue;
+            };
+            match element.field_marker.as_deref() {
+                Some("begin") => {
+                    let field = fields.len();
+                    fields.push(CarriedField {
+                        markers: [Some(index), None, None],
+                        edge_runs: [run, run],
+                        parent: active.last().copied(),
+                        domain,
+                        domain_end: domain_ends[&domain],
+                        simple_fields: Vec::new(),
+                        valid: true,
+                    });
+                    active.push(field);
+                }
+                Some("separate") => {
+                    if let Some(field) = active.last().copied()
+                        && fields[field].domain == domain
+                        && fields[field].markers[1].replace(index).is_some()
+                    {
+                        fields[field].valid = false;
+                    }
+                }
+                Some("end") => {
+                    if let Some(field) = active.last().copied() {
+                        if fields[field].domain == domain {
+                            fields[field].markers[2] = Some(index);
+                            fields[field].edge_runs[1] = run;
+                            active.pop();
+                        } else {
+                            for field in active.drain(..) {
+                                fields[field].valid = false;
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    for field in active.drain(..) {
+                        fields[field].valid = false;
+                    }
+                }
+            }
+        }
+        for active in story_fields.values() {
+            for field in active {
+                fields[*field].valid = false;
+            }
+        }
+        for field in &mut fields {
+            field.valid &= field.markers.iter().all(Option::is_some);
+        }
+        for index in 0..fields.len() {
+            if let Some(parent) = fields[index].parent
+                && !fields[parent].valid
+            {
+                fields[index].valid = false;
+            }
+        }
+        Ok((fields, owners))
+    }
+
+    fn carried_simple_field_retirements(&self, state: &RenderState<'_>) -> Result<HashSet<usize>> {
+        let (fields, _) = self.carried_field_sources()?;
+        let mut has_simple = fields
+            .iter()
+            .map(|field| !field.simple_fields.is_empty())
+            .collect::<Vec<_>>();
+        for index in (0..fields.len()).rev() {
+            if has_simple[index]
+                && let Some(parent) = fields[index].parent
+            {
+                has_simple[parent] = true;
+            }
+        }
+        let mut watched = vec![false; fields.len()];
+        for (index, field) in fields.iter().enumerate() {
+            watched[index] = field.valid
+                && field.markers.iter().all(Option::is_some)
+                && (has_simple[index] || field.parent.is_some_and(|parent| watched[parent]));
+        }
+        let mut removed = vec![false; self.elements.len()];
+        let mut unclaimed_gaps = vec![false; self.elements.len() + 1];
+        for element in &self.elements {
+            if element.modeled
+                && element.word
+                && matches!(
+                    element.local.as_str(),
+                    "p" | "fldSimple" | "hyperlink" | "sdtContent"
+                )
+            {
+                let mut cursor = element.open_end;
+                for child in &element.children {
+                    let current = &self.elements[*child];
+                    unclaimed_gaps[*child] = !self.source[cursor..current.start]
+                        .iter()
+                        .all(u8::is_ascii_whitespace);
+                    cursor = current.end;
+                }
+                let end = self
+                    .elements
+                    .partition_point(|child| child.start < element.end);
+                unclaimed_gaps[end] |= !self.source[cursor..element.close_start]
+                    .iter()
+                    .all(u8::is_ascii_whitespace);
+            }
+        }
+        let mut bad = Vec::with_capacity(self.elements.len() + 1);
+        bad.push(0usize);
+        for (index, element) in self.elements.iter().enumerate() {
+            removed[index] = element.parent.is_some_and(|parent| removed[parent])
+                || element.revision.as_ref().is_some_and(|metadata| {
+                    state.scope.matches(metadata)
+                        && removes_content(state.resolution, metadata.kind)
+                })
+                || self
+                    .selected_owner_markers(index, state)
+                    .iter()
+                    .any(|marker| {
+                        removes_content(
+                            state.resolution,
+                            self.elements[*marker]
+                                .revision
+                                .as_ref()
+                                .expect("actual marker")
+                                .kind,
+                        )
+                    });
+            let unselected_revision = element
+                .revision
+                .as_ref()
+                .is_some_and(|metadata| !state.scope.matches(metadata));
+            let live_run =
+                element.modeled && element.word && element.local == "r" && !removed[index];
+            let unclaimed = !removed[index]
+                && !element.modeled
+                && element.parent.is_some_and(|parent| {
+                    let parent = &self.elements[parent];
+                    parent.modeled
+                        && parent.word
+                        && matches!(
+                            parent.local.as_str(),
+                            "p" | "fldSimple" | "hyperlink" | "sdtContent"
+                        )
+                        && !(element.word
+                            && element.local == "fldData"
+                            && parent.local == "fldSimple")
+                });
+            bad.push(
+                bad[index]
+                    .checked_add(usize::from(
+                        unselected_revision
+                            || live_run
+                            || unclaimed
+                            || unclaimed_gaps[index] && !removed[index],
+                    ))
+                    .ok_or_else(|| Error::Other("carrier source budget overflow".into()))?,
+            );
+        }
+        // One bottom-up source-material proof per actual XML owner. Prefix
+        // budgets separately cover the physical cross-paragraph carrier interval.
+        let mut surviving_material = bad
+            .windows(2)
+            .map(|pair| pair[0] != pair[1])
+            .collect::<Vec<_>>();
+        for index in (0..self.elements.len()).rev() {
+            if surviving_material[index]
+                && let Some(parent) = self.elements[index].parent
+            {
+                surviving_material[parent] = true;
+            }
+        }
+        let mut retiring = HashSet::new();
+        let mut removes_field = vec![false; fields.len()];
+        for (index, field) in fields.iter().enumerate() {
+            if !watched[index] {
+                continue;
+            }
+            let markers = field
+                .markers
+                .map(|marker| marker.expect("proved complete carrier"));
+            let survival = markers.map(|marker| !removed[marker]);
+            if survival == [true; 3] {
+                continue;
+            }
+            let end = self
+                .elements
+                .partition_point(|element| element.start < self.elements[field.edge_runs[1]].end);
+            if survival != [false; 3]
+                || bad[end] != bad[field.edge_runs[0]]
+                || field
+                    .simple_fields
+                    .iter()
+                    .any(|simple| surviving_material[*simple])
+            {
+                return Err(Error::Other(format!(
+                    "selected revision would break complete field carriage at byte {} or leave surviving payload",
+                    self.elements[markers[0]].start
+                )));
+            }
+            removes_field[index] = true;
+        }
+        for (index, field) in fields.iter().enumerate() {
+            if field.parent.is_some_and(|parent| removes_field[parent]) {
+                removes_field[index] = true;
+            }
+            if removes_field[index] {
+                retiring.extend(field.simple_fields.iter().copied());
+            }
+        }
+        Ok(retiring)
+    }
+
     fn parse(source: &'a [u8]) -> Result<Self> {
         Self::parse_in_scope(source, &NamespaceScope::new())
     }
@@ -658,6 +1636,10 @@ impl<'a> XmlTree<'a> {
         destination: &[(String, String)],
     ) -> Result<Vec<u8>> {
         let element = &self.elements[index];
+        if state.retiring_simple_fields.contains(&index) {
+            self.validate_selected_descendants(index, state)?;
+            return Ok(Vec::new());
+        }
         if let Some(metadata) = &element.revision
             && state.scope.matches(metadata)
         {
@@ -673,6 +1655,16 @@ impl<'a> XmlTree<'a> {
                     self.validate_selected_descendants(*selected, state)?;
                 }
 
+                if !state.discarded
+                    && state.leaf_elements.iter().any(|leaf| {
+                        self.elements[*leaf].start >= element.start
+                            && self.elements[*leaf].end <= element.end
+                    })
+                {
+                    return Err(Error::Other(
+                        "comparison leaf transport does not admit property replacement".into(),
+                    ));
+                }
                 return self.render_rejected_property_owner(
                     index,
                     prior,
@@ -743,6 +1735,7 @@ impl<'a> XmlTree<'a> {
         convert_deleted_text: bool,
         destination: &[(String, String)],
     ) -> Result<Vec<u8>> {
+        let leaf_mark = state.leaf_updates.len();
         let element = &self.elements[index];
         let declarations = self.relocation_namespaces(index, destination);
         let current_scope = merged_namespaces(
@@ -760,10 +1753,20 @@ impl<'a> XmlTree<'a> {
             let raw = &self.source[element.start..element.end];
             let raw =
                 inject_namespace_declarations(raw, &element.namespace_declarations, &declarations);
-            return Ok(match restored_local {
+            let output = match restored_local {
                 Some(local) => rename_element(&raw, &element.name, local),
                 None => raw,
-            });
+            };
+            if !state.discarded
+                && let Some(leaf) = state
+                    .leaf_elements
+                    .iter()
+                    .position(|selected| *selected == index)
+            {
+                state.leaf_ranges[leaf] = Some(0..output.len());
+                state.leaf_updates.push(leaf);
+            }
+            return Ok(output);
         }
 
         let resolves_paragraph_property_change = element.word
@@ -804,12 +1807,22 @@ impl<'a> XmlTree<'a> {
         } else {
             output.extend_from_slice(&open);
         }
+        state.shift_leaves(leaf_mark, output.len());
         output.extend_from_slice(&inner);
         let close = &self.source[element.close_start..element.end];
         if let Some(local) = restored_local {
             output.extend_from_slice(&rename_element(close, &element.name, local));
         } else {
             output.extend_from_slice(close);
+        }
+        if !state.discarded
+            && let Some(leaf) = state
+                .leaf_elements
+                .iter()
+                .position(|selected| *selected == index)
+        {
+            state.leaf_ranges[leaf] = Some(0..output.len());
+            state.leaf_updates.push(leaf);
         }
         Ok(output)
     }
@@ -834,6 +1847,11 @@ impl<'a> XmlTree<'a> {
                 && !state.discarded
                 && self.paragraph_mark_removes(child, state)
             {
+                if !state.leaf_elements.is_empty() {
+                    return Err(Error::Other(
+                        "comparison leaf transport does not admit paragraph merging".into(),
+                    ));
+                }
                 let mut paragraphs = vec![child];
                 // A table whose every row is removed is crossed, so the
                 // paragraphs on either side of it merge. Rendering it resolves
@@ -890,12 +1908,11 @@ impl<'a> XmlTree<'a> {
                 child_index = next_index;
                 continue;
             }
-            output.extend_from_slice(&self.render_with_namespaces(
-                child,
-                state,
-                convert_deleted_text,
-                destination,
-            )?);
+            let leaf_mark = state.leaf_updates.len();
+            let rendered =
+                self.render_with_namespaces(child, state, convert_deleted_text, destination)?;
+            state.shift_leaves(leaf_mark, output.len());
+            output.extend_from_slice(&rendered);
             cursor = child_element.end;
             child_index += 1;
         }
@@ -1113,7 +2130,10 @@ impl<'a> XmlTree<'a> {
         let mut output = Vec::new();
         for child in &element.children {
             let child_element = &self.elements[*child];
-            if replaces_run_properties && child_element.revision.is_none() {
+            if replaces_run_properties
+                && child_element.revision.is_none()
+                && !retained_revision_local(&element.local, &child_element.local)
+            {
                 continue;
             }
             if let Some(prior) = prior
@@ -1209,13 +2229,14 @@ impl<'a> XmlTree<'a> {
         let children = &self.elements[index].children;
         !children.is_empty()
             && children.iter().all(|child| {
-                self.elements[*child]
-                    .revision
-                    .as_ref()
-                    .is_some_and(|metadata| {
-                        state.scope.matches(metadata)
-                            && removes_content(state.resolution, metadata.kind)
-                    })
+                state.retiring_simple_fields.contains(child)
+                    || self.elements[*child]
+                        .revision
+                        .as_ref()
+                        .is_some_and(|metadata| {
+                            state.scope.matches(metadata)
+                                && removes_content(state.resolution, metadata.kind)
+                        })
             })
     }
 
@@ -1508,12 +2529,51 @@ fn push_element(
             ),
             |parent| modeled_child(&elements[parent], word, &local),
         );
+    if word && local == "fldSimple" {
+        modeled = parent.is_some_and(|index| {
+            let parent = &elements[index];
+            parent.modeled
+                && parent.word
+                && match parent.local.as_str() {
+                    "p" | "fldSimple" | "hyperlink" => true,
+                    "sdtContent" => inline_field_control_owner(elements, index),
+                    _ => false,
+                }
+        });
+    }
     let revision = modeled
         .then(|| revision_metadata(start, &local, scope))
         .transpose()?
         .flatten();
     if modeled && is_revision_local(&local) && revision.is_none() {
         modeled = false;
+    }
+    let mut field_marker = None;
+    if word
+        && local == "fldChar"
+        && parent.is_some_and(|parent| {
+            elements[parent].modeled && elements[parent].word && elements[parent].local == "r"
+        })
+    {
+        for attribute in start.attributes() {
+            let attribute = attribute.map_err(|error| Error::Other(error.to_string()))?;
+            let key = std::str::from_utf8(attribute.key.as_ref())
+                .map_err(|error| Error::Other(error.to_string()))?;
+            if let Some((prefix, "fldCharType")) = key.split_once(':')
+                && scope.get(prefix).is_some_and(|uri| uri == WORD_NS)
+            {
+                if field_marker.is_some() {
+                    field_marker = Some(String::new());
+                    break;
+                }
+                field_marker = Some(
+                    attribute
+                        .decoded_and_normalized_value(XmlVersion::Implicit1_0, start.decoder())
+                        .map_err(xml_error)?
+                        .into_owned(),
+                );
+            }
+        }
     }
     let index = elements.len();
     elements.push(XmlElement {
@@ -1530,6 +2590,7 @@ fn push_element(
         children: Vec::new(),
         revision,
         namespace_declarations,
+        field_marker,
     });
     if let Some(parent) = parent {
         elements[parent].children.push(index);
@@ -1560,6 +2621,24 @@ fn element_scope(
     Ok((scope, declarations))
 }
 
+fn inline_field_control_owner(elements: &[XmlElement], mut index: usize) -> bool {
+    loop {
+        let element = &elements[index];
+        if !element.modeled || !element.word {
+            return false;
+        }
+        match element.local.as_str() {
+            "p" | "fldSimple" | "hyperlink" => return true,
+            "sdt" | "sdtContent" | "ins" | "del" | "moveFrom" | "moveTo" => {}
+            _ => return false,
+        }
+        let Some(parent) = element.parent else {
+            return false;
+        };
+        index = parent;
+    }
+}
+
 fn modeled_child(parent: &XmlElement, word: bool, local: &str) -> bool {
     if !parent.modeled || !word {
         return false;
@@ -1578,6 +2657,10 @@ fn modeled_child(parent: &XmlElement, word: bool, local: &str) -> bool {
             "pPr" | "r" | "hyperlink" | "sdt" | "ins" | "del" | "moveFrom" | "moveTo"
         ),
         "hyperlink" => matches!(local, "r" | "ins" | "del" | "moveFrom" | "moveTo"),
+        "fldSimple" => matches!(
+            local,
+            "r" | "fldSimple" | "hyperlink" | "sdt" | "ins" | "del" | "moveFrom" | "moveTo"
+        ),
         "pPr" => matches!(local, "rPr" | "numPr" | "sectPr" | "pPrChange"),
         "r" => local == "rPr",
         "rPr" => matches!(local, "ins" | "del" | "moveFrom" | "moveTo" | "rPrChange"),
@@ -2045,4 +3128,333 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + i64::from(day) - 1;
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     era * 146_097 + day_of_era - 719_468
+}
+
+#[cfg(test)]
+#[test]
+fn carried_simple_fields_preserve_schema_and_selected_source_custody() {
+    let document = |body: &str| {
+        format!("<w:document xmlns:w=\"{WORD_NS}\"><w:body>{body}</w:body></w:document>")
+    };
+    let fixture = |kind: &str, plain: &str| {
+        let text = if kind == "del" { "delText" } else { "t" };
+        document(&format!(
+            r#"<w:p><w:{kind} w:id="10" w:author="New"><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>TOC</w:instrText><w:fldChar w:fldCharType="separate"/></w:r></w:{kind}><w:fldSimple w:instr="PAGEREF target" w:dirty="off" xmlns:x="urn:producer" x:note="kept"><w:fldData>QUJD</w:fldData><w:{kind} w:id="11" w:author="New"><w:r><w:{text}>1</w:{text}></w:r></w:{kind}></w:fldSimple>{plain}<w:{kind} w:id="12" w:author="New"><w:r><w:fldChar w:fldCharType="end"/></w:r></w:{kind}></w:p>"#
+        ))
+    };
+    for (kind, action) in [("del", Resolution::Accept), ("ins", Resolution::Reject)] {
+        let source = fixture(kind, "");
+        for id in [10, 12] {
+            let error =
+                resolve_story_xml(source.as_bytes(), action, RevisionScope::Id(id)).unwrap_err();
+            assert!(
+                error.to_string().contains("break complete field carriage"),
+                "{error}"
+            );
+        }
+        let boundary = HashSet::from([10, 12]);
+        assert!(
+            resolve_story_xml(source.as_bytes(), action, RevisionScope::Ids(&boundary)).is_err()
+        );
+        let (cache_only, count) =
+            resolve_story_xml(source.as_bytes(), action, RevisionScope::Id(11)).unwrap();
+        assert_eq!(count, 1);
+        let cache_only = std::str::from_utf8(&cache_only).unwrap();
+        assert!(cache_only.contains("fldSimple"));
+        assert!(cache_only.contains("PAGEREF target"));
+        assert!(cache_only.contains("x:note=\"kept\""));
+        assert!(cache_only.contains("QUJD"));
+        assert!(!cache_only.contains(">1<"));
+        let (removed, count) =
+            resolve_story_xml(source.as_bytes(), action, RevisionScope::Author("New")).unwrap();
+        assert_eq!(count, 3);
+        let removed = std::str::from_utf8(&removed).unwrap();
+        assert!(!removed.contains("fldSimple"));
+        assert!(!removed.contains("fldChar"));
+        let plain = fixture(kind, "<w:r><w:t>unselected</w:t></w:r>");
+        assert!(resolve_story_xml(plain.as_bytes(), action, RevisionScope::All).is_err());
+    }
+    let nested = document(
+        r#"<w:p><w:del w:id="1" w:author="Outer"><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>TOC</w:instrText><w:fldChar w:fldCharType="separate"/></w:r></w:del><w:del w:id="2" w:author="Inner"><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>QUOTE</w:instrText><w:fldChar w:fldCharType="separate"/></w:r></w:del><w:fldSimple w:instr="PAGE"><w:del w:id="3" w:author="Inner"><w:r><w:delText>1</w:delText></w:r></w:del></w:fldSimple><w:del w:id="4" w:author="Inner"><w:r><w:fldChar w:fldCharType="end"/></w:r></w:del><w:del w:id="5" w:author="Outer"><w:r><w:fldChar w:fldCharType="end"/></w:r></w:del></w:p>"#,
+    );
+    let (inner_removed, count) = resolve_story_xml(
+        nested.as_bytes(),
+        Resolution::Accept,
+        RevisionScope::Author("Inner"),
+    )
+    .unwrap();
+    assert_eq!(count, 3);
+    let inner_removed = std::str::from_utf8(&inner_removed).unwrap();
+    assert!(!inner_removed.contains("fldSimple"));
+    assert!(inner_removed.contains("TOC"));
+    assert!(
+        resolve_story_xml(nested.as_bytes(), Resolution::Accept, RevisionScope::Id(2)).is_err()
+    );
+    let prior = fixture(
+        "del",
+        "<w:ins w:id=\"99\" w:author=\"Prior\"><w:r><w:t>prior</w:t></w:r></w:ins>",
+    );
+    assert!(
+        resolve_story_xml(
+            prior.as_bytes(),
+            Resolution::Accept,
+            RevisionScope::Author("New")
+        )
+        .is_err()
+    );
+
+    let complete = fixture("del", "");
+    for attribute in [
+        "",
+        "w:fldCharType=\"unknown\"",
+        "xmlns:x=\"urn:foreign\" x:fldCharType=\"separate\"",
+    ] {
+        let imported = complete.replace("w:fldCharType=\"separate\"", attribute);
+        let tree = XmlTree::parse(imported.as_bytes()).unwrap();
+        let (fields, _) = tree.carried_field_sources().unwrap();
+        assert!(!fields[0].valid);
+        let unrelated = imported.replace("</w:body>", "<w:p><w:ins w:id=\"80\" w:author=\"Other\"><w:r><w:t>outside</w:t></w:r></w:ins></w:p></w:body>");
+        let (kept, count) = resolve_story_xml(
+            unrelated.as_bytes(),
+            Resolution::Accept,
+            RevisionScope::Id(80),
+        )
+        .unwrap();
+        assert_eq!(count, 1);
+        let expected_body = imported
+            .split("<w:body>")
+            .nth(1)
+            .unwrap()
+            .split("</w:body>")
+            .next()
+            .unwrap();
+        assert!(std::str::from_utf8(&kept).unwrap().contains(expected_body));
+    }
+    let foreign_marker = complete.replace(
+        "<w:instrText>TOC</w:instrText>",
+        "<w:instrText>TOC</w:instrText><x:fldChar xmlns:x=\"urn:foreign\" x:fldCharType=\"end\"/>",
+    );
+    assert!(
+        XmlTree::parse(foreign_marker.as_bytes())
+            .unwrap()
+            .carried_field_sources()
+            .unwrap()
+            .0[0]
+            .valid
+    );
+    let body = complete
+        .split("<w:body>")
+        .nth(1)
+        .unwrap()
+        .split("</w:body>")
+        .next()
+        .unwrap();
+    for related in [
+        format!("<w:hdr xmlns:w=\"{WORD_NS}\">{body}</w:hdr>"),
+        format!(
+            "<w:footnotes xmlns:w=\"{WORD_NS}\"><w:footnote w:id=\"2\">{body}</w:footnote></w:footnotes>"
+        ),
+    ] {
+        let (removed, count) =
+            resolve_story_xml(related.as_bytes(), Resolution::Accept, RevisionScope::All).unwrap();
+        assert_eq!(count, 3);
+        assert!(!std::str::from_utf8(&removed).unwrap().contains("fldSimple"));
+    }
+    let source = format!(
+        r#"<w:p><w:r><w:t>before</w:t></w:r><q:fldSimple xmlns:q="{WORD_NS}" xmlns:w="urn:foreign" q:instr="PAGE" q:dirty="off" w:note="root"><q:fldData>QUJD</q:fldData><q:r><q:t w:note="leaf">1</q:t></q:r><q:fldSimple q:instr="DATE"><q:r><q:t>nested</q:t></q:r></q:fldSimple></q:fldSimple></w:p>"#
+    );
+    let mut id = 0;
+    let tracked = tracked_paragraph_children(&source, true, false, &mut |content| {
+        id += 1;
+        Ok(format!(
+            "<w:del xmlns:w=\"{WORD_NS}\" w:id=\"{id}\" w:author=\"New\">{content}</w:del>"
+        ))
+    })
+    .unwrap();
+    let tracked = document(&format!("<w:p>{tracked}</w:p>"));
+    let tree = XmlTree::parse(tracked.as_bytes()).unwrap();
+    for (index, element) in tree.elements.iter().enumerate() {
+        if element.word && element.local == "fldSimple" {
+            let parent = &tree.elements[element.parent.unwrap()];
+            assert!(!matches!(
+                parent.local.as_str(),
+                "ins" | "del" | "moveFrom" | "moveTo"
+            ));
+        }
+        if element.word
+            && element.local == "delText"
+            && tree.source[element.start..element.end]
+                .windows(4)
+                .any(|bytes| bytes == b"leaf")
+        {
+            assert!(
+                tree.source_scope(index)
+                    .iter()
+                    .any(|(prefix, uri)| prefix == "w" && uri == "urn:foreign")
+            );
+        }
+    }
+    assert!(tracked.contains("q:dirty=\"off\""));
+    assert!(tracked.contains("q:instr=\"PAGE\""));
+    assert!(tracked.contains("<q:fldData>QUJD</q:fldData>"));
+    for atomic in [
+        r#"<q:r w:note="q:t > &lt;q:t&gt;"><q:t w:note="q:t">value<!-- marker > --><![CDATA[x > y]]></q:t><q:instrText>PAGE &amp; q:t</q:instrText><q:t/></q:r>"#,
+        r#"<q:r w:note="empty"/>"#,
+    ] {
+        let source = format!(
+            r#"<w:p><q:fldSimple xmlns:q="{WORD_NS}" xmlns:w="urn:producer" q:instr="PAGE">{atomic}</q:fldSimple></w:p>"#
+        );
+        let tracked = tracked_paragraph_children(&source, true, false, &mut |content| {
+            Ok(format!(
+                "<w:del xmlns:w=\"{WORD_NS}\" w:id=\"1\" w:author=\"New\">{content}</w:del>"
+            ))
+        })
+        .unwrap();
+        let tracked = document(&format!("<w:p>{tracked}</w:p>"));
+        let tree = XmlTree::parse(tracked.as_bytes()).unwrap();
+        let (index, run) = tree
+            .elements
+            .iter()
+            .enumerate()
+            .find(|(_, element)| element.word && element.local == "r")
+            .unwrap();
+        let opening = std::str::from_utf8(&tree.source[run.start..run.open_end]).unwrap();
+        assert!(opening.contains("xmlns:w=\"urn:producer\""), "{tracked}");
+        assert!(
+            tree.source_scope(index)
+                .iter()
+                .any(|(prefix, uri)| { prefix == "w" && uri == "urn:producer" })
+        );
+        if !run.empty {
+            assert_eq!(&tree.source[run.close_start..run.end], b"</q:r>");
+            assert!(opening.contains(r#"w:note="q:t > &lt;q:t&gt;""#));
+            assert!(tracked.contains(
+                r#"<q:delText w:note="q:t">value<!-- marker > --><![CDATA[x > y]]></q:delText>"#
+            ));
+            assert!(tracked.contains("<q:delInstrText>PAGE &amp; q:t</q:delInstrText>"));
+            assert!(tracked.contains("<q:delText/>"));
+        } else {
+            assert!(opening.contains("w:note=\"empty\""));
+            assert!(opening.ends_with("/>"));
+        }
+    }
+    let same_scope = tracked_paragraph_children(
+        "<w:p><w:r><w:t>plain</w:t></w:r></w:p>",
+        true,
+        false,
+        &mut |content| Ok(format!("<w:del>{content}</w:del>")),
+    )
+    .unwrap();
+    assert_eq!(
+        same_scope,
+        "<w:del><w:r><w:delText>plain</w:delText></w:r></w:del>"
+    );
+    // A textbox re-entry recognized by the all-story scanner is still opaque
+    // to the enclosing paragraph publisher's local inline ownership.
+    let pict = r#"<w:pict xmlns:v="urn:schemas-microsoft-com:vml"><v:shape><v:textbox><w:txbxContent><w:p><w:r><w:t>opaque-text</w:t><w:instrText>opaque-code</w:instrText></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict>"#;
+    let source = format!("<w:p><w:r>{pict}<w:t>outer</w:t></w:r></w:p>");
+    let tracked = tracked_paragraph_children(&source, true, false, &mut |content| {
+        Ok(format!("<w:del>{content}</w:del>"))
+    })
+    .unwrap();
+    assert!(tracked.contains(pict), "opaque host changed: {tracked}");
+    assert!(
+        tracked.contains("<w:delText>outer</w:delText>"),
+        "{tracked}"
+    );
+    let boxed = document(&format!(
+        r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>TOC</w:instrText><w:fldChar w:fldCharType="separate"/>{}</w:r><w:fldSimple w:instr="PAGE"><w:r><w:t>body</w:t></w:r></w:fldSimple><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#,
+        pict.replace(
+            "<w:r><w:t>opaque-text</w:t><w:instrText>opaque-code</w:instrText></w:r>",
+            "<w:fldSimple w:instr=\"PAGE\"><w:r><w:t>box</w:t></w:r></w:fldSimple>"
+        )
+    ));
+    let boxed_tree = XmlTree::parse(boxed.as_bytes()).unwrap();
+    let (_, owners) = boxed_tree.carried_field_sources().unwrap();
+    let simple = owners
+        .iter()
+        .filter(|(index, _)| boxed_tree.elements[*index].local == "fldSimple")
+        .collect::<Vec<_>>();
+    assert_eq!(simple.len(), 2);
+    assert!(simple[0].1.is_none(), "textbox borrowed body carrier");
+    assert!(simple[1].1.is_some(), "direct body field lost carrier");
+    let imported_boxed = CT_Document::from_xml(boxed.as_bytes()).unwrap();
+    let boxed_paragraphs = imported_boxed.body.paragraphs().collect::<Vec<_>>();
+    validate_carried_paragraph_fields(&boxed_paragraphs).unwrap();
+    let atomic = document(
+        r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>TOC</w:instrText><w:fldChar w:fldCharType="separate"/></w:r><w:fldSimple w:instr="PAGE"><w:r><w:t>body</w:t></w:r></w:fldSimple><w:r><w:fldChar w:fldCharType="end"/></w:r><w:sdt><w:sdtPr/><w:sdtContent><w:fldSimple w:instr="PAGE"><w:r><w:t>atomic</w:t></w:r></w:fldSimple></w:sdtContent></w:sdt></w:p>"#,
+    );
+    let imported_atomic = CT_Document::from_xml(atomic.as_bytes()).unwrap();
+    let atomic_paragraphs = imported_atomic.body.paragraphs().collect::<Vec<_>>();
+    validate_carried_paragraph_fields(&atomic_paragraphs).unwrap();
+    validate_carried_paragraph_fields(&[]).unwrap();
+    let standalone = document("<w:p><w:fldSimple w:instr=\"PAGE\"/></w:p>");
+    let imported_standalone = CT_Document::from_xml(standalone.as_bytes()).unwrap();
+    let standalone_paragraphs = imported_standalone.body.paragraphs().collect::<Vec<_>>();
+    assert!(validate_carried_paragraph_fields(&standalone_paragraphs).is_err());
+    let body = boxed_tree
+        .direct_word_child(boxed_tree.root, "body")
+        .unwrap();
+    let paragraph = boxed_tree.direct_word_child(body, "p").unwrap();
+    assert_eq!(
+        boxed_tree.paragraph_field_events(paragraph),
+        [FieldEvent::Begin, FieldEvent::Owner, FieldEvent::End]
+    );
+    for (hidden, expected) in [
+        (
+            r#"<x:wrapper><w:fldChar w:fldCharType="end"/></x:wrapper><x:fldChar w:fldCharType="end"/><w:fldChar x:fldCharType="end"/>"#,
+            vec![FieldEvent::Begin, FieldEvent::Owner, FieldEvent::End],
+        ),
+        (
+            r#"<w:fldChar w:fldCharType="end"/>"#,
+            vec![
+                FieldEvent::Begin,
+                FieldEvent::End,
+                FieldEvent::Owner,
+                FieldEvent::End,
+            ],
+        ),
+    ] {
+        let source = document(&format!(
+            r#"<w:p xmlns:q="{WORD_NS}" xmlns:x="urn:foreign"><q:r><q:fldChar q:fldCharType="b&#101;gin"/><q:fldChar q:fldCharType="separate"/>{hidden}</q:r><x:fldSimple/><w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple><q:r><q:fldChar q:fldCharType="end"/></q:r></w:p>"#
+        ));
+        let tree = XmlTree::parse(source.as_bytes()).unwrap();
+        let body = tree.direct_word_child(tree.root, "body").unwrap();
+        let paragraph = tree.direct_word_child(body, "p").unwrap();
+        assert_eq!(tree.paragraph_field_events(paragraph), expected);
+    }
+
+    let simple = "<w:fldSimple w:instr=\"PAGE\"><w:r><w:t>1</w:t></w:r></w:fldSimple>";
+    for depth in [16, 32] {
+        let result = format!(
+            "{}{}{}",
+            "<w:fldSimple w:instr=\"QUOTE\">".repeat(depth),
+            simple,
+            "</w:fldSimple>".repeat(depth)
+        );
+        let source = document(&format!("<w:p>{result}</w:p>"));
+        CT_Document::from_xml(source.as_bytes()).unwrap();
+        let tracked = tracked_paragraph_children(
+            &format!("<w:p>{result}</w:p>"),
+            false,
+            false,
+            &mut |content| Ok(format!("<w:ins>{content}</w:ins>")),
+        )
+        .unwrap();
+        assert_eq!(tracked.matches("<w:fldSimple ").count(), depth + 1);
+        assert!(!tracked.contains("<w:ins><w:fldSimple"));
+    }
+    let too_deep = document(&format!(
+        "<w:p>{}<w:r><w:t>x</w:t></w:r>{}</w:p>",
+        "<w:sdt><w:sdtContent>".repeat(257),
+        "</w:sdtContent></w:sdt>".repeat(257)
+    ));
+    assert!(CT_Document::from_xml(too_deep.as_bytes()).is_err());
+    let nested_link = "<w:p><w:hyperlink w:anchor=\"a\"><w:fldSimple w:instr=\"PAGE\"><w:hyperlink w:anchor=\"b\"><w:r><w:t>x</w:t></w:r></w:hyperlink></w:fldSimple></w:hyperlink></w:p>";
+    assert!(
+        tracked_paragraph_children(nested_link, false, false, &mut |content| Ok(
+            content.to_owned()
+        ))
+        .is_err()
+    );
 }

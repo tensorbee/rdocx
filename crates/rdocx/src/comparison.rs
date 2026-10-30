@@ -19,10 +19,16 @@ use rdocx_oxml::text::{
 };
 use sha2::{Digest, Sha256};
 
-use crate::revision::validate_revision_timestamp;
+use crate::revision::{FieldEvent, paragraph_field_events, validate_revision_timestamp};
 use crate::{Document, Error, Result, StoryKind};
 
 type NamespaceBindings = Vec<(String, String)>;
+type SourceCoordinates = (usize, Vec<(Range<usize>, Range<usize>)>);
+type RawSourceSelection = (usize, usize, usize);
+type RunSourceSelection<'a> = (&'a [RawSourceSelection], &'a [Option<TypedSourceSelection>]);
+type PublishedRunRole = (Range<usize>, Option<usize>, Option<TypedSourceSelection>);
+type SourceBudget = Vec<(Vec<(u8, usize)>, Vec<String>)>;
+type SourceBudgetHole = (Vec<(u8, usize)>, u8, Range<usize>, NamespaceBindings);
 type OriginalBodySource<'a> = (&'a str, &'a [Range<usize>], &'a [(String, String)]);
 type PropertyChildren = Vec<((String, usize), Range<usize>)>;
 
@@ -35,6 +41,100 @@ pub(crate) const COMMENT_COMPARISON_REL: &str =
 pub(crate) const COMMENT_COMPARISON_OPEN: &str =
     "<rdocx:comparisonComments xmlns:rdocx=\"urn:rdocx:comparison:comments:1\">";
 pub(crate) const COMMENT_COMPARISON_CLOSE: &str = "</rdocx:comparisonComments>";
+
+#[cfg(test)]
+std::thread_local! {
+    static POLICY_DIAGNOSTIC_SCOPES: std::cell::RefCell<Vec<(String, String)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+struct PolicyDiagnosticScope;
+#[cfg(test)]
+impl PolicyDiagnosticScope {
+    fn enter(stage: &str, owner: &str) -> Self {
+        POLICY_DIAGNOSTIC_SCOPES
+            .with(|scopes| scopes.borrow_mut().push((stage.into(), owner.into())));
+        Self
+    }
+}
+#[cfg(test)]
+impl Drop for PolicyDiagnosticScope {
+    fn drop(&mut self) {
+        POLICY_DIAGNOSTIC_SCOPES.with(|scopes| {
+            scopes.borrow_mut().pop();
+        });
+    }
+}
+#[cfg(test)]
+fn policy_diagnostic_path(xml: &str, target: usize) -> String {
+    let mut reader = NsReader::from_str(xml);
+    let mut path = Vec::new();
+    let mut counts = vec![0usize];
+    loop {
+        let at = reader.buffer_position() as usize;
+        let (namespace, event) = match reader.read_resolved_event() {
+            Ok(value) => value,
+            Err(error) => return format!("reader error: {error}"),
+        };
+        match event {
+            Event::Start(root) | Event::Empty(root) => {
+                let child = counts.last_mut().unwrap();
+                let ordinal = *child;
+                *child += 1;
+                let local = String::from_utf8_lossy(root.local_name().as_ref()).into_owned();
+                let uri = match namespace {
+                    ResolveResult::Bound(uri) => String::from_utf8_lossy(uri.as_ref()).into_owned(),
+                    other => format!("{other:?}"),
+                };
+                let node = (uri, local, ordinal);
+                if at == target {
+                    let mut selected = path.clone();
+                    selected.push(node);
+                    return format!("{selected:?}");
+                }
+                if matches!(
+                    xml.as_bytes().get(reader.buffer_position() as usize - 2),
+                    Some(b'/')
+                ) {
+                    continue;
+                }
+                path.push(node);
+                counts.push(0);
+            }
+            Event::End(_) => {
+                path.pop();
+                counts.pop();
+            }
+            Event::Eof => return format!("no event at offset {target}"),
+            _ => {}
+        }
+    }
+}
+#[cfg(test)]
+fn policy_diagnostic(event: &str, value: serde_json::Value) {
+    if std::env::var_os("RDOCX_POLICY_DIAGNOSTICS").is_some() {
+        POLICY_DIAGNOSTIC_SCOPES.with(|scopes| {
+            eprintln!(
+                "POLICY3_DIAGNOSTIC {}",
+                serde_json::json!({
+                    "test": std::thread::current().name(), "event": event,
+                    "scopes": &*scopes.borrow(), "value": value,
+                })
+            )
+        });
+    }
+}
+
+#[cfg(test)]
+fn destination_diagnostic_enabled() -> bool {
+    std::thread::current().name().is_some_and(|name| {
+        name.contains("destination_option_metadata_diagnostics")
+            || name.contains("projected_aliases_keep_authored")
+            || name.contains("default_run_controls_keep_property")
+            || name.contains("destination_repair")
+            || name.contains("mixed_textbox_projection")
+    })
+}
 
 fn comment_relationship(relationship: &Relationship) -> bool {
     matches!(
@@ -575,6 +675,16 @@ pub struct ComparisonOptions {
     pub ignored_stories: Vec<ComparisonStoryKind>,
 }
 
+#[derive(Clone, Debug)]
+struct FieldConversionWitness {
+    sources: [FieldSourceOccurrence; 2],
+    instruction_changed: bool,
+    form_changed: bool,
+    input_complex: [bool; 2],
+    revision_ids: [i32; 2],
+    generated_spans: [String; 2],
+}
+
 struct Metadata<'a> {
     author: &'a str,
     timestamp: &'a str,
@@ -584,8 +694,15 @@ struct Metadata<'a> {
     /// keeps only in owners that both inputs hold unchanged.
     existing_revisions: bool,
     source_frames: Vec<SourceSnapshots>,
+    projected_textbox_noop: bool,
+    leaf_capture: bool,
+    /// Set only inside the checked paired-host source/interval publisher.
+    paired_field_story: Option<String>,
+    leaf_publications: Vec<LeafPublication>,
+    field_conversions: Vec<FieldConversionWitness>,
 }
 
+#[derive(Clone)]
 struct IdAllocator {
     used: HashSet<i32>,
     next: i32,
@@ -649,13 +766,48 @@ impl IdAllocator {
         }
     }
 
+    fn generated_bindings(&self) -> BTreeMap<String, String> {
+        if self.local_word_binding {
+            BTreeMap::from([("w".to_owned(), W_NS.to_owned())])
+        } else {
+            BTreeMap::new()
+        }
+    }
+
+    fn revision_parent_scope(&self, parent: &NamespaceBindings) -> NamespaceBindings {
+        let mut scope = parent.clone();
+        for (prefix, uri) in self.generated_bindings() {
+            let key = format!("xmlns:{prefix}");
+            scope.retain(|(name, _)| name != &key);
+            scope.push((key, uri));
+        }
+        scope
+    }
+
     fn generated(&self, xml: String) -> Result<String> {
-        if !self.local_word_binding || xml.is_empty() {
+        #[cfg(test)]
+        if destination_diagnostic_enabled() {
+            let closed = crate::document::close_content_fragment_namespaces(
+                xml.as_bytes(),
+                &BTreeMap::from([("w".to_owned(), W_NS.to_owned())]),
+            );
+            policy_diagnostic(
+                "destination_generated",
+                serde_json::json!({
+                    "local_word_binding":self.local_word_binding,"input":xml,
+                    "root_qualified_output":if self.local_word_binding && !xml.is_empty() {
+                        format!("{:?}",closed.as_ref().map(|bytes|String::from_utf8_lossy(bytes)))
+                    } else { xml.clone() }, "allocated_ids":self.used,
+                }),
+            );
+        }
+        let scope = self.generated_bindings();
+        if scope.is_empty() || xml.is_empty() {
             return Ok(xml);
         }
         String::from_utf8(crate::document::close_content_fragment_namespaces(
             xml.as_bytes(),
-            &BTreeMap::from([("w".to_owned(), W_NS.to_owned())]),
+            &scope,
         )?)
         .map_err(utf8_error)
     }
@@ -839,6 +991,11 @@ impl Document {
                     ids: IdAllocator::new(HashSet::new()),
                     existing_revisions,
                     source_frames: Vec::new(),
+                    projected_textbox_noop: false,
+                    leaf_capture: false,
+                    paired_field_story: None,
+                    leaf_publications: Vec::new(),
+                    field_conversions: Vec::new(),
                 },
                 &mut Vec::new(),
             )
@@ -945,6 +1102,11 @@ impl Document {
             ids: IdAllocator::new(used_ids),
             existing_revisions,
             source_frames: Vec::new(),
+            projected_textbox_noop: false,
+            leaf_capture: false,
+            paired_field_story: None,
+            leaf_publications: Vec::new(),
+            field_conversions: Vec::new(),
         };
         metadata.ids.local_word_binding =
             foreign_word_binding(original_xml)? || foreign_word_binding(edited_xml)?;
@@ -1016,14 +1178,15 @@ impl Document {
         // declares, which the original root may not.
         declare_w14_on_part_root(&mut tracked_xml)?;
         let tracked_xml = crate::document::uniquify_drawing_ids_in_xml(&tracked_xml)?;
-        let tracked_model_xml = close_drawing_namespaces(tracked_xml, true)?;
-        let tracked = CT_Document::from_xml(&tracked_model_xml)?;
+        // Physical package source is not a parse-closure scratch buffer. The
+        // imported model retains its actual ancestor namespace context.
+        let tracked = CT_Document::from_xml(&tracked_xml)?;
         tracked.to_xml()?;
         let mut candidate = original.clone_for_staging();
         candidate.document = tracked;
         candidate
             .package
-            .set_part(&candidate.doc_part_name, tracked_model_xml);
+            .set_part(&candidate.doc_part_name, tracked_xml);
         for story in &original_stories {
             let tracked_story = compare_story_part(
                 story_xml(&original, story)?,
@@ -1155,7 +1318,7 @@ impl Document {
                 &new_ids,
             )?;
         }
-        let accepted_body = resolved_package(
+        let mut accepted_body = resolved_package(
             &candidate,
             |document| document.accept_revision_ids(&new_ids),
             &original_stories,
@@ -1168,6 +1331,68 @@ impl Document {
         if main_ignored {
             edited_package.0 = accepted_body.0.clone();
         }
+        #[cfg(test)]
+        {
+            let diagnostic_rejected = resolved_package(
+                &candidate,
+                |document| document.reject_revision_ids(&new_ids),
+                &original_stories,
+                options,
+                &text_box_markers,
+            );
+            let diagnostic_original =
+                normalized_package(&original, &original_stories, options, &text_box_markers);
+            policy_diagnostic(
+                "global_guards",
+                serde_json::json!({
+                    "accepted":format!("{accepted_body:?}"), "edited":format!("{edited_package:?}"),
+                    "rejected":format!("{diagnostic_rejected:?}"),"original":format!("{diagnostic_original:?}"),
+                    "new_ids":new_ids,"projected_textbox_noop":metadata.projected_textbox_noop,
+                    "candidate_main":String::from_utf8_lossy(candidate.package.get_part(&candidate.doc_part_name).unwrap_or_default()),
+                    "candidate_model":format!("{:?}",candidate.document),
+                }),
+            );
+        }
+        #[cfg(test)]
+        if destination_diagnostic_enabled() {
+            for accept in [true, false] {
+                let observation = (|| -> Result<serde_json::Value> {
+                    let mut diagnostic_candidate = candidate.clone_for_staging();
+                    let count = if accept {
+                        diagnostic_candidate.accept_revision_ids(&new_ids)?
+                    } else {
+                        diagnostic_candidate.reject_revision_ids(&new_ids)?
+                    };
+                    let resolved_xml = String::from_utf8_lossy(
+                        diagnostic_candidate
+                            .package
+                            .get_part(&diagnostic_candidate.doc_part_name)
+                            .unwrap_or_default(),
+                    )
+                    .into_owned();
+                    let saved = diagnostic_candidate.to_bytes()?;
+                    let reopened = Document::from_bytes(&saved)?;
+                    Ok(
+                        serde_json::json!({"accept":accept,"count":count,"selected_ids":new_ids,
+                        "resolved_xml":resolved_xml,"reopened_xml":String::from_utf8_lossy(reopened.package.get_part(&reopened.doc_part_name).unwrap_or_default()),
+                        "revisions":format!("{:?}",reopened.story_revisions())}),
+                    )
+                })();
+                policy_diagnostic(
+                    "destination_candidate_resolution",
+                    serde_json::json!({"observation":format!("{observation:?}")}),
+                );
+            }
+        }
+        validate_field_conversion_role(
+            &candidate,
+            &mut accepted_body,
+            &edited_package,
+            &original_stories,
+            &metadata.field_conversions,
+            1,
+            &new_ids,
+        )?;
         if accepted_body != edited_package {
             return Err(comparison_postcondition_error(
                 "acceptance",
@@ -1185,7 +1410,7 @@ impl Document {
                 ));
             }
         }
-        let rejected_package = resolved_package(
+        let mut rejected_package = resolved_package(
             &candidate,
             |document| document.reject_revision_ids(&new_ids),
             &original_stories,
@@ -1197,6 +1422,15 @@ impl Document {
         if main_ignored {
             original_package.0 = rejected_package.0.clone();
         }
+        validate_field_conversion_role(
+            &candidate,
+            &mut rejected_package,
+            &original_package,
+            &original_stories,
+            &metadata.field_conversions,
+            0,
+            &new_ids,
+        )?;
         if rejected_package != original_package {
             return Err(comparison_postcondition_error(
                 "rejection",
@@ -1215,6 +1449,26 @@ impl Document {
             }
         }
 
+        if metadata.projected_textbox_noop
+            && new_ids.is_empty()
+            && candidate.package.parts == original.package.parts
+            && candidate.package.content_types == original.package.content_types
+            && candidate.package.package_rels.to_xml()? == original.package.package_rels.to_xml()?
+            && candidate
+                .package
+                .part_rels
+                .iter()
+                .map(|(name, rels)| Ok((name, rels.to_xml()?)))
+                .collect::<Result<BTreeMap<_, _>>>()?
+                == original
+                    .package
+                    .part_rels
+                    .iter()
+                    .map(|(name, rels)| Ok((name, rels.to_xml()?)))
+                    .collect::<Result<BTreeMap<_, _>>>()?
+        {
+            return Ok(diagnostics);
+        }
         self.commit_staged_mutation(candidate);
         Ok(diagnostics)
     }
@@ -2196,6 +2450,8 @@ fn compare_story_inner(
     metadata: &mut Metadata<'_>,
     diagnostics: &mut Vec<ComparisonDiagnostic>,
 ) -> Result<String> {
+    #[cfg(test)]
+    let _diagnostic_scope = PolicyDiagnosticScope::enter("compare_story_inner", location);
     compare_story_inner_impl(
         original,
         edited,
@@ -2727,7 +2983,8 @@ fn element_inner_range_any_prefix(xml: &str, local: &str) -> Result<Range<usize>
 
 fn story_document(inner: &str, namespace_bindings: &[(String, String)]) -> Result<CT_Document> {
     let (xml, _) = story_wrapper(inner, namespace_bindings)?;
-    let xml = close_drawing_namespaces(xml, false)?;
+    // Full occurrence capture consumes this exact physical representation.
+    // Descendant closure before capture would change opaque pict/MCE bytes.
     CT_Document::from_xml(&xml).map_err(Into::into)
 }
 
@@ -2837,54 +3094,13 @@ fn story_wrapper(inner: &str, namespace_bindings: &[(String, String)]) -> Result
 
 fn comparison_input(document: &Document) -> Result<Document> {
     let mut candidate = document.clone_for_staging();
-    if let Some(source) = candidate
-        .package
-        .get_part(&candidate.doc_part_name)
-        .map(<[u8]>::to_vec)
-    {
-        let parsed_source = CT_Document::from_xml(&source)?;
-        let scoped_source = close_drawing_namespaces(source, true)?;
-        let scoped_document = CT_Document::from_xml(&scoped_source)?;
-        if parsed_source == candidate.document {
-            candidate.document = scoped_document;
-            candidate
-                .package
-                .set_part(&candidate.doc_part_name, scoped_source);
-        } else {
-            retain_matching_drawing_namespaces(&mut candidate.document, &scoped_document);
-        }
-    }
     candidate.prepare_staged_package()?;
     let source = candidate
         .package
         .get_part(&candidate.doc_part_name)
         .ok_or_else(|| Error::Other(format!("missing main story {}", candidate.doc_part_name)))?;
-    let source = close_drawing_namespaces(source.to_vec(), true)?;
-    candidate.document = CT_Document::from_xml(&source)?;
-    candidate.package.set_part(&candidate.doc_part_name, source);
+    candidate.document = CT_Document::from_xml(source)?;
     Ok(candidate)
-}
-
-fn retain_matching_drawing_namespaces(target: &mut CT_Document, scoped_source: &CT_Document) {
-    let mut source_drawings = Vec::new();
-    crate::document::visit_all_drawings(&scoped_source.body.content, &mut |drawing| {
-        source_drawings.push((drawing_signature(drawing), drawing.clone()));
-    });
-    crate::document::visit_all_drawings_mut(&mut target.body.content, &mut |drawing| {
-        let signature = drawing_signature(drawing);
-        let Some(index) = source_drawings
-            .iter()
-            .position(|(candidate, _)| candidate == &signature)
-        else {
-            return;
-        };
-        let (_, source) = source_drawings.remove(index);
-        if let (Some(target), Some(source)) = (&mut drawing.inline, source.inline) {
-            target.raw_xml = source.raw_xml;
-        } else if let (Some(target), Some(source)) = (&mut drawing.anchor, source.anchor) {
-            target.raw_xml = source.raw_xml;
-        }
-    });
 }
 
 fn drawing_signature(drawing: &rdocx_oxml::drawing::CT_Drawing) -> rdocx_oxml::drawing::CT_Drawing {
@@ -2894,10 +3110,19 @@ fn drawing_signature(drawing: &rdocx_oxml::drawing::CT_Drawing) -> rdocx_oxml::d
     }
     if let Some(anchor) = &mut signature.anchor {
         anchor.raw_xml = None;
+        let mut prefixes = HashSet::new();
+        if anchor
+            .source_namespace_bindings
+            .iter()
+            .all(|(prefix, _)| prefixes.insert(prefix))
+        {
+            anchor.source_namespace_bindings.sort();
+        }
     }
     signature
 }
 
+#[cfg(test)]
 fn close_drawing_namespaces(
     xml: Vec<u8>,
     preserve_root_namespace_ownership: bool,
@@ -2953,6 +3178,7 @@ fn close_drawing_namespaces(
     Ok(output)
 }
 
+#[cfg(test)]
 fn comparison_root_namespace_scope(
     xml: &[u8],
 ) -> Result<std::collections::BTreeMap<String, String>> {
@@ -3109,6 +3335,35 @@ fn foreign_word_binding(xml: &[u8]) -> Result<bool> {
     }
 }
 
+/// Read actual inherited/root bindings without inventing a serializer prefix.
+fn actual_root_bindings(xml: &str, inherited: &NamespaceBindings) -> Result<NamespaceBindings> {
+    let mut root = BytesStart::new("scope");
+    for (name, uri) in inherited {
+        root.push_attribute((name.as_str(), uri.as_str()));
+    }
+    let mut writer = Writer::new(Vec::new());
+    writer
+        .write_event(Event::Start(root))
+        .map_err(|error| Error::Other(error.to_string()))?;
+    let offset = writer.get_ref().len();
+    writer.get_mut().extend_from_slice(xml.as_bytes());
+    writer.get_mut().extend_from_slice(b"</scope>");
+    let source = writer.into_inner();
+    let mut reader = NsReader::from_reader(source.as_slice());
+    loop {
+        let before = reader.buffer_position() as usize;
+        let (_, event) = reader
+            .read_resolved_event()
+            .map_err(|error| Error::Other(error.to_string()))?;
+        if before == offset && matches!(event, Event::Start(_) | Event::Empty(_)) {
+            return resolved_source_bindings(&reader);
+        }
+        if matches!(event, Event::Eof) {
+            return Err(Error::Other("actual source root is absent".into()));
+        }
+    }
+}
+
 /// Make a changed source owner self-contained without rewriting its payload.
 /// Unchanged revision-bearing owners bypass this analysis/publication path.
 fn source_fragment(xml: &str, bindings: &[(String, String)]) -> Result<String> {
@@ -3122,6 +3377,37 @@ fn source_fragment(xml: &str, bindings: &[(String, String)]) -> Result<String> {
         &scope,
     )?)
     .map_err(utf8_error)
+}
+
+fn publication_parent_at(parent: &str, at: usize) -> Result<NamespaceBindings> {
+    let opening = format!(r#"<scope xmlns:w="{W_NS}">"#);
+    let wrapped = format!("{opening}{parent}</scope>");
+    let mut reader = NsReader::from_str(&wrapped);
+    let mut scopes = Vec::new();
+    loop {
+        let before = reader.buffer_position() as usize;
+        let (_, event) = reader
+            .read_resolved_event()
+            .map_err(|error| Error::Other(error.to_string()))?;
+        if before == opening.len() + at {
+            return scopes
+                .last()
+                .cloned()
+                .ok_or_else(|| Error::Other("publication boundary has no actual parent".into()));
+        }
+        match event {
+            Event::Start(_) => scopes.push(resolved_source_bindings(&reader)?),
+            Event::End(_) => {
+                scopes.pop();
+            }
+            Event::Eof => {
+                return Err(Error::Other(
+                    "publication boundary is absent from its actual shell".into(),
+                ));
+            }
+            _ => {}
+        }
+    }
 }
 
 fn source_child(parent: &str, span: Range<usize>) -> Result<String> {
@@ -3423,7 +3709,10 @@ pub(crate) fn reopen_staged(candidate: Document) -> Result<Document> {
     candidate.prepare_and_reopen_staged()
 }
 
-type NormalizedPackage = (Vec<String>, Vec<(ComparisonStoryKind, String, Vec<String>)>);
+type NormalizedPackage = (
+    Vec<GuardItem>,
+    Vec<(ComparisonStoryKind, String, Vec<GuardItem>)>,
+);
 
 fn comparison_postcondition_error(
     outcome: &str,
@@ -3431,6 +3720,12 @@ fn comparison_postcondition_error(
     actual: &NormalizedPackage,
     wanted: &NormalizedPackage,
 ) -> Error {
+    #[cfg(debug_assertions)]
+    if std::env::var_os("RDOCX_POLICY_DIAGNOSTICS").is_some() {
+        eprintln!(
+            "COMPARISON_GUARD_DIAGNOSTIC outcome={outcome} actual={actual:?} wanted={wanted:?}"
+        );
+    }
     Error::Other(format!(
         "comparison {outcome} does not reproduce the {expected} stories at {}",
         first_normalized_mismatch(actual, wanted)
@@ -3565,6 +3860,592 @@ fn resolved_package(
     normalized_package(&resolved, stories, options, text_box_markers)
 }
 
+/// Check each guard role against freshly read input occurrences and the actual
+/// allocated publication, then consume only the independently verified encoding
+/// exception at its actual resolved occurrence.
+#[allow(clippy::too_many_arguments)]
+fn validate_field_conversion_role(
+    candidate: &Document,
+    actual: &mut NormalizedPackage,
+    wanted: &NormalizedPackage,
+    stories: &[StoryPart],
+    witnesses: &[FieldConversionWitness],
+    role: usize,
+    new_ids: &HashSet<i32>,
+) -> Result<()> {
+    fn observations<'a>(
+        items: &'a [GuardItem],
+        output: &mut Vec<(
+            &'a GuardFieldObservation,
+            &'a GuardField,
+            &'a ContentMetadata,
+        )>,
+    ) {
+        for item in items {
+            for observation in &item.field_observations {
+                let mut field = item.fields.get(observation.field_index);
+                for slot in &observation.result_path {
+                    field = field.and_then(|field| field.result_fields.get(*slot));
+                }
+                if let Some(field) = field {
+                    output.push((observation, field, &item.content_metadata));
+                }
+            }
+            for host in &item.hosts {
+                for body in &host.bodies {
+                    observations(body, output);
+                }
+            }
+        }
+    }
+    let mut actual_inputs = Vec::new();
+    observations(&wanted.0, &mut actual_inputs);
+    for (_, _, items) in &wanted.1 {
+        observations(items, &mut actual_inputs);
+    }
+    let mut consumed = HashSet::new();
+    let mut consumed_occurrences = HashSet::new();
+    for witness in witnesses {
+        let source = &witness.sources[role];
+        let forms = [
+            actual_field_is_complex(&witness.sources[0].source, &witness.sources[0].scope)?,
+            actual_field_is_complex(&witness.sources[1].source, &witness.sources[1].scope)?,
+        ];
+        if forms != witness.input_complex || witness.form_changed != (forms[0] != forms[1]) {
+            return Err(Error::Other(
+                "field conversion reason differs from actual qualified input forms".into(),
+            ));
+        }
+        if !forms[0] && !forms[1] {
+            let instructions = [
+                conversion_source_inventory(&witness.sources[0].source, &witness.sources[0].scope)?
+                    .0,
+                conversion_source_inventory(&witness.sources[1].source, &witness.sources[1].scope)?
+                    .0,
+            ];
+            let left = rdocx_oxml::text::Field::new(&instructions[0], "");
+            let right = rdocx_oxml::text::Field::new(&instructions[1], "");
+            if witness.instruction_changed
+                == comparison_instruction_eq(&left.instruction, &right.instruction)
+            {
+                return Err(Error::Other("field conversion instruction reason differs from independently read source instructions".into()));
+            }
+        }
+        if source.input_role != role
+            || source.bounds.start >= source.bounds.end
+            || source.bounds.len() != source.source.len()
+            || !(witness.instruction_changed || witness.form_changed)
+            || witness.revision_ids[0] == witness.revision_ids[1]
+            || witness.revision_ids.iter().any(|id| !new_ids.contains(id))
+            || !consumed.insert(witness.revision_ids[role])
+            || !consumed_occurrences.insert((
+                source.story.clone(),
+                source.owner_path.clone(),
+                source.field_slot,
+                source.bounds.clone(),
+                source.result_ancestors.clone(),
+            ))
+        {
+            return Err(Error::Other(
+                "invalid or multiply consumed field conversion witness".into(),
+            ));
+        }
+        let matches = actual_inputs
+            .iter()
+            .filter(|(observation, _, _)| {
+                let actual = &observation.occurrence;
+                actual.story == source.story
+                    && actual.owner_path == source.owner_path
+                    && actual.field_slot == source.field_slot
+                    && actual.result_ancestors == source.result_ancestors
+                    && actual.bounds == source.bounds
+                    && actual.source == source.source
+                    && actual.scope == source.scope
+            })
+            .collect::<Vec<_>>();
+        if matches.len() != 1 || matches[0].1.complex != witness.input_complex[role] {
+            return Err(Error::Other(
+                "field conversion witness has no unique actual input occurrence".into(),
+            ));
+        }
+        let part = if source.story == "body" {
+            candidate.doc_part_name.as_str()
+        } else {
+            stories
+                .iter()
+                .find(|story| {
+                    let location = format!("{}:{}", story.kind.label(), story.part_name);
+                    source.story == location || source.story.starts_with(&format!("{location}/"))
+                })
+                .map(|story| story.part_name.as_str())
+                .ok_or_else(|| {
+                    Error::Other("field conversion has no proven physical story part".into())
+                })?
+        };
+        let bytes = candidate
+            .package
+            .get_part(part)
+            .ok_or_else(|| Error::Other("field conversion part is missing".into()))?;
+        let spans = crate::revision::modeled_revision_spans(bytes)?
+            .into_iter()
+            .filter(|(_, id)| *id == witness.revision_ids[role])
+            .collect::<Vec<_>>();
+        if spans.len() != 1 {
+            return Err(Error::Other(
+                "field conversion publication id has no unique physical span".into(),
+            ));
+        }
+        let raw = std::str::from_utf8(&bytes[spans[0].0.clone()]).map_err(utf8_error)?;
+        let kind = if role == 0 { "del" } else { "ins" };
+        let inner = element_inner_range_any_prefix(raw, kind)?;
+        if raw[inner] != witness.generated_spans[role] {
+            return Err(Error::Other(
+                "field conversion publication payload differs from its checked local span".into(),
+            ));
+        }
+        let roots = direct_element_spans(raw)?
+            .into_iter()
+            .map(|range| {
+                range
+                    .start
+                    .checked_add(spans[0].0.start)
+                    .zip(range.end.checked_add(spans[0].0.start))
+                    .map(|(start, end)| start..end)
+                    .ok_or_else(|| Error::Other("publication root part offset overflow".into()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let (transported, _, mapped) = crate::revision::resolve_story_xml_with_publication_roots(
+            bytes,
+            if role == 0 {
+                crate::revision::Resolution::Reject
+            } else {
+                crate::revision::Resolution::Accept
+            },
+            crate::revision::RevisionScope::Ids(new_ids),
+            witness.revision_ids[role],
+            &roots,
+        )?;
+        let mut ranges = Vec::with_capacity(mapped.len());
+        let mut previous = None;
+        for range in mapped {
+            let range = range.ok_or_else(|| {
+                Error::Other("a selected publication root was discarded or unproved".into())
+            })?;
+            if range.start >= range.end
+                || range.end > transported.len()
+                || previous.is_some_and(|end| {
+                    end > range.start
+                        || !transported[end..range.start]
+                            .iter()
+                            .all(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+                })
+            {
+                return Err(Error::Other(
+                    "resolved publication root order or intervening source coverage changed".into(),
+                ));
+            }
+            previous = Some(range.end);
+            ranges.push(range);
+        }
+        let extent = ranges
+            .first()
+            .zip(ranges.last())
+            .map(|(first, last)| first.start..last.end)
+            .ok_or_else(|| {
+                Error::Other("selected publication has no resolved root extent".into())
+            })?;
+        let mut current_observations = Vec::new();
+        observations(&actual.0, &mut current_observations);
+        for (_, _, items) in &actual.1 {
+            observations(items, &mut current_observations);
+        }
+        let current = current_observations
+            .iter()
+            .filter(|(observation, _, _)| {
+                let actual = &observation.occurrence;
+                actual.story == source.story
+                    && actual.owner_path == source.owner_path
+                    && actual.field_slot == source.field_slot
+            })
+            .collect::<Vec<_>>();
+        if current.len() != 1 {
+            #[cfg(debug_assertions)]
+            if std::env::var_os("RDOCX_POLICY_DIAGNOSTICS").is_some() {
+                eprintln!(
+                    "FIELD_TARGET_DIAGNOSTIC role={role} source={source:?} actual={current_observations:?}"
+                );
+            }
+            return Err(Error::Other(
+                "publication has no unique independently observed resolved logical Field target"
+                    .into(),
+            ));
+        }
+        let current = &current[0].0.occurrence;
+        if current.part_span.as_ref() != Some(&extent)
+            || current.part_hash != Some(Sha256::digest(&transported).into())
+            || transported.get(extent.clone()) != Some(current.source.as_bytes())
+        {
+            return Err(Error::Other("publication transport does not reach the actual resolved Field's complete part extent".into()));
+        }
+        if !witness.input_complex[role] {
+            let (observation, field, metadata) = *matches[0];
+            let expected_record = observation
+                .metadata_record
+                .2
+                .map(|index| {
+                    metadata
+                        .get("field")
+                        .and_then(|records| records.get(index))
+                        .cloned()
+                        .ok_or_else(|| {
+                            Error::Other("input field metadata record is missing".into())
+                        })
+                })
+                .transpose()?;
+            let mut count =
+                map_field_conversion_role(&mut actual.0, source, field, expected_record.as_ref())?;
+            for (_, _, items) in &mut actual.1 {
+                count += map_field_conversion_role(items, source, field, expected_record.as_ref())?;
+            }
+            if count != 1 {
+                return Err(Error::Other(
+                    "resolved conversion lacks one actual current Field occurrence".into(),
+                ));
+            }
+        }
+    }
+    map_nested_conversion_metadata(&mut actual.0, &wanted.0, witnesses, role)?;
+    for ((actual_kind, actual_part, actual_items), (wanted_kind, wanted_part, wanted_items)) in
+        actual.1.iter_mut().zip(&wanted.1)
+    {
+        if actual_kind != wanted_kind || actual_part != wanted_part {
+            return Err(Error::Other(
+                "nested conversion changed physical story inventory".into(),
+            ));
+        }
+        map_nested_conversion_metadata(actual_items, wanted_items, witnesses, role)?;
+    }
+    Ok(())
+}
+
+/// Consume one proven encoding exception at an actual resolved occurrence.
+/// Every other semantic and owning-source record keeps normal guard equality.
+fn map_field_conversion_role(
+    items: &mut [GuardItem],
+    input: &FieldSourceOccurrence,
+    expected: &GuardField,
+    expected_record: Option<&(usize, usize, Vec<String>)>,
+) -> Result<usize> {
+    let mut count = 0usize;
+    for item in items {
+        for observation in item.field_observations.clone() {
+            let current = &observation.occurrence;
+            if current.story != input.story
+                || current.owner_path != input.owner_path
+                || current.field_slot != input.field_slot
+            {
+                continue;
+            }
+            let mut target = item.fields.get_mut(observation.field_index);
+            for slot in &observation.result_path {
+                target = target.and_then(|field| field.result_fields.get_mut(*slot));
+            }
+            let field = target.ok_or_else(|| {
+                Error::Other("resolved conversion has no actual nested Field target".into())
+            })?;
+            if !field.complex || expected.complex {
+                return Err(Error::Other(
+                    "conversion exception does not describe actual simple-to-complex encoding"
+                        .into(),
+                ));
+            }
+            let mut semantic = field.clone();
+            semantic.complex = false;
+            if semantic != *expected
+                || conversion_source_inventory(&input.source, &input.scope)?
+                    != conversion_source_inventory(&current.source, &current.scope)?
+            {
+                return Err(Error::Other(
+                    "resolved field conversion changed independent semantic or source facts".into(),
+                ));
+            }
+            field.complex = false;
+            map_field_metadata_record(item, &observation, expected_record)?;
+            count += 1;
+        }
+        for host in &mut item.hosts {
+            for body in &mut host.bodies {
+                count += map_field_conversion_role(body, input, expected, expected_record)?;
+            }
+        }
+    }
+    Ok(count)
+}
+
+fn map_field_metadata_record(
+    item: &mut GuardItem,
+    observation: &GuardFieldObservation,
+    expected_record: Option<&(usize, usize, Vec<String>)>,
+) -> Result<()> {
+    let (start, width, index) = observation.metadata_record;
+    if let Some((expected_start, expected_width, _)) = expected_record
+        && (start != *expected_start || width != *expected_width)
+    {
+        return Err(Error::Other(
+            "converted field owning metadata coverage changed".into(),
+        ));
+    }
+    match (index, expected_record) {
+        (Some(index), Some(record)) => {
+            let actual = item
+                .content_metadata
+                .get_mut("field")
+                .and_then(|records| records.get_mut(index))
+                .ok_or_else(|| Error::Other("resolved field metadata record is missing".into()))?;
+            if actual.0 != start || actual.1 != width {
+                return Err(Error::Other(
+                    "resolved field source record lost its actual owner".into(),
+                ));
+            }
+            *actual = record.clone();
+        }
+        (Some(index), None) => {
+            let records = item.content_metadata.get_mut("field").ok_or_else(|| {
+                Error::Other("resolved field metadata inventory is missing".into())
+            })?;
+            if records
+                .get(index)
+                .is_none_or(|record| record.0 != start || record.1 != width)
+            {
+                return Err(Error::Other(
+                    "resolved field metadata has a different owner".into(),
+                ));
+            }
+            records.remove(index);
+            if records.is_empty() {
+                item.content_metadata.remove("field");
+            }
+            for other in &mut item.field_observations {
+                if let Some(record) = &mut other.metadata_record.2 {
+                    if *record == index {
+                        other.metadata_record.2 = None;
+                    } else if *record > index {
+                        *record -= 1;
+                    }
+                }
+            }
+        }
+        (None, Some(record)) => {
+            let records = item.content_metadata.entry("field".into()).or_default();
+            let index = records.partition_point(|actual| actual.0 < start);
+            records.insert(index, record.clone());
+            for other in &mut item.field_observations {
+                if let Some(record) = &mut other.metadata_record.2
+                    && *record >= index
+                {
+                    *record += 1;
+                }
+            }
+        }
+        (None, None) => {}
+    }
+    Ok(())
+}
+
+/// Verify every delegated source span before mapping a coarse ancestor record.
+fn map_nested_conversion_metadata(
+    actual: &mut [GuardItem],
+    wanted: &[GuardItem],
+    witnesses: &[FieldConversionWitness],
+    role: usize,
+) -> Result<()> {
+    fn same_occurrence(left: &FieldSourceOccurrence, right: &FieldSourceOccurrence) -> bool {
+        left.story == right.story
+            && left.owner_path == right.owner_path
+            && left.field_slot == right.field_slot
+    }
+    fn observation<'a>(
+        item: &'a GuardItem,
+        root: usize,
+        path: &[usize],
+    ) -> Result<&'a GuardFieldObservation> {
+        let matches = item
+            .field_observations
+            .iter()
+            .filter(|observation| {
+                observation.field_index == root && observation.result_path == path
+            })
+            .collect::<Vec<_>>();
+        if matches.len() != 1 {
+            return Err(Error::Other(
+                "nested source budget lacks one actual semantic target".into(),
+            ));
+        }
+        Ok(matches[0])
+    }
+    fn tree(
+        actual: &GuardItem,
+        wanted: &GuardItem,
+        roots: [usize; 2],
+        path: &mut Vec<usize>,
+        claims: &[Vec<usize>],
+        consumed: &mut HashSet<Vec<usize>>,
+    ) -> Result<()> {
+        let input = observation(wanted, roots[0], path)?;
+        let current = observation(actual, roots[1], path)?;
+        if !same_occurrence(&input.occurrence, &current.occurrence) {
+            return Err(Error::Other(
+                "nested source budget changed physical owner or logical slot".into(),
+            ));
+        }
+        if claims.contains(path) {
+            if !consumed.insert(path.clone()) {
+                return Err(Error::Other(
+                    "nested source budget consumed a child twice".into(),
+                ));
+            }
+            // The role-local child checker already consumed its complete carrier,
+            // result, semantic facts and allocated publication association.
+            return Ok(());
+        }
+        if !claims.iter().any(|claim| claim.starts_with(path)) {
+            if field_source_sequence_budget(&input.occurrence.source, &input.occurrence.scope)?
+                != field_source_sequence_budget(
+                    &current.occurrence.source,
+                    &current.occurrence.scope,
+                )?
+            {
+                return Err(Error::Other(
+                    "unclaimed nested source changed its strict opaque facts".into(),
+                ));
+            }
+            return Ok(());
+        }
+        if input.occurrence.carrier_budget.is_none()
+            || input.occurrence.carrier_budget != current.occurrence.carrier_budget
+            || input.occurrence.result_budget.is_none()
+            || input.occurrence.result_budget != current.occurrence.result_budget
+        {
+            return Err(Error::Other("nested conversion changed parent shell, typed hole map, context or outside source budget".into()));
+        }
+        let mut input_field = &wanted.fields[roots[0]];
+        let mut current_field = &actual.fields[roots[1]];
+        for slot in path.iter() {
+            input_field = input_field
+                .result_fields
+                .get(*slot)
+                .ok_or_else(|| Error::Other("input nested source target disappeared".into()))?;
+            current_field = current_field
+                .result_fields
+                .get(*slot)
+                .ok_or_else(|| Error::Other("actual nested source target disappeared".into()))?;
+        }
+        if input_field != current_field {
+            return Err(Error::Other(
+                "nested source exception changed independent parent semantic facts".into(),
+            ));
+        }
+        for slot in 0..input_field.result_fields.len() {
+            path.push(slot);
+            tree(actual, wanted, roots, path, claims, consumed)?;
+            path.pop();
+        }
+        Ok(())
+    }
+    for actual_item in actual {
+        let roots = actual_item
+            .field_observations
+            .iter()
+            .filter(|observation| observation.result_path.is_empty())
+            .cloned()
+            .collect::<Vec<_>>();
+        for current_root in roots {
+            let mut candidates = Vec::new();
+            for input_item in wanted {
+                for input_root in input_item
+                    .field_observations
+                    .iter()
+                    .filter(|observation| observation.result_path.is_empty())
+                {
+                    if same_occurrence(&input_root.occurrence, &current_root.occurrence) {
+                        candidates.push((input_item, input_root));
+                    }
+                }
+            }
+            let relevant = actual_item
+                .field_observations
+                .iter()
+                .filter(|observation| {
+                    observation.field_index == current_root.field_index
+                        && !observation.result_path.is_empty()
+                })
+                .filter(|observation| {
+                    witnesses.iter().any(|witness| {
+                        !witness.input_complex[role]
+                            && same_occurrence(&witness.sources[role], &observation.occurrence)
+                    })
+                })
+                .map(|observation| observation.result_path.clone())
+                .collect::<Vec<_>>();
+            if relevant.is_empty() {
+                continue;
+            }
+            if candidates.len() != 1 {
+                return Err(Error::Other(
+                    "nested parent source budget has no unique actual input root".into(),
+                ));
+            }
+            let (input_item, input_root) = candidates[0];
+            let mut claims = relevant;
+            claims.sort();
+            if claims.windows(2).any(|pair| pair[1].starts_with(&pair[0])) {
+                return Err(Error::Other(
+                    "nested conversion child claims overlap or duplicate".into(),
+                ));
+            }
+            let mut consumed = HashSet::new();
+            tree(
+                actual_item,
+                input_item,
+                [input_root.field_index, current_root.field_index],
+                &mut Vec::new(),
+                &claims,
+                &mut consumed,
+            )?;
+            if consumed.len() != claims.len() {
+                return Err(Error::Other(
+                    "nested source budget left an unconsumed child claim".into(),
+                ));
+            }
+            let expected = input_root
+                .metadata_record
+                .2
+                .map(|index| {
+                    input_item
+                        .content_metadata
+                        .get("field")
+                        .and_then(|records| records.get(index))
+                        .cloned()
+                        .ok_or_else(|| {
+                            Error::Other("nested input parent metadata record is missing".into())
+                        })
+                })
+                .transpose()?;
+            map_field_metadata_record(actual_item, &current_root, expected.as_ref())?;
+        }
+        // Host bodies retain their own independently captured physical inventory.
+        for (host_index, host) in actual_item.hosts.iter_mut().enumerate() {
+            let wanted_host = wanted.iter().flat_map(|item| &item.hosts).nth(host_index);
+            if let Some(wanted_host) = wanted_host {
+                for (body, input) in host.bodies.iter_mut().zip(&wanted_host.bodies) {
+                    map_nested_conversion_metadata(body, input, witnesses, role)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn normalized_package(
     document: &Document,
     stories: &[StoryPart],
@@ -3576,7 +4457,7 @@ fn normalized_package(
         related.push((
             story.kind,
             story.part_name.clone(),
-            normalized_story_part(
+            guard_story_part(
                 document,
                 &story.part_name,
                 story_xml(document, story)?,
@@ -3586,7 +4467,6 @@ fn normalized_package(
                     .related
                     .get(&story.part_name)
                     .map(String::as_str),
-                postcondition_body,
             )?,
         ));
     }
@@ -3596,24 +4476,1195 @@ fn normalized_package(
         .ok_or_else(|| Error::Other(format!("missing main story {}", document.doc_part_name)))?;
     let source = std::str::from_utf8(source).map_err(utf8_error)?;
     let main_source;
+    let original_source = source;
+    let mut coordinates = Vec::new();
     let source = if story_ignored(options, ComparisonStoryKind::TextBox) {
         let (masked, _) = mask_text_box_subtrees(source, "w", &text_box_markers.main)?;
         main_source = masked;
+        coordinates =
+            guard_mask_coordinates(original_source, &main_source, "w", &text_box_markers.main)?;
         main_source.as_str()
     } else {
         source
     };
-    let (_, bindings) = main_body_source(source.as_bytes())?;
-    let mut main_document = story_document(extract_body_inner(source.as_bytes())?, &bindings)?;
-    normalize_drawing_relationships(&mut main_document, document, &document.doc_part_name)?;
-    let main = project_source_body(
+    let (body_range, bindings) = main_body_source(source.as_bytes())?;
+    let main_document = story_document(extract_body_inner(source.as_bytes())?, &bindings)?;
+    let main = guard_source_body_at(
         &main_document,
         extract_body_inner(source.as_bytes())?,
         &bindings,
+        document,
+        &document.doc_part_name,
         options,
-        postcondition_body,
+        "body",
+        Some((body_range.start, coordinates)),
     )?;
     Ok((main, related))
+}
+
+/// Opaque owning-classifier facts, indexed by normalized content coverage.
+/// The kind separates overlapping root and leaf facts. Physical run partitions
+/// are source witnesses, not equality keys.
+type ContentMetadata = BTreeMap<String, Vec<(usize, usize, Vec<String>)>>;
+
+#[derive(Default)]
+struct SourceMetadata {
+    cursor: usize,
+    has_fields: bool,
+    facts: ContentMetadata,
+    field_records: HashMap<usize, (usize, usize, Option<usize>)>,
+}
+
+fn source_root_metadata(xml: &str, inherited: &NamespaceBindings) -> Result<Vec<String>> {
+    let (opening, closing) = paragraph_shell(Some(xml))?;
+    let shell = format!("{opening}{closing}");
+    let closed = actual_field_source_fragment(&shell, inherited)?;
+    let mut reader = NsReader::from_str(&closed);
+    let (namespace, event) = reader
+        .read_resolved_event()
+        .map_err(|error| Error::Other(error.to_string()))?;
+    if matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == W_NS.as_bytes())
+        && let Event::Start(root) = event
+        && root.local_name().as_ref() == b"tr"
+    {
+        // These qualified producer identities are already excluded by the row
+        // comparison policy. Other root attributes remain protected facts.
+        let mut filtered = root.clone().into_owned();
+        filtered.clear_attributes();
+        for attribute in root.attributes() {
+            let attribute = attribute.map_err(|error| Error::Other(error.to_string()))?;
+            let (namespace, local) = reader.resolver().resolve_attribute(attribute.key);
+            let identity = match namespace {
+                ResolveResult::Bound(Namespace(uri)) if uri == W_NS.as_bytes() => matches!(
+                    local.as_ref(),
+                    b"rsidR" | b"rsidTr" | b"rsidRPr" | b"rsidDel"
+                ),
+                ResolveResult::Bound(Namespace(uri))
+                    if uri == b"http://schemas.microsoft.com/office/word/2010/wordml" =>
+                {
+                    matches!(local.as_ref(), b"paraId" | b"textId")
+                }
+                _ => false,
+            };
+            if !identity {
+                filtered.push_attribute(attribute);
+            }
+        }
+        let mut writer = Writer::new(Vec::new());
+        writer.write_event(Event::Start(filtered))?;
+        writer.write_event(Event::End(root.to_end()))?;
+        return Ok(rdocx_oxml::properties::protected_source_residual(
+            &writer.into_inner(),
+            inherited,
+        )?);
+    }
+    Ok(rdocx_oxml::properties::protected_source_residual(
+        shell.as_bytes(),
+        inherited,
+    )?)
+}
+
+/// Paragraph and control fields share one source-qualified residual policy.
+fn field_source_metadata(view: &str, complex: bool) -> Result<Vec<String>> {
+    Ok(if !complex {
+        let mut remainder = view.to_owned();
+        let simple = direct_word_element_spans(view, "fldSimple")?;
+        if simple.len() != 1 {
+            return Err(Error::Other(
+                "simple field source has no unique actual owner".into(),
+            ));
+        }
+        let field_xml = source_child(view, simple[0].clone())?;
+        let runs = direct_word_element_spans(&field_xml, "r")?;
+        let mut result_facts = Vec::new();
+        for span in &runs {
+            let actual = source_child(&field_xml, span.clone())?;
+            result_facts.extend(rdocx_oxml::properties::protected_source_residual(
+                actual.as_bytes(),
+                &[],
+            )?);
+        }
+        let mut shell = field_xml;
+        for span in runs.into_iter().rev() {
+            shell.replace_range(span, "");
+        }
+        remainder.replace_range(simple[0].clone(), &shell);
+        let mut facts =
+            rdocx_oxml::properties::protected_source_residual(remainder.as_bytes(), &[])?;
+        facts.extend(result_facts);
+        facts
+    } else {
+        rdocx_oxml::properties::protected_source_residual(view.as_bytes(), &[])?
+    })
+}
+
+/// Omit actual Word property roles while retaining foreign and opaque events.
+fn source_without_text_properties(xml: &str, inherited: &NamespaceBindings) -> Result<String> {
+    let closed = source_fragment(xml, inherited)?;
+    let mut reader = NsReader::from_str(&closed);
+    let mut owners = Vec::<(Vec<u8>, bool)>::new();
+    let mut omitted = None;
+    let mut spans = Vec::new();
+    let property = |word: bool, local: &[u8], owners: &[(Vec<u8>, bool)]| {
+        word && owners.last().is_some_and(|(parent, admitted)| {
+            *admitted && matches!((parent.as_slice(), local), (b"r", b"rPr") | (b"p", b"pPr"))
+        })
+    };
+    loop {
+        let before = reader.buffer_position() as usize;
+        let (namespace, event) = reader
+            .read_resolved_event()
+            .map_err(|error| Error::Other(error.to_string()))?;
+        let word =
+            matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == W_NS.as_bytes());
+        match event {
+            Event::Start(element) => {
+                let local = element.local_name().as_ref().to_vec();
+                if omitted.is_none() && property(word, &local, &owners) {
+                    omitted = Some((before, owners.len()));
+                }
+                // Only the current field-result routes expose modeled properties.
+                // An opaque ancestor, prior revision or drawing stays opaque.
+                let admitted = word
+                    && match owners.last() {
+                        None => local.as_slice() == b"p",
+                        Some((parent, true)) => match parent.as_slice() {
+                            b"p" | b"fldSimple" => matches!(
+                                local.as_slice(),
+                                b"r" | b"fldSimple" | b"hyperlink" | b"sdt"
+                            ),
+                            b"hyperlink" | b"sdtContent" => {
+                                matches!(local.as_slice(), b"r" | b"fldSimple" | b"sdt")
+                            }
+                            b"sdt" => local.as_slice() == b"sdtContent",
+                            _ => false,
+                        },
+                        Some((_, false)) => false,
+                    };
+                owners.push((local, admitted));
+            }
+            Event::Empty(element)
+                if omitted.is_none() && property(word, element.local_name().as_ref(), &owners) =>
+            {
+                spans.push(before..reader.buffer_position() as usize);
+            }
+            Event::End(_) => {
+                owners.pop();
+                if let Some((start, level)) = omitted
+                    && level == owners.len()
+                {
+                    spans.push(start..reader.buffer_position() as usize);
+                    omitted = None;
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    let mut output = closed;
+    for span in spans.into_iter().rev() {
+        output.replace_range(span, "");
+    }
+    Ok(output)
+}
+
+fn source_without_run_root_attributes(xml: &str) -> Result<String> {
+    let mut reader = NsReader::from_str(xml);
+    let mut output = String::new();
+    loop {
+        let before = reader.buffer_position() as usize;
+        let (namespace, event) = reader
+            .read_resolved_event()
+            .map_err(|error| Error::Other(error.to_string()))?;
+        let word = matches!(namespace,ResolveResult::Bound(Namespace(uri)) if uri==W_NS.as_bytes());
+        let empty = matches!(event, Event::Empty(_));
+        match event {
+            Event::Start(root) | Event::Empty(root)
+                if word && root.local_name().as_ref() == b"r" =>
+            {
+                let attributes = root
+                    .attributes()
+                    .map(|attribute| attribute.map_err(|error| Error::Other(error.to_string())))
+                    .collect::<Result<Vec<_>>>()?;
+                let namespaces = attributes
+                    .iter()
+                    .filter(|attribute| {
+                        attribute.key.as_ref() == b"xmlns"
+                            || attribute.key.as_ref().starts_with(b"xmlns:")
+                    })
+                    .map(|attribute| {
+                        (
+                            attribute.key.as_ref().to_vec(),
+                            attribute.value.as_ref().to_vec(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let mut root = root.into_owned();
+                root.clear_attributes();
+                for (key, value) in &namespaces {
+                    root.push_attribute((key.as_slice(), value.as_slice()));
+                }
+                let mut writer = Writer::new(Vec::new());
+                writer.write_event(if empty {
+                    Event::Empty(root)
+                } else {
+                    Event::Start(root)
+                })?;
+                output.push_str(&String::from_utf8(writer.into_inner()).map_err(utf8_error)?);
+            }
+            Event::Eof => return Ok(output),
+            _ => output.push_str(&xml[before..reader.buffer_position() as usize]),
+        }
+    }
+}
+
+fn normalized_content_width(content: &RunContent, options: &ComparisonOptions) -> usize {
+    if ignored_run_content(content, options) {
+        return 0;
+    }
+    match content {
+        RunContent::Text(text) | RunContent::DeletedText(text) => text
+            .text
+            .chars()
+            .filter(|character| !options.ignore_whitespace || !character.is_whitespace())
+            .count(),
+        _ => 1,
+    }
+}
+
+impl SourceMetadata {
+    fn record(&mut self, kind: &str, start: usize, length: usize, facts: Vec<String>) {
+        if !facts.is_empty() {
+            self.facts
+                .entry(kind.to_owned())
+                .or_default()
+                .push((start, length, facts));
+        }
+    }
+
+    fn root(&mut self, kind: &str, xml: Option<&String>, start: usize) -> Result<()> {
+        if let Some(xml) = xml {
+            self.record(
+                kind,
+                start,
+                self.cursor - start,
+                source_root_metadata(xml, &Vec::new())?,
+            );
+        }
+        Ok(())
+    }
+
+    fn run(
+        &mut self,
+        run: &CT_R,
+        source: &SourceSnapshots,
+        options: &ComparisonOptions,
+    ) -> Result<()> {
+        let start = self.cursor;
+        let actual = source.runs.get(&(run as *const CT_R as usize));
+        for (ordinal, content) in run.content.iter().enumerate() {
+            let length = normalized_content_width(content, options);
+            if let RunContent::Field(field) = content {
+                self.has_fields |= !options.ignore_fields;
+                if let Some(facts) = source.fields.get(&(field as *const _ as usize)) {
+                    let record =
+                        (!facts.is_empty()).then(|| self.facts.get("field").map_or(0, Vec::len));
+                    self.field_records.insert(
+                        std::ptr::from_ref(field) as usize,
+                        (self.cursor, length, record),
+                    );
+                    self.record("field", self.cursor, length, facts.clone());
+                }
+            } else if !matches!(content, RunContent::Drawing(_))
+                && let Some(actual) = actual
+                && let Some(span) = actual.typed_slots.get(ordinal).cloned().flatten()
+            {
+                self.record(
+                    "content",
+                    self.cursor,
+                    length,
+                    source_content_metadata(actual, span)?,
+                );
+            }
+            self.cursor += length;
+        }
+        if !source
+            .shared_root_runs
+            .contains(&(run as *const CT_R as usize))
+            && let Some(actual) = actual
+        {
+            self.record(
+                "r-root",
+                start,
+                self.cursor - start,
+                source_root_metadata(&actual.scoped, &actual.parent)?,
+            );
+        }
+        Ok(())
+    }
+
+    fn paragraph(
+        &mut self,
+        paragraph: &CT_P,
+        source: &SourceSnapshots,
+        options: &ComparisonOptions,
+    ) -> Result<()> {
+        let start = self.cursor;
+        for boundary in 0..=paragraph.runs.len() {
+            for (_, _, _, control) in paragraph
+                .content_controls
+                .iter()
+                .filter(|(at, _, _, _)| *at == boundary)
+            {
+                self.control(control, source, options)?;
+            }
+            if let Some(run) = paragraph.runs.get(boundary) {
+                self.run(run, source, options)?;
+            }
+        }
+        self.root(
+            "p-root",
+            source.paragraphs.get(&(paragraph as *const _ as usize)),
+            start,
+        )?;
+        if let Some(facts) = source
+            .shared_root_facts
+            .get(&(paragraph as *const CT_P as usize))
+        {
+            self.record(
+                "unproved-shared-r-roots",
+                start,
+                self.cursor - start,
+                facts.clone(),
+            );
+        }
+        self.cursor += 1;
+        Ok(())
+    }
+
+    fn table(
+        &mut self,
+        table: &CT_Tbl,
+        source: &SourceSnapshots,
+        options: &ComparisonOptions,
+    ) -> Result<()> {
+        let start = self.cursor;
+        for boundary in 0..=table.rows.len() {
+            for (_, _, control) in table
+                .content_controls
+                .iter()
+                .filter(|(at, _, _)| *at == boundary)
+            {
+                self.control(control, source, options)?;
+            }
+            if let Some(row) = table.rows.get(boundary) {
+                self.row(row, source, options)?;
+            }
+        }
+        self.root(
+            "tbl-root",
+            source.tables.get(&(table as *const _ as usize)),
+            start,
+        )?;
+        self.cursor += 1;
+        Ok(())
+    }
+
+    fn row(
+        &mut self,
+        row: &CT_Row,
+        source: &SourceSnapshots,
+        options: &ComparisonOptions,
+    ) -> Result<()> {
+        let start = self.cursor;
+        for boundary in 0..=row.cells.len() {
+            for (_, _, control) in row
+                .content_controls
+                .iter()
+                .filter(|(at, _, _)| *at == boundary)
+            {
+                self.control(control, source, options)?;
+            }
+            if let Some(cell) = row.cells.get(boundary) {
+                self.cell(cell, source, options)?;
+            }
+        }
+        self.root(
+            "tr-root",
+            source.rows.get(&(row as *const _ as usize)),
+            start,
+        )?;
+        self.cursor += 1;
+        Ok(())
+    }
+
+    fn cell(
+        &mut self,
+        cell: &CT_Tc,
+        source: &SourceSnapshots,
+        options: &ComparisonOptions,
+    ) -> Result<()> {
+        let start = self.cursor;
+        for child in &cell.content {
+            match child {
+                CellContent::Paragraph(p) => self.paragraph(p, source, options)?,
+                CellContent::Table(t) => self.table(t, source, options)?,
+                CellContent::ContentControl(c) => self.control(c, source, options)?,
+            }
+        }
+        self.root(
+            "tc-root",
+            source.cells.get(&(cell as *const _ as usize)),
+            start,
+        )?;
+        self.cursor += 1;
+        Ok(())
+    }
+
+    fn control(
+        &mut self,
+        control: &CT_Sdt,
+        source: &SourceSnapshots,
+        options: &ComparisonOptions,
+    ) -> Result<()> {
+        let start = self.cursor;
+        for child in &control.content {
+            match child {
+                SdtContent::Paragraph(p) => self.paragraph(p, source, options)?,
+                SdtContent::Table(t) => self.table(t, source, options)?,
+                SdtContent::Row(r) => self.row(r, source, options)?,
+                SdtContent::Cell(c) => self.cell(c, source, options)?,
+                SdtContent::Run(r) => self.run(r, source, options)?,
+                SdtContent::ContentControl(c) => self.control(c, source, options)?,
+                SdtContent::RawXml(raw) if raw.iter().all(u8::is_ascii_whitespace) => {}
+                SdtContent::RawXml(_) => self.cursor += 1,
+            }
+        }
+        let xml = source.controls.get(&(control as *const _ as usize));
+        self.root("sdt-root", xml, start)?;
+        if let Some(xml) = xml
+            && let Some(span) = direct_word_element_spans(xml, "sdtContent")?
+                .into_iter()
+                .next()
+        {
+            let (parent_open, parent_close) = paragraph_shell(Some(xml))?;
+            let child = source_child(xml, span)?;
+            let (child_open, child_close) = paragraph_shell(Some(&child))?;
+            // The actual qualified parent supplies the classifier's grammar.
+            // A standalone sdtContent would become an opaque scope-sensitive root.
+            let contextual = format!("{parent_open}{child_open}{child_close}{parent_close}");
+            self.record(
+                "sdtContent-root",
+                start,
+                self.cursor - start,
+                rdocx_oxml::properties::protected_source_residual(contextual.as_bytes(), &[])?,
+            );
+        }
+        self.cursor += 1;
+        Ok(())
+    }
+
+    fn paragraph_contains_fields(paragraph: &CT_P, options: &ComparisonOptions) -> Result<bool> {
+        let mut state = Self::default();
+        state.paragraph(paragraph, &SourceSnapshots::default(), options)?;
+        Ok(state.has_fields)
+    }
+
+    fn body(
+        content: &BodyContent,
+        source: &SourceSnapshots,
+        options: &ComparisonOptions,
+    ) -> Result<Self> {
+        let mut state = Self::default();
+        match content {
+            BodyContent::Paragraph(p) => state.paragraph(p, source, options)?,
+            BodyContent::Table(t) => state.table(t, source, options)?,
+            BodyContent::ContentControl(c) => state.control(c, source, options)?,
+            BodyContent::RawXml(_) => {}
+        }
+        for (kind, records) in &mut state.facts {
+            if kind != "r-root" {
+                continue;
+            }
+            let mut merged: Vec<(usize, usize, Vec<String>)> = Vec::new();
+            for (start, length, facts) in std::mem::take(records) {
+                if length > 0
+                    && let Some((previous, coverage, actual)) = merged.last_mut()
+                    && *coverage > 0
+                    && *previous + *coverage == start
+                    && *actual == facts
+                {
+                    *coverage += length;
+                } else {
+                    merged.push((start, length, facts));
+                }
+            }
+            *records = merged;
+        }
+        Ok(state)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct GuardField {
+    instruction: rdocx_oxml::text::FieldInstruction,
+    complex: bool,
+    cached: String,
+    dirty: Option<bool>,
+    locked: Option<bool>,
+    legacy: Option<rdocx_oxml::text::LegacyFormFieldData>,
+    segments: Vec<(String, Option<rdocx_oxml::properties::CT_RPr>)>,
+    instruction_fields: Vec<GuardField>,
+    result_fields: Vec<GuardField>,
+    graphs: Vec<(String, String)>,
+}
+
+impl GuardField {
+    fn of(field: &rdocx_oxml::text::Field) -> Self {
+        Self {
+            graphs: Vec::new(),
+            instruction: field.effective_instruction(),
+            complex: field.is_complex(),
+            cached: field.cached_result.clone(),
+            dirty: field.dirty,
+            locked: field.locked(),
+            legacy: field.legacy_form.clone(),
+            segments: field
+                .effective_display_field_segments()
+                .into_iter()
+                .map(|(text, properties, _)| (text.into_owned(), properties.cloned()))
+                .collect(),
+            instruction_fields: field
+                .nested_fields_in_source_order()
+                .into_iter()
+                .map(Self::of)
+                .collect(),
+            result_fields: field
+                .cached_fields_in_source_order()
+                .into_iter()
+                .map(Self::of)
+                .collect(),
+        }
+    }
+}
+
+/// Guard-only values. Empty payload slots in the private model clone retain
+/// canonical content boundaries. Their identities live here, never in XML.
+#[derive(Clone, Debug)]
+struct GuardFieldObservation {
+    field_index: usize,
+    result_path: Vec<usize>,
+    occurrence: FieldSourceOccurrence,
+    metadata_record: (usize, usize, Option<usize>),
+}
+
+#[derive(Clone, Debug)]
+struct GuardItem {
+    content: String,
+    hosts: Vec<GuardHost>,
+    fields: Vec<GuardField>,
+    content_metadata: ContentMetadata,
+    field_observations: Vec<GuardFieldObservation>,
+}
+
+impl PartialEq for GuardItem {
+    fn eq(&self, other: &Self) -> bool {
+        self.content == other.content
+            && self.hosts == other.hosts
+            && self.fields == other.fields
+            && self.content_metadata == other.content_metadata
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct GuardHost {
+    outside: Vec<String>,
+    bodies: Vec<Vec<GuardItem>>,
+    drawing: Option<rdocx_oxml::drawing::CT_Drawing>,
+}
+
+struct GuardProjection<'a> {
+    document: &'a Document,
+    owner: &'a str,
+    options: &'a ComparisonOptions,
+    sources: &'a SourceSnapshots,
+    hosts: Vec<GuardHost>,
+    fields: Vec<GuardField>,
+    field_keys: Vec<(usize, Vec<usize>, usize)>,
+}
+
+impl GuardProjection<'_> {
+    fn paragraph(&mut self, original: &CT_P, projected: &mut CT_P) -> Result<()> {
+        for boundary in 0..=original.runs.len() {
+            for (index, (_, _, _, control)) in original
+                .content_controls
+                .iter()
+                .enumerate()
+                .filter(|(_, (at, _, _, _))| *at == boundary)
+            {
+                self.control(control, &mut projected.content_controls[index].3)?;
+            }
+            if let Some(run) = original.runs.get(boundary) {
+                self.run(run, &mut projected.runs[boundary])?;
+            }
+        }
+        for link in &mut projected.hyperlinks {
+            if let Some(id) = &mut link.rel_id {
+                normalize_relationship_id(id, self.document, self.owner)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn body(&mut self, original: &BodyContent, projected: &mut BodyContent) -> Result<()> {
+        match (original, projected) {
+            (BodyContent::Paragraph(left), BodyContent::Paragraph(right)) => {
+                self.paragraph(left, right)
+            }
+            (BodyContent::Table(left), BodyContent::Table(right)) => self.table(left, right),
+            (BodyContent::ContentControl(left), BodyContent::ContentControl(right)) => {
+                self.control(left, right)
+            }
+            (BodyContent::RawXml(_), BodyContent::RawXml(_)) => Ok(()),
+            _ => Err(Error::Other("guard body clone changed kind".into())),
+        }
+    }
+
+    fn table(&mut self, original: &CT_Tbl, projected: &mut CT_Tbl) -> Result<()> {
+        for boundary in 0..=original.rows.len() {
+            for (index, (_, _, control)) in original
+                .content_controls
+                .iter()
+                .enumerate()
+                .filter(|(_, (at, _, _))| *at == boundary)
+            {
+                self.control(control, &mut projected.content_controls[index].2)?;
+            }
+            if let Some(row) = original.rows.get(boundary) {
+                self.row(row, &mut projected.rows[boundary])?;
+            }
+        }
+        Ok(())
+    }
+
+    fn row(&mut self, original: &CT_Row, projected: &mut CT_Row) -> Result<()> {
+        for boundary in 0..=original.cells.len() {
+            for (index, (_, _, control)) in original
+                .content_controls
+                .iter()
+                .enumerate()
+                .filter(|(_, (at, _, _))| *at == boundary)
+            {
+                self.control(control, &mut projected.content_controls[index].2)?;
+            }
+            if let Some(cell) = original.cells.get(boundary) {
+                self.cell(cell, &mut projected.cells[boundary])?;
+            }
+        }
+        Ok(())
+    }
+
+    fn cell(&mut self, original: &CT_Tc, projected: &mut CT_Tc) -> Result<()> {
+        for (left, right) in original.content.iter().zip(&mut projected.content) {
+            match (left, right) {
+                (CellContent::Paragraph(left), CellContent::Paragraph(right)) => {
+                    self.paragraph(left, right)?
+                }
+                (CellContent::Table(left), CellContent::Table(right)) => self.table(left, right)?,
+                (CellContent::ContentControl(left), CellContent::ContentControl(right)) => {
+                    self.control(left, right)?
+                }
+                _ => return Err(Error::Other("guard cell clone changed kind".into())),
+            }
+        }
+        Ok(())
+    }
+
+    fn control(&mut self, original: &CT_Sdt, projected: &mut CT_Sdt) -> Result<()> {
+        for (left, right) in original.content.iter().zip(&mut projected.content) {
+            match (left, right) {
+                (SdtContent::Paragraph(left), SdtContent::Paragraph(right)) => {
+                    self.paragraph(left, right)?
+                }
+                (SdtContent::Table(left), SdtContent::Table(right)) => self.table(left, right)?,
+                (SdtContent::Row(left), SdtContent::Row(right)) => self.row(left, right)?,
+                (SdtContent::Cell(left), SdtContent::Cell(right)) => self.cell(left, right)?,
+                (SdtContent::Run(left), SdtContent::Run(right)) => self.run(left, right)?,
+                (SdtContent::ContentControl(left), SdtContent::ContentControl(right)) => {
+                    self.control(left, right)?
+                }
+                (SdtContent::RawXml(_), SdtContent::RawXml(_)) => {}
+                _ => return Err(Error::Other("guard control clone changed kind".into())),
+            }
+        }
+        Ok(())
+    }
+
+    fn host(
+        &mut self,
+        source: &RunSource,
+        span: Range<usize>,
+        typed: bool,
+        drawing: Option<&rdocx_oxml::drawing::CT_Drawing>,
+    ) -> Result<Option<GuardHost>> {
+        let actual = &source.scoped[span.clone()];
+        let mut reader = Reader::from_str(actual);
+        if !matches!(reader.read_event(), Ok(Event::Start(_) | Event::Empty(_))) {
+            return Ok(None);
+        }
+        let closed = source_child(&source.scoped, span)?;
+        let boxes = policy_textbox_intervals(&closed)?;
+        if boxes.is_empty() {
+            return Ok(None);
+        }
+        let added = element_opening(&closed)?
+            .0
+            .checked_sub(element_opening(actual)?.0)
+            .ok_or_else(|| Error::Other("guard source closure changed its opening".into()))?;
+        if closed[element_opening(&closed)?.0..] != actual[element_opening(actual)?.0..] {
+            return Err(Error::Other(
+                "guard source closure changed descendant bytes".into(),
+            ));
+        }
+        let mut outside = Vec::new();
+        let mut bodies = Vec::new();
+        let mut cursor = 0;
+        let drawing_span = if drawing.is_some() {
+            if boxes.len() != 1 {
+                return Err(Error::Other(
+                    "selected modeled drawing has ambiguous body source".into(),
+                ));
+            }
+            boxes[0].3.clone()
+        } else {
+            None
+        };
+        for (box_span, bindings, _, _) in boxes {
+            let box_xml = &closed[box_span.clone()];
+            let inner = element_inner_range_any_prefix(box_xml, "txbxContent")?;
+            let start = box_span.start + inner.start - added;
+            let end = box_span.start + inner.end - added;
+            if !typed && drawing.is_none() {
+                outside.push(actual[cursor..start].to_owned());
+            }
+            if typed {
+                let box_start = box_span.start - added;
+                let box_end = box_span.end - added;
+                outside.push(actual[box_start..start].to_owned());
+                outside.push(actual[end..box_end].to_owned());
+            }
+            let inner_xml = &actual[start..end];
+            let model = story_document(inner_xml, &bindings)?;
+            bodies.push(guard_source_body(
+                &model,
+                inner_xml,
+                &bindings,
+                self.document,
+                self.owner,
+                self.options,
+            )?);
+            cursor = end;
+        }
+        if !typed && drawing.is_none() {
+            outside.push(actual[cursor..].to_owned());
+        }
+        if let Some(span) = drawing_span {
+            let start = span.start - added;
+            let end = span.end - added;
+            let inner = element_inner_range_any_prefix(&actual[start..end], "drawing")?;
+            outside.push(actual[..start + inner.start].to_owned());
+            outside.push(actual[start + inner.end..].to_owned());
+        }
+        let drawing = drawing
+            .map(|drawing| -> Result<_> {
+                let mut drawing = drawing_signature(drawing);
+                normalize_drawing_identity(&mut drawing, self.document, self.owner)?;
+                if let Some(shape) = drawing
+                    .anchor
+                    .as_mut()
+                    .and_then(|anchor| anchor.shape.as_mut())
+                {
+                    shape.text_body = None;
+                    shape.text.clear();
+                    shape.source_text_box_owner = None;
+                }
+                Ok(drawing)
+            })
+            .transpose()?;
+        Ok(Some(GuardHost {
+            outside,
+            bodies,
+            drawing,
+        }))
+    }
+
+    fn run(&mut self, original: &CT_R, projected: &mut CT_R) -> Result<()> {
+        if !self.options.ignore_fields {
+            for content in &original.content {
+                if let RunContent::Field(field) = content {
+                    fn keys(
+                        field: &rdocx_oxml::text::Field,
+                        root: usize,
+                        path: Vec<usize>,
+                        output: &mut Vec<(usize, Vec<usize>, usize)>,
+                    ) {
+                        output.push((root, path.clone(), std::ptr::from_ref(field) as usize));
+                        for (slot, child) in field
+                            .cached_fields_in_source_order()
+                            .into_iter()
+                            .enumerate()
+                        {
+                            let mut child_path = path.clone();
+                            child_path.push(slot);
+                            keys(child, root, child_path, output);
+                        }
+                    }
+                    fn graph_identity(
+                        identity: &mut GuardField,
+                        field: &rdocx_oxml::text::Field,
+                        sources: &SourceSnapshots,
+                        document: &Document,
+                        owner: &str,
+                    ) -> Result<()> {
+                        let key = std::ptr::from_ref(field) as usize;
+                        if let Some(graphs) = sources.field_graphs.get(&key) {
+                            identity.graphs = graphs.clone();
+                            for (_, id) in &mut identity.graphs {
+                                normalize_relationship_id(id, document, owner)?;
+                            }
+                        }
+                        for (identity, child) in identity
+                            .instruction_fields
+                            .iter_mut()
+                            .zip(field.nested_fields_in_source_order())
+                        {
+                            graph_identity(identity, child, sources, document, owner)?;
+                        }
+                        for (identity, child) in identity
+                            .result_fields
+                            .iter_mut()
+                            .zip(field.cached_fields_in_source_order())
+                        {
+                            graph_identity(identity, child, sources, document, owner)?;
+                        }
+                        Ok(())
+                    }
+                    let root = self.fields.len();
+                    let mut identity = GuardField::of(field);
+                    graph_identity(
+                        &mut identity,
+                        field,
+                        self.sources,
+                        self.document,
+                        self.owner,
+                    )?;
+                    self.fields.push(identity);
+                    keys(field, root, Vec::new(), &mut self.field_keys);
+                }
+            }
+        }
+        let Some(source) = self.sources.runs.get(&(original as *const CT_R as usize)) else {
+            return Ok(());
+        };
+        let mut slots = Vec::new();
+        for (ordinal, slot) in source.raw_slots.iter().enumerate() {
+            if let Some((span, _, _)) = slot {
+                slots.push((span.start, RunHostRole::Raw(ordinal, ordinal), span.clone()));
+            }
+        }
+        for (ordinal, slot) in source.typed_slots.iter().enumerate() {
+            if let Some(span) = slot {
+                slots.push((
+                    span.start,
+                    RunHostRole::Typed(ordinal, ordinal),
+                    span.clone(),
+                ));
+            }
+        }
+        slots.sort_by_key(|(start, _, _)| *start);
+        for (_, role, span) in slots {
+            match role {
+                RunHostRole::Raw(local, _) => {
+                    // A selected modeled compatibility drawing is represented
+                    // once by its physical raw slot, never again by alt_drawings.
+                    let alternate = CT_R::raw_child_has_alternate_content_drawing(
+                        original.extra_xml_positions[local],
+                    );
+                    let selected = if alternate {
+                        let index = original.extra_xml_positions[..local]
+                            .iter()
+                            .filter(|encoded| {
+                                CT_R::raw_child_has_alternate_content_drawing(**encoded)
+                            })
+                            .count();
+                        let selected = original.alt_drawings.get(index);
+                        if !selected
+                            .and_then(|drawing| drawing.anchor.as_ref())
+                            .and_then(|anchor| anchor.shape.as_ref())
+                            .is_some_and(|shape| shape.text_body.is_some())
+                        {
+                            continue;
+                        }
+                        selected
+                    } else {
+                        None
+                    };
+                    if let Some(identity) = self.host(source, span, false, selected)? {
+                        projected.extra_xml[local].clear();
+                        self.hosts.push(identity);
+                    }
+                }
+                RunHostRole::Typed(local, _) => {
+                    let Some(RunContent::Drawing(drawing)) = original.content.get(local) else {
+                        continue;
+                    };
+                    if !drawing
+                        .anchor
+                        .as_ref()
+                        .and_then(|anchor| anchor.shape.as_ref())
+                        .is_some_and(|shape| shape.text_body.is_some() || !shape.text.is_empty())
+                    {
+                        continue;
+                    }
+                    let Some(identity) = self.host(source, span, true, None)? else {
+                        return Err(Error::Other(
+                            "typed textbox has no admitted source body".into(),
+                        ));
+                    };
+                    let RunContent::Drawing(drawing) = &mut projected.content[local] else {
+                        unreachable!()
+                    };
+                    if let Some(shape) = drawing
+                        .anchor
+                        .as_mut()
+                        .and_then(|anchor| anchor.shape.as_mut())
+                    {
+                        shape.text_body = None;
+                        shape.text.clear();
+                        shape.source_text_box_owner = None;
+                    }
+                    self.hosts.push(identity);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn guard_source_body(
+    model: &CT_Document,
+    source: &str,
+    bindings: &[(String, String)],
+    document: &Document,
+    owner: &str,
+    options: &ComparisonOptions,
+) -> Result<Vec<GuardItem>> {
+    guard_source_body_at(
+        model, source, bindings, document, owner, options, owner, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn guard_source_body_at(
+    model: &CT_Document,
+    source: &str,
+    bindings: &[(String, String)],
+    document: &Document,
+    owner: &str,
+    options: &ComparisonOptions,
+    location: &str,
+    coordinates: Option<SourceCoordinates>,
+) -> Result<Vec<GuardItem>> {
+    #[cfg(test)]
+    let _diagnostic_scope = PolicyDiagnosticScope::enter("guard_source_body", owner);
+    #[cfg(test)]
+    policy_diagnostic(
+        "guard_input",
+        serde_json::json!({"owner": owner,"source": source,"bindings": bindings,"model": format!("{model:?}")}),
+    );
+    let spans = story_content_spans(source, bindings)?;
+    let mut snapshots = SourceSnapshots {
+        guard_graphs: true,
+        story: location.to_owned(),
+        ..SourceSnapshots::default()
+    };
+    if let Some(part) = document.package.get_part(owner) {
+        snapshots.part_hash = Some(Sha256::digest(part).into());
+        snapshots.part_len = Some(part.len());
+        if let Some((base, projection)) = coordinates {
+            snapshots.part_base = Some(base);
+            snapshots.part_projection = projection;
+        } else {
+            let start = (source.as_ptr() as usize).checked_sub(part.as_ptr() as usize);
+            snapshots.part_base = start.filter(|start| {
+                start
+                    .checked_add(source.len())
+                    .is_some_and(|end| end <= part.len())
+            });
+        }
+    }
+    snapshots.body(model, (source, &spans, bindings), &HeldRevisions::default())?;
+    let mut cleaned = model.clone();
+    // The snapshots refer to the still-live, source-faithful model. Only its
+    // explicitly corresponding analysis clone receives canonical graph values.
+    normalize_drawing_relationships(&mut cleaned, document, owner)?;
+    let mut identities = Vec::new();
+    let mut state = GuardProjection {
+        document,
+        owner,
+        options,
+        sources: &snapshots,
+        hosts: Vec::new(),
+        fields: Vec::new(),
+        field_keys: Vec::new(),
+    };
+    let mut inspection = cleaned.clone();
+    for (original, projected) in model.body.content.iter().zip(&mut inspection.body.content) {
+        state.body(original, projected)?;
+        let metadata = SourceMetadata::body(original, &snapshots, options)?;
+        let observations = std::mem::take(&mut state.field_keys)
+            .into_iter()
+            .filter_map(|(field_index, result_path, key)| {
+                snapshots
+                    .field_occurrences
+                    .get(&key)
+                    .cloned()
+                    .map(|occurrence| {
+                        let metadata_record = metadata
+                            .field_records
+                            .get(&key)
+                            .copied()
+                            .unwrap_or((0, 1, None));
+                        GuardFieldObservation {
+                            field_index,
+                            result_path,
+                            occurrence,
+                            metadata_record,
+                        }
+                    })
+            })
+            .collect::<Vec<_>>();
+        identities.push((
+            std::mem::take(&mut state.hosts),
+            std::mem::take(&mut state.fields),
+            metadata.facts,
+            observations,
+        ));
+    }
+    if options.ignore_formatting {
+        cleaned = inspection;
+    }
+    let content = project_source_body(&cleaned, source, bindings, options, postcondition_body)?;
+    Ok(content
+        .into_iter()
+        .enumerate()
+        .map(|(index, content)| {
+            let (hosts, fields, content_metadata, field_observations) = identities
+                .get_mut(index)
+                .map(std::mem::take)
+                .unwrap_or_default();
+            GuardItem {
+                content,
+                hosts,
+                fields,
+                content_metadata,
+                field_observations,
+            }
+        })
+        .collect())
+}
+
+fn guard_mask_coordinates(
+    original: &str,
+    masked: &str,
+    prefix: &str,
+    marker: &str,
+) -> Result<Vec<(Range<usize>, Range<usize>)>> {
+    let original = text_box_host_spans(original, &text_box_spans(original, prefix)?)?;
+    let masked = private_text_box_host_spans(masked, prefix, marker)?;
+    if original.len() != masked.len() {
+        return Err(Error::Other(
+            "ignored host coordinate projection lost an actual owner".into(),
+        ));
+    }
+    Ok(original.into_iter().zip(masked).collect())
+}
+
+fn guard_story_part(
+    document: &Document,
+    owner: &str,
+    xml: &[u8],
+    kind: ComparisonStoryKind,
+    options: &ComparisonOptions,
+    marker: Option<&str>,
+) -> Result<Vec<GuardItem>> {
+    let source = std::str::from_utf8(xml).map_err(utf8_error)?;
+    let masked;
+    let original_source = source;
+    let mut coordinates = Vec::new();
+    let source = if story_ignored(options, ComparisonStoryKind::TextBox) {
+        let prefix = root_prefix(source, kind.root_local())?;
+        masked = mask_text_box_subtrees(
+            source,
+            &prefix,
+            marker.ok_or_else(|| Error::Other("missing guard textbox marker".into()))?,
+        )?
+        .0;
+        coordinates = guard_mask_coordinates(
+            original_source,
+            &masked,
+            &prefix,
+            marker.ok_or_else(|| Error::Other("missing ignored host coordinate marker".into()))?,
+        )?;
+        masked.as_str()
+    } else {
+        source
+    };
+    let root = root_inner_range(source, kind.root_local())?;
+    let root_bindings = root_namespace_bindings(source, kind.root_local(), &[])?;
+    let mut output = Vec::new();
+    if let Some(local) = kind.owner_local() {
+        for (index, span) in direct_word_element_spans(source, local)?
+            .into_iter()
+            .enumerate()
+        {
+            let owner_start = span.start;
+            let actual = &source[span];
+            if matches!(
+                kind,
+                ComparisonStoryKind::Footnote | ComparisonStoryKind::Endnote
+            ) && !normal_note_owner(actual)?
+            {
+                continue;
+            }
+            let inner = element_inner_range_any_prefix(actual, local)?;
+            let bindings = root_namespace_bindings(actual, local, &root_bindings)?;
+            let model = story_document(&actual[inner.clone()], &bindings)?;
+            output.extend(guard_source_body_at(
+                &model,
+                &actual[inner.clone()],
+                &bindings,
+                document,
+                owner,
+                options,
+                &format!("{}:{owner}/{local}[{index}]", kind.label()),
+                Some((owner_start + inner.start, coordinates.clone())),
+            )?);
+        }
+    } else {
+        let model = story_document(&source[root.clone()], &root_bindings)?;
+        output = guard_source_body_at(
+            &model,
+            &source[root.clone()],
+            &root_bindings,
+            document,
+            owner,
+            options,
+            &format!("{}:{owner}", kind.label()),
+            Some((root.start, coordinates)),
+        )?;
+    }
+    Ok(output)
 }
 
 fn normalized_story_part(
@@ -3835,6 +5886,28 @@ fn project_source_body(
     Ok(output)
 }
 
+fn normalize_drawing_identity(
+    drawing: &mut rdocx_oxml::drawing::CT_Drawing,
+    document: &Document,
+    owner: &str,
+) -> Result<()> {
+    if let Some(inline) = &mut drawing.inline {
+        inline.doc_pr_id = 0;
+        normalize_relationship_id(&mut inline.embed_id, document, owner)?;
+        if let Some(id) = &mut inline.chart_rel_id {
+            normalize_relationship_id(id, document, owner)?;
+        }
+    }
+    if let Some(anchor) = &mut drawing.anchor {
+        anchor.doc_pr_id = 0;
+        normalize_relationship_id(&mut anchor.embed_id, document, owner)?;
+        if let Some(id) = &mut anchor.chart_rel_id {
+            normalize_relationship_id(id, document, owner)?;
+        }
+    }
+    Ok(())
+}
+
 fn normalize_drawing_relationships(
     model: &mut CT_Document,
     document: &Document,
@@ -3842,26 +5915,9 @@ fn normalize_drawing_relationships(
 ) -> Result<()> {
     let mut result = Ok(());
     crate::document::visit_all_drawings_mut(&mut model.body.content, &mut |drawing| {
-        if result.is_err() {
-            return;
+        if result.is_ok() {
+            result = normalize_drawing_identity(drawing, document, owner);
         }
-        result = (|| {
-            if let Some(inline) = &mut drawing.inline {
-                inline.doc_pr_id = 0;
-                normalize_relationship_id(&mut inline.embed_id, document, owner)?;
-                if let Some(id) = &mut inline.chart_rel_id {
-                    normalize_relationship_id(id, document, owner)?;
-                }
-            }
-            if let Some(anchor) = &mut drawing.anchor {
-                anchor.doc_pr_id = 0;
-                normalize_relationship_id(&mut anchor.embed_id, document, owner)?;
-                if let Some(id) = &mut anchor.chart_rel_id {
-                    normalize_relationship_id(id, document, owner)?;
-                }
-            }
-            Ok(())
-        })();
     });
     result
 }
@@ -3912,18 +5968,1044 @@ fn normalize_relationship_id(id: &mut String, document: &Document, owner: &str) 
 /// revise, delete, insert or move it, or mark its paragraph mark, is refused.
 // Frames contain only live immutable parse owners. Nested body calls push a
 // separate frame, and pop on every Result exit before their owners can drop.
+#[derive(Clone)]
+struct RunSource {
+    owner: usize,
+    scoped: String,
+    raw: String,
+    parent: NamespaceBindings,
+    // Indexed by the actual parsed raw ordinal. Root records have no child.
+    raw_slots: Vec<Option<(Range<usize>, usize, bool)>>,
+    typed_slots: Vec<Option<Range<usize>>>,
+    // Only qualified policy projections may change these original physical slots.
+    projected_raw_slots: HashSet<usize>,
+    projected_typed_slots: HashSet<usize>,
+}
+
+impl RunSource {
+    fn capture(run: Option<&CT_R>, parent: &str, span: Range<usize>) -> Result<Self> {
+        #[cfg(test)]
+        if destination_diagnostic_enabled() {
+            policy_diagnostic(
+                "destination_actual_parent",
+                serde_json::json!({"parent_source":parent,"run_span":[span.start,span.end]}),
+            );
+        }
+        let opening = format!(r#"<scope xmlns:w="{W_NS}">"#);
+        let wrapped = format!("{opening}{parent}</scope>");
+        let mut reader = NsReader::from_str(&wrapped);
+        let mut scopes = Vec::new();
+        loop {
+            let before = reader.buffer_position() as usize;
+            let (_, event) = reader
+                .read_resolved_event()
+                .map_err(|error| Error::Other(error.to_string()))?;
+            match event {
+                Event::Start(_) | Event::Empty(_) => {
+                    let bindings = resolved_source_bindings(&reader)?;
+                    if before == opening.len() + span.start {
+                        let raw = parent[span].to_owned();
+                        let mut source = Self {
+                            owner: run.map_or(0, |run| run as *const CT_R as usize),
+                            scoped: source_fragment(&raw, &bindings)?,
+                            raw,
+                            parent: scopes.last().cloned().unwrap_or_default(),
+                            raw_slots: Vec::new(),
+                            typed_slots: Vec::new(),
+                            projected_raw_slots: HashSet::new(),
+                            projected_typed_slots: HashSet::new(),
+                        };
+                        if let Some(run) = run {
+                            source.capture_children(run)?;
+                        }
+                        return Ok(source);
+                    }
+                    if matches!(event, Event::Start(_)) {
+                        scopes.push(bindings);
+                    }
+                }
+                Event::End(_) => {
+                    scopes.pop();
+                }
+                Event::Eof => return Err(Error::Other("run source has no actual opening".into())),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Only root declaration plumbing is projected here, after a physical slot is
+/// already selected. Every non-declaration byte and descendant remains exact.
+fn raw_occurrence_representation(
+    xml: &str,
+    context: &[(String, String)],
+) -> Result<(String, NamespaceBindings)> {
+    let mut initial = Reader::from_str(xml);
+    if !matches!(
+        initial
+            .read_event()
+            .map_err(|error| Error::Other(error.to_string()))?,
+        Event::Start(_) | Event::Empty(_)
+    ) {
+        return Ok((xml.to_owned(), Vec::new()));
+    }
+    let scoped = source_fragment(xml, context)?;
+    let mut reader = NsReader::from_str(&scoped);
+    let (_, event) = reader
+        .read_resolved_event()
+        .map_err(|error| Error::Other(error.to_string()))?;
+    let (Event::Start(root) | Event::Empty(root)) = event else {
+        return Ok((xml.to_owned(), Vec::new()));
+    };
+    let mut bindings = resolved_source_bindings(&reader)?;
+    bindings.sort();
+    let mut ranges = Vec::new();
+    for attribute in root.attributes() {
+        let attribute = attribute.map_err(|error| Error::Other(error.to_string()))?;
+        let key = attribute.key.as_ref();
+        if key != b"xmlns" && !key.starts_with(b"xmlns:") {
+            continue;
+        }
+        let start = key.as_ptr() as usize - scoped.as_ptr() as usize;
+        let end = attribute.value.as_ptr() as usize - scoped.as_ptr() as usize
+            + attribute.value.len()
+            + 1;
+        if start == 0 || end > scoped.len() || !scoped.as_bytes()[start - 1].is_ascii_whitespace() {
+            return Err(Error::Other(
+                "raw occurrence declaration range is invalid".into(),
+            ));
+        }
+        ranges.push(start - 1..end);
+    }
+    let mut lexical = scoped;
+    for range in ranges.into_iter().rev() {
+        lexical.replace_range(range, "");
+    }
+    Ok((lexical, bindings))
+}
+
+impl RunSource {
+    fn capture_children(&mut self, run: &CT_R) -> Result<()> {
+        if run.extra_xml.len() != run.extra_xml_positions.len() {
+            return Err(Error::Other("run raw ownership is unordered".into()));
+        }
+        let mut events = run_source_events(&self.scoped)?;
+        let word = word_element_starts(&self.scoped)?;
+        if run.properties.is_none() {
+            events.retain(|span| {
+                !(word.contains(&span.start)
+                    && element_local_name(&self.scoped[span.clone()]) == "rPr")
+            });
+        }
+        let context = root_namespace_bindings(&self.scoped, "r", &[])?;
+        #[cfg(test)]
+        if destination_diagnostic_enabled() {
+            policy_diagnostic(
+                "destination_captured_run",
+                serde_json::json!({"raw":self.raw,"scoped":self.scoped,"parent_bindings":self.parent,"model":format!("{run:?}")}),
+            );
+        }
+        self.raw_slots.resize(run.extra_xml.len(), None);
+        let mut cursor = 0;
+        let mut boundary = 0;
+        let mut typed = Vec::new();
+        for (ordinal, (&encoded, modeled_raw)) in run
+            .extra_xml_positions
+            .iter()
+            .zip(&run.extra_xml)
+            .enumerate()
+        {
+            if CT_R::raw_child_is_root_attributes(encoded) {
+                continue;
+            }
+            let target = CT_R::raw_child_position(encoded);
+            while boundary < target {
+                let span = events
+                    .get(cursor)
+                    .ok_or_else(|| {
+                        Error::Other("source run raw boundary exceeds its children".into())
+                    })?
+                    .clone();
+                cursor += 1;
+                if word.contains(&span.start)
+                    && element_local_name(&self.scoped[span.clone()]) == "rPr"
+                {
+                    if run.properties.is_some() {
+                        boundary += 1;
+                    }
+                } else {
+                    typed.push(span);
+                    boundary += 1;
+                }
+            }
+            let span = events
+                .get(cursor)
+                .ok_or_else(|| Error::Other("source run has no child for its raw ordinal".into()))?
+                .clone();
+            let comment = word.contains(&span.start)
+                && element_local_name(&self.scoped[span.clone()]) == "commentReference"
+                && run.content.iter().any(|content| matches!(content, RunContent::CommentReference {raw_before, ..} if *raw_before == ordinal + 1));
+            if !comment {
+                let actual = &self.scoped[span.clone()];
+                let modeled = std::str::from_utf8(modeled_raw).map_err(utf8_error)?;
+                if raw_occurrence_representation(actual, &context)?
+                    != raw_occurrence_representation(modeled, &context)?
+                {
+                    #[cfg(test)]
+                    policy_diagnostic(
+                        "raw_role_refusal",
+                        serde_json::json!({
+                            "qualified_path":policy_diagnostic_path(&self.scoped,span.start),"ordinal": ordinal,"target_boundary":target,"actual_boundary":boundary,"event_cursor":cursor,
+                            "span":[span.start,span.end],"actual":actual,"modeled":modeled,
+                            "actual_len":actual.len(),"modeled_len":modeled.len(),
+                            "actual_sha256":Sha256::digest(actual.as_bytes()).iter().map(|byte|format!("{byte:02x}")).collect::<String>(),
+                            "modeled_sha256":Sha256::digest(modeled.as_bytes()).iter().map(|byte|format!("{byte:02x}")).collect::<String>(),
+                            "first_diff":actual.bytes().zip(modeled.bytes()).position(|(a,b)|a!=b).or_else(||(actual.len()!=modeled.len()).then_some(actual.len().min(modeled.len()))),
+                            "actual_representation":format!("{:?}",raw_occurrence_representation(actual,&context)),
+                            "modeled_representation":format!("{:?}",raw_occurrence_representation(modeled,&context)),
+                            "raw_run":self.raw,"scoped_run":self.scoped,"parent_scope":self.parent,"root_scope":context,
+                            "trace":std::backtrace::Backtrace::force_capture().to_string(),
+                        }),
+                    );
+                    return Err(Error::Other(format!(
+                        "source raw ordinal {ordinal} has a different physical role"
+                    )));
+                }
+            }
+            self.raw_slots[ordinal] = Some((span.clone(), target, comment));
+            cursor += 1;
+            if comment {
+                typed.push(span);
+                boundary += 1;
+            }
+        }
+        for span in &events[cursor..] {
+            if !(word.contains(&span.start)
+                && element_local_name(&self.scoped[span.clone()]) == "rPr")
+            {
+                typed.push(span.clone());
+            }
+        }
+        self.typed_slots.resize(run.content.len(), None);
+        let widths = run
+            .content
+            .iter()
+            .map(run_content_source_width)
+            .collect::<Vec<_>>();
+        if widths.iter().sum::<usize>() == typed.len() {
+            let mut at = 0;
+            for (index, width) in widths.into_iter().enumerate() {
+                if width == 1 {
+                    self.typed_slots[index] = Some(typed[at].clone());
+                }
+                at += width;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn run_content_source_width(content: &RunContent) -> usize {
+    match content {
+        RunContent::FootnoteRef {
+            custom_mark: Some(_),
+            ..
+        }
+        | RunContent::EndnoteRef {
+            custom_mark: Some(_),
+            ..
+        } => 2,
+        RunContent::Field(_) => 0,
+        _ => 1,
+    }
+}
+
+/// Full direct run events owned by CT_R, excluding ignored inter-element text.
+fn run_source_events(xml: &str) -> Result<Vec<Range<usize>>> {
+    let (opening, _) = paragraph_shell(Some(xml))?;
+    let mut reader = Reader::from_str(xml);
+    let mut output = Vec::new();
+    loop {
+        let before = reader.buffer_position() as usize;
+        let event = reader
+            .read_event()
+            .map_err(|error| Error::Other(error.to_string()))?;
+        if before < opening.len() {
+            continue;
+        }
+        match event {
+            Event::Start(root) => {
+                reader
+                    .read_to_end(root.name())
+                    .map_err(|error| Error::Other(error.to_string()))?;
+            }
+            Event::Empty(_) | Event::PI(_) | Event::Comment(_) => {}
+            Event::End(_) | Event::Eof => return Ok(output),
+            _ => continue,
+        }
+        output.push(before..reader.buffer_position() as usize);
+    }
+}
+
+fn resolved_source_bindings(reader: &NsReader<&[u8]>) -> Result<NamespaceBindings> {
+    reader
+        .resolver()
+        .bindings()
+        .map(|(prefix, uri)| {
+            let key = match prefix {
+                quick_xml::name::PrefixDeclaration::Default => "xmlns".to_owned(),
+                quick_xml::name::PrefixDeclaration::Named(prefix) => {
+                    format!("xmlns:{}", std::str::from_utf8(prefix).map_err(utf8_error)?)
+                }
+            };
+            let uri = std::str::from_utf8(uri.as_ref()).map_err(utf8_error)?;
+            Ok((
+                key,
+                quick_xml::escape::unescape(uri)
+                    .map_err(|error| Error::Other(error.to_string()))?
+                    .into_owned(),
+            ))
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug)]
+struct FieldSourceOccurrence {
+    input_role: usize,
+    story: String,
+    owner_path: Vec<(u8, usize)>,
+    field_slot: usize,
+    result_ancestors: Vec<Range<usize>>,
+    result_budget: Option<SourceBudget>,
+    carrier_budget: Option<Vec<String>>,
+    part_span: Option<Range<usize>>,
+    part_hash: Option<[u8; 32]>,
+    bounds: Range<usize>,
+    source: String,
+    scope: NamespaceBindings,
+}
+
 #[derive(Default)]
 struct SourceSnapshots {
     properties_only: bool,
+    guard_graphs: bool,
+    field_graphs: HashMap<usize, Vec<(String, String)>>,
+    input_role: usize,
+    story: String,
+    owner_paths: HashMap<usize, Vec<(u8, usize)>>,
+    result_ancestors: HashMap<usize, Vec<Range<usize>>>,
+    result_origins: HashMap<usize, (Range<usize>, usize)>,
+    unproved_result_owners: HashSet<usize>,
+    budget_sources: HashMap<usize, (String, NamespaceBindings)>,
+    budget_holes: HashMap<usize, Vec<SourceBudgetHole>>,
+    budget_offsets: HashMap<usize, usize>,
+    part_base: Option<usize>,
+    part_len: Option<usize>,
+    part_hash: Option<[u8; 32]>,
+    part_projection: Vec<(Range<usize>, Range<usize>)>,
+    part_origins: HashMap<usize, (usize, usize)>,
+    field_occurrences: HashMap<usize, FieldSourceOccurrence>,
     paragraphs: HashMap<usize, String>,
-    runs: HashMap<usize, String>,
+    runs: HashMap<usize, RunSource>,
     tables: HashMap<usize, String>,
     rows: HashMap<usize, String>,
     cells: HashMap<usize, String>,
     controls: HashMap<usize, String>,
+    fields: HashMap<usize, Vec<String>>,
+    field_scopes: HashMap<usize, NamespaceBindings>,
+    roots: HashMap<usize, (String, NamespaceBindings)>,
+    shared_root_runs: HashSet<usize>,
+    shared_root_facts: HashMap<usize, Vec<String>>,
 }
 
 impl SourceSnapshots {
+    fn inherit_owner_path(&mut self, parent: usize, child: usize, role: u8, index: usize) {
+        let mut path = self.owner_paths.get(&parent).cloned().unwrap_or_default();
+        path.push((role, index));
+        self.owner_paths.insert(child, path);
+        if self.unproved_result_owners.contains(&parent) {
+            self.unproved_result_owners.insert(child);
+        }
+        if let Some(ancestors) = self.result_ancestors.get(&parent).cloned() {
+            self.result_ancestors.insert(child, ancestors);
+        }
+    }
+
+    fn inherit_part_origin(
+        &mut self,
+        parent: usize,
+        child: usize,
+        source: &str,
+        child_start: usize,
+    ) -> Result<()> {
+        let Some((base, opening)) = self.part_origins.get(&parent).copied() else {
+            return Ok(());
+        };
+        let (raw, _) = self.roots.get(&parent).ok_or_else(|| {
+            Error::Other("physical child origin has no actual parent source".into())
+        })?;
+        let source_opening = element_opening(source)?.0;
+        let raw_opening = element_opening(raw)?.0;
+        if source[source_opening..] != raw[raw_opening..] {
+            return Err(Error::Other(
+                "physical parent closure changed descendant source".into(),
+            ));
+        }
+        let growth = source_opening
+            .checked_sub(raw_opening)
+            .ok_or_else(|| Error::Other("physical parent closure shortened its opening".into()))?;
+        let start = child_start
+            .checked_sub(growth)
+            .and_then(|start| start.checked_sub(opening))
+            .and_then(|start| base.checked_add(start))
+            .ok_or_else(|| Error::Other("physical child part origin overflow".into()))?;
+        self.part_origins.insert(child, (start, 0));
+        Ok(())
+    }
+
+    fn capture_field_occurrence(
+        &mut self,
+        owner: usize,
+        field: &rdocx_oxml::text::Field,
+        slot: usize,
+        source: &str,
+        bounds: Range<usize>,
+        scope: NamespaceBindings,
+    ) -> Result<()> {
+        if self.unproved_result_owners.contains(&owner) {
+            return Ok(());
+        }
+        if bounds.end > source.len() || bounds.start >= bounds.end {
+            return Err(Error::Other(
+                "field occurrence has unproved actual source bounds".into(),
+            ));
+        }
+        let part_span = self.part_origins.get(&owner).and_then(|(base, opening)| {
+            let offset = self.budget_offsets.get(&owner).copied().unwrap_or(0);
+            let start = bounds
+                .start
+                .checked_add(offset)?
+                .checked_sub(*opening)?
+                .checked_add(*base)?;
+            let end = bounds
+                .end
+                .checked_add(offset)?
+                .checked_sub(*opening)?
+                .checked_add(*base)?;
+            let mut delta = 0i128;
+            for (physical, projected) in &self.part_projection {
+                if start < projected.end && end > projected.start {
+                    return None;
+                }
+                if projected.end <= start {
+                    delta = delta.checked_add(physical.len() as i128 - projected.len() as i128)?;
+                }
+            }
+            let start = usize::try_from((start as i128).checked_add(delta)?).ok()?;
+            let end = usize::try_from((end as i128).checked_add(delta)?).ok()?;
+            (start < end && self.part_len.is_some_and(|length| end <= length)).then_some(start..end)
+        });
+        let actual_source = source[bounds.clone()].to_owned();
+        let mut hole_path = self.owner_paths.get(&owner).cloned().unwrap_or_default();
+        hole_path.push((11, slot));
+        let offset = self.budget_offsets.get(&owner).copied().unwrap_or(0);
+        let hole = bounds
+            .start
+            .checked_add(offset)
+            .zip(bounds.end.checked_add(offset))
+            .map(|(start, end)| start..end)
+            .ok_or_else(|| Error::Other("source-budget field interval overflow".into()))?;
+        self.budget_holes
+            .entry(owner)
+            .or_default()
+            .push((hole_path, 11, hole, scope.clone()));
+        let bounds = if let Some((result, opening)) = self.result_origins.get(&owner) {
+            let start = bounds
+                .start
+                .checked_sub(*opening)
+                .and_then(|offset| result.start.checked_add(offset));
+            let end = bounds
+                .end
+                .checked_sub(*opening)
+                .and_then(|offset| result.start.checked_add(offset));
+            start
+                .zip(end)
+                .filter(|(start, end)| *start >= result.start && *end <= result.end)
+                .map(|(start, end)| start..end)
+                .ok_or_else(|| {
+                    Error::Other(
+                        "nested Field occurrence leaves its actual outer result interval".into(),
+                    )
+                })?
+        } else {
+            bounds
+        };
+        self.field_occurrences.insert(
+            std::ptr::from_ref(field) as usize,
+            FieldSourceOccurrence {
+                input_role: self.input_role,
+                story: self.story.clone(),
+                owner_path: self.owner_paths.get(&owner).cloned().unwrap_or_default(),
+                field_slot: slot,
+                result_budget: None,
+                carrier_budget: None,
+                part_span,
+                part_hash: self.part_hash,
+                result_ancestors: self
+                    .result_ancestors
+                    .get(&owner)
+                    .cloned()
+                    .unwrap_or_default(),
+                source: actual_source,
+                bounds,
+                scope,
+            },
+        );
+        let occurrence = self
+            .field_occurrences
+            .get(&(std::ptr::from_ref(field) as usize))
+            .cloned()
+            .expect("captured field occurrence");
+        self.capture_result_descendants(field, &occurrence)?;
+        Ok(())
+    }
+
+    fn graph_runs(
+        &mut self,
+        runs: &[&CT_R],
+        graphs: &mut Vec<(String, String)>,
+        nested_fields: bool,
+    ) -> Result<()> {
+        for run in runs {
+            for content in &run.content {
+                match content {
+                    RunContent::Drawing(drawing) => {
+                        let slot = graphs.len();
+                        if let Some(inline) = &drawing.inline {
+                            if !inline.embed_id.is_empty() {
+                                graphs.push((
+                                    format!("drawing[{slot}]/inline/image"),
+                                    inline.embed_id.clone(),
+                                ));
+                            }
+                            if let Some(id) = &inline.chart_rel_id {
+                                graphs.push((format!("drawing[{slot}]/inline/chart"), id.clone()));
+                            }
+                        }
+                        if let Some(anchor) = &drawing.anchor {
+                            if !anchor.embed_id.is_empty() {
+                                graphs.push((
+                                    format!("drawing[{slot}]/anchor/image"),
+                                    anchor.embed_id.clone(),
+                                ));
+                            }
+                            if let Some(id) = &anchor.chart_rel_id {
+                                graphs.push((format!("drawing[{slot}]/anchor/chart"), id.clone()));
+                            }
+                            if let Some(body) = anchor
+                                .shape
+                                .as_ref()
+                                .and_then(|shape| shape.text_body.as_ref())
+                            {
+                                self.graph_body(&body.content, graphs)?;
+                            }
+                        }
+                    }
+                    RunContent::Field(field) if nested_fields => {
+                        self.graph_tree(field)?;
+                        fn append(
+                            field: &rdocx_oxml::text::Field,
+                            sources: &SourceSnapshots,
+                            prefix: &str,
+                            graphs: &mut Vec<(String, String)>,
+                        ) {
+                            if let Some(owned) = sources
+                                .field_graphs
+                                .get(&(std::ptr::from_ref(field) as usize))
+                            {
+                                graphs.extend(
+                                    owned
+                                        .iter()
+                                        .map(|(path, id)| (format!("{prefix}/{path}"), id.clone())),
+                                );
+                            }
+                            for (slot, child) in field
+                                .nested_fields_in_source_order()
+                                .into_iter()
+                                .enumerate()
+                            {
+                                append(
+                                    child,
+                                    sources,
+                                    &format!("{prefix}/instruction[{slot}]"),
+                                    graphs,
+                                );
+                            }
+                            for (slot, child) in field
+                                .cached_fields_in_source_order()
+                                .into_iter()
+                                .enumerate()
+                            {
+                                append(child, sources, &format!("{prefix}/result[{slot}]"), graphs);
+                            }
+                        }
+                        let slot = graphs.len();
+                        append(field, self, &format!("textbox-field[{slot}]"), graphs);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn graph_links(&self, paragraph: &CT_P, graphs: &mut Vec<(String, String)>) {
+        use rdocx_oxml::text::{AcceptedRunPathSegment, hyperlink_revision_index};
+        let paths = paragraph.accepted_run_paths();
+        for (slot, link) in paragraph.hyperlinks.iter().enumerate() {
+            let live = paths.iter().any(|path| match path.segments().first() {
+                Some(AcceptedRunPathSegment::Run(index)) => {
+                    link.run_start <= *index && *index < link.run_end
+                }
+                Some(AcceptedRunPathSegment::Revision(index)) => paragraph
+                    .revisions
+                    .get(*index)
+                    .is_some_and(|(_, encoded, _)| {
+                        hyperlink_revision_index(*encoded) == Some(slot)
+                    }),
+                _ => false,
+            });
+            if live && let Some(id) = &link.rel_id {
+                graphs.push((format!("hyperlink[{}]", graphs.len()), id.clone()));
+            }
+        }
+        for (_, _, revision) in &paragraph.revisions {
+            if matches!(
+                revision.kind(),
+                rdocx_oxml::revision::RevisionKind::Insertion
+                    | rdocx_oxml::revision::RevisionKind::MoveTo
+            ) && let Some(owner) = revision.content_paragraph()
+            {
+                self.graph_links(owner, graphs);
+            }
+        }
+        for (_, _, _, control) in &paragraph.content_controls {
+            self.graph_control_links(control, graphs);
+        }
+    }
+
+    fn graph_control_links(&self, control: &CT_Sdt, graphs: &mut Vec<(String, String)>) {
+        for child in &control.content {
+            match child {
+                SdtContent::Paragraph(paragraph) => self.graph_links(paragraph, graphs),
+                SdtContent::ContentControl(control) => self.graph_control_links(control, graphs),
+                _ => {}
+            }
+        }
+        for (_, revision) in control.revisions() {
+            if matches!(
+                revision.kind(),
+                rdocx_oxml::revision::RevisionKind::Insertion
+                    | rdocx_oxml::revision::RevisionKind::MoveTo
+            ) && let Some(owner) = revision.content_paragraph()
+            {
+                self.graph_links(owner, graphs);
+            }
+        }
+    }
+
+    fn graph_paragraph(
+        &mut self,
+        paragraph: &CT_P,
+        graphs: &mut Vec<(String, String)>,
+        nested_fields: bool,
+    ) -> Result<()> {
+        let runs = paragraph
+            .accepted_run_paths()
+            .iter()
+            .filter_map(|path| paragraph.accepted_run(path))
+            .collect::<Vec<_>>();
+        self.graph_runs(&runs, graphs, nested_fields)?;
+        self.graph_links(paragraph, graphs);
+        Ok(())
+    }
+
+    fn graph_cell(&mut self, cell: &CT_Tc, graphs: &mut Vec<(String, String)>) -> Result<()> {
+        for child in &cell.content {
+            match child {
+                CellContent::Paragraph(paragraph) => {
+                    self.graph_paragraph(paragraph, graphs, true)?
+                }
+                CellContent::Table(table) => self.graph_table(table, graphs)?,
+                CellContent::ContentControl(control) => self.graph_control(control, graphs)?,
+            }
+        }
+        Ok(())
+    }
+
+    fn graph_table(&mut self, table: &CT_Tbl, graphs: &mut Vec<(String, String)>) -> Result<()> {
+        for row in &table.rows {
+            for cell in &row.cells {
+                self.graph_cell(cell, graphs)?;
+            }
+            for (_, _, control) in &row.content_controls {
+                self.graph_control(control, graphs)?;
+            }
+        }
+        for (_, _, control) in &table.content_controls {
+            self.graph_control(control, graphs)?;
+        }
+        Ok(())
+    }
+
+    fn graph_control(
+        &mut self,
+        control: &CT_Sdt,
+        graphs: &mut Vec<(String, String)>,
+    ) -> Result<()> {
+        for (slot, child) in control.content.iter().enumerate() {
+            match child {
+                SdtContent::Run(run) => self.graph_runs(&[run], graphs, true)?,
+                SdtContent::Paragraph(paragraph) => {
+                    self.graph_paragraph(paragraph, graphs, true)?
+                }
+                SdtContent::Table(table) => self.graph_table(table, graphs)?,
+                SdtContent::Row(row) => {
+                    for cell in &row.cells {
+                        self.graph_cell(cell, graphs)?;
+                    }
+                }
+                SdtContent::Cell(cell) => self.graph_cell(cell, graphs)?,
+                SdtContent::ContentControl(control) => self.graph_control(control, graphs)?,
+                SdtContent::RawXml(_) => {
+                    if let Some((_, revision)) =
+                        control.revisions().iter().find(|(at, _)| *at == slot)
+                        && matches!(
+                            revision.kind(),
+                            rdocx_oxml::revision::RevisionKind::Insertion
+                                | rdocx_oxml::revision::RevisionKind::MoveTo
+                        )
+                        && let Some(owner) = revision.content_paragraph()
+                    {
+                        self.graph_paragraph(owner, graphs, true)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn graph_body(
+        &mut self,
+        content: &[BodyContent],
+        graphs: &mut Vec<(String, String)>,
+    ) -> Result<()> {
+        for child in content {
+            match child {
+                BodyContent::Paragraph(paragraph) => {
+                    self.graph_paragraph(paragraph, graphs, true)?
+                }
+                BodyContent::Table(table) => self.graph_table(table, graphs)?,
+                BodyContent::ContentControl(control) => self.graph_control(control, graphs)?,
+                BodyContent::RawXml(_) => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn graph_owner(&mut self, field: &rdocx_oxml::text::Field) -> Result<Option<CT_P>> {
+        let key = std::ptr::from_ref(field) as usize;
+        if self.field_graphs.contains_key(&key) {
+            return Ok(None);
+        }
+        self.field_graphs.insert(key, Vec::new());
+        let owner = field.cached_result_owner_projection()?;
+        let mut graphs = Vec::new();
+        if let Some(owner) = &owner {
+            self.graph_paragraph(owner, &mut graphs, false)?;
+        } else if let Some(runs) = field.cached_result_physical_runs() {
+            self.graph_runs(&runs.iter().collect::<Vec<_>>(), &mut graphs, false)?;
+        }
+        self.field_graphs.insert(key, graphs);
+        for child in field.nested_fields_in_source_order() {
+            self.graph_tree(child)?;
+        }
+        Ok(owner)
+    }
+
+    fn graph_tree(&mut self, field: &rdocx_oxml::text::Field) -> Result<()> {
+        if self
+            .field_graphs
+            .contains_key(&(std::ptr::from_ref(field) as usize))
+        {
+            return Ok(());
+        }
+        let _owner = self.graph_owner(field)?;
+        for child in field.cached_fields_in_source_order() {
+            self.graph_tree(child)?;
+        }
+        Ok(())
+    }
+
+    fn capture_result_descendants(
+        &mut self,
+        field: &rdocx_oxml::text::Field,
+        outer: &FieldSourceOccurrence,
+    ) -> Result<()> {
+        let graph_owner = if self.guard_graphs {
+            self.graph_owner(field)?
+        } else {
+            None
+        };
+        if field.cached_fields_in_source_order().is_empty() {
+            return Ok(());
+        }
+        let Ok(interval) = actual_field_result_range(&outer.source, &outer.scope) else {
+            // Keep the existing strict outer source/semantic guard for legacy
+            // unproved geometry. It gains no nested conversion authority.
+            if self.guard_graphs {
+                for child in field.cached_fields_in_source_order() {
+                    self.graph_tree(child)?;
+                }
+            }
+            return Ok(());
+        };
+        let result = &outer.source[interval.clone()];
+        let prepared = if let Some(owner) = graph_owner {
+            owner
+        } else {
+            prepared_field_result_owner(field, result)?
+        };
+        let source = field_result_source_paragraph(result, &outer.scope)?;
+        let key = std::ptr::from_ref(&prepared) as usize;
+        let mut frame = SourceSnapshots {
+            guard_graphs: self.guard_graphs,
+            input_role: outer.input_role,
+            story: outer.story.clone(),
+            ..Default::default()
+        };
+        let mut path = outer.owner_path.clone();
+        path.push((7, outer.field_slot));
+        frame.owner_paths.insert(key, path);
+        frame.part_hash = outer.part_hash;
+        frame.part_len = self.part_len;
+        if let Some(base) = outer
+            .part_span
+            .as_ref()
+            .and_then(|span| span.start.checked_add(interval.start))
+        {
+            frame
+                .part_origins
+                .insert(key, (base, element_opening(&source)?.0));
+        }
+        let mut ancestors = outer.result_ancestors.clone();
+        ancestors.push(interval.clone());
+        frame.result_ancestors.insert(key, ancestors);
+        frame
+            .result_origins
+            .insert(key, (interval, element_opening(&source)?.0));
+        frame
+            .roots
+            .insert(key, (source.clone(), outer.scope.clone()));
+        frame.paragraph(&prepared, &source)?;
+        let budget = frame.result_source_budget()?;
+        let carrier = field_carrier_source_budget(&outer.source, &outer.scope)?;
+        if let Some(occurrence) = self
+            .field_occurrences
+            .get_mut(&(std::ptr::from_ref(field) as usize))
+        {
+            occurrence.result_budget = budget;
+            occurrence.carrier_budget = Some(carrier);
+        }
+        let prepared_fields = prepared
+            .accepted_run_paths()
+            .iter()
+            .filter_map(|path| prepared.accepted_run(path))
+            .flat_map(|run| &run.content)
+            .filter_map(|content| {
+                if let RunContent::Field(field) = content {
+                    Some(field)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let originals = field.cached_fields_in_source_order();
+        if originals.len() != prepared_fields.len() {
+            return Err(Error::Other(
+                "prepared result changed actual accepted child slots".into(),
+            ));
+        }
+        fn bind(
+            original: &rdocx_oxml::text::Field,
+            prepared: &rdocx_oxml::text::Field,
+            frame: &SourceSnapshots,
+            output: &mut SourceSnapshots,
+        ) -> Result<()> {
+            if original.is_complex() != prepared.is_complex()
+                || original.instruction.name != prepared.instruction.name
+                || original.cached_result != prepared.cached_result
+            {
+                return Err(Error::Other(
+                    "prepared result child slot changed its actual source kind or current value"
+                        .into(),
+                ));
+            }
+            let from = std::ptr::from_ref(prepared) as usize;
+            let to = std::ptr::from_ref(original) as usize;
+            let Some(occurrence) = frame.field_occurrences.get(&from).cloned() else {
+                return Ok(());
+            };
+            output.field_occurrences.insert(to, occurrence);
+            if let Some(graphs) = frame.field_graphs.get(&from) {
+                output.field_graphs.insert(to, graphs.clone());
+            }
+            for (original, prepared) in original
+                .nested_fields_in_source_order()
+                .into_iter()
+                .zip(prepared.nested_fields_in_source_order())
+            {
+                fn instruction_graphs(
+                    original: &rdocx_oxml::text::Field,
+                    prepared: &rdocx_oxml::text::Field,
+                    frame: &SourceSnapshots,
+                    output: &mut SourceSnapshots,
+                ) {
+                    if let Some(graphs) = frame
+                        .field_graphs
+                        .get(&(std::ptr::from_ref(prepared) as usize))
+                    {
+                        output
+                            .field_graphs
+                            .insert(std::ptr::from_ref(original) as usize, graphs.clone());
+                    }
+                    for (original, prepared) in original
+                        .nested_fields_in_source_order()
+                        .into_iter()
+                        .zip(prepared.nested_fields_in_source_order())
+                    {
+                        instruction_graphs(original, prepared, frame, output);
+                    }
+                    for (original, prepared) in original
+                        .cached_fields_in_source_order()
+                        .into_iter()
+                        .zip(prepared.cached_fields_in_source_order())
+                    {
+                        instruction_graphs(original, prepared, frame, output);
+                    }
+                }
+                instruction_graphs(original, prepared, frame, output);
+            }
+            if let Some(scope) = frame.field_scopes.get(&from) {
+                output.field_scopes.insert(to, scope.clone());
+            }
+            if let Some(facts) = frame.fields.get(&from) {
+                output.fields.insert(to, facts.clone());
+            }
+            let left = original.cached_fields_in_source_order();
+            let right = prepared.cached_fields_in_source_order();
+            if left.len() != right.len() {
+                return Err(Error::Other(
+                    "prepared nested child slots changed cardinality".into(),
+                ));
+            }
+            for (original, prepared) in left.into_iter().zip(right) {
+                bind(original, prepared, frame, output)?;
+            }
+            Ok(())
+        }
+        for (original, prepared) in originals.into_iter().zip(prepared_fields) {
+            bind(original, prepared, &frame, self)?;
+        }
+        Ok(())
+    }
+
+    fn result_source_budget(&self) -> Result<Option<SourceBudget>> {
+        let mut output = Vec::new();
+        for (key, (source, scope)) in &self.budget_sources {
+            let Some(path) = self.owner_paths.get(key) else {
+                return Ok(None);
+            };
+            let (lexical, bindings) = raw_occurrence_representation(source, scope)?;
+            let growth = element_opening(source)?
+                .0
+                .checked_sub(element_opening(&lexical)?.0)
+                .ok_or_else(|| {
+                    Error::Other("source-budget namespace projection grew its opening".into())
+                })?;
+            let mut holes = self.budget_holes.get(key).cloned().unwrap_or_default();
+            holes.sort_by_key(|(_, _, interval, _)| (interval.start, interval.end));
+            let mut facts = vec![format!("scope:{:?}", conversion_namespace_facts(bindings))];
+            let mut cursor = 0usize;
+            let mut seen = HashSet::new();
+            for (ordinal, (child, kind, interval, context)) in holes.into_iter().enumerate() {
+                if interval.start >= interval.end
+                    || interval.end > source.len()
+                    || !seen.insert((child.clone(), kind))
+                {
+                    return Ok(None);
+                }
+                let start = interval.start.checked_sub(growth);
+                let end = interval.end.checked_sub(growth);
+                let Some((start, end)) = start
+                    .zip(end)
+                    .filter(|(start, end)| *start >= cursor && *end <= lexical.len())
+                else {
+                    return Ok(None);
+                };
+                if kind != 11
+                    && !self
+                        .budget_sources
+                        .keys()
+                        .any(|key| self.owner_paths.get(key) == Some(&child))
+                {
+                    return Ok(None);
+                }
+                facts.push(format!("outside:{:?}", &lexical[cursor..start]));
+                facts.push(format!(
+                    "hole:{ordinal}:{child:?}:{kind}:{:?}",
+                    conversion_namespace_facts(context)
+                ));
+                cursor = end;
+            }
+            facts.push(format!("outside:{:?}", &lexical[cursor..]));
+            output.push((path.clone(), facts));
+        }
+        output.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(Some(output))
+    }
+
+    fn revision_result(
+        &mut self,
+        revision: &rdocx_oxml::revision::CT_Revision,
+        raw: &[u8],
+        parent: usize,
+        ordinal: usize,
+        inherited: &NamespaceBindings,
+    ) -> Result<()> {
+        if !matches!(
+            revision.kind(),
+            rdocx_oxml::revision::RevisionKind::Insertion
+                | rdocx_oxml::revision::RevisionKind::MoveTo
+        ) {
+            return Ok(());
+        }
+        let Some(paragraph) = revision.content_paragraph() else {
+            return Ok(());
+        };
+        let raw = std::str::from_utf8(raw).map_err(utf8_error)?;
+        let scope = actual_root_bindings(raw, inherited)?;
+        let local = element_local_name(raw);
+        let inner = element_inner_range_any_prefix(raw, local)?;
+        let source = field_result_source_paragraph(&raw[inner.clone()], &scope)?;
+        let key = std::ptr::from_ref(paragraph) as usize;
+        self.inherit_owner_path(parent, key, 10, ordinal);
+        self.result_origins
+            .insert(key, (inner, element_opening(&source)?.0));
+        self.roots.insert(key, (source.clone(), scope));
+        self.paragraph(paragraph, &source)
+    }
+
     fn body(
         &mut self,
         document: &CT_Document,
@@ -3935,6 +7017,18 @@ impl SourceSnapshots {
             if held.holds(Some(index)) {
                 continue;
             }
+            let key = match content {
+                BodyContent::Paragraph(p) => p.as_ref() as *const _ as usize,
+                BodyContent::Table(t) => t.as_ref() as *const _ as usize,
+                BodyContent::ContentControl(c) => c.as_ref() as *const _ as usize,
+                BodyContent::RawXml(_) => continue,
+            };
+            self.owner_paths.insert(key, vec![(0, index)]);
+            if let Some(base) = self.part_base.and_then(|base| base.checked_add(span.start)) {
+                self.part_origins.insert(key, (base, 0));
+            }
+            self.roots
+                .insert(key, (xml[span.clone()].to_owned(), bindings.to_vec()));
             self.content(content, &source_fragment(&xml[span.clone()], bindings)?)?;
         }
         Ok(())
@@ -3950,77 +7044,546 @@ impl SourceSnapshots {
     }
 
     fn paragraph(&mut self, paragraph: &CT_P, xml: &str) -> Result<()> {
-        self.paragraphs
-            .insert(paragraph as *const CT_P as usize, xml.to_owned());
-        if !self.properties_only {
-            let runs = modeled_paragraph_run_spans(paragraph, xml)?;
-            for (run, span) in paragraph.runs.iter().zip(runs) {
-                if !run_is_field(run) {
-                    self.runs
-                        .insert(run as *const CT_R as usize, source_child(xml, span)?);
+        #[cfg(test)]
+        if destination_diagnostic_enabled() {
+            policy_diagnostic(
+                "destination_owner_classification",
+                serde_json::json!({"kind":"paragraph","source":xml,"model":format!("{paragraph:?}"),"existing_owning_residual":format!("{:?}",rdocx_oxml::properties::protected_source_residual(xml.as_bytes(),&[]))}),
+            );
+        }
+        #[cfg(test)]
+        if destination_diagnostic_enabled() {
+            for (index, run) in paragraph.runs.iter().enumerate() {
+                let fields=run.content.iter().filter_map(|content|match content {RunContent::Field(field)=>Some(serde_json::json!({
+                    "owner_id":field.source_owner_id(),"model":format!("{field:?}"),
+                    "actual_source_fragment":field.source_replacement().ok().flatten().map(|(raw,_)|String::from_utf8_lossy(raw).into_owned()),
+                    "detached_source":format!("{:?}",field.detached_source().map(|raw|raw.map(|raw|String::from_utf8_lossy(&raw).into_owned()))),
+                    "source_replacement":format!("{:?}",field.source_replacement().map(|source|source.map(|(raw,replacement)|(String::from_utf8_lossy(raw).into_owned(),String::from_utf8_lossy(&replacement).into_owned())))),
+                })),_=>None}).collect::<Vec<_>>();
+                if !fields.is_empty()
+                    || paragraph
+                        .field_source_run_fragments_at(index)
+                        .is_ok_and(|value| value.is_some())
+                {
+                    policy_diagnostic(
+                        "destination_actual_inner_field_bridge",
+                        serde_json::json!({"paragraph":xml,"run":index,
+                        "bridge":format!("{:?}",paragraph.field_source_run_fragments_at(index).map(|source|source.map(|(coverage,fragments)|(coverage,fragments.into_iter().map(|raw|raw.map(|raw|String::from_utf8_lossy(&raw).into_owned())).collect::<Vec<_>>())))),"fields":fields}),
+                    );
                 }
             }
         }
+        self.paragraphs
+            .insert(paragraph as *const CT_P as usize, xml.to_owned());
+        let actual_parent_scope = self
+            .roots
+            .get(&(std::ptr::from_ref(paragraph) as usize))
+            .map(|(raw, inherited)| actual_root_bindings(raw, inherited))
+            .transpose()?
+            .unwrap_or(actual_root_bindings(xml, &Vec::new())?);
+
+        let (opening, closing) = paragraph_shell(Some(xml))?;
+        let mut shared_fields = HashSet::new();
+        let mut group_roots = Vec::new();
+        let mut shared_index = 0;
+        while shared_index < paragraph.runs.len() {
+            if let Some((coverage, _)) = paragraph.field_source_run_fragments_at(shared_index)? {
+                let mut owners = Vec::new();
+                if paragraph.field_source_replacements_at(shared_index, &mut owners)? != coverage
+                    || owners.len() != 1
+                {
+                    return Err(Error::Other(
+                        "shared field root coverage is unproved".into(),
+                    ));
+                }
+                let raw = std::str::from_utf8(&owners[0].0).map_err(utf8_error)?;
+                let parent = format!("{opening}{raw}{closing}");
+                let mut roots = Vec::new();
+                for span in paragraph_run_spans(&parent)? {
+                    roots.extend(source_root_metadata(
+                        &source_child(&parent, span)?,
+                        &Vec::new(),
+                    )?);
+                }
+                if !roots.is_empty() {
+                    group_roots.extend(roots);
+                    for run in &paragraph.runs[shared_index..shared_index + coverage] {
+                        self.shared_root_runs.insert(run as *const CT_R as usize);
+                        for content in &run.content {
+                            if let RunContent::Field(field) = content {
+                                shared_fields.insert(field as *const _ as usize);
+                            }
+                        }
+                    }
+                }
+                shared_index += coverage;
+            } else {
+                shared_index += 1;
+            }
+        }
+        if !group_roots.is_empty() {
+            self.shared_root_facts
+                .insert(paragraph as *const CT_P as usize, group_roots);
+        }
+        let mut root_reader = Reader::from_str(&opening);
+        let Event::Start(mut root) = root_reader
+            .read_event()
+            .map_err(|error| Error::Other(error.to_string()))?
+        else {
+            unreachable!()
+        };
+        let namespaces = root
+            .attributes()
+            .filter_map(|attribute| match attribute {
+                Ok(attribute)
+                    if attribute.key.as_ref() == b"xmlns"
+                        || attribute.key.as_ref().starts_with(b"xmlns:") =>
+                {
+                    Some(Ok((
+                        attribute.key.as_ref().to_vec(),
+                        attribute.value.as_ref().to_vec(),
+                    )))
+                }
+                Ok(_) => None,
+                Err(error) => Some(Err(Error::Other(error.to_string()))),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        root.clear_attributes();
+        for (key, value) in &namespaces {
+            root.push_attribute((key.as_slice(), value.as_slice()));
+        }
+        let mut parent_writer = Writer::new(Vec::new());
+        parent_writer.write_event(Event::Start(root))?;
+        let opening = String::from_utf8(parent_writer.into_inner()).map_err(utf8_error)?;
+        let mut field_spans = modeled_paragraph_run_spans(paragraph, xml)?;
+        // Legacy rendering keeps zero-length continuation placeholders. A source
+        // witness instead retains the proven whole physical span at every actual
+        // logical slot of that same shared group.
+        let mut source_index = 0usize;
+        while source_index < paragraph.runs.len() {
+            if let Some((coverage, _)) = paragraph.field_source_run_fragments_at(source_index)? {
+                let first = field_spans
+                    .get(source_index)
+                    .ok_or_else(|| {
+                        Error::Other("shared field occurrence has no source start".into())
+                    })?
+                    .start;
+                let end = field_spans
+                    .get(source_index..source_index + coverage)
+                    .and_then(|spans| spans.iter().map(|span| span.end).max())
+                    .ok_or_else(|| {
+                        Error::Other("shared field occurrence has no physical extent".into())
+                    })?;
+                if first >= end {
+                    return Err(Error::Other("shared field physical extent is empty".into()));
+                }
+                for span in &mut field_spans[source_index..source_index + coverage] {
+                    *span = first..end;
+                }
+                source_index += coverage;
+            } else {
+                source_index += 1;
+            }
+        }
+        let physical_owner = self
+            .roots
+            .get(&(std::ptr::from_ref(paragraph) as usize))
+            .map(|(raw, _)| raw.clone())
+            .unwrap_or_else(|| xml.to_owned());
+        self.budget_sources.insert(
+            std::ptr::from_ref(paragraph) as usize,
+            (physical_owner.clone(), actual_parent_scope.clone()),
+        );
+        let closure_growth = element_opening(xml)?
+            .0
+            .checked_sub(element_opening(&physical_owner)?.0)
+            .ok_or_else(|| {
+                Error::Other("field owner namespace closure changed its source boundary".into())
+            })?;
+        let mut field_slot = 0usize;
+        for (run_index, run) in paragraph.runs.iter().enumerate() {
+            for content in &run.content {
+                if let RunContent::Field(field) = content {
+                    let span = field_spans.get(run_index).ok_or_else(|| {
+                        Error::Other("field source run occurrence is missing".into())
+                    })?;
+                    let physical_span = span
+                        .start
+                        .checked_sub(closure_growth)
+                        .zip(span.end.checked_sub(closure_growth))
+                        .map(|(start, end)| start..end)
+                        .ok_or_else(|| {
+                            Error::Other("field source occurrence precedes its actual owner".into())
+                        })?;
+                    let actual_field_source = &physical_owner[physical_span.clone()];
+                    let actual_scope = actual_root_bindings(
+                        actual_field_source,
+                        &publication_parent_at(xml, span.start)?,
+                    )?;
+                    self.capture_field_occurrence(
+                        std::ptr::from_ref(paragraph) as usize,
+                        field,
+                        field_slot,
+                        &physical_owner,
+                        physical_span,
+                        actual_scope,
+                    )?;
+                    field_slot += 1;
+                    let raw = if let Some(raw) = field.detached_source()? {
+                        raw
+                    } else {
+                        field
+                            .source_replacement()?
+                            .map(|(raw, _)| raw.to_vec())
+                            .unwrap_or_else(|| actual_field_source.as_bytes().to_vec())
+                    };
+                    let raw = std::str::from_utf8(&raw).map_err(utf8_error)?;
+                    let scope = actual_root_bindings(raw, &actual_parent_scope)?;
+                    self.field_scopes
+                        .insert(std::ptr::from_ref(field) as usize, scope);
+                    let view = source_without_text_properties(
+                        &format!("{opening}{raw}{closing}"),
+                        &Vec::new(),
+                    )?;
+                    let view = if shared_fields.contains(&(field as *const _ as usize)) {
+                        source_without_run_root_attributes(&view)?
+                    } else {
+                        view
+                    };
+                    let facts = field_source_metadata(&view, field.is_complex())?;
+                    self.fields.insert(field as *const _ as usize, facts);
+                }
+            }
+        }
+
+        if !self.properties_only {
+            let spans = modeled_paragraph_run_spans(paragraph, xml)?;
+            let (opening, closing) = paragraph_shell(Some(xml))?;
+            let mut index = 0;
+            while index < paragraph.runs.len() {
+                if let Some((coverage, fragments)) =
+                    paragraph.field_source_run_fragments_at(index)?
+                {
+                    for (run, fragment) in paragraph.runs[index..index + coverage]
+                        .iter()
+                        .zip(fragments)
+                    {
+                        if let Some(raw) = fragment {
+                            let raw = String::from_utf8(raw).map_err(utf8_error)?;
+                            let wrapped = format!("{opening}{raw}{closing}");
+                            self.runs.insert(
+                                run as *const CT_R as usize,
+                                RunSource::capture(
+                                    Some(run),
+                                    &wrapped,
+                                    opening.len()..opening.len() + raw.len(),
+                                )?,
+                            );
+                        }
+                    }
+                    index += coverage;
+                    continue;
+                }
+                let run = &paragraph.runs[index];
+                if !run_is_field(run) {
+                    self.runs.insert(
+                        run as *const CT_R as usize,
+                        RunSource::capture(Some(run), xml, spans[index].clone())?,
+                    );
+                }
+                index += 1;
+            }
+        }
         let controls = direct_word_element_spans(xml, "sdt")?;
-        for ((_, _, _, control), span) in paragraph.content_controls.iter().zip(controls) {
+        for (index, ((_, _, _, control), span)) in
+            paragraph.content_controls.iter().zip(controls).enumerate()
+        {
+            self.inherit_owner_path(
+                std::ptr::from_ref(paragraph) as usize,
+                std::ptr::from_ref(control) as usize,
+                1,
+                index,
+            );
+            self.inherit_part_origin(
+                std::ptr::from_ref(paragraph) as usize,
+                std::ptr::from_ref(control) as usize,
+                xml,
+                span.start,
+            )?;
+            let path = self
+                .owner_paths
+                .get(&(std::ptr::from_ref(control) as usize))
+                .cloned()
+                .unwrap_or_default();
+            let hole = span
+                .start
+                .checked_sub(closure_growth)
+                .zip(span.end.checked_sub(closure_growth))
+                .map(|(start, end)| start..end)
+                .ok_or_else(|| {
+                    Error::Other("control budget interval precedes physical owner".into())
+                })?;
+            self.budget_holes
+                .entry(std::ptr::from_ref(paragraph) as usize)
+                .or_default()
+                .push((
+                    path,
+                    1,
+                    hole,
+                    actual_root_bindings(
+                        &xml[span.clone()],
+                        &publication_parent_at(xml, span.start)?,
+                    )?,
+                ));
+            self.roots.insert(
+                control as *const CT_Sdt as usize,
+                (
+                    xml[span.clone()].to_owned(),
+                    publication_parent_at(xml, span.start)?,
+                ),
+            );
             self.control(control, &source_child(xml, span)?)?;
+        }
+        for (ordinal, (at, raw_before, revision)) in paragraph.revisions.iter().enumerate() {
+            let raw = paragraph
+                .extra_xml
+                .iter()
+                .filter(|(boundary, _)| boundary == at)
+                .nth(*raw_before)
+                .map(|(_, raw)| raw.as_slice())
+                .ok_or_else(|| {
+                    Error::Other("canonical revision has no actual owning raw slot".into())
+                })?;
+            self.revision_result(
+                revision,
+                raw,
+                std::ptr::from_ref(paragraph) as usize,
+                ordinal,
+                &actual_parent_scope,
+            )?;
         }
         Ok(())
     }
 
     fn table(&mut self, table: &CT_Tbl, xml: &str) -> Result<()> {
+        #[cfg(test)]
+        if destination_diagnostic_enabled() {
+            policy_diagnostic(
+                "destination_owner_classification",
+                serde_json::json!({"kind":"table","source":xml,"model":format!("{table:?}"),"existing_owning_residual":format!("{:?}",rdocx_oxml::properties::protected_source_residual(xml.as_bytes(),&[]))}),
+            );
+        }
         self.tables
             .insert(table as *const CT_Tbl as usize, xml.to_owned());
-        for (row, span) in table.rows.iter().zip(direct_word_element_spans(xml, "tr")?) {
+        for (index, (row, span)) in table
+            .rows
+            .iter()
+            .zip(direct_word_element_spans(xml, "tr")?)
+            .enumerate()
+        {
+            self.inherit_owner_path(
+                std::ptr::from_ref(table) as usize,
+                std::ptr::from_ref(row) as usize,
+                2,
+                index,
+            );
+            self.inherit_part_origin(
+                std::ptr::from_ref(table) as usize,
+                std::ptr::from_ref(row) as usize,
+                xml,
+                span.start,
+            )?;
+            self.roots.insert(
+                row as *const CT_Row as usize,
+                (
+                    xml[span.clone()].to_owned(),
+                    publication_parent_at(xml, span.start)?,
+                ),
+            );
             self.row(row, &source_child(xml, span)?)?;
         }
-        for ((_, _, control), span) in table
+        for (index, ((_, _, control), span)) in table
             .content_controls
             .iter()
             .zip(direct_word_element_spans(xml, "sdt")?)
+            .enumerate()
         {
+            self.inherit_owner_path(
+                std::ptr::from_ref(table) as usize,
+                std::ptr::from_ref(control) as usize,
+                4,
+                index,
+            );
+            self.inherit_part_origin(
+                std::ptr::from_ref(table) as usize,
+                std::ptr::from_ref(control) as usize,
+                xml,
+                span.start,
+            )?;
+            self.roots.insert(
+                control as *const CT_Sdt as usize,
+                (
+                    xml[span.clone()].to_owned(),
+                    publication_parent_at(xml, span.start)?,
+                ),
+            );
             self.control(control, &source_child(xml, span)?)?;
         }
         Ok(())
     }
 
     fn row(&mut self, row: &CT_Row, xml: &str) -> Result<()> {
+        #[cfg(test)]
+        if destination_diagnostic_enabled() {
+            policy_diagnostic(
+                "destination_owner_classification",
+                serde_json::json!({"kind":"row","source":xml,"model":format!("{row:?}"),"existing_owning_residual":format!("{:?}",rdocx_oxml::properties::protected_source_residual(xml.as_bytes(),&[]))}),
+            );
+        }
         self.rows
             .insert(row as *const CT_Row as usize, xml.to_owned());
-        for (cell, span) in row.cells.iter().zip(direct_word_element_spans(xml, "tc")?) {
+        for (index, (cell, span)) in row
+            .cells
+            .iter()
+            .zip(direct_word_element_spans(xml, "tc")?)
+            .enumerate()
+        {
+            self.inherit_owner_path(
+                std::ptr::from_ref(row) as usize,
+                std::ptr::from_ref(cell) as usize,
+                3,
+                index,
+            );
+            self.inherit_part_origin(
+                std::ptr::from_ref(row) as usize,
+                std::ptr::from_ref(cell) as usize,
+                xml,
+                span.start,
+            )?;
+            self.roots.insert(
+                cell as *const CT_Tc as usize,
+                (
+                    xml[span.clone()].to_owned(),
+                    publication_parent_at(xml, span.start)?,
+                ),
+            );
             self.cell(cell, &source_child(xml, span)?)?;
         }
-        for ((_, _, control), span) in row
+        for (index, ((_, _, control), span)) in row
             .content_controls
             .iter()
             .zip(direct_word_element_spans(xml, "sdt")?)
+            .enumerate()
         {
+            self.inherit_owner_path(
+                std::ptr::from_ref(row) as usize,
+                std::ptr::from_ref(control) as usize,
+                4,
+                index,
+            );
+            self.inherit_part_origin(
+                std::ptr::from_ref(row) as usize,
+                std::ptr::from_ref(control) as usize,
+                xml,
+                span.start,
+            )?;
+            self.roots.insert(
+                control as *const CT_Sdt as usize,
+                (
+                    xml[span.clone()].to_owned(),
+                    publication_parent_at(xml, span.start)?,
+                ),
+            );
             self.control(control, &source_child(xml, span)?)?;
         }
         Ok(())
     }
 
     fn cell(&mut self, cell: &CT_Tc, xml: &str) -> Result<()> {
+        #[cfg(test)]
+        if destination_diagnostic_enabled() {
+            policy_diagnostic(
+                "destination_owner_classification",
+                serde_json::json!({"kind":"cell","source":xml,"model":format!("{cell:?}"),"existing_owning_residual":format!("{:?}",rdocx_oxml::properties::protected_source_residual(xml.as_bytes(),&[]))}),
+            );
+        }
         self.cells
             .insert(cell as *const CT_Tc as usize, xml.to_owned());
-        for (child, (_, span)) in
-            cell.content
-                .iter()
-                .zip(cell_child_spans(cell, xml, "source snapshot")?)
+        for (index, (child, (_, span))) in cell
+            .content
+            .iter()
+            .zip(cell_child_spans(cell, xml, "source snapshot")?)
+            .enumerate()
         {
-            let source = source_child(xml, span)?;
+            let child_key = match child {
+                CellContent::Paragraph(p) => std::ptr::from_ref(p) as usize,
+                CellContent::Table(t) => std::ptr::from_ref(t) as usize,
+                CellContent::ContentControl(c) => std::ptr::from_ref(c) as usize,
+            };
+            self.inherit_owner_path(std::ptr::from_ref(cell) as usize, child_key, 5, index);
+            self.inherit_part_origin(
+                std::ptr::from_ref(cell) as usize,
+                child_key,
+                xml,
+                span.start,
+            )?;
+            let source = source_child(xml, span.clone())?;
             match child {
-                CellContent::Paragraph(p) => self.paragraph(p, &source)?,
-                CellContent::Table(t) => self.table(t, &source)?,
-                CellContent::ContentControl(c) => self.control(c, &source)?,
+                CellContent::Paragraph(p) => {
+                    self.roots.insert(
+                        p as *const CT_P as usize,
+                        (
+                            xml[span.clone()].to_owned(),
+                            publication_parent_at(xml, span.start)?,
+                        ),
+                    );
+                    self.paragraph(p, &source)?
+                }
+                CellContent::Table(t) => {
+                    self.roots.insert(
+                        t as *const CT_Tbl as usize,
+                        (
+                            xml[span.clone()].to_owned(),
+                            publication_parent_at(xml, span.start)?,
+                        ),
+                    );
+                    self.table(t, &source)?
+                }
+                CellContent::ContentControl(c) => {
+                    self.roots.insert(
+                        c as *const CT_Sdt as usize,
+                        (
+                            xml[span.clone()].to_owned(),
+                            publication_parent_at(xml, span.start)?,
+                        ),
+                    );
+                    self.control(c, &source)?
+                }
             }
         }
         Ok(())
     }
 
     fn control(&mut self, control: &CT_Sdt, xml: &str) -> Result<()> {
+        #[cfg(test)]
+        if destination_diagnostic_enabled() {
+            policy_diagnostic(
+                "destination_owner_classification",
+                serde_json::json!({"kind":"control","source":xml,"model":format!("{control:?}"),"existing_owning_residual":format!("{:?}",rdocx_oxml::properties::protected_source_residual(xml.as_bytes(),&[]))}),
+            );
+        }
         self.controls
             .insert(control as *const CT_Sdt as usize, xml.to_owned());
+        let (budget_source, budget_scope) = self
+            .roots
+            .get(&(std::ptr::from_ref(control) as usize))
+            .cloned()
+            .unwrap_or_else(|| (xml.to_owned(), Vec::new()));
+        let budget_scope = actual_root_bindings(&budget_source, &budget_scope)?;
+        self.budget_sources.insert(
+            std::ptr::from_ref(control) as usize,
+            (budget_source, budget_scope),
+        );
         let content = modeled_control_content(control);
         if content.is_empty() {
             return Ok(());
@@ -4030,31 +7593,443 @@ impl SourceSnapshots {
             .first()
             .ok_or_else(|| Error::Other("source control has no content".into()))?;
         let payload = source_child(xml, span.clone())?;
-        let spans = direct_element_spans(&payload)?;
-        if spans.len() != content.len() {
+        let (raw_control, parent_scope) = self
+            .roots
+            .get(&(std::ptr::from_ref(control) as usize))
+            .map(|(raw, scope)| (raw.clone(), scope.clone()))
+            .unwrap_or_else(|| (xml.to_owned(), Vec::new()));
+        let control_scope = actual_root_bindings(&raw_control, &parent_scope)?;
+        let raw_content =
+            direct_word_element_spans_in_scope(&raw_control, "sdtContent", &control_scope)?;
+        if raw_content.len() != 1 {
             return Err(Error::Other(
-                "source control ownership does not match its model".into(),
+                "control has no unique actual physical content owner".into(),
             ));
         }
-        for (child, span) in content.into_iter().zip(spans) {
-            let source = source_child(&payload, span)?;
+        let raw_payload = &raw_control[raw_content[0].clone()];
+        self.budget_offsets
+            .insert(std::ptr::from_ref(control) as usize, raw_content[0].start);
+        let closure_growth = element_opening(&payload)?
+            .0
+            .checked_sub(element_opening(raw_payload)?.0)
+            .ok_or_else(|| {
+                Error::Other("control content closure shortened its physical opening".into())
+            })?;
+        if payload[element_opening(&payload)?.0..] != raw_payload[element_opening(raw_payload)?.0..]
+        {
+            return Err(Error::Other(
+                "control content closure changed physical descendants".into(),
+            ));
+        }
+        let spans = modeled_control_source_spans(&content, &payload)?;
+        let mut field_slot = 0usize;
+        for (index, (child, span)) in content.into_iter().zip(spans).enumerate() {
+            let child_key = match child {
+                SdtContent::Paragraph(p) => Some(std::ptr::from_ref(p) as usize),
+                SdtContent::Table(t) => Some(std::ptr::from_ref(t) as usize),
+                SdtContent::Row(r) => Some(std::ptr::from_ref(r) as usize),
+                SdtContent::Cell(c) => Some(std::ptr::from_ref(c) as usize),
+                SdtContent::ContentControl(c) => Some(std::ptr::from_ref(c) as usize),
+                _ => None,
+            };
+            if let Some(child_key) = child_key {
+                self.inherit_owner_path(std::ptr::from_ref(control) as usize, child_key, 6, index);
+                let start = span
+                    .start
+                    .checked_sub(closure_growth)
+                    .and_then(|start| raw_content[0].start.checked_add(start))
+                    .ok_or_else(|| {
+                        Error::Other("control child source coordinate overflow".into())
+                    })?;
+                self.inherit_part_origin(
+                    std::ptr::from_ref(control) as usize,
+                    child_key,
+                    &raw_control,
+                    start,
+                )?;
+            }
+            // Raw events participate in correlation but already own their bytes.
+            // PI and comment events have no element opening to namespace-close.
+            if matches!(child, SdtContent::RawXml(_)) {
+                continue;
+            }
+            let source = source_child(&payload, span.clone())?;
             match child {
-                SdtContent::Paragraph(p) => self.paragraph(p, &source)?,
-                SdtContent::Table(t) => self.table(t, &source)?,
-                SdtContent::Row(r) => self.row(r, &source)?,
-                SdtContent::Cell(c) => self.cell(c, &source)?,
-                SdtContent::ContentControl(c) => self.control(c, &source)?,
+                SdtContent::Paragraph(p) => {
+                    self.roots.insert(
+                        p as *const CT_P as usize,
+                        (
+                            payload[span.clone()].to_owned(),
+                            publication_parent_at(&payload, span.start)?,
+                        ),
+                    );
+                    self.paragraph(p, &source)?;
+                }
+                SdtContent::Table(t) => {
+                    self.roots.insert(
+                        t as *const CT_Tbl as usize,
+                        (
+                            payload[span.clone()].to_owned(),
+                            publication_parent_at(&payload, span.start)?,
+                        ),
+                    );
+                    self.table(t, &source)?;
+                }
+                SdtContent::Row(r) => {
+                    self.roots.insert(
+                        r as *const CT_Row as usize,
+                        (
+                            payload[span.clone()].to_owned(),
+                            publication_parent_at(&payload, span.start)?,
+                        ),
+                    );
+                    self.row(r, &source)?;
+                }
+                SdtContent::Cell(c) => {
+                    self.roots.insert(
+                        c as *const CT_Tc as usize,
+                        (
+                            payload[span.clone()].to_owned(),
+                            publication_parent_at(&payload, span.start)?,
+                        ),
+                    );
+                    self.cell(c, &source)?;
+                }
+                SdtContent::ContentControl(c) => {
+                    let path = self
+                        .owner_paths
+                        .get(&(std::ptr::from_ref(c) as usize))
+                        .cloned()
+                        .unwrap_or_default();
+                    let start = span
+                        .start
+                        .checked_sub(closure_growth)
+                        .and_then(|offset| raw_content[0].start.checked_add(offset));
+                    let end = span
+                        .end
+                        .checked_sub(closure_growth)
+                        .and_then(|offset| raw_content[0].start.checked_add(offset));
+                    let hole = start
+                        .zip(end)
+                        .map(|(start, end)| start..end)
+                        .ok_or_else(|| {
+                            Error::Other("nested control source-budget interval overflow".into())
+                        })?;
+                    self.budget_holes
+                        .entry(std::ptr::from_ref(control) as usize)
+                        .or_default()
+                        .push((
+                            path,
+                            6,
+                            hole,
+                            actual_root_bindings(
+                                &source,
+                                &publication_parent_at(&payload, span.start)?,
+                            )?,
+                        ));
+                    self.roots.insert(
+                        c as *const CT_Sdt as usize,
+                        (
+                            payload[span.clone()].to_owned(),
+                            publication_parent_at(&payload, span.start)?,
+                        ),
+                    );
+                    self.control(c, &source)?;
+                }
                 SdtContent::Run(r) => {
-                    self.runs.insert(r as *const CT_R as usize, source);
+                    let fields = r
+                        .content
+                        .iter()
+                        .filter_map(|content| match content {
+                            RunContent::Field(field) => Some(field),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    if fields.is_empty() {
+                        if !self.properties_only {
+                            self.runs.insert(
+                                r as *const CT_R as usize,
+                                RunSource::capture(Some(r), &payload, span)?,
+                            );
+                        }
+                    } else {
+                        for field in fields {
+                            let scope = actual_root_bindings(
+                                &source,
+                                &actual_root_bindings(&payload, &Vec::new())?,
+                            )?;
+                            self.capture_field_occurrence(
+                                std::ptr::from_ref(control) as usize,
+                                field,
+                                field_slot,
+                                raw_payload,
+                                span.start.checked_sub(closure_growth)
+                                    .zip(span.end.checked_sub(closure_growth))
+                                    .map(|(start, end)| start..end)
+                                    .ok_or_else(|| Error::Other("control field source precedes its actual content owner".into()))?,
+                                scope.clone(),
+                            )?;
+                            field_slot += 1;
+                            self.field_scopes
+                                .insert(std::ptr::from_ref(field) as usize, scope.clone());
+                            self.fields.insert(
+                                std::ptr::from_ref(field) as usize,
+                                field_source_metadata(
+                                    &source_without_text_properties(
+                                        &field_result_source_paragraph(&source, &scope)?,
+                                        &Vec::new(),
+                                    )?,
+                                    field.is_complex(),
+                                )?,
+                            );
+                        }
+                    }
                 }
                 SdtContent::RawXml(_) => {}
             }
+        }
+        let content_scope = actual_root_bindings(raw_payload, &control_scope)?;
+        for (ordinal, (slot, revision)) in control.revisions().iter().enumerate() {
+            let Some(SdtContent::RawXml(raw)) = control.content.get(*slot) else {
+                return Err(Error::Other(
+                    "control revision has no actual raw content slot".into(),
+                ));
+            };
+            self.revision_result(
+                revision,
+                raw,
+                std::ptr::from_ref(control) as usize,
+                ordinal,
+                &content_scope,
+            )?;
         }
         Ok(())
     }
 }
 
+struct FieldCloneBinding {
+    frame: usize,
+    key: usize,
+    occurrence: Option<FieldSourceOccurrence>,
+    scope: Option<NamespaceBindings>,
+    facts: Option<Vec<String>>,
+}
+
 impl Metadata<'_> {
+    fn bind_field_clone(
+        &mut self,
+        original: &rdocx_oxml::text::Field,
+        cloned: &rdocx_oxml::text::Field,
+        bindings: &mut Vec<FieldCloneBinding>,
+    ) -> Result<()> {
+        if std::ptr::eq(original, cloned) {
+            return Ok(());
+        }
+        if original != cloned
+            || original.form() != cloned.form()
+            || original.source_owner_id() != cloned.source_owner_id()
+        {
+            return Err(Error::Other(
+                "field clone changed its actual owner facts".into(),
+            ));
+        }
+        let old_key = std::ptr::from_ref(original) as usize;
+        let new_key = std::ptr::from_ref(cloned) as usize;
+        let frame = self
+            .source_frames
+            .iter()
+            .rposition(|frame| frame.field_occurrences.contains_key(&old_key))
+            .ok_or_else(|| Error::Other("field clone has no actual original occurrence".into()))?;
+        let data = &mut self.source_frames[frame];
+        let actual = data.field_occurrences[&old_key].clone();
+        let scope = data.field_scopes.get(&old_key).cloned();
+        let facts = data.fields.get(&old_key).cloned();
+        bindings.push(FieldCloneBinding {
+            frame,
+            key: new_key,
+            occurrence: data.field_occurrences.insert(new_key, actual),
+            scope: scope.and_then(|scope| data.field_scopes.insert(new_key, scope)),
+            facts: facts.and_then(|facts| data.fields.insert(new_key, facts)),
+        });
+        let original = original.cached_fields_in_source_order();
+        let cloned = cloned.cached_fields_in_source_order();
+        if original.len() != cloned.len() {
+            return Err(Error::Other(
+                "field clone changed its actual result slots".into(),
+            ));
+        }
+        for (original, cloned) in original.into_iter().zip(cloned) {
+            // Unproved descendants gain no authority from the enclosing clone.
+            if self.source_frames.iter().any(|frame| {
+                frame
+                    .field_occurrences
+                    .contains_key(&(std::ptr::from_ref(original) as usize))
+            }) {
+                self.bind_field_clone(original, cloned, bindings)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn bind_selected_run_fields(
+        &mut self,
+        original: &CT_R,
+        cloned: &CT_R,
+        selected: &[Option<TypedSourceSelection>],
+    ) -> Result<Vec<FieldCloneBinding>> {
+        let mut bindings = Vec::new();
+        let result = (|| -> Result<()> {
+            if cloned.content.len() != selected.len() {
+                return Err(Error::Other(
+                    "cloned selected run changed content slots".into(),
+                ));
+            }
+            for (content, selected) in cloned.content.iter().zip(selected) {
+                let RunContent::Field(cloned) = content else {
+                    continue;
+                };
+                let selected = selected
+                    .filter(|selected| selected.scalars.is_none())
+                    .ok_or_else(|| {
+                        Error::Other("cloned Field has no complete actual content slot".into())
+                    })?;
+                let Some(RunContent::Field(original)) = original.content.get(selected.ordinal)
+                else {
+                    return Err(Error::Other(
+                        "cloned Field changed its actual source slot kind".into(),
+                    ));
+                };
+                self.bind_field_clone(original, cloned, &mut bindings)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            self.unbind_cloned_control_runs(bindings)?;
+            return Err(error);
+        }
+        Ok(bindings)
+    }
+
+    fn bind_cloned_control_runs(
+        &mut self,
+        content: &[&SdtContent],
+        cloned: &[CT_R],
+    ) -> Result<Vec<FieldCloneBinding>> {
+        let original = content
+            .iter()
+            .filter_map(|content| match content {
+                SdtContent::Run(run) => Some(run),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut bindings = Vec::new();
+        let result = (|| -> Result<()> {
+            if original.len() != cloned.len() {
+                return Err(Error::Other("control run clone cardinality changed".into()));
+            }
+            for (original, cloned) in original.into_iter().zip(cloned) {
+                if original.content.len() != cloned.content.len() {
+                    return Err(Error::Other(
+                        "control run clone content slots changed".into(),
+                    ));
+                }
+                for (old, new) in original.content.iter().zip(&cloned.content) {
+                    if let (RunContent::Field(old), RunContent::Field(new)) = (old, new) {
+                        self.bind_field_clone(old, new, &mut bindings)?;
+                    } else if matches!(old, RunContent::Field(_))
+                        || matches!(new, RunContent::Field(_))
+                    {
+                        return Err(Error::Other(
+                            "control clone changed its actual field slot kind".into(),
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            self.unbind_cloned_control_runs(bindings)?;
+            return Err(error);
+        }
+        Ok(bindings)
+    }
+
+    fn unbind_cloned_control_runs(&mut self, bindings: Vec<FieldCloneBinding>) -> Result<()> {
+        for binding in bindings.into_iter().rev() {
+            let frame = self.source_frames.get_mut(binding.frame).ok_or_else(|| {
+                Error::Other("control field clone source frame disappeared".into())
+            })?;
+            match binding.occurrence {
+                Some(value) => {
+                    frame.field_occurrences.insert(binding.key, value);
+                }
+                None => {
+                    frame.field_occurrences.remove(&binding.key);
+                }
+            }
+            match binding.scope {
+                Some(value) => {
+                    frame.field_scopes.insert(binding.key, value);
+                }
+                None => {
+                    frame.field_scopes.remove(&binding.key);
+                }
+            }
+            match binding.facts {
+                Some(value) => {
+                    frame.fields.insert(binding.key, value);
+                }
+                None => {
+                    frame.fields.remove(&binding.key);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn restore_owner_root(&self, owner: usize, output: String) -> Result<String> {
+        let actual = self
+            .source_frames
+            .iter()
+            .rev()
+            .find_map(|frame| frame.roots.get(&owner));
+        let Some((raw, parent)) = actual else {
+            return Ok(output);
+        };
+        // A paired publisher can emit multiple tracked owners for boundary
+        // changes. Those do not have one retained root to restore here.
+        let (wrapped, offset) = story_wrapper(&output, parent)?;
+        let mut reader = Reader::from_reader(wrapped.as_slice());
+        let mut depth = 0usize;
+        let mut roots = 0usize;
+        loop {
+            let before = reader.buffer_position() as usize;
+            match reader
+                .read_event()
+                .map_err(|error| Error::Other(error.to_string()))?
+            {
+                Event::Start(_) => {
+                    if before >= offset && depth == 2 {
+                        roots += 1;
+                    }
+                    depth += 1;
+                }
+                Event::Empty(_) => {
+                    if before >= offset && depth == 2 {
+                        roots += 1;
+                    }
+                }
+                Event::End(_) => depth = depth.saturating_sub(1),
+                Event::Eof => break,
+                _ => {}
+            }
+        }
+        if roots != 1 {
+            return Ok(output);
+        }
+        restore_extracted_root(&output, raw, parent)
+    }
+
     fn paragraph_source(&self, paragraph: &CT_P) -> Option<&str> {
         self.source_frames
             .iter()
@@ -4062,12 +8037,11 @@ impl Metadata<'_> {
             .find_map(|frame| frame.paragraphs.get(&(paragraph as *const CT_P as usize)))
             .map(String::as_str)
     }
-    fn run_source(&self, run: &CT_R) -> Option<&str> {
+    fn run_source(&self, run: &CT_R) -> Option<&RunSource> {
         self.source_frames
             .iter()
             .rev()
             .find_map(|frame| frame.runs.get(&(run as *const CT_R as usize)))
-            .map(String::as_str)
     }
     fn table_source(&self, table: &CT_Tbl) -> Option<&str> {
         self.source_frames
@@ -4109,10 +8083,15 @@ fn compare_body(
     diagnostics: &mut Vec<ComparisonDiagnostic>,
 ) -> Result<String> {
     let [original, edited] = documents;
-    let mut frame = SourceSnapshots::default();
+    let mut frame = SourceSnapshots {
+        story: location.to_owned(),
+        ..SourceSnapshots::default()
+    };
     if let Some(source) = original_source {
+        frame.input_role = 0;
         frame.body(original, source, held[0])?;
     }
+    frame.input_role = 1;
     frame.body(edited, edited_source, held[1])?;
     metadata.source_frames.push(frame);
     let result = compare_body_impl(
@@ -4120,6 +8099,7 @@ fn compare_body(
         edited,
         location,
         original_source,
+        edited_source,
         held,
         metadata,
         diagnostics,
@@ -4133,6 +8113,7 @@ fn compare_body_impl(
     edited: &CT_Document,
     location: &str,
     original_source: Option<OriginalBodySource<'_>>,
+    edited_source: OriginalBodySource<'_>,
     held: [&HeldRevisions; 2],
     metadata: &mut Metadata<'_>,
     diagnostics: &mut Vec<ComparisonDiagnostic>,
@@ -4228,7 +8209,9 @@ fn compare_body_impl(
     };
     let mut output: Vec<(EmittedOwner, String)> = Vec::new();
     let mut trailing_merged = PropertySide::default();
+    let mut owner_leaves = Vec::new();
     for (position, (original_index, edited_index)) in aligned.iter().copied().enumerate() {
+        let item_leaf_mark = metadata.leaf_publications.len();
         let item = |(left, right): (Option<usize>, Option<usize>)| {
             right
                 .and_then(|index| edited.body.content.get(index))
@@ -4259,8 +8242,49 @@ fn compare_body_impl(
                             .and_then(Option::as_ref),
                     )
                     .is_some_and(|(original, edited)| original == edited);
-                let compared = if original_content == edited_content && (!protected || same_source)
+                let equal = original_content == edited_content;
+                let needs_field_dispatch = equal
+                    && !(protected && same_source)
+                    && SourceMetadata::body(
+                        original_content,
+                        &SourceSnapshots::default(),
+                        metadata.options,
+                    )?
+                    .has_fields;
+                let same_physical_source = if needs_field_dispatch
+                    && let Some((source, spans, bindings)) = original_source
                 {
+                    if let Some((left, right)) = source
+                        .get(spans[left].clone())
+                        .zip(edited_source.0.get(edited_source.1[right].clone()))
+                        && left == right
+                    {
+                        let external = |bindings: &[(String, String)]| {
+                            bindings
+                                .iter()
+                                .map(|(name, uri)| {
+                                    (
+                                        name.strip_prefix("xmlns:").unwrap_or("").to_owned(),
+                                        uri.clone(),
+                                    )
+                                })
+                                .collect::<BTreeMap<_, _>>()
+                        };
+                        required_external_bindings(left.as_bytes(), &external(bindings))?
+                            == required_external_bindings(
+                                right.as_bytes(),
+                                &external(edited_source.2),
+                            )?
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                // Global Field equality omits representation. Exact source and
+                // required bindings additionally prove a field owner's no-op.
+                let field_dispatch = needs_field_dispatch && !same_physical_source;
+                let compared = if equal && !field_dispatch && (!protected || same_source) {
                     if let Some((source, spans, _)) = original_source {
                         source
                             .get(spans[left].clone())
@@ -4467,6 +8491,7 @@ fn compare_body_impl(
             }
             (None, None) => unreachable!(),
         }
+        owner_leaves.push(metadata.leaf_publications.split_off(item_leaf_mark));
     }
     let mut output = if let Some((source, spans, bindings)) = original_source {
         let section_start = if original.body.sect_pr.is_some() {
@@ -4474,9 +8499,25 @@ fn compare_body_impl(
         } else {
             None
         };
-        interleave_story_source(source, spans, &aligned, output, section_start)?
+        interleave_story_source(
+            source,
+            spans,
+            &aligned,
+            output,
+            section_start,
+            bindings,
+            edited_source,
+            &mut owner_leaves,
+            &mut metadata.leaf_publications,
+        )?
     } else {
-        output.into_iter().map(|(_, xml)| xml).collect::<String>()
+        let mut result = String::new();
+        for ((_, xml), mut leaves) in output.into_iter().zip(owner_leaves) {
+            shift_leaf_publications(&mut leaves, result.len() as isize)?;
+            metadata.leaf_publications.extend(leaves);
+            result.push_str(&xml);
+        }
+        result
     };
     let same_section_source = held_original
         .section_source
@@ -4525,12 +8566,205 @@ fn compare_body_impl(
     Ok(output)
 }
 
+/// Remove only closure added to a modeled source owner's root when it is
+/// published back under identical inherited bindings. Authored declarations,
+/// non-declaration attributes and every descendant byte remain untouched.
+fn retain_source_root_namespaces(
+    published: &str,
+    source: &str,
+    destination: &[(String, String)],
+) -> Result<String> {
+    let scoped = source_fragment(source, destination)?;
+    let mut source_reader = NsReader::from_str(&scoped);
+    let (namespace, event) = source_reader
+        .read_resolved_event()
+        .map_err(|error| Error::Other(error.to_string()))?;
+    let (Event::Start(root) | Event::Empty(root)) = event else {
+        return Ok(published.to_owned());
+    };
+    if !matches!(namespace, ResolveResult::Bound(uri) if uri.as_ref() == W_NS.as_bytes())
+        || !matches!(
+            root.local_name().as_ref(),
+            b"p" | b"tbl"
+                | b"sdt"
+                | b"hyperlink"
+                | b"r"
+                | b"t"
+                | b"delText"
+                | b"instrText"
+                | b"delInstrText"
+                | b"fldChar"
+                | b"drawing"
+                | b"tab"
+                | b"br"
+                | b"sym"
+                | b"footnoteReference"
+                | b"endnoteReference"
+                | b"commentReference"
+                | b"cr"
+                | b"noBreakHyphen"
+                | b"softHyphen"
+                | b"ptab"
+        )
+    {
+        return Ok(published.to_owned());
+    }
+    restore_extracted_root(published, source, destination)
+}
+
+/// Source-only namespace restoration after an actual retained owner has been
+/// established. It does not participate in comparison identity or selection.
+fn restore_extracted_root(
+    published: &str,
+    source: &str,
+    destination: &[(String, String)],
+) -> Result<String> {
+    let mut original = Reader::from_str(source);
+    let (Event::Start(original) | Event::Empty(original)) = original
+        .read_event()
+        .map_err(|error| Error::Other(error.to_string()))?
+    else {
+        return Ok(published.to_owned());
+    };
+    let authored = declared_prefixes(&original)?;
+    let original_scope = source_fragment(source, destination)?;
+    let mut qualified_original = NsReader::from_str(&original_scope);
+    let (source_namespace, _) = qualified_original
+        .read_resolved_event()
+        .map_err(|error| Error::Other(error.to_string()))?;
+    let source_namespace = match source_namespace {
+        ResolveResult::Bound(uri) => Some(uri.as_ref().to_vec()),
+        ResolveResult::Unbound => None,
+        ResolveResult::Unknown(_) => {
+            return Err(Error::Other(
+                "retained source root namespace is unresolved".into(),
+            ));
+        }
+    };
+    let published_scope = source_fragment(published, destination)?;
+    let mut qualified = NsReader::from_str(&published_scope);
+    let (namespace, qualified_event) = qualified
+        .read_resolved_event()
+        .map_err(|error| Error::Other(error.to_string()))?;
+    let namespace = match namespace {
+        ResolveResult::Bound(uri) => Some(uri.as_ref().to_vec()),
+        ResolveResult::Unbound => None,
+        ResolveResult::Unknown(_) => {
+            return Err(Error::Other(
+                "published retained root namespace is unresolved".into(),
+            ));
+        }
+    };
+    if namespace != source_namespace
+        || !matches!(qualified_event, Event::Start(_) | Event::Empty(_))
+    {
+        return Ok(published.to_owned());
+    }
+    let mut reader = Reader::from_str(published);
+    let event = reader
+        .read_event()
+        .map_err(|error| Error::Other(error.to_string()))?;
+    let (Event::Start(element) | Event::Empty(element)) = event else {
+        return Ok(published.to_owned());
+    };
+    if element.local_name().as_ref() != element_local_name(source).as_bytes() {
+        return Ok(published.to_owned());
+    }
+    let mut remove = Vec::new();
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|error| Error::Other(error.to_string()))?;
+        let name = std::str::from_utf8(attribute.key.as_ref()).map_err(utf8_error)?;
+        let prefix = if name == "xmlns" {
+            ""
+        } else if let Some(prefix) = name.strip_prefix("xmlns:") {
+            prefix
+        } else {
+            continue;
+        };
+        let value = attribute
+            .decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())
+            .map_err(|error| Error::Other(error.to_string()))?;
+        if authored.contains(prefix)
+            || !destination
+                .iter()
+                .any(|(key, uri)| key == name && uri == value.as_ref())
+        {
+            continue;
+        }
+        // The borrowed event retains the exact source slices, including quotes.
+        let key = attribute.key.as_ref().as_ptr() as usize - published.as_ptr() as usize;
+        let end = attribute.value.as_ptr() as usize - published.as_ptr() as usize
+            + attribute.value.len()
+            + 1;
+        if key == 0
+            || end > published.len()
+            || !matches!(published.as_bytes()[end - 1], b'\'' | b'"')
+        {
+            return Err(Error::Other(
+                "namespace declaration has no exact source range".into(),
+            ));
+        }
+        let start = if published.as_bytes()[key - 1].is_ascii_whitespace() {
+            key - 1
+        } else {
+            key
+        };
+        remove.push(start..end);
+    }
+    let mut output = published.to_owned();
+    for range in remove.into_iter().rev() {
+        output.replace_range(range, "");
+    }
+    Ok(output)
+}
+
+/// Current pPr and its mark rPr retain their actual owner context. Prior
+/// change payloads have different roles and deliberately keep their closure.
+fn restore_current_property_roots(
+    published: &str,
+    actual: &str,
+    destination: &[(String, String)],
+) -> Result<String> {
+    let mut output = restore_extracted_root(published, actual, destination)?;
+    if element_local_name(actual) == "pPr" {
+        let scoped = source_fragment(actual, destination)?;
+        if let (Some(source_span), Some(output_span)) = (
+            direct_word_element_spans(&scoped, "rPr")?.first(),
+            direct_word_element_spans(&output, "rPr")?.first(),
+        ) {
+            let delta = element_opening(&scoped)?
+                .0
+                .checked_sub(element_opening(actual)?.0)
+                .ok_or_else(|| {
+                    Error::Other("property extraction shortened its source root".into())
+                })?;
+            if scoped[element_opening(&scoped)?.0..] != actual[element_opening(actual)?.0..] {
+                return Err(Error::Other(
+                    "property extraction changed descendant bytes".into(),
+                ));
+            }
+            let context = root_namespace_bindings(&output, "pPr", destination)?;
+            let restored = restore_extracted_root(
+                &output[output_span.clone()],
+                &actual[source_span.start - delta..source_span.end - delta],
+                &context,
+            )?;
+            output.replace_range(output_span.clone(), &restored);
+        }
+    }
+    Ok(output)
+}
+
 fn interleave_story_source(
     source: &str,
     spans: &[Range<usize>],
     aligned: &[(Option<usize>, Option<usize>)],
     output: Vec<(EmittedOwner<'_>, String)>,
     section_start: Option<usize>,
+    bindings: &[(String, String)],
+    edited_source: OriginalBodySource<'_>,
+    owner_leaves: &mut [Vec<LeafPublication>],
+    publications: &mut Vec<LeafPublication>,
 ) -> Result<String> {
     if spans.len() != aligned.iter().filter(|(left, _)| left.is_some()).count()
         || aligned.len() != output.len()
@@ -4547,7 +8781,7 @@ fn interleave_story_source(
         tracked.push_str(&source[..content_end]);
     }
     let mut next_original = 0usize;
-    for ((left, _), (_, xml)) in aligned.iter().zip(output) {
+    for (owner_index, ((left, right), (_, xml))) in aligned.iter().zip(output).enumerate() {
         if let Some(index) = left {
             if *index != next_original {
                 return Err(Error::Other(
@@ -4559,7 +8793,19 @@ fn interleave_story_source(
             }
             next_original += 1;
         }
-        tracked.push_str(&xml);
+        let template = left
+            .map(|index| &source[spans[index].clone()])
+            .or_else(|| right.map(|index| &edited_source.0[edited_source.1[index].clone()]));
+        let published = if let Some(template) = template {
+            retain_source_root_namespaces(&xml, template, bindings)?
+        } else {
+            xml.clone()
+        };
+        let delta = element_opening(&published)?.0 as isize - element_opening(&xml)?.0 as isize;
+        let mut leaves = std::mem::take(&mut owner_leaves[owner_index]);
+        shift_leaf_publications(&mut leaves, tracked.len() as isize + delta)?;
+        publications.extend(leaves);
+        tracked.push_str(&published);
     }
     if let Some(last) = spans.last() {
         if last.end > content_end {
@@ -4650,7 +8896,7 @@ fn moved_paragraph(
     let (mut output, closing) = paragraph_shell(metadata.paragraph_source(paragraph))?;
     output.push_str(&properties);
     let children = paragraph_children_xml(paragraph, false, metadata)?;
-    output.push_str(&wrapped_children(
+    output.push_str(&crate::revision::tracked_paragraph_children(
         &children,
         false,
         false,
@@ -4730,8 +8976,105 @@ struct PropertySide<'a> {
 fn direct_property(xml: &str, local: &str) -> Result<Option<String>> {
     direct_word_element_spans(xml, local)?
         .first()
-        .map(|span| source_child(xml, span.clone()))
+        .map(|span| {
+            let source = source_child(xml, span.clone())?;
+            if local == "pPr" {
+                let mut reader = Reader::from_str(&source);
+                if let Event::Empty(root) = reader
+                    .read_event()
+                    .map_err(|error| Error::Other(error.to_string()))?
+                    && root.attributes().all(|attribute| {
+                        attribute.is_ok_and(|attribute| {
+                            attribute.key.as_ref() == b"xmlns"
+                                || attribute.key.as_ref().starts_with(b"xmlns:")
+                        })
+                    })
+                {
+                    let (opening, closing) = paragraph_shell(Some(&source))?;
+                    return Ok(format!("{opening}{closing}"));
+                }
+            }
+            Ok(source)
+        })
         .transpose()
+}
+
+/// Full direct source events, including raw boundaries the control parser owns.
+fn modeled_control_source_spans(
+    content: &[&SdtContent],
+    payload: &str,
+) -> Result<Vec<Range<usize>>> {
+    let physical = control_source_event_spans(payload)?;
+    let mut spans = Vec::with_capacity(content.len());
+    let mut cursor = 0usize;
+    for child in content {
+        let first = physical.get(cursor).ok_or_else(|| {
+            Error::Other("source control has fewer physical owners than its model".into())
+        })?;
+        let mut extent = first.clone();
+        if let SdtContent::Run(run) = child
+            && let Some(field) = run_field(run)
+            && let Some((original, _)) = field.source_replacement()?
+        {
+            let end = first
+                .start
+                .checked_add(original.len())
+                .ok_or_else(|| Error::Other("control field source extent overflow".into()))?;
+            if payload.as_bytes().get(first.start..end) != Some(original) {
+                return Err(Error::Other(
+                    "control field is not at its actual physical source boundary".into(),
+                ));
+            }
+            let last = physical[cursor..]
+                .iter()
+                .position(|span| span.end == end)
+                .ok_or_else(|| {
+                    Error::Other("control field does not end at a complete physical owner".into())
+                })?;
+            extent.end = end;
+            cursor += last;
+        }
+        spans.push(extent);
+        cursor += 1;
+    }
+    if cursor != physical.len() {
+        return Err(Error::Other(
+            "source control ownership does not match its model".into(),
+        ));
+    }
+    Ok(spans)
+}
+
+fn control_source_event_spans(xml: &str) -> Result<Vec<Range<usize>>> {
+    let (opening, _) = paragraph_shell(Some(xml))?;
+    let mut reader = Reader::from_str(xml);
+    let mut spans = Vec::new();
+    loop {
+        let before = reader.buffer_position() as usize;
+        let event = reader
+            .read_event()
+            .map_err(|error| Error::Other(error.to_string()))?;
+        if before < opening.len() {
+            continue;
+        }
+        match event {
+            Event::Start(root) => {
+                reader
+                    .read_to_end(root.name())
+                    .map_err(|error| Error::Other(error.to_string()))?;
+            }
+            Event::End(_) | Event::Eof => break,
+            _ => {}
+        }
+        let after = reader.buffer_position() as usize;
+        if !xml.as_bytes()[before..after]
+            .iter()
+            .all(u8::is_ascii_whitespace)
+        {
+            spans.push(before..after);
+        }
+    }
+    Ok(spans)
 }
 
 fn without_property_children(xml: &str, locals: &[&str]) -> Result<String> {
@@ -4778,6 +9121,13 @@ fn patch_property_source(
     source: Option<&str>,
     ids: &IdAllocator,
 ) -> Result<String> {
+    #[cfg(test)]
+    if destination_diagnostic_enabled() {
+        policy_diagnostic(
+            "destination_property_input",
+            serde_json::json!({"before":before,"after":after,"actual_source":source,"local_word_binding":ids.local_word_binding}),
+        );
+    }
     let Some(source) = source else {
         return ids.generated(after.to_owned());
     };
@@ -4846,6 +9196,13 @@ fn patch_property_source(
             output = append_word_child(&output, element_local_name(source), &child)?;
         }
     }
+    #[cfg(test)]
+    if destination_diagnostic_enabled() {
+        policy_diagnostic(
+            "destination_property_output",
+            serde_json::json!({"actual_source":source,"output":output}),
+        );
+    }
     Ok(output)
 }
 
@@ -4880,12 +9237,813 @@ fn preserve_prior_property_sources(current: &str, source: &str) -> Result<String
     Ok(output)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TypedSourceSelection {
+    ordinal: usize,
+    scalars: Option<(usize, usize)>,
+}
+
+/// A leaf emitted from a proved typed input slot, before temporary resolution.
+/// The key is local input owner plus original content ordinal, never XML value.
+#[derive(Clone)]
+struct LeafPublication {
+    range: Range<usize>,
+    owner: usize,
+    ordinal: usize,
+    scalars: Range<usize>,
+    source: String,
+    context: NamespaceBindings,
+    payload: String,
+    physical: (usize, usize, Range<usize>),
+    domains: [Option<(usize, usize, usize)>; 2],
+    actions: Vec<([Option<Range<usize>>; 2], GranularAction)>,
+}
+
+#[cfg(test)]
+fn occurrence_leaf_diagnostic(leaf: &LeafPublication) -> serde_json::Value {
+    serde_json::json!({"range":[leaf.range.start,leaf.range.end],"owner":leaf.owner,
+        "ordinal":leaf.ordinal,"scalars":[leaf.scalars.start,leaf.scalars.end],
+        "source":leaf.source,"context":leaf.context,"payload":leaf.payload,
+        "physical":format!("{:?}",leaf.physical),"domains":leaf.domains,
+        "actions":format!("{:?}",leaf.actions)})
+}
+
+#[cfg(test)]
+fn occurrence_units_diagnostic(units: &[AttributedRunUnit]) -> serde_json::Value {
+    serde_json::json!(
+        units
+            .iter()
+            .enumerate()
+            .map(|(index, unit)| {
+                serde_json::json!({"index":index,"owner_index":unit.owner,"ignored":unit.ignored,
+            "raw_sources":unit.raw_sources,"typed_sources":format!("{:?}",unit.typed_sources),
+            "properties":format!("{:?}",unit.run.properties),
+            "xml":format!("{:?}",paragraph_owned_run_xml(&unit.run))})
+            })
+            .collect::<Vec<_>>()
+    )
+}
+
+#[cfg(test)]
+fn occurrence_source_diagnostic(source: Option<&RunSource>) -> serde_json::Value {
+    source.map_or(serde_json::Value::Null, |source| serde_json::json!({
+        "owner":source.owner,"raw":source.raw,"scoped":source.scoped,"parent":source.parent,
+        "typed_slots":source.typed_slots.iter().map(|span|span.as_ref().map(|s|[s.start,s.end])).collect::<Vec<_>>(),
+        "raw_slots":format!("{:?}",source.raw_slots)}))
+}
+
+fn shift_leaf_publications(leaves: &mut [LeafPublication], delta: isize) -> Result<()> {
+    for leaf in leaves {
+        leaf.range.start = leaf
+            .range
+            .start
+            .checked_add_signed(delta)
+            .ok_or_else(|| Error::Other("leaf publication offset underflow".into()))?;
+        leaf.range.end = leaf
+            .range
+            .end
+            .checked_add_signed(delta)
+            .ok_or_else(|| Error::Other("leaf publication offset underflow".into()))?;
+    }
+    Ok(())
+}
+
+/// Compose emitted child proofs at the actual replacement offsets. Existing
+/// proofs outside the replaced intervals move by the same disjoint edits.
+fn splice_leaf_publications(
+    metadata: &mut Metadata<'_>,
+    mark: usize,
+    spans: &[Range<usize>],
+    replacements: &[String],
+    children: Vec<Vec<LeafPublication>>,
+) -> Result<()> {
+    if spans.len() != replacements.len() || spans.len() != children.len() {
+        return Err(Error::Other(
+            "leaf replacement coverage differs from publication".into(),
+        ));
+    }
+    let mut existing = metadata.leaf_publications.split_off(mark);
+    for leaf in &mut existing {
+        let mut delta = 0isize;
+        for (span, replacement) in spans.iter().zip(replacements) {
+            if span.end <= leaf.range.start {
+                delta += replacement.len() as isize - span.len() as isize;
+            } else if span.start < leaf.range.end {
+                return Err(Error::Other(
+                    "leaf proof overlaps another replaced owner".into(),
+                ));
+            }
+        }
+        shift_leaf_publications(std::slice::from_mut(leaf), delta)?;
+    }
+    let mut delta = 0isize;
+    for ((span, replacement), mut leaves) in spans.iter().zip(replacements).zip(children) {
+        shift_leaf_publications(&mut leaves, span.start as isize + delta)?;
+        existing.extend(leaves);
+        delta += replacement.len() as isize - span.len() as isize;
+    }
+    metadata.leaf_publications.extend(existing);
+    Ok(())
+}
+
+fn emitted_fragment_leaves(
+    xml: &str,
+    content: &CT_R,
+    source: &RunSource,
+    raw: &[(usize, usize, usize)],
+    typed: &[Option<TypedSourceSelection>],
+    inserted: bool,
+    ignore_whitespace: bool,
+    destination_parent: &NamespaceBindings,
+) -> Result<Vec<LeafPublication>> {
+    if !content
+        .content
+        .iter()
+        .any(|item| matches!(item, RunContent::Text(_) | RunContent::DeletedText(_)))
+    {
+        return Ok(Vec::new());
+    }
+    let envelope = source_fragment(
+        &format!("<rdocxComparisonPublication>{xml}</rdocxComparisonPublication>"),
+        destination_parent,
+    )?;
+    let offset = element_opening(&envelope)?.0;
+    let word = word_element_starts(&envelope)?;
+    let mut children = direct_element_spans(&envelope)?;
+    if inserted {
+        children.retain(|span| {
+            word.contains(&span.start) && element_local_name(&envelope[span.clone()]) == "ins"
+        });
+        if children.len() != 1 {
+            return Err(Error::Other(
+                "fragment insertion has no unique actual publication owner".into(),
+            ));
+        }
+        let insertion = children[0].clone();
+        children = direct_element_spans(&envelope[insertion.clone()])?
+            .into_iter()
+            .map(|span| insertion.start + span.start..insertion.start + span.end)
+            .collect();
+    }
+    children.retain(|span| {
+        word.contains(&span.start) && element_local_name(&envelope[span.clone()]) == "r"
+    });
+    if children.len() != 1 {
+        return Err(Error::Other(
+            "fragment publication has no unique actual run owner".into(),
+        ));
+    }
+    let run = children.remove(0);
+    let parent = publication_parent_at(&envelope, run.start)?;
+    let closed = source_fragment(&envelope[run.clone()], &parent)?;
+    let closure = element_opening(&closed)?.0 - element_opening(&envelope[run.clone()])?.0;
+    let emitted_context = root_namespace_bindings(&closed, "r", &parent)?;
+    let roles = run_publication_roles(&closed, content, source, raw, typed)?;
+    let context = root_namespace_bindings(&source.scoped, "r", &source.parent)?;
+    let mut leaves = Vec::new();
+    for (span, raw, selection) in roles {
+        let Some(selection) = selection.filter(|_| raw.is_none()) else {
+            continue;
+        };
+        let Some(source_span) = source.typed_slots.get(selection.ordinal).cloned().flatten() else {
+            return Err(Error::Other("fragment source leaf is unproved".into()));
+        };
+        if source_content_metadata(source, source_span.clone())?.is_empty() {
+            continue;
+        }
+        let actual = source.scoped[source_span].to_owned();
+        let Some(RunContent::Text(text) | RunContent::DeletedText(text)) =
+            source_content_model(&actual, &context)?
+        else {
+            continue;
+        };
+        let (start, end) = selection.scalars.unwrap_or((0, text.text.chars().count()));
+        let selected = source_text_fragment(&actual, &context, start..end)?;
+        let Some(RunContent::Text(expected) | RunContent::DeletedText(expected)) =
+            source_content_model(&selected, &context)?
+        else {
+            return Err(Error::Other("selected fragment is not text".into()));
+        };
+        let Some(RunContent::Text(emitted) | RunContent::DeletedText(emitted)) =
+            source_content_model(&closed[span.clone()], &emitted_context)?
+        else {
+            return Err(Error::Other(
+                "emitted fragment has no qualified text role".into(),
+            ));
+        };
+        if expected.text != emitted.text
+            && !(ignore_whitespace
+                && expected.text.chars().all(char::is_whitespace)
+                && emitted.text.chars().all(char::is_whitespace))
+        {
+            return Err(Error::Other(
+                "emitted fragment differs from its attributed source pair".into(),
+            ));
+        }
+        leaves.push(LeafPublication {
+            range: run.start + span.start - closure - offset
+                ..run.start + span.end - closure - offset,
+            owner: source.owner,
+            ordinal: selection.ordinal,
+            scalars: start..end,
+            source: actual,
+            context: context.clone(),
+            payload: emitted.text,
+            physical: (source.owner, selection.ordinal, start..end),
+            domains: [None, None],
+            actions: Vec::new(),
+        });
+    }
+    Ok(leaves)
+}
+
+fn restore_resolved_leaf_occurrences(
+    resolved: &[u8],
+    publications: &[LeafPublication],
+    mapped: &[Option<Range<usize>>],
+) -> Result<String> {
+    let xml = std::str::from_utf8(resolved).map_err(utf8_error)?;
+    let mut groups = BTreeMap::<(usize, usize), Vec<(&LeafPublication, Range<usize>)>>::new();
+    for (leaf, range) in publications.iter().zip(mapped) {
+        if let Some(range) = range {
+            groups
+                .entry((leaf.owner, leaf.ordinal))
+                .or_default()
+                .push((leaf, range.clone()));
+        }
+    }
+    #[cfg(test)]
+    policy_diagnostic(
+        "occurrence_restore_input",
+        serde_json::json!({
+        "resolved":xml,"publications":publications.iter().map(occurrence_leaf_diagnostic).collect::<Vec<_>>(),
+        "mapped":mapped.iter().map(|range|range.as_ref().map(|s|[s.start,s.end])).collect::<Vec<_>>(),
+        "groups":groups.iter().map(|(key,group)|serde_json::json!({"key":key,"entries":group.iter().map(|(leaf,range)|serde_json::json!({"leaf":occurrence_leaf_diagnostic(leaf),"mapped":[range.start,range.end]})).collect::<Vec<_>>()})).collect::<Vec<_>>() }),
+    );
+    let mut physical = HashMap::<(usize, usize), Vec<Range<usize>>>::new();
+    for group in groups.values() {
+        for (leaf, _) in group {
+            let ranges = physical
+                .entry((leaf.physical.0, leaf.physical.1))
+                .or_default();
+            if ranges.iter().any(|range| {
+                *range == leaf.physical.2
+                    || (range.start < leaf.physical.2.end && leaf.physical.2.start < range.end)
+            }) {
+                return Err(Error::Other(
+                    "projection repeats physical emitted scalar provenance".into(),
+                ));
+            }
+            ranges.push(leaf.physical.2.clone());
+        }
+    }
+    let mut replacements = Vec::new();
+    for group in groups.values() {
+        let first = group[0].0;
+        let Some(RunContent::Text(source_text) | RunContent::DeletedText(source_text)) =
+            source_content_model(&first.source, &first.context)?
+        else {
+            return Err(Error::Other(
+                "fragment restoration has no source text".into(),
+            ));
+        };
+        let _ = &source_text;
+        validate_projection_actions(&first.domains, &first.actions)?;
+        #[cfg(test)]
+        let mut scalar = 0;
+        let mut value = String::new();
+        let mut runs = Vec::<Range<usize>>::new();
+        let mut properties = None;
+        let mut root_facts = None;
+        let mut root_scope = None;
+        for (leaf, range) in group {
+            #[cfg(test)]
+            policy_diagnostic(
+                "occurrence_restore_coverage_operand",
+                serde_json::json!({
+                "key":[first.owner,first.ordinal],"leaf":occurrence_leaf_diagnostic(leaf),
+                "mapped":[range.start,range.end],"scalar_before":scalar,
+                "source_equal":leaf.source==first.source,"context_equal":leaf.context==first.context }),
+            );
+            if leaf.source != first.source
+                || leaf.context != first.context
+                || leaf.domains != first.domains
+                || leaf.actions != first.actions
+            {
+                return Err(Error::Other(
+                    "fragment restoration has incomplete source occurrence coverage".into(),
+                ));
+            }
+            #[cfg(test)]
+            {
+                scalar = leaf.scalars.end;
+            }
+            let parent = publication_parent_at(xml, range.start)?;
+            let Some(RunContent::Text(text) | RunContent::DeletedText(text)) =
+                source_content_model(&xml[range.clone()], &parent)?
+            else {
+                return Err(Error::Other("resolved fragment lost its text owner".into()));
+            };
+            if text.text != leaf.payload {
+                return Err(Error::Other(
+                    "resolved fragment changed its actual emitted scalar payload".into(),
+                ));
+            }
+            value.push_str(&text.text);
+            let (start, end) = containing_run(xml, range.start)?;
+            let run = start..end;
+            if !word_element_starts(xml)?.contains(&start) {
+                return Err(Error::Other(
+                    "resolved fragment has a foreign run owner".into(),
+                ));
+            }
+            #[cfg(test)]
+            let opening = paragraph_shell(Some(&xml[run.clone()]))?;
+            let props = direct_property(&xml[run.clone()], "rPr")?.unwrap_or_default();
+            let parent_scope = publication_parent_at(xml, start)?;
+            let facts = source_root_metadata(&xml[run.clone()], &parent_scope)?;
+            let scope = root_namespace_bindings(&xml[run.clone()], "r", &parent_scope)?
+                .into_iter()
+                .collect::<BTreeMap<_, _>>();
+            #[cfg(test)]
+            policy_diagnostic(
+                "occurrence_restore_shell_operands",
+                serde_json::json!({
+                "key":[first.owner,first.ordinal],"leaf":occurrence_leaf_diagnostic(leaf),
+                "mapped":[range.start,range.end],"run":[run.start,run.end],"run_xml":&xml[run.clone()],
+                "parent":parent,"text":text.text,"payload_equal":text.text==leaf.payload,
+                "prior_facts":root_facts,"facts":facts,"prior_scope":root_scope,"scope":scope,
+                "prior_properties":properties,"properties":props,"opening":opening }),
+            );
+            if root_facts.as_ref().is_some_and(|actual| actual != &facts)
+                || root_scope.as_ref().is_some_and(|actual| actual != &scope)
+                || properties.as_ref().is_some_and(|actual| actual != &props)
+            {
+                return Err(Error::Other(
+                    "fragment restoration crosses different run shells or properties".into(),
+                ));
+            }
+            root_facts = Some(facts);
+            root_scope = Some(scope);
+            properties = Some(props);
+            if runs.last() != Some(&run) {
+                runs.push(run);
+            }
+        }
+        #[cfg(test)]
+        policy_diagnostic(
+            "occurrence_restore_terminal_operands",
+            serde_json::json!({
+            "key":[first.owner,first.ordinal],"scalar":scalar,"source_length":source_text.text.chars().count(),
+            "source_text":source_text.text,"actual_value":value,"runs":runs.iter().map(|s|[s.start,s.end]).collect::<Vec<_>>() }),
+        );
+        if group.iter().any(|(leaf, _)| {
+            leaf.scalars != leaf.physical.2 || leaf.physical.2.start > leaf.physical.2.end
+        }) {
+            return Err(Error::Other(
+                "fragment restoration omits a source scalar interval".into(),
+            ));
+        }
+        if group.len() == 1 {
+            continue;
+        }
+        for pair in runs.windows(2) {
+            if pair[0].end != pair[1].start
+                || publication_parent_at(xml, pair[0].start)?
+                    != publication_parent_at(xml, pair[1].start)?
+            {
+                return Err(Error::Other(
+                    "fragment restoration crosses an authored source barrier".into(),
+                ));
+            }
+        }
+        // Retire only complete member runs. The terminal carrier stays in place,
+        // including any independent raw suffix after its selected text children.
+        let terminal = runs.last().unwrap();
+        for run in &runs {
+            let mut cursor = element_opening(&xml[run.clone()])?.0 + run.start;
+            let mut seen_member = false;
+            let mut suffix = false;
+            for span in run_source_events(&xml[run.clone()])? {
+                let child = run.start + span.start..run.start + span.end;
+                if cursor != child.start {
+                    return Err(Error::Other(
+                        "fragment restoration crosses an unmodelled run event".into(),
+                    ));
+                }
+                cursor = child.end;
+                if element_local_name(&xml[child.clone()]) == "rPr"
+                    && word_element_starts(xml)?.contains(&child.start)
+                    && !seen_member
+                    && !suffix
+                {
+                    continue;
+                }
+                if group.iter().any(|(_, range)| *range == child) {
+                    if suffix {
+                        return Err(Error::Other(
+                            "fragment restoration crosses an independent authored leaf".into(),
+                        ));
+                    }
+                    seen_member = true;
+                } else if run == terminal && seen_member {
+                    suffix = true;
+                } else {
+                    return Err(Error::Other(
+                        "fragment restoration crosses an independent authored leaf".into(),
+                    ));
+                }
+            }
+            if cursor != run.start + paragraph_close_start(&xml[run.clone()])? {
+                return Err(Error::Other(
+                    "fragment restoration crosses trailing run events".into(),
+                ));
+            }
+            if !seen_member {
+                return Err(Error::Other(
+                    "restored carrier has no selected child".into(),
+                ));
+            }
+        }
+        let (opening, _) = paragraph_shell(Some(&first.source))?;
+        let leaf = format!(
+            "{opening}{}</{}>",
+            quick_xml::escape::escape(&value),
+            element_opening(&first.source)?.2
+        );
+        for run in &runs[..runs.len() - 1] {
+            replacements.push((run.clone(), String::new()));
+        }
+        let terminal_members = group
+            .iter()
+            .filter(|(_, range)| terminal.start < range.start && range.end < terminal.end)
+            .map(|(_, range)| range.clone())
+            .collect::<Vec<_>>();
+        let Some(last) = terminal_members.last() else {
+            return Err(Error::Other(
+                "terminal carrier has no selected child".into(),
+            ));
+        };
+        #[cfg(test)]
+        policy_diagnostic(
+            "occurrence_terminal_child_budget",
+            serde_json::json!({"key":[first.owner,first.ordinal],
+            "terminal":[terminal.start,terminal.end],"terminal_source":&xml[terminal.clone()],
+            "retired_runs":runs[..runs.len()-1].iter().map(|r|[r.start,r.end]).collect::<Vec<_>>(),
+            "children":terminal_members.iter().map(|r|[r.start,r.end]).collect::<Vec<_>>(),
+            "suffix":&xml[last.end..terminal.end],"actual_value":value,"replacement":leaf}),
+        );
+        for member in &terminal_members[..terminal_members.len() - 1] {
+            replacements.push((member.clone(), String::new()));
+        }
+        replacements.push((last.clone(), leaf));
+    }
+    replacements.sort_by_key(|(span, _)| span.start);
+    if replacements
+        .windows(2)
+        .any(|pair| pair[0].0.end > pair[1].0.start)
+    {
+        return Err(Error::Other("restored source occurrences overlap".into()));
+    }
+    let mut result = xml.to_owned();
+    for (span, replacement) in replacements.into_iter().rev() {
+        result.replace_range(span, &replacement);
+    }
+    Ok(result)
+}
+
+fn complete_run_selection(
+    run: &CT_R,
+) -> (Vec<RawSourceSelection>, Vec<Option<TypedSourceSelection>>) {
+    let raw = run
+        .extra_xml_positions
+        .iter()
+        .enumerate()
+        .filter(|(_, encoded)| !CT_R::raw_child_is_root_attributes(**encoded))
+        .map(|(ordinal, encoded)| (ordinal, ordinal, CT_R::raw_child_position(*encoded)))
+        .collect();
+    (
+        raw,
+        (0..run.content.len())
+            .map(|ordinal| {
+                Some(TypedSourceSelection {
+                    ordinal,
+                    scalars: None,
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Generated spans receive roles from the emitted model and selected original
+/// slots. The source is never searched by bytes, QName spelling or closure.
+fn run_publication_roles(
+    generated: &str,
+    run: &CT_R,
+    source: &RunSource,
+    selected_raw: &[(usize, usize, usize)],
+    selected_typed: &[Option<TypedSourceSelection>],
+) -> Result<Vec<PublishedRunRole>> {
+    if source.projected_raw_slots.iter().any(|ordinal| {
+        !selected_raw
+            .iter()
+            .any(|(_, selected, _)| ordinal == selected)
+    }) {
+        return Err(Error::Other(
+            "projected textbox escaped its selected source role".into(),
+        ));
+    }
+    if source.projected_typed_slots.iter().any(|ordinal| {
+        !selected_typed
+            .iter()
+            .flatten()
+            .any(|selected| selected.ordinal == *ordinal && selected.scalars.is_none())
+    }) {
+        return Err(Error::Other(
+            "projected drawing escaped its selected typed source role".into(),
+        ));
+    }
+    if selected_typed.len() != run.content.len() {
+        return Err(Error::Other(
+            "typed publication selection is incomplete".into(),
+        ));
+    }
+    let properties = usize::from(direct_property(generated, "rPr")?.is_some());
+    let total = properties + run.content.len();
+    let mut ordinary = vec![Vec::new(); total + 1];
+    let mut comments = vec![Vec::new(); total + 1];
+    let mut covered = vec![false; run.extra_xml.len()];
+    let mut previous = None;
+    for &(local, ordinal, original_boundary) in selected_raw {
+        if local >= covered.len()
+            || covered[local]
+            || previous.is_some_and(|previous| ordinal <= previous)
+        {
+            return Err(Error::Other(
+                "raw publication selection repeats or reorders a source occurrence".into(),
+            ));
+        }
+        let Some(Some((_, boundary, comment))) = source.raw_slots.get(ordinal) else {
+            return Err(Error::Other(
+                "raw publication source ordinal is absent".into(),
+            ));
+        };
+        if *boundary != original_boundary
+            || CT_R::raw_child_is_root_attributes(run.extra_xml_positions[local])
+        {
+            return Err(Error::Other(
+                "raw publication source boundary changed".into(),
+            ));
+        }
+        let output_boundary = CT_R::raw_child_position(run.extra_xml_positions[local]);
+        if output_boundary > total {
+            return Err(Error::Other(
+                "raw publication boundary is outside the emitted owner".into(),
+            ));
+        }
+        if *comment {
+            comments[output_boundary].push(ordinal);
+        } else {
+            ordinary[output_boundary].push(ordinal);
+        }
+        covered[local] = true;
+        previous = Some(ordinal);
+    }
+    if covered
+        .iter()
+        .zip(&run.extra_xml_positions)
+        .any(|(covered, encoded)| !*covered && !CT_R::raw_child_is_root_attributes(*encoded))
+    {
+        return Err(Error::Other(
+            "raw publication selection omits emitted content".into(),
+        ));
+    }
+    let events = run_source_events(generated)?;
+    let mut cursor = 0;
+    let mut roles = Vec::with_capacity(events.len());
+    for boundary in 0..=total {
+        for &ordinal in &ordinary[boundary] {
+            let span = events
+                .get(cursor)
+                .ok_or_else(|| Error::Other("generated raw role has no event".into()))?
+                .clone();
+            roles.push((span, Some(ordinal), None));
+            cursor += 1;
+        }
+        if boundary == total {
+            if !comments[boundary].is_empty() {
+                return Err(Error::Other("comment source has no typed reference".into()));
+            }
+            break;
+        }
+        if properties == 1 && boundary == 0 {
+            if !comments[boundary].is_empty() {
+                return Err(Error::Other(
+                    "comment source precedes the emitted property role".into(),
+                ));
+            }
+            let span = events
+                .get(cursor)
+                .ok_or_else(|| Error::Other("generated properties have no event".into()))?
+                .clone();
+            roles.push((span, None, None));
+            cursor += 1;
+            continue;
+        }
+        let index = boundary - properties;
+        let width = run_content_source_width(&run.content[index]);
+        if !comments[boundary].is_empty() {
+            if comments[boundary].len() != 1
+                || !matches!(run.content[index], RunContent::CommentReference { .. })
+            {
+                return Err(Error::Other(
+                    "comment raw source has a different typed owner".into(),
+                ));
+            }
+            let span = events
+                .get(cursor)
+                .ok_or_else(|| Error::Other("generated comment has no event".into()))?
+                .clone();
+            roles.push((span, Some(comments[boundary][0]), None));
+            cursor += 1;
+        } else {
+            for _ in 0..width {
+                let span = events
+                    .get(cursor)
+                    .ok_or_else(|| Error::Other("generated typed role has no event".into()))?
+                    .clone();
+                roles.push((
+                    span,
+                    None,
+                    (width == 1).then_some(selected_typed[index]).flatten(),
+                ));
+                cursor += 1;
+            }
+        }
+    }
+    if cursor != events.len() {
+        return Err(Error::Other(
+            "generated run roles do not cover its events".into(),
+        ));
+    }
+    Ok(roles)
+}
+
+/// Supply only the actual run grammar and inherited context for one associated
+/// content slot. Neither this read envelope nor its namespace declarations publish.
+fn source_content_envelope(xml: &str, context: &[(String, String)]) -> Result<Vec<u8>> {
+    let (binding, _) = context
+        .iter()
+        .find(|(_, uri)| uri == W_NS)
+        .ok_or_else(|| Error::Other("content source has no qualified run context".into()))?;
+    let name = if binding == "xmlns" {
+        "r".to_owned()
+    } else {
+        format!(
+            "{}:r",
+            binding
+                .strip_prefix("xmlns:")
+                .ok_or_else(|| Error::Other("content context has an invalid binding".into()))?
+        )
+    };
+    let mut writer = Writer::new(Vec::new());
+    let mut root = BytesStart::new(name.as_str());
+    for (key, value) in context {
+        root.push_attribute((key.as_str(), value.as_str()));
+    }
+    writer.write_event(Event::Start(root))?;
+    writer.get_mut().extend_from_slice(xml.as_bytes());
+    writer.write_event(Event::End(BytesEnd::new(name.as_str())))?;
+    Ok(writer.into_inner())
+}
+
+/// Interpret the actual selected content child, independently of its spelling.
+fn source_content_model(xml: &str, context: &[(String, String)]) -> Result<Option<RunContent>> {
+    let run = CT_R::from_xml_fragment_checked(&source_content_envelope(xml, context)?)?;
+    Ok(if run.content.len() == 1 {
+        Some(run.content[0].clone())
+    } else {
+        None
+    })
+}
+
+/// Use the existing lower nonformatting content classifier, excluding rPr/pPr.
+fn source_content_metadata(source: &RunSource, span: Range<usize>) -> Result<Vec<String>> {
+    let context = root_namespace_bindings(&source.scoped, "r", &source.parent)?;
+    if !word_element_starts(&source.scoped)?.contains(&span.start) {
+        return Ok(Vec::new());
+    }
+    Ok(rdocx_oxml::properties::protected_source_residual(
+        &source_content_envelope(&source.scoped[span], &context)?,
+        &[],
+    )?)
+}
+
+fn source_text_fragment(
+    xml: &str,
+    context: &NamespaceBindings,
+    scalars: Range<usize>,
+) -> Result<String> {
+    let Some(RunContent::Text(text) | RunContent::DeletedText(text)) =
+        source_content_model(xml, context)?
+    else {
+        return Err(Error::Other(
+            "split typed role has no actual text model".into(),
+        ));
+    };
+    let mut reader = Reader::from_str(xml);
+    let mut texts = 0;
+    let mut depth = 0;
+    loop {
+        match reader
+            .read_event()
+            .map_err(|error| Error::Other(error.to_string()))?
+        {
+            Event::Start(_) => {
+                depth += 1;
+                if depth != 1 {
+                    return Err(Error::Other("split text has opaque mixed events".into()));
+                }
+            }
+            Event::Empty(_) if depth == 0 => {}
+            Event::End(_) => {
+                depth -= 1;
+            }
+            Event::Text(_) if depth == 1 && texts == 0 => {
+                texts += 1;
+            }
+            Event::Eof => break,
+            _ => return Err(Error::Other("split text has opaque mixed events".into())),
+        }
+    }
+    if scalars.start > scalars.end || scalars.end > text.text.chars().count() {
+        return Err(Error::Other(
+            "split text scalar range is outside its source".into(),
+        ));
+    }
+    let value = text
+        .text
+        .chars()
+        .skip(scalars.start)
+        .take(scalars.len())
+        .collect::<String>();
+    let (end, empty, name) = element_opening(xml)?;
+    let mut opening = xml[..end].to_owned();
+    if empty {
+        opening.truncate(end - 2);
+        opening.push('>');
+    }
+    if has_edge_whitespace(&value) && !text.preserve_space {
+        // The actual leaf shell is retained. Only the standard serialization
+        // space policy is added for the selected text's new boundary.
+        let mut start = match Reader::from_str(&opening)
+            .read_event()
+            .map_err(|error| Error::Other(error.to_string()))?
+        {
+            Event::Start(start) => start.into_owned(),
+            _ => unreachable!(),
+        };
+        let attributes = start
+            .attributes()
+            .map(|attribute| {
+                attribute.map(|attribute| {
+                    (
+                        attribute.key.as_ref().to_vec(),
+                        attribute.value.as_ref().to_vec(),
+                    )
+                })
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|error| Error::Other(error.to_string()))?;
+        start.clear_attributes();
+        for (key, value) in &attributes {
+            if key.as_slice() != b"xml:space" {
+                start.push_attribute((key.as_slice(), value.as_slice()));
+            }
+        }
+        start.push_attribute(("xml:space", "preserve"));
+        let mut writer = Writer::new(Vec::new());
+        writer.write_event(Event::Start(start))?;
+        opening = String::from_utf8(writer.into_inner()).map_err(utf8_error)?;
+    }
+    Ok(format!(
+        "{opening}{}</{name}>",
+        quick_xml::escape::escape(&value)
+    ))
+}
+
 fn preserve_run_source(
     generated: &str,
     original_properties: &str,
-    source: &str,
+    sources: [&RunSource; 2],
+    content_run: &CT_R,
+    selected_raw: &[(usize, usize, usize)],
+    selected_typed: &[Option<TypedSourceSelection>],
+    destination_parent: &NamespaceBindings,
     ids: &IdAllocator,
 ) -> Result<String> {
+    let [shell_source, content_source] = sources;
+    let source = shell_source.scoped.as_str();
     if element_local_name(generated) != "r" || element_local_name(source) != "r" {
         return ids.generated(generated.to_owned());
     }
@@ -4903,30 +10061,170 @@ fn preserve_run_source(
         current
     };
     let (mut output, closing) = paragraph_shell(Some(source))?;
-    let spans = direct_element_spans(generated)?;
+    let destination = root_namespace_bindings(&output, "r", destination_parent)?;
+    let context = root_namespace_bindings(&content_source.scoped, "r", &content_source.parent)?;
+    let same_scope = destination
+        .iter()
+        .map(|(key, uri)| (key, uri))
+        .collect::<BTreeMap<_, _>>()
+        == context
+            .iter()
+            .map(|(key, uri)| (key, uri))
+            .collect::<BTreeMap<_, _>>();
+    let current =
+        if let Some(actual) = direct_word_element_spans(&shell_source.scoped, "rPr")?.first() {
+            let scoped_open = element_opening(&shell_source.scoped)?.0;
+            let raw_open = element_opening(&shell_source.raw)?.0;
+            if shell_source.scoped[scoped_open..] != shell_source.raw[raw_open..] {
+                return Err(Error::Other(
+                    "retained run extraction changed descendant source".into(),
+                ));
+            }
+            let added = scoped_open
+                .checked_sub(raw_open)
+                .ok_or_else(|| Error::Other("retained run extraction shortened its root".into()))?;
+            restore_extracted_root(
+                &current,
+                &shell_source.raw[actual.start - added..actual.end - added],
+                &destination,
+            )?
+        } else {
+            current
+        };
+    let roles = run_publication_roles(
+        generated,
+        content_run,
+        content_source,
+        selected_raw,
+        selected_typed,
+    )?;
     let word = word_element_starts(generated)?;
-    let source_spans = direct_element_spans(source)?;
-    let source_word = word_element_starts(source)?;
-    let mut properties_emitted = false;
     if generated_properties.is_none() && !current.is_empty() {
         output.push_str(&current);
-        properties_emitted = true;
     }
     let mut cursor = element_opening(generated)?.0;
-    for span in spans {
+    for (span, raw_ordinal, typed_ordinal) in roles {
         output.push_str(&generated[cursor..span.start]);
-        if word.contains(&span.start) && element_local_name(&generated[span.clone()]) == "rPr" {
+        let generated_child = &generated[span.clone()];
+        if word.contains(&span.start) && element_local_name(generated_child) == "rPr" {
             output.push_str(&current);
-            properties_emitted = true;
-        } else if source_spans.iter().any(|prior| {
-            source[prior.clone()] == generated[span.clone()]
-                && source_word.contains(&prior.start) == word.contains(&span.start)
-        }) {
-            // The exact child remains under its actual source run shell.
-            // Closing it again would mutate opaque bytes without relocation.
-            output.push_str(&generated[span.clone()]);
         } else {
-            output.push_str(&source_child(generated, span.clone())?);
+            let actual = raw_ordinal
+                .and_then(|ordinal| {
+                    content_source.raw_slots[ordinal]
+                        .as_ref()
+                        .map(|(span, _, comment)| (span.clone(), *comment))
+                })
+                .or_else(|| {
+                    typed_ordinal
+                        .and_then(|ordinal| {
+                            content_source
+                                .typed_slots
+                                .get(ordinal.ordinal)
+                                .cloned()
+                                .flatten()
+                        })
+                        .map(|span| (span, true))
+                });
+            let mut restored = false;
+            if let Some((source_span, typed_authority)) = actual {
+                let mut source_child_xml = content_source.scoped[source_span.clone()].to_owned();
+                if let Some((start, end)) = typed_ordinal.and_then(|selected| selected.scalars) {
+                    source_child_xml =
+                        source_text_fragment(&source_child_xml, &context, start..end)?;
+                }
+                let deletion_name = match (
+                    raw_ordinal.is_some(),
+                    element_local_name(generated_child),
+                    element_local_name(&source_child_xml),
+                ) {
+                    (true, "delInstrText", "instrText") => Some("delInstrText"),
+                    (false, "delText", "t") => Some("delText"),
+                    _ => None,
+                };
+                if let Some(target) = deletion_name
+                    && word.contains(&span.start)
+                    && word_element_starts(&content_source.scoped)?.contains(&source_span.start)
+                {
+                    let (_, empty, name) = element_opening(&source_child_xml)?;
+                    let replacement = name
+                        .rsplit_once(':')
+                        .map_or(target.to_owned(), |(prefix, _)| {
+                            format!("{prefix}:{target}")
+                        });
+                    if !empty {
+                        let close = paragraph_close_start(&source_child_xml)?;
+                        source_child_xml
+                            .replace_range(close + 2..close + 2 + name.len(), &replacement);
+                    }
+                    source_child_xml.replace_range(1..1 + name.len(), &replacement);
+                }
+                let lexical = raw_occurrence_representation(&source_child_xml, &context)?
+                    == raw_occurrence_representation(generated_child, &context)?;
+                let modeled = if raw_ordinal.is_none() && !lexical {
+                    let actual = source_content_model(&source_child_xml, &context)?;
+                    // These generated typed Word events come from CT_R's writer,
+                    // independently of a producer's retained w binding.
+                    let mut generated_context = destination.clone();
+                    if word.contains(&span.start) {
+                        generated_context.retain(|(key, _)| key != "xmlns:w");
+                        generated_context.push(("xmlns:w".into(), W_NS.into()));
+                    }
+                    let generated = source_content_model(generated_child, &generated_context)?;
+                    match (actual, generated) {
+                        (Some(actual), Some(generated)) => {
+                            run_content_signature(&actual) == run_content_signature(&generated)
+                        }
+                        _ => false,
+                    }
+                } else {
+                    false
+                };
+                let derived = typed_ordinal.is_some_and(|ordinal| {
+                    content_source
+                        .projected_typed_slots
+                        .contains(&ordinal.ordinal)
+                });
+                let consistent = lexical || modeled || derived;
+                if consistent {
+                    if same_scope
+                        || !source_child_xml.starts_with('<')
+                        || source_child_xml.starts_with("<?")
+                        || source_child_xml.starts_with("<!--")
+                    {
+                        output.push_str(&source_child_xml);
+                    } else if raw_ordinal.is_some() {
+                        output.push_str(&source_child(&content_source.scoped, source_span)?);
+                    } else {
+                        output.push_str(&source_fragment(&source_child_xml, &context)?);
+                    }
+                    restored = true;
+                } else if !typed_authority {
+                    #[cfg(test)]
+                    policy_diagnostic(
+                        "occurrence_raw_mismatch",
+                        serde_json::json!({
+                            "source_child":source_child_xml,"generated_child":generated_child,
+                            "raw_ordinal":raw_ordinal,"source_parent":content_source.parent,
+                            "source_context":context,"destination":destination,"source_run":content_source.scoped,
+                            "selected_raw":selected_raw,"selected_typed":format!("{selected_typed:?}"),
+                            "scopes":format!("{:?}",std::backtrace::Backtrace::force_capture()),
+                        }),
+                    );
+                    return Err(Error::Other(format!(
+                        "generated raw source occurrence {:?} changed its payload",
+                        raw_ordinal
+                    )));
+                }
+            }
+            if !restored {
+                let closed = source_child(generated, span.clone())?;
+                output.push_str(&retain_source_root_namespaces(
+                    &closed,
+                    generated_child,
+                    &destination,
+                )?);
+            }
         }
         cursor = span.end;
     }
@@ -4936,11 +10234,23 @@ fn preserve_run_source(
         paragraph_close_start(generated)?
     };
     output.push_str(&generated[cursor..end]);
-    if !properties_emitted && !current.is_empty() {
-        return Err(Error::Other("run source properties were not placed".into()));
-    }
     output.push_str(&closing);
-    Ok(output)
+    #[cfg(test)]
+    if destination_diagnostic_enabled() {
+        policy_diagnostic(
+            "destination_run_restore",
+            serde_json::json!({
+                "generated":generated,"shell_raw":shell_source.raw,"shell_scoped":shell_source.scoped,
+                "source_parent":shell_source.parent,"content_raw":content_source.raw,
+                "content_scoped":content_source.scoped,"content_parent":content_source.parent,
+                "computed_destination_from_source":destination,"content_context":context,
+                "same_source_scopes":same_scope,"properties":current,"pre_root_restore":output,
+                "root_restore_result":format!("{:?}",retain_source_root_namespaces(&output,&shell_source.raw,&shell_source.parent)),
+                "selected_raw":selected_raw,"selected_typed":format!("{selected_typed:?}"),"ids":ids.used,
+            }),
+        );
+    }
+    retain_source_root_namespaces(&output, &shell_source.raw, destination_parent)
 }
 
 fn replace_property_slot(xml: &str, local: &str, replacement: &str) -> Result<String> {
@@ -5252,7 +10562,7 @@ fn final_paragraph<'a>(
         &own, &accepted, &rejected, metadata,
     )?);
     let children = paragraph_children_xml(paragraph, kind == "del", metadata)?;
-    output.push_str(&wrapped_children(
+    output.push_str(&crate::revision::tracked_paragraph_children(
         &children,
         kind == "del",
         false,
@@ -5343,180 +10653,207 @@ fn compare_paragraph(
     metadata: &mut Metadata<'_>,
     diagnostics: &mut Vec<ComparisonDiagnostic>,
 ) -> Result<String> {
-    if original.bookmark_markers == edited.bookmark_markers
-        && paragraph_boundaries_differ(original, edited, metadata.options)
-    {
-        return Ok(format!(
-            "{}{}",
-            deleted_paragraph(original, metadata)?,
-            inserted_paragraph(edited, metadata)?
-        ));
-    }
-    let detached = detach_field_spans(original, original_source)?;
-    let original_source = detached.as_deref().or(original_source);
-    if uses_attributed_run_path(metadata.options) {
-        return compare_granular_paragraph(
-            original,
-            edited,
-            original_source,
-            location,
-            metadata,
-            diagnostics,
-        );
-    }
-    if !original.hyperlinks.is_empty()
-        || !edited.hyperlinks.is_empty()
-        || !original.comment_ranges.is_empty()
-        || !edited.comment_ranges.is_empty()
-        || !original.bookmark_markers.is_empty()
-        || !edited.bookmark_markers.is_empty()
-        || !original.content_controls.is_empty()
-        || !edited.content_controls.is_empty()
-        || original
-            .extra_xml
-            .iter()
-            .any(|(position, raw)| !CT_P::raw_is_root_attributes(*position, raw))
-        || edited
-            .extra_xml
-            .iter()
-            .any(|(position, raw)| !CT_P::raw_is_root_attributes(*position, raw))
-    {
-        return compare_complex_paragraph(
-            original,
-            edited,
-            original_source,
-            location,
-            metadata,
-            diagnostics,
-        );
-    }
+    let leaf_mark = metadata.leaf_publications.len();
+    let output = (|| -> Result<String> {
+        #[cfg(test)]
+        let _destination_diagnostic_scope =
+            PolicyDiagnosticScope::enter("destination:compare_paragraph", location);
+        if original.bookmark_markers == edited.bookmark_markers
+            && paragraph_boundaries_differ(original, edited, metadata.options)
+        {
+            return Ok(format!(
+                "{}{}",
+                deleted_paragraph(original, metadata)?,
+                inserted_paragraph(edited, metadata)?
+            ));
+        }
+        if metadata.options.ignore_formatting
+            && metadata.options.ignore_fields
+            && paragraph_signature_with_options(original, metadata.options)
+                == paragraph_signature_with_options(edited, metadata.options)
+            && let Some(source) = original_source
+        {
+            return Ok(source.to_owned());
+        }
+        if original == edited
+            && let Some((left, right)) = metadata
+                .paragraph_source(original)
+                .zip(metadata.paragraph_source(edited))
+            && left == right
+        {
+            return Ok(original_source.unwrap_or(left).to_owned());
+        }
+        let detached = detach_field_spans(original, original_source)?;
+        let original_source = detached.as_deref().or(original_source);
+        if uses_attributed_run_path(metadata.options) {
+            return compare_granular_paragraph(
+                original,
+                edited,
+                original_source,
+                location,
+                metadata,
+                diagnostics,
+            );
+        }
+        if !original.hyperlinks.is_empty()
+            || !edited.hyperlinks.is_empty()
+            || !original.comment_ranges.is_empty()
+            || !edited.comment_ranges.is_empty()
+            || !original.bookmark_markers.is_empty()
+            || !edited.bookmark_markers.is_empty()
+            || !original.content_controls.is_empty()
+            || !edited.content_controls.is_empty()
+            || original
+                .extra_xml
+                .iter()
+                .any(|(position, raw)| !CT_P::raw_is_root_attributes(*position, raw))
+            || edited
+                .extra_xml
+                .iter()
+                .any(|(position, raw)| !CT_P::raw_is_root_attributes(*position, raw))
+        {
+            return compare_complex_paragraph(
+                original,
+                edited,
+                original_source,
+                location,
+                metadata,
+                diagnostics,
+            );
+        }
 
-    let (mut output, paragraph_close) = paragraph_shell(original_source)?;
-    output.push_str(&paragraph_properties_xml(
-        original,
-        edited,
-        location,
-        metadata,
-        diagnostics,
-    )?);
-    let original_signatures = original
-        .runs
-        .iter()
-        .map(|run| run_signature_with_options(run, metadata.options))
-        .collect::<Vec<_>>();
-    let edited_signatures = edited
-        .runs
-        .iter()
-        .map(|run| run_signature_with_options(run, metadata.options))
-        .collect::<Vec<_>>();
-    let aligned = align(&original_signatures, &edited_signatures);
-    if !metadata.options.ignore_fields {
-        validate_field_alignment(
-            &aligned,
-            &original.runs,
-            &edited.runs,
-            &original_signatures,
-            &edited_signatures,
+        let (mut output, paragraph_close) = paragraph_shell(original_source)?;
+        let destination_parent = root_namespace_bindings(&output, "p", &[])?;
+        let revision_parent = metadata.ids.revision_parent_scope(&destination_parent);
+        output.push_str(&paragraph_properties_xml(
+            original,
+            edited,
             location,
-        )?;
-    }
-    let original_run_spans = original_source
-        .map(|source| modeled_paragraph_run_spans(original, source))
-        .transpose()?
-        .unwrap_or_default();
-    if original_source.is_some() && original_run_spans.len() != original.runs.len() {
-        return Err(Error::Other(format!(
-            "comparison could not correlate paragraph run owners at {location}"
-        )));
-    }
-    for (left, right) in aligned {
-        match (left, right) {
-            (Some(i), Some(j)) => {
-                if original_signatures[i] == edited_signatures[j] {
-                    if original.runs[i] == edited.runs[j]
-                        && let Some(source) = original_source
-                    {
-                        output.push_str(&source[original_run_spans[i].clone()]);
+            metadata,
+            diagnostics,
+        )?);
+        let original_signatures = original
+            .runs
+            .iter()
+            .map(|run| run_signature_with_options(run, metadata.options))
+            .collect::<Vec<_>>();
+        let edited_signatures = edited
+            .runs
+            .iter()
+            .map(|run| run_signature_with_options(run, metadata.options))
+            .collect::<Vec<_>>();
+        let aligned = align(&original_signatures, &edited_signatures);
+        if !metadata.options.ignore_fields {
+            validate_field_alignment(
+                &aligned,
+                &original.runs,
+                &edited.runs,
+                &original_signatures,
+                &edited_signatures,
+                location,
+            )?;
+        }
+        let original_run_spans = original_source
+            .map(|source| modeled_paragraph_run_spans(original, source))
+            .transpose()?
+            .unwrap_or_default();
+        if original_source.is_some() && original_run_spans.len() != original.runs.len() {
+            return Err(Error::Other(format!(
+                "comparison could not correlate paragraph run owners at {location}"
+            )));
+        }
+        for (left, right) in aligned {
+            match (left, right) {
+                (Some(i), Some(j)) => {
+                    if original_signatures[i] == edited_signatures[j] {
+                        if !run_is_field(&original.runs[i])
+                            && original.runs[i] == edited.runs[j]
+                            && let Some(source) = original_source
+                        {
+                            output.push_str(&source[original_run_spans[i].clone()]);
+                        } else {
+                            output.push_str(&compared_run_xml(
+                                &original.runs[i],
+                                &edited.runs[j],
+                                None,
+                                None,
+                                &format!("{location}/run[{j}]"),
+                                &destination_parent,
+                                metadata,
+                                diagnostics,
+                            )?);
+                        }
                     } else {
-                        output.push_str(&compared_run_xml(
-                            &original.runs[i],
-                            &edited.runs[j],
-                            None,
+                        output.push_str(&paired_run_replacement(
+                            [&original.runs[i], &edited.runs[j]],
+                            [None, None],
+                            [None, None],
                             &format!("{location}/run[{j}]"),
+                            &destination_parent,
                             metadata,
                             diagnostics,
                         )?);
                     }
-                } else {
-                    let deleted = publish_run_source(
+                }
+                (Some(i), None) => {
+                    if run_is_ignored(&original.runs[i], metadata.options) {
+                        if let Some(source) = original_source {
+                            output.push_str(&source[original_run_spans[i].clone()]);
+                        } else {
+                            output.push_str(&paragraph_owned_run_xml(&original.runs[i])?);
+                        }
+                        continue;
+                    }
+                    let run = publish_run_source(
+                        &original.runs[i],
                         &original.runs[i],
                         deleted_run_xml(&original.runs[i])?,
                         None,
+                        None,
+                        None,
+                        &revision_parent,
                         metadata,
                     )?;
                     output.push_str(&metadata.ids.revision(
                         "del",
                         metadata.author,
                         metadata.timestamp,
-                        &deleted,
+                        &run,
                     )?);
-                    let inserted = policy_inserted_run_xml(
+                }
+                (None, Some(j)) => {
+                    if run_is_ignored(&edited.runs[j], metadata.options) {
+                        continue;
+                    }
+                    let run = publish_run_source(
                         &edited.runs[j],
-                        Some(&original.runs[i]),
-                        metadata.options,
+                        &edited.runs[j],
+                        paragraph_owned_run_xml(&edited.runs[j])?,
+                        None,
+                        None,
+                        None,
+                        &revision_parent,
+                        metadata,
                     )?;
-                    let inserted = publish_run_source(&original.runs[i], inserted, None, metadata)?;
                     output.push_str(&metadata.ids.revision(
                         "ins",
                         metadata.author,
                         metadata.timestamp,
-                        &inserted,
+                        &run,
                     )?);
                 }
+                (None, None) => unreachable!(),
             }
-            (Some(i), None) => {
-                if run_is_ignored(&original.runs[i], metadata.options) {
-                    if let Some(source) = original_source {
-                        output.push_str(&source[original_run_spans[i].clone()]);
-                    } else {
-                        output.push_str(&paragraph_owned_run_xml(&original.runs[i])?);
-                    }
-                    continue;
-                }
-                let run = publish_run_source(
-                    &original.runs[i],
-                    deleted_run_xml(&original.runs[i])?,
-                    None,
-                    metadata,
-                )?;
-                output.push_str(&metadata.ids.revision(
-                    "del",
-                    metadata.author,
-                    metadata.timestamp,
-                    &run,
-                )?);
-            }
-            (None, Some(j)) => {
-                if run_is_ignored(&edited.runs[j], metadata.options) {
-                    continue;
-                }
-                let run = publish_run_source(
-                    &edited.runs[j],
-                    paragraph_owned_run_xml(&edited.runs[j])?,
-                    None,
-                    metadata,
-                )?;
-                output.push_str(&metadata.ids.revision(
-                    "ins",
-                    metadata.author,
-                    metadata.timestamp,
-                    &run,
-                )?);
-            }
-            (None, None) => unreachable!(),
         }
-    }
-    output.push_str(&paragraph_close);
+        output.push_str(&paragraph_close);
+        Ok(output)
+    })()?;
+    let old_open = element_opening(&output)?.0;
+    let output = metadata.restore_owner_root(original as *const CT_P as usize, output)?;
+    shift_leaf_publications(
+        &mut metadata.leaf_publications[leaf_mark..],
+        element_opening(&output)?.0 as isize - old_open as isize,
+    )?;
     Ok(output)
 }
 
@@ -5575,9 +10912,13 @@ struct AttributedRunUnit {
     run: CT_R,
     ignored: bool,
     owner: usize,
+    // Local raw-array index, original physical ordinal and original boundary.
+    raw_sources: Vec<(usize, usize, usize)>,
+    // A whole unchanged typed atom, or generated authority for a split atom.
+    typed_sources: Vec<Option<TypedSourceSelection>>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GranularAction {
     Preserve,
     Equal,
@@ -5595,6 +10936,20 @@ fn compare_granular_paragraph(
     metadata: &mut Metadata<'_>,
     diagnostics: &mut Vec<ComparisonDiagnostic>,
 ) -> Result<String> {
+    #[cfg(test)]
+    let _destination_diagnostic_scope =
+        PolicyDiagnosticScope::enter("destination:compare_granular_paragraph", location);
+    let leaf_mark = metadata.leaf_publications.len();
+    let actual_source = original_source
+        .map(str::to_owned)
+        .map_or_else(|| paragraph_xml(original), Ok)?;
+    let actual_spans = modeled_paragraph_run_spans(original, &actual_source)?;
+    let parent_for = |owner: usize| {
+        let at = actual_spans
+            .get(owner)
+            .map_or(element_opening(&actual_source)?.0, |span| span.start);
+        publication_parent_at(&actual_source, at)
+    };
     let boundary_error = || {
         Error::Other(format!(
             "comparison cannot revise paragraph boundary structures at {location}"
@@ -5616,9 +10971,21 @@ fn compare_granular_paragraph(
         .iter()
         .map(attributed_run_signature)
         .collect::<Vec<_>>();
+    #[cfg(test)]
+    policy_diagnostic(
+        "occurrence_whole_owner_witnesses",
+        serde_json::json!({
+        "location":location,"original_boundaries":original_boundaries,"edited_boundaries":edited_boundaries,
+        "original_signatures":original_run_signatures,"edited_signatures":edited_run_signatures,
+        "diagnostic_ordered_alignment_not_selected_relation":align(&original_run_signatures,&edited_run_signatures),
+        "original":original.runs.iter().enumerate().map(|(index,run)|serde_json::json!({"index":index,"owner":run as *const CT_R as usize,"source":occurrence_source_diagnostic(metadata.run_source(run)),"model":format!("{:?}",run)})).collect::<Vec<_>>(),
+        "edited":edited.runs.iter().enumerate().map(|(index,run)|serde_json::json!({"index":index,"owner":run as *const CT_R as usize,"source":occurrence_source_diagnostic(metadata.run_source(run)),"model":format!("{:?}",run)})).collect::<Vec<_>>() }),
+    );
     // Runs that all match stay whole even when a control differs, so a
     // control's metadata or content never moves run-indexed markers.
-    if original_run_signatures == edited_run_signatures && original_boundaries == edited_boundaries
+    if original_run_signatures == edited_run_signatures
+        && original_boundaries == edited_boundaries
+        && !SourceMetadata::paragraph_contains_fields(original, metadata.options)?
     {
         let properties =
             paragraph_properties_xml(original, edited, location, metadata, diagnostics)?;
@@ -5646,7 +11013,9 @@ fn compare_granular_paragraph(
                         left,
                         right,
                         None,
+                        None,
                         &format!("{location}/run[{index}]"),
+                        &parent_for(index)?,
                         metadata,
                         diagnostics,
                     )
@@ -5669,11 +11038,47 @@ fn compare_granular_paragraph(
             location,
             metadata,
             diagnostics,
+            leaf_mark,
         );
     }
 
+    let projection_pairs = metadata.leaf_capture.then(|| {
+        projection_leaf_pairs(
+            [&original.runs[..], &edited.runs[..]],
+            &original_boundaries
+                .iter()
+                .copied()
+                .zip(edited_boundaries.iter().copied())
+                .collect::<Vec<_>>(),
+        )
+    });
+    let projection_sources = [&original.runs[..], &edited.runs[..]]
+        .into_iter()
+        .enumerate()
+        .map(|(side, runs)| {
+            runs.iter()
+                .enumerate()
+                .map(|(owner, run)| {
+                    let _ = (side, owner);
+                    metadata.run_source(run).cloned()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let projection_sources = [projection_sources[0].clone(), projection_sources[1].clone()];
+    let mut projection_ledgers = if let Some(pairs) = &projection_pairs {
+        projection_action_ledgers(
+            pairs,
+            [&original.runs[..], &edited.runs[..]],
+            &projection_sources,
+        )?
+    } else {
+        Vec::new()
+    };
     let original_units = attributed_run_units(&original.runs, metadata.options);
     let edited_units = attributed_run_units(&edited.runs, metadata.options);
+    validate_raw_attribution(&original.runs, &original_units)?;
+    validate_raw_attribution(&edited.runs, &edited_units)?;
     let original_signatures = original_units
         .iter()
         .map(attributed_unit_signature)
@@ -5691,16 +11096,41 @@ fn compare_granular_paragraph(
     ) else {
         return Err(boundary_error());
     };
-    let (aligned, segments) = align_between_shells(&original_signatures, &edited_signatures, &cuts);
+    let (aligned, segments) = if let Some(pairs) = &projection_pairs {
+        projection_unit_alignment(
+            pairs,
+            [&original_units, &edited_units],
+            [&original_signatures, &edited_signatures],
+        )?
+    } else {
+        align_between_shells(&original_signatures, &edited_signatures, &cuts)
+    };
     // The original run each shell segment starts at, before which the
     // redline copies the original bytes, shell tags included.
-    let segment_runs = std::iter::once(0)
-        .chain(cuts.iter().map(|&(cut, _)| {
-            original_units
-                .get(cut)
-                .map_or(original.runs.len(), |unit| unit.owner)
-        }))
-        .collect::<Vec<_>>();
+    let segment_runs = if let Some(pairs) = &projection_pairs {
+        pairs
+            .iter()
+            .enumerate()
+            .map(|(at, pair)| {
+                pair[0]
+                    .map(|(owner, _)| owner)
+                    .or_else(|| {
+                        pairs[at..]
+                            .iter()
+                            .find_map(|next| next[0].map(|(owner, _)| owner))
+                    })
+                    .unwrap_or(original.runs.len())
+            })
+            .collect::<Vec<_>>()
+    } else {
+        std::iter::once(0)
+            .chain(cuts.iter().map(|&(cut, _)| {
+                original_units
+                    .get(cut)
+                    .map_or(original.runs.len(), |unit| unit.owner)
+            }))
+            .collect::<Vec<_>>()
+    };
     if !metadata.options.ignore_fields {
         validate_field_alignment(
             &aligned,
@@ -5717,6 +11147,15 @@ fn compare_granular_paragraph(
             location,
         )?;
     }
+    #[cfg(test)]
+    policy_diagnostic(
+        "occurrence_alignment_before_group",
+        serde_json::json!({
+        "location":location,"aligned":aligned,"segments":segments,"cuts":cuts,
+        "original_units":occurrence_units_diagnostic(&original_units),
+        "edited_units":occurrence_units_diagnostic(&edited_units),
+        "original_signatures":original_signatures,"edited_signatures":edited_signatures }),
+    );
     let (aligned, segments) = grouped_text_alignment(
         &aligned,
         &segments,
@@ -5726,17 +11165,48 @@ fn compare_granular_paragraph(
         &edited_signatures,
         metadata.options,
     );
-    let grouped = coalesced_granular_alignment(
+    let mut grouped = coalesced_granular_alignment(
         &aligned,
         &original_units,
         &edited_units,
         &original_signatures,
         &edited_signatures,
     );
+    if let Some(pairs) = &projection_pairs {
+        retain_projection_separators(
+            &mut grouped,
+            &aligned,
+            &segments,
+            pairs,
+            [&original_units, &edited_units],
+            &projection_sources,
+            metadata.options,
+        )?;
+    }
+    #[cfg(test)]
+    policy_diagnostic(
+        "occurrence_alignment_after_group",
+        serde_json::json!({
+        "location":location,"aligned":aligned,"segments":segments,
+        "groups":grouped.iter().map(|(action,range)|serde_json::json!({"action":match action { GranularAction::Preserve=>"Preserve",GranularAction::Equal=>"Equal",GranularAction::Replace=>"Replace",GranularAction::Delete=>"Delete",GranularAction::Insert=>"Insert",GranularAction::Drop=>"Drop" },"members":[range.start,range.end]})).collect::<Vec<_>>() }),
+    );
+    validate_fragment_partition(&aligned, &grouped)?;
     let mut grouped_alignment = Vec::with_capacity(grouped.len());
     let mut grouped_segment_runs = Vec::with_capacity(grouped.len());
     let mut replacements = Vec::with_capacity(grouped.len());
+    let mut fragment_publications = Vec::with_capacity(grouped.len());
     for (action, members) in grouped {
+        if metadata.leaf_capture {
+            record_projection_actions(
+                &mut projection_ledgers,
+                action,
+                members.clone(),
+                &aligned,
+                [&original_units, &edited_units],
+                &projection_sources,
+            )?;
+        }
+        let members_start = members.start;
         let first = aligned[members.start];
         grouped_alignment.push(first);
         grouped_segment_runs.push(segment_runs[segments[members.start]]);
@@ -5747,83 +11217,238 @@ fn compare_granular_paragraph(
         let right_indices = members
             .filter_map(|index| aligned[index].1)
             .collect::<Vec<_>>();
-        let left = merge_unit_runs(&original_units, &left_indices);
-        let right = merge_unit_runs(&edited_units, &right_indices);
+        let mut left_raw = Vec::new();
+        let mut left_typed = Vec::new();
+        let mut right_raw = Vec::new();
+        let mut right_typed = Vec::new();
+        let left = merge_unit_runs(
+            &original_units,
+            &left_indices,
+            &mut left_raw,
+            &mut left_typed,
+        )?;
+        let right = merge_unit_runs(
+            &edited_units,
+            &right_indices,
+            &mut right_raw,
+            &mut right_typed,
+        )?;
         let left_source = left_indices
             .first()
             .and_then(|index| metadata.run_source(&original.runs[original_units[*index].owner]))
-            .map(str::to_owned);
+            .cloned();
         let right_source = right_indices
             .first()
             .and_then(|index| metadata.run_source(&edited.runs[edited_units[*index].owner]))
-            .map(str::to_owned);
-        replacements.push(match action {
-            GranularAction::Preserve => publish_run_source(
-                left.as_ref().unwrap(),
-                paragraph_owned_run_xml(left.as_ref().unwrap())?,
-                left_source.as_deref(),
-                metadata,
-            )?,
-            GranularAction::Equal => compared_run_xml(
-                left.as_ref().unwrap(),
-                right.as_ref().unwrap(),
-                left_source.as_deref(),
-                &format!("{location}/run-unit[{}]", right_indices[0]),
-                metadata,
-                diagnostics,
-            )?,
-            GranularAction::Replace => {
-                let left = left.as_ref().unwrap();
-                let deleted_payload = publish_run_source(
-                    left,
-                    deleted_run_xml(left)?,
-                    left_source.as_deref(),
-                    metadata,
-                )?;
-                let inserted_payload = publish_run_source(
-                    left,
-                    policy_inserted_run_xml(right.as_ref().unwrap(), Some(left), metadata.options)?,
-                    left_source.as_deref(),
-                    metadata,
-                )?;
-                let deleted = metadata.ids.revision(
-                    "del",
-                    metadata.author,
-                    metadata.timestamp,
-                    &deleted_payload,
-                )?;
-                let inserted = metadata.ids.revision(
-                    "ins",
-                    metadata.author,
-                    metadata.timestamp,
-                    &inserted_payload,
-                )?;
-                format!("{deleted}{inserted}")
+            .cloned();
+        let destination_owner = left_indices
+            .first()
+            .map(|index| original_units[*index].owner)
+            .unwrap_or(segment_runs[segments[members_start]]);
+        let destination_parent = parent_for(destination_owner)?;
+        let revision_parent = metadata.ids.revision_parent_scope(&destination_parent);
+        let policy_shell = projection_pairs
+            .as_ref()
+            .and_then(|pairs| {
+                right_indices.first().and_then(|index| {
+                    let unit = &edited_units[*index];
+                    if !matches!(
+                        unit.run.content.first(),
+                        Some(RunContent::Text(_) | RunContent::DeletedText(_))
+                    ) {
+                        return None;
+                    }
+                    let ordinal = unit.typed_sources.first().and_then(|slot| *slot)?.ordinal;
+                    pairs.iter().find_map(|pair| {
+                        (pair[1] == Some((unit.owner, ordinal)))
+                            .then_some(pair[0])
+                            .flatten()
+                    })
+                })
+            })
+            .map(|(owner, ordinal)| {
+                let run = &original.runs[owner];
+                let source = metadata.run_source(run).cloned().ok_or_else(|| {
+                    Error::Other("paired projection shell has no actual source".into())
+                })?;
+                if source
+                    .typed_slots
+                    .get(ordinal)
+                    .and_then(Option::as_ref)
+                    .is_none()
+                {
+                    return Err(Error::Other(
+                        "paired projection shell leaf has no physical slot".into(),
+                    ));
+                }
+                Ok((run, source))
+            })
+            .transpose()?;
+        let mut field_bindings = Vec::new();
+        for (indices, units, originals, cloned, selected) in [
+            (
+                &left_indices,
+                &original_units,
+                &original.runs,
+                left.as_ref(),
+                &left_typed,
+            ),
+            (
+                &right_indices,
+                &edited_units,
+                &edited.runs,
+                right.as_ref(),
+                &right_typed,
+            ),
+        ] {
+            if let Some(cloned) = cloned
+                && run_is_field(cloned)
+            {
+                let owner = units[indices[0]].owner;
+                match metadata.bind_selected_run_fields(&originals[owner], cloned, selected) {
+                    Ok(bindings) => field_bindings.extend(bindings),
+                    Err(error) => {
+                        metadata.unbind_cloned_control_runs(field_bindings)?;
+                        return Err(error);
+                    }
+                }
             }
-            GranularAction::Delete => {
-                let payload = publish_run_source(
+        }
+        let replacement = (|| -> Result<String> {
+            Ok(match action {
+                GranularAction::Preserve => publish_run_source(
                     left.as_ref().unwrap(),
-                    deleted_run_xml(left.as_ref().unwrap())?,
-                    left_source.as_deref(),
+                    left.as_ref().unwrap(),
+                    paragraph_owned_run_xml(left.as_ref().unwrap())?,
+                    left_source.as_ref(),
+                    None,
+                    Some((&left_raw, &left_typed)),
+                    &destination_parent,
                     metadata,
-                )?;
-                metadata
-                    .ids
-                    .revision("del", metadata.author, metadata.timestamp, &payload)?
-            }
-            GranularAction::Insert => {
-                let payload = publish_run_source(
+                )?,
+                GranularAction::Equal => compared_run_xml(
+                    left.as_ref().unwrap(),
                     right.as_ref().unwrap(),
-                    paragraph_owned_run_xml(right.as_ref().unwrap())?,
-                    right_source.as_deref(),
+                    left_source.as_ref(),
+                    Some((&left_raw, &left_typed)),
+                    &format!("{location}/run-unit[{}]", right_indices[0]),
+                    &destination_parent,
                     metadata,
+                    diagnostics,
+                )?,
+                GranularAction::Replace => paired_run_replacement(
+                    [left.as_ref().unwrap(), right.as_ref().unwrap()],
+                    [left_source.as_ref(), right_source.as_ref()],
+                    [
+                        Some((&left_raw, &left_typed)),
+                        Some((&right_raw, &right_typed)),
+                    ],
+                    location,
+                    &destination_parent,
+                    metadata,
+                    diagnostics,
+                )?,
+                GranularAction::Delete => {
+                    let payload = publish_run_source(
+                        left.as_ref().unwrap(),
+                        left.as_ref().unwrap(),
+                        deleted_run_xml(left.as_ref().unwrap())?,
+                        left_source.as_ref(),
+                        None,
+                        Some((&left_raw, &left_typed)),
+                        &revision_parent,
+                        metadata,
+                    )?;
+                    metadata
+                        .ids
+                        .revision("del", metadata.author, metadata.timestamp, &payload)?
+                }
+                GranularAction::Insert => {
+                    let mut content = right.as_ref().unwrap().clone();
+                    let (shell, shell_source) = if let Some((shell, source)) = &policy_shell {
+                        let before = usize::from(content.properties.is_some());
+                        content.properties = shell.properties.clone();
+                        let after = usize::from(content.properties.is_some());
+                        for encoded in &mut content.extra_xml_positions {
+                            if !CT_R::raw_child_is_root_attributes(*encoded) {
+                                let at = CT_R::raw_child_position(*encoded).saturating_sub(before)
+                                    + after;
+                                CT_R::set_raw_child_position(encoded, at);
+                            }
+                        }
+                        (*shell, Some(source))
+                    } else {
+                        (right.as_ref().unwrap(), right_source.as_ref())
+                    };
+                    let payload = publish_run_source(
+                        shell,
+                        &content,
+                        paragraph_owned_run_xml(&content)?,
+                        shell_source,
+                        right_source.as_ref(),
+                        Some((&right_raw, &right_typed)),
+                        &revision_parent,
+                        metadata,
+                    )?;
+                    metadata
+                        .ids
+                        .revision("ins", metadata.author, metadata.timestamp, &payload)?
+                }
+                GranularAction::Drop => String::new(),
+            })
+        })();
+        metadata.unbind_cloned_control_runs(field_bindings)?;
+        replacements.push(replacement?);
+        let mut leaves = Vec::new();
+        if metadata.leaf_capture {
+            let selected = match action {
+                GranularAction::Replace | GranularAction::Insert => right
+                    .as_ref()
+                    .zip(right_source.as_ref())
+                    .map(|(run, source)| {
+                        (
+                            run,
+                            source,
+                            &right_raw[..],
+                            &right_typed[..],
+                            matches!(action, GranularAction::Replace | GranularAction::Insert),
+                        )
+                    }),
+                GranularAction::Equal | GranularAction::Preserve => left
+                    .as_ref()
+                    .zip(left_source.as_ref())
+                    .map(|(run, source)| (run, source, &left_raw[..], &left_typed[..], false)),
+                _ => None,
+            };
+            if let Some((run, source, raw, typed, inserted)) = selected {
+                leaves = emitted_fragment_leaves(
+                    replacements.last().unwrap(),
+                    run,
+                    source,
+                    raw,
+                    typed,
+                    inserted,
+                    metadata.options.ignore_whitespace,
+                    &destination_parent,
                 )?;
-                metadata
-                    .ids
-                    .revision("ins", metadata.author, metadata.timestamp, &payload)?
             }
-            GranularAction::Drop => String::new(),
-        });
+        }
+        #[cfg(test)]
+        policy_diagnostic(
+            "occurrence_actual_emission",
+            serde_json::json!({
+            "location":location,"action":match action { GranularAction::Preserve=>"Preserve",GranularAction::Equal=>"Equal",GranularAction::Replace=>"Replace",GranularAction::Delete=>"Delete",GranularAction::Insert=>"Insert",GranularAction::Drop=>"Drop" },
+            "left_indices":left_indices,"right_indices":right_indices,
+            "left_source":occurrence_source_diagnostic(left_source.as_ref()),"right_source":occurrence_source_diagnostic(right_source.as_ref()),
+            "left_typed":format!("{:?}",left_typed),"right_typed":format!("{:?}",right_typed),
+            "left_properties":left.as_ref().map(|run|format!("{:?}",run.properties)),
+            "right_properties":right.as_ref().map(|run|format!("{:?}",run.properties)),
+            "actual_xml":replacements.last(),"recorded_leaves":leaves.iter().map(occurrence_leaf_diagnostic).collect::<Vec<_>>() }),
+        );
+        fragment_publications.push(leaves);
+    }
+    if metadata.leaf_capture {
+        attach_projection_actions(&mut fragment_publications, &projection_ledgers)?;
     }
     interleave_granular_paragraph(
         original,
@@ -5834,6 +11459,7 @@ fn compare_granular_paragraph(
         &grouped_alignment,
         &grouped_segment_runs,
         &replacements,
+        &fragment_publications,
         &properties,
         location,
         metadata,
@@ -6036,6 +11662,532 @@ fn granular_action(
         (None, Some(_)) => GranularAction::Insert,
         (None, None) => unreachable!(),
     }
+}
+
+fn validate_fragment_partition(
+    aligned: &[(Option<usize>, Option<usize>)],
+    groups: &[(GranularAction, Range<usize>)],
+) -> Result<()> {
+    let mut end = 0;
+    for (_, range) in groups {
+        if range.start != end || range.start >= range.end || range.end > aligned.len() {
+            return Err(Error::Other(
+                "fragment groups do not partition their input roles".into(),
+            ));
+        }
+        end = range.end;
+    }
+    if end != aligned.len() {
+        return Err(Error::Other(
+            "fragment groups omit aligned input roles".into(),
+        ));
+    }
+    for side in [0, 1] {
+        let mut next = 0;
+        for &(left, right) in aligned {
+            if let Some(index) = if side == 0 { left } else { right } {
+                if index != next {
+                    return Err(Error::Other(
+                        "fragment input role repeats, reorders or loses a unit".into(),
+                    ));
+                }
+                next += 1;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Only isolated paired-body projection selects these ordered source-slot pairs.
+/// Scalar alignment is confined to each pair, including ignored whitespace.
+fn projection_leaf_pairs(
+    runs: [&[CT_R]; 2],
+    boundaries: &[(usize, usize)],
+) -> Vec<[Option<(usize, usize)>; 2]> {
+    let signatures = runs.map(|runs| {
+        runs.iter()
+            .map(attributed_run_signature)
+            .collect::<Vec<_>>()
+    });
+    let mut output = Vec::new();
+    for (left, right) in align_between_shells(&signatures[0], &signatures[1], boundaries).0 {
+        let slots = [left, right]
+            .into_iter()
+            .enumerate()
+            .map(|(side, owner)| {
+                owner
+                    .map(|owner| {
+                        let run = &runs[side][owner];
+                        if run.content.is_empty() {
+                            vec!["raw-run".to_owned()]
+                        } else {
+                            run.content.iter().map(run_content_signature).collect()
+                        }
+                    })
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<Vec<String>>>();
+        let raw_cuts = [left, right]
+            .into_iter()
+            .enumerate()
+            .map(|(side, owner)| {
+                owner
+                    .map(|owner| {
+                        let run = &runs[side][owner];
+                        run.extra_xml_positions
+                            .iter()
+                            .filter(|encoded| !CT_R::raw_child_is_root_attributes(**encoded))
+                            .map(|encoded| {
+                                CT_R::raw_child_position(*encoded)
+                                    .saturating_sub(usize::from(run.properties.is_some()))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+        let cuts = if raw_cuts[0].len() == raw_cuts[1].len() {
+            raw_cuts[0]
+                .iter()
+                .copied()
+                .zip(raw_cuts[1].iter().copied())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        for (a, b) in align_between_shells(&slots[0], &slots[1], &cuts).0 {
+            output.push([
+                left.zip(a).map(|(owner, ordinal)| {
+                    (
+                        owner,
+                        if runs[0][owner].content.is_empty() {
+                            usize::MAX
+                        } else {
+                            ordinal
+                        },
+                    )
+                }),
+                right.zip(b).map(|(owner, ordinal)| {
+                    (
+                        owner,
+                        if runs[1][owner].content.is_empty() {
+                            usize::MAX
+                        } else {
+                            ordinal
+                        },
+                    )
+                }),
+            ]);
+        }
+    }
+    output
+}
+
+/// One logical occurrence has independent original and edited scalar domains.
+/// Capture source membership before unit grouping, then record actual actions.
+struct ProjectionActionLedger {
+    domains: [Option<(usize, usize, usize)>; 2],
+    source: String,
+    context: NamespaceBindings,
+    actions: Vec<([Option<Range<usize>>; 2], GranularAction)>,
+}
+
+fn projection_action_ledgers(
+    pairs: &[[Option<(usize, usize)>; 2]],
+    runs: [&[CT_R]; 2],
+    sources: &[Vec<Option<RunSource>>; 2],
+) -> Result<Vec<ProjectionActionLedger>> {
+    let mut result = Vec::new();
+    for pair in pairs {
+        let mut domains = [None, None];
+        let mut template = None;
+        for side in 0..2 {
+            let Some((owner, ordinal)) = pair[side] else {
+                continue;
+            };
+            if !matches!(
+                runs[side][owner].content.get(ordinal),
+                Some(RunContent::Text(_) | RunContent::DeletedText(_))
+            ) {
+                continue;
+            }
+            let source = sources[side][owner]
+                .as_ref()
+                .ok_or_else(|| Error::Other("projection leaf ledger has no source owner".into()))?;
+            let span = source
+                .typed_slots
+                .get(ordinal)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| {
+                    Error::Other("projection leaf ledger has no actual lexical slot".into())
+                })?;
+            let context = root_namespace_bindings(&source.scoped, "r", &source.parent)?;
+            let raw = source.scoped[span.clone()].to_owned();
+            let Some(RunContent::Text(text) | RunContent::DeletedText(text)) =
+                source_content_model(&raw, &context)?
+            else {
+                return Err(Error::Other(
+                    "projection leaf ledger has incompatible source grammar".into(),
+                ));
+            };
+            domains[side] = Some((source.owner, ordinal, text.text.chars().count()));
+            if template.is_none() {
+                template = Some((raw, context));
+            }
+        }
+        if let Some((source, context)) = template {
+            result.push(ProjectionActionLedger {
+                domains,
+                source,
+                context,
+                actions: Vec::new(),
+            });
+        }
+    }
+    Ok(result)
+}
+
+fn record_projection_actions(
+    ledgers: &mut [ProjectionActionLedger],
+    action: GranularAction,
+    members: Range<usize>,
+    aligned: &Alignment,
+    units: [&[AttributedRunUnit]; 2],
+    sources: &[Vec<Option<RunSource>>; 2],
+) -> Result<()> {
+    for at in members {
+        let pair = [aligned[at].0, aligned[at].1];
+        let mut inputs = [None, None];
+        let mut selected = None;
+        for side in 0..2 {
+            let Some(index) = pair[side] else {
+                continue;
+            };
+            let unit = &units[side][index];
+            let Some(source) = sources[side][unit.owner].as_ref() else {
+                continue;
+            };
+            for slot in unit.typed_sources.iter().flatten() {
+                if let Some((ledger_index, domain)) =
+                    ledgers.iter().enumerate().find_map(|(i, ledger)| {
+                        ledger.domains[side]
+                            .filter(|(owner, ordinal, _)| {
+                                *owner == source.owner && *ordinal == slot.ordinal
+                            })
+                            .map(|domain| (i, domain))
+                    })
+                {
+                    if selected.is_some_and(|previous| previous != ledger_index)
+                        || inputs[side].is_some()
+                    {
+                        return Err(Error::Other(
+                            "projection action crosses selected logical occurrences".into(),
+                        ));
+                    }
+                    selected = Some(ledger_index);
+                    let (start, end) = slot.scalars.unwrap_or((0, domain.2));
+                    inputs[side] = Some(start..end);
+                }
+            }
+        }
+        if let Some(index) = selected {
+            ledgers[index].actions.push((inputs, action));
+        }
+    }
+    Ok(())
+}
+
+fn attach_projection_actions(
+    leaves: &mut [Vec<LeafPublication>],
+    ledgers: &[ProjectionActionLedger],
+) -> Result<()> {
+    for ledger in ledgers {
+        validate_projection_actions(&ledger.domains, &ledger.actions)?;
+    }
+    for leaf in leaves.iter_mut().flatten() {
+        let ledger = ledgers
+            .iter()
+            .find(|ledger| {
+                ledger.domains.iter().flatten().any(|(owner, ordinal, _)| {
+                    *owner == leaf.physical.0 && *ordinal == leaf.physical.1
+                })
+            })
+            .ok_or_else(|| {
+                Error::Other("emitted leaf lost its selected logical occurrence".into())
+            })?;
+        let (owner, ordinal, _) = ledger.domains.iter().flatten().next().copied().unwrap();
+        leaf.owner = owner;
+        leaf.ordinal = ordinal;
+        leaf.source = ledger.source.clone();
+        leaf.context = ledger.context.clone();
+        leaf.domains = ledger.domains;
+        leaf.actions = ledger.actions.clone();
+    }
+    Ok(())
+}
+
+fn validate_projection_actions(
+    domains: &[Option<(usize, usize, usize)>; 2],
+    actions: &[([Option<Range<usize>>; 2], GranularAction)],
+) -> Result<()> {
+    for side in 0..2 {
+        let ranges = actions
+            .iter()
+            .filter_map(|(inputs, _)| inputs[side].clone())
+            .collect::<Vec<_>>();
+        let Some((_, _, length)) = domains[side] else {
+            if !ranges.is_empty() {
+                return Err(Error::Other(
+                    "projection actions invent an absent input domain".into(),
+                ));
+            }
+            continue;
+        };
+        let mut covered = 0;
+        for range in &ranges {
+            if range.start != covered || range.end < range.start || range.end > length {
+                return Err(Error::Other(format!(
+                    "projection input {side} action coverage is incomplete or repeated"
+                )));
+            }
+            covered = range.end;
+        }
+        if covered != length || (length == 0 && ranges.len() != 1) {
+            return Err(Error::Other(format!(
+                "projection input {side} action coverage omits source scalars"
+            )));
+        }
+    }
+    for (inputs, action) in actions {
+        let valid = match action {
+            GranularAction::Preserve => inputs[0].is_some(),
+            GranularAction::Equal | GranularAction::Replace => inputs.iter().all(Option::is_some),
+            GranularAction::Delete => inputs[0].is_some() && inputs[1].is_none(),
+            GranularAction::Insert | GranularAction::Drop => {
+                inputs[0].is_none() && inputs[1].is_some()
+            }
+        };
+        if !valid {
+            return Err(Error::Other(
+                "projection action has inconsistent input roles".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn projection_unit_alignment(
+    pairs: &[[Option<(usize, usize)>; 2]],
+    units: [&[AttributedRunUnit]; 2],
+    signatures: [&[String]; 2],
+) -> Result<(Alignment, Vec<usize>)> {
+    let mut output = Vec::new();
+    let mut segments = Vec::new();
+    let mut seen = [vec![false; units[0].len()], vec![false; units[1].len()]];
+    for (segment, pair) in pairs.iter().enumerate() {
+        let indices = [0, 1].map(|side| {
+            units[side]
+                .iter()
+                .enumerate()
+                .filter_map(|(index, unit)| {
+                    pair[side]
+                        .filter(|(owner, ordinal)| {
+                            unit.owner == *owner
+                                && (if *ordinal == usize::MAX {
+                                    unit.typed_sources.is_empty()
+                                } else {
+                                    unit.typed_sources
+                                        .iter()
+                                        .flatten()
+                                        .any(|slot| slot.ordinal == *ordinal)
+                                })
+                        })
+                        .map(|_| index)
+                })
+                .collect::<Vec<_>>()
+        });
+        for side in 0..2 {
+            for &index in &indices[side] {
+                if std::mem::replace(&mut seen[side][index], true) {
+                    return Err(Error::Other("projection source slot repeats a unit".into()));
+                }
+            }
+        }
+        let values = [0, 1].map(|side| {
+            indices[side]
+                .iter()
+                .map(|index| signatures[side][*index].clone())
+                .collect::<Vec<_>>()
+        });
+        for (left, right) in align(&values[0], &values[1]) {
+            output.push((left.map(|i| indices[0][i]), right.map(|i| indices[1][i])));
+            segments.push(segment);
+        }
+    }
+    if seen.iter().flatten().any(|seen| !seen) {
+        return Err(Error::Other("projection source slots omit a unit".into()));
+    }
+    Ok((output, segments))
+}
+
+/// Publish a source separator only when one-occurrence assembly would otherwise
+/// merge two surviving Run/Word tokens. Ordinary comparison never calls this.
+fn retain_projection_separators(
+    grouped: &mut [(GranularAction, Range<usize>)],
+    aligned: &Alignment,
+    segments: &[usize],
+    pairs: &[[Option<(usize, usize)>; 2]],
+    units: [&[AttributedRunUnit]; 2],
+    sources: &[Vec<Option<RunSource>>; 2],
+    options: &ComparisonOptions,
+) -> Result<()> {
+    if !options.ignore_whitespace || options.granularity == ComparisonGranularity::Character {
+        return Ok(());
+    }
+    let mut actions = vec![GranularAction::Drop; aligned.len()];
+    for (action, members) in grouped.iter() {
+        actions[members.clone()].fill(*action);
+    }
+    // Source raw slots are ordered relative to the actual selected typed slot.
+    // A right edge may retain a suffix, but that suffix cannot precede the edge.
+    let edge = |at: usize, before: bool| -> Result<Option<char>> {
+        let (side, index) = match actions[at] {
+            GranularAction::Preserve | GranularAction::Equal => (0, aligned[at].0),
+            GranularAction::Replace | GranularAction::Insert => (1, aligned[at].1),
+            GranularAction::Delete | GranularAction::Drop => return Ok(None),
+        };
+        let unit = &units[side][index.unwrap()];
+        let [RunContent::Text(text)] = unit.run.content.as_slice() else {
+            return Ok(None);
+        };
+        let [Some(selected)] = unit.typed_sources.as_slice() else {
+            return Ok(None);
+        };
+        if !unit.run.alt_drawings.is_empty() {
+            return Ok(None);
+        }
+        let source = sources[side][unit.owner]
+            .as_ref()
+            .ok_or_else(|| Error::Other("separator neighbor has no actual source owner".into()))?;
+        let span = source
+            .typed_slots
+            .get(selected.ordinal)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| Error::Other("separator neighbor has no typed source slot".into()))?;
+        for &(_, ordinal, _) in &unit.raw_sources {
+            let raw = source
+                .raw_slots
+                .get(ordinal)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| Error::Other("separator neighbor has no raw source slot".into()))?;
+            if if before {
+                raw.0.end > span.start
+            } else {
+                raw.0.start < span.end
+            } {
+                return Ok(None);
+            }
+        }
+        Ok(if before {
+            text.text.chars().next_back()
+        } else {
+            text.text.chars().next()
+        })
+    };
+    for (action, members) in grouped {
+        if *action != GranularAction::Drop {
+            continue;
+        }
+        if members.len() != 1 {
+            return Err(Error::Other(
+                "separator Drop has ambiguous unit coverage".into(),
+            ));
+        }
+        let at = members.start;
+        let pair = pairs[segments[at]];
+        let (Some(_), Some((right_owner, right_ordinal))) = (pair[0], pair[1]) else {
+            continue;
+        };
+        let (None, Some(right_index)) = aligned[at] else {
+            return Err(Error::Other(
+                "separator Drop has inconsistent source roles".into(),
+            ));
+        };
+        let right = &units[1][right_index];
+        let [Some(selected)] = right.typed_sources.as_slice() else {
+            continue;
+        };
+        if right.owner != right_owner || selected.ordinal != right_ordinal {
+            return Err(Error::Other(
+                "separator crosses its selected source leaf".into(),
+            ));
+        }
+        let source = sources[1][right.owner]
+            .as_ref()
+            .ok_or_else(|| Error::Other("separator has no actual source owner".into()))?;
+        let span = source
+            .typed_slots
+            .get(selected.ordinal)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| Error::Other("separator has no typed source slot".into()))?;
+        if source_content_metadata(source, span.clone())?.is_empty() {
+            continue;
+        }
+        let [RunContent::Text(text)] = right.run.content.as_slice() else {
+            continue;
+        };
+        if text.text.is_empty() || !text.text.chars().all(char::is_whitespace) {
+            return Err(Error::Other(
+                "separator is not actual ignored whitespace".into(),
+            ));
+        }
+        let neighbor = |before| -> Result<Option<char>> {
+            let mut index = at;
+            loop {
+                let next = if before {
+                    index.checked_sub(1)
+                } else {
+                    index.checked_add(1).filter(|index| *index < aligned.len())
+                };
+                let Some(next) = next else { return Ok(None) };
+                index = next;
+                if segments[index] != segments[at] {
+                    return Ok(None);
+                }
+                if matches!(
+                    actions[index],
+                    GranularAction::Delete | GranularAction::Drop
+                ) {
+                    continue;
+                }
+                return edge(index, before);
+            }
+        };
+        let (Some(left), Some(right_edge)) = (neighbor(true)?, neighbor(false)?) else {
+            continue;
+        };
+        if left.is_whitespace() || right_edge.is_whitespace() {
+            continue;
+        }
+        let joined = CT_Text {
+            text: format!("{left}{right_edge}"),
+            preserve_space: false,
+        };
+        if granular_text(&joined, options).len() != 1 {
+            continue;
+        }
+        *action = GranularAction::Insert;
+        #[cfg(test)]
+        policy_diagnostic(
+            "occurrence_necessary_separator",
+            serde_json::json!({
+            "segment":segments[at],"pair":pair,"actual_owner":source.owner,
+            "ordinal":selected.ordinal,"scalars":selected.scalars,"payload":text.text,
+            "left_edge":left,"right_edge":right_edge,"joined_edge_tokens":1,
+            "granularity":format!("{:?}",options.granularity),"action":"Insert"}),
+        );
+    }
+    Ok(())
 }
 
 fn coalesced_granular_alignment(
@@ -6298,19 +12450,46 @@ fn grouped_text_alignment(
     (grouped, grouped_segments)
 }
 
-fn merge_unit_runs(units: &[AttributedRunUnit], indices: &[usize]) -> Option<CT_R> {
-    let mut merged = units.get(*indices.first()?)?.run.clone();
+fn merge_unit_runs(
+    units: &[AttributedRunUnit],
+    indices: &[usize],
+    raw_sources: &mut Vec<(usize, usize, usize)>,
+    typed_sources: &mut Vec<Option<TypedSourceSelection>>,
+) -> Result<Option<CT_R>> {
+    let Some(first) = indices.first().and_then(|index| units.get(*index)) else {
+        return Ok(None);
+    };
+    let mut merged = first.run.clone();
+    raw_sources.extend_from_slice(&first.raw_sources);
+    typed_sources.extend_from_slice(&first.typed_sources);
     let property_boundary = usize::from(merged.properties.is_some());
     for &index in &indices[1..] {
-        let next = &units[index].run;
+        let unit = &units[index];
+        if unit.owner != first.owner {
+            return Err(Error::Other(
+                "comparison merged different physical run owners".into(),
+            ));
+        }
+        let next = &unit.run;
         let content_offset = merged.content.len();
         merged.content.extend(next.content.iter().cloned());
+        typed_sources.extend_from_slice(&unit.typed_sources);
         merged
             .alt_drawings
             .extend(next.alt_drawings.iter().cloned());
-        for (raw, &encoded) in next.extra_xml.iter().zip(&next.extra_xml_positions) {
+        for (local, (raw, &encoded)) in next
+            .extra_xml
+            .iter()
+            .zip(&next.extra_xml_positions)
+            .enumerate()
+        {
             if CT_R::raw_child_is_root_attributes(encoded) {
                 continue;
+            }
+            if let Some(&(_, ordinal, original_boundary)) =
+                unit.raw_sources.iter().find(|(at, _, _)| *at == local)
+            {
+                raw_sources.push((merged.extra_xml.len(), ordinal, original_boundary));
             }
             let boundary = CT_R::raw_child_position(encoded);
             let mut rebased = encoded;
@@ -6322,7 +12501,12 @@ fn merge_unit_runs(units: &[AttributedRunUnit], indices: &[usize]) -> Option<CT_
             merged.properties = next.properties.clone();
         }
     }
-    Some(merged)
+    if raw_sources.windows(2).any(|pair| pair[0].1 >= pair[1].1) {
+        return Err(Error::Other(
+            "fragment raw source order or multiplicity is invalid".into(),
+        ));
+    }
+    Ok(Some(merged))
 }
 
 /// The paragraph source with `properties` in place of its own `w:pPr`. A
@@ -6371,11 +12555,13 @@ fn interleave_granular_paragraph(
     aligned: &[(Option<usize>, Option<usize>)],
     segment_runs: &[usize],
     replacements: &[String],
+    fragment_publications: &[Vec<LeafPublication>],
     properties: &str,
     location: &str,
     metadata: &mut Metadata<'_>,
     diagnostics: &mut Vec<ComparisonDiagnostic>,
 ) -> Result<String> {
+    let leaf_mark = metadata.leaf_publications.len();
     let source = paragraph_with_properties(original, original_source, properties)?;
     let spans = modeled_paragraph_run_spans(original, &source)?;
     if spans.len() != original.runs.len()
@@ -6403,8 +12589,11 @@ fn interleave_granular_paragraph(
     for unit in edited_units {
         edited_owner_units[unit.owner] += 1;
     }
-    for (((left, right), replacement), &segment_run) in
-        aligned.iter().zip(replacements).zip(segment_runs)
+    for (replacement_index, (((left, right), replacement), &segment_run)) in aligned
+        .iter()
+        .zip(replacements)
+        .zip(segment_runs)
+        .enumerate()
     {
         // Text inserted at the start of a shell segment comes after the
         // shell tags that open it.
@@ -6422,6 +12611,7 @@ fn interleave_granular_paragraph(
             cursor = span.end;
             consumed_owner = Some(unit.owner);
             if let Some(right_owner) = right.map(|index| edited_units[index].owner)
+                && !run_is_field(&original.runs[unit.owner])
                 && original.runs[unit.owner] == edited.runs[right_owner]
                 && original_owner_units[unit.owner] == 1
                 && edited_owner_units[right_owner] == 1
@@ -6429,10 +12619,23 @@ fn interleave_granular_paragraph(
                 exact_run = Some(&source[span.clone()]);
             }
         }
+        if exact_run.is_none() {
+            let mut leaves = fragment_publications[replacement_index].clone();
+            shift_leaf_publications(&mut leaves, output.len() as isize)?;
+            metadata.leaf_publications.extend(leaves);
+        }
         output.push_str(exact_run.unwrap_or(replacement));
     }
     output.push_str(&source[cursor..]);
-    compare_granular_controls(original, edited, &output, location, metadata, diagnostics)
+    compare_granular_controls(
+        original,
+        edited,
+        &output,
+        location,
+        metadata,
+        diagnostics,
+        leaf_mark,
+    )
 }
 
 /// Compare the inline controls of a paragraph whose revised runs are in
@@ -6444,6 +12647,7 @@ fn compare_granular_controls(
     location: &str,
     metadata: &mut Metadata<'_>,
     diagnostics: &mut Vec<ComparisonDiagnostic>,
+    leaf_mark: usize,
 ) -> Result<String> {
     let control_spans = direct_word_element_spans(output, "sdt")?;
     if control_spans.len() != original.content_controls.len() {
@@ -6451,6 +12655,7 @@ fn compare_granular_controls(
             "comparison could not correlate granular content controls at {location}"
         )));
     }
+    let mut child_leaves = Vec::new();
     let mut control_replacements = Vec::with_capacity(control_spans.len());
     for (index, ((_, _, _, left), (_, _, _, right))) in original
         .content_controls
@@ -6458,6 +12663,7 @@ fn compare_granular_controls(
         .zip(&edited.content_controls)
         .enumerate()
     {
+        let child_mark = metadata.leaf_publications.len();
         control_replacements.push(compare_control_from_xml(
             left,
             right,
@@ -6466,7 +12672,15 @@ fn compare_granular_controls(
             diagnostics,
             &source_child(output, control_spans[index].clone())?,
         )?);
+        child_leaves.push(metadata.leaf_publications.split_off(child_mark));
     }
+    splice_leaf_publications(
+        metadata,
+        leaf_mark,
+        &control_spans,
+        &control_replacements,
+        child_leaves,
+    )?;
     replace_direct_word_elements(output, "sdt", &control_replacements)
 }
 
@@ -6475,7 +12689,7 @@ fn attributed_run_units(runs: &[CT_R], options: &ComparisonOptions) -> Vec<Attri
     for (owner, run) in runs.iter().enumerate() {
         let unit_start = units.len();
         let mut content_units = Vec::<Range<usize>>::with_capacity(run.content.len());
-        for content in &run.content {
+        for (content_index, content) in run.content.iter().enumerate() {
             let start = units.len() - unit_start;
             let fragments = match content {
                 RunContent::Text(text) => granular_text(text, options)
@@ -6488,7 +12702,18 @@ fn attributed_run_units(runs: &[CT_R], options: &ComparisonOptions) -> Vec<Attri
                     .collect::<Vec<_>>(),
                 content => vec![content.clone()],
             };
+            let whole = fragments.len() == 1;
+            let mut scalar_cursor = 0;
             for fragment in fragments {
+                let scalars = match &fragment {
+                    RunContent::Text(text) | RunContent::DeletedText(text) if !whole => {
+                        let end = scalar_cursor + text.text.chars().count();
+                        let range = Some((scalar_cursor, end));
+                        scalar_cursor = end;
+                        range
+                    }
+                    _ => None,
+                };
                 let ignored = ignored_run_content(&fragment, options);
                 units.push(AttributedRunUnit {
                     run: CT_R {
@@ -6500,6 +12725,11 @@ fn attributed_run_units(runs: &[CT_R], options: &ComparisonOptions) -> Vec<Attri
                     },
                     ignored,
                     owner,
+                    raw_sources: Vec::new(),
+                    typed_sources: vec![Some(TypedSourceSelection {
+                        ordinal: content_index,
+                        scalars,
+                    })],
                 });
             }
             content_units.push(start..units.len() - unit_start);
@@ -6511,18 +12741,23 @@ fn attributed_run_units(runs: &[CT_R], options: &ComparisonOptions) -> Vec<Attri
                     content: Vec::new(),
                     extra_xml: Vec::new(),
                     extra_xml_positions: Vec::new(),
-                    alt_drawings: run.alt_drawings.clone(),
+                    alt_drawings: Vec::new(),
                 },
                 ignored: false,
                 owner,
+                raw_sources: Vec::new(),
+                typed_sources: Vec::new(),
             });
-        } else {
-            units[unit_start].run.alt_drawings = run.alt_drawings.clone();
         }
         attribute_raw_children(run, &content_units, &mut units[unit_start..]);
         let property_boundary = usize::from(run.properties.is_some());
         let mut inserted = 0usize;
-        for (raw, &encoded) in run.extra_xml.iter().zip(&run.extra_xml_positions) {
+        for (ordinal, (raw, &encoded)) in run
+            .extra_xml
+            .iter()
+            .zip(&run.extra_xml_positions)
+            .enumerate()
+        {
             if !is_text_box_host_marker(raw) {
                 continue;
             }
@@ -6547,9 +12782,35 @@ fn attributed_run_units(runs: &[CT_R], options: &ComparisonOptions) -> Vec<Attri
                     },
                     ignored: false,
                     owner,
+                    raw_sources: vec![(0, ordinal, boundary)],
+                    typed_sources: Vec::new(),
                 },
             );
             inserted += 1;
+        }
+        preserve_marker_raw_order(run, &mut units[unit_start..]);
+        // Each AlternateContent projection follows its actual flagged raw slot.
+        let projected = run
+            .extra_xml_positions
+            .iter()
+            .enumerate()
+            .filter(|(_, encoded)| CT_R::raw_child_has_alternate_content_drawing(**encoded))
+            .map(|(ordinal, _)| ordinal)
+            .collect::<Vec<_>>();
+        for unit in &mut units[unit_start..] {
+            for &(_, ordinal, _) in &unit.raw_sources {
+                if let Some(index) = projected.iter().position(|candidate| *candidate == ordinal)
+                    && let Some(drawing) = run.alt_drawings.get(index)
+                {
+                    unit.run.alt_drawings.push(drawing.clone());
+                }
+            }
+        }
+        if projected.len() < run.alt_drawings.len() {
+            units[unit_start]
+                .run
+                .alt_drawings
+                .extend_from_slice(&run.alt_drawings[projected.len()..]);
         }
     }
     units
@@ -6561,23 +12822,223 @@ fn attribute_raw_children(
     units: &mut [AttributedRunUnit],
 ) {
     let property_boundary = usize::from(run.properties.is_some());
-    for (raw, &encoded) in run.extra_xml.iter().zip(&run.extra_xml_positions) {
+    for (ordinal, (raw, &encoded)) in run
+        .extra_xml
+        .iter()
+        .zip(&run.extra_xml_positions)
+        .enumerate()
+    {
         if is_text_box_host_marker(raw) {
             continue;
         }
         let boundary = CT_R::raw_child_position(encoded);
-        let (unit_index, position) = if boundary <= property_boundary || content_units.is_empty() {
+        let comment = raw_comment_content_index(run, ordinal);
+        let (unit_index, position) = if let Some(index) = comment {
+            (content_units[index].start, property_boundary)
+        } else if boundary <= property_boundary || content_units.is_empty() {
             (0, boundary.min(property_boundary))
         } else {
             let content_index = (boundary - property_boundary - 1).min(content_units.len() - 1);
             let range = &content_units[content_index];
             (range.end.saturating_sub(1), property_boundary + 1)
         };
+        let local = units[unit_index].run.extra_xml.len();
+        if !CT_R::raw_child_is_root_attributes(encoded) {
+            units[unit_index]
+                .raw_sources
+                .push((local, ordinal, boundary));
+        }
         units[unit_index].run.extra_xml.push(raw.clone());
         let mut attributed = encoded;
         CT_R::set_raw_child_position(&mut attributed, position);
         units[unit_index].run.extra_xml_positions.push(attributed);
     }
+}
+
+fn preserve_marker_raw_order(run: &CT_R, units: &mut [AttributedRunUnit]) {
+    let hosts = units
+        .iter()
+        .enumerate()
+        .flat_map(|(index, unit)| {
+            unit.raw_sources
+                .iter()
+                .filter_map(move |&(local, ordinal, boundary)| {
+                    is_text_box_host_marker(&unit.run.extra_xml[local])
+                        .then_some((index, ordinal, boundary))
+                })
+        })
+        .collect::<Vec<_>>();
+    for (host, host_ordinal, host_boundary) in hosts {
+        let mut moved = Vec::new();
+        for (index, unit) in units.iter_mut().enumerate() {
+            if index == host {
+                continue;
+            }
+            let provenance = std::mem::take(&mut unit.raw_sources);
+            let raw = std::mem::take(&mut unit.run.extra_xml);
+            let positions = std::mem::take(&mut unit.run.extra_xml_positions);
+            for (local, (raw, position)) in raw.into_iter().zip(positions).enumerate() {
+                let source = provenance.iter().find(|(at, _, _)| *at == local).copied();
+                if let Some((_, ordinal, boundary)) = source
+                    && boundary == host_boundary
+                    && ordinal > host_ordinal
+                    && !is_text_box_host_marker(&raw)
+                {
+                    moved.push((ordinal, boundary, raw, position));
+                } else {
+                    if let Some((_, ordinal, boundary)) = source {
+                        unit.raw_sources
+                            .push((unit.run.extra_xml.len(), ordinal, boundary));
+                    }
+                    unit.run.extra_xml.push(raw);
+                    unit.run.extra_xml_positions.push(position);
+                }
+            }
+        }
+        moved.sort_by_key(|(ordinal, _, _, _)| *ordinal);
+        for (ordinal, boundary, raw, mut position) in moved {
+            let unit = &mut units[host];
+            CT_R::set_raw_child_position(&mut position, usize::from(run.properties.is_some()));
+            unit.raw_sources
+                .push((unit.run.extra_xml.len(), ordinal, boundary));
+            unit.run.extra_xml.push(raw);
+            unit.run.extra_xml_positions.push(position);
+        }
+    }
+}
+
+fn raw_comment_content_index(run: &CT_R, ordinal: usize) -> Option<usize> {
+    let raw = run.extra_xml.get(ordinal)?;
+    let mut reader = NsReader::from_reader(raw.as_slice());
+    let (namespace, event) = reader.read_resolved_event().ok()?;
+    if !matches!(namespace, ResolveResult::Bound(uri) if uri.as_ref() == W_NS.as_bytes()) {
+        return None;
+    }
+    let (Event::Start(root) | Event::Empty(root)) = event else {
+        return None;
+    };
+    if root.local_name().as_ref() != b"commentReference" {
+        return None;
+    }
+    run.content.iter().position(|content| matches!(content, RunContent::CommentReference {raw_before, ..} if *raw_before == ordinal + 1))
+}
+
+/// Prove the attribution partition once per physical input role. This validates
+/// identities supplied by the parser, never a lookup by generated XML spelling.
+fn validate_raw_attribution(runs: &[CT_R], units: &[AttributedRunUnit]) -> Result<()> {
+    let mut seen = runs
+        .iter()
+        .map(|run| vec![false; run.extra_xml.len()])
+        .collect::<Vec<_>>();
+    let mut previous = vec![None; runs.len()];
+    let mut typed_coverage = runs
+        .iter()
+        .map(|run| vec![(false, 0usize); run.content.len()])
+        .collect::<Vec<_>>();
+    for unit in units {
+        let run = runs
+            .get(unit.owner)
+            .ok_or_else(|| Error::Other("attributed run owner is absent".into()))?;
+        if unit.typed_sources.len() != unit.run.content.len() {
+            return Err(Error::Other(
+                "typed attribution coverage is incomplete".into(),
+            ));
+        }
+        for (content, selected) in unit.run.content.iter().zip(&unit.typed_sources) {
+            let selected = selected
+                .ok_or_else(|| Error::Other("typed attribution has no source role".into()))?;
+            let original = run
+                .content
+                .get(selected.ordinal)
+                .ok_or_else(|| Error::Other("typed source ordinal is absent".into()))?;
+            let (whole, cursor) = &mut typed_coverage[unit.owner][selected.ordinal];
+            if *whole {
+                return Err(Error::Other(
+                    "typed attribution repeats a whole source role".into(),
+                ));
+            }
+            if let Some((start, end)) = selected.scalars {
+                let (
+                    RunContent::Text(actual) | RunContent::DeletedText(actual),
+                    RunContent::Text(fragment) | RunContent::DeletedText(fragment),
+                ) = (original, content)
+                else {
+                    return Err(Error::Other(
+                        "typed scalar selection has no text source".into(),
+                    ));
+                };
+                if start != *cursor
+                    || end < start
+                    || end > actual.text.chars().count()
+                    || actual
+                        .text
+                        .chars()
+                        .skip(start)
+                        .take(end - start)
+                        .collect::<String>()
+                        != fragment.text
+                {
+                    return Err(Error::Other(
+                        "typed source scalar partition is incomplete or reordered".into(),
+                    ));
+                }
+                *cursor = end;
+            } else {
+                if *cursor != 0
+                    || match (original, content) {
+                        (RunContent::Text(a), RunContent::Text(b))
+                        | (RunContent::DeletedText(a), RunContent::DeletedText(b)) => {
+                            a.text != b.text
+                        }
+                        _ => original != content,
+                    }
+                {
+                    return Err(Error::Other("typed whole source authority changed".into()));
+                }
+                *whole = true;
+            }
+        }
+        for &(local, ordinal, boundary) in &unit.raw_sources {
+            if ordinal >= run.extra_xml.len()
+                || local >= unit.run.extra_xml.len()
+                || seen[unit.owner][ordinal]
+                || previous[unit.owner].is_some_and(|previous| ordinal <= previous)
+                || CT_R::raw_child_position(run.extra_xml_positions[ordinal]) != boundary
+                || run.extra_xml[ordinal] != unit.run.extra_xml[local]
+            {
+                return Err(Error::Other(
+                    "raw attribution has an invalid or repeated source occurrence".into(),
+                ));
+            }
+            seen[unit.owner][ordinal] = true;
+            previous[unit.owner] = Some(ordinal);
+        }
+    }
+    for (run, roles) in runs.iter().zip(typed_coverage) {
+        for (content, (whole, covered)) in run.content.iter().zip(roles) {
+            let count = match content {
+                RunContent::Text(text) | RunContent::DeletedText(text) => text.text.chars().count(),
+                _ => 0,
+            };
+            if !whole && (count == 0 || covered != count) {
+                return Err(Error::Other(
+                    "typed attribution lost an input occurrence".into(),
+                ));
+            }
+        }
+    }
+    for (run, seen) in runs.iter().zip(seen) {
+        if seen
+            .iter()
+            .zip(&run.extra_xml_positions)
+            .any(|(seen, encoded)| !*seen && !CT_R::raw_child_is_root_attributes(*encoded))
+        {
+            return Err(Error::Other(
+                "raw attribution lost an input occurrence".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn is_text_box_host_marker(raw: &[u8]) -> bool {
@@ -6721,8 +13182,12 @@ fn compare_complex_paragraph(
     metadata: &mut Metadata<'_>,
     diagnostics: &mut Vec<ComparisonDiagnostic>,
 ) -> Result<String> {
+    #[cfg(test)]
+    let _destination_diagnostic_scope =
+        PolicyDiagnosticScope::enter("destination:compare_complex_paragraph", location);
     if paragraph_signature_with_options(original, metadata.options)
         == paragraph_signature_with_options(edited, metadata.options)
+        && !SourceMetadata::paragraph_contains_fields(original, metadata.options)?
     {
         if !metadata.options.ignore_formatting
             && paragraph_formatting(original) != paragraph_formatting(edited)
@@ -6797,6 +13262,9 @@ fn compare_complex_paragraph(
     let mut output = String::new();
     let mut cursor = 0usize;
     for (left, right) in aligned {
+        let at = left.map_or(cursor, |index| run_spans[index].start);
+        let destination_parent = publication_parent_at(&source, at)?;
+        let revision_parent = metadata.ids.revision_parent_scope(&destination_parent);
         if let Some(index) = left {
             let span = &run_spans[index];
             output.push_str(&source[cursor..span.start]);
@@ -6804,37 +13272,30 @@ fn compare_complex_paragraph(
         }
         match (left, right) {
             (Some(i), Some(j)) if original_signatures[i] == edited_signatures[j] => {
-                if original.runs[i] == edited.runs[j] {
+                if !run_is_field(&original.runs[i]) && original.runs[i] == edited.runs[j] {
                     output.push_str(&source[run_spans[i].clone()]);
                 } else {
                     output.push_str(&compared_run_xml(
                         &original.runs[i],
                         &edited.runs[j],
                         None,
+                        None,
                         &format!("{location}/run[{j}]"),
+                        &destination_parent,
                         metadata,
                         diagnostics,
                     )?);
                 }
             }
             (Some(i), Some(j)) => {
-                let deleted = deleted_run_xml(&original.runs[i])?;
-                output.push_str(&metadata.ids.revision(
-                    "del",
-                    metadata.author,
-                    metadata.timestamp,
-                    &deleted,
-                )?);
-                let inserted = policy_inserted_run_xml(
-                    &edited.runs[j],
-                    Some(&original.runs[i]),
-                    metadata.options,
-                )?;
-                output.push_str(&metadata.ids.revision(
-                    "ins",
-                    metadata.author,
-                    metadata.timestamp,
-                    &inserted,
+                output.push_str(&paired_run_replacement(
+                    [&original.runs[i], &edited.runs[j]],
+                    [None, None],
+                    [None, None],
+                    &format!("{location}/run[{j}]"),
+                    &destination_parent,
+                    metadata,
+                    diagnostics,
                 )?);
             }
             (Some(i), None) => {
@@ -6842,7 +13303,16 @@ fn compare_complex_paragraph(
                     output.push_str(&source[run_spans[i].clone()]);
                     continue;
                 }
-                let deleted = deleted_run_xml(&original.runs[i])?;
+                let deleted = publish_run_source(
+                    &original.runs[i],
+                    &original.runs[i],
+                    deleted_run_xml(&original.runs[i])?,
+                    None,
+                    None,
+                    None,
+                    &revision_parent,
+                    metadata,
+                )?;
                 output.push_str(&metadata.ids.revision(
                     "del",
                     metadata.author,
@@ -6854,7 +13324,16 @@ fn compare_complex_paragraph(
                 if run_is_ignored(&edited.runs[j], metadata.options) {
                     continue;
                 }
-                let inserted = paragraph_owned_run_xml(&edited.runs[j])?;
+                let inserted = publish_run_source(
+                    &edited.runs[j],
+                    &edited.runs[j],
+                    paragraph_owned_run_xml(&edited.runs[j])?,
+                    None,
+                    None,
+                    None,
+                    &revision_parent,
+                    metadata,
+                )?;
                 output.push_str(&metadata.ids.revision(
                     "ins",
                     metadata.author,
@@ -6959,10 +13438,18 @@ fn paragraph_properties_xml(
         .transpose()?
         .unwrap_or_default();
     let output = patch_property_source(&before, &generated, source.as_deref(), &metadata.ids)?;
-    if let Some(source) = source {
-        preserve_prior_property_sources(&output, &source)
+    let output = if let Some(source) = source {
+        preserve_prior_property_sources(&output, &source)?
     } else {
-        metadata.ids.generated(output)
+        metadata.ids.generated(output)?
+    };
+    if let Some(paragraph) = metadata.paragraph_source(original)
+        && let Some(span) = direct_word_element_spans(paragraph, "pPr")?.first()
+    {
+        let context = root_namespace_bindings(paragraph, "p", &[])?;
+        restore_current_property_roots(&output, &paragraph[span.clone()], &context)
+    } else {
+        Ok(output)
     }
 }
 
@@ -7281,11 +13768,16 @@ fn deleted_paragraph(paragraph: &CT_P, metadata: &mut Metadata<'_>) -> Result<St
     let (mut output, closing) = paragraph_shell(metadata.paragraph_source(paragraph))?;
     output.push_str(&paragraph_mark_properties(paragraph, "del", metadata)?);
     let children = paragraph_children_xml(paragraph, true, metadata)?;
-    output.push_str(&wrapped_children(&children, true, false, &mut |content| {
-        metadata
-            .ids
-            .revision("del", metadata.author, metadata.timestamp, content)
-    })?);
+    output.push_str(&crate::revision::tracked_paragraph_children(
+        &children,
+        true,
+        false,
+        &mut |content| {
+            metadata
+                .ids
+                .revision("del", metadata.author, metadata.timestamp, content)
+        },
+    )?);
     output.push_str(&closing);
     metadata.ids.generated(output)
 }
@@ -7294,7 +13786,7 @@ fn inserted_paragraph(paragraph: &CT_P, metadata: &mut Metadata<'_>) -> Result<S
     let (mut output, closing) = paragraph_shell(metadata.paragraph_source(paragraph))?;
     output.push_str(&paragraph_mark_properties(paragraph, "ins", metadata)?);
     let children = paragraph_children_xml(paragraph, false, metadata)?;
-    output.push_str(&wrapped_children(
+    output.push_str(&crate::revision::tracked_paragraph_children(
         &children,
         false,
         false,
@@ -7308,19 +13800,9 @@ fn inserted_paragraph(paragraph: &CT_P, metadata: &mut Metadata<'_>) -> Result<S
     metadata.ids.generated(output)
 }
 
-/// The children of a whole deleted, inserted or moved paragraph after its
-/// properties, each group inside the wrapper that `wrap` writes.
-///
-/// Simple fields, bookmarks and comment ranges go inside the wrappers with
-/// the runs, so resolving the revision removes or keeps them with the text.
-/// A range or proofing marker shares the wrapper of the content after it,
-/// or of the content before it at the end of the paragraph, so a paragraph
-/// of runs alone keeps one wrapper per run.
-///
-/// A revision wrapper may not hold a hyperlink, so a hyperlink stays outside
-/// and its own children go inside wrappers, as Word writes a tracked
-/// hyperlink run. Resolving the revision keeps the hyperlink when it keeps
-/// the text, and drops the hyperlink it leaves empty.
+/// Stage a whole paragraph without its properties, retaining actual run source
+/// and destination namespace custody before the shared revision publisher wraps
+/// eligible payloads. Field and hyperlink shells remain that publisher's owners.
 fn paragraph_children_xml(
     paragraph: &CT_P,
     deleted: bool,
@@ -7333,16 +13815,36 @@ fn paragraph_children_xml(
     }
     let mut xml = paragraph_xml(&children)?;
     let spans = modeled_paragraph_run_spans(&children, &xml)?;
-    for (run, span) in paragraph.runs.iter().zip(spans).rev() {
-        if let Some(source) = metadata.run_source(run) {
-            let replacement = preserve_run_source(
-                &xml[span.clone()],
-                &run_property_xml(run.properties.as_ref())?,
-                source,
-                &metadata.ids,
-            )?;
-            xml.replace_range(span, &replacement);
+    let mut replacements = Vec::new();
+    let mut index = 0;
+    while index < children.runs.len() {
+        if let Some((coverage, _)) = children.field_source_run_fragments_at(index)? {
+            index += coverage;
+            continue;
         }
+        let run = &paragraph.runs[index];
+        if let Some(source) = metadata.run_source(run) {
+            let span = spans[index].clone();
+            replacements.push((span.clone(), {
+                let (raw, typed) = complete_run_selection(&paragraph.runs[index]);
+                preserve_run_source(
+                    &xml[span.clone()],
+                    &run_property_xml(run.properties.as_ref())?,
+                    [source, source],
+                    &children.runs[index],
+                    &raw,
+                    &typed,
+                    &metadata
+                        .ids
+                        .revision_parent_scope(&publication_parent_at(&xml, span.start)?),
+                    &metadata.ids,
+                )
+            }?));
+        }
+        index += 1;
+    }
+    for (span, replacement) in replacements.into_iter().rev() {
+        xml.replace_range(span, &replacement);
     }
     Ok(xml)
 }
@@ -7373,86 +13875,6 @@ fn word_element_starts(xml: &str) -> Result<HashSet<usize>> {
     }
 }
 
-/// The children of the element `xml`, a paragraph or a hyperlink, as
-/// [`paragraph_children_xml`] writes them. Only a direct hyperlink is
-/// admitted, bounding calls to the paragraph and one hyperlink owner. Captured
-/// nested hyperlinks stay unsupported rather than growing a copied-subtree stack.
-fn wrapped_children(
-    xml: &str,
-    deleted: bool,
-    inside_hyperlink: bool,
-    wrap: &mut impl FnMut(&str) -> Result<String>,
-) -> Result<String> {
-    let mut output = String::new();
-    let mut groups: Vec<(String, bool)> = Vec::new();
-    let word_starts = word_element_starts(xml)?;
-    let mut cursor = element_opening(xml)?.0;
-    for span in direct_element_spans(xml)? {
-        if cursor < span.start {
-            groups.push((xml[cursor..span.start].to_owned(), false));
-        }
-        cursor = span.end;
-        let word = word_starts.contains(&span.start);
-        let child = &xml[span];
-        let local = if word { element_local_name(child) } else { "" };
-        if local == "hyperlink" {
-            if inside_hyperlink {
-                return Err(Error::Other(
-                    "comparison cannot track nested hyperlinks in a whole paragraph".to_owned(),
-                ));
-            }
-            let open_end = element_opening(child)?.0;
-            for (group, _) in groups.drain(..) {
-                output.push_str(&wrap(&group)?);
-            }
-            // Resolution drops a hyperlink only when it removes its content.
-            let inner = wrapped_children(child, deleted, true, wrap)?;
-            if inner.is_empty() {
-                return Err(Error::Other(
-                    "comparison cannot track a whole paragraph's empty hyperlink".to_owned(),
-                ));
-            }
-            output.push_str(&child[..open_end]);
-            output.push_str(&inner);
-            output.push_str(&child[child.rfind("</").unwrap_or(child.len())..]);
-            continue;
-        }
-        let marker = matches!(
-            local,
-            "bookmarkStart" | "bookmarkEnd" | "commentRangeStart" | "commentRangeEnd" | "proofErr"
-        );
-        // Runs already hold deleted text, as `deleted_run_xml` writes them.
-        // Field results, hyperlink runs and other owners are renamed whole.
-        let child = match (deleted, local) {
-            (true, "") => child.to_owned(),
-            (true, "r") => renamed_word_elements(child, "w:instrText", "w:delInstrText"),
-            (true, _) => deleted_text_xml(child),
-            (false, _) => child.to_owned(),
-        };
-        match groups.last_mut() {
-            Some((group, has_content)) if !*has_content => {
-                group.push_str(&child);
-                *has_content = !marker;
-            }
-            _ => groups.push((child, !marker)),
-        }
-    }
-    let close = xml.rfind("</").unwrap_or(xml.len());
-    if cursor < close {
-        groups.push((xml[cursor..close].to_owned(), false));
-    }
-    if groups.len() > 1
-        && let Some((markers, false)) = groups.pop_if(|(_, has_content)| !*has_content)
-        && let Some((group, _)) = groups.last_mut()
-    {
-        group.push_str(&markers);
-    }
-    for (group, _) in &groups {
-        output.push_str(&wrap(group)?);
-    }
-    Ok(output)
-}
-
 fn paragraph_mark_properties(
     paragraph: &CT_P,
     kind: &str,
@@ -7476,127 +13898,149 @@ fn compare_table(
     metadata: &mut Metadata<'_>,
     diagnostics: &mut Vec<ComparisonDiagnostic>,
 ) -> Result<String> {
-    if original.grid != edited.grid {
-        let deleted = marked_table(original, "del", metadata)?;
-        let inserted = marked_table(edited, "ins", metadata)?;
-        return Ok(format!("{deleted}{inserted}"));
-    }
-    if original.extra_xml != edited.extra_xml
-        || table_control_boundaries(original) != table_control_boundaries(edited)
-    {
-        return Err(Error::Other(format!(
-            "comparison cannot revise table boundary structures at {location}"
-        )));
-    }
-    let original_signatures = original
-        .rows
-        .iter()
-        .map(|row| row_signature_with_options(row, metadata.options))
-        .collect::<Vec<_>>();
-    let edited_signatures = edited
-        .rows
-        .iter()
-        .map(|row| row_signature_with_options(row, metadata.options))
-        .collect::<Vec<_>>();
-    let mut source = original_source
-        .map(str::to_owned)
-        .map_or_else(|| table_xml(original), Ok)?;
-    let properties = table_properties_xml(
-        original.properties.as_ref(),
-        edited.properties.as_ref(),
-        location,
-        metadata,
-        diagnostics,
-    )?;
-    let template = direct_property(&source, "tblPr")?;
-    let before_properties = original
-        .properties
-        .as_ref()
-        .map(table_property_xml)
-        .transpose()?
-        .unwrap_or_default();
-    let properties = patch_property_source(
-        &before_properties,
-        &properties,
-        template.as_deref(),
-        &metadata.ids,
-    )?;
-    let properties = if let Some(template) = template {
-        preserve_prior_property_sources(&properties, &template)?
-    } else {
-        metadata.ids.generated(properties)?
-    };
-    let property_spans = direct_word_element_spans(&source, "tblPr")?;
-    match (property_spans.first(), properties.is_empty()) {
-        (Some(span), false) => source.replace_range(span.clone(), &properties),
-        (Some(span), true) => source.replace_range(span.clone(), ""),
-        (None, false) => {
-            source = insert_first_child(&source, &properties)?;
+    let leaf_mark = metadata.leaf_publications.len();
+    let output = (|| -> Result<String> {
+        if original.grid != edited.grid {
+            let deleted = marked_table(original, "del", metadata)?;
+            let inserted = marked_table(edited, "ins", metadata)?;
+            return Ok(format!("{deleted}{inserted}"));
         }
-        (None, true) => {}
-    }
-    let row_spans = direct_word_element_spans(&source, "tr")?;
-    if row_spans.len() != original.rows.len() {
-        return Err(Error::Other(format!(
-            "comparison could not correlate direct table rows at {location}"
-        )));
-    }
-    let aligned = align(&original_signatures, &edited_signatures);
-    let mut output = String::new();
-    let mut cursor = 0usize;
-    for (alignment_index, &(left, right)) in aligned.iter().enumerate() {
-        if let Some(index) = left {
-            let span = &row_spans[index];
-            output.push_str(&source[cursor..span.start]);
-            cursor = span.end;
-        } else {
-            let next_row_start = aligned[alignment_index + 1..]
-                .iter()
-                .find_map(|(next_left, _)| next_left.map(|index| row_spans[index].start))
-                .map_or_else(|| paragraph_close_start(&source), Ok)?;
-            output.push_str(&source[cursor..next_row_start]);
-            cursor = next_row_start;
+        if original.extra_xml != edited.extra_xml
+            || table_control_boundaries(original) != table_control_boundaries(edited)
+        {
+            return Err(Error::Other(format!(
+                "comparison cannot revise table boundary structures at {location}"
+            )));
         }
-        match (left, right) {
-            (Some(i), Some(j)) => {
-                output.push_str(&compare_row(
-                    &original.rows[i],
-                    &edited.rows[j],
-                    Some(&source_child(&source, row_spans[i].clone())?),
-                    &format!("{location}/row[{j}]"),
-                    metadata,
-                    diagnostics,
-                )?);
-            }
-            (Some(i), None) => output.push_str(&marked_row(&original.rows[i], "del", metadata)?),
-            (None, Some(j)) => output.push_str(&marked_row(&edited.rows[j], "ins", metadata)?),
-            (None, None) => unreachable!(),
-        }
-    }
-    output.push_str(&source[cursor..]);
-    let spans = direct_word_element_spans(&output, "sdt")?;
-    if spans.len() != original.content_controls.len() {
-        return Err(Error::Other(format!(
-            "comparison could not correlate table content controls at {location}"
-        )));
-    }
-    let mut replacements = Vec::with_capacity(spans.len());
-    for (index, ((_, _, left), (_, _, right))) in original
-        .content_controls
-        .iter()
-        .zip(&edited.content_controls)
-        .enumerate()
-    {
-        replacements.push(compare_control_from_xml(
-            left,
-            right,
-            &format!("{location}/content-control[{index}]"),
+        let original_signatures = original
+            .rows
+            .iter()
+            .map(|row| row_signature_with_options(row, metadata.options))
+            .collect::<Vec<_>>();
+        let edited_signatures = edited
+            .rows
+            .iter()
+            .map(|row| row_signature_with_options(row, metadata.options))
+            .collect::<Vec<_>>();
+        let mut source = original_source
+            .map(str::to_owned)
+            .map_or_else(|| table_xml(original), Ok)?;
+        let properties = table_properties_xml(
+            original.properties.as_ref(),
+            edited.properties.as_ref(),
+            location,
             metadata,
             diagnostics,
-            &source_child(&output, spans[index].clone())?,
-        )?);
-    }
-    replace_direct_word_elements(&output, "sdt", &replacements)
+        )?;
+        let template = direct_property(&source, "tblPr")?;
+        let before_properties = original
+            .properties
+            .as_ref()
+            .map(table_property_xml)
+            .transpose()?
+            .unwrap_or_default();
+        let properties = patch_property_source(
+            &before_properties,
+            &properties,
+            template.as_deref(),
+            &metadata.ids,
+        )?;
+        let properties = if let Some(template) = template {
+            preserve_prior_property_sources(&properties, &template)?
+        } else {
+            metadata.ids.generated(properties)?
+        };
+        let property_spans = direct_word_element_spans(&source, "tblPr")?;
+        match (property_spans.first(), properties.is_empty()) {
+            (Some(span), false) => source.replace_range(span.clone(), &properties),
+            (Some(span), true) => source.replace_range(span.clone(), ""),
+            (None, false) => {
+                source = insert_first_child(&source, &properties)?;
+            }
+            (None, true) => {}
+        }
+        let row_spans = direct_word_element_spans(&source, "tr")?;
+        if row_spans.len() != original.rows.len() {
+            return Err(Error::Other(format!(
+                "comparison could not correlate direct table rows at {location}"
+            )));
+        }
+        let aligned = align(&original_signatures, &edited_signatures);
+        let mut output = String::new();
+        let mut cursor = 0usize;
+        for (alignment_index, &(left, right)) in aligned.iter().enumerate() {
+            if let Some(index) = left {
+                let span = &row_spans[index];
+                output.push_str(&source[cursor..span.start]);
+                cursor = span.end;
+            } else {
+                let next_row_start = aligned[alignment_index + 1..]
+                    .iter()
+                    .find_map(|(next_left, _)| next_left.map(|index| row_spans[index].start))
+                    .map_or_else(|| paragraph_close_start(&source), Ok)?;
+                output.push_str(&source[cursor..next_row_start]);
+                cursor = next_row_start;
+            }
+            let child_mark = metadata.leaf_publications.len();
+            let child_offset = output.len();
+            match (left, right) {
+                (Some(i), Some(j)) => {
+                    output.push_str(&compare_row(
+                        &original.rows[i],
+                        &edited.rows[j],
+                        Some(&source_child(&source, row_spans[i].clone())?),
+                        &format!("{location}/row[{j}]"),
+                        metadata,
+                        diagnostics,
+                    )?);
+                }
+                (Some(i), None) => {
+                    output.push_str(&marked_row(&original.rows[i], "del", metadata)?)
+                }
+                (None, Some(j)) => output.push_str(&marked_row(&edited.rows[j], "ins", metadata)?),
+                (None, None) => unreachable!(),
+            }
+            shift_leaf_publications(
+                &mut metadata.leaf_publications[child_mark..],
+                child_offset as isize,
+            )?;
+        }
+        output.push_str(&source[cursor..]);
+        let spans = direct_word_element_spans(&output, "sdt")?;
+        if spans.len() != original.content_controls.len() {
+            return Err(Error::Other(format!(
+                "comparison could not correlate table content controls at {location}"
+            )));
+        }
+        let mut child_leaves = Vec::new();
+        let mut replacements = Vec::with_capacity(spans.len());
+        for (index, ((_, _, left), (_, _, right))) in original
+            .content_controls
+            .iter()
+            .zip(&edited.content_controls)
+            .enumerate()
+        {
+            let child_mark = metadata.leaf_publications.len();
+            replacements.push(compare_control_from_xml(
+                left,
+                right,
+                &format!("{location}/content-control[{index}]"),
+                metadata,
+                diagnostics,
+                &source_child(&output, spans[index].clone())?,
+            )?);
+            child_leaves.push(metadata.leaf_publications.split_off(child_mark));
+        }
+        splice_leaf_publications(metadata, leaf_mark, &spans, &replacements, child_leaves)?;
+        replace_direct_word_elements(&output, "sdt", &replacements)
+    })()?;
+    let old_open = element_opening(&output)?.0;
+    let output = metadata.restore_owner_root(original as *const CT_Tbl as usize, output)?;
+    shift_leaf_publications(
+        &mut metadata.leaf_publications[leaf_mark..],
+        element_opening(&output)?.0 as isize - old_open as isize,
+    )?;
+    Ok(output)
 }
 
 fn table_properties_xml(
@@ -7712,6 +14156,12 @@ fn mark_control_owned_rows(
     metadata: &mut Metadata<'_>,
     original_xml: &str,
 ) -> Result<String> {
+    let content_span = direct_word_element_spans(original_xml, "sdtContent")?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::Other("marked control has no actual content owner".into()))?;
+    let actual_content = source_child(original_xml, content_span)?;
+    let destination_parent = root_namespace_bindings(&actual_content, "sdtContent", &[])?;
     let mut content = String::new();
     for child in &control.content {
         content.push_str(&match child {
@@ -7728,9 +14178,16 @@ fn mark_control_owned_rows(
                 || cell_xml(cell).and_then(|xml| metadata.ids.generated(xml)),
                 Ok,
             )?,
-            SdtContent::Run(run) => {
-                publish_run_source(run, paragraph_owned_run_xml(run)?, None, metadata)?
-            }
+            SdtContent::Run(run) => publish_run_source(
+                run,
+                run,
+                paragraph_owned_run_xml(run)?,
+                None,
+                None,
+                None,
+                &destination_parent,
+                metadata,
+            )?,
             SdtContent::ContentControl(nested) => {
                 let nested_xml = metadata
                     .control_source(nested)
@@ -7761,6 +14218,9 @@ fn marked_row(row: &CT_Row, kind: &str, metadata: &mut Metadata<'_>) -> Result<S
 /// nested tables included. Without the cell marks Word merges an adjacent
 /// removed paragraph mark into the first cell and leaves the row unresolved.
 fn marked_row_xml(row: &str, kind: &str, metadata: &mut Metadata<'_>) -> Result<String> {
+    #[cfg(test)]
+    let _destination_diagnostic_scope =
+        PolicyDiagnosticScope::enter("destination:marked_row_xml", row);
     let marker = metadata
         .ids
         .marker(kind, metadata.author, metadata.timestamp)?;
@@ -7790,6 +14250,9 @@ fn marked_row_xml(row: &str, kind: &str, metadata: &mut Metadata<'_>) -> Result<
 }
 
 fn marked_cell_xml(cell: &str, kind: &str, metadata: &mut Metadata<'_>) -> Result<String> {
+    #[cfg(test)]
+    let _destination_diagnostic_scope =
+        PolicyDiagnosticScope::enter("destination:marked_cell_xml", cell);
     let paragraphs = direct_word_element_spans(cell, "p")?
         .into_iter()
         .map(|span| {
@@ -7802,7 +14265,10 @@ fn marked_cell_xml(cell: &str, kind: &str, metadata: &mut Metadata<'_>) -> Resul
             let hyperlinks = direct_word_element_spans(&paragraph, "hyperlink")?
                 .into_iter()
                 .map(|span| {
-                    marked_direct_runs_xml(&source_child(&paragraph, span)?, kind, metadata)
+                    let scoped = source_child(&paragraph, span.clone())?;
+                    let marked = marked_direct_runs_xml(&scoped, kind, metadata)?;
+                    let destination = root_namespace_bindings(&paragraph, "p", &[])?;
+                    retain_source_root_namespaces(&marked, &paragraph[span], &destination)
                 })
                 .collect::<Result<Vec<_>>>()?;
             replace_direct_word_elements(&paragraph, "hyperlink", &hyperlinks)
@@ -7829,10 +14295,14 @@ fn marked_cell_xml(cell: &str, kind: &str, metadata: &mut Metadata<'_>) -> Resul
 /// Wrap every direct `w:r` of `owner` in a revision, with deleted text as
 /// `w:delText`.
 fn marked_direct_runs_xml(owner: &str, kind: &str, metadata: &mut Metadata<'_>) -> Result<String> {
+    #[cfg(test)]
+    let _destination_diagnostic_scope =
+        PolicyDiagnosticScope::enter("destination:marked_direct_runs_xml", owner);
     let runs = direct_word_element_spans(owner, "r")?
         .into_iter()
         .map(|span| {
-            let mut run = source_child(owner, span)?;
+            let source = RunSource::capture(None, owner, span)?;
+            let mut run = source.scoped.clone();
             if kind == "del" {
                 for (local, deleted_local) in [("t", "delText"), ("instrText", "delInstrText")] {
                     for text in direct_word_element_spans(&run, local)?.into_iter().rev() {
@@ -7858,6 +14328,8 @@ fn marked_direct_runs_xml(owner: &str, kind: &str, metadata: &mut Metadata<'_>) 
                     }
                 }
             }
+            let revision_parent = metadata.ids.revision_parent_scope(&source.parent);
+            run = retain_source_root_namespaces(&run, &source.raw, &revision_parent)?;
             metadata
                 .ids
                 .revision(kind, metadata.author, metadata.timestamp, &run)
@@ -7874,62 +14346,93 @@ fn compare_row(
     metadata: &mut Metadata<'_>,
     diagnostics: &mut Vec<ComparisonDiagnostic>,
 ) -> Result<String> {
-    if original.cells.len() != edited.cells.len()
-        || row_raw_children(original) != row_raw_children(edited)
-        || row_control_boundaries(original) != row_control_boundaries(edited)
-    {
-        return Err(Error::Other(format!(
-            "comparison cannot revise row boundary structures at {location}"
-        )));
-    }
-    if !metadata.options.ignore_formatting && row_formatting(original) != row_formatting(edited) {
-        formatting_diagnostic(diagnostics, location.to_owned());
-    }
-    let mut output = original_source
-        .map(str::to_owned)
-        .map_or_else(|| row_xml(original), Ok)?;
-    let cell_spans = direct_word_element_spans(&output, "tc")?;
-    if cell_spans.len() != original.cells.len() {
-        return Err(Error::Other(format!(
-            "comparison could not correlate row cells at {location}"
-        )));
-    }
-    let mut cell_replacements = Vec::with_capacity(cell_spans.len());
-    for (index, (left, right)) in original.cells.iter().zip(&edited.cells).enumerate() {
-        cell_replacements.push(compare_cell_from_xml(
-            left,
-            right,
-            &format!("{location}/cell[{index}]"),
+    let leaf_mark = metadata.leaf_publications.len();
+    let output = (|| -> Result<String> {
+        if original.cells.len() != edited.cells.len()
+            || row_raw_children(original) != row_raw_children(edited)
+            || row_control_boundaries(original) != row_control_boundaries(edited)
+        {
+            return Err(Error::Other(format!(
+                "comparison cannot revise row boundary structures at {location}"
+            )));
+        }
+        if !metadata.options.ignore_formatting && row_formatting(original) != row_formatting(edited)
+        {
+            formatting_diagnostic(diagnostics, location.to_owned());
+        }
+        let mut output = original_source
+            .map(str::to_owned)
+            .map_or_else(|| row_xml(original), Ok)?;
+        let cell_spans = direct_word_element_spans(&output, "tc")?;
+        if cell_spans.len() != original.cells.len() {
+            return Err(Error::Other(format!(
+                "comparison could not correlate row cells at {location}"
+            )));
+        }
+        let mut child_leaves = Vec::new();
+        let mut cell_replacements = Vec::with_capacity(cell_spans.len());
+        for (index, (left, right)) in original.cells.iter().zip(&edited.cells).enumerate() {
+            let child_mark = metadata.leaf_publications.len();
+            cell_replacements.push(compare_cell_from_xml(
+                left,
+                right,
+                &format!("{location}/cell[{index}]"),
+                metadata,
+                diagnostics,
+                &source_child(&output, cell_spans[index].clone())?,
+            )?);
+            child_leaves.push(metadata.leaf_publications.split_off(child_mark));
+        }
+        splice_leaf_publications(
             metadata,
-            diagnostics,
-            &source_child(&output, cell_spans[index].clone())?,
-        )?);
-    }
-    output = replace_direct_word_elements(&output, "tc", &cell_replacements)?;
+            leaf_mark,
+            &cell_spans,
+            &cell_replacements,
+            child_leaves,
+        )?;
+        output = replace_direct_word_elements(&output, "tc", &cell_replacements)?;
 
-    let control_spans = direct_word_element_spans(&output, "sdt")?;
-    if control_spans.len() != original.content_controls.len() {
-        return Err(Error::Other(format!(
-            "comparison could not correlate row content controls at {location}"
-        )));
-    }
-    let mut control_replacements = Vec::with_capacity(control_spans.len());
-    for (index, ((_, _, left), (_, _, right))) in original
-        .content_controls
-        .iter()
-        .zip(&edited.content_controls)
-        .enumerate()
-    {
-        control_replacements.push(compare_control_from_xml(
-            left,
-            right,
-            &format!("{location}/content-control[{index}]"),
+        let control_spans = direct_word_element_spans(&output, "sdt")?;
+        if control_spans.len() != original.content_controls.len() {
+            return Err(Error::Other(format!(
+                "comparison could not correlate row content controls at {location}"
+            )));
+        }
+        let mut child_leaves = Vec::new();
+        let mut control_replacements = Vec::with_capacity(control_spans.len());
+        for (index, ((_, _, left), (_, _, right))) in original
+            .content_controls
+            .iter()
+            .zip(&edited.content_controls)
+            .enumerate()
+        {
+            let child_mark = metadata.leaf_publications.len();
+            control_replacements.push(compare_control_from_xml(
+                left,
+                right,
+                &format!("{location}/content-control[{index}]"),
+                metadata,
+                diagnostics,
+                &source_child(&output, control_spans[index].clone())?,
+            )?);
+            child_leaves.push(metadata.leaf_publications.split_off(child_mark));
+        }
+        splice_leaf_publications(
             metadata,
-            diagnostics,
-            &source_child(&output, control_spans[index].clone())?,
-        )?);
-    }
-    replace_direct_word_elements(&output, "sdt", &control_replacements)
+            leaf_mark,
+            &control_spans,
+            &control_replacements,
+            child_leaves,
+        )?;
+        replace_direct_word_elements(&output, "sdt", &control_replacements)
+    })()?;
+    let old_open = element_opening(&output)?.0;
+    let output = metadata.restore_owner_root(original as *const CT_Row as usize, output)?;
+    shift_leaf_publications(
+        &mut metadata.leaf_publications[leaf_mark..],
+        element_opening(&output)?.0 as isize - old_open as isize,
+    )?;
+    Ok(output)
 }
 
 /// Return the raw children of a row without the record of its start-tag
@@ -7956,61 +14459,85 @@ fn compare_cell_from_xml(
     diagnostics: &mut Vec<ComparisonDiagnostic>,
     original_xml: &str,
 ) -> Result<String> {
-    if original.content.len() != edited.content.len() || original.extra_xml != edited.extra_xml {
-        return Err(Error::Other(format!(
-            "comparison cannot revise cell boundary structures at {location}"
-        )));
-    }
-    if !metadata.options.ignore_formatting && original.properties != edited.properties {
-        formatting_diagnostic(diagnostics, location.to_owned());
-    }
-    let children = cell_child_spans(original, original_xml, location)?;
-    let mut replacements = Vec::with_capacity(children.len());
-    for (index, ((left, right), (_, span))) in original
-        .content
-        .iter()
-        .zip(&edited.content)
-        .zip(&children)
-        .enumerate()
-    {
-        let child_location = format!("{location}/content[{index}]");
-        let source = source_child(original_xml, span.clone())?;
-        let source = source.as_str();
-        replacements.push(match (left, right) {
-            (CellContent::Paragraph(left), CellContent::Paragraph(right)) => compare_paragraph(
-                left,
-                right,
-                Some(source),
-                &child_location,
-                metadata,
-                diagnostics,
-            )?,
-            (CellContent::Table(left), CellContent::Table(right)) => compare_table(
-                left,
-                right,
-                Some(source),
-                &child_location,
-                metadata,
-                diagnostics,
-            )?,
-            (CellContent::ContentControl(left), CellContent::ContentControl(right)) => {
-                compare_control_from_xml(
+    let leaf_mark = metadata.leaf_publications.len();
+    let output = (|| -> Result<String> {
+        if original.content.len() != edited.content.len() || original.extra_xml != edited.extra_xml
+        {
+            return Err(Error::Other(format!(
+                "comparison cannot revise cell boundary structures at {location}"
+            )));
+        }
+        if !metadata.options.ignore_formatting && original.properties != edited.properties {
+            formatting_diagnostic(diagnostics, location.to_owned());
+        }
+        let children = cell_child_spans(original, original_xml, location)?;
+        let mut child_leaves = Vec::new();
+        let mut replacements = Vec::with_capacity(children.len());
+        for (index, ((left, right), (_, span))) in original
+            .content
+            .iter()
+            .zip(&edited.content)
+            .zip(&children)
+            .enumerate()
+        {
+            let child_location = format!("{location}/content[{index}]");
+            let source = source_child(original_xml, span.clone())?;
+            let source = source.as_str();
+            let child_mark = metadata.leaf_publications.len();
+            replacements.push(match (left, right) {
+                (CellContent::Paragraph(left), CellContent::Paragraph(right)) => compare_paragraph(
                     left,
                     right,
+                    Some(source),
                     &child_location,
                     metadata,
                     diagnostics,
-                    source,
-                )?
-            }
-            _ => {
-                return Err(Error::Other(format!(
-                    "comparison cannot revise incompatible cell children at {child_location}"
-                )));
-            }
-        });
-    }
-    replace_ranges(original_xml, &children, &replacements)
+                )?,
+                (CellContent::Table(left), CellContent::Table(right)) => compare_table(
+                    left,
+                    right,
+                    Some(source),
+                    &child_location,
+                    metadata,
+                    diagnostics,
+                )?,
+                (CellContent::ContentControl(left), CellContent::ContentControl(right)) => {
+                    compare_control_from_xml(
+                        left,
+                        right,
+                        &child_location,
+                        metadata,
+                        diagnostics,
+                        source,
+                    )?
+                }
+                _ => {
+                    return Err(Error::Other(format!(
+                        "comparison cannot revise incompatible cell children at {child_location}"
+                    )));
+                }
+            });
+            child_leaves.push(metadata.leaf_publications.split_off(child_mark));
+        }
+        splice_leaf_publications(
+            metadata,
+            leaf_mark,
+            &children
+                .iter()
+                .map(|(_, span)| span.clone())
+                .collect::<Vec<_>>(),
+            &replacements,
+            child_leaves,
+        )?;
+        replace_ranges(original_xml, &children, &replacements)
+    })()?;
+    let old_open = element_opening(&output)?.0;
+    let output = metadata.restore_owner_root(original as *const CT_Tc as usize, output)?;
+    shift_leaf_publications(
+        &mut metadata.leaf_publications[leaf_mark..],
+        element_opening(&output)?.0 as isize - old_open as isize,
+    )?;
+    Ok(output)
 }
 
 fn compare_control(
@@ -8043,319 +14570,402 @@ fn compare_control_from_xml(
     diagnostics: &mut Vec<ComparisonDiagnostic>,
     original_xml: &str,
 ) -> Result<String> {
-    if control_property_signature(original) != control_property_signature(edited) {
-        return Err(Error::Other(format!(
-            "comparison cannot revise content-control properties at {location}"
-        )));
-    }
-    control_metadata_diagnostics(original, edited, location, diagnostics)?;
-    let original_content = modeled_control_content(original);
-    let edited_content = modeled_control_content(edited);
-    let direct_run_or_raw =
-        |content: &&SdtContent| matches!(content, SdtContent::Run(_) | SdtContent::RawXml(_));
-    if uses_attributed_run_path(metadata.options)
-        && original_content.iter().all(direct_run_or_raw)
-        && edited_content.iter().all(direct_run_or_raw)
-        && (!original_content.is_empty() || !edited_content.is_empty())
-        && inline_control_raw_boundaries(&original_content, metadata.options)
-            == inline_control_raw_boundaries(&edited_content, metadata.options)
-    {
-        let property_sources = [
-            original_content
+    let leaf_mark = metadata.leaf_publications.len();
+    let output = (|| -> Result<String> {
+        #[cfg(test)]
+        let _destination_diagnostic_scope =
+            PolicyDiagnosticScope::enter("destination:compare_control_from_xml", location);
+        if control_property_signature(original) != control_property_signature(edited) {
+            return Err(Error::Other(format!(
+                "comparison cannot revise content-control properties at {location}"
+            )));
+        }
+        control_metadata_diagnostics(original, edited, location, diagnostics)?;
+        let original_content = modeled_control_content(original);
+        let edited_content = modeled_control_content(edited);
+        let direct_run_or_raw =
+            |content: &&SdtContent| matches!(content, SdtContent::Run(_) | SdtContent::RawXml(_));
+        if uses_attributed_run_path(metadata.options)
+            && original_content.iter().all(direct_run_or_raw)
+            && edited_content.iter().all(direct_run_or_raw)
+            && (!original_content.is_empty() || !edited_content.is_empty())
+            && inline_control_raw_boundaries(&original_content, metadata.options)
+                == inline_control_raw_boundaries(&edited_content, metadata.options)
+        {
+            let property_sources = [
+                original_content
+                    .iter()
+                    .filter_map(|child| match child {
+                        SdtContent::Run(run) => Some(metadata.run_source(run).cloned()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                edited_content
+                    .iter()
+                    .filter_map(|child| match child {
+                        SdtContent::Run(run) => Some(metadata.run_source(run).cloned()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+            ];
+            let original_runs = original_content
                 .iter()
-                .filter_map(|child| match child {
-                    SdtContent::Run(run) => Some(metadata.run_source(run).map(str::to_owned)),
+                .filter_map(|content| match content {
+                    SdtContent::Run(run) => Some(run.clone()),
                     _ => None,
                 })
-                .collect::<Vec<_>>(),
-            edited_content
+                .collect::<Vec<_>>();
+            let edited_runs = edited_content
                 .iter()
-                .filter_map(|child| match child {
-                    SdtContent::Run(run) => Some(metadata.run_source(run).map(str::to_owned)),
+                .filter_map(|content| match content {
+                    SdtContent::Run(run) => Some(run.clone()),
                     _ => None,
                 })
-                .collect::<Vec<_>>(),
-        ];
-        let original_runs = original_content
+                .collect::<Vec<_>>();
+            let content_spans = direct_word_element_spans(original_xml, "sdtContent")?;
+            let content_span = content_spans.first().ok_or_else(|| {
+                Error::Other(format!(
+                    "comparison could not find inline-control content at {location}"
+                ))
+            })?;
+            let scoped_content = source_child(original_xml, content_span.clone())?;
+            let content_source = scoped_content.as_str();
+            let inner = element_inner_range_any_prefix(content_source, "sdtContent")?;
+            // Raw children remain physical shell boundaries after the runs are
+            // extracted. Logical boundary equality above does not preserve them
+            // in the run-only alignment by itself.
+            let raw_runs = |content: &[&SdtContent]| {
+                let mut runs = 0;
+                content
+                    .iter()
+                    .filter_map(|child| match child {
+                        SdtContent::Run(_) => {
+                            runs += 1;
+                            None
+                        }
+                        SdtContent::RawXml(_) => Some(runs),
+                        _ => unreachable!(),
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let boundaries = raw_runs(&original_content)
+                .into_iter()
+                .zip(raw_runs(&edited_content))
+                .collect::<Vec<_>>();
+            let modeled_spans = modeled_control_source_spans(&original_content, content_source)?;
+            let run_spans = original_content
+                .iter()
+                .zip(modeled_spans)
+                .filter_map(|(child, span)| {
+                    matches!(child, SdtContent::Run(_))
+                        .then_some(span.start - inner.start..span.end - inner.start)
+                })
+                .collect::<Vec<_>>();
+            let child_mark = metadata.leaf_publications.len();
+            let mut field_bindings =
+                metadata.bind_cloned_control_runs(&original_content, &original_runs)?;
+            field_bindings
+                .extend(metadata.bind_cloned_control_runs(&edited_content, &edited_runs)?);
+            let compared_result = compare_control_runs_with_options(
+                [&original_runs, &edited_runs],
+                Some((
+                    &source_fragment(
+                        &format!(
+                            "<w:inlineControl>{}</w:inlineControl>",
+                            &content_source[inner]
+                        ),
+                        &root_namespace_bindings(content_source, "sdtContent", &[])?,
+                    )?,
+                    &run_spans,
+                )),
+                Some(&property_sources),
+                &boundaries,
+                location,
+                &root_namespace_bindings(content_source, "sdtContent", &[])?,
+                metadata,
+                diagnostics,
+            );
+            metadata.unbind_cloned_control_runs(field_bindings)?;
+            let compared = compared_result?;
+            let actual_inner =
+                element_inner_range_any_prefix(&original_xml[content_span.clone()], "sdtContent")?;
+            shift_leaf_publications(
+                &mut metadata.leaf_publications[child_mark..],
+                (content_span.start + actual_inner.start) as isize,
+            )?;
+            return replace_element_inner(original_xml, "w:sdtContent", &compared);
+        }
+        let whitespace_slots = control_whitespace_slots(original)?;
+        let original_signatures = original_content
             .iter()
-            .filter_map(|content| match content {
-                SdtContent::Run(run) => Some(run.clone()),
-                _ => None,
-            })
+            .map(|content| control_content_signature_with_options(content, metadata.options))
             .collect::<Vec<_>>();
-        let edited_runs = edited_content
+        let edited_signatures = edited_content
             .iter()
-            .filter_map(|content| match content {
-                SdtContent::Run(run) => Some(run.clone()),
-                _ => None,
-            })
+            .map(|content| control_content_signature_with_options(content, metadata.options))
             .collect::<Vec<_>>();
+        fn paragraphs<'a>(content: &[&'a SdtContent]) -> Vec<Option<&'a CT_P>> {
+            content
+                .iter()
+                .map(|content| match content {
+                    SdtContent::Paragraph(paragraph) => Some(paragraph),
+                    _ => None,
+                })
+                .collect()
+        }
+        let original_paragraphs = paragraphs(&original_content);
+        let edited_paragraphs = paragraphs(&edited_content);
+        let (aligned, carried) = replace_changed_paragraph_runs(
+            pair_gaps_by_kind(
+                align(&original_signatures, &edited_signatures),
+                &original_signatures,
+                &edited_signatures,
+            ),
+            &original_paragraphs,
+            &edited_paragraphs,
+            &original_signatures,
+            &edited_signatures,
+            metadata.options,
+        )?;
+        refuse_uncarried_field_owners(
+            &aligned,
+            &original_paragraphs,
+            &edited_paragraphs,
+            &carried,
+            location,
+        )?;
+        let trailing_paragraph_insert_start = aligned
+            .iter()
+            .enumerate()
+            .rev()
+            .take_while(|(_, (left, right))| {
+                left.is_none()
+                    && right
+                        .and_then(|index| edited_content.get(index))
+                        .is_some_and(|content| matches!(content, SdtContent::Paragraph(_)))
+            })
+            .map(|(position, _)| position)
+            .last();
+        let trailing_paragraph_delete_start = aligned
+            .iter()
+            .enumerate()
+            .rev()
+            .take_while(|(_, (left, right))| {
+                right.is_none()
+                    && left
+                        .and_then(|index| original_content.get(index))
+                        .is_some_and(|content| matches!(content, SdtContent::Paragraph(_)))
+            })
+            .map(|(position, _)| position)
+            .last();
         let content_spans = direct_word_element_spans(original_xml, "sdtContent")?;
         let content_span = content_spans.first().ok_or_else(|| {
             Error::Other(format!(
-                "comparison could not find inline-control content at {location}"
+                "comparison could not find content-control content at {location}"
             ))
         })?;
         let scoped_content = source_child(original_xml, content_span.clone())?;
         let content_source = scoped_content.as_str();
-        let inner = element_inner_range_any_prefix(content_source, "sdtContent")?;
-        // Raw children remain physical shell boundaries after the runs are
-        // extracted. Logical boundary equality above does not preserve them
-        // in the run-only alignment by itself.
-        let raw_runs = |content: &[&SdtContent]| {
-            let mut runs = 0;
-            content
-                .iter()
-                .filter_map(|child| match child {
-                    SdtContent::Run(_) => {
-                        runs += 1;
-                        None
-                    }
-                    SdtContent::RawXml(_) => Some(runs),
-                    _ => unreachable!(),
-                })
-                .collect::<Vec<_>>()
-        };
-        let boundaries = raw_runs(&original_content)
+        let content_range = element_inner_range_any_prefix(content_source, "sdtContent")?;
+        let original_spans = modeled_control_source_spans(&original_content, content_source)?
             .into_iter()
-            .zip(raw_runs(&edited_content))
+            .map(|span| span.start - content_range.start..span.end - content_range.start)
             .collect::<Vec<_>>();
-        let compared = compare_control_runs_with_options(
-            [&original_runs, &edited_runs],
-            Some(&source_fragment(
-                &format!(
-                    "<w:inlineControl>{}</w:inlineControl>",
-                    &content_source[inner]
-                ),
-                &root_namespace_bindings(content_source, "sdtContent", &[])?,
-            )?),
-            Some(&property_sources),
-            &boundaries,
-            location,
-            metadata,
-            diagnostics,
-        )?;
-        return replace_element_inner(original_xml, "w:sdtContent", &compared);
-    }
-    let whitespace_slots = control_whitespace_slots(original)?;
-    let original_signatures = original_content
-        .iter()
-        .map(|content| control_content_signature_with_options(content, metadata.options))
-        .collect::<Vec<_>>();
-    let edited_signatures = edited_content
-        .iter()
-        .map(|content| control_content_signature_with_options(content, metadata.options))
-        .collect::<Vec<_>>();
-    fn paragraphs<'a>(content: &[&'a SdtContent]) -> Vec<Option<&'a CT_P>> {
-        content
-            .iter()
-            .map(|content| match content {
-                SdtContent::Paragraph(paragraph) => Some(paragraph),
-                _ => None,
-            })
-            .collect()
-    }
-    let original_paragraphs = paragraphs(&original_content);
-    let edited_paragraphs = paragraphs(&edited_content);
-    let (aligned, carried) = replace_changed_paragraph_runs(
-        pair_gaps_by_kind(
-            align(&original_signatures, &edited_signatures),
-            &original_signatures,
-            &edited_signatures,
-        ),
-        &original_paragraphs,
-        &edited_paragraphs,
-        &original_signatures,
-        &edited_signatures,
-        metadata.options,
-    )?;
-    refuse_uncarried_field_owners(
-        &aligned,
-        &original_paragraphs,
-        &edited_paragraphs,
-        &carried,
-        location,
-    )?;
-    let trailing_paragraph_insert_start = aligned
-        .iter()
-        .enumerate()
-        .rev()
-        .take_while(|(_, (left, right))| {
-            left.is_none()
-                && right
-                    .and_then(|index| edited_content.get(index))
-                    .is_some_and(|content| matches!(content, SdtContent::Paragraph(_)))
-        })
-        .map(|(position, _)| position)
-        .last();
-    let trailing_paragraph_delete_start = aligned
-        .iter()
-        .enumerate()
-        .rev()
-        .take_while(|(_, (left, right))| {
-            right.is_none()
-                && left
-                    .and_then(|index| original_content.get(index))
-                    .is_some_and(|content| matches!(content, SdtContent::Paragraph(_)))
-        })
-        .map(|(position, _)| position)
-        .last();
-    let content_spans = direct_word_element_spans(original_xml, "sdtContent")?;
-    let content_span = content_spans.first().ok_or_else(|| {
-        Error::Other(format!(
-            "comparison could not find content-control content at {location}"
-        ))
-    })?;
-    let scoped_content = source_child(original_xml, content_span.clone())?;
-    let content_source = scoped_content.as_str();
-    let content_inner = element_inner_range_any_prefix(content_source, "sdtContent")?;
-    let content_inner = &content_source[content_inner];
-    let bindings = root_namespace_bindings(original_xml, "sdt", &[])?;
-    let bindings = root_namespace_bindings(content_source, "sdtContent", &bindings)?;
-    let original_spans = story_content_spans(content_inner, &bindings)?;
-    if original_spans.len() != original_content.len() {
-        return Err(Error::Other(format!(
-            "comparison could not correlate content-control owners at {location}"
-        )));
-    }
-    let mut content: Vec<(EmittedOwner, String)> = Vec::new();
-    let mut trailing_merged = PropertySide::default();
-    let mut whitespace_emitted = vec![false; whitespace_slots.len()];
-    for (position, (left, right)) in aligned.iter().copied().enumerate() {
-        let whitespace_boundary = left.or_else(|| {
-            let right = right?;
-            let (Some(next_left), None) = aligned.get(position + 1).copied()? else {
-                return None;
+        let content_inner = &content_source[content_range];
+        let bindings = root_namespace_bindings(original_xml, "sdt", &[])?;
+        let bindings = root_namespace_bindings(content_source, "sdtContent", &bindings)?;
+        if original_spans.len() != original_content.len() {
+            return Err(Error::Other(format!(
+                "comparison could not correlate content-control owners at {location}"
+            )));
+        }
+        let mut content: Vec<(EmittedOwner, String)> = Vec::new();
+        let mut trailing_merged = PropertySide::default();
+        let mut whitespace_emitted = vec![false; whitespace_slots.len()];
+        let mut child_offsets = Vec::new();
+        for (position, (left, right)) in aligned.iter().copied().enumerate() {
+            let whitespace_boundary = left.or_else(|| {
+                let right = right?;
+                let (Some(next_left), None) = aligned.get(position + 1).copied()? else {
+                    return None;
+                };
+                (matches!(original_content[next_left], SdtContent::Paragraph(_))
+                    && matches!(edited_content[right], SdtContent::Table(_)))
+                .then_some(next_left)
+            });
+            if let Some(index) = whitespace_boundary
+                && !whitespace_emitted[index]
+                && !whitespace_slots[index].is_empty()
+            {
+                content.push((EmittedOwner::Whitespace, whitespace_slots[index].clone()));
+                whitespace_emitted[index] = true;
+            }
+            let item = |(left, right): (Option<usize>, Option<usize>)| {
+                right
+                    .and_then(|index| edited_content.get(index).copied())
+                    .or_else(|| left.and_then(|index| original_content.get(index).copied()))
             };
-            (matches!(original_content[next_left], SdtContent::Paragraph(_))
-                && matches!(edited_content[right], SdtContent::Table(_)))
-            .then_some(next_left)
-        });
-        if let Some(index) = whitespace_boundary
-            && !whitespace_emitted[index]
-            && !whitespace_slots[index].is_empty()
-        {
-            content.push((EmittedOwner::Whitespace, whitespace_slots[index].clone()));
-            whitespace_emitted[index] = true;
-        }
-        let item = |(left, right): (Option<usize>, Option<usize>)| {
-            right
-                .and_then(|index| edited_content.get(index).copied())
-                .or_else(|| left.and_then(|index| original_content.get(index).copied()))
-        };
-        let next_takes_mark = next_kept_owner(&aligned, position, |pair| {
-            matches!(item(pair), Some(SdtContent::Table(_)))
-        })
-        .is_some_and(|pair| {
-            matches!(
-                item(pair),
-                Some(SdtContent::Paragraph(_) | SdtContent::Table(_))
-            )
-        });
-        let child_location = format!("{location}/content[{position}]");
-        match (left, right) {
-            (Some(i), Some(j)) => content.push((
-                EmittedOwner::of_control(original_content[i], edited_content[j], None, metadata)?,
-                compare_control_content(
-                    original_content[i],
-                    edited_content[j],
-                    Some(&source_fragment(
-                        &content_inner[original_spans[i].clone()],
+            let next_takes_mark = next_kept_owner(&aligned, position, |pair| {
+                matches!(item(pair), Some(SdtContent::Table(_)))
+            })
+            .is_some_and(|pair| {
+                matches!(
+                    item(pair),
+                    Some(SdtContent::Paragraph(_) | SdtContent::Table(_))
+                )
+            });
+            let child_mark = metadata.leaf_publications.len();
+            let child_offset = content.iter().map(|(_, xml)| xml.len()).sum::<usize>();
+            let child_location = format!("{location}/content[{position}]");
+            match (left, right) {
+                (Some(i), Some(j)) => content.push((
+                    EmittedOwner::of_control(
+                        original_content[i],
+                        edited_content[j],
+                        None,
+                        metadata,
+                    )?,
+                    compare_control_content(
+                        original_content[i],
+                        edited_content[j],
+                        Some(&source_fragment(
+                            &content_inner[original_spans[i].clone()],
+                            &bindings,
+                        )?),
+                        &child_location,
                         &bindings,
-                    )?),
-                    &child_location,
-                    metadata,
-                    diagnostics,
-                )?,
-            )),
-            (Some(i), None) => {
-                if let SdtContent::Paragraph(paragraph) = original_content[i]
-                    && trailing_paragraph_delete_start.is_some_and(|start| position >= start)
-                {
-                    if trailing_paragraph_delete_start == Some(position) {
-                        trailing_merged =
+                        metadata,
+                        diagnostics,
+                    )?,
+                )),
+                (Some(i), None) => {
+                    if let SdtContent::Paragraph(paragraph) = original_content[i]
+                        && trailing_paragraph_delete_start.is_some_and(|start| position >= start)
+                    {
+                        if trailing_paragraph_delete_start == Some(position) {
+                            trailing_merged =
+                                mark_previous_paragraph(&mut content, "del", &bindings, metadata)?;
+                        }
+                        if next_takes_mark {
+                            content.push((
+                                EmittedOwner::paragraph(paragraph, paragraph, metadata)?,
+                                marked_control_content(
+                                    original_content[i],
+                                    "del",
+                                    &bindings,
+                                    metadata,
+                                )?,
+                            ));
+                        } else {
+                            content.push(final_paragraph(
+                                paragraph,
+                                "del",
+                                None,
+                                trailing_merged.clone(),
+                                metadata,
+                            )?);
+                        }
+                    } else if let SdtContent::Paragraph(paragraph) = original_content[i]
+                        && !next_takes_mark
+                    {
+                        let merged =
                             mark_previous_paragraph(&mut content, "del", &bindings, metadata)?;
-                    }
-                    if next_takes_mark {
-                        content.push((
-                            EmittedOwner::paragraph(paragraph, paragraph, metadata)?,
-                            marked_control_content(original_content[i], "del", metadata)?,
-                        ));
+                        content.push(final_paragraph(paragraph, "del", None, merged, metadata)?);
                     } else {
-                        content.push(final_paragraph(
-                            paragraph,
-                            "del",
-                            None,
-                            trailing_merged.clone(),
-                            metadata,
-                        )?);
+                        content.push((
+                            EmittedOwner::of_control(
+                                original_content[i],
+                                original_content[i],
+                                Some("del"),
+                                metadata,
+                            )?,
+                            marked_control_content(
+                                original_content[i],
+                                "del",
+                                &bindings,
+                                metadata,
+                            )?,
+                        ));
                     }
-                } else if let SdtContent::Paragraph(paragraph) = original_content[i]
-                    && !next_takes_mark
-                {
-                    let merged = mark_previous_paragraph(&mut content, "del", &bindings, metadata)?;
-                    content.push(final_paragraph(paragraph, "del", None, merged, metadata)?);
-                } else {
-                    content.push((
-                        EmittedOwner::of_control(
-                            original_content[i],
-                            original_content[i],
-                            Some("del"),
-                            metadata,
-                        )?,
-                        marked_control_content(original_content[i], "del", metadata)?,
-                    ));
                 }
-            }
-            (None, Some(j)) => {
-                if let SdtContent::Paragraph(paragraph) = edited_content[j]
-                    && trailing_paragraph_insert_start.is_some_and(|start| position >= start)
-                {
-                    if trailing_paragraph_insert_start == Some(position) {
-                        trailing_merged =
+                (None, Some(j)) => {
+                    if let SdtContent::Paragraph(paragraph) = edited_content[j]
+                        && trailing_paragraph_insert_start.is_some_and(|start| position >= start)
+                    {
+                        if trailing_paragraph_insert_start == Some(position) {
+                            trailing_merged =
+                                mark_previous_paragraph(&mut content, "ins", &bindings, metadata)?;
+                        }
+                        if next_takes_mark {
+                            content.push((
+                                EmittedOwner::paragraph(paragraph, paragraph, metadata)?,
+                                marked_control_content(
+                                    edited_content[j],
+                                    "ins",
+                                    &bindings,
+                                    metadata,
+                                )?,
+                            ));
+                        } else {
+                            content.push(final_paragraph(
+                                paragraph,
+                                "ins",
+                                None,
+                                trailing_merged.clone(),
+                                metadata,
+                            )?);
+                        }
+                    } else if let SdtContent::Paragraph(paragraph) = edited_content[j]
+                        && !next_takes_mark
+                    {
+                        let merged =
                             mark_previous_paragraph(&mut content, "ins", &bindings, metadata)?;
-                    }
-                    if next_takes_mark {
-                        content.push((
-                            EmittedOwner::paragraph(paragraph, paragraph, metadata)?,
-                            marked_control_content(edited_content[j], "ins", metadata)?,
-                        ));
+                        content.push(final_paragraph(paragraph, "ins", None, merged, metadata)?);
                     } else {
-                        content.push(final_paragraph(
-                            paragraph,
-                            "ins",
-                            None,
-                            trailing_merged.clone(),
-                            metadata,
-                        )?);
+                        content.push((
+                            EmittedOwner::of_control(
+                                edited_content[j],
+                                edited_content[j],
+                                Some("ins"),
+                                metadata,
+                            )?,
+                            marked_control_content(edited_content[j], "ins", &bindings, metadata)?,
+                        ));
                     }
-                } else if let SdtContent::Paragraph(paragraph) = edited_content[j]
-                    && !next_takes_mark
-                {
-                    let merged = mark_previous_paragraph(&mut content, "ins", &bindings, metadata)?;
-                    content.push(final_paragraph(paragraph, "ins", None, merged, metadata)?);
-                } else {
-                    content.push((
-                        EmittedOwner::of_control(
-                            edited_content[j],
-                            edited_content[j],
-                            Some("ins"),
-                            metadata,
-                        )?,
-                        marked_control_content(edited_content[j], "ins", metadata)?,
-                    ));
                 }
+                (None, None) => unreachable!(),
             }
-            (None, None) => unreachable!(),
+            child_offsets.push((child_mark, metadata.leaf_publications.len(), child_offset));
         }
-    }
-    if let Some(trailing) = whitespace_slots.last()
-        && !trailing.is_empty()
-    {
-        content.push((EmittedOwner::Whitespace, trailing.clone()));
-    }
-    let content = content.into_iter().map(|(_, xml)| xml).collect::<String>();
-    replace_element_inner(original_xml, "w:sdtContent", &content)
+        let container = direct_word_element_spans(original_xml, "sdtContent")?
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::Other("control has no actual content source".into()))?;
+        let actual_content =
+            element_inner_range_any_prefix(&original_xml[container.clone()], "sdtContent")?;
+        let actual_content =
+            container.start + actual_content.start..container.start + actual_content.end;
+        for (start, end, offset) in child_offsets {
+            shift_leaf_publications(
+                &mut metadata.leaf_publications[start..end],
+                (actual_content.start + offset) as isize,
+            )?;
+        }
+        if let Some(trailing) = whitespace_slots.last()
+            && !trailing.is_empty()
+        {
+            content.push((EmittedOwner::Whitespace, trailing.clone()));
+        }
+        let content = content.into_iter().map(|(_, xml)| xml).collect::<String>();
+        replace_element_inner(original_xml, "w:sdtContent", &content)
+    })()?;
+    let old_open = element_opening(&output)?.0;
+    let output = metadata.restore_owner_root(original as *const CT_Sdt as usize, output)?;
+    shift_leaf_publications(
+        &mut metadata.leaf_publications[leaf_mark..],
+        element_opening(&output)?.0 as isize - old_open as isize,
+    )?;
+    Ok(output)
 }
 
 fn inline_control_raw_boundaries(
@@ -8385,9 +14995,13 @@ fn compare_control_content(
     edited: &SdtContent,
     original_source: Option<&str>,
     location: &str,
+    destination_parent: &NamespaceBindings,
     metadata: &mut Metadata<'_>,
     diagnostics: &mut Vec<ComparisonDiagnostic>,
 ) -> Result<String> {
+    #[cfg(test)]
+    let _destination_diagnostic_scope =
+        PolicyDiagnosticScope::enter("destination:compare_control_content", location);
     match (original, edited) {
         (SdtContent::Paragraph(left), SdtContent::Paragraph(right)) => compare_paragraph(
             left,
@@ -8438,6 +15052,18 @@ fn compare_control_content(
                     None,
                     &[],
                     location,
+                    destination_parent,
+                    metadata,
+                    diagnostics,
+                )
+            } else if run_is_field(left) || run_is_field(right) {
+                compared_run_xml(
+                    left,
+                    right,
+                    None,
+                    None,
+                    location,
+                    destination_parent,
                     metadata,
                     diagnostics,
                 )
@@ -8450,30 +15076,27 @@ fn compare_control_content(
                 {
                     Ok(source.to_owned())
                 } else {
-                    publish_run_source(left, run_xml(left)?, original_source, metadata)
+                    publish_run_source(
+                        left,
+                        left,
+                        run_xml(left)?,
+                        metadata.run_source(left),
+                        None,
+                        None,
+                        destination_parent,
+                        metadata,
+                    )
                 }
             } else {
-                let deleted_payload =
-                    publish_run_source(left, deleted_run_xml(left)?, original_source, metadata)?;
-                let inserted_payload = publish_run_source(
-                    left,
-                    policy_inserted_run_xml(right, Some(left), metadata.options)?,
-                    original_source,
+                paired_run_replacement(
+                    [left, right],
+                    [None, None],
+                    [None, None],
+                    location,
+                    destination_parent,
                     metadata,
-                )?;
-                let deleted = metadata.ids.revision(
-                    "del",
-                    metadata.author,
-                    metadata.timestamp,
-                    &deleted_payload,
-                )?;
-                let inserted = metadata.ids.revision(
-                    "ins",
-                    metadata.author,
-                    metadata.timestamp,
-                    &inserted_payload,
-                )?;
-                Ok(format!("{deleted}{inserted}"))
+                    diagnostics,
+                )
             }
         }
         (SdtContent::RawXml(left), SdtContent::RawXml(right)) if left == right => {
@@ -8487,16 +15110,47 @@ fn compare_control_content(
 
 fn compare_control_runs_with_options(
     runs: [&[CT_R]; 2],
-    original_source: Option<&str>,
-    property_sources: Option<&[Vec<Option<String>>; 2]>,
+    original_source: Option<(&str, &[Range<usize>])>,
+    property_sources: Option<&[Vec<Option<RunSource>>; 2]>,
     raw_boundaries: &[(usize, usize)],
     location: &str,
+    destination_parent: &NamespaceBindings,
     metadata: &mut Metadata<'_>,
     diagnostics: &mut Vec<ComparisonDiagnostic>,
 ) -> Result<String> {
+    #[cfg(test)]
+    let _destination_diagnostic_scope =
+        PolicyDiagnosticScope::enter("destination:compare_control_runs_with_options", location);
+    let revision_parent = metadata.ids.revision_parent_scope(destination_parent);
     let [original, edited] = runs;
+    let projection_pairs = metadata
+        .leaf_capture
+        .then(|| projection_leaf_pairs([original, edited], raw_boundaries));
+    let projection_sources = [original, edited]
+        .into_iter()
+        .enumerate()
+        .map(|(side, runs)| {
+            runs.iter()
+                .enumerate()
+                .map(|(owner, run)| {
+                    let _ = (side, owner);
+                    property_sources
+                        .and_then(|sources| sources[side].get(owner).cloned().flatten())
+                        .or_else(|| metadata.run_source(run).cloned())
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let projection_sources = [projection_sources[0].clone(), projection_sources[1].clone()];
+    let mut projection_ledgers = if let Some(pairs) = &projection_pairs {
+        projection_action_ledgers(pairs, [original, edited], &projection_sources)?
+    } else {
+        Vec::new()
+    };
     let original_units = attributed_run_units(original, metadata.options);
     let edited_units = attributed_run_units(edited, metadata.options);
+    validate_raw_attribution(original, &original_units)?;
+    validate_raw_attribution(edited, &edited_units)?;
     let original_signatures = original_units
         .iter()
         .map(attributed_unit_signature)
@@ -8519,14 +15173,39 @@ fn compare_control_runs_with_options(
             ))
         })?
     };
-    let (aligned, segments) = align_between_shells(&original_signatures, &edited_signatures, &cuts);
-    let segment_runs = std::iter::once(0)
-        .chain(cuts.iter().map(|&(cut, _)| {
-            original_units
-                .get(cut)
-                .map_or(original.len(), |unit| unit.owner)
-        }))
-        .collect::<Vec<_>>();
+    let (aligned, segments) = if let Some(pairs) = &projection_pairs {
+        projection_unit_alignment(
+            pairs,
+            [&original_units, &edited_units],
+            [&original_signatures, &edited_signatures],
+        )?
+    } else {
+        align_between_shells(&original_signatures, &edited_signatures, &cuts)
+    };
+    let segment_runs = if let Some(pairs) = &projection_pairs {
+        pairs
+            .iter()
+            .enumerate()
+            .map(|(at, pair)| {
+                pair[0]
+                    .map(|(owner, _)| owner)
+                    .or_else(|| {
+                        pairs[at..]
+                            .iter()
+                            .find_map(|next| next[0].map(|(owner, _)| owner))
+                    })
+                    .unwrap_or(original.len())
+            })
+            .collect::<Vec<_>>()
+    } else {
+        std::iter::once(0)
+            .chain(cuts.iter().map(|&(cut, _)| {
+                original_units
+                    .get(cut)
+                    .map_or(original.len(), |unit| unit.owner)
+            }))
+            .collect::<Vec<_>>()
+    };
     if !metadata.options.ignore_fields {
         validate_field_alignment(
             &aligned,
@@ -8543,6 +15222,15 @@ fn compare_control_runs_with_options(
             location,
         )?;
     }
+    #[cfg(test)]
+    policy_diagnostic(
+        "occurrence_alignment_before_group",
+        serde_json::json!({
+        "location":location,"aligned":aligned,"segments":segments,"cuts":cuts,
+        "original_units":occurrence_units_diagnostic(&original_units),
+        "edited_units":occurrence_units_diagnostic(&edited_units),
+        "original_signatures":original_signatures,"edited_signatures":edited_signatures }),
+    );
     let (aligned, segments) = grouped_text_alignment(
         &aligned,
         &segments,
@@ -8552,17 +15240,47 @@ fn compare_control_runs_with_options(
         &edited_signatures,
         metadata.options,
     );
-    let grouped = coalesced_granular_alignment(
+    let mut grouped = coalesced_granular_alignment(
         &aligned,
         &original_units,
         &edited_units,
         &original_signatures,
         &edited_signatures,
     );
+    if let Some(pairs) = &projection_pairs {
+        retain_projection_separators(
+            &mut grouped,
+            &aligned,
+            &segments,
+            pairs,
+            [&original_units, &edited_units],
+            &projection_sources,
+            metadata.options,
+        )?;
+    }
+    #[cfg(test)]
+    policy_diagnostic(
+        "occurrence_alignment_after_group",
+        serde_json::json!({
+        "location":location,"aligned":aligned,"segments":segments,
+        "groups":grouped.iter().map(|(action,range)|serde_json::json!({"action":match action { GranularAction::Preserve=>"Preserve",GranularAction::Equal=>"Equal",GranularAction::Replace=>"Replace",GranularAction::Delete=>"Delete",GranularAction::Insert=>"Insert",GranularAction::Drop=>"Drop" },"members":[range.start,range.end]})).collect::<Vec<_>>() }),
+    );
+    validate_fragment_partition(&aligned, &grouped)?;
     let mut grouped_alignment = Vec::with_capacity(grouped.len());
     let mut grouped_segment_runs = Vec::with_capacity(grouped.len());
     let mut replacements = Vec::with_capacity(grouped.len());
+    let mut fragment_publications = Vec::with_capacity(grouped.len());
     for (action, members) in grouped {
+        if metadata.leaf_capture {
+            record_projection_actions(
+                &mut projection_ledgers,
+                action,
+                members.clone(),
+                &aligned,
+                [&original_units, &edited_units],
+                &projection_sources,
+            )?;
+        }
         grouped_alignment.push(aligned[members.start]);
         grouped_segment_runs.push(segment_runs[segments[members.start]]);
         let left_indices = members
@@ -8572,96 +15290,250 @@ fn compare_control_runs_with_options(
         let right_indices = members
             .filter_map(|index| aligned[index].1)
             .collect::<Vec<_>>();
-        let left = merge_unit_runs(&original_units, &left_indices);
-        let right = merge_unit_runs(&edited_units, &right_indices);
+        let mut left_raw = Vec::new();
+        let mut left_typed = Vec::new();
+        let mut right_raw = Vec::new();
+        let mut right_typed = Vec::new();
+        let left = merge_unit_runs(
+            &original_units,
+            &left_indices,
+            &mut left_raw,
+            &mut left_typed,
+        )?;
+        let right = merge_unit_runs(
+            &edited_units,
+            &right_indices,
+            &mut right_raw,
+            &mut right_typed,
+        )?;
         let left_source = left_indices.first().and_then(|index| {
             let owner = original_units[*index].owner;
             property_sources
                 .and_then(|sources| sources[0].get(owner).cloned().flatten())
-                .or_else(|| metadata.run_source(&original[owner]).map(str::to_owned))
+                .or_else(|| metadata.run_source(&original[owner]).cloned())
         });
         let right_source = right_indices.first().and_then(|index| {
             let owner = edited_units[*index].owner;
             property_sources
                 .and_then(|sources| sources[1].get(owner).cloned().flatten())
-                .or_else(|| metadata.run_source(&edited[owner]).map(str::to_owned))
+                .or_else(|| metadata.run_source(&edited[owner]).cloned())
         });
-        replacements.push(match action {
-            GranularAction::Preserve => publish_run_source(
-                left.as_ref().unwrap(),
-                paragraph_owned_run_xml(left.as_ref().unwrap())?,
-                left_source.as_deref(),
-                metadata,
-            )?,
-            GranularAction::Equal => compared_run_xml(
-                left.as_ref().unwrap(),
-                right.as_ref().unwrap(),
-                left_source.as_deref(),
-                location,
-                metadata,
-                diagnostics,
-            )?,
-            GranularAction::Replace => {
-                let left = left.as_ref().unwrap();
-                let deleted_payload = publish_run_source(
-                    left,
-                    deleted_run_xml(left)?,
-                    left_source.as_deref(),
-                    metadata,
-                )?;
-                let inserted_payload = publish_run_source(
-                    left,
-                    policy_inserted_run_xml(right.as_ref().unwrap(), Some(left), metadata.options)?,
-                    left_source.as_deref(),
-                    metadata,
-                )?;
-                let deleted = metadata.ids.revision(
-                    "del",
-                    metadata.author,
-                    metadata.timestamp,
-                    &deleted_payload,
-                )?;
-                let inserted = metadata.ids.revision(
-                    "ins",
-                    metadata.author,
-                    metadata.timestamp,
-                    &inserted_payload,
-                )?;
-                format!("{deleted}{inserted}")
+        let policy_shell = projection_pairs
+            .as_ref()
+            .and_then(|pairs| {
+                right_indices.first().and_then(|index| {
+                    let unit = &edited_units[*index];
+                    if !matches!(
+                        unit.run.content.first(),
+                        Some(RunContent::Text(_) | RunContent::DeletedText(_))
+                    ) {
+                        return None;
+                    }
+                    let ordinal = unit.typed_sources.first().and_then(|slot| *slot)?.ordinal;
+                    pairs.iter().find_map(|pair| {
+                        (pair[1] == Some((unit.owner, ordinal)))
+                            .then_some(pair[0])
+                            .flatten()
+                    })
+                })
+            })
+            .map(|(owner, ordinal)| {
+                let run = &original[owner];
+                let source = property_sources
+                    .and_then(|sources| sources[0].get(owner).cloned().flatten())
+                    .or_else(|| metadata.run_source(run).cloned())
+                    .ok_or_else(|| {
+                        Error::Other("paired controlled shell has no actual source".into())
+                    })?;
+                if source
+                    .typed_slots
+                    .get(ordinal)
+                    .and_then(Option::as_ref)
+                    .is_none()
+                {
+                    return Err(Error::Other(
+                        "paired controlled leaf has no physical source slot".into(),
+                    ));
+                }
+                Ok((run, source))
+            })
+            .transpose()?;
+        let mut field_bindings = Vec::new();
+        for (indices, units, originals, cloned, selected) in [
+            (
+                &left_indices,
+                &original_units,
+                original,
+                left.as_ref(),
+                &left_typed,
+            ),
+            (
+                &right_indices,
+                &edited_units,
+                edited,
+                right.as_ref(),
+                &right_typed,
+            ),
+        ] {
+            if let Some(cloned) = cloned
+                && run_is_field(cloned)
+            {
+                let owner = units[indices[0]].owner;
+                match metadata.bind_selected_run_fields(&originals[owner], cloned, selected) {
+                    Ok(bindings) => field_bindings.extend(bindings),
+                    Err(error) => {
+                        metadata.unbind_cloned_control_runs(field_bindings)?;
+                        return Err(error);
+                    }
+                }
             }
-            GranularAction::Delete => {
-                let payload = publish_run_source(
+        }
+        let replacement = (|| -> Result<String> {
+            Ok(match action {
+                GranularAction::Preserve => publish_run_source(
                     left.as_ref().unwrap(),
-                    deleted_run_xml(left.as_ref().unwrap())?,
-                    left_source.as_deref(),
+                    left.as_ref().unwrap(),
+                    paragraph_owned_run_xml(left.as_ref().unwrap())?,
+                    left_source.as_ref(),
+                    None,
+                    Some((&left_raw, &left_typed)),
+                    destination_parent,
                     metadata,
-                )?;
-                metadata
-                    .ids
-                    .revision("del", metadata.author, metadata.timestamp, &payload)?
-            }
-            GranularAction::Insert => {
-                let payload = publish_run_source(
+                )?,
+                GranularAction::Equal => compared_run_xml(
+                    left.as_ref().unwrap(),
                     right.as_ref().unwrap(),
-                    paragraph_owned_run_xml(right.as_ref().unwrap())?,
-                    right_source.as_deref(),
+                    left_source.as_ref(),
+                    Some((&left_raw, &left_typed)),
+                    location,
+                    destination_parent,
                     metadata,
+                    diagnostics,
+                )?,
+                GranularAction::Replace => paired_run_replacement(
+                    [left.as_ref().unwrap(), right.as_ref().unwrap()],
+                    [left_source.as_ref(), right_source.as_ref()],
+                    [
+                        Some((&left_raw, &left_typed)),
+                        Some((&right_raw, &right_typed)),
+                    ],
+                    location,
+                    destination_parent,
+                    metadata,
+                    diagnostics,
+                )?,
+                GranularAction::Delete => {
+                    let payload = publish_run_source(
+                        left.as_ref().unwrap(),
+                        left.as_ref().unwrap(),
+                        deleted_run_xml(left.as_ref().unwrap())?,
+                        left_source.as_ref(),
+                        None,
+                        Some((&left_raw, &left_typed)),
+                        &revision_parent,
+                        metadata,
+                    )?;
+                    metadata
+                        .ids
+                        .revision("del", metadata.author, metadata.timestamp, &payload)?
+                }
+                GranularAction::Insert => {
+                    let mut content = right.as_ref().unwrap().clone();
+                    let (shell, shell_source) = if let Some((shell, source)) = &policy_shell {
+                        let before = usize::from(content.properties.is_some());
+                        content.properties = shell.properties.clone();
+                        let after = usize::from(content.properties.is_some());
+                        for encoded in &mut content.extra_xml_positions {
+                            if !CT_R::raw_child_is_root_attributes(*encoded) {
+                                let at = CT_R::raw_child_position(*encoded).saturating_sub(before)
+                                    + after;
+                                CT_R::set_raw_child_position(encoded, at);
+                            }
+                        }
+                        (*shell, Some(source))
+                    } else {
+                        (right.as_ref().unwrap(), right_source.as_ref())
+                    };
+                    let payload = publish_run_source(
+                        shell,
+                        &content,
+                        paragraph_owned_run_xml(&content)?,
+                        shell_source,
+                        right_source.as_ref(),
+                        Some((&right_raw, &right_typed)),
+                        &revision_parent,
+                        metadata,
+                    )?;
+                    metadata
+                        .ids
+                        .revision("ins", metadata.author, metadata.timestamp, &payload)?
+                }
+                GranularAction::Drop => String::new(),
+            })
+        })();
+        metadata.unbind_cloned_control_runs(field_bindings)?;
+        replacements.push(replacement?);
+        let mut leaves = Vec::new();
+        if metadata.leaf_capture {
+            let selected = match action {
+                GranularAction::Replace | GranularAction::Insert => right
+                    .as_ref()
+                    .zip(right_source.as_ref())
+                    .map(|(run, source)| {
+                        (
+                            run,
+                            source,
+                            &right_raw[..],
+                            &right_typed[..],
+                            matches!(action, GranularAction::Replace | GranularAction::Insert),
+                        )
+                    }),
+                GranularAction::Equal | GranularAction::Preserve => left
+                    .as_ref()
+                    .zip(left_source.as_ref())
+                    .map(|(run, source)| (run, source, &left_raw[..], &left_typed[..], false)),
+                _ => None,
+            };
+            if let Some((run, source, raw, typed, inserted)) = selected {
+                leaves = emitted_fragment_leaves(
+                    replacements.last().unwrap(),
+                    run,
+                    source,
+                    raw,
+                    typed,
+                    inserted,
+                    metadata.options.ignore_whitespace,
+                    destination_parent,
                 )?;
-                metadata
-                    .ids
-                    .revision("ins", metadata.author, metadata.timestamp, &payload)?
             }
-            GranularAction::Drop => String::new(),
-        });
+        }
+        #[cfg(test)]
+        policy_diagnostic(
+            "occurrence_actual_emission",
+            serde_json::json!({
+            "location":location,"action":match action { GranularAction::Preserve=>"Preserve",GranularAction::Equal=>"Equal",GranularAction::Replace=>"Replace",GranularAction::Delete=>"Delete",GranularAction::Insert=>"Insert",GranularAction::Drop=>"Drop" },
+            "left_indices":left_indices,"right_indices":right_indices,
+            "left_source":occurrence_source_diagnostic(left_source.as_ref()),"right_source":occurrence_source_diagnostic(right_source.as_ref()),
+            "left_typed":format!("{:?}",left_typed),"right_typed":format!("{:?}",right_typed),
+            "left_properties":left.as_ref().map(|run|format!("{:?}",run.properties)),
+            "right_properties":right.as_ref().map(|run|format!("{:?}",run.properties)),
+            "actual_xml":replacements.last(),"recorded_leaves":leaves.iter().map(occurrence_leaf_diagnostic).collect::<Vec<_>>() }),
+        );
+        fragment_publications.push(leaves);
     }
-    let Some(source) = original_source else {
-        return Ok(replacements.concat());
+    if metadata.leaf_capture {
+        attach_projection_actions(&mut fragment_publications, &projection_ledgers)?;
+    }
+    let Some((source, spans)) = original_source else {
+        let mut output = String::new();
+        for (replacement, mut leaves) in replacements.into_iter().zip(fragment_publications) {
+            shift_leaf_publications(&mut leaves, output.len() as isize)?;
+            metadata.leaf_publications.extend(leaves);
+            output.push_str(&replacement);
+        }
+        return Ok(output);
     };
     let inner = element_inner_range_any_prefix(source, "inlineControl")?;
-    let spans = direct_word_element_spans(source, "r")?
-        .into_iter()
-        .map(|span| span.start - inner.start..span.end - inner.start)
-        .collect::<Vec<_>>();
     let source = &source[inner];
     if spans.len() != original.len() {
         return Err(Error::Other(format!(
@@ -8672,10 +15544,11 @@ fn compare_control_runs_with_options(
     let mut output = source[..insertion_boundary].to_owned();
     let mut cursor = insertion_boundary;
     let mut consumed_owner = None;
-    for (((left, _), replacement), &segment_run) in grouped_alignment
+    for (replacement_index, (((left, _), replacement), &segment_run)) in grouped_alignment
         .iter()
         .zip(&replacements)
         .zip(&grouped_segment_runs)
+        .enumerate()
     {
         // An insertion can be the first action after a raw child, with no
         // original unit to consume. Copy that shell before its new text.
@@ -8694,6 +15567,9 @@ fn compare_control_runs_with_options(
             cursor = span.end;
             consumed_owner = Some(unit.owner);
         }
+        let mut leaves = fragment_publications[replacement_index].clone();
+        shift_leaf_publications(&mut leaves, output.len() as isize)?;
+        metadata.leaf_publications.extend(leaves);
         output.push_str(replacement);
     }
     output.push_str(&source[cursor..]);
@@ -8703,6 +15579,7 @@ fn compare_control_runs_with_options(
 fn marked_control_content(
     content: &SdtContent,
     kind: &str,
+    destination_parent: &NamespaceBindings,
     metadata: &mut Metadata<'_>,
 ) -> Result<String> {
     match content {
@@ -8716,7 +15593,17 @@ fn marked_control_content(
             } else {
                 paragraph_owned_run_xml(run)?
             };
-            let payload = publish_run_source(run, generated, None, metadata)?;
+            let revision_parent = metadata.ids.revision_parent_scope(destination_parent);
+            let payload = publish_run_source(
+                run,
+                run,
+                generated,
+                None,
+                None,
+                None,
+                &revision_parent,
+                metadata,
+            )?;
             metadata
                 .ids
                 .revision(kind, metadata.author, metadata.timestamp, &payload)
@@ -8731,16 +15618,34 @@ fn marked_control_content(
 
 fn publish_run_source(
     original: &CT_R,
+    content: &CT_R,
     generated: String,
-    source: Option<&str>,
+    source: Option<&RunSource>,
+    content_source: Option<&RunSource>,
+    selection: Option<RunSourceSelection<'_>>,
+    destination_parent: &NamespaceBindings,
     metadata: &Metadata<'_>,
 ) -> Result<String> {
     let source = source.or_else(|| metadata.run_source(original));
     if let Some(source) = source {
+        let content_source = content_source
+            .or_else(|| metadata.run_source(content))
+            .unwrap_or(source);
+        let complete;
+        let (raw, typed) = if let Some(selection) = selection {
+            selection
+        } else {
+            complete = complete_run_selection(content);
+            (&complete.0[..], &complete.1[..])
+        };
         preserve_run_source(
             &generated,
             &run_property_xml(original.properties.as_ref())?,
-            source,
+            [source, content_source],
+            content,
+            raw,
+            typed,
+            destination_parent,
             &metadata.ids,
         )
     } else {
@@ -8751,16 +15656,34 @@ fn publish_run_source(
 fn compared_run_xml(
     original: &CT_R,
     edited: &CT_R,
-    source: Option<&str>,
+    source: Option<&RunSource>,
+    selection: Option<RunSourceSelection<'_>>,
     location: &str,
+    destination_parent: &NamespaceBindings,
     metadata: &mut Metadata<'_>,
     diagnostics: &mut Vec<ComparisonDiagnostic>,
 ) -> Result<String> {
-    let source = source
-        .map(str::to_owned)
-        .or_else(|| metadata.run_source(original).map(str::to_owned));
+    if let (Some(original_field), Some(edited_field)) = (run_field(original), run_field(edited)) {
+        // A virtual Field is not a physical run owner. Its producer qualifies
+        // new revision nodes without rebinding the retained field's namespace.
+        return if metadata.options.ignore_fields {
+            field_xml(original_field)
+        } else {
+            compare_field_xml(original_field, edited_field, metadata)
+        };
+    }
+    let source = source.or_else(|| metadata.run_source(original)).cloned();
     let generated = compared_run_xml_impl(original, edited, location, metadata, diagnostics)?;
-    publish_run_source(original, generated, source.as_deref(), metadata)
+    publish_run_source(
+        original,
+        original,
+        generated,
+        source.as_ref(),
+        None,
+        selection,
+        destination_parent,
+        metadata,
+    )
 }
 
 fn compared_run_xml_impl(
@@ -8775,9 +15698,6 @@ fn compared_run_xml_impl(
     }
     if metadata.options.ignore_formatting {
         return metadata.ids.generated(paragraph_owned_run_xml(original)?);
-    }
-    if let (Some(original_field), Some(edited_field)) = (run_field(original), run_field(edited)) {
-        return compare_field_xml(original_field, edited_field, metadata);
     }
     let original_properties = modeled_run_properties(original);
     let edited_properties = modeled_run_properties(edited);
@@ -8808,58 +15728,1056 @@ fn compared_run_xml_impl(
     metadata.ids.generated(current)
 }
 
-fn compare_field_xml(
-    original: &rdocx_oxml::text::Field,
-    edited: &rdocx_oxml::text::Field,
-    metadata: &mut Metadata<'_>,
-) -> Result<String> {
-    let xml = compare_field_xml_impl(original, edited, metadata)?;
-    metadata.ids.generated(xml)
+fn field_result_scope(
+    field: &rdocx_oxml::text::Field,
+    metadata: &Metadata<'_>,
+) -> NamespaceBindings {
+    metadata
+        .source_frames
+        .iter()
+        .rev()
+        .find_map(|frame| {
+            frame
+                .field_scopes
+                .get(&(std::ptr::from_ref(field) as usize))
+        })
+        .cloned()
+        .unwrap_or_else(|| vec![("xmlns:w".into(), W_NS.into())])
 }
 
-fn compare_field_xml_impl(
+fn comparison_instruction_eq(
+    left: &rdocx_oxml::text::FieldInstruction,
+    right: &rdocx_oxml::text::FieldInstruction,
+) -> bool {
+    use rdocx_oxml::text::FieldArgument;
+    let same_operand = |left: &FieldArgument, right: &FieldArgument| match (left, right) {
+        (FieldArgument::Text(left), FieldArgument::Text(right)) => left == right,
+        (FieldArgument::Nested(left), FieldArgument::Nested(right)) => {
+            comparison_instruction_eq(&left.instruction, &right.instruction)
+        }
+        _ => false,
+    };
+    left.name == right.name
+        && left.arguments.len() == right.arguments.len()
+        && left
+            .arguments
+            .iter()
+            .zip(&right.arguments)
+            .all(|(left, right)| same_operand(left, right))
+        && left.switches.len() == right.switches.len()
+        && left
+            .switches
+            .iter()
+            .zip(&right.switches)
+            .all(|(left, right)| {
+                left.name == right.name
+                    && match (&left.argument, &right.argument) {
+                        (None, None) => true,
+                        (Some(left), Some(right)) => same_operand(left, right),
+                        _ => false,
+                    }
+            })
+}
+
+fn compare_field_xml(
     original: &rdocx_oxml::text::Field,
     edited: &rdocx_oxml::text::Field,
     metadata: &mut Metadata<'_>,
 ) -> Result<String> {
     let original_xml = field_xml(original)?;
     let edited_xml = field_xml(edited)?;
-    if original == edited {
+    let old_scope = field_result_scope(original, metadata);
+    let new_scope = field_result_scope(edited, metadata);
+
+    let original_complex_form = actual_field_is_complex(&original_xml, &old_scope)?;
+    let edited_complex_form = actual_field_is_complex(&edited_xml, &new_scope)?;
+    let same_instruction = comparison_instruction_eq(
+        &original.effective_instruction(),
+        &edited.effective_instruction(),
+    );
+    let same_form = original_complex_form == edited_complex_form;
+    // Representation dispatch precedes global Field equality, which deliberately
+    // omits simple/complex form. Protected source facts remain independent.
+    let source_facts = |field: &rdocx_oxml::text::Field| {
+        metadata
+            .source_frames
+            .iter()
+            .rev()
+            .find_map(|frame| frame.fields.get(&(std::ptr::from_ref(field) as usize)))
+    };
+    let same_source_facts = source_facts(original) == source_facts(edited);
+    if same_instruction && same_form && original == edited && same_source_facts {
         return Ok(original_xml);
     }
-    let same_instruction = original.effective_instruction() == edited.effective_instruction();
-    if same_instruction && original.is_complex() == edited.is_complex() {
-        if original.is_complex() {
+    if same_instruction && same_form {
+        if original_complex_form {
             let (before, old_result, after) = complex_field_result(&original_xml)?;
             let (_, new_result, _) = complex_field_result(&edited_xml)?;
             return Ok(format!(
                 "{before}{}{after}",
-                tracked_field_result(&old_result, &new_result, metadata)?
+                tracked_field_result(
+                    [original, edited],
+                    &old_result,
+                    &new_result,
+                    [&old_scope, &new_scope],
+                    metadata
+                )?
             ));
         }
+        let original_xml = append_word_child(&original_xml, "fldSimple", "")?;
+        let edited_xml = append_word_child(&edited_xml, "fldSimple", "")?;
         let original_inner = element_inner_range_any_prefix(&original_xml, "fldSimple")?;
         let edited_inner = element_inner_range_any_prefix(&edited_xml, "fldSimple")?;
-        let old_result = original_xml[original_inner.clone()].to_owned();
-        let new_result = edited_xml[edited_inner].to_owned();
-        let mut tracked = original_xml;
-        tracked.replace_range(
-            original_inner,
-            &tracked_field_result(&old_result, &new_result, metadata)?,
-        );
-        return Ok(tracked);
+        let old_data = direct_word_element_spans_in_scope(&original_xml, "fldData", &old_scope)?;
+        let new_data = direct_word_element_spans_in_scope(&edited_xml, "fldData", &new_scope)?;
+        if old_data.len() > 1 || new_data.len() > 1 {
+            return Err(Error::Other(
+                "field result comparison has ambiguous fldData ownership".into(),
+            ));
+        }
+        let old_start = old_data
+            .first()
+            .map_or(original_inner.start, |span| span.end);
+        let new_start = new_data.first().map_or(edited_inner.start, |span| span.end);
+        let tracked = tracked_field_result(
+            [original, edited],
+            &original_xml[old_start..original_inner.end],
+            &edited_xml[new_start..edited_inner.end],
+            [&old_scope, &new_scope],
+            metadata,
+        )?;
+        let mut output = original_xml;
+        output.replace_range(old_start..original_inner.end, &tracked);
+        return Ok(output);
     }
 
-    let deleted = metadata.ids.revision(
+    if let Some(story) = &metadata.paired_field_story {
+        let actual = |field: &rdocx_oxml::text::Field| {
+            metadata.source_frames.iter().rev().find_map(|frame| {
+                frame
+                    .field_occurrences
+                    .get(&(std::ptr::from_ref(field) as usize))
+            })
+        };
+        let left = actual(original).ok_or_else(|| {
+            Error::Other("paired field lacks its actual original source occurrence".into())
+        })?;
+        let right = actual(edited).ok_or_else(|| {
+            Error::Other("paired field lacks its actual edited source occurrence".into())
+        })?;
+        if left.story != *story
+            || right.story != *story
+            || left.input_role != 0
+            || right.input_role != 1
+            || left.owner_path != right.owner_path
+            || left.field_slot != right.field_slot
+            || left.bounds.is_empty()
+            || right.bounds.is_empty()
+        {
+            return Err(Error::Other(
+                "paired field does not belong to the checked host interval".into(),
+            ));
+        }
+        // The outer checked host owns the replacement. Its actual selected side
+        // remains its own representation, with no ordinary conversion witness.
+        return Ok(edited_xml);
+    }
+
+    let original_complex = if original_complex_form {
+        original_xml
+    } else {
+        clean_simple_complex_source(&original_xml, &old_scope, original)?
+    };
+    let edited_complex = if edited_complex_form {
+        edited_xml
+    } else {
+        clean_simple_complex_source(&edited_xml, &new_scope, edited)?
+    };
+    let deleted_source =
+        qualified_complete_field_payload(&original_complex, &old_scope, true, false, true, &mut 0)?;
+    let inserted_source =
+        qualified_complete_field_payload(&edited_complex, &new_scope, false, false, true, &mut 0)?;
+    let deleted_id = metadata.ids.allocate()?;
+    let inserted_id = metadata.ids.allocate()?;
+    let deleted = metadata.ids.generated(IdAllocator::revision_with_id(
         "del",
         metadata.author,
         metadata.timestamp,
-        &deleted_text_xml(&original_xml),
-    )?;
-    let inserted =
-        metadata
-            .ids
-            .revision("ins", metadata.author, metadata.timestamp, &edited_xml)?;
+        &deleted_source,
+        deleted_id,
+    ))?;
+    let inserted = metadata.ids.generated(IdAllocator::revision_with_id(
+        "ins",
+        metadata.author,
+        metadata.timestamp,
+        &inserted_source,
+        inserted_id,
+    ))?;
+    if !original_complex_form || !edited_complex_form {
+        let occurrence = |field: &rdocx_oxml::text::Field| {
+            metadata
+                .source_frames
+                .iter()
+                .rev()
+                .find_map(|frame| {
+                    frame
+                        .field_occurrences
+                        .get(&(std::ptr::from_ref(field) as usize))
+                })
+                .cloned()
+        };
+        let left = occurrence(original).ok_or_else(|| {
+            Error::Other(
+                "ordinary field conversion has no original physical source occurrence".into(),
+            )
+        })?;
+        let right = occurrence(edited).ok_or_else(|| {
+            Error::Other(
+                "ordinary field conversion has no edited physical source occurrence".into(),
+            )
+        })?;
+        {
+            if left.input_role != 0 || right.input_role != 1 || left.story != right.story {
+                return Err(Error::Other(
+                    "field conversion input roles or physical story association changed".into(),
+                ));
+            }
+            metadata.field_conversions.push(FieldConversionWitness {
+                sources: [left, right],
+                instruction_changed: !same_instruction,
+                form_changed: !same_form,
+                input_complex: [original_complex_form, edited_complex_form],
+                revision_ids: [deleted_id, inserted_id],
+                generated_spans: [deleted_source, inserted_source],
+            });
+        }
+    }
     Ok(format!("{deleted}{inserted}"))
+}
+
+fn actual_field_source_fragment(xml: &str, bindings: &NamespaceBindings) -> Result<String> {
+    let scope = bindings
+        .iter()
+        .map(|(name, uri)| {
+            (
+                name.strip_prefix("xmlns:").unwrap_or("").to_owned(),
+                uri.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    String::from_utf8(crate::document::close_content_fragment_namespaces(
+        xml.as_bytes(),
+        &scope,
+    )?)
+    .map_err(utf8_error)
+}
+
+fn actual_field_is_complex(xml: &str, bindings: &NamespaceBindings) -> Result<bool> {
+    let closed = actual_field_source_fragment(xml, bindings)?;
+    let mut reader = NsReader::from_str(&closed);
+    let (namespace, event) = reader
+        .read_resolved_event()
+        .map_err(|error| Error::Other(error.to_string()))?;
+    let (Event::Start(element) | Event::Empty(element)) = event else {
+        return Err(Error::Other("field has no actual source root".into()));
+    };
+    if !matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == W_NS.as_bytes()) {
+        return Err(Error::Other(
+            "field source root has no actual Word binding".into(),
+        ));
+    }
+    match element.local_name().as_ref() {
+        b"fldSimple" => Ok(false),
+        b"r" => Ok(true),
+        _ => Err(Error::Other(
+            "field source root is not a qualified field carrier".into(),
+        )),
+    }
+}
+
+fn conversion_namespace_facts(bindings: NamespaceBindings) -> BTreeMap<String, String> {
+    bindings
+        .into_iter()
+        .filter(|(name, uri)| !(name == "xmlns:w" && uri == W_NS))
+        .collect()
+}
+
+fn field_source_sequence_budget(source: &str, scope: &NamespaceBindings) -> Result<Vec<String>> {
+    let wrapped = format!("<sourceBudget>{source}</sourceBudget>");
+    let mut output = Vec::new();
+    let mut cursor = "<sourceBudget>".len();
+    for span in direct_element_spans(&wrapped)? {
+        output.push(format!("outside:{:?}", &wrapped[cursor..span.start]));
+        let (lexical, bindings) = raw_occurrence_representation(&wrapped[span.clone()], scope)?;
+        output.push(format!(
+            "root:{:?}:{lexical:?}",
+            conversion_namespace_facts(bindings)
+        ));
+        cursor = span.end;
+    }
+    output.push(format!(
+        "outside:{:?}",
+        &wrapped[cursor..wrapped.len() - "</sourceBudget>".len()]
+    ));
+    Ok(output)
+}
+
+fn field_carrier_source_budget(source: &str, scope: &NamespaceBindings) -> Result<Vec<String>> {
+    let result = actual_field_result_range(source, scope)?;
+    if actual_field_is_complex(source, scope)? {
+        let mut facts = field_source_sequence_budget(&source[..result.start], scope)?;
+        facts.push("result-boundary".into());
+        facts.extend(field_source_sequence_budget(&source[result.end..], scope)?);
+        Ok(facts)
+    } else {
+        let (lexical, bindings) = raw_occurrence_representation(source, scope)?;
+        let growth = element_opening(source)?
+            .0
+            .checked_sub(element_opening(&lexical)?.0)
+            .ok_or_else(|| {
+                Error::Other("field carrier namespace projection grew its opening".into())
+            })?;
+        let start = result
+            .start
+            .checked_sub(growth)
+            .ok_or_else(|| Error::Other("field carrier result precedes opening".into()))?;
+        let end = result
+            .end
+            .checked_sub(growth)
+            .ok_or_else(|| Error::Other("field carrier result precedes opening".into()))?;
+        Ok(vec![
+            format!("scope:{:?}", conversion_namespace_facts(bindings)),
+            format!("before:{:?}", &lexical[..start]),
+            format!("after:{:?}", &lexical[end..]),
+        ])
+    }
+}
+
+/// Read encoding facts from an actual carrier. The guard never invokes the
+/// comparison converter to produce expected source or an expected model.
+fn conversion_source_inventory(
+    source: &str,
+    inherited: &NamespaceBindings,
+) -> Result<(String, BTreeMap<String, String>, String, String)> {
+    fn element(
+        source: &str,
+        scope: &NamespaceBindings,
+        expected: &str,
+        allowed: &[&str],
+    ) -> Result<BTreeMap<String, (String, String)>> {
+        let closed = actual_field_source_fragment(source, scope)?;
+        let mut reader = NsReader::from_str(&closed);
+        let (namespace, event) = reader
+            .read_resolved_event()
+            .map_err(|error| Error::Other(error.to_string()))?;
+        let (Event::Start(root) | Event::Empty(root)) = event else {
+            return Err(Error::Other("conversion inventory has no element".into()));
+        };
+        if !matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == W_NS.as_bytes())
+            || root.local_name().as_ref() != expected.as_bytes()
+        {
+            return Err(Error::Other(
+                "conversion inventory has an unproved qualified carrier".into(),
+            ));
+        }
+        let mut attributes = BTreeMap::new();
+        for attribute in root.attributes() {
+            let attribute = attribute.map_err(|error| Error::Other(error.to_string()))?;
+            if attribute.key.as_ref() == b"xmlns" || attribute.key.as_ref().starts_with(b"xmlns:") {
+                continue;
+            }
+            let (namespace, local) = reader.resolver().resolve_attribute(attribute.key);
+            let xml_space = matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == b"http://www.w3.org/XML/1998/namespace")
+                && local.as_ref() == b"space";
+            let name = if xml_space {
+                "xml:space".to_owned()
+            } else {
+                if !matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == W_NS.as_bytes())
+                {
+                    return Err(Error::Other(
+                        "unconsumed conversion carrier attribute namespace".into(),
+                    ));
+                }
+                std::str::from_utf8(local.as_ref())
+                    .map_err(utf8_error)?
+                    .to_owned()
+            };
+            if !allowed.contains(&name.as_str()) {
+                return Err(Error::Other(
+                    "unconsumed conversion carrier attribute".into(),
+                ));
+            }
+            let lexical = std::str::from_utf8(attribute.value.as_ref())
+                .map_err(utf8_error)?
+                .to_owned();
+            let decoded = attribute
+                .decoded_and_normalized_value(XmlVersion::Implicit1_0, root.decoder())
+                .map_err(|error| Error::Other(error.to_string()))?
+                .into_owned();
+            if attributes.insert(name, (lexical, decoded)).is_some() {
+                return Err(Error::Other(
+                    "duplicate conversion carrier attribute".into(),
+                ));
+            }
+        }
+        Ok(attributes)
+    }
+    fn run_child<'a>(run: &'a str, scope: &NamespaceBindings) -> Result<&'a str> {
+        element(run, scope, "r", &[])?;
+        let inner = element_inner_range_any_prefix(run, "r")?;
+        let children = direct_element_spans(run)?;
+        if children.len() != 1
+            || !run[inner.start..children[0].start].trim().is_empty()
+            || !run[children[0].end..inner.end].trim().is_empty()
+        {
+            return Err(Error::Other(
+                "conversion marker run has additional source payload".into(),
+            ));
+        }
+        Ok(&run[children[0].clone()])
+    }
+    fn marker(
+        run: &str,
+        scope: &NamespaceBindings,
+        kind: &str,
+    ) -> Result<(BTreeMap<String, String>, String)> {
+        let raw = run_child(run, scope)?;
+        let mut attributes = element(raw, scope, "fldChar", &["fldCharType", "dirty", "fldLock"])?;
+        if attributes
+            .remove("fldCharType")
+            .map(|(_, value)| value)
+            .as_deref()
+            != Some(kind)
+        {
+            return Err(Error::Other(
+                "conversion marker kind differs from actual carrier geometry".into(),
+            ));
+        }
+        if kind != "begin" && !attributes.is_empty() {
+            return Err(Error::Other(
+                "conversion non-begin marker has unexpected flags".into(),
+            ));
+        }
+        let data = if element_opening(raw)?.1 {
+            String::new()
+        } else {
+            let inner = element_inner_range_any_prefix(raw, "fldChar")?;
+            let children = direct_element_spans(raw)?;
+            if kind != "begin"
+                || children.len() != 1
+                || !raw[inner.start..children[0].start].trim().is_empty()
+                || !raw[children[0].end..inner.end].trim().is_empty()
+            {
+                return Err(Error::Other(
+                    "conversion marker has unconsumed owned source".into(),
+                ));
+            }
+            let data = &raw[children[0].clone()];
+            let closed = actual_field_source_fragment(data, scope)?;
+            let mut reader = NsReader::from_str(&closed);
+            let (namespace, event) = reader
+                .read_resolved_event()
+                .map_err(|error| Error::Other(error.to_string()))?;
+            if !matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == W_NS.as_bytes())
+                || !matches!(event, Event::Start(ref root) | Event::Empty(ref root) if root.local_name().as_ref() == b"fldData")
+            {
+                return Err(Error::Other(
+                    "conversion marker data has no actual fldData owner".into(),
+                ));
+            }
+            data.to_owned()
+        };
+        Ok((
+            attributes
+                .into_iter()
+                .map(|(name, (lexical, _))| (name, lexical))
+                .collect(),
+            data,
+        ))
+    }
+    // Namespace declarations introduced by closure may differ at a result root.
+    // Compare their actual effective bindings, every other root attribute and
+    // the complete untouched descendant bytes independently.
+    fn result_facts(result: &str, scope: &NamespaceBindings) -> Result<String> {
+        let wrapped = format!("<result>{result}</result>");
+        let spans = direct_element_spans(&wrapped)?;
+        let mut output = String::new();
+        let mut cursor = "<result>".len();
+        for span in spans {
+            output.push_str(&wrapped[cursor..span.start]);
+            let (lexical, bindings) = raw_occurrence_representation(&wrapped[span.clone()], scope)?;
+            let bindings = bindings
+                .into_iter()
+                .filter(|(name, uri)| !(name == "xmlns:w" && uri == W_NS))
+                .collect::<BTreeMap<_, _>>();
+            output.push_str(&format!("{bindings:?}"));
+            output.push_str(&lexical);
+            cursor = span.end;
+        }
+        output.push_str(&wrapped[cursor..wrapped.len() - "</result>".len()]);
+        Ok(output)
+    }
+    let scope = actual_root_bindings(source, inherited)?;
+    if !actual_field_is_complex(source, inherited)? {
+        let mut attributes = element(source, &scope, "fldSimple", &["instr", "dirty", "fldLock"])?;
+        let instruction = attributes
+            .remove("instr")
+            .ok_or_else(|| Error::Other("simple conversion source lacks instruction".into()))?
+            .1;
+        let expanded = append_word_child(source, "fldSimple", "")?;
+        let inner = element_inner_range_any_prefix(&expanded, "fldSimple")?;
+        let data = direct_word_element_spans_in_scope(&expanded, "fldData", &scope)?;
+        if data.len() > 1
+            || data
+                .first()
+                .is_some_and(|span| !expanded[inner.start..span.start].trim().is_empty())
+        {
+            return Err(Error::Other(
+                "simple conversion source has ambiguous data".into(),
+            ));
+        }
+        let start = data.first().map_or(inner.start, |span| span.end);
+        return Ok((
+            instruction,
+            attributes
+                .into_iter()
+                .map(|(name, (raw, _))| (name, raw))
+                .collect(),
+            data.first()
+                .map_or(String::new(), |span| expanded[span.clone()].to_owned()),
+            result_facts(&expanded[start..inner.end], &scope)?,
+        ));
+    }
+    let wrapped = format!("<carrier>{source}</carrier>");
+    let spans = direct_element_spans(&wrapped)?;
+    if spans.len() < 4 {
+        return Err(Error::Other(
+            "converted complex source lacks pure carrier runs".into(),
+        ));
+    }
+    let (flags, data) = marker(&wrapped[spans[0].clone()], &scope, "begin")?;
+    let instruction = run_child(&wrapped[spans[1].clone()], &scope)?;
+    let attributes = element(instruction, &scope, "instrText", &["xml:space"])?;
+    if attributes.get("xml:space").map(|(_, value)| value.as_str()) != Some("preserve") {
+        return Err(Error::Other(
+            "converted instruction lost its whitespace contract".into(),
+        ));
+    }
+    let inner = element_inner_range_any_prefix(instruction, "instrText")?;
+    if !direct_element_spans(instruction)?.is_empty() {
+        return Err(Error::Other(
+            "converted instruction has unconsumed child source".into(),
+        ));
+    }
+    let instruction = quick_xml::escape::unescape(&instruction[inner])
+        .map_err(|error| Error::Other(error.to_string()))?
+        .into_owned();
+    marker(&wrapped[spans[2].clone()], &scope, "separate")?;
+    let last = spans.last().unwrap();
+    marker(&wrapped[last.clone()], &scope, "end")?;
+    if !wrapped["<carrier>".len()..spans[0].start].trim().is_empty()
+        || !wrapped[last.end..wrapped.len() - "</carrier>".len()]
+            .trim()
+            .is_empty()
+        || !wrapped[spans[0].end..spans[1].start].trim().is_empty()
+        || !wrapped[spans[1].end..spans[2].start].trim().is_empty()
+    {
+        return Err(Error::Other(
+            "converted carrier has unconsumed outside source".into(),
+        ));
+    }
+    Ok((
+        instruction,
+        flags,
+        data,
+        result_facts(&wrapped[spans[2].end..last.start], &scope)?,
+    ))
+}
+
+/// Map only the qualified clean source roles. This is an encoding change, not
+/// Field re-authoring: the XML-normalized attribute value supplies instrText.
+fn clean_simple_complex_source(
+    xml: &str,
+    inherited: &NamespaceBindings,
+    field: &rdocx_oxml::text::Field,
+) -> Result<String> {
+    let closed = actual_field_source_fragment(xml, inherited)?;
+    let scope = actual_root_bindings(xml, inherited)?;
+    let mut reader = NsReader::from_str(&closed);
+    let (namespace, event) = reader
+        .read_resolved_event()
+        .map_err(|error| Error::Other(error.to_string()))?;
+    if !matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == W_NS.as_bytes()) {
+        return Err(Error::Other(
+            "unconsumed simple-field source root namespace".into(),
+        ));
+    }
+    let (Event::Start(root) | Event::Empty(root)) = event else {
+        return Err(Error::Other(
+            "simple-field conversion has no actual source root".into(),
+        ));
+    };
+    if root.local_name().as_ref() != b"fldSimple" {
+        return Err(Error::Other(
+            "simple-field conversion source is not fldSimple".into(),
+        ));
+    }
+    let mut seen = HashSet::new();
+    let mut instruction = None;
+    let mut word_prefix = None;
+    let mut flags = Vec::new();
+    for attribute in root.attributes() {
+        let attribute = attribute.map_err(|error| Error::Other(error.to_string()))?;
+        if attribute.key.as_ref() == b"xmlns" || attribute.key.as_ref().starts_with(b"xmlns:") {
+            continue;
+        }
+        let (namespace, local) = reader.resolver().resolve_attribute(attribute.key);
+        let uri = match namespace {
+            ResolveResult::Bound(uri) => uri.as_ref().to_vec(),
+            ResolveResult::Unbound => Vec::new(),
+            ResolveResult::Unknown(prefix) => {
+                return Err(Error::Other(format!(
+                    "unbound simple-field source attribute prefix {prefix:?}"
+                )));
+            }
+        };
+        if !seen.insert((uri.clone(), local.as_ref().to_vec())) {
+            return Err(Error::Other(
+                "duplicate expanded simple-field source attribute".into(),
+            ));
+        }
+        let value = attribute
+            .decoded_and_normalized_value(XmlVersion::Implicit1_0, root.decoder())
+            .map_err(|error| Error::Other(error.to_string()))?;
+        if uri != W_NS.as_bytes() {
+            return Err(Error::Other(format!(
+                "unconsumed simple-field root attribute {}",
+                String::from_utf8_lossy(attribute.key.as_ref())
+            )));
+        }
+        match local.as_ref() {
+            b"instr" => {
+                let name = std::str::from_utf8(attribute.key.as_ref()).map_err(utf8_error)?;
+                word_prefix = name.split_once(':').map(|(prefix, _)| prefix.to_owned());
+                instruction = Some(value.into_owned());
+            }
+            b"dirty" | b"fldLock" => {
+                if !matches!(value.as_ref(), "0" | "1" | "false" | "true" | "off" | "on") {
+                    return Err(Error::Other(format!(
+                        "unmappable simple-field flag {}={value:?}",
+                        String::from_utf8_lossy(local.as_ref())
+                    )));
+                }
+                flags.push((
+                    std::str::from_utf8(attribute.key.as_ref())
+                        .map_err(utf8_error)?
+                        .to_owned(),
+                    std::str::from_utf8(attribute.value.as_ref())
+                        .map_err(utf8_error)?
+                        .to_owned(),
+                ));
+            }
+            _ => {
+                return Err(Error::Other(format!(
+                    "unconsumed simple-field root attribute {}",
+                    String::from_utf8_lossy(attribute.key.as_ref())
+                )));
+            }
+        }
+    }
+    let prefix = word_prefix.ok_or_else(|| {
+        Error::Other("simple-field instruction lacks a qualified actual Word prefix".into())
+    })?;
+    let instruction = instruction
+        .ok_or_else(|| Error::Other("simple-field source instruction is missing".into()))?;
+    let expanded = append_word_child(xml, "fldSimple", "")?;
+    let inner = element_inner_range_any_prefix(&expanded, "fldSimple")?;
+    let data = direct_word_element_spans_in_scope(&expanded, "fldData", &scope)?;
+    if data.len() > 1
+        || data
+            .first()
+            .is_some_and(|span| !expanded[inner.start..span.start].trim().is_empty())
+    {
+        return Err(Error::Other(
+            "multiple or late simple-field fldData source owners".into(),
+        ));
+    }
+    let result_start = data.first().map_or(inner.start, |span| span.end);
+    let result = &expanded[result_start..inner.end];
+    let result = qualified_complete_field_payload(result, &scope, false, false, true, &mut 0)?;
+    let mut namespace_root = BytesStart::new(format!("{prefix}:r"));
+    for (name, uri) in &scope {
+        namespace_root.push_attribute((name.as_str(), uri.as_str()));
+    }
+    let mut writer = Writer::new(Vec::new());
+    writer
+        .write_event(Event::Start(namespace_root))
+        .map_err(|error| Error::Other(error.to_string()))?;
+    let run_open = String::from_utf8(writer.into_inner()).map_err(utf8_error)?;
+    let run_close = format!("</{prefix}:r>");
+    let mut begin = format!("<{prefix}:fldChar {prefix}:fldCharType=\"begin\"");
+    for (name, value) in flags {
+        begin.push_str(&format!(" {name}=\"{value}\""));
+    }
+    if let Some(span) = data.first() {
+        begin.push('>');
+        begin.push_str(&expanded[span.clone()]);
+        begin.push_str(&format!("</{prefix}:fldChar>"));
+    } else {
+        begin.push_str("/>");
+    }
+    let output = format!(
+        "{run_open}{begin}{run_close}{run_open}<{prefix}:instrText xml:space=\"preserve\">{}</{prefix}:instrText>{run_close}{run_open}<{prefix}:fldChar {prefix}:fldCharType=\"separate\"/>{run_close}{result}{run_open}<{prefix}:fldChar {prefix}:fldCharType=\"end\"/>{run_close}",
+        quick_xml::escape::escape(&instruction)
+    );
+    // An independent read of emitted source must actually group a root Field.
+    // No witness is allowed to fill a missing parsed owner or cached display.
+    let root = format!("<w:p xmlns:w=\"{W_NS}\">{output}</w:p>");
+    let model = story_document(&root, &Vec::new())?;
+    let Some(BodyContent::Paragraph(paragraph)) = model.body.content.first() else {
+        return Err(Error::Other(
+            "converted source has no actual root paragraph".into(),
+        ));
+    };
+    let fields = paragraph
+        .runs
+        .iter()
+        .flat_map(|run| &run.content)
+        .filter_map(|content| {
+            if let RunContent::Field(field) = content {
+                Some(field)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    if fields.len() != 1
+        || !fields[0].is_complex()
+        || fields[0].effective_instruction().name != field.effective_instruction().name
+        || fields[0].effective_instruction().arguments != field.effective_instruction().arguments
+        || fields[0].effective_instruction().switches != field.effective_instruction().switches
+        || fields[0].cached_result != field.cached_result
+        || fields[0].dirty != field.dirty
+        || fields[0].locked() != field.locked()
+    {
+        return Err(Error::Other(
+            "converted source did not reconstruct its actual root field instruction/cache/flags"
+                .into(),
+        ));
+    }
+    Ok(output)
+}
+
+/// Qualify an ordinary whole-field run-revision payload at its actual owners.
+/// Direct runs use the existing qualified child scanner. Opaque run payloads
+/// and real nested control/wrapper custody retain their own source authority.
+fn qualified_complete_field_payload(
+    source: &str,
+    scope: &NamespaceBindings,
+    deleted: bool,
+    paragraph_content: bool,
+    close_roots: bool,
+    field_depth: &mut usize,
+) -> Result<String> {
+    let initial_depth = *field_depth;
+    let mut root = BytesStart::new("fieldPayload");
+    for (name, uri) in scope {
+        root.push_attribute((name.as_str(), uri.as_str()));
+    }
+    let mut writer = Writer::new(Vec::new());
+    writer
+        .write_event(Event::Start(root))
+        .map_err(|error| Error::Other(error.to_string()))?;
+    let opening = String::from_utf8(writer.into_inner()).map_err(utf8_error)?;
+    let wrapped = format!("{opening}{source}</fieldPayload>");
+    let mut output = String::new();
+    let mut cursor = opening.len();
+    for span in direct_element_spans(&wrapped)? {
+        if !wrapped[cursor..span.start].trim().is_empty() {
+            return Err(Error::Other(
+                "unconsumed direct field-result source event".into(),
+            ));
+        }
+        output.push_str(&wrapped[cursor..span.start]);
+        let raw = &wrapped[span.clone()];
+        let closed = actual_field_source_fragment(raw, scope)?;
+        let mut reader = NsReader::from_str(&closed);
+        let (namespace, event) = reader
+            .read_resolved_event()
+            .map_err(|error| Error::Other(error.to_string()))?;
+        let (Event::Start(element) | Event::Empty(element)) = event else {
+            return Err(Error::Other("field-result source child is missing".into()));
+        };
+        if !matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == W_NS.as_bytes()) {
+            return Err(Error::Other(format!(
+                "unproved direct field-result owner {}",
+                String::from_utf8_lossy(element.name().as_ref())
+            )));
+        }
+        let local = element.local_name();
+        if !(paragraph_content && matches!(local.as_ref(), b"fldSimple" | b"hyperlink"))
+            && !matches!(
+                local.as_ref(),
+                b"r" | b"sdt"
+                    | b"customXml"
+                    | b"smartTag"
+                    | b"dir"
+                    | b"bdo"
+                    | b"proofErr"
+                    | b"permStart"
+                    | b"permEnd"
+                    | b"bookmarkStart"
+                    | b"bookmarkEnd"
+                    | b"commentRangeStart"
+                    | b"commentRangeEnd"
+                    | b"moveFromRangeStart"
+                    | b"moveFromRangeEnd"
+                    | b"moveToRangeStart"
+                    | b"moveToRangeEnd"
+                    | b"customXmlInsRangeStart"
+                    | b"customXmlInsRangeEnd"
+                    | b"customXmlDelRangeStart"
+                    | b"customXmlDelRangeEnd"
+                    | b"customXmlMoveFromRangeStart"
+                    | b"customXmlMoveFromRangeEnd"
+                    | b"customXmlMoveToRangeStart"
+                    | b"customXmlMoveToRangeEnd"
+                    | b"ins"
+                    | b"del"
+                    | b"moveFrom"
+                    | b"moveTo"
+            )
+        {
+            return Err(Error::Other(format!(
+                "unproved whole-field run-revision child {}",
+                String::from_utf8_lossy(element.name().as_ref())
+            )));
+        }
+        let local = local.as_ref().to_vec();
+        let child_scope = actual_root_bindings(raw, scope)?;
+        let mut child = if close_roots { closed } else { raw.to_owned() };
+        if local == b"sdt" {
+            let children = direct_element_spans(&child)?;
+            let mut previous = None;
+            let mut seen = HashSet::new();
+            for span in children.into_iter().rev() {
+                let raw = &child[span.clone()];
+                let scoped = actual_field_source_fragment(raw, &child_scope)?;
+                let mut reader = NsReader::from_str(&scoped);
+                let (namespace, event) = reader
+                    .read_resolved_event()
+                    .map_err(|error| Error::Other(error.to_string()))?;
+                let (Event::Start(element) | Event::Empty(element)) = event else {
+                    return Err(Error::Other("control source child is missing".into()));
+                };
+                if !matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == W_NS.as_bytes())
+                {
+                    return Err(Error::Other(
+                        "unproved foreign direct inline-control child".into(),
+                    ));
+                }
+                let role = match element.local_name().as_ref() {
+                    b"sdtPr" => 0,
+                    b"sdtEndPr" => 1,
+                    b"sdtContent" => 2,
+                    _ => {
+                        return Err(Error::Other(
+                            "unproved block/opaque inline-control child".into(),
+                        ));
+                    }
+                };
+                if !seen.insert(role) || previous.is_some_and(|next| role >= next) {
+                    return Err(Error::Other(
+                        "inline-control source order or multiplicity is unproved".into(),
+                    ));
+                }
+                previous = Some(role);
+                if role == 2 && !element_opening(raw)?.1 {
+                    let content_scope = actual_root_bindings(raw, &child_scope)?;
+                    let content = element_inner_range_any_prefix(raw, "sdtContent")?;
+                    let replacement = qualified_complete_field_payload(
+                        &raw[content.clone()],
+                        &content_scope,
+                        deleted,
+                        true,
+                        false,
+                        field_depth,
+                    )?;
+                    let mut current = raw.to_owned();
+                    current.replace_range(content, &replacement);
+                    child.replace_range(span, &current);
+                }
+            }
+        } else if matches!(
+            local.as_slice(),
+            b"customXml"
+                | b"smartTag"
+                | b"dir"
+                | b"bdo"
+                | b"ins"
+                | b"del"
+                | b"moveFrom"
+                | b"moveTo"
+                | b"hyperlink"
+                | b"fldSimple"
+        ) && !element_opening(&child)?.1
+        {
+            let name = std::str::from_utf8(&local).map_err(utf8_error)?;
+            let inner = element_inner_range_any_prefix(&child, name)?;
+            let property = match local.as_slice() {
+                b"customXml" => Some("customXmlPr"),
+                b"smartTag" => Some("smartTagPr"),
+                b"fldSimple" => Some("fldData"),
+                _ => None,
+            };
+            let mut start = inner.start;
+            if let Some(property) = property {
+                let properties =
+                    direct_word_element_spans_in_scope(&child, property, &child_scope)?;
+                if properties.len() > 1
+                    || properties
+                        .first()
+                        .is_some_and(|span| !child[start..span.start].trim().is_empty())
+                {
+                    return Err(Error::Other(format!(
+                        "unproved {name} property order or multiplicity"
+                    )));
+                }
+                if let Some(property) = properties.first() {
+                    start = property.end;
+                }
+            }
+            let paragraph = !matches!(local.as_slice(), b"ins" | b"del" | b"moveFrom" | b"moveTo");
+            let replacement = qualified_complete_field_payload(
+                &child[start..inner.end],
+                &child_scope,
+                deleted && local != b"fldSimple",
+                paragraph,
+                false,
+                field_depth,
+            )?;
+            child.replace_range(start..inner.end, &replacement);
+        }
+        if local == b"r" {
+            for forbidden in [
+                "fldSimple",
+                "hyperlink",
+                "sdt",
+                "p",
+                "tbl",
+                "ins",
+                "del",
+                "moveFrom",
+                "moveTo",
+            ] {
+                if !direct_word_element_spans_in_scope(&child, forbidden, &child_scope)?.is_empty()
+                {
+                    return Err(Error::Other(format!(
+                        "unproved {forbidden} inside an actual result run"
+                    )));
+                }
+            }
+        }
+        if local == b"r" {
+            let mut renames = Vec::new();
+            for direct in direct_element_spans(&child)? {
+                let raw = &child[direct.clone()];
+                let scoped = actual_field_source_fragment(raw, &child_scope)?;
+                let mut reader = NsReader::from_str(&scoped);
+                let (namespace, event) = reader
+                    .read_resolved_event()
+                    .map_err(|error| Error::Other(error.to_string()))?;
+                let (Event::Start(element) | Event::Empty(element)) = event else {
+                    continue;
+                };
+                if !matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == W_NS.as_bytes())
+                {
+                    continue;
+                }
+                let local = element.local_name();
+                if local.as_ref() == b"fldChar" {
+                    let mut kind = None;
+                    for attribute in element.attributes() {
+                        let attribute =
+                            attribute.map_err(|error| Error::Other(error.to_string()))?;
+                        let (namespace, name) = reader.resolver().resolve_attribute(attribute.key);
+                        if matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == W_NS.as_bytes())
+                            && name.as_ref() == b"fldCharType"
+                        {
+                            kind = Some(
+                                attribute
+                                    .decoded_and_normalized_value(
+                                        XmlVersion::Implicit1_0,
+                                        element.decoder(),
+                                    )
+                                    .map_err(|error| Error::Other(error.to_string()))?
+                                    .into_owned(),
+                            );
+                        }
+                    }
+                    match kind.as_deref() {
+                        Some("begin") => {
+                            *field_depth = field_depth.checked_add(1).ok_or_else(|| {
+                                Error::Other("field deletion depth overflow".into())
+                            })?
+                        }
+                        Some("end") => {
+                            *field_depth = field_depth.checked_sub(1).ok_or_else(|| {
+                                Error::Other("field deletion has an unmatched end".into())
+                            })?
+                        }
+                        Some("separate") if *field_depth > 0 => {}
+                        _ => {
+                            return Err(Error::Other(
+                                "unproved field marker ownership during complete-span publication"
+                                    .into(),
+                            ));
+                        }
+                    }
+                } else if deleted && *field_depth == 1 {
+                    let target = match local.as_ref() {
+                        b"t" => Some("delText"),
+                        b"instrText" => Some("delInstrText"),
+                        _ => None,
+                    };
+                    if let Some(target) = target {
+                        renames.push((direct, target));
+                    }
+                }
+            }
+            for (text, target) in renames.into_iter().rev() {
+                let raw = &child[text.clone()];
+                let (_, empty, name) = element_opening(raw)?;
+                let target = name
+                    .rsplit_once(':')
+                    .map_or(target.to_owned(), |(prefix, _)| {
+                        format!("{prefix}:{target}")
+                    });
+                let mut renamed = raw.to_owned();
+                if !empty {
+                    let close = paragraph_close_start(raw)?;
+                    renamed.replace_range(close + 2..close + 2 + name.len(), &target);
+                }
+                renamed.replace_range(1..1 + name.len(), &target);
+                child.replace_range(text, &renamed);
+            }
+        }
+        output.push_str(&child);
+        cursor = span.end;
+    }
+    let end = wrapped.len() - "</fieldPayload>".len();
+    if !wrapped[cursor..end].trim().is_empty() {
+        return Err(Error::Other(
+            "unconsumed trailing field-result source event".into(),
+        ));
+    }
+    output.push_str(&wrapped[cursor..end]);
+    if *field_depth != initial_depth {
+        return Err(Error::Other(
+            "field markers cross their actual enclosing source owner".into(),
+        ));
+    }
+    Ok(output)
 }
 
 fn field_xml(field: &rdocx_oxml::text::Field) -> Result<String> {
@@ -8872,26 +16790,160 @@ fn field_xml(field: &rdocx_oxml::text::Field) -> Result<String> {
     })
 }
 
+fn prepared_field_result_owner(field: &rdocx_oxml::text::Field, source: &str) -> Result<CT_P> {
+    if let Some(owner) = field.cached_result_owner_projection()? {
+        return Ok(owner);
+    }
+    if field.cached_result.is_empty() && source.as_bytes().iter().all(u8::is_ascii_whitespace) {
+        return Ok(CT_P::default());
+    }
+    let runs = field.cached_result_physical_runs().ok_or_else(|| {
+        Error::Other(
+            "field result has neither a current ordered owner nor a proved contiguous run owner"
+                .into(),
+        )
+    })?;
+    Ok(CT_P {
+        runs: runs.to_vec(),
+        ..Default::default()
+    })
+}
+
+fn field_result_source_paragraph(source: &str, scope: &NamespaceBindings) -> Result<String> {
+    let prefix = scope
+        .iter()
+        .find(|(_, uri)| uri == W_NS)
+        .map(|(name, _)| name.strip_prefix("xmlns:").unwrap_or(""))
+        .ok_or_else(|| Error::Other("field result has no actual Word namespace binding".into()))?;
+    let name = if prefix.is_empty() {
+        "p".to_owned()
+    } else {
+        format!("{prefix}:p")
+    };
+    let mut root = BytesStart::new(name.as_str());
+    for (name, uri) in scope {
+        root.push_attribute((name.as_str(), uri.as_str()));
+    }
+    let mut writer = Writer::new(Vec::new());
+    writer
+        .write_event(Event::Start(root))
+        .map_err(|error| Error::Other(error.to_string()))?;
+    writer.get_mut().extend_from_slice(source.as_bytes());
+    writer
+        .write_event(Event::End(quick_xml::events::BytesEnd::new(name.as_str())))
+        .map_err(|error| Error::Other(error.to_string()))?;
+    String::from_utf8(writer.into_inner()).map_err(utf8_error)
+}
+
 fn tracked_field_result(
+    fields: [&rdocx_oxml::text::Field; 2],
     original: &str,
     edited: &str,
+    scopes: [&NamespaceBindings; 2],
     metadata: &mut Metadata<'_>,
 ) -> Result<String> {
-    let deleted = metadata.ids.revision(
-        "del",
-        metadata.author,
-        metadata.timestamp,
-        &deleted_text_xml(original),
+    let left_model = prepared_field_result_owner(fields[0], original)?;
+    let right_model = prepared_field_result_owner(fields[1], edited)?;
+    let left = field_result_source_paragraph(original, scopes[0])?;
+    let right = field_result_source_paragraph(edited, scopes[1])?;
+    let outer = fields
+        .iter()
+        .map(|field| {
+            metadata
+                .source_frames
+                .iter()
+                .rev()
+                .find_map(|frame| {
+                    frame
+                        .field_occurrences
+                        .get(&(std::ptr::from_ref(*field) as usize))
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    Error::Other("field result has no actual outer source occurrence".into())
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if outer[0].input_role != 0 || outer[1].input_role != 1 || outer[0].story != outer[1].story {
+        return Err(Error::Other(
+            "field result outer occurrence association changed".into(),
+        ));
+    }
+    let mut result_sources = SourceSnapshots {
+        story: outer[0].story.clone(),
+        ..Default::default()
+    };
+    for (role, (model, source)) in [(&left_model, &left), (&right_model, &right)]
+        .into_iter()
+        .enumerate()
+    {
+        result_sources.input_role = role;
+        let key = std::ptr::from_ref(model) as usize;
+        let mut path = outer[role].owner_path.clone();
+        path.push((7, outer[role].field_slot));
+        result_sources.owner_paths.insert(key, path);
+        if !fields[role].cached_fields_in_source_order().is_empty() {
+            let result = if role == 0 { original } else { edited };
+            match actual_field_result_range(&outer[role].source, &outer[role].scope) {
+                Ok(interval) if outer[role].source.get(interval.clone()) == Some(result) => {
+                    let mut ancestors = outer[role].result_ancestors.clone();
+                    ancestors.push(interval.clone());
+                    result_sources.result_ancestors.insert(key, ancestors);
+                    result_sources
+                        .result_origins
+                        .insert(key, (interval, element_opening(source)?.0));
+                }
+                _ => {
+                    result_sources.unproved_result_owners.insert(key);
+                }
+            }
+        }
+        result_sources
+            .roots
+            .insert(key, (source.clone(), scopes[role].clone()));
+        result_sources.paragraph(model, source)?;
+    }
+    let mut options = metadata.options.clone();
+    // Cached-result properties are owned by the Field, before the ordinary
+    // paragraph ignore-formatting policy. The actual legal child owners recurse
+    // through the existing qualified paragraph/control/hyperlink publishers.
+    options.ignore_formatting = false;
+    let mut inner = Metadata {
+        author: metadata.author,
+        timestamp: metadata.timestamp,
+        options: &options,
+        ids: metadata.ids.clone(),
+        existing_revisions: metadata.existing_revisions,
+        source_frames: vec![result_sources],
+        projected_textbox_noop: false,
+        leaf_capture: false,
+        paired_field_story: metadata
+            .paired_field_story
+            .as_ref()
+            .filter(|story| outer[0].story == **story && outer[1].story == **story)
+            .cloned(),
+        leaf_publications: Vec::new(),
+        field_conversions: Vec::new(),
+    };
+    let mut diagnostics = Vec::new();
+    let result = compare_paragraph(
+        &left_model,
+        &right_model,
+        Some(&left),
+        &format!("{}/field[{}]/result", outer[0].story, outer[0].field_slot),
+        &mut inner,
+        &mut diagnostics,
     )?;
-    let inserted = metadata
-        .ids
-        .revision("ins", metadata.author, metadata.timestamp, edited)?;
-    Ok(format!("{deleted}{inserted}"))
+    metadata.ids = inner.ids;
+    metadata.field_conversions.extend(inner.field_conversions);
+    let inner_range = element_inner_range_any_prefix(&result, "p")?;
+    Ok(result[inner_range].to_owned())
 }
 
 /// Rename each `w:t` element to `w:delText` and each `w:instrText` to
 /// `w:delInstrText`, and no other element whose name starts the same way,
 /// such as `w:tab`. Word refuses to open a deletion that holds `w:instrText`.
+#[cfg(test)]
 fn deleted_text_xml(xml: &str) -> String {
     renamed_word_elements(
         &renamed_word_elements(xml, "w:t", "w:delText"),
@@ -8902,6 +16954,7 @@ fn deleted_text_xml(xml: &str) -> String {
 
 /// Rename each `from` element to `to`, and no other element whose name
 /// starts the same way.
+#[cfg(test)]
 fn renamed_word_elements(xml: &str, from: &str, to: &str) -> String {
     let mut output = String::with_capacity(xml.len());
     let mut rest = xml;
@@ -8916,6 +16969,160 @@ fn renamed_word_elements(xml: &str, from: &str, to: &str) -> String {
     }
     output.push_str(rest);
     output
+}
+
+/// Locate an unchanged physical result interval without splitting producer runs.
+/// Only complete pure marker geometry supplies a nested occurrence anchor.
+fn actual_field_result_range(source: &str, inherited: &NamespaceBindings) -> Result<Range<usize>> {
+    let scope = actual_root_bindings(source, inherited)?;
+    if !actual_field_is_complex(source, inherited)? {
+        if element_opening(source)?.1 {
+            return Err(Error::Other(
+                "empty field root has no physical result interval".into(),
+            ));
+        }
+        let inner = element_inner_range_any_prefix(source, "fldSimple")?;
+        let data = direct_word_element_spans_in_scope(source, "fldData", &scope)?;
+        if data.len() > 1
+            || data
+                .first()
+                .is_some_and(|span| !source[inner.start..span.start].trim().is_empty())
+        {
+            return Err(Error::Other(
+                "field result data boundary is ambiguous".into(),
+            ));
+        }
+        return Ok(data.first().map_or(inner.start, |span| span.end)..inner.end);
+    }
+    let opening = "<fieldSource>";
+    let wrapped = format!("{opening}{source}</fieldSource>");
+    let spans = direct_element_spans(&wrapped)?;
+    let mut depth = 0usize;
+    let mut start = None;
+    let mut end = None;
+    for (index, span) in spans.iter().enumerate() {
+        let run = &wrapped[span.clone()];
+        let run_scope = actual_root_bindings(run, &scope)?;
+        let closed = actual_field_source_fragment(run, &scope)?;
+        let mut reader = NsReader::from_str(&closed);
+        let (namespace, event) = reader
+            .read_resolved_event()
+            .map_err(|error| Error::Other(error.to_string()))?;
+        if !matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == W_NS.as_bytes())
+            || !matches!(event, Event::Start(ref root) if root.local_name().as_ref() == b"r")
+        {
+            continue;
+        }
+        let children = direct_element_spans(run)?;
+        let properties = direct_word_element_spans_in_scope(run, "rPr", &run_scope)?;
+        let inner = element_inner_range_any_prefix(run, "r")?;
+        let mut cursor = inner.start;
+        let mut trivia = true;
+        for child in &children {
+            trivia &= run[cursor..child.start]
+                .bytes()
+                .all(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n'));
+            cursor = child.end;
+        }
+        trivia &= run[cursor..inner.end]
+            .bytes()
+            .all(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n'));
+        let pure = trivia
+            && properties.len() <= 1
+            && children.len() == 1 + properties.len()
+            && properties
+                .first()
+                .is_none_or(|property| children.first() == Some(property));
+        for child in &children {
+            let raw = actual_field_source_fragment(&run[child.clone()], &run_scope)?;
+            let mut reader = NsReader::from_str(&raw);
+            let (namespace, event) = reader
+                .read_resolved_event()
+                .map_err(|error| Error::Other(error.to_string()))?;
+            let (Event::Start(root) | Event::Empty(root)) = event else {
+                continue;
+            };
+            if !matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == W_NS.as_bytes())
+                || root.local_name().as_ref() != b"fldChar"
+            {
+                continue;
+            }
+            let mut kind = None;
+            for attribute in root.attributes() {
+                let attribute = attribute.map_err(|error| Error::Other(error.to_string()))?;
+                let (namespace, name) = reader.resolver().resolve_attribute(attribute.key);
+                if matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == W_NS.as_bytes())
+                    && name.as_ref() == b"fldCharType"
+                {
+                    if kind.is_some() {
+                        return Err(Error::Other("duplicate physical field marker kind".into()));
+                    }
+                    kind = Some(
+                        attribute
+                            .decoded_and_normalized_value(XmlVersion::Implicit1_0, root.decoder())
+                            .map_err(|error| Error::Other(error.to_string()))?
+                            .into_owned(),
+                    );
+                }
+            }
+            match kind.as_deref() {
+                Some("begin") => {
+                    if depth == 0 && (index != 0 || !pure) {
+                        return Err(Error::Other(
+                            "nested result anchor has a shared or partial begin run".into(),
+                        ));
+                    }
+                    depth = depth
+                        .checked_add(1)
+                        .ok_or_else(|| Error::Other("physical field depth overflow".into()))?;
+                }
+                Some("separate") if depth == 1 => {
+                    if start.is_some() || !pure {
+                        return Err(Error::Other(
+                            "nested result anchor has a shared or duplicate separate run".into(),
+                        ));
+                    }
+                    start = Some(span.end - opening.len());
+                }
+                Some("separate") if depth > 1 => {}
+                Some("end") if depth > 0 => {
+                    if depth == 1 {
+                        if end.is_some() || !pure || index + 1 != spans.len() {
+                            return Err(Error::Other(
+                                "nested result anchor has a shared or partial end run".into(),
+                            ));
+                        }
+                        end = Some(span.start - opening.len());
+                    }
+                    depth -= 1;
+                }
+                _ => {
+                    return Err(Error::Other(
+                        "unbalanced qualified physical field marker".into(),
+                    ));
+                }
+            }
+        }
+    }
+    let range = start
+        .zip(end)
+        .filter(|(start, end)| start <= end && depth == 0)
+        .map(|(start, end)| start..end)
+        .ok_or_else(|| {
+            Error::Other("field has no complete proved physical result interval".into())
+        })?;
+    if !source[..spans.first().unwrap().start - opening.len()]
+        .trim()
+        .is_empty()
+        || !source[spans.last().unwrap().end - opening.len()..]
+            .trim()
+            .is_empty()
+    {
+        return Err(Error::Other(
+            "field anchor has independent outside source".into(),
+        ));
+    }
+    Ok(range)
 }
 
 fn complex_field_result(xml: &str) -> Result<(String, String, String)> {
@@ -9304,10 +17511,12 @@ fn replace_changed_paragraph_runs(
                 }
                 range.end += 1;
             } else if balances.contains(&FieldBalance::Uncarried)
-                || !markers(originals.into_iter()).is_disjoint(&markers(edits.into_iter()))
+                || !markers(originals.iter().copied()).is_disjoint(&markers(edits.iter().copied()))
             {
                 return Ok(None);
             } else {
+                crate::revision::validate_carried_paragraph_fields(&originals)?;
+                crate::revision::validate_carried_paragraph_fields(&edits)?;
                 return Ok(Some(range));
             }
         }
@@ -9400,9 +17609,9 @@ struct CarriedParagraphs {
 /// Refuse a whole deleted, inserted or moved paragraph that holds a simple
 /// field outside a complex field carried with it.
 ///
-/// A simple field may not sit inside a revision wrapper. Its own children
-/// could, as a hyperlink's do, but rdocx reads a simple field as one field
-/// run and resolves no revision inside it.
+/// A tracked result alone cannot authorize retiring its simple-field shell.
+/// Whole-paragraph publication therefore retains the existing refusal unless
+/// the complete carried owner supplies the admitted shell-lifetime proof.
 fn refuse_uncarried_field_owners(
     aligned: &[(Option<usize>, Option<usize>)],
     original: &[Option<&CT_P>],
@@ -9427,9 +17636,8 @@ fn refuse_uncarried_field_owners(
     Ok(())
 }
 
-/// Whether a whole-paragraph revision would wrap a simple field: one that is
-/// a child of the paragraph or of a hyperlink there, whose children the
-/// wrappers go inside.
+/// Whether this paragraph has a simple-field owner on the existing direct or
+/// hyperlink path that requires complete carriage for whole-paragraph changes.
 fn paragraph_wraps_simple_field(paragraph: &CT_P) -> Result<bool> {
     let xml = paragraph_xml(paragraph)?;
     let word_starts = word_element_starts(&xml)?;
@@ -9469,65 +17677,6 @@ fn paragraph_wraps_simple_field(paragraph: &CT_P) -> Result<bool> {
         }
         buffer.clear();
     }
-}
-
-/// A complex field character or a field owner of a paragraph.
-#[derive(Clone, Copy, PartialEq)]
-enum FieldEvent {
-    Begin,
-    End,
-    /// A hyperlink or simple field, which a revision wrapper may not hold.
-    Owner,
-}
-
-/// The complex field characters and field owners of a paragraph in
-/// document order.
-fn paragraph_field_events(paragraph: &CT_P) -> Result<Vec<FieldEvent>> {
-    let xml = paragraph_xml(paragraph)?;
-    let mut reader = Reader::from_reader(xml.as_bytes());
-    let mut events = Vec::new();
-    let mut depth = 0usize;
-    let mut buffer = Vec::new();
-    loop {
-        let event = reader
-            .read_event_into(&mut buffer)
-            .map_err(|error| Error::Other(format!("comparison XML scan failed: {error}")))?;
-        let (element, empty) = match &event {
-            Event::Start(element) => (element, false),
-            Event::Empty(element) => (element, true),
-            Event::End(_) => {
-                depth = depth.saturating_sub(1);
-                buffer.clear();
-                continue;
-            }
-            Event::Eof => break,
-            _ => {
-                buffer.clear();
-                continue;
-            }
-        };
-        match element.local_name().as_ref() {
-            b"hyperlink" | b"fldSimple" if depth == 1 => events.push(FieldEvent::Owner),
-            b"fldChar" => {
-                let kind = element
-                    .attributes()
-                    .flatten()
-                    .find(|attribute| attribute.key.local_name().as_ref() == b"fldCharType")
-                    .map(|attribute| attribute.value.into_owned());
-                match kind.as_deref() {
-                    Some(b"begin") => events.push(FieldEvent::Begin),
-                    Some(b"end") => events.push(FieldEvent::End),
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-        if !empty {
-            depth += 1;
-        }
-        buffer.clear();
-    }
-    Ok(events)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -10313,7 +18462,7 @@ fn control_content_signature_with_options(
 }
 
 fn paragraph_formatting(paragraph: &CT_P) -> Option<CT_PPr> {
-    paragraph.properties.clone().map(|mut properties| {
+    paragraph.properties.clone().and_then(|mut properties| {
         properties.num_id = None;
         properties.num_ilvl = None;
         properties.num_id_raw = None;
@@ -10327,7 +18476,7 @@ fn paragraph_formatting(paragraph: &CT_P) -> Option<CT_PPr> {
         if let Some(section) = properties.sect_pr.as_mut() {
             clear_default_orientation(section);
         }
-        properties
+        nonempty_paragraph_properties(properties)
     })
 }
 
@@ -10351,7 +18500,42 @@ fn body_content_xml(content: &BodyContent) -> Result<String> {
 /// The paragraph source with each run that the reader split around a field
 /// written as separate physical runs, one per modeled run.
 fn detach_field_spans(paragraph: &CT_P, source: Option<&str>) -> Result<Option<String>> {
-    let spans = paragraph.detached_field_spans()?;
+    let mut spans = Vec::new();
+    let mut index = 0;
+    while index < paragraph.runs.len() {
+        if let Some((coverage, fragments)) = paragraph.field_source_run_fragments_at(index)? {
+            let mut owners = Vec::new();
+            if paragraph.field_source_replacements_at(index, &mut owners)? != coverage
+                || owners.len() != 1
+            {
+                return Err(Error::Other(
+                    "detached source span coverage is unproved".into(),
+                ));
+            }
+            let mut detached = Vec::new();
+            for (run, fragment) in paragraph.runs[index..index + coverage]
+                .iter()
+                .zip(fragments)
+            {
+                if let Some(fragment) = fragment {
+                    detached.extend_from_slice(&fragment);
+                } else if let Some(field) = run_field(run) {
+                    let payload = field.detached_source()?.ok_or_else(|| {
+                        Error::Other("shared field has no individual source".into())
+                    })?;
+                    detached.extend_from_slice(&payload);
+                } else {
+                    return Err(Error::Other(
+                        "shared source field slot has no typed owner".into(),
+                    ));
+                }
+            }
+            spans.push((owners.remove(0).0, detached));
+            index += coverage;
+        } else {
+            index += 1;
+        }
+    }
     if spans.is_empty() {
         return Ok(None);
     }
@@ -10362,7 +18546,7 @@ fn detach_field_spans(paragraph: &CT_P, source: Option<&str>) -> Result<Option<S
     let mut edits = Vec::with_capacity(spans.len());
     let mut cursor = 0;
     for (raw, detached) in spans {
-        let raw = std::str::from_utf8(raw).map_err(utf8_error)?;
+        let raw = std::str::from_utf8(&raw).map_err(utf8_error)?;
         let start = runs
             .iter()
             .map(|run| run.start)
@@ -10416,19 +18600,826 @@ fn paragraph_owned_run_xml(run: &CT_R) -> Result<String> {
     Ok(xml[start..end].to_owned())
 }
 
-fn policy_inserted_run_xml(
-    edited: &CT_R,
-    original: Option<&CT_R>,
-    options: &ComparisonOptions,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RunHostRole {
+    Raw(usize, usize),
+    Typed(usize, usize),
+}
+
+/// The aligned pair, its role-local selections and actual source frame own this
+/// policy. Projection happens before allocating the established outer records.
+#[allow(clippy::type_complexity)]
+fn paired_run_replacement(
+    runs: [&CT_R; 2],
+    sources: [Option<&RunSource>; 2],
+    selections: [Option<RunSourceSelection<'_>>; 2],
+    location: &str,
+    destination_parent: &NamespaceBindings,
+    metadata: &mut Metadata<'_>,
+    diagnostics: &mut Vec<ComparisonDiagnostic>,
 ) -> Result<String> {
-    if !options.ignore_formatting {
-        return paragraph_owned_run_xml(edited);
+    let [original, edited] = runs;
+    if run_field(original).is_some() && run_field(edited).is_some() {
+        return compared_run_xml(
+            original,
+            edited,
+            sources[0],
+            selections[1],
+            location,
+            destination_parent,
+            metadata,
+            diagnostics,
+        );
     }
+    let left_source = sources[0]
+        .or_else(|| metadata.run_source(original))
+        .cloned();
+    let mut right_source = sources[1].or_else(|| metadata.run_source(edited)).cloned();
+    let left_complete = complete_run_selection(original);
+    let right_complete = complete_run_selection(edited);
+    let left_selection = selections[0].unwrap_or((&left_complete.0, &left_complete.1));
+    let right_selection = selections[1].unwrap_or((&right_complete.0, &right_complete.1));
     let mut inserted = edited.clone();
-    if let Some(original) = original {
+    let mut projected = false;
+    if metadata.options.ignore_formatting {
         inserted.properties = original.properties.clone();
+        if let (Some(left), Some(right)) = (left_source.as_ref(), right_source.as_mut()) {
+            projected = project_paired_textboxes(
+                &mut inserted,
+                original,
+                left,
+                right,
+                [left_selection, right_selection],
+                location,
+                metadata,
+                diagnostics,
+            )?;
+        } else if edited
+            .extra_xml
+            .iter()
+            .any(|raw| std::str::from_utf8(raw).is_ok_and(|raw| raw.contains("txbxContent")))
+        {
+            return Err(Error::Other(format!(
+                "comparison has no paired physical textbox source at {location}"
+            )));
+        }
     }
-    paragraph_owned_run_xml(&inserted)
+    let inserted_xml = publish_run_source(
+        original,
+        &inserted,
+        paragraph_owned_run_xml(&inserted)?,
+        left_source.as_ref(),
+        right_source.as_ref(),
+        Some(right_selection),
+        destination_parent,
+        metadata,
+    )?;
+    if projected {
+        let original_xml = publish_run_source(
+            original,
+            original,
+            paragraph_owned_run_xml(original)?,
+            left_source.as_ref(),
+            None,
+            Some(left_selection),
+            destination_parent,
+            metadata,
+        )?;
+        // Both strings are faithful publications from their selected source
+        // roles. Geometry, root attributes and opaque payloads participate.
+        #[cfg(test)]
+        policy_diagnostic(
+            "paired_publications",
+            serde_json::json!({"location":location,"inserted":inserted_xml,"original":original_xml,
+            "equal":inserted_xml==original_xml,"used_ids":metadata.ids.used,"local_word_binding":metadata.ids.local_word_binding,
+            "left_source":left_source.as_ref().map(|source|serde_json::json!({"raw":source.raw,"scoped":source.scoped,"parent":source.parent})),
+            "right_source":right_source.as_ref().map(|source|serde_json::json!({"raw":source.raw,"scoped":source.scoped,"parent":source.parent})),
+            "original_model":format!("{original:?}"),"derived_model":format!("{inserted:?}")}),
+        );
+        if inserted_xml == original_xml {
+            metadata.projected_textbox_noop = true;
+            return Ok(original_xml);
+        }
+    }
+    let revision_parent = metadata.ids.revision_parent_scope(destination_parent);
+    let inserted_xml = publish_run_source(
+        original,
+        &inserted,
+        paragraph_owned_run_xml(&inserted)?,
+        left_source.as_ref(),
+        right_source.as_ref(),
+        Some(right_selection),
+        &revision_parent,
+        metadata,
+    )?;
+    let deleted = publish_run_source(
+        original,
+        original,
+        deleted_run_xml(original)?,
+        left_source.as_ref(),
+        None,
+        Some(left_selection),
+        &revision_parent,
+        metadata,
+    )?;
+    let deleted = metadata
+        .ids
+        .revision("del", metadata.author, metadata.timestamp, &deleted)?;
+    let inserted =
+        metadata
+            .ids
+            .revision("ins", metadata.author, metadata.timestamp, &inserted_xml)?;
+    #[cfg(test)]
+    if destination_diagnostic_enabled() {
+        policy_diagnostic(
+            "destination_paired_wrappers",
+            serde_json::json!({
+                "location":location,"inserted_before_wrapper":inserted_xml,"deleted_wrapped":deleted,
+                "inserted_wrapped":inserted,"local_word_binding":metadata.ids.local_word_binding,
+                "ids":metadata.ids.used,
+            }),
+        );
+    }
+    Ok(format!("{deleted}{inserted}"))
+}
+
+/// Qualified paths include every physical child ordinal. Only outermost boxes
+/// are returned, so nested work descends through the existing story comparator.
+#[allow(clippy::type_complexity)]
+fn policy_textbox_intervals(
+    xml: &str,
+) -> Result<
+    Vec<(
+        Range<usize>,
+        NamespaceBindings,
+        Vec<(String, String, usize)>,
+        Option<Range<usize>>,
+    )>,
+> {
+    let opening = format!(r#"<rdocxPolicy:p xmlns:rdocxPolicy="{W_NS}"><rdocxPolicy:r>"#);
+    let inner = format!("{opening}{xml}</rdocxPolicy:r></rdocxPolicy:p>");
+    let (wrapped, offset) = story_wrapper(&inner, &[])?;
+    let offset = offset + opening.len();
+    let mut admitted = crate::document::scan_story_owners(&wrapped, StoryKind::Body)?
+        .into_iter()
+        .filter(|owner| owner.kind == StoryKind::TextBox)
+        .map(|owner| owner.full.start.saturating_sub(offset)..owner.full.end.saturating_sub(offset))
+        .filter(|span| span.end <= xml.len())
+        .collect::<Vec<_>>();
+    admitted.sort_by_key(|span| (span.start, std::cmp::Reverse(span.end)));
+    let mut outermost: Vec<Range<usize>> = Vec::new();
+    for span in admitted {
+        if !outermost
+            .last()
+            .is_some_and(|parent| parent.start <= span.start && span.end <= parent.end)
+        {
+            outermost.push(span);
+        }
+    }
+    let mut reader = NsReader::from_str(xml);
+    let mut path = Vec::new();
+    let mut starts = Vec::new();
+    let mut children = vec![0usize];
+    let mut active = None;
+    let mut output = Vec::new();
+    loop {
+        let before = reader.buffer_position() as usize;
+        let (namespace, event) = reader
+            .read_resolved_event()
+            .map_err(|error| Error::Other(error.to_string()))?;
+        match event {
+            Event::Start(element) | Event::Empty(element) => {
+                let local = std::str::from_utf8(element.local_name().as_ref())
+                    .map_err(utf8_error)?
+                    .to_owned();
+                let uri = match namespace {
+                    ResolveResult::Bound(Namespace(uri)) => {
+                        std::str::from_utf8(uri).map_err(utf8_error)?.to_owned()
+                    }
+                    ResolveResult::Unbound => String::new(),
+                    ResolveResult::Unknown(_) => {
+                        return Err(Error::Other(
+                            "textbox source has an unresolved QName".into(),
+                        ));
+                    }
+                };
+                let empty = xml[..reader.buffer_position() as usize].ends_with("/>");
+                let ordinal = *children.last().unwrap();
+                *children.last_mut().unwrap() += 1;
+                path.push((uri.clone(), local.clone(), ordinal));
+                starts.push(before);
+                if outermost.iter().any(|span| span.start == before) && active.is_none() {
+                    let drawing = path
+                        .iter()
+                        .rposition(|(uri, local, _)| uri == W_NS && local == "drawing")
+                        .map(|index| {
+                            let start = starts[index];
+                            let mut scanner = Reader::from_str(&xml[start..]);
+                            let Event::Start(root) = scanner
+                                .read_event()
+                                .map_err(|error| Error::Other(error.to_string()))?
+                            else {
+                                return Err(Error::Other(
+                                    "admitted drawing ancestor is empty".into(),
+                                ));
+                            };
+                            scanner
+                                .read_to_end(root.name())
+                                .map_err(|error| Error::Other(error.to_string()))?;
+                            Ok(start..start + scanner.buffer_position() as usize)
+                        })
+                        .transpose()?;
+                    let record = (
+                        before,
+                        resolved_source_bindings(&reader)?,
+                        path.clone(),
+                        drawing,
+                    );
+                    if empty {
+                        output.push((
+                            before..reader.buffer_position() as usize,
+                            record.1,
+                            record.2,
+                            record.3,
+                        ));
+                    } else {
+                        active = Some(record);
+                    }
+                }
+                if empty {
+                    path.pop();
+                    starts.pop();
+                } else {
+                    children.push(0);
+                }
+            }
+            Event::End(_) => {
+                if active
+                    .as_ref()
+                    .is_some_and(|(_, _, owner_path, _)| owner_path.len() == path.len())
+                {
+                    let (start, bindings, owner_path, drawing) = active.take().unwrap();
+                    output.push((
+                        start..reader.buffer_position() as usize,
+                        bindings,
+                        owner_path,
+                        drawing,
+                    ));
+                }
+                path.pop();
+                starts.pop();
+                children.pop();
+            }
+            Event::Eof => return Ok(output),
+            _ => {}
+        }
+    }
+}
+
+/// Actual role/slot provenance is retained while only admitted inner intervals
+/// change. No source occurrence is discovered by searching its payload bytes.
+fn project_paired_textboxes(
+    inserted: &mut CT_R,
+    original: &CT_R,
+    left: &RunSource,
+    right: &mut RunSource,
+    selections: [RunSourceSelection<'_>; 2],
+    location: &str,
+    metadata: &mut Metadata<'_>,
+    diagnostics: &mut Vec<ComparisonDiagnostic>,
+) -> Result<bool> {
+    let mut hosts = [Vec::new(), Vec::new()];
+    for side in 0..2 {
+        let source = if side == 0 { left } else { &*right };
+        let model = if side == 0 { original } else { &*inserted };
+        for (selected_index, &(local, ordinal, boundary)) in selections[side].0.iter().enumerate() {
+            let (span, actual_boundary, _) = source
+                .raw_slots
+                .get(ordinal)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| {
+                    Error::Other(format!("textbox source slot is absent at {location}"))
+                })?;
+            if boundary != *actual_boundary {
+                return Err(Error::Other(format!(
+                    "textbox source boundary changed at {location}"
+                )));
+            }
+            let mut event_reader = Reader::from_str(&source.scoped[span.clone()]);
+            if !matches!(
+                event_reader.read_event(),
+                Ok(Event::Start(_) | Event::Empty(_))
+            ) {
+                continue;
+            }
+            if CT_R::raw_child_has_alternate_content_drawing(model.extra_xml_positions[local]) {
+                let index = model.extra_xml_positions[..local]
+                    .iter()
+                    .filter(|encoded| CT_R::raw_child_has_alternate_content_drawing(**encoded))
+                    .count();
+                if !model
+                    .alt_drawings
+                    .get(index)
+                    .and_then(|drawing| drawing.anchor.as_ref())
+                    .and_then(|anchor| anchor.shape.as_ref())
+                    .is_some_and(|shape| shape.text_body.is_some())
+                {
+                    continue;
+                }
+            }
+            let closed = source_child(&source.scoped, span.clone())?;
+            let boxes = policy_textbox_intervals(&closed)?;
+            if !boxes.is_empty() {
+                hosts[side].push((
+                    RunHostRole::Raw(local, ordinal),
+                    selected_index,
+                    span.clone(),
+                    closed,
+                    boxes,
+                ));
+            }
+        }
+    }
+    for side in 0..2 {
+        let source = if side == 0 { left } else { &*right };
+        let model = if side == 0 { original } else { &*inserted };
+        for (local, ordinal) in selections[side].1.iter().enumerate() {
+            if !matches!(model.content.get(local), Some(RunContent::Drawing(drawing)) if drawing.anchor.as_ref().and_then(|anchor| anchor.shape.as_ref()).is_some_and(|shape| shape.text_body.is_some() || !shape.text.is_empty()))
+            {
+                continue;
+            }
+            let Some(selected) = ordinal else {
+                continue;
+            };
+            if selected.scalars.is_some() {
+                return Err(Error::Other(format!(
+                    "drawing source has a text subrange at {location}"
+                )));
+            }
+            let ordinal = selected.ordinal;
+            let Some(span) = source.typed_slots.get(ordinal).cloned().flatten() else {
+                continue;
+            };
+            let closed = source_child(&source.scoped, span.clone())?;
+            let boxes = policy_textbox_intervals(&closed)?;
+            if !boxes.is_empty() {
+                hosts[side].push((
+                    RunHostRole::Typed(local, ordinal),
+                    local,
+                    span,
+                    closed,
+                    boxes,
+                ));
+            }
+        }
+        hosts[side].sort_by_key(|host| host.2.start);
+    }
+    for (side, side_hosts) in hosts.iter().enumerate() {
+        let model = if side == 0 { original } else { &*inserted };
+        for (local, encoded) in model.extra_xml_positions.iter().enumerate() {
+            if CT_R::raw_child_has_alternate_content_drawing(*encoded) {
+                let index = model.extra_xml_positions[..local]
+                    .iter()
+                    .filter(|encoded| CT_R::raw_child_has_alternate_content_drawing(**encoded))
+                    .count();
+                if model
+                    .alt_drawings
+                    .get(index)
+                    .and_then(|drawing| drawing.anchor.as_ref())
+                    .and_then(|anchor| anchor.shape.as_ref())
+                    .is_some_and(|shape| shape.text_body.is_some())
+                    && !side_hosts
+                        .iter()
+                        .any(|host| matches!(host.0, RunHostRole::Raw(slot, _) if slot == local))
+                {
+                    return Err(Error::Other(format!(
+                        "comparison cannot establish selected compatibility body source at {location}"
+                    )));
+                }
+            }
+        }
+        for (local, content) in model.content.iter().enumerate() {
+            if matches!(content, RunContent::Drawing(drawing) if drawing.anchor.as_ref().and_then(|anchor| anchor.shape.as_ref()).is_some_and(|shape| shape.text_body.is_some() || !shape.text.is_empty()))
+                && !side_hosts
+                    .iter()
+                    .any(|host| matches!(host.0, RunHostRole::Typed(index, _) if index == local))
+            {
+                return Err(Error::Other(format!(
+                    "comparison cannot establish a physical typed textbox source at {location}"
+                )));
+            }
+        }
+    }
+    if hosts.iter().all(Vec::is_empty) {
+        return Ok(false);
+    }
+    if hosts[0].len() != hosts[1].len() {
+        return Err(Error::Other(format!(
+            "comparison cannot pair textbox source slots at {location}"
+        )));
+    }
+    let mut replacements = Vec::new();
+    for (left_host, right_host) in hosts[0].iter().zip(&hosts[1]) {
+        if std::mem::discriminant(&left_host.0) != std::mem::discriminant(&right_host.0)
+            || left_host.1 != right_host.1
+            || left_host.4.len() != right_host.4.len()
+        {
+            return Err(Error::Other(format!(
+                "comparison has ambiguous textbox source ownership at {location}"
+            )));
+        }
+        let mut derived = right_host.3.clone();
+        let mut inner_replacements = Vec::new();
+        for (left_box, right_box) in left_host.4.iter().zip(&right_host.4) {
+            if left_box.2 != right_box.2 {
+                return Err(Error::Other(format!(
+                    "comparison changed a qualified textbox owner path at {location}"
+                )));
+            }
+            let left_xml = &left_host.3[left_box.0.clone()];
+            let right_xml = &right_host.3[right_box.0.clone()];
+            let left_inner = element_inner_range_any_prefix(left_xml, "txbxContent")?;
+            let right_inner = element_inner_range_any_prefix(right_xml, "txbxContent")?;
+            let used = metadata.ids.used.clone();
+            let local_binding = metadata.ids.local_word_binding;
+            // The qualified host already supplies the actual ancestor scope.
+            // Closing a retained p here would turn extraction into authored bytes.
+            let left_content = left_xml[left_inner.clone()].to_owned();
+            let right_content = right_xml[right_inner.clone()].to_owned();
+            let left_model = story_document(&left_content, &left_box.1)?;
+            let right_model = story_document(&right_content, &right_box.1)?;
+            let mut left_sources = SourceSnapshots::default();
+            let mut right_sources = SourceSnapshots::default();
+            left_sources.body(
+                &left_model,
+                (
+                    &left_content,
+                    &story_content_spans(&left_content, &left_box.1)?,
+                    &left_box.1,
+                ),
+                &HeldRevisions::default(),
+            )?;
+            right_sources.body(
+                &right_model,
+                (
+                    &right_content,
+                    &story_content_spans(&right_content, &right_box.1)?,
+                    &right_box.1,
+                ),
+                &HeldRevisions::default(),
+            )?;
+            if (!left_sources.shared_root_facts.is_empty()
+                || !right_sources.shared_root_facts.is_empty())
+                && left_content != right_content
+            {
+                return Err(Error::Other(format!(
+                    "comparison cannot prove significant shared field run-root correspondence at {location}/textbox-slot[{}]",
+                    right_host.1
+                )));
+            }
+            let facts = |model: &CT_Document,
+                         source: &SourceSnapshots|
+             -> Result<Vec<BTreeMap<String, Vec<Vec<String>>>>> {
+                let mut facts = model
+                    .body
+                    .content
+                    .iter()
+                    .map(|content| {
+                        Ok(SourceMetadata::body(content, source, metadata.options)?
+                            .facts
+                            .into_iter()
+                            .map(|(kind, records)| {
+                                (
+                                    kind,
+                                    records.into_iter().map(|(_, _, facts)| facts).collect(),
+                                )
+                            })
+                            .collect())
+                    })
+                    .collect::<Result<Vec<BTreeMap<String, Vec<Vec<String>>>>>>()?;
+                facts.retain(|facts| !facts.is_empty());
+                Ok(facts)
+            };
+            if facts(&left_model, &left_sources)? != facts(&right_model, &right_sources)? {
+                return Err(Error::Other(format!(
+                    "comparison cannot revise significant source metadata at {location}/textbox-slot[{}]",
+                    right_host.1
+                )));
+            }
+            let outer_leaves = std::mem::take(&mut metadata.leaf_publications);
+            let outer_capture = std::mem::replace(&mut metadata.leaf_capture, true);
+            let paired_location = format!("{location}/textbox-slot[{}]", right_host.1);
+            let outer_field_story = metadata.paired_field_story.replace(paired_location.clone());
+            let tracked_result = compare_story_inner_impl(
+                &left_content,
+                &right_content,
+                &paired_location,
+                "w",
+                &left_box.1,
+                &right_box.1,
+                metadata,
+                diagnostics,
+                // Nested paired hosts recurse through this same source-qualified
+                // publisher. Do not rescan them with the legacy prefix wrapper.
+                false,
+            );
+            let mut leaf_publications =
+                std::mem::replace(&mut metadata.leaf_publications, outer_leaves);
+            metadata.leaf_capture = outer_capture;
+            metadata.paired_field_story = outer_field_story;
+            let tracked = tracked_result?;
+            let temporary = metadata
+                .ids
+                .used
+                .difference(&used)
+                .copied()
+                .collect::<HashSet<_>>();
+            let (wrapped, wrapper_offset) = story_wrapper(&tracked, &left_box.1)?;
+            shift_leaf_publications(&mut leaf_publications, wrapper_offset as isize)?;
+            leaf_publications.sort_by_key(|leaf| leaf.range.start);
+            let leaf_ranges = leaf_publications
+                .iter()
+                .map(|leaf| leaf.range.clone())
+                .collect::<Vec<_>>();
+            let (input, _) = story_wrapper(&left_xml[left_inner.clone()], &left_box.1)?;
+            let input_held = crate::revision::modeled_revision_spans(&input)?
+                .into_iter()
+                .map(|(range, id)| (id, input[range].to_vec()))
+                .collect::<Vec<_>>();
+            let held = crate::revision::modeled_revision_spans(&wrapped)?
+                .into_iter()
+                .filter(|(_, id)| !temporary.contains(id))
+                .map(|(range, id)| (id, wrapped[range].to_vec()))
+                .collect::<Vec<_>>();
+            let (resolved, _, mapped) = crate::revision::resolve_story_xml_with_leaf_ranges(
+                &wrapped,
+                crate::revision::Resolution::Accept,
+                crate::revision::RevisionScope::Ids(&temporary),
+                &leaf_ranges,
+            )?;
+            #[cfg(test)]
+            policy_diagnostic(
+                "occurrence_projection_transport",
+                serde_json::json!({
+                "location":location,"tracked":tracked,"wrapped":String::from_utf8_lossy(&wrapped),
+                "wrapper_offset":wrapper_offset,"resolved":String::from_utf8_lossy(&resolved),
+                "leaf_ranges":leaf_ranges.iter().map(|s|[s.start,s.end]).collect::<Vec<_>>(),
+                "publications":leaf_publications.iter().map(occurrence_leaf_diagnostic).collect::<Vec<_>>(),
+                "mapped":mapped.iter().map(|s|s.as_ref().map(|s|[s.start,s.end])).collect::<Vec<_>>(),
+                "temporary":temporary }),
+            );
+            let resolved =
+                restore_resolved_leaf_occurrences(&resolved, &leaf_publications, &mapped)?
+                    .into_bytes();
+            let remaining = crate::revision::modeled_revision_spans(&resolved)?;
+            #[cfg(test)]
+            policy_diagnostic(
+                "occurrence_projection_held_operands",
+                serde_json::json!({
+                "location":location,"input":String::from_utf8_lossy(&input),
+                "tracked":String::from_utf8_lossy(&wrapped),"resolved":String::from_utf8_lossy(&resolved),
+                "input_held":input_held.iter().map(|(id,bytes)|serde_json::json!({"id":id,"xml":String::from_utf8_lossy(bytes)})).collect::<Vec<_>>(),
+                "tracked_spans":format!("{:?}",crate::revision::modeled_revision_spans(&wrapped)),
+                "input_spans":format!("{:?}",crate::revision::modeled_revision_spans(&input)),
+                "held":held.iter().map(|(id,bytes)|serde_json::json!({"id":id,"xml":String::from_utf8_lossy(bytes)})).collect::<Vec<_>>(),
+                "remaining":remaining.iter().map(|(span,id)|serde_json::json!({"id":id,"span":[span.start,span.end],"xml":String::from_utf8_lossy(&resolved[span.clone()])})).collect::<Vec<_>>(),
+                "temporary":temporary,"word_ids":format!("{:?}",word_ids(&resolved)),
+                "held_equal":held==input_held,"remaining_temporary":remaining.iter().any(|(_,id)|temporary.contains(id)) }),
+            );
+            if held != input_held
+                || remaining.iter().any(|(_, id)| temporary.contains(id))
+                || held
+                    != remaining
+                        .into_iter()
+                        .map(|(range, id)| (id, resolved[range].to_vec()))
+                        .collect::<Vec<_>>()
+                || word_ids(&resolved)?.iter().any(|id| temporary.contains(id))
+            {
+                return Err(Error::Other(format!(
+                    "textbox projection changed held revision source at {location}"
+                )));
+            }
+            let mut projected = extract_body_inner(&resolved)?.to_owned();
+            if temporary.is_empty() {
+                // The unchanged owners still come from the original frame.
+                // Remove only closure introduced on their extraction roots.
+                let original_inner = &left_xml[left_inner];
+                let original_spans = story_content_spans(original_inner, &left_box.1)?;
+                let projected_spans = story_content_spans(&projected, &left_box.1)?;
+                if original_spans.len() == projected_spans.len() {
+                    for (original_span, projected_span) in
+                        original_spans.iter().zip(&projected_spans).rev()
+                    {
+                        let restored = retain_source_root_namespaces(
+                            &projected[projected_span.clone()],
+                            &original_inner[original_span.clone()],
+                            &left_box.1,
+                        )?;
+                        projected.replace_range(projected_span.clone(), &restored);
+                    }
+                }
+            }
+            metadata.ids.used = used;
+            metadata.ids.local_word_binding = local_binding;
+            // The body was authored in the original owner context. Transport
+            // only actual direct roots when the edited context differs.
+            let same_context = left_box
+                .1
+                .iter()
+                .map(|(key, value)| (key, value))
+                .collect::<BTreeMap<_, _>>()
+                == right_box
+                    .1
+                    .iter()
+                    .map(|(key, value)| (key, value))
+                    .collect::<BTreeMap<_, _>>();
+            if !same_context {
+                let spans = story_content_spans(&projected, &left_box.1)?;
+                for span in spans.into_iter().rev() {
+                    let closed = source_fragment(&projected[span.clone()], &left_box.1)?;
+                    projected.replace_range(span, &closed);
+                }
+            }
+            #[cfg(test)]
+            policy_diagnostic(
+                "inner_projection",
+                serde_json::json!({"location":location,"temporary_ids":temporary,"left_box":left_xml,"right_box":right_xml,
+                "left_bindings":left_box.1,"right_bindings":right_box.1,"qualified_path":right_box.2,
+                "left_content":left_content,"right_content":right_content,"tracked":tracked,"resolved":String::from_utf8_lossy(&resolved),"projected":projected}),
+            );
+            inner_replacements.push((
+                right_box.0.start + right_inner.start..right_box.0.start + right_inner.end,
+                projected,
+            ));
+        }
+        for (span, projected) in inner_replacements.into_iter().rev() {
+            derived.replace_range(span, &projected);
+        }
+        // Closure belongs to extraction, not to the retained edited host root.
+        let actual = &right.scoped[right_host.2.clone()];
+        let context = root_namespace_bindings(&right.scoped, "r", &right.parent)?;
+        let derived = restore_extracted_root(&derived, actual, &context)?;
+        #[cfg(test)]
+        policy_diagnostic(
+            "derived_host",
+            serde_json::json!({"location":location,"before_splice":right_host.3,"derived":derived,
+            "actual_template":actual,"destination_context":context,"typed":matches!(right_host.0,RunHostRole::Typed(..))}),
+        );
+        match right_host.0 {
+            RunHostRole::Raw(local, _) => {
+                inserted.extra_xml[local] = derived.as_bytes().to_vec();
+                if CT_R::raw_child_has_alternate_content_drawing(
+                    inserted.extra_xml_positions[local],
+                ) {
+                    let index = inserted.extra_xml_positions[..local]
+                        .iter()
+                        .filter(|encoded| CT_R::raw_child_has_alternate_content_drawing(**encoded))
+                        .count();
+                    let closed = source_fragment(&derived, &context)?;
+                    let drawing =
+                        rdocx_oxml::drawing::parse_alternate_content(closed.as_bytes(), &[])
+                            .ok_or_else(|| {
+                                Error::Other(format!(
+                                    "projected compatibility drawing cannot be parsed at {location}"
+                                ))
+                            })?;
+                    let target = inserted.alt_drawings.get_mut(index).ok_or_else(|| {
+                        Error::Other("selected drawing source slot is absent".into())
+                    })?;
+                    let mut drawing = drawing;
+                    reconcile_projected_drawing(&mut drawing, target, &context, location)?;
+                    *target = drawing;
+                }
+            }
+            RunHostRole::Typed(local, _) => {
+                let mut drawing = match source_content_model(&derived, &context)? {
+                    Some(RunContent::Drawing(drawing)) => drawing,
+                    _ => {
+                        return Err(Error::Other(
+                            "projected source is not one typed drawing".into(),
+                        ));
+                    }
+                };
+                let Some(RunContent::Drawing(authored)) = inserted.content.get(local) else {
+                    return Err(Error::Other(
+                        "projected drawing lost its source model".into(),
+                    ));
+                };
+                reconcile_projected_drawing(&mut drawing, authored, &context, location)?;
+                if !drawing
+                    .anchor
+                    .as_ref()
+                    .and_then(|anchor| anchor.shape.as_ref())
+                    .is_some_and(|shape| shape.text_body.is_some())
+                {
+                    return Err(Error::Other(format!(
+                        "projected drawing has no supported body at {location}"
+                    )));
+                }
+                #[cfg(test)]
+                policy_diagnostic(
+                    "reparsed_typed_host",
+                    serde_json::json!({"location":location,"derived":derived,"context":context,
+                    "drawing":format!("{drawing:?}"),"signature":format!("{:?}",drawing_signature(&drawing))}),
+                );
+                inserted.content[local] = RunContent::Drawing(drawing);
+            }
+        }
+        replacements.push((right_host.2.clone(), derived, right_host.0));
+    }
+    // Every original slot keeps its ordinal/boundary. Only its physical range
+    // moves when an admitted inner interval changes length.
+    replacements.sort_by_key(|(span, _, _)| span.start);
+    for slot in right.raw_slots.iter_mut().flatten() {
+        slot.0 = projected_source_span(slot.0.clone(), &replacements)?;
+    }
+    for span in right.typed_slots.iter_mut().flatten() {
+        *span = projected_source_span(span.clone(), &replacements)?;
+    }
+    for (span, payload, ordinal) in replacements.into_iter().rev() {
+        right.scoped.replace_range(span, &payload);
+        match ordinal {
+            RunHostRole::Raw(_, source) => {
+                right.projected_raw_slots.insert(source);
+            }
+            RunHostRole::Typed(_, source) => {
+                right.projected_typed_slots.insert(source);
+            }
+        }
+    }
+    right.raw = retain_source_root_namespaces(&right.scoped, &right.raw, &right.parent)?;
+    Ok(true)
+}
+
+/// The source pair owns non-text drawing meaning. Only its admitted inner
+/// body changes. Extra inherited bindings introduced by the private parse
+/// envelope are not new source dependencies of that non-text owner.
+fn reconcile_projected_drawing(
+    projected: &mut rdocx_oxml::drawing::CT_Drawing,
+    authored: &rdocx_oxml::drawing::CT_Drawing,
+    context: &[(String, String)],
+    location: &str,
+) -> Result<()> {
+    let mut expected = drawing_signature(authored);
+    let mut actual = drawing_signature(projected);
+    if let (Some(actual), Some(expected)) = (&mut actual.anchor, &mut expected.anchor) {
+        for (prefix, uri) in &actual.source_namespace_bindings {
+            if !expected
+                .source_namespace_bindings
+                .contains(&(prefix.clone(), uri.clone()))
+                && !context.iter().any(|(key, value)| {
+                    key == &if prefix.is_empty() {
+                        "xmlns".into()
+                    } else {
+                        format!("xmlns:{prefix}")
+                    } && value == uri
+                })
+            {
+                return Err(Error::Other(format!(
+                    "projected drawing has an unproved namespace dependency at {location}"
+                )));
+            }
+        }
+        actual.source_namespace_bindings = expected.source_namespace_bindings.clone();
+        for anchor in [actual, expected] {
+            if let Some(shape) = &mut anchor.shape {
+                shape.text.clear();
+                shape.text_body = None;
+                shape.source_text_box_owner = None;
+            }
+        }
+    }
+    if actual != expected {
+        return Err(Error::Other(format!(
+            "projected drawing changed non-text source at {location}"
+        )));
+    }
+    if let (Some(projected), Some(authored)) = (&mut projected.anchor, &authored.anchor) {
+        projected.source_namespace_bindings = authored.source_namespace_bindings.clone();
+    }
+    Ok(())
+}
+
+fn projected_source_span(
+    span: Range<usize>,
+    replacements: &[(Range<usize>, String, RunHostRole)],
+) -> Result<Range<usize>> {
+    let mut start = span.start as i64;
+    let mut end = span.end as i64;
+    for (changed, value, _) in replacements {
+        let delta = value.len() as i64 - changed.len() as i64;
+        if changed.end <= span.start {
+            start += delta;
+            end += delta;
+        } else if *changed == span {
+            end += delta;
+        } else if changed.start < span.end && span.start < changed.end {
+            return Err(Error::Other(
+                "textbox projection overlaps another physical run role".into(),
+            ));
+        }
+    }
+    Ok(start as usize..end as usize)
 }
 
 fn run_is_field(run: &CT_R) -> bool {
@@ -10469,11 +19460,26 @@ fn validate_field_alignment(
 /// A run as deleted content. The field instruction of a field that spans
 /// paragraphs is a preserved child, so it is renamed in the written run.
 fn deleted_run_xml(run: &CT_R) -> Result<String> {
-    Ok(renamed_word_elements(
-        &run_xml(&deleted_run(run))?,
-        "w:instrText",
-        "w:delInstrText",
-    ))
+    let mut xml = run_xml(&deleted_run(run))?;
+    let spans = direct_word_element_spans(&xml, "instrText")?;
+    for span in spans.into_iter().rev() {
+        let child = &xml[span.clone()];
+        let (_, _, name) = element_opening(child)?;
+        let replacement = name
+            .rsplit_once(':')
+            .map_or("delInstrText".to_owned(), |(prefix, _)| {
+                format!("{prefix}:delInstrText")
+            });
+        let mut renamed = child.to_owned();
+        if !element_opening(child)?.1 {
+            let close = paragraph_close_start(child)?;
+            renamed.replace_range(close + 2..close + 2 + name.len(), &replacement);
+        }
+        let name_start = 1;
+        renamed.replace_range(name_start..name_start + name.len(), &replacement);
+        xml.replace_range(span, &renamed);
+    }
+    Ok(xml)
 }
 
 fn deleted_run(run: &CT_R) -> CT_R {
@@ -10673,7 +19679,23 @@ fn element_local_name(xml: &str) -> &str {
 }
 
 fn direct_word_element_spans(xml: &str, local: &str) -> Result<Vec<Range<usize>>> {
-    let opening = format!(r#"<scope xmlns:w="{W_NS}">"#);
+    direct_word_element_spans_in_scope(xml, local, &vec![("xmlns:w".into(), W_NS.into())])
+}
+
+fn direct_word_element_spans_in_scope(
+    xml: &str,
+    local: &str,
+    scope: &NamespaceBindings,
+) -> Result<Vec<Range<usize>>> {
+    let mut root = BytesStart::new("scope");
+    for (name, uri) in scope {
+        root.push_attribute((name.as_str(), uri.as_str()));
+    }
+    let mut writer = Writer::new(Vec::new());
+    writer
+        .write_event(Event::Start(root))
+        .map_err(|error| Error::Other(error.to_string()))?;
+    let opening = String::from_utf8(writer.into_inner()).map_err(utf8_error)?;
     let wrapped = format!("{opening}{xml}</scope>");
     let offset = opening.len();
     let mut reader = NsReader::from_reader(wrapped.as_bytes());
@@ -10748,7 +19770,10 @@ fn paragraph_run_spans(xml: &str) -> Result<Vec<Range<usize>>> {
                 let target = is_word
                     && matches!(local.as_slice(), b"r" | b"fldSimple")
                     && parent.is_some_and(|(value, word)| {
-                        word && (value == b"p" || value == b"hyperlink")
+                        word && ((value == b"p" && stack.len() == 2)
+                            || (value == b"hyperlink"
+                                && stack.len() == 3
+                                && local.as_slice() == b"r"))
                     });
                 stack.push((local, is_word, target.then_some(before)));
             }
@@ -10758,10 +19783,8 @@ fn paragraph_run_spans(xml: &str) -> Result<Vec<Range<usize>>> {
                     .last()
                     .map(|(local, word, _)| (local.as_slice(), *word));
                 if is_word
-                    && matches!(local.as_ref(), b"r" | b"fldSimple")
-                    && parent.is_some_and(|(value, word)| {
-                        word && (value == b"p" || value == b"hyperlink")
-                    })
+                    && local.as_ref() == b"fldSimple"
+                    && parent.is_some_and(|(value, word)| word && value == b"p" && stack.len() == 2)
                 {
                     spans.push(before.saturating_sub(offset)..after.saturating_sub(offset));
                 }
@@ -10806,7 +19829,41 @@ fn modeled_paragraph_run_spans(paragraph: &CT_P, xml: &str) -> Result<Vec<Range<
     let mut projected = Vec::with_capacity(paragraph.runs.len());
     let mut cursor = 0usize;
     let mut previous_field_owner = None;
-    for (modeled_index, run) in paragraph.runs.iter().enumerate() {
+    let mut modeled_index = 0;
+    while modeled_index < paragraph.runs.len() {
+        if let Some((coverage, _)) = paragraph.field_source_run_fragments_at(modeled_index)? {
+            let mut sources = Vec::new();
+            let actual_coverage =
+                paragraph.field_source_replacements_at(modeled_index, &mut sources)?;
+            if actual_coverage != coverage || sources.len() != 1 {
+                return Err(Error::Other(
+                    "shared field source coverage changed during correlation".into(),
+                ));
+            }
+            let raw = std::str::from_utf8(&sources[0].0).map_err(utf8_error)?;
+            if let Some(at) = physical.get(cursor).map(|span| span.start)
+                && let Some(relative) = xml[at..].find(raw)
+            {
+                let start = at + relative;
+                let end = start + raw.len();
+                let count = physical[cursor..]
+                    .iter()
+                    .take_while(|span| span.start < end)
+                    .count();
+                if count > 0
+                    && physical[cursor].start >= start
+                    && physical[cursor + count - 1].end <= end
+                {
+                    projected.push(start..end);
+                    projected.extend(std::iter::repeat_n(end..end, coverage - 1));
+                    cursor += count;
+                    modeled_index += coverage;
+                    previous_field_owner = None;
+                    continue;
+                }
+            }
+        }
+        let run = &paragraph.runs[modeled_index];
         let (physical_count, field_owner) = match run.content.as_slice() {
             [RunContent::Field(field)] if field.is_complex() => {
                 if let Some(source) = field.detached_source()? {
@@ -10819,6 +19876,7 @@ fn modeled_paragraph_run_spans(paragraph: &CT_P, xml: &str) -> Result<Vec<Range<
                     }
                     projected.push(physical[cursor].start..physical[cursor + count - 1].end);
                     cursor += count;
+                    modeled_index += 1;
                     previous_field_owner = None;
                     continue;
                 }
@@ -10826,7 +19884,9 @@ fn modeled_paragraph_run_spans(paragraph: &CT_P, xml: &str) -> Result<Vec<Range<
                     Error::Other("parsed complex field has no source owner".to_owned())
                 })?;
                 if previous_field_owner == Some(field_owner) {
-                    projected.push(cursor..cursor);
+                    let end = physical[cursor - 1].end;
+                    projected.push(end..end);
+                    modeled_index += 1;
                     continue;
                 }
                 let (source, _) = field.source_replacement()?.ok_or_else(|| {
@@ -10852,6 +19912,7 @@ fn modeled_paragraph_run_spans(paragraph: &CT_P, xml: &str) -> Result<Vec<Range<
         projected.push(physical[cursor].start..physical[cursor + physical_count - 1].end);
         cursor += physical_count;
         previous_field_owner = field_owner;
+        modeled_index += 1;
     }
     if cursor != physical.len() {
         return Err(Error::Other(format!(
@@ -10984,10 +20045,44 @@ fn utf8_error(error: impl std::fmt::Display) -> Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn drawing_context_identity_keeps_values_and_duplicate_prefix_order() {
+        let mut anchor = rdocx_oxml::drawing::CT_Anchor::background("rId1", 1, 1);
+        anchor.source_namespace_bindings = vec![
+            ("r".into(), "urn:relationships".into()),
+            ("w".into(), W_NS.into()),
+            ("".into(), "urn:default".into()),
+            ("valueOnly".into(), "urn:opaque-value".into()),
+        ];
+        let mut left = rdocx_oxml::drawing::CT_Drawing::anchor(anchor);
+        let mut right = left.clone();
+        right
+            .anchor
+            .as_mut()
+            .unwrap()
+            .source_namespace_bindings
+            .reverse();
+        assert_eq!(drawing_signature(&left), drawing_signature(&right));
+        right.anchor.as_mut().unwrap().source_namespace_bindings[0].1 = "urn:changed".into();
+        assert_ne!(drawing_signature(&left), drawing_signature(&right));
+        left.anchor.as_mut().unwrap().source_namespace_bindings = vec![
+            ("w".into(), "urn:producer".into()),
+            ("w".into(), W_NS.into()),
+        ];
+        right = left.clone();
+        right
+            .anchor
+            .as_mut()
+            .unwrap()
+            .source_namespace_bindings
+            .reverse();
+        assert_ne!(drawing_signature(&left), drawing_signature(&right));
+    }
+
     use super::{
         ComparisonGranularity, ComparisonOptions, FAIL_AFTER_COMPARISON_STAGING, align,
         attributed_run_units, attributed_unit_signature, canonical_owned_story,
-        comparison_postcondition_error, complex_field_result, deleted_text_xml,
+        comparison_postcondition_error, complex_field_result, deleted_text_xml, drawing_signature,
         grouped_text_alignment, normalized_body_with_options, pair_gaps_by_kind,
         postcondition_body, story_document, text_words, word_fragments,
     };
@@ -11432,10 +20527,25 @@ mod tests {
     #[test]
     fn comparison_postcondition_diagnostic_names_one_item_without_model_bytes() {
         let actual = (
-            vec!["Drawing(CT_Drawing { huge model })".to_owned()],
+            vec![super::GuardItem {
+                content: "Drawing(CT_Drawing { huge model })".to_owned(),
+                hosts: Vec::new(),
+                fields: Vec::new(),
+                field_observations: Vec::new(),
+                content_metadata: Default::default(),
+            }],
             Vec::new(),
         );
-        let wanted = (vec!["different".to_owned()], Vec::new());
+        let wanted = (
+            vec![super::GuardItem {
+                content: "different".to_owned(),
+                hosts: Vec::new(),
+                fields: Vec::new(),
+                field_observations: Vec::new(),
+                content_metadata: Default::default(),
+            }],
+            Vec::new(),
+        );
         let message =
             comparison_postcondition_error("acceptance", "edited", &actual, &wanted).to_string();
 
@@ -12104,6 +21214,4957 @@ mod tests {
             let actual = OpcPackage::resolve_rel_target(target, &edge.target);
             assert_eq!(actual, "/word/copy-two.xml");
             assert!(destination.package.contains_part(&actual));
+        }
+    }
+
+    #[test]
+    fn issue425_paired_textbox_postcondition_signature_diagnostic() {
+        use super::*;
+        let make = |text: &str, style: &str| {
+            let host = format!(
+                r#"<w:r><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml" style="width:100pt;height:50pt"><v:textbox><w:txbxContent><w:p><w:r><w:rPr><w:{style}/></w:rPr><w:t>{text}</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r>"#
+            );
+            let xml = format!(
+                r#"<w:document xmlns:w="{W_NS}"><w:body><w:p>{host}</w:p><w:p><w:r><w:t>Anchor.</w:t></w:r></w:p></w:body></w:document>"#
+            );
+            let mut document = Document::new();
+            document
+                .package
+                .set_part(&document.doc_part_name, xml.into_bytes());
+            Document::from_package(document.package).unwrap()
+        };
+        let options = ComparisonOptions {
+            ignore_formatting: true,
+            ..Default::default()
+        };
+        let mut failures = Vec::new();
+        for edited_text in ["Old.", "New."] {
+            let original = make("Old.", "b");
+            let edited = make(edited_text, "i");
+            let original_xml = original.package.get_part(&original.doc_part_name).unwrap();
+            let edited_xml = edited.package.get_part(&edited.doc_part_name).unwrap();
+            let original_body = extract_body_inner(original_xml).unwrap();
+            let edited_body = extract_body_inner(edited_xml).unwrap();
+            let paragraph = |document: &Document| match &document.document.body.content[0] {
+                BodyContent::Paragraph(paragraph) => paragraph.as_ref().clone(),
+                _ => unreachable!(),
+            };
+            let left = paragraph(&original);
+            let right = paragraph(&edited);
+            let bindings = vec![("xmlns:w".to_owned(), W_NS.to_owned())];
+            let source = |body: &str, p: &CT_P| {
+                let spans = story_content_spans(body, &bindings).unwrap();
+                let xml = &body[spans[0].clone()];
+                let spans = modeled_paragraph_run_spans(p, xml).unwrap();
+                RunSource::capture(Some(&p.runs[0]), xml, spans[0].clone()).unwrap()
+            };
+            let left_source = source(original_body, &left);
+            let right_source = source(edited_body, &right);
+            let mut metadata = Metadata {
+                author: "Policy",
+                timestamp: "2026-10-01T12:00:00Z",
+                options: &options,
+                ids: IdAllocator::new(HashSet::new()),
+                existing_revisions: false,
+                source_frames: Vec::new(),
+                projected_textbox_noop: false,
+                leaf_capture: false,
+                paired_field_story: None,
+                leaf_publications: Vec::new(),
+                field_conversions: Vec::new(),
+            };
+            let replacement = paired_run_replacement(
+                [&left.runs[0], &right.runs[0]],
+                [Some(&left_source), Some(&right_source)],
+                [None, None],
+                "body/paragraph[0]/run[0]",
+                &bindings,
+                &mut metadata,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            let paragraph_span = story_content_spans(original_body, &bindings).unwrap()[0].clone();
+            let mut body = original_body.to_owned();
+            body.replace_range(paragraph_span, &format!("<w:p>{replacement}</w:p>"));
+            let mut candidate = original.clone_for_staging();
+            candidate.package.set_part(
+                &candidate.doc_part_name,
+                replace_body_inner(original_xml, &body)
+                    .unwrap()
+                    .into_bytes(),
+            );
+            let candidate = Document::from_package(candidate.package).unwrap();
+            let markers = comparison_text_box_markers(&original, &edited, &[], &options).unwrap();
+            let accepted = resolved_package(
+                &candidate,
+                |document| document.accept_revision_ids(&metadata.ids.used),
+                &[],
+                &options,
+                &markers,
+            )
+            .unwrap();
+            let rejected = resolved_package(
+                &candidate,
+                |document| document.reject_revision_ids(&metadata.ids.used),
+                &[],
+                &options,
+                &markers,
+            )
+            .unwrap();
+            let wanted_accepted = normalized_package(&edited, &[], &options, &markers).unwrap();
+            let wanted_rejected = normalized_package(&original, &[], &options, &markers).unwrap();
+            eprintln!(
+                "POLICY_SIGNATURE_DIAGNOSTIC {}",
+                serde_json::json!({
+                    "edited_text": edited_text, "tracked_xml": String::from_utf8_lossy(candidate.package.get_part(&candidate.doc_part_name).unwrap()),
+                    "accepted": format!("{:?}", accepted.0), "wanted_accepted": format!("{:?}", wanted_accepted.0), "rejected": format!("{:?}", rejected.0), "wanted_rejected": format!("{:?}", wanted_rejected.0),
+                    "new_ids": metadata.ids.used, "suppressed": metadata.projected_textbox_noop,
+                })
+            );
+            if accepted != wanted_accepted || rejected != wanted_rejected {
+                failures.push(edited_text);
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "actual policy signature mismatches: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn issue425_paired_typed_drawing_textbox_formatting_policy() {
+        use super::*;
+        let mut failures = Vec::new();
+        for owner in ["anchor", "inline"] {
+            let make = |text: &str, style: &str| {
+                let attributes = if owner == "anchor" {
+                    r#" simplePos="0" relativeHeight="0" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1""#
+                } else {
+                    ""
+                };
+                let position = if owner == "anchor" {
+                    r#"<wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV>"#
+                } else {
+                    ""
+                };
+                let xml = format!(
+                    r#"<w:document xmlns:w="{W_NS}" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:body><w:p><w:r><w:drawing><wp:{owner}{attributes}>{position}<wp:extent cx="1270000" cy="635000"/><wp:docPr id="9" name="Box"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:rPr><w:{style}/></w:rPr><w:t>{text}</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:{owner}></w:drawing></w:r></w:p><w:p><w:r><w:t>Anchor.</w:t></w:r></w:p></w:body></w:document>"#
+                );
+                let mut document = Document::new();
+                document
+                    .package
+                    .set_part(&document.doc_part_name, xml.into_bytes());
+                Document::from_package(document.package).unwrap()
+            };
+            let mut original = make("Old.", "b");
+            let edited = make("New.", "i");
+            let BodyContent::Paragraph(paragraph) = &original.document.body.content[0] else {
+                unreachable!()
+            };
+            let RunContent::Drawing(drawing) = &paragraph.runs[0].content[0] else {
+                panic!("fixture must exercise actual typed Drawing")
+            };
+            if owner == "inline" {
+                let inline = drawing.inline.as_ref().expect("actual inline carrier");
+                let raw = inline
+                    .raw_xml
+                    .as_ref()
+                    .expect("opaque inline source retained");
+                assert!(
+                    std::str::from_utf8(raw)
+                        .unwrap()
+                        .contains("<w:txbxContent>")
+                );
+                assert!(drawing.anchor.is_none());
+                eprintln!(
+                    "TYPED_POLICY_EXCLUSION inline has retained raw_xml but no parsed shape/text_body carrier"
+                );
+                continue;
+            }
+            assert!(
+                drawing
+                    .anchor
+                    .as_ref()
+                    .and_then(|anchor| anchor.shape.as_ref())
+                    .and_then(|shape| shape.text_body.as_ref())
+                    .is_some(),
+                "fixture must carry parsed Word body"
+            );
+            let options = ComparisonOptions {
+                ignore_formatting: true,
+                ..Default::default()
+            };
+            if let Err(error) =
+                original.compare_with_options(&edited, "Policy", "2026-10-01T12:00:00Z", &options)
+            {
+                failures.push(format!("{owner}: comparison {error}"));
+                continue;
+            }
+            let tracked = original.to_bytes().unwrap();
+            for accept in [true, false] {
+                let mut resolved = Document::from_bytes(&tracked).unwrap();
+                if accept {
+                    resolved.accept_all().unwrap();
+                } else {
+                    resolved.reject_all().unwrap();
+                }
+                let xml = String::from_utf8_lossy(
+                    resolved.package.get_part(&resolved.doc_part_name).unwrap(),
+                )
+                .into_owned();
+                eprintln!(
+                    "TYPED_POLICY_DIAGNOSTIC {}",
+                    serde_json::json!({"owner": owner, "accept": accept, "xml": xml})
+                );
+                if !xml.contains("<w:b")
+                    || xml.contains("<w:i/")
+                    || !xml.contains(if accept { ">New.</w:t>" } else { ">Old.</w:t>" })
+                {
+                    failures.push(format!(
+                        "{owner} accept={accept}: original formatting or resolved text missing"
+                    ));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    fn occurrence_fixture_artifact(document: &Document, label: &str) {
+        if let Some(directory) = std::env::var_os("RDOCX_OCCURRENCE_ARTIFACTS") {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = std::path::PathBuf::from(directory).join(format!("{id:04}-{label}"));
+            document.package.save(path.with_extension("docx")).unwrap();
+            std::fs::write(
+                path.with_extension("xml"),
+                document.package.get_part(&document.doc_part_name).unwrap(),
+            )
+            .unwrap();
+            super::policy_diagnostic(
+                "occurrence_actual_artifact",
+                serde_json::json!({"path":path,"label":label}),
+            );
+        }
+    }
+
+    fn issue425_guard_fixture(inner: &str, metadata: &str) -> Document {
+        let xml = format!(
+            r#"<w:document xmlns:w="{W_NS}"><w:body><w:p><w:r><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml" xmlns:x="urn:opaque" x:host="{metadata}" style="width:100pt;height:50pt"><v:textbox><w:txbxContent>{inner}</w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p><w:p><w:r><w:t>Anchor.</w:t></w:r></w:p></w:body></w:document>"#
+        );
+        let mut document = Document::new();
+        document
+            .package
+            .set_part(&document.doc_part_name, xml.into_bytes());
+        let document = Document::from_package(document.package).unwrap();
+        occurrence_fixture_artifact(&document, "constructed");
+        document
+    }
+
+    #[test]
+    fn issue425_nested_guard_is_independent_and_keeps_content_boundaries() {
+        use super::*;
+        let options = ComparisonOptions {
+            ignore_formatting: true,
+            granularity: ComparisonGranularity::Word,
+            ..Default::default()
+        };
+        let baseline = "<w:p><w:pPr><w:jc w:val=\"left\"/></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t>Stable.</w:t></w:r></w:p>";
+        let formatting = "<w:p><w:pPr><w:jc w:val=\"right\"/></w:pPr><w:r><w:rPr><w:i/></w:rPr><w:t>Stable</w:t></w:r><w:r><w:rPr><w:i/></w:rPr><w:t>.</w:t></w:r></w:p>";
+        let identity = |inner: &str, metadata: &str, options: &ComparisonOptions| {
+            let document = issue425_guard_fixture(inner, metadata);
+            let markers = comparison_text_box_markers(&document, &document, &[], options).unwrap();
+            normalized_package(&document, &[], options, &markers).unwrap()
+        };
+        let wanted = identity(baseline, "original", &options);
+        assert_eq!(
+            wanted,
+            identity(formatting, "original", &options),
+            "run partition is not source identity"
+        );
+        assert_ne!(
+            identity(baseline, "original", &ComparisonOptions::default()),
+            identity(formatting, "original", &ComparisonOptions::default())
+        );
+        for changed in [
+            baseline.replace("Stable.", "Wrong."),
+            baseline.replace("<w:t>Stable.</w:t>", "<w:delText>Stable.</w:delText>"),
+            baseline.replace("<w:t>Stable.</w:t>", "<w:tab/><w:t>Stable.</w:t>"),
+            baseline.replace("</w:r>", "<x:opaque xmlns:x=\"urn:opaque\"/></w:r>"),
+        ] {
+            let actual = identity(&changed, "original", &options);
+            assert_ne!(actual, wanted);
+            assert!(
+                comparison_postcondition_error("acceptance", "edited", &actual, &wanted)
+                    .to_string()
+                    .contains("item[0]")
+            );
+            assert!(
+                comparison_postcondition_error("rejection", "original", &actual, &wanted)
+                    .to_string()
+                    .contains("item[0]")
+            );
+        }
+        assert_ne!(wanted, identity(baseline, "changed", &options));
+        let metadata =
+            baseline.replace("<w:t>", r#"<w:t xmlns:x="urn:metadata" x:unknown="same">"#);
+        let with_metadata = identity(&metadata, "original", &options);
+        assert_ne!(
+            with_metadata, wanted,
+            "an independently removed metadata attribute must fail both guards"
+        );
+        assert_ne!(
+            with_metadata,
+            identity(
+                &metadata.replace("x:unknown=\"same\"", "x:unknown=\"changed\""),
+                "original",
+                &options
+            )
+        );
+
+        let opaque = |order: &str| format!("<w:p><w:r><w:t>Stable.</w:t>{order}</w:r></w:p>");
+        let a = "<x:a xmlns:x=\"urn:opaque\"/>";
+        let b = "<x:b xmlns:x=\"urn:opaque\"/>";
+        assert_ne!(
+            identity(&opaque(&format!("{a}{b}")), "original", &options),
+            identity(&opaque(&format!("{b}{a}")), "original", &options)
+        );
+        assert_ne!(
+            identity(&opaque(a), "original", &options),
+            identity(&opaque(&format!("{a}{a}")), "original", &options)
+        );
+        let cell = |text: &str| format!("<w:tc><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:tc>");
+        let table = |cells: &str| {
+            format!(
+                "<w:tbl><w:tblPr/><w:tblGrid><w:gridCol/><w:gridCol/></w:tblGrid><w:tr>{cells}</w:tr></w:tbl>"
+            )
+        };
+        assert_ne!(
+            identity(
+                &table(&format!("{}{}", cell("A"), cell("B"))),
+                "original",
+                &options
+            ),
+            identity(
+                &table(&format!("{}{}", cell("B"), cell("A"))),
+                "original",
+                &options
+            )
+        );
+        let control = |kind: &str| {
+            format!(
+                "<w:p><w:sdt><w:sdtPr><w:{kind}/></w:sdtPr><w:sdtContent><w:r><w:t>Stable.</w:t></w:r></w:sdtContent></w:sdt></w:p>"
+            )
+        };
+        assert_ne!(
+            identity(&control("text"), "original", &options),
+            identity(&control("comboBox"), "original", &options)
+        );
+        let field = |instruction: &str| {
+            format!(
+                "<w:p><w:fldSimple w:instr=\"{instruction}\"><w:r><w:t>Stored</w:t></w:r></w:fldSimple></w:p>"
+            )
+        };
+        assert_ne!(
+            identity(&field("PAGE"), "original", &options),
+            identity(&field("NUMPAGES"), "original", &options)
+        );
+        let ignored = ComparisonOptions {
+            ignore_fields: true,
+            ..options.clone()
+        };
+        assert_eq!(
+            identity(&field("PAGE"), "original", &ignored),
+            identity(&field("NUMPAGES"), "original", &ignored)
+        );
+    }
+
+    #[test]
+    fn issue425_projected_noop_retains_native_owner_and_exact_source() {
+        let mut original = issue425_guard_fixture(
+            "<w:p><w:pPr><w:jc w:val=\"left\"/><w:rPr><w:b/></w:rPr></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t>Stable.</w:t></w:r></w:p>",
+            "original",
+        );
+        let edited = issue425_guard_fixture(
+            "<w:p><w:pPr><w:jc w:val=\"right\"/><w:rPr><w:i/></w:rPr></w:pPr><w:r><w:rPr><w:i/></w:rPr><w:t>Stable.</w:t></w:r></w:p>",
+            "original",
+        );
+        let before = original.to_bytes().unwrap();
+        let before_owner = match &original.document.body.content[0] {
+            BodyContent::Paragraph(paragraph) => paragraph.as_ref() as *const _ as usize,
+            _ => unreachable!(),
+        };
+        let options = ComparisonOptions {
+            ignore_formatting: true,
+            ..Default::default()
+        };
+        original
+            .compare_with_options(&edited, "Policy", "2026-10-01T12:00:00Z", &options)
+            .unwrap();
+        assert_eq!(original.to_bytes().unwrap(), before);
+        assert!(original.revisions().is_empty());
+        let after_owner = match &original.document.body.content[0] {
+            BodyContent::Paragraph(paragraph) => paragraph.as_ref() as *const _ as usize,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            before_owner, after_owner,
+            "equivalent staged receiver is not a no-op"
+        );
+    }
+    fn issue425_anchored_policy_fixture(inner: &str, alternate: bool) -> Document {
+        let drawing = format!(
+            r#"<w:drawing><wp:anchor simplePos="0" relativeHeight="0" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="column"><wp:posOffset>0</wp:posOffset></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="1270000" cy="635000"/><wp:docPr id="9" name="Box"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:txbx><w:txbxContent>{inner}</w:txbxContent></wps:txbx><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing>"#
+        );
+        let host = if alternate {
+            format!(
+                r#"<mc:AlternateContent><mc:Choice Requires="wps">{drawing}</mc:Choice><mc:Fallback><w:pict><v:shape style="width:100pt;height:50pt"><v:textbox><w:txbxContent><w:p><w:r><w:t>FALLBACK_KEEP</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></mc:Fallback></mc:AlternateContent>"#
+            )
+        } else {
+            drawing
+        };
+        let xml = format!(
+            r#"<w:document xmlns:w="{W_NS}" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><w:body><w:p><w:r>{host}</w:r></w:p><w:p><w:r><w:t>Anchor.</w:t></w:r></w:p></w:body></w:document>"#
+        );
+        let mut document = Document::new();
+        document
+            .package
+            .set_part(&document.doc_part_name, xml.into_bytes());
+        Document::from_package(document.package).unwrap()
+    }
+
+    #[test]
+    fn issue425_selected_policy_body_and_opaque_fallback_have_separate_custody() {
+        use super::*;
+        let body = |text: &str, style: &str| {
+            format!("<w:p><w:r><w:rPr><w:{style}/></w:rPr><w:t>{text}</w:t></w:r></w:p>")
+        };
+        let options = ComparisonOptions {
+            ignore_formatting: true,
+            ..Default::default()
+        };
+        let mut failures = Vec::new();
+        for alternate in [false, true] {
+            for equal_text in [false, true] {
+                let mut original = issue425_anchored_policy_fixture(&body("Old.", "b"), alternate);
+                let edited = issue425_anchored_policy_fixture(
+                    &body(if equal_text { "Old." } else { "New." }, "i"),
+                    alternate,
+                );
+                let before = original.to_bytes().unwrap();
+                let diagnostic_before = original.clone_for_staging();
+                let diagnostic_pointer = match &original.document.body.content[0] {
+                    BodyContent::Paragraph(p) => p.as_ref() as *const _ as usize,
+                    _ => unreachable!(),
+                };
+                if let Err(error) = original.compare_with_options(
+                    &edited,
+                    "Policy",
+                    "2026-10-01T12:00:00Z",
+                    &options,
+                ) {
+                    policy_diagnostic(
+                        "exact_fixture_refusal",
+                        serde_json::json!({"fixture":"issue425_selected_policy_body_and_opaque_fallback_have_separate_custody","error":error.to_string(),"documents":policy3_document_observation(&diagnostic_before,&original)}),
+                    );
+                    assert_eq!(original.to_bytes().unwrap(), before);
+                    failures.push(format!("alternate={alternate} equal={equal_text}: {error}"));
+                    continue;
+                }
+                let count = original.revisions().len();
+                if equal_text {
+                    if count != 0 || original.to_bytes().unwrap() != before {
+                        failures.push(format!(
+                            "alternate={alternate}: not an exact zero-record no-op"
+                        ));
+                    }
+                } else if count != 2 {
+                    failures.push(format!("alternate={alternate}: outer record count {count}"));
+                }
+                policy_diagnostic(
+                    "exact_fixture_noop",
+                    serde_json::json!({"fixture":"issue425_selected_policy_body_and_opaque_fallback_have_separate_custody","equal_text":equal_text,
+                    "pointer_before":diagnostic_pointer,"pointer_after":match &original.document.body.content[0]{BodyContent::Paragraph(p)=>p.as_ref() as *const _ as usize,_=>unreachable!()},
+                    "bytes_equal":original.to_bytes().unwrap()==before,"zero_records":original.revisions().is_empty(),"documents":policy3_document_observation(&diagnostic_before,&original)}),
+                );
+                let tracked = original.to_bytes().unwrap();
+                for accept in [true, false] {
+                    let mut resolved = Document::from_bytes(&tracked).unwrap();
+                    if accept {
+                        resolved.accept_all().unwrap();
+                    } else {
+                        resolved.reject_all().unwrap();
+                    }
+                    let reopened = Document::from_bytes(&resolved.to_bytes().unwrap()).unwrap();
+                    let xml = String::from_utf8_lossy(
+                        reopened.package.get_part(&reopened.doc_part_name).unwrap(),
+                    )
+                    .into_owned();
+                    if !xml.contains("<w:b")
+                        || xml.contains("<w:i/")
+                        || !xml.contains(if accept && !equal_text {
+                            ">New.</w:t>"
+                        } else {
+                            ">Old.</w:t>"
+                        })
+                    {
+                        failures.push(format!(
+                            "alternate={alternate} equal={equal_text} accept={accept}: {xml}"
+                        ));
+                    }
+                    if alternate {
+                        assert_eq!(xml.matches("FALLBACK_KEEP").count(), 1);
+                        assert_eq!(xml.matches("<mc:Fallback>").count(), 1);
+                    }
+                    assert!(reopened.revisions().is_empty());
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn issue425_guard_uses_actual_related_relationship_owner() {
+        use super::*;
+        let make = |part: &str, link_id: &str, image_id: &str, image: &[u8], target: &str| {
+            let inner = format!(
+                r#"<w:p><w:hyperlink xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="{link_id}"><w:r><w:t>Link</w:t></w:r></w:hyperlink><w:r><w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:inline><wp:extent cx="100" cy="200"/><wp:docPr id="9" name="Image"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="{image_id}"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#
+            );
+            let mut document = issue425_guard_fixture(&inner, "original");
+            let source = document
+                .package
+                .get_part(&document.doc_part_name)
+                .unwrap()
+                .to_vec();
+            let body = extract_body_inner(&source).unwrap();
+            let mut rels = oxml_opc::relationship::Relationships::new();
+            rels.items.push(oxml_opc::relationship::Relationship {
+                id: link_id.to_owned(),
+                rel_type: rel_types::HYPERLINK.to_owned(),
+                target: target.to_owned(),
+                target_mode: Some("External".into()),
+            });
+            rels.items.push(oxml_opc::relationship::Relationship {
+                id: image_id.to_owned(),
+                rel_type: rel_types::IMAGE.to_owned(),
+                target: "media/guard.bin".into(),
+                target_mode: None,
+            });
+            document.package.set_part_rels(part, rels);
+            document
+                .package
+                .set_part("/word/media/guard.bin", image.to_vec());
+            // Same numeric ids in main point elsewhere, so main-part fallback fails.
+            document
+                .package
+                .get_or_create_part_rels(&document.doc_part_name)
+                .items
+                .push(oxml_opc::relationship::Relationship {
+                    id: link_id.to_owned(),
+                    rel_type: rel_types::HYPERLINK.to_owned(),
+                    target: format!("https://wrong.invalid/{link_id}"),
+                    target_mode: Some("External".into()),
+                });
+            (document, body.to_owned())
+        };
+        let options = ComparisonOptions {
+            ignore_formatting: true,
+            ..Default::default()
+        };
+        for part in [
+            "/word/header1.xml",
+            "/word/footer1.xml",
+            "/word/footnotes.xml",
+        ] {
+            let identity = |link: &str, image_id: &str, image: &[u8], target: &str| {
+                let (document, body) = make(part, link, image_id, image, target);
+                let bindings = vec![("xmlns:w".to_owned(), W_NS.to_owned())];
+                let model = story_document(&body, &bindings).unwrap();
+                guard_source_body(&model, &body, &bindings, &document, part, &options).unwrap()
+            };
+            let baseline = identity("link1", "image1", b"same pixels", "https://same.invalid/");
+            assert_eq!(
+                baseline,
+                identity("link99", "image99", b"same pixels", "https://same.invalid/")
+            );
+            assert_ne!(
+                baseline,
+                identity(
+                    "link1",
+                    "image1",
+                    b"different pixels",
+                    "https://same.invalid/"
+                )
+            );
+            assert_ne!(
+                baseline,
+                identity(
+                    "link1",
+                    "image1",
+                    b"same pixels",
+                    "https://different.invalid/"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn issue425_guard_keeps_foreign_and_unadmitted_word_payloads_opaque() {
+        use super::*;
+        let mut document = issue425_guard_fixture(
+            "<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Stable.</w:t></w:r></w:p>",
+            "original",
+        );
+        let original =
+            String::from_utf8_lossy(document.package.get_part(&document.doc_part_name).unwrap())
+                .into_owned();
+        let options = ComparisonOptions {
+            ignore_formatting: true,
+            ..Default::default()
+        };
+        for source in [
+            original
+                .replace(
+                    "<v:textbox>",
+                    "<x:opaque xmlns:x=\"urn:opaque\"><v:textbox>",
+                )
+                .replace("</v:textbox>", "</v:textbox></x:opaque>"),
+            original.replace(
+                "<w:txbxContent>",
+                "<w:txbxContent xmlns:w=\"urn:producer\">",
+            ),
+        ] {
+            let inner = extract_body_inner(source.as_bytes()).unwrap();
+            let bindings = vec![("xmlns:w".to_owned(), W_NS.to_owned())];
+            let model = story_document(inner, &bindings).unwrap();
+            let a = guard_source_body(
+                &model,
+                inner,
+                &bindings,
+                &document,
+                &document.doc_part_name,
+                &options,
+            )
+            .unwrap();
+            let changed = inner.replace("<w:b/>", "<w:i/>");
+            let model = story_document(&changed, &bindings).unwrap();
+            let b = guard_source_body(
+                &model,
+                &changed,
+                &bindings,
+                &document,
+                &document.doc_part_name,
+                &options,
+            )
+            .unwrap();
+            assert_ne!(
+                a, b,
+                "opaque content cannot become typed formatting through a wrapper"
+            );
+        }
+        let before = document.to_bytes().unwrap();
+        assert!(!before.is_empty());
+    }
+    #[test]
+    fn issue425_projected_aliases_keep_authored_property_and_opaque_bytes() {
+        use super::*;
+        let mut failures = Vec::new();
+        for default_word in [false, true] {
+            for equal_text in [false, true] {
+                let make = |text: &str, style: &str| {
+                    let inner = format!(
+                        r#"<w:p><w:r xmlns:x="urn:opaque"><w:rPr><w:{style}/></w:rPr><w:t>{text}</w:t><x:opaque xmlns=""/><x:opaque xmlns=""/></w:r></w:p>"#
+                    );
+                    let document = issue425_guard_fixture(&inner, "original");
+                    let source = std::str::from_utf8(
+                        document.package.get_part(&document.doc_part_name).unwrap(),
+                    )
+                    .unwrap();
+                    let mut source = source.replace(
+                        &format!(r#"xmlns:w="{W_NS}""#),
+                        &format!(r#"xmlns:q="{W_NS}" xmlns:w="urn:producer""#),
+                    );
+                    source = source.replace("<w:", "<q:").replace("</w:", "</q:");
+                    source = source.replace("<q:rPr>", "<q:rPr w:note=\"w:token > kept\">");
+                    if default_word {
+                        source = source
+                            .replace(
+                                &format!(r#"xmlns:q="{W_NS}""#),
+                                &format!(r#"xmlns="{W_NS}""#),
+                            )
+                            .replace("<q:", "<")
+                            .replace("</q:", "</");
+                    }
+                    let mut package = document.package;
+                    package.set_part("/word/document.xml", source.into_bytes());
+                    Document::from_package(package).unwrap()
+                };
+                let mut original = make("Old.", "b");
+                let edited = make(if equal_text { "Old." } else { "New." }, "i");
+                let before = original.to_bytes().unwrap();
+                let diagnostic_before = original.clone_for_staging();
+                let diagnostic_pointer = match &original.document.body.content[0] {
+                    BodyContent::Paragraph(p) => p.as_ref() as *const _ as usize,
+                    _ => unreachable!(),
+                };
+                let options = ComparisonOptions {
+                    ignore_formatting: true,
+                    ..Default::default()
+                };
+                if let Err(error) = original.compare_with_options(
+                    &edited,
+                    "Policy",
+                    "2026-10-01T12:00:00Z",
+                    &options,
+                ) {
+                    policy_diagnostic(
+                        "exact_fixture_refusal",
+                        serde_json::json!({"fixture":"issue425_projected_aliases_keep_authored_property_and_opaque_bytes","error":error.to_string(),"documents":policy3_document_observation(&diagnostic_before,&original)}),
+                    );
+                    assert_eq!(original.to_bytes().unwrap(), before);
+                    failures.push(format!(
+                        "default={default_word} equal={equal_text}: {error}"
+                    ));
+                    continue;
+                }
+                if equal_text {
+                    assert_eq!(
+                        diagnostic_pointer,
+                        match &original.document.body.content[0] {
+                            BodyContent::Paragraph(p) => p.as_ref() as *const _ as usize,
+                            _ => unreachable!(),
+                        }
+                    );
+                }
+                if equal_text
+                    && (original.to_bytes().unwrap() != before || !original.revisions().is_empty())
+                {
+                    failures.push(format!("default={default_word}: not an exact alias no-op"));
+                }
+                policy_diagnostic(
+                    "exact_fixture_noop",
+                    serde_json::json!({"fixture":"issue425_projected_aliases_keep_authored_property_and_opaque_bytes","equal_text":equal_text,
+                    "pointer_before":diagnostic_pointer,"pointer_after":match &original.document.body.content[0]{BodyContent::Paragraph(p)=>p.as_ref() as *const _ as usize,_=>unreachable!()},
+                    "bytes_equal":original.to_bytes().unwrap()==before,"zero_records":original.revisions().is_empty(),"documents":policy3_document_observation(&diagnostic_before,&original)}),
+                );
+                let tracked = original.to_bytes().unwrap();
+                for accept in [true, false] {
+                    let mut resolved = Document::from_bytes(&tracked).unwrap();
+                    if accept {
+                        resolved.accept_all().unwrap();
+                    } else {
+                        resolved.reject_all().unwrap();
+                    }
+                    let reopened = Document::from_bytes(&resolved.to_bytes().unwrap()).unwrap();
+                    let xml = String::from_utf8_lossy(
+                        reopened.package.get_part(&reopened.doc_part_name).unwrap(),
+                    )
+                    .into_owned();
+                    assert_eq!(xml.matches("<x:opaque xmlns=\"\"/>").count(), 2, "{xml}");
+                    assert_eq!(xml.matches("w:note=\"w:token > kept\"").count(), 1, "{xml}");
+                    let mut reader = NsReader::from_str(&xml);
+                    let mut producer_attribute = 0;
+                    loop {
+                        match reader.read_event().unwrap() {
+                            Event::Start(element) | Event::Empty(element) => {
+                                for attribute in element.attributes() {
+                                    let attribute = attribute.unwrap();
+                                    if attribute.key.as_ref() == b"w:note" {
+                                        let namespace =
+                                            reader.resolver().resolve_attribute(attribute.key).0;
+                                        assert!(
+                                            matches!(namespace, ResolveResult::Bound(uri) if uri.as_ref() == b"urn:producer")
+                                        );
+                                        producer_attribute += 1;
+                                    }
+                                }
+                            }
+                            Event::Eof => break,
+                            _ => {}
+                        }
+                    }
+                    assert_eq!(producer_attribute, 1);
+                    assert!(xml.contains(if accept && !equal_text {
+                        "New."
+                    } else {
+                        "Old."
+                    }));
+                    assert!(reopened.revisions().is_empty());
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn issue425_nested_paired_policy_has_one_outer_record_pair() {
+        let inner = |text: &str, style: &str| {
+            format!(
+                r#"<w:p><w:r><w:pict><v:shape style="width:40pt;height:20pt"><v:textbox><w:txbxContent><w:p><w:r><w:rPr><w:{style}/></w:rPr><w:t>{text}</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>"#
+            )
+        };
+        let mut original = issue425_guard_fixture(&inner("Old.", "b"), "original");
+        let edited = issue425_guard_fixture(&inner("New.", "i"), "original");
+        let options = ComparisonOptions {
+            ignore_formatting: true,
+            ..Default::default()
+        };
+        original
+            .compare_with_options(&edited, "Policy", "2026-10-01T12:00:00Z", &options)
+            .unwrap();
+        assert_eq!(original.revisions().len(), 2);
+        let tracked = original.to_bytes().unwrap();
+        for accept in [true, false] {
+            let mut resolved = Document::from_bytes(&tracked).unwrap();
+            if accept {
+                resolved.accept_all().unwrap();
+            } else {
+                resolved.reject_all().unwrap();
+            }
+            let reopened = Document::from_bytes(&resolved.to_bytes().unwrap()).unwrap();
+            let xml = String::from_utf8_lossy(
+                reopened.package.get_part(&reopened.doc_part_name).unwrap(),
+            );
+            assert!(xml.contains("<w:b"));
+            assert!(!xml.contains("<w:i/"));
+            assert!(xml.contains(if accept { "New." } else { "Old." }));
+            assert!(reopened.revisions().is_empty());
+        }
+    }
+    fn policy3_document_observation(before: &Document, after: &Document) -> serde_json::Value {
+        use super::*;
+        let names = before
+            .package
+            .parts
+            .keys()
+            .chain(after.package.parts.keys())
+            .collect::<std::collections::BTreeSet<_>>();
+        let diffs = names.into_iter().filter_map(|name| {
+            let left = before.package.parts.get(name).map(|raw| raw.as_slice()).unwrap_or_default();
+            let right = after.package.parts.get(name).map(|raw| raw.as_slice()).unwrap_or_default();
+            (left != right).then(|| serde_json::json!({"part":name,"before":String::from_utf8_lossy(left),"after":String::from_utf8_lossy(right),
+                "first_diff":left.iter().zip(right).position(|(a,b)|a!=b).unwrap_or(left.len().min(right.len())),
+                "before_sha":Sha256::digest(left).iter().map(|byte|format!("{byte:02x}")).collect::<String>(),"after_sha":Sha256::digest(right).iter().map(|byte|format!("{byte:02x}")).collect::<String>()}))
+        }).collect::<Vec<_>>();
+        serde_json::json!({"part_differences":diffs,"records":format!("{:?}",after.revisions()),"count":after.revisions().len(),
+            "content_types_equal":before.package.content_types==after.package.content_types,
+            "package_rels_before":format!("{:?}",before.package.package_rels.to_xml()),"package_rels_after":format!("{:?}",after.package.package_rels.to_xml()),
+            "part_rels_before":format!("{:?}",before.package.part_rels),"part_rels_after":format!("{:?}",after.package.part_rels)})
+    }
+
+    #[test]
+    fn issue425_policy3_frozen_representation_diagnostics() {
+        use super::*;
+        let options = ComparisonOptions {
+            ignore_formatting: true,
+            ..Default::default()
+        };
+        let mut public_failures = Vec::new();
+        for representation in ["vml", "alias", "default", "anchor-expanded", "selected-mce"] {
+            for equal in [false, true] {
+                let make = |text: &str, style: &str| {
+                    let body = format!(
+                        "<w:p><w:r><w:rPr><w:{style}/></w:rPr><w:t>{text}</w:t></w:r></w:p>"
+                    );
+                    if representation.starts_with("anchor") || representation == "selected-mce" {
+                        return issue425_anchored_policy_fixture(
+                            &body,
+                            representation == "selected-mce",
+                        );
+                    }
+                    let document = issue425_guard_fixture(&body, "original");
+                    if representation == "vml" {
+                        return document;
+                    }
+                    let source = std::str::from_utf8(
+                        document.package.get_part(&document.doc_part_name).unwrap(),
+                    )
+                    .unwrap();
+                    let mut source = source
+                        .replace(
+                            &format!(r#"xmlns:w="{W_NS}""#),
+                            &format!(r#"xmlns:q="{W_NS}" xmlns:w="urn:producer""#),
+                        )
+                        .replace("<w:", "<q:")
+                        .replace("</w:", "</q:");
+                    source = source.replace("<q:rPr>", "<q:rPr w:note=\"w:token > kept\">");
+                    if representation == "default" {
+                        source = source
+                            .replace(
+                                &format!(r#"xmlns:q="{W_NS}""#),
+                                &format!(r#"xmlns="{W_NS}""#),
+                            )
+                            .replace("<q:", "<")
+                            .replace("</q:", "</");
+                    }
+                    let mut package = document.package;
+                    package.set_part("/word/document.xml", source.into_bytes());
+                    Document::from_package(package).unwrap()
+                };
+                let mut original = make("Old.", "b");
+                let edited = make(if equal { "Old." } else { "New." }, "i");
+                let before = original.clone_for_staging();
+                let bytes = original.to_bytes().unwrap();
+                let pointer = match &original.document.body.content[0] {
+                    BodyContent::Paragraph(p) => p.as_ref() as *const _ as usize,
+                    _ => unreachable!(),
+                };
+                let result = original.compare_with_options(
+                    &edited,
+                    "Policy",
+                    "2026-10-01T12:00:00Z",
+                    &options,
+                );
+                let after_pointer = match &original.document.body.content[0] {
+                    BodyContent::Paragraph(p) => p.as_ref() as *const _ as usize,
+                    _ => unreachable!(),
+                };
+                policy_diagnostic(
+                    "public_representation",
+                    serde_json::json!({"representation":representation,"equal_text":equal,"result":format!("{result:?}"),
+                    "bytes_equal":original.to_bytes().unwrap()==bytes,"zero_records":original.revisions().is_empty(),"pointer_before":pointer,"pointer_after":after_pointer,
+                    "documents":policy3_document_observation(&before,&original)}),
+                );
+                if let Err(error) = &result {
+                    public_failures.push(format!("{representation} equal={equal}: {error}"));
+                } else if equal {
+                    if !original.revisions().is_empty()
+                        || original.to_bytes().unwrap() != bytes
+                        || pointer != after_pointer
+                    {
+                        public_failures.push(format!(
+                            "{representation}: counts/bytes/native owner do not form an exact no-op"
+                        ));
+                    }
+                } else if original.revisions().len() != 2 {
+                    public_failures.push(format!("{representation}: expected one outer pair"));
+                }
+                // Directly inspect the same paired publisher even if the public guard refused.
+                // This is a diagnostic result, not alternate publication or expected-doc substitution.
+                let inspect = (|| -> Result<()> {
+                    let left_xml = before.package.get_part(&before.doc_part_name).unwrap();
+                    let right_xml = edited.package.get_part(&edited.doc_part_name).unwrap();
+                    let left_body = extract_body_inner(left_xml)?;
+                    let right_body = extract_body_inner(right_xml)?;
+                    let bindings_left = root_namespace_bindings(
+                        std::str::from_utf8(left_xml).unwrap(),
+                        "document",
+                        &[],
+                    )?;
+                    let bindings_right = root_namespace_bindings(
+                        std::str::from_utf8(right_xml).unwrap(),
+                        "document",
+                        &[],
+                    )?;
+                    let left = match &before.document.body.content[0] {
+                        BodyContent::Paragraph(p) => p,
+                        _ => unreachable!(),
+                    };
+                    let right = match &edited.document.body.content[0] {
+                        BodyContent::Paragraph(p) => p,
+                        _ => unreachable!(),
+                    };
+                    let capture =
+                        |body: &str, p: &CT_P, bindings: &NamespaceBindings| -> Result<RunSource> {
+                            let pspan = story_content_spans(body, bindings)?[0].clone();
+                            let closed = source_fragment(&body[pspan], bindings)?;
+                            let spans = modeled_paragraph_run_spans(p, &closed)?;
+                            RunSource::capture(Some(&p.runs[0]), &closed, spans[0].clone())
+                        };
+                    let left_source = capture(left_body, left, &bindings_left)?;
+                    let right_source = capture(right_body, right, &bindings_right)?;
+                    let mut metadata = Metadata {
+                        author: "Policy",
+                        timestamp: "2026-10-01T12:00:00Z",
+                        options: &options,
+                        ids: IdAllocator::new(HashSet::new()),
+                        existing_revisions: false,
+                        source_frames: Vec::new(),
+                        projected_textbox_noop: false,
+                        leaf_capture: false,
+                        paired_field_story: None,
+                        leaf_publications: Vec::new(),
+                        field_conversions: Vec::new(),
+                    };
+                    let replacement = paired_run_replacement(
+                        [&left.runs[0], &right.runs[0]],
+                        [Some(&left_source), Some(&right_source)],
+                        [None, None],
+                        "diagnostic/body/paragraph[0]/run[0]",
+                        &root_namespace_bindings(&left_source.scoped, "r", &left_source.parent)?,
+                        &mut metadata,
+                        &mut Vec::new(),
+                    )?;
+                    let pspan = story_content_spans(left_body, &bindings_left)?[0].clone();
+                    let psource = &left_body[pspan.clone()];
+                    let (opening, _, qname) = element_opening(psource)?;
+                    let mut body = left_body.to_owned();
+                    body.replace_range(
+                        pspan,
+                        &format!("{}{replacement}</{qname}>", &psource[..opening]),
+                    );
+                    let mut candidate = before.clone_for_staging();
+                    candidate.package.set_part(
+                        &candidate.doc_part_name,
+                        replace_body_inner(left_xml, &body)?.into_bytes(),
+                    );
+                    let candidate = Document::from_package(candidate.package)?;
+                    let markers = comparison_text_box_markers(&before, &edited, &[], &options)?;
+                    let accepted = resolved_package(
+                        &candidate,
+                        |d| d.accept_revision_ids(&metadata.ids.used),
+                        &[],
+                        &options,
+                        &markers,
+                    );
+                    let rejected = resolved_package(
+                        &candidate,
+                        |d| d.reject_revision_ids(&metadata.ids.used),
+                        &[],
+                        &options,
+                        &markers,
+                    );
+                    let wanted_accepted = normalized_package(&edited, &[], &options, &markers);
+                    let wanted_rejected = normalized_package(&before, &[], &options, &markers);
+                    policy_diagnostic(
+                        "independent_paired_vectors",
+                        serde_json::json!({"representation":representation,"equal_text":equal,"new_ids":metadata.ids.used,"suppressed":metadata.projected_textbox_noop,
+                        "accepted":format!("{accepted:?}"),"edited":format!("{wanted_accepted:?}"),"rejected":format!("{rejected:?}"),"original":format!("{wanted_rejected:?}"),
+                        "candidate_model":format!("{:?}",candidate.document),"candidate":policy3_document_observation(&before,&candidate)}),
+                    );
+                    Ok(())
+                })();
+                policy_diagnostic(
+                    "paired_inspection_status",
+                    serde_json::json!({"representation":representation,"equal_text":equal,"result":format!("{inspect:?}")}),
+                );
+            }
+        }
+        assert!(public_failures.is_empty(), "{}", public_failures.join("\n"));
+    }
+
+    #[test]
+    fn issue425_policy3_related_source_and_closure_diagnostics() {
+        use super::*;
+        let options = ComparisonOptions {
+            ignore_formatting: true,
+            ..Default::default()
+        };
+        for owner in [
+            "/word/header1.xml",
+            "/word/footer1.xml",
+            "/word/footnotes.xml",
+            "/word/endnotes.xml",
+            "/word/comments.xml",
+        ] {
+            for selected in [false, true] {
+                let inner = r#"<w:p><w:r><w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:inline><wp:extent cx="100" cy="200"/><wp:docPr id="9" name="Image"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="image1"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#;
+                let document = if selected {
+                    issue425_anchored_policy_fixture(inner, true)
+                } else {
+                    issue425_guard_fixture(inner, "original")
+                };
+                let bytes = document.package.get_part(&document.doc_part_name).unwrap();
+                let body = extract_body_inner(bytes).unwrap();
+                let bindings =
+                    root_namespace_bindings(std::str::from_utf8(bytes).unwrap(), "document", &[])
+                        .unwrap();
+                for closed in [false, true] {
+                    let scope = PolicyDiagnosticScope::enter(
+                        if closed {
+                            "related-drawing-closed-model"
+                        } else {
+                            "related-source-faithful-model"
+                        },
+                        owner,
+                    );
+                    let model = if closed {
+                        story_wrapper(body, &bindings)
+                            .and_then(|(xml, _)| close_drawing_namespaces(xml, false))
+                            .and_then(|xml| CT_Document::from_xml(&xml).map_err(Into::into))
+                    } else {
+                        story_wrapper(body, &bindings)
+                            .and_then(|(xml, _)| CT_Document::from_xml(&xml).map_err(Into::into))
+                    };
+                    let observation = model.and_then(|model| {
+                        guard_source_body(&model, body, &bindings, &document, owner, &options)
+                    });
+                    if closed {
+                        assert!(
+                            observation.as_ref().is_err_and(|error| error
+                                .to_string()
+                                .contains("different physical role")),
+                            "strict descendant closure check must remain substantive: {owner} selected={selected}: {observation:?}"
+                        );
+                    } else {
+                        assert!(
+                            observation.is_ok(),
+                            "source-faithful owner must correlate: {owner} selected={selected}: {observation:?}"
+                        );
+                    }
+                    policy_diagnostic(
+                        "related_source_stage",
+                        serde_json::json!({"owner":owner,"selected":selected,"drawing_closed":closed,"result":format!("{observation:?}")}),
+                    );
+                    drop(scope);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn issue425_policy3_unknown_text_metadata_diagnostics() {
+        use super::*;
+        let options = ComparisonOptions {
+            ignore_formatting: true,
+            ..Default::default()
+        };
+        for attribute in ["w:unknown", "x:unknown"] {
+            for changed_text in [false, true] {
+                for protected in [false, true] {
+                    let make = |value: &str, text: &str| {
+                        let inner = format!(
+                            r#"<w:p><w:r><w:rPr><w:b/></w:rPr><w:t xmlns:x="urn:opaque" {attribute}="{value}">{text}</w:t></w:r></w:p>"#
+                        );
+                        let mut document = issue425_guard_fixture(&inner, "original");
+                        if protected {
+                            let xml = std::str::from_utf8(
+                                document.package.get_part(&document.doc_part_name).unwrap(),
+                            )
+                            .unwrap();
+                            let xml=xml.replacen("<w:p>","<w:p><w:ins w:id=\"7\" w:author=\"A\" w:date=\"2026-10-01T12:00:00Z\"><w:r><w:t>Held</w:t></w:r></w:ins>",1);
+                            document
+                                .package
+                                .set_part("/word/document.xml", xml.into_bytes());
+                            document = Document::from_package(document.package).unwrap();
+                        }
+                        document
+                    };
+                    let mut original = make("before", "Old.");
+                    let edited = make("after", if changed_text { "New." } else { "Old." });
+                    let before = original.clone_for_staging();
+                    let bytes = original.to_bytes().unwrap();
+                    let identity = |document: &Document| -> Result<Vec<GuardItem>> {
+                        let xml = document.package.get_part(&document.doc_part_name).unwrap();
+                        let body = extract_body_inner(xml)?;
+                        let bindings = root_namespace_bindings(
+                            std::str::from_utf8(xml).unwrap(),
+                            "document",
+                            &[],
+                        )?;
+                        let model = story_document(body, &bindings)?;
+                        guard_source_body(
+                            &model,
+                            body,
+                            &bindings,
+                            document,
+                            &document.doc_part_name,
+                            &options,
+                        )
+                    };
+                    let a = identity(&original);
+                    let b = identity(&edited);
+                    let result = original.compare_with_options(
+                        &edited,
+                        "Policy",
+                        "2026-10-01T12:00:00Z",
+                        &options,
+                    );
+                    assert_ne!(
+                        a.as_ref().unwrap(),
+                        b.as_ref().unwrap(),
+                        "content metadata is not ignored formatting"
+                    );
+                    if let Err(error) = &result {
+                        assert_eq!(bytes, original.to_bytes().unwrap());
+                        assert!(
+                            error.to_string().contains("body/paragraph")
+                                || error.to_string().contains("body story item"),
+                            "{error}"
+                        );
+                    } else {
+                        assert!(!protected);
+                        let tracked = original.to_bytes().unwrap();
+                        for accept in [true, false] {
+                            let mut resolved = Document::from_bytes(&tracked).unwrap();
+                            if accept {
+                                resolved.accept_all().unwrap();
+                            } else {
+                                resolved.reject_all().unwrap();
+                            }
+                            let reopened =
+                                Document::from_bytes(&resolved.to_bytes().unwrap()).unwrap();
+                            assert_eq!(
+                                policy3_text_metadata_inventory(&reopened),
+                                vec![(
+                                    if attribute.starts_with("w:") {
+                                        W_NS
+                                    } else {
+                                        "urn:opaque"
+                                    }
+                                    .into(),
+                                    if accept { "after" } else { "before" }.into()
+                                )]
+                            );
+                        }
+                    }
+                    policy_diagnostic(
+                        "unknown_text_metadata",
+                        serde_json::json!({"attribute":attribute,"changed_text":changed_text,"protected":protected,
+                        "guard_before":format!("{a:?}"),"guard_edited":format!("{b:?}"),"public_result":format!("{result:?}"),
+                        "bytes_equal":bytes==original.to_bytes().unwrap(),"source_before":String::from_utf8_lossy(before.package.get_part(&before.doc_part_name).unwrap()),
+                        "source_edited":String::from_utf8_lossy(edited.package.get_part(&edited.doc_part_name).unwrap()),"output":policy3_document_observation(&before,&original)}),
+                    );
+                }
+            }
+        }
+    }
+    fn policy3_text_metadata_inventory(document: &Document) -> Vec<(String, String)> {
+        use super::*;
+        let xml = document.package.get_part(&document.doc_part_name).unwrap();
+        let mut reader = NsReader::from_reader(xml);
+        let mut found = Vec::new();
+        loop {
+            match reader.read_event().unwrap() {
+                Event::Start(root) | Event::Empty(root) => {
+                    if !matches!(reader.resolver().resolve_element(root.name()).0,ResolveResult::Bound(uri)if uri.as_ref()==W_NS.as_bytes())
+                        || root.local_name().as_ref() != b"t"
+                    {
+                        continue;
+                    }
+                    for attribute in root.attributes() {
+                        let attribute = attribute.unwrap();
+                        if attribute.key.local_name().as_ref() != b"unknown" {
+                            continue;
+                        }
+                        let ns = match reader.resolver().resolve_attribute(attribute.key).0 {
+                            ResolveResult::Bound(uri) => {
+                                String::from_utf8_lossy(uri.as_ref()).into_owned()
+                            }
+                            other => format!("{other:?}"),
+                        };
+                        found.push((
+                            ns,
+                            attribute
+                                .decoded_and_normalized_value(
+                                    XmlVersion::Implicit1_0,
+                                    root.decoder(),
+                                )
+                                .unwrap()
+                                .into_owned(),
+                        ));
+                    }
+                }
+                Event::Eof => return found,
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn issue425_mixed_textbox_projection_keeps_unchanged_lexical_owners() {
+        use super::*;
+        let mut failures = Vec::new();
+        for representation in ["vml", "direct", "selected"] {
+            for operation in ["body", "header", "another-box", "inner-body"] {
+                let observed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let make = |edited: bool| {
+                        let mixed = operation == "inner-body";
+                        let style = if edited { "i" } else { "b" };
+                        let inner = format!(
+                            "<w:p><w:r><w:rPr><w:{style}/></w:rPr><w:t>KEEP</w:t></w:r></w:p>{}",
+                            if mixed {
+                                format!(
+                                    r#"<w:p><w:r><w:t>{}</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:r><w:t>{}</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:sdt><w:sdtPr/><w:sdtContent><w:p><w:r><w:t>{}</w:t></w:r></w:p></w:sdtContent></w:sdt>"#,
+                                    if edited { "New." } else { "Old." },
+                                    if edited { "NewCell" } else { "OldCell" },
+                                    if edited { "NewControl" } else { "OldControl" }
+                                )
+                            } else {
+                                String::new()
+                            }
+                        );
+                        let document = if representation == "vml" {
+                            issue425_guard_fixture(&inner, "original")
+                        } else {
+                            issue425_anchored_policy_fixture(&inner, representation == "selected")
+                        };
+                        let xml = std::str::from_utf8(
+                            document.package.get_part(&document.doc_part_name).unwrap(),
+                        )
+                        .unwrap();
+                        let mut xml = xml.to_owned();
+                        if operation == "body" {
+                            xml = xml.replace(
+                                "Anchor.",
+                                if edited {
+                                    "AfterAnchor"
+                                } else {
+                                    "BeforeAnchor"
+                                },
+                            );
+                        }
+                        if operation == "another-box" {
+                            let second = issue425_guard_fixture(
+                                &format!(
+                                    "<w:p><w:r><w:rPr><w:{style}/></w:rPr><w:t>{}</w:t></w:r></w:p>",
+                                    if edited { "New." } else { "Old." }
+                                ),
+                                "second",
+                            );
+                            let source = second.package.get_part(&second.doc_part_name).unwrap();
+                            let body = extract_body_inner(source).unwrap();
+                            let spans =
+                                story_content_spans(body, &[("xmlns:w".into(), W_NS.into())])
+                                    .unwrap();
+                            xml = xml.replace(
+                                "<w:p><w:r><w:t>Anchor.</w:t></w:r></w:p>",
+                                &format!(
+                                    "{}<w:p><w:r><w:t>Anchor.</w:t></w:r></w:p>",
+                                    &body[spans[0].clone()]
+                                ),
+                            );
+                        }
+                        if operation == "header" {
+                            xml = xml.replace("</w:body>", &format!(r#"<w:sectPr><w:headerReference xmlns:r="{}" w:type="default" r:id="headerSource"/></w:sectPr></w:body>"#,rdocx_oxml::namespace::R_NS));
+                        }
+                        let mut package = document.package;
+                        package.set_part("/word/document.xml", xml.into_bytes());
+                        if operation == "header" {
+                            package.set_part("/word/header1.xml",format!(r#"<w:hdr xmlns:w="{W_NS}"><w:p><w:r><w:t>{}</w:t></w:r></w:p></w:hdr>"#,if edited{"HeaderNew"}else{"HeaderOld"}).into_bytes());
+                            package.content_types.add_override("/word/header1.xml","application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml");
+                            package
+                                .get_or_create_part_rels("/word/document.xml")
+                                .items
+                                .push(Relationship {
+                                    id: "headerSource".into(),
+                                    rel_type: rel_types::HEADER.into(),
+                                    target: "header1.xml".into(),
+                                    target_mode: None,
+                                });
+                        }
+                        let document = Document::from_package(package).unwrap();
+                        if operation == "header" {
+                            let selected = story_parts(&document).unwrap();
+                            assert!(
+                                selected
+                                    .iter()
+                                    .any(|story| story.kind == ComparisonStoryKind::Header
+                                        && story.part_name == "/word/header1.xml")
+                            );
+                            let xml = std::str::from_utf8(
+                                document.package.get_part(&document.doc_part_name).unwrap(),
+                            )
+                            .unwrap();
+                            assert_eq!(
+                                direct_word_element_spans(
+                                    &source_child(
+                                        xml,
+                                        direct_word_element_spans(xml, "body").unwrap()[0].clone()
+                                    )
+                                    .unwrap(),
+                                    "sectPr"
+                                )
+                                .unwrap()
+                                .len(),
+                                1
+                            );
+                            policy_diagnostic(
+                                "mixed_selected_header_topology",
+                                serde_json::json!({"representation":representation,"edited":edited,"stories":format!("{selected:?}"),"source":xml}),
+                            );
+                        }
+                        document
+                    };
+                    let mut original = make(false);
+                    let edited = make(true);
+                    let source = original.package.get_part(&original.doc_part_name).unwrap();
+                    let body = extract_body_inner(source).unwrap();
+                    let bindings = root_namespace_bindings(
+                        std::str::from_utf8(source).unwrap(),
+                        "document",
+                        &[],
+                    )
+                    .unwrap();
+                    let spans = story_content_spans(body, &bindings).unwrap();
+                    let first = body[spans[0].clone()].to_owned();
+                    let options = ComparisonOptions {
+                        ignore_formatting: true,
+                        ..Default::default()
+                    };
+                    if let Err(error) = original.compare_with_options(
+                        &edited,
+                        "Policy",
+                        "2026-10-01T12:00:00Z",
+                        &options,
+                    ) {
+                        failures.push(format!("{representation}/{operation}: {error}"));
+                        return;
+                    }
+                    if operation != "header" {
+                        assert!(
+                            !original.revisions().is_empty(),
+                            "{representation}/{operation}: real edit must publish"
+                        );
+                    }
+                    let tracked = original.to_bytes().unwrap();
+                    if operation == "header" {
+                        let saved = Document::from_bytes(&tracked).unwrap();
+                        assert!(saved.revisions().is_empty());
+                        let inventory = saved.story_revisions().unwrap();
+                        let policy = inventory
+                            .iter()
+                            .filter(|revision| revision.author() == "Policy")
+                            .collect::<Vec<_>>();
+                        assert_eq!(
+                            policy.len(),
+                            2,
+                            "{representation}/{operation}: {inventory:?}"
+                        );
+                        assert!(
+                            policy
+                                .iter()
+                                .all(|revision| revision.story().kind() == StoryKind::Header
+                                    && revision.story().part_name() == "/word/header1.xml")
+                        );
+                        assert_ne!(policy[0].id(), policy[1].id());
+                        assert!(
+                            policy.iter().any(|revision| revision.kind()
+                                == crate::revision::RevisionKind::Insertion)
+                        );
+                        assert!(
+                            policy.iter().any(|revision| revision.kind()
+                                == crate::revision::RevisionKind::Deletion)
+                        );
+                        policy_diagnostic(
+                            "destination_saved_header_inventory",
+                            serde_json::json!({"representation":representation,"inventory":format!("{inventory:?}"),"header_xml":String::from_utf8_lossy(saved.package.get_part("/word/header1.xml").unwrap())}),
+                        );
+                    }
+                    let tracked_xml = std::str::from_utf8(
+                        original.package.get_part(&original.doc_part_name).unwrap(),
+                    )
+                    .unwrap();
+                    if operation != "inner-body" {
+                        assert!(
+                            tracked_xml.contains(&first),
+                            "{representation}/{operation}: unchanged first owner changed: {tracked_xml}"
+                        );
+                    } else {
+                        assert!(tracked_xml.contains(
+                            "<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>KEEP</w:t></w:r></w:p>"
+                        ));
+                    }
+                    for accept in [true, false] {
+                        let mut resolved = Document::from_bytes(&tracked).unwrap();
+                        if accept {
+                            resolved.accept_revisions_by_author("Policy").unwrap();
+                        } else {
+                            resolved.reject_revisions_by_author("Policy").unwrap();
+                        }
+                        let reopened = Document::from_bytes(&resolved.to_bytes().unwrap()).unwrap();
+                        assert!(reopened.revisions().is_empty());
+                        if operation == "header" {
+                            let inventory = reopened.story_revisions().unwrap();
+                            assert!(
+                                inventory
+                                    .iter()
+                                    .all(|revision| revision.author() != "Policy")
+                            );
+                            policy_diagnostic(
+                                "destination_saved_header_resolved",
+                                serde_json::json!({"representation":representation,"accept":accept,"inventory":format!("{inventory:?}"),"header_xml":String::from_utf8_lossy(reopened.package.get_part("/word/header1.xml").unwrap())}),
+                            );
+                        }
+                        let xml = std::str::from_utf8(
+                            reopened.package.get_part(&reopened.doc_part_name).unwrap(),
+                        )
+                        .unwrap();
+                        assert!(xml.contains(">KEEP<"));
+                        assert!(xml.contains("<w:b"));
+                        assert!(!xml.contains("<w:i/"));
+                        match operation {
+                            "body" => assert!(xml.contains(if accept {
+                                "AfterAnchor"
+                            } else {
+                                "BeforeAnchor"
+                            })),
+                            "header" => assert!(
+                                std::str::from_utf8(
+                                    reopened.package.get_part("/word/header1.xml").unwrap()
+                                )
+                                .unwrap()
+                                .contains(if accept {
+                                    "HeaderNew"
+                                } else {
+                                    "HeaderOld"
+                                })
+                            ),
+                            "another-box" => assert!(xml.contains(if accept {
+                                ">New.</w:t>"
+                            } else {
+                                ">Old.</w:t>"
+                            })),
+                            "inner-body" => {
+                                for label in if accept {
+                                    ["New.", "NewCell", "NewControl"]
+                                } else {
+                                    ["Old.", "OldCell", "OldControl"]
+                                } {
+                                    assert!(
+                                        xml.contains(label),
+                                        "{representation}/{operation}: {xml}"
+                                    );
+                                }
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                }));
+                policy_diagnostic(
+                    "mixed_case_outcome",
+                    serde_json::json!({"representation":representation,"operation":operation,"assertions_completed":observed.is_ok()}),
+                );
+                if observed.is_err() {
+                    failures.push(format!("{representation}/{operation}: assertion failure, remaining resolutions in this case may be unrun"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn issue425_mapped_content_metadata_survives_or_refuses_ambiguity_atomically() {
+        use super::*;
+        let mut failures = Vec::new();
+        for changed_text in [false, true] {
+            for alias in ["canonical", "alias", "default"] {
+                for repeated in [false, true] {
+                    for attribute in ["w:unknown", "x:unknown"] {
+                        for granularity in [
+                            ComparisonGranularity::Run,
+                            ComparisonGranularity::Word,
+                            ComparisonGranularity::Character,
+                        ] {
+                            for changed_metadata in [false, true] {
+                                let make = |edited: bool| {
+                                    let style = if edited { "i" } else { "b" };
+                                    let value = if edited && changed_metadata {
+                                        "after"
+                                    } else {
+                                        "before"
+                                    };
+                                    let text = if edited && changed_text {
+                                        "New words."
+                                    } else {
+                                        "Old words."
+                                    };
+                                    let inner = format!(
+                                        r#"<w:p><w:r><w:rPr><w:{style}/></w:rPr><w:t xmlns:x="urn:opaque" {attribute}="{value}">{text}</w:t></w:r></w:p>"#
+                                    );
+                                    let inner = if repeated {
+                                        inner.replace("</w:p>",&format!(r#"<w:r><w:rPr><w:{style}/></w:rPr><w:t xmlns:x="urn:opaque" {attribute}="second">Old words.</w:t></w:r></w:p>"#))
+                                    } else {
+                                        inner
+                                    };
+                                    let document = issue425_guard_fixture(&inner, "original");
+                                    if alias == "canonical" {
+                                        return document;
+                                    }
+                                    let source = std::str::from_utf8(
+                                        document.package.get_part(&document.doc_part_name).unwrap(),
+                                    )
+                                    .unwrap();
+                                    let mut source = source
+                                        .replace(
+                                            &format!(r#"xmlns:w="{W_NS}""#),
+                                            &format!(r#"xmlns:q="{W_NS}" xmlns:w="urn:producer""#),
+                                        )
+                                        .replace("<w:", "<q:")
+                                        .replace("</w:", "</q:");
+                                    if attribute == "w:unknown" {
+                                        source = source.replace("w:unknown=", "q:unknown=");
+                                    }
+                                    if alias == "default" {
+                                        source = source
+                                            .replace(
+                                                &format!(r#"xmlns:q="{W_NS}""#),
+                                                &format!(r#"xmlns:q="{W_NS}" xmlns="{W_NS}""#),
+                                            )
+                                            .replace("<q:", "<")
+                                            .replace("</q:", "</");
+                                    }
+                                    let mut package = document.package;
+                                    package.set_part("/word/document.xml", source.into_bytes());
+                                    Document::from_package(package).unwrap()
+                                };
+                                let mut original = make(false);
+                                let edited = make(true);
+                                let before = original.to_bytes().unwrap();
+                                let options = ComparisonOptions {
+                                    ignore_formatting: true,
+                                    granularity,
+                                    ..Default::default()
+                                };
+                                let result = original.compare_with_options(
+                                    &edited,
+                                    "Policy",
+                                    "2026-10-01T12:00:00Z",
+                                    &options,
+                                );
+                                if let Err(error) = result {
+                                    assert_eq!(original.to_bytes().unwrap(), before);
+                                    assert!(
+                                        error.to_string().contains("body/paragraph")
+                                            || error.to_string().contains("body story item"),
+                                        "{error}"
+                                    );
+                                    if granularity == ComparisonGranularity::Run
+                                        && !changed_metadata
+                                    {
+                                        failures.push(format!(
+                                "mapped unchanged metadata must survive: {attribute}: {error}"
+                            ));
+                                    }
+                                    continue;
+                                }
+                                if !changed_text && !changed_metadata {
+                                    assert!(original.revisions().is_empty());
+                                    assert_eq!(
+                                        original.to_bytes().unwrap(),
+                                        before,
+                                        "known unchanged metadata must retain source"
+                                    );
+                                }
+                                let tracked = original.to_bytes().unwrap();
+                                if changed_text
+                                    && alias == "canonical"
+                                    && !repeated
+                                    && attribute == "w:unknown"
+                                    && granularity == ComparisonGranularity::Word
+                                    && !changed_metadata
+                                {
+                                    let mut rejected = Document::from_bytes(&tracked).unwrap();
+                                    rejected.reject_all().unwrap();
+                                    let reopened =
+                                        Document::from_bytes(&rejected.to_bytes().unwrap())
+                                            .unwrap();
+                                    occurrence_fixture_artifact(
+                                        &reopened,
+                                        "mapped-independent-rejected",
+                                    );
+                                    policy_diagnostic(
+                                        "occurrence_mapped_rejection",
+                                        serde_json::json!({"inventory":policy3_text_metadata_inventory(&reopened),"xml":String::from_utf8_lossy(reopened.package.get_part(&reopened.doc_part_name).unwrap())}),
+                                    );
+                                }
+                                for accept in [true, false] {
+                                    let mut resolved = Document::from_bytes(&tracked).unwrap();
+                                    if accept {
+                                        resolved.accept_all().unwrap();
+                                    } else {
+                                        resolved.reject_all().unwrap();
+                                    }
+                                    let reopened =
+                                        Document::from_bytes(&resolved.to_bytes().unwrap())
+                                            .unwrap();
+                                    let inventory = policy3_text_metadata_inventory(&reopened);
+                                    let expected = if accept && changed_metadata {
+                                        "after"
+                                    } else {
+                                        "before"
+                                    };
+                                    let namespace = if attribute.starts_with("w:") {
+                                        W_NS
+                                    } else {
+                                        "urn:opaque"
+                                    };
+                                    let mut expected_inventory =
+                                        vec![(namespace.to_owned(), expected.to_owned())];
+                                    if repeated {
+                                        expected_inventory
+                                            .push((namespace.to_owned(), "second".into()));
+                                    }
+                                    if changed_text
+                                        && alias == "canonical"
+                                        && !repeated
+                                        && attribute == "w:unknown"
+                                        && granularity == ComparisonGranularity::Word
+                                        && !changed_metadata
+                                    {
+                                        occurrence_fixture_artifact(
+                                            &reopened,
+                                            if accept {
+                                                "mapped-accepted-reopened"
+                                            } else {
+                                                "mapped-rejected-reopened"
+                                            },
+                                        );
+                                        policy_diagnostic(
+                                            "occurrence_mapped_resolution",
+                                            serde_json::json!({"accept":accept,"inventory":inventory,"xml":String::from_utf8_lossy(reopened.package.get_part(&reopened.doc_part_name).unwrap())}),
+                                        );
+                                    }
+                                    assert_eq!(
+                                        inventory, expected_inventory,
+                                        "{alias} repeated={repeated} {attribute} {granularity:?} accept={accept}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+    #[test]
+    fn issue425_physical_related_graphs_keep_direct_selected_and_nested_owners() {
+        use super::*;
+        let options = ComparisonOptions {
+            ignore_formatting: true,
+            ..Default::default()
+        };
+        for (part, kind, relationship, content_type) in [
+            (
+                "/word/header1.xml",
+                ComparisonStoryKind::Header,
+                rel_types::HEADER,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+            ),
+            (
+                "/word/footer1.xml",
+                ComparisonStoryKind::Footer,
+                rel_types::FOOTER,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml",
+            ),
+            (
+                "/word/footnotes.xml",
+                ComparisonStoryKind::Footnote,
+                rel_types::FOOTNOTES,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml",
+            ),
+            (
+                "/word/endnotes.xml",
+                ComparisonStoryKind::Endnote,
+                rel_types::ENDNOTES,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml",
+            ),
+            (
+                "/word/comments.xml",
+                ComparisonStoryKind::Comment,
+                rel_types::COMMENTS,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml",
+            ),
+        ] {
+            for representation in ["vml", "direct", "selected"] {
+                let make = |suffix: &str, image: &[u8], chart: &str, link: &str| {
+                    let image_id = format!("image{suffix}");
+                    let chart_id = format!("chart{suffix}");
+                    let link_id = format!("link{suffix}");
+                    let inner = format!(
+                        r#"<w:p><w:hyperlink xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="{link_id}"><w:r><w:t>Link</w:t></w:r></w:hyperlink><w:r><w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:inline><wp:extent cx="100" cy="200"/><wp:docPr id="9" name="Image"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="{image_id}"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r><w:r><w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:inline><wp:extent cx="200" cy="200"/><wp:docPr id="10" name="Chart"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="{chart_id}"/></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>"#
+                    );
+                    let mut document = if representation == "vml" {
+                        issue425_guard_fixture(&inner, "original")
+                    } else {
+                        issue425_anchored_policy_fixture(&inner, representation == "selected")
+                    };
+                    let source = document.package.get_part(&document.doc_part_name).unwrap();
+                    let body = extract_body_inner(source).unwrap();
+                    let bindings = root_namespace_bindings(
+                        std::str::from_utf8(source).unwrap(),
+                        "document",
+                        &[],
+                    )
+                    .unwrap();
+                    let owner = if let Some(local) = kind.owner_local() {
+                        format!(r#"<w:{local} w:id="1" w:author="Source">{body}</w:{local}>"#)
+                    } else {
+                        body.to_owned()
+                    };
+                    let mut writer = Writer::new(Vec::new());
+                    let root = format!("w:{}", kind.root_local());
+                    let mut opening = BytesStart::new(root.as_str());
+                    for (key, value) in &bindings {
+                        opening.push_attribute((key.as_str(), value.as_str()));
+                    }
+                    writer.write_event(Event::Start(opening)).unwrap();
+                    writer.get_mut().extend_from_slice(owner.as_bytes());
+                    writer
+                        .write_event(Event::End(BytesEnd::new(root.as_str())))
+                        .unwrap();
+                    document.package.set_part(part, writer.into_inner());
+                    document
+                        .package
+                        .content_types
+                        .add_override(part, content_type);
+                    document
+                        .package
+                        .get_or_create_part_rels(&document.doc_part_name)
+                        .items
+                        .push(Relationship {
+                            id: "actualOwner".into(),
+                            rel_type: relationship.into(),
+                            target: part.trim_start_matches("/word/").into(),
+                            target_mode: None,
+                        });
+                    let mut rels = oxml_opc::relationship::Relationships::new();
+                    for (id, rel_type, target, target_mode) in [
+                        (&image_id, rel_types::IMAGE, "media/actual.bin", None),
+                        (&chart_id, rel_types::CHART, "charts/actual.xml", None),
+                        (
+                            &link_id,
+                            rel_types::HYPERLINK,
+                            link,
+                            Some("External".to_owned()),
+                        ),
+                    ] {
+                        rels.items.push(Relationship {
+                            id: id.clone(),
+                            rel_type: rel_type.into(),
+                            target: target.into(),
+                            target_mode,
+                        });
+                        document
+                            .package
+                            .get_or_create_part_rels(&document.doc_part_name)
+                            .items
+                            .push(Relationship {
+                                id: id.clone(),
+                                rel_type: rel_type.into(),
+                                target: if rel_type == rel_types::HYPERLINK {
+                                    "https://main-decoy.invalid/".into()
+                                } else if rel_type == rel_types::IMAGE {
+                                    "media/decoy.bin".into()
+                                } else {
+                                    "charts/decoy.xml".into()
+                                },
+                                target_mode: if rel_type == rel_types::HYPERLINK {
+                                    Some("External".into())
+                                } else {
+                                    None
+                                },
+                            });
+                    }
+                    document.package.set_part_rels(part, rels);
+                    document
+                        .package
+                        .set_part("/word/media/actual.bin", image.to_vec());
+                    document
+                        .package
+                        .set_part("/word/media/decoy.bin", b"main image decoy".to_vec());
+                    document.package.set_part("/word/charts/actual.xml",format!(r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:title>{chart}</c:title></c:chart></c:chartSpace>"#).into_bytes());
+                    document
+                        .package
+                        .set_part("/word/charts/decoy.xml", b"<mainDecoy/>".to_vec());
+                    document
+                        .package
+                        .content_types
+                        .add_override("/word/media/actual.bin", "application/octet-stream");
+                    document
+                        .package
+                        .content_types
+                        .add_override("/word/media/decoy.bin", "application/octet-stream");
+                    for path in ["/word/charts/actual.xml", "/word/charts/decoy.xml"] {
+                        document.package.content_types.add_override(
+                            path,
+                            "application/vnd.openxmlformats-officedocument.drawingml.chart+xml",
+                        );
+                    }
+                    let mut document = Document::from_package(document.package).unwrap();
+                    Document::from_bytes(&document.to_bytes().unwrap()).unwrap()
+                };
+                let identity = |suffix: &str, image: &[u8], chart: &str, link: &str| {
+                    let document = make(suffix, image, chart, link);
+                    let source = document.package.get_part(part).unwrap();
+                    guard_story_part(&document, part, source, kind, &options, None).unwrap()
+                };
+                let baseline =
+                    identity("1", b"actual pixels", "chart same", "https://same.invalid/");
+                assert_eq!(
+                    baseline,
+                    identity(
+                        "99",
+                        b"actual pixels",
+                        "chart same",
+                        "https://same.invalid/"
+                    ),
+                    "{part}/{representation}: equivalent actual graph"
+                );
+                assert_ne!(
+                    baseline,
+                    identity(
+                        "1",
+                        b"changed pixels",
+                        "chart same",
+                        "https://same.invalid/"
+                    ),
+                    "{part}/{representation}: changed image"
+                );
+                assert_ne!(
+                    baseline,
+                    identity(
+                        "1",
+                        b"actual pixels",
+                        "chart changed",
+                        "https://same.invalid/"
+                    ),
+                    "{part}/{representation}: changed chart"
+                );
+                assert_ne!(
+                    baseline,
+                    identity(
+                        "1",
+                        b"actual pixels",
+                        "chart same",
+                        "https://changed.invalid/"
+                    ),
+                    "{part}/{representation}: changed hyperlink"
+                );
+            }
+        }
+    }
+    fn destination_diagnostic_document(body: &str, namespace: &str) -> Document {
+        use super::*;
+        let mut source = format!(
+            r#"<w:document xmlns:w="{W_NS}" xmlns:x="urn:producer"><w:body>{body}</w:body></w:document>"#
+        );
+        if namespace != "canonical" {
+            source = source
+                .replace(
+                    &format!(r#"xmlns:w="{W_NS}""#),
+                    &format!(r#"xmlns:q="{W_NS}" xmlns:w="urn:producer""#),
+                )
+                .replace("<w:", "<q:")
+                .replace("</w:", "</q:")
+                .replace(" w:", " q:");
+            source = source.replace("x:note=", "w:note=");
+            if namespace == "default" {
+                source = source
+                    .replace(
+                        &format!(r#"xmlns:q="{W_NS}""#),
+                        &format!(r#"xmlns:q="{W_NS}" xmlns="{W_NS}""#),
+                    )
+                    .replace("<q:", "<")
+                    .replace("</q:", "</");
+            }
+            if namespace == "local-shadow" {
+                source = source
+                    .replace(r#"xmlns:w="urn:producer""#, &format!(r#"xmlns:w="{W_NS}""#))
+                    .replace("<q:p>", r#"<q:p xmlns:w="urn:producer">"#);
+            }
+        }
+        let mut document = Document::new();
+        document
+            .package
+            .set_part(&document.doc_part_name, source.into_bytes());
+        Document::from_package(document.package).unwrap()
+    }
+
+    #[test]
+    fn issue425_ordinary_field_result_and_conversion_source_contract() {
+        use super::*;
+        let field = |instruction: &str, value: &str, property: &str| {
+            format!(
+                r#"<w:fldSimple w:instr=" {instruction} &amp; &quot;x&quot; " w:dirty="false" w:fldLock="0"><w:fldData>QUJD</w:fldData><w:r><w:rPr><w:{property}/></w:rPr><w:t x:note="exact">{value}</w:t></w:r></w:fldSimple>"#
+            )
+        };
+        for namespace in ["canonical", "alias", "default", "local-shadow"] {
+            for owner in ["paragraph", "control", "table", "header"] {
+                for converted in [false, true] {
+                    for ignore_formatting in [false, true] {
+                        let body = |field: String| match owner {
+                            "control" => format!(
+                                "<w:p><w:sdt><w:sdtPr/><w:sdtContent>{field}</w:sdtContent></w:sdt></w:p>"
+                            ),
+                            "table" => format!(
+                                "<w:tbl><w:tblPr/><w:tblGrid/><w:tr><w:tc><w:tcPr/><w:p>{field}</w:p></w:tc></w:tr></w:tbl>"
+                            ),
+                            _ => format!("<w:p>{field}</w:p>"),
+                        };
+                        let make = |body: String| {
+                            let document = destination_diagnostic_document(&body, namespace);
+                            if owner != "header" {
+                                return document;
+                            }
+                            let raw = document.package.get_part(&document.doc_part_name).unwrap();
+                            let source = std::str::from_utf8(raw).unwrap();
+                            let (_, scope) = main_body_source(raw).unwrap();
+                            let prefix = scope
+                                .iter()
+                                .find(|(name, uri)| name.starts_with("xmlns:") && uri == W_NS)
+                                .unwrap()
+                                .0
+                                .strip_prefix("xmlns:")
+                                .unwrap();
+                            let mut root = BytesStart::new(format!("{prefix}:hdr"));
+                            for (name, uri) in &scope {
+                                root.push_attribute((name.as_str(), uri.as_str()));
+                            }
+                            let mut writer = Writer::new(Vec::new());
+                            writer.write_event(Event::Start(root)).unwrap();
+                            writer.get_mut().extend_from_slice(
+                                extract_body_inner(source.as_bytes()).unwrap().as_bytes(),
+                            );
+                            writer
+                                .write_event(Event::End(quick_xml::events::BytesEnd::new(format!(
+                                    "{prefix}:hdr"
+                                ))))
+                                .unwrap();
+                            let mut package = document.package.clone();
+                            package.set_part("/word/header1.xml", writer.into_inner());
+                            package.content_types.add_override("/word/header1.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml");
+                            package
+                                .get_or_create_part_rels(&document.doc_part_name)
+                                .add_with_id("fieldHeader", rel_types::HEADER, "header1.xml");
+                            package.set_part(&document.doc_part_name, format!(r#"<w:document xmlns:w="{W_NS}"><w:body><w:p/><w:sectPr><w:headerReference xmlns:r="{}" w:type="default" r:id="fieldHeader"/></w:sectPr></w:body></w:document>"#, rdocx_oxml::namespace::R_NS).into_bytes());
+                            Document::from_package(package).unwrap()
+                        };
+                        let mut original = make(body(field("DATE", "old", "b")));
+                        let edited = make(body(field(
+                            if converted { "TIME" } else { "DATE" },
+                            "new",
+                            "i",
+                        )));
+                        let original_input = original.clone_for_staging();
+                        let options = ComparisonOptions {
+                            ignore_formatting,
+                            ..Default::default()
+                        };
+                        original
+                            .compare_with_options(
+                                &edited,
+                                "Field",
+                                "2026-10-01T12:00:00Z",
+                                &options,
+                            )
+                            .unwrap_or_else(|error| panic!(
+                                "{namespace}/{owner}/converted={converted}/ignore_formatting={ignore_formatting}: {error}"
+                            ));
+                        let revisions = original.story_revisions().unwrap();
+                        assert_eq!(
+                            revisions.len(),
+                            2,
+                            "{namespace}/{owner}/{converted}/{ignore_formatting}"
+                        );
+                        let ids = revisions
+                            .iter()
+                            .map(|revision| revision.id())
+                            .collect::<Vec<_>>();
+                        assert_ne!(ids[0], ids[1]);
+                        let tracked = original.to_bytes().unwrap();
+                        for accept in [false, true] {
+                            for selection in ["all", "author", "date"] {
+                                let mut resolved = Document::from_bytes(&tracked).unwrap();
+                                let count = match (accept, selection) {
+                                    (true, "all") => resolved.accept_all(),
+                                    (false, "all") => resolved.reject_all(),
+                                    (true, "author") => {
+                                        resolved.accept_revisions_by_author("Field")
+                                    }
+                                    (false, "author") => {
+                                        resolved.reject_revisions_by_author("Field")
+                                    }
+                                    (true, _) => resolved.accept_revisions_in_date_range(
+                                        "2026-10-01T12:00:00Z",
+                                        "2026-10-01T12:00:00Z",
+                                    ),
+                                    (false, _) => resolved.reject_revisions_in_date_range(
+                                        "2026-10-01T12:00:00Z",
+                                        "2026-10-01T12:00:00Z",
+                                    ),
+                                }
+                                .unwrap();
+                                assert_eq!(count, 2);
+                                let reopened =
+                                    Document::from_bytes(&resolved.to_bytes().unwrap()).unwrap();
+                                assert!(reopened.story_revisions().unwrap().is_empty());
+                                let markers = TextBoxMarkers::default();
+                                let actual = normalized_package(
+                                    &reopened,
+                                    &story_parts_with_options(&reopened, &options).unwrap(),
+                                    &options,
+                                    &markers,
+                                )
+                                .unwrap();
+                                let wanted = normalized_package(
+                                    if accept { &edited } else { &original_input },
+                                    &story_parts_with_options(
+                                        if accept { &edited } else { &original_input },
+                                        &options,
+                                    )
+                                    .unwrap(),
+                                    &options,
+                                    &markers,
+                                )
+                                .unwrap();
+                                let actual_fields = actual
+                                    .0
+                                    .iter()
+                                    .chain(actual.1.iter().flat_map(|(_, _, items)| items))
+                                    .flat_map(|item| &item.fields)
+                                    .collect::<Vec<_>>();
+                                let wanted_fields = wanted
+                                    .0
+                                    .iter()
+                                    .chain(wanted.1.iter().flat_map(|(_, _, items)| items))
+                                    .flat_map(|item| &item.fields)
+                                    .collect::<Vec<_>>();
+                                assert_eq!(actual_fields.len(), 1);
+                                assert_eq!(wanted_fields.len(), 1);
+                                let mut expected = wanted_fields[0].clone();
+                                expected.complex = converted;
+                                assert_eq!(*actual_fields[0], expected);
+                                let source = std::str::from_utf8(
+                                    reopened
+                                        .package
+                                        .get_part(if owner == "header" {
+                                            "/word/header1.xml"
+                                        } else {
+                                            &reopened.doc_part_name
+                                        })
+                                        .unwrap(),
+                                )
+                                .unwrap();
+                                assert!(source.contains(":dirty=\"false\""));
+                                assert!(source.contains(":fldLock=\"0\""));
+                                assert!(source.contains("QUJD"));
+                                assert!(source.contains("note=\"exact\""));
+                            }
+                        }
+                        for id in ids {
+                            for accept in [false, true] {
+                                let mut selected = Document::from_bytes(&tracked).unwrap();
+                                assert_eq!(
+                                    if accept {
+                                        selected.accept_revision_id(id)
+                                    } else {
+                                        selected.reject_revision_id(id)
+                                    }
+                                    .unwrap(),
+                                    1
+                                );
+                                let reopened =
+                                    Document::from_bytes(&selected.to_bytes().unwrap()).unwrap();
+                                assert_eq!(reopened.story_revisions().unwrap().len(), 1);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for controlled in [false, true] {
+            for ignore_formatting in [false, true] {
+                let make = |instruction: &str| {
+                    let child = format!(
+                        r#"<w:fldSimple w:instr="{instruction}" w:dirty="off"><w:fldData>QUJD</w:fldData><w:r><w:t>child</w:t></w:r></w:fldSimple>"#
+                    );
+                    let child = if controlled {
+                        format!("<w:sdt><w:sdtPr/><w:sdtContent>{child}</w:sdtContent></w:sdt>")
+                    } else {
+                        child
+                    };
+                    destination_diagnostic_document(
+                        &format!(
+                            r#"<w:p><w:fldSimple w:instr="QUOTE" x:parent="exact"><w:r><w:t>before</w:t></w:r>{child}<w:r><w:t>after</w:t></w:r></w:fldSimple></w:p>"#
+                        ),
+                        "canonical",
+                    )
+                };
+                let mut compared = make("DATE");
+                let edited = make("TIME");
+                let options = ComparisonOptions {
+                    ignore_formatting,
+                    ..Default::default()
+                };
+                compared
+                    .compare_with_options(&edited, "Nested", "2026-10-01T12:00:00Z", &options)
+                    .unwrap();
+                assert_eq!(compared.story_revisions().unwrap().len(), 2);
+                let tracked = compared.to_bytes().unwrap();
+                for accept in [false, true] {
+                    let mut resolved = Document::from_bytes(&tracked).unwrap();
+                    assert_eq!(
+                        if accept {
+                            resolved.accept_revisions_by_author("Nested")
+                        } else {
+                            resolved.reject_revisions_by_author("Nested")
+                        }
+                        .unwrap(),
+                        2
+                    );
+                    let reopened = Document::from_bytes(&resolved.to_bytes().unwrap()).unwrap();
+                    let package =
+                        normalized_package(&reopened, &[], &options, &TextBoxMarkers::default())
+                            .unwrap();
+                    let fields = package
+                        .0
+                        .iter()
+                        .flat_map(|item| &item.fields)
+                        .collect::<Vec<_>>();
+                    assert_eq!(fields.len(), 1);
+                    assert!(
+                        !fields[0].complex,
+                        "the unchanged outer owner retains its actual simple form"
+                    );
+                    assert_eq!(fields[0].instruction.name, "QUOTE");
+                    assert_eq!(fields[0].cached, "beforechildafter");
+                    assert_eq!(fields[0].result_fields.len(), 1);
+                    let child = &fields[0].result_fields[0];
+                    assert!(child.complex);
+                    assert_eq!(child.instruction.name, if accept { "TIME" } else { "DATE" });
+                    assert_eq!(child.cached, "child");
+                    assert_eq!(child.dirty, Some(false));
+                    let source = std::str::from_utf8(
+                        reopened.package.get_part(&reopened.doc_part_name).unwrap(),
+                    )
+                    .unwrap();
+                    assert!(source.contains("x:parent=\"exact\""));
+                    assert!(source.contains("<w:t>before</w:t>"));
+                    assert!(source.contains("<w:t>after</w:t>"));
+                    assert!(source.contains("dirty=\"off\""));
+                    assert_eq!(source.matches("QUJD").count(), 1);
+                }
+            }
+        }
+        // Outer deletion authority stops at actual nested Field owners.
+        let scope = vec![("xmlns:w".into(), W_NS.into())];
+        let complex = |instruction: &str, result: &str| {
+            format!(
+                "<w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText>{instruction}</w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r>{result}<w:r><w:fldChar w:fldCharType=\"end\"/></w:r>"
+            )
+        };
+        let nested = complex("NESTED", "<w:r><w:t>nested-cache</w:t></w:r>");
+        let simple = "<w:sdt><w:sdtPr/><w:sdtContent><w:fldSimple w:instr=\"DATE\"><w:r><w:t>simple-cache</w:t></w:r></w:fldSimple></w:sdtContent></w:sdt>";
+        let source = complex(
+            "OUTER",
+            &format!("<w:r><w:t>outer-cache</w:t></w:r>{nested}{simple}"),
+        );
+        let deleted =
+            qualified_complete_field_payload(&source, &scope, true, false, true, &mut 0).unwrap();
+        assert!(deleted.contains("<w:delInstrText>OUTER</w:delInstrText>"));
+        assert!(deleted.contains("<w:delText>outer-cache</w:delText>"));
+        assert!(deleted.contains("<w:instrText>NESTED</w:instrText>"));
+        assert!(deleted.contains("<w:t>nested-cache</w:t>"));
+        assert!(deleted.contains("<w:t>simple-cache</w:t>"));
+    }
+
+    #[test]
+    fn issue425_ordinary_field_form_delta_precedes_equality() {
+        use super::*;
+        let simple = "<w:fldSimple w:instr=\"DATE\"><w:r><w:t>same</w:t></w:r></w:fldSimple>";
+        let complex = "<w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText>DATE</w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>same</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r>";
+        for reverse in [false, true] {
+            for control in [false, true] {
+                for ignore_formatting in [false, true] {
+                    let make = |source: &str| {
+                        destination_diagnostic_document(
+                            &if control {
+                                format!(
+                                    "<w:p><w:sdt><w:sdtPr/><w:sdtContent>{source}</w:sdtContent></w:sdt></w:p>"
+                                )
+                            } else {
+                                format!("<w:p>{source}</w:p>")
+                            },
+                            "canonical",
+                        )
+                    };
+                    let left = if reverse { complex } else { simple };
+                    let right = if reverse { simple } else { complex };
+                    let mut original = make(left);
+                    let edited = make(right);
+                    if !control {
+                        let BodyContent::Paragraph(a) = &original.document.body.content[0] else {
+                            unreachable!()
+                        };
+                        let BodyContent::Paragraph(b) = &edited.document.body.content[0] else {
+                            unreachable!()
+                        };
+                        assert_eq!(
+                            run_field(&a.runs[0]),
+                            run_field(&b.runs[0]),
+                            "global Field equality keeps its form-insensitive compatibility"
+                        );
+                    }
+                    let options = ComparisonOptions {
+                        ignore_formatting,
+                        ..Default::default()
+                    };
+                    original
+                        .compare_with_options(&edited, "Form", "2026-10-01T12:00:00Z", &options)
+                        .unwrap();
+                    assert_eq!(
+                        original.story_revisions().unwrap().len(),
+                        2,
+                        "actual form-only edit must not disappear through equality"
+                    );
+                    let tracked = original.to_bytes().unwrap();
+                    for accept in [false, true] {
+                        let mut resolved = Document::from_bytes(&tracked).unwrap();
+                        assert_eq!(
+                            if accept {
+                                resolved.accept_revisions_by_author("Form")
+                            } else {
+                                resolved.reject_revisions_by_author("Form")
+                            }
+                            .unwrap(),
+                            2
+                        );
+                        let reopened = Document::from_bytes(&resolved.to_bytes().unwrap()).unwrap();
+                        let package = normalized_package(
+                            &reopened,
+                            &[],
+                            &options,
+                            &TextBoxMarkers::default(),
+                        )
+                        .unwrap();
+                        let fields = package
+                            .0
+                            .iter()
+                            .flat_map(|item| &item.fields)
+                            .collect::<Vec<_>>();
+                        assert_eq!(fields.len(), 1);
+                        assert!(fields[0].complex);
+                        assert_eq!(fields[0].instruction.name, "DATE");
+                        assert_eq!(fields[0].cached, "same");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn issue425_ordered_field_guards_reject_unwitnessed_facts() {
+        use super::*;
+        for ignore_formatting in [false, true] {
+            let make = |instruction: &str, value: &str| {
+                destination_diagnostic_document(
+                    &format!(
+                        r#"<w:p><w:fldSimple w:instr="{instruction}" w:dirty="false" w:fldLock="0"><w:fldData>QUJD</w:fldData><w:r><w:t x:note="exact">{value}</w:t></w:r></w:fldSimple></w:p>"#
+                    ),
+                    "canonical",
+                )
+            };
+            let original = make("DATE", "old");
+            let edited = make("TIME", "new");
+            let options = ComparisonOptions {
+                ignore_formatting,
+                ..Default::default()
+            };
+            for payload in [
+                r#"<x:opaque><w:rPr><w:color w:val="111111"/></w:rPr></x:opaque>"#,
+                r#"<w:opaque><w:pPr><w:keepNext/></w:pPr></w:opaque>"#,
+                r#"<w:fldData><w:rPr><w:color w:val="111111"/></w:rPr></w:fldData>"#,
+            ] {
+                for control in [false, true] {
+                    let make_opaque = |payload: &str| {
+                        let field = format!(
+                            r#"<w:fldSimple w:instr="DATE"><w:r><w:t>cache</w:t></w:r>{payload}</w:fldSimple>"#
+                        );
+                        let content = if control {
+                            format!("<w:sdt><w:sdtPr/><w:sdtContent>{field}</w:sdtContent></w:sdt>")
+                        } else {
+                            field
+                        };
+                        destination_diagnostic_document(
+                            &format!("<w:p>{content}</w:p>"),
+                            "canonical",
+                        )
+                    };
+                    let mut current = make_opaque(payload);
+                    let changed = make_opaque(
+                        &payload
+                            .replace("111111", "222222")
+                            .replace("<w:keepNext/>", "<w:keepNext w:val=\"0\"/>"),
+                    );
+                    let markers = TextBoxMarkers::default();
+                    assert_ne!(
+                        normalized_package(&current, &[], &options, &markers).unwrap(),
+                        normalized_package(&changed, &[], &options, &markers).unwrap(),
+                        "opaque property payload must remain visible: control={control}, {payload}",
+                    );
+                    assert!(
+                        current
+                            .compare_with_options(
+                                &changed,
+                                "Opaque",
+                                "2026-10-30T11:00:00Z",
+                                &options
+                            )
+                            .is_err(),
+                        "opaque-only changes must be refused: control={control}, {payload}"
+                    );
+                }
+            }
+            let mut metadata = Metadata {
+                author: "Guard",
+                timestamp: "2026-10-01T12:00:00Z",
+                options: &options,
+                ids: IdAllocator::new(HashSet::new()),
+                existing_revisions: false,
+                source_frames: Vec::new(),
+                projected_textbox_noop: false,
+                leaf_capture: false,
+                paired_field_story: None,
+                leaf_publications: Vec::new(),
+                field_conversions: Vec::new(),
+            };
+            let left =
+                std::str::from_utf8(original.package.get_part(&original.doc_part_name).unwrap())
+                    .unwrap();
+            let right =
+                std::str::from_utf8(edited.package.get_part(&edited.doc_part_name).unwrap())
+                    .unwrap();
+            let left_body = extract_body_inner(left.as_bytes()).unwrap();
+            let right_body = extract_body_inner(right.as_bytes()).unwrap();
+            let (_, left_scope) = main_body_source(left.as_bytes()).unwrap();
+            let (_, right_scope) = main_body_source(right.as_bytes()).unwrap();
+            let left_spans = story_content_spans(left_body, &left_scope).unwrap();
+            let right_spans = story_content_spans(right_body, &right_scope).unwrap();
+            let tracked = compare_body(
+                [&original.document, &edited.document],
+                "body",
+                Some((left_body, &left_spans, &left_scope)),
+                (right_body, &right_spans, &right_scope),
+                [&HeldRevisions::default(), &HeldRevisions::default()],
+                &mut metadata,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(metadata.field_conversions.len(), 1);
+            assert_eq!(metadata.ids.used.len(), 2);
+            let mut package = original.package.clone();
+            package.set_part(&original.doc_part_name, format!(r#"<w:document xmlns:w="{W_NS}" xmlns:x="urn:producer"><w:body>{tracked}</w:body></w:document>"#).into_bytes());
+            let candidate = Document::from_package(package).unwrap();
+            let markers = TextBoxMarkers::default();
+            for role in [0usize, 1] {
+                let wanted = normalized_package(
+                    if role == 0 { &original } else { &edited },
+                    &[],
+                    &options,
+                    &markers,
+                )
+                .unwrap();
+                let mut resolved = candidate.clone_for_staging();
+                assert_eq!(
+                    if role == 0 {
+                        resolved.reject_revision_ids(&metadata.ids.used)
+                    } else {
+                        resolved.accept_revision_ids(&metadata.ids.used)
+                    }
+                    .unwrap(),
+                    2
+                );
+                let mut actual = normalized_package(&resolved, &[], &options, &markers).unwrap();
+                validate_field_conversion_role(
+                    &candidate,
+                    &mut actual,
+                    &wanted,
+                    &[],
+                    &metadata.field_conversions,
+                    role,
+                    &metadata.ids.used,
+                )
+                .unwrap();
+                assert_eq!(
+                    actual, wanted,
+                    "independent actual baseline must pass before perturbation"
+                );
+                let resolved_source = std::str::from_utf8(
+                    resolved.package.get_part(&resolved.doc_part_name).unwrap(),
+                )
+                .unwrap();
+                let value = if role == 0 { "old" } else { "new" };
+                let instruction = if role == 0 { "DATE" } else { "TIME" };
+                for (label, changed) in [
+                    (
+                        "cache",
+                        resolved_source.replace(&format!(">{value}<"), ">wrong<"),
+                    ),
+                    (
+                        "instruction",
+                        resolved_source.replace(&format!(">{instruction}<"), ">WRONG<"),
+                    ),
+                    (
+                        "lexical flag",
+                        resolved_source.replace("dirty=\"false\"", "dirty=\"0\""),
+                    ),
+                    ("data", resolved_source.replace("QUJD", "UkVG")),
+                    (
+                        "opaque result",
+                        resolved_source.replace("note=\"exact\"", "note=\"wrong\""),
+                    ),
+                    (
+                        "duplicate marker",
+                        resolved_source.replace(
+                            "<w:fldChar w:fldCharType=\"end\"/>",
+                            "<w:fldChar w:fldCharType=\"end\"/><w:fldChar w:fldCharType=\"end\"/>",
+                        ),
+                    ),
+                ] {
+                    assert_ne!(
+                        changed, resolved_source,
+                        "{label} must alter actual resolved source"
+                    );
+                    let mut package = resolved.package.clone();
+                    package.set_part(&resolved.doc_part_name, changed.into_bytes());
+                    let changed = Document::from_package(package).unwrap();
+                    let result = normalized_package(&changed, &[], &options, &markers).and_then(
+                        |mut actual| {
+                            validate_field_conversion_role(
+                                &candidate,
+                                &mut actual,
+                                &wanted,
+                                &[],
+                                &metadata.field_conversions,
+                                role,
+                                &metadata.ids.used,
+                            )?;
+                            if actual != wanted {
+                                return Err(Error::Other(
+                                    "independent guard equality differs".into(),
+                                ));
+                            }
+                            Ok(())
+                        },
+                    );
+                    assert!(
+                        result.is_err(),
+                        "{label} role={role} ignore_formatting={ignore_formatting}"
+                    );
+                }
+                for corruption in [
+                    "role",
+                    "slot",
+                    "owner",
+                    "bounds",
+                    "story",
+                    "id",
+                    "reason",
+                    "wrong form reason",
+                    "result ancestry",
+                    "duplicate",
+                ] {
+                    let mut witnesses = metadata.field_conversions.clone();
+                    let witness = &mut witnesses[0];
+                    match corruption {
+                        "role" => witness.sources[role].input_role = 1 - role,
+                        "slot" => witness.sources[role].field_slot += 1,
+                        "owner" => witness.sources[role].owner_path.push((6, 99)),
+                        "bounds" => witness.sources[role].bounds.start += 1,
+                        "story" => {
+                            witness.sources[role].story = "header:/word/unrelated.xml".into()
+                        }
+                        "id" => witness.revision_ids[role] = i32::MAX,
+                        "reason" => {
+                            witness.instruction_changed = false;
+                            witness.form_changed = false;
+                        }
+                        "result ancestry" => witness.sources[role].result_ancestors.push(0..1),
+                        "wrong form reason" => {
+                            witness.form_changed = true;
+                        }
+                        "duplicate" => witnesses.push(witnesses[0].clone()),
+                        _ => unreachable!(),
+                    }
+                    let mut actual =
+                        normalized_package(&resolved, &[], &options, &markers).unwrap();
+                    assert!(
+                        validate_field_conversion_role(
+                            &candidate,
+                            &mut actual,
+                            &wanted,
+                            &[],
+                            &witnesses,
+                            role,
+                            &metadata.ids.used
+                        )
+                        .is_err(),
+                        "{corruption} role={role}"
+                    );
+                }
+                let mut unproven = normalized_package(&resolved, &[], &options, &markers).unwrap();
+                assert!(
+                    validate_field_conversion_role(
+                        &candidate,
+                        &mut unproven,
+                        &wanted,
+                        &[],
+                        &[],
+                        role,
+                        &metadata.ids.used
+                    )
+                    .is_ok()
+                );
+                assert_ne!(
+                    unproven, wanted,
+                    "absence of a witness must retain strict representation/source equality"
+                );
+            }
+        }
+        for controlled in [false, true] {
+            for prior_revision in [false, true] {
+                for ignore_formatting in [false, true] {
+                    let child = |instruction: &str| {
+                        format!(
+                            r#"<w:fldSimple w:instr="{instruction}" w:dirty="off"><w:fldData>QUJD</w:fldData><w:r><w:t x:note="child">same</w:t></w:r></w:fldSimple>"#
+                        )
+                    };
+                    let body = |child: &str| {
+                        let owned = if controlled {
+                            format!("<w:sdt><w:sdtPr/><w:sdtContent>{child}</w:sdtContent></w:sdt>")
+                        } else {
+                            child.to_owned()
+                        };
+                        let prior = if prior_revision {
+                            "<w:ins w:id=\"70\" w:author=\"Prior\"><w:r><w:t>held</w:t></w:r></w:ins>"
+                        } else {
+                            ""
+                        };
+                        format!(
+                            r#"<w:p><w:fldSimple w:instr="QUOTE" x:parent="exact"><w:r><w:t>before</w:t></w:r>{prior}{owned}<w:r><w:t>after</w:t></w:r></w:fldSimple></w:p>"#
+                        )
+                    };
+                    let original =
+                        destination_diagnostic_document(&body(&child("DATE")), "canonical");
+                    let edited =
+                        destination_diagnostic_document(&body(&child("TIME")), "canonical");
+                    let options = ComparisonOptions {
+                        ignore_formatting,
+                        ..Default::default()
+                    };
+                    let mut metadata = Metadata {
+                        author: "NestedGuard",
+                        timestamp: "2026-10-01T12:00:00Z",
+                        options: &options,
+                        ids: IdAllocator::new(if prior_revision {
+                            HashSet::from([70])
+                        } else {
+                            HashSet::new()
+                        }),
+                        existing_revisions: prior_revision,
+                        source_frames: Vec::new(),
+                        projected_textbox_noop: false,
+                        leaf_capture: false,
+                        paired_field_story: None,
+                        leaf_publications: Vec::new(),
+                        field_conversions: Vec::new(),
+                    };
+                    let mut sources = SourceSnapshots {
+                        story: "body".into(),
+                        ..Default::default()
+                    };
+                    for (role, document) in [&original, &edited].into_iter().enumerate() {
+                        let source = document.package.get_part(&document.doc_part_name).unwrap();
+                        let content = extract_body_inner(source).unwrap();
+                        let (_, bindings) = main_body_source(source).unwrap();
+                        sources.input_role = role;
+                        sources
+                            .body(
+                                &document.document,
+                                (
+                                    content,
+                                    &story_content_spans(content, &bindings).unwrap(),
+                                    &bindings,
+                                ),
+                                &HeldRevisions::default(),
+                            )
+                            .unwrap();
+                    }
+                    metadata.source_frames.push(sources);
+                    // The publisher receives the actual source-model references.
+                    let BodyContent::Paragraph(left_paragraph) = &original.document.body.content[0]
+                    else {
+                        unreachable!()
+                    };
+                    let BodyContent::Paragraph(right_paragraph) = &edited.document.body.content[0]
+                    else {
+                        unreachable!()
+                    };
+                    let left = run_field(&left_paragraph.runs[0])
+                        .unwrap()
+                        .cached_fields_in_source_order()[0];
+                    let right = run_field(&right_paragraph.runs[0])
+                        .unwrap()
+                        .cached_fields_in_source_order()[0];
+                    assert_eq!(left.instruction.name, "DATE");
+                    let publication = compare_field_xml(left, right, &mut metadata).unwrap();
+                    assert_eq!(metadata.field_conversions.len(), 1);
+                    let candidate =
+                        destination_diagnostic_document(&body(&publication), "canonical");
+                    let generated = metadata
+                        .ids
+                        .used
+                        .iter()
+                        .copied()
+                        .filter(|id| *id != 70)
+                        .collect::<HashSet<_>>();
+                    assert_eq!(generated.len(), 2);
+                    for role in [0usize, 1] {
+                        let wanted = normalized_package(
+                            if role == 0 { &original } else { &edited },
+                            &[],
+                            &options,
+                            &TextBoxMarkers::default(),
+                        )
+                        .unwrap();
+                        let mut resolved = candidate.clone_for_staging();
+                        assert_eq!(
+                            if role == 0 {
+                                resolved.reject_revision_ids(&generated)
+                            } else {
+                                resolved.accept_revision_ids(&generated)
+                            }
+                            .unwrap(),
+                            2
+                        );
+                        let mut actual = normalized_package(
+                            &resolved,
+                            &[],
+                            &options,
+                            &TextBoxMarkers::default(),
+                        )
+                        .unwrap();
+                        validate_field_conversion_role(
+                            &candidate,
+                            &mut actual,
+                            &wanted,
+                            &[],
+                            &metadata.field_conversions,
+                            role,
+                            &generated,
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            actual, wanted,
+                            "nested guard baseline controlled={controlled} prior={prior_revision} role={role}"
+                        );
+                        if prior_revision {
+                            let revisions = resolved.story_revisions().unwrap();
+                            assert_eq!(revisions.len(), 1);
+                            assert_eq!(revisions[0].id(), 70);
+                            assert_eq!(revisions[0].author(), "Prior");
+                        }
+                        let source = std::str::from_utf8(
+                            resolved.package.get_part(&resolved.doc_part_name).unwrap(),
+                        )
+                        .unwrap();
+                        if prior_revision {
+                            let held = "<w:ins w:id=\"70\" w:author=\"Prior\"><w:r><w:t>held</w:t></w:r></w:ins>";
+                            assert_eq!(
+                                source.matches(held).count(),
+                                1,
+                                "canonical held wrapper stays byte-exact once"
+                            );
+                        }
+                        let changed = source.replace("x:parent=\"exact\"", "x:parent=\"tampered\"");
+                        assert_ne!(changed, source);
+                        let mut package = resolved.package.clone();
+                        package.set_part(&resolved.doc_part_name, changed.into_bytes());
+                        let tampered = Document::from_package(package).unwrap();
+                        let mut actual = normalized_package(
+                            &tampered,
+                            &[],
+                            &options,
+                            &TextBoxMarkers::default(),
+                        )
+                        .unwrap();
+                        assert!(
+                            validate_field_conversion_role(
+                                &candidate,
+                                &mut actual,
+                                &wanted,
+                                &[],
+                                &metadata.field_conversions,
+                                role,
+                                &generated
+                            )
+                            .is_err(),
+                            "a valid nested child witness cannot consume an outside parent fact"
+                        );
+                    }
+                    if prior_revision {
+                        let mut attempted = original.clone_for_staging();
+                        let bytes = attempted.to_bytes().unwrap();
+                        let model = format!("{:?}", attempted.document);
+                        let layout = attempted.layout_deterministic().unwrap();
+                        let caches = attempted.redaction_cache_identity();
+                        let owner = match &attempted.document.body.content[0] {
+                            BodyContent::Paragraph(paragraph) => {
+                                std::ptr::from_ref(paragraph.as_ref()) as usize
+                            }
+                            _ => unreachable!(),
+                        };
+                        assert!(
+                            attempted
+                                .compare_with_options(
+                                    &edited,
+                                    "Refused",
+                                    "2026-10-01T12:00:00Z",
+                                    &options
+                                )
+                                .is_err()
+                        );
+                        assert_eq!(attempted.to_bytes().unwrap(), bytes);
+                        assert_eq!(format!("{:?}", attempted.document), model);
+                        assert_eq!(attempted.redaction_cache_identity(), caches);
+                        assert!(std::sync::Arc::ptr_eq(
+                            &layout,
+                            &attempted.layout_deterministic().unwrap()
+                        ));
+                        assert_eq!(
+                            match &attempted.document.body.content[0] {
+                                BodyContent::Paragraph(paragraph) =>
+                                    std::ptr::from_ref(paragraph.as_ref()) as usize,
+                                _ => unreachable!(),
+                            },
+                            owner
+                        );
+                    }
+                }
+            }
+        }
+        for mixed in [false, true] {
+            for ignore_formatting in [false, true] {
+                let simple = |instruction: &str| {
+                    format!(
+                        "<w:fldSimple w:instr=\"{instruction}\"><w:r><w:t>same</w:t></w:r></w:fldSimple>"
+                    )
+                };
+                let complex = |instruction: &str| {
+                    format!(
+                        "<w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText>{instruction}</w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>same</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r>"
+                    )
+                };
+                let left = if mixed {
+                    complex("DATE")
+                } else {
+                    simple("DATE")
+                };
+                let right = simple("TIME");
+                let original = destination_diagnostic_document(
+                    &format!("<w:p>{left}{left}</w:p>"),
+                    "canonical",
+                );
+                let edited = destination_diagnostic_document(
+                    &format!("<w:p>{right}{right}</w:p>"),
+                    "canonical",
+                );
+                let options = ComparisonOptions {
+                    ignore_formatting,
+                    ..Default::default()
+                };
+                let mut metadata = Metadata {
+                    author: "Neighbors",
+                    timestamp: "2026-10-01T12:00:00Z",
+                    options: &options,
+                    ids: IdAllocator::new(HashSet::new()),
+                    existing_revisions: false,
+                    source_frames: Vec::new(),
+                    projected_textbox_noop: false,
+                    leaf_capture: false,
+                    paired_field_story: None,
+                    leaf_publications: Vec::new(),
+                    field_conversions: Vec::new(),
+                };
+                let left_xml = original.package.get_part(&original.doc_part_name).unwrap();
+                let right_xml = edited.package.get_part(&edited.doc_part_name).unwrap();
+                let left = extract_body_inner(left_xml).unwrap();
+                let right = extract_body_inner(right_xml).unwrap();
+                let (_, left_scope) = main_body_source(left_xml).unwrap();
+                let (_, right_scope) = main_body_source(right_xml).unwrap();
+                let tracked = compare_body(
+                    [&original.document, &edited.document],
+                    "body",
+                    Some((
+                        left,
+                        &story_content_spans(left, &left_scope).unwrap(),
+                        &left_scope,
+                    )),
+                    (
+                        right,
+                        &story_content_spans(right, &right_scope).unwrap(),
+                        &right_scope,
+                    ),
+                    [&HeldRevisions::default(), &HeldRevisions::default()],
+                    &mut metadata,
+                    &mut Vec::new(),
+                )
+                .unwrap();
+                assert_eq!(metadata.field_conversions.len(), 2);
+                assert_eq!(metadata.ids.used.len(), 4);
+                let candidate = destination_diagnostic_document(&tracked, "canonical");
+                for role in [0usize, 1] {
+                    let wanted = normalized_package(
+                        if role == 0 { &original } else { &edited },
+                        &[],
+                        &options,
+                        &TextBoxMarkers::default(),
+                    )
+                    .unwrap();
+                    let mut resolved = candidate.clone_for_staging();
+                    assert_eq!(
+                        if role == 0 {
+                            resolved.reject_revision_ids(&metadata.ids.used)
+                        } else {
+                            resolved.accept_revision_ids(&metadata.ids.used)
+                        }
+                        .unwrap(),
+                        4
+                    );
+                    let mut actual =
+                        normalized_package(&resolved, &[], &options, &TextBoxMarkers::default())
+                            .unwrap();
+                    validate_field_conversion_role(
+                        &candidate,
+                        &mut actual,
+                        &wanted,
+                        &[],
+                        &metadata.field_conversions,
+                        role,
+                        &metadata.ids.used,
+                    )
+                    .unwrap();
+                    assert_eq!(actual, wanted);
+                    let mut swapped = metadata.field_conversions.clone();
+                    let ids = swapped[0].revision_ids;
+                    swapped[0].revision_ids = swapped[1].revision_ids;
+                    swapped[1].revision_ids = ids;
+                    assert_eq!(
+                        swapped[0].generated_spans, swapped[1].generated_spans,
+                        "equal payloads must not supply occurrence identity"
+                    );
+                    let mut actual =
+                        normalized_package(&resolved, &[], &options, &TextBoxMarkers::default())
+                            .unwrap();
+                    assert!(
+                        validate_field_conversion_role(
+                            &candidate,
+                            &mut actual,
+                            &wanted,
+                            &[],
+                            &swapped,
+                            role,
+                            &metadata.ids.used
+                        )
+                        .is_err(),
+                        "neighbor ID exchange must fail independently for each role, including a source-complex side"
+                    );
+                    let source = candidate
+                        .package
+                        .get_part(&candidate.doc_part_name)
+                        .unwrap();
+                    let id = metadata.field_conversions[0].revision_ids[role];
+                    let span = crate::revision::modeled_revision_spans(source)
+                        .unwrap()
+                        .into_iter()
+                        .find(|(_, actual)| *actual == id)
+                        .unwrap()
+                        .0;
+                    let raw = std::str::from_utf8(&source[span.clone()]).unwrap();
+                    let roots = direct_element_spans(raw)
+                        .unwrap()
+                        .into_iter()
+                        .map(|range| range.start + span.start..range.end + span.start)
+                        .collect::<Vec<_>>();
+                    assert!(roots.len() >= 4);
+                    for corruption in ["missing", "duplicate", "reordered", "wrapper", "partial"] {
+                        let mut selected = roots.clone();
+                        match corruption {
+                            "missing" => {
+                                selected.remove(1);
+                            }
+                            "duplicate" => selected.insert(1, selected[0].clone()),
+                            "reordered" => selected.swap(0, 1),
+                            "wrapper" => selected = vec![span.clone()],
+                            "partial" => selected[0].start += 1,
+                            _ => unreachable!(),
+                        }
+                        assert!(
+                            crate::revision::resolve_story_xml_with_publication_roots(
+                                source,
+                                if role == 0 {
+                                    crate::revision::Resolution::Reject
+                                } else {
+                                    crate::revision::Resolution::Accept
+                                },
+                                crate::revision::RevisionScope::Ids(&metadata.ids.used),
+                                id,
+                                &selected,
+                            )
+                            .is_err(),
+                            "{corruption} publication root coverage must refuse"
+                        );
+                    }
+                }
+            }
+        }
+        // Target changes leave the actual story XML and its rId unchanged.
+        // This challenges graph identity independently of source/body equality.
+        for (placement, kind, custody) in [
+            ("body", "image", "accepted"),
+            ("header", "image", "accepted"),
+            ("body", "hyperlink", "accepted"),
+            ("body", "image", "controlled"),
+            ("body", "image", "nested"),
+            ("body", "image", "prior"),
+            ("body", "image", "deleted"),
+            ("body", "image", "opaque"),
+            ("body", "image", "legacy-paired"),
+        ] {
+            for ignore_formatting in [false, true] {
+                let image = r#"<w:r><w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:inline><wp:extent cx="100" cy="200"/><wp:docPr id="9" name="Image"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="asset"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"#;
+                let link = r#"<w:hyperlink xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="asset"><w:r><w:t>link</w:t></w:r></w:hyperlink>"#;
+                let result = if kind == "image" { image } else { link };
+                let result = match custody {
+                    "controlled" => {
+                        format!("<w:sdt><w:sdtPr/><w:sdtContent>{result}</w:sdtContent></w:sdt>")
+                    }
+                    "nested" => format!("<w:fldSimple w:instr=\"QUOTE\">{result}</w:fldSimple>"),
+                    "prior" => format!("<w:ins w:id=\"70\" w:author=\"Prior\">{result}</w:ins>"),
+                    "deleted" => format!("<w:del w:id=\"71\" w:author=\"Prior\">{result}</w:del>"),
+                    "opaque" => format!("<x:opaque xmlns:x=\"urn:opaque\">{result}</x:opaque>"),
+                    "legacy-paired" => format!("<w:r><w:tab></w:tab></w:r>{result}"),
+                    _ => result.to_owned(),
+                };
+                let body =
+                    format!("<w:p><w:fldSimple w:instr=\"QUOTE\">{result}</w:fldSimple></w:p>");
+                let mut package = Document::new().package;
+                let owner = if placement == "header" {
+                    "/word/header1.xml"
+                } else {
+                    "/word/document.xml"
+                };
+                if placement == "header" {
+                    package.set_part(
+                        "/word/document.xml",
+                        format!(
+                            r#"<w:document xmlns:w="{W_NS}"><w:body><w:p/></w:body></w:document>"#
+                        )
+                        .into_bytes(),
+                    );
+                    package.set_part(
+                        owner,
+                        format!(r#"<w:hdr xmlns:w="{W_NS}">{body}</w:hdr>"#).into_bytes(),
+                    );
+                    package.content_types.add_override(
+                        owner,
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml",
+                    );
+                    package
+                        .get_or_create_part_rels("/word/document.xml")
+                        .add_with_id("header", rel_types::HEADER, "header1.xml");
+                    package
+                        .get_or_create_part_rels("/word/document.xml")
+                        .add_with_id("asset", rel_types::IMAGE, "media/decoy.bin");
+                    package.set_part("/word/media/decoy.bin", b"decoy stays fixed".to_vec());
+                } else {
+                    package.set_part(
+                        owner,
+                        format!(
+                            r#"<w:document xmlns:w="{W_NS}"><w:body>{body}</w:body></w:document>"#
+                        )
+                        .into_bytes(),
+                    );
+                }
+                package
+                    .get_or_create_part_rels(owner)
+                    .items
+                    .push(Relationship {
+                        id: "asset".into(),
+                        rel_type: if kind == "image" {
+                            rel_types::IMAGE
+                        } else {
+                            rel_types::HYPERLINK
+                        }
+                        .into(),
+                        target: if kind == "image" {
+                            "media/actual.bin"
+                        } else {
+                            "https://before.invalid/"
+                        }
+                        .into(),
+                        target_mode: (kind == "hyperlink").then(|| "External".into()),
+                    });
+                package.set_part("/word/media/actual.bin", b"same asset bytes".to_vec());
+                package
+                    .content_types
+                    .add_override("/word/media/actual.bin", "application/octet-stream");
+                let original = Document::from_package(package).unwrap();
+                let stories = if placement == "header" {
+                    vec![StoryPart {
+                        kind: ComparisonStoryKind::Header,
+                        part_name: owner.into(),
+                    }]
+                } else {
+                    Vec::new()
+                };
+                let options = ComparisonOptions {
+                    ignore_formatting,
+                    ..Default::default()
+                };
+                let identity = |document: &Document| {
+                    normalized_package(document, &stories, &options, &TextBoxMarkers::default())
+                        .unwrap()
+                };
+                let baseline = identity(&original);
+                assert_eq!(baseline, identity(&original.clone_for_staging()));
+                fn graph_count(field: &GuardField) -> usize {
+                    field.graphs.len()
+                        + field.result_fields.iter().map(graph_count).sum::<usize>()
+                        + field
+                            .instruction_fields
+                            .iter()
+                            .map(graph_count)
+                            .sum::<usize>()
+                }
+                let graphs = baseline
+                    .0
+                    .iter()
+                    .chain(baseline.1.iter().flat_map(|(_, _, items)| items))
+                    .flat_map(|item| &item.fields)
+                    .map(graph_count)
+                    .sum::<usize>();
+                let live = !matches!(custody, "deleted" | "opaque");
+                assert_eq!(
+                    graphs > 0,
+                    live,
+                    "actual typed accepted graph coverage {placement}/{kind}/{custody}"
+                );
+                let mut changed = original.package.clone();
+                if kind == "image" {
+                    changed.set_part("/word/media/actual.bin", b"changed asset bytes".to_vec());
+                } else {
+                    changed
+                        .get_or_create_part_rels(owner)
+                        .items
+                        .iter_mut()
+                        .find(|relationship| relationship.id == "asset")
+                        .unwrap()
+                        .target = "https://after.invalid/".into();
+                }
+                assert_eq!(
+                    changed.get_part(owner),
+                    original.package.get_part(owner),
+                    "story XML and relationship identifier remain exact"
+                );
+                let changed = Document::from_package(changed).unwrap();
+                if live {
+                    assert_ne!(
+                        baseline,
+                        identity(&changed),
+                        "same-rId changed target must differ under the real OPC owner in both guards"
+                    );
+                } else {
+                    assert_eq!(
+                        baseline,
+                        identity(&changed),
+                        "deleted-only and opaque references do not become accepted graph assets"
+                    );
+                }
+                if kind == "image" && live {
+                    let mut renamed = original.package.clone();
+                    renamed.set_part("/word/media/equivalent.bin", b"same asset bytes".to_vec());
+                    renamed
+                        .content_types
+                        .add_override("/word/media/equivalent.bin", "application/octet-stream");
+                    renamed
+                        .get_or_create_part_rels(owner)
+                        .items
+                        .iter_mut()
+                        .find(|relationship| relationship.id == "asset")
+                        .unwrap()
+                        .target = "media/equivalent.bin".into();
+                    assert_eq!(
+                        baseline,
+                        identity(&Document::from_package(renamed).unwrap()),
+                        "existing internal-content identity admits an equivalent renamed target"
+                    );
+                }
+            }
+        }
+    }
+
+    fn destination_diagnostic_case(
+        label: &str,
+        mut original: Document,
+        edited: Document,
+        options: ComparisonOptions,
+    ) {
+        use super::*;
+        let _case = PolicyDiagnosticScope::enter("diagnostic-case", label);
+        let observed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let before = original.to_bytes().unwrap();
+            let before_xml = String::from_utf8_lossy(
+                original.package.get_part(&original.doc_part_name).unwrap(),
+            )
+            .into_owned();
+            let edited_xml =
+                String::from_utf8_lossy(edited.package.get_part(&edited.doc_part_name).unwrap())
+                    .into_owned();
+            let pointer = match &original.document.body.content[0] {
+                BodyContent::Paragraph(p) => p.as_ref() as *const _ as usize,
+                _ => 0,
+            };
+            let original_stories = story_parts_with_options(&original, &options).unwrap();
+            let edited_stories = story_parts_with_options(&edited, &options).unwrap();
+            let markers =
+                comparison_text_box_markers(&original, &edited, &original_stories, &options)
+                    .unwrap();
+            let original_vector =
+                normalized_package(&original, &original_stories, &options, &markers);
+            let edited_vector = normalized_package(&edited, &edited_stories, &options, &markers);
+            let source_fields = |document: &Document| {
+                let mut fields = Vec::new();
+                crate::document::visit_body_paragraphs(
+                    &document.document.body.content,
+                    true,
+                    &mut |paragraph| {
+                        for (index, run) in paragraph.runs.iter().enumerate() {
+                            fields.push(format!(
+                                "run={index},model={run:?},field_source={:?}",
+                                paragraph.field_source_run_fragments_at(index)
+                            ));
+                        }
+                    },
+                );
+                fields
+            };
+            policy_diagnostic(
+                "destination_case_input",
+                serde_json::json!({"label":label,"options":format!("{options:?}"),
+                "original_xml":before_xml,"edited_xml":edited_xml,"original_vector":format!("{original_vector:?}"),
+                "edited_vector":format!("{edited_vector:?}"),"input_vectors_equal":format!("{original_vector:?}")==format!("{edited_vector:?}"),
+                "original_fields":source_fields(&original),"edited_fields":source_fields(&edited),"pointer_before":pointer}),
+            );
+            let result = original.compare_with_options(
+                &edited,
+                "Destination",
+                "2026-10-01T12:00:00Z",
+                &options,
+            );
+            let pointer_after = match &original.document.body.content[0] {
+                BodyContent::Paragraph(p) => p.as_ref() as *const _ as usize,
+                _ => 0,
+            };
+            let after = original.to_bytes().unwrap();
+            policy_diagnostic(
+                "destination_case_public",
+                serde_json::json!({"label":label,"result":format!("{result:?}"),
+                "bytes_equal":before==after,"pointer_before":pointer,"pointer_after":pointer_after,
+                "revisions":format!("{:?}",original.story_revisions()),"xml":String::from_utf8_lossy(original.package.get_part(&original.doc_part_name).unwrap()),
+                "source_residual":format!("{:?}",rdocx_oxml::properties::protected_source_residual(original.package.get_part(&original.doc_part_name).unwrap(),&[]))}),
+            );
+            if result.is_ok() {
+                for accept in [true, false] {
+                    let resolution = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let mut resolved = Document::from_bytes(&after).unwrap();
+                        let count = if accept {
+                            resolved.accept_revisions_by_author("Destination")
+                        } else {
+                            resolved.reject_revisions_by_author("Destination")
+                        };
+                        let resolved_xml = String::from_utf8_lossy(
+                            resolved.package.get_part(&resolved.doc_part_name).unwrap(),
+                        )
+                        .into_owned();
+                        let saved = resolved.to_bytes().unwrap();
+                        let reopened = Document::from_bytes(&saved).unwrap();
+                        let vector = normalized_package(
+                            &reopened,
+                            &story_parts_with_options(&reopened, &options).unwrap(),
+                            &options,
+                            &markers,
+                        );
+                        policy_diagnostic(
+                            "destination_case_resolved",
+                            serde_json::json!({"label":label,"accept":accept,"count":format!("{count:?}"),
+                            "resolved_xml":resolved_xml,"reopened_xml":String::from_utf8_lossy(reopened.package.get_part(&reopened.doc_part_name).unwrap()),
+                            "vector":format!("{vector:?}"),"revisions":format!("{:?}",reopened.story_revisions()),
+                            "residual":format!("{:?}",rdocx_oxml::properties::protected_source_residual(reopened.package.get_part(&reopened.doc_part_name).unwrap(),&[]))}),
+                        );
+                    }));
+                    policy_diagnostic(
+                        "destination_resolution_status",
+                        serde_json::json!({"label":label,"accept":accept,"completed":resolution.is_ok()}),
+                    );
+                }
+            }
+        }));
+        policy_diagnostic(
+            "destination_case_status",
+            serde_json::json!({"label":label,"completed":observed.is_ok()}),
+        );
+        // This diagnostic records setup failures per case and continues the matrix.
+        // Product acceptance is still asserted by the existing regression carriers.
+    }
+
+    #[test]
+    fn issue425_destination_repair_deletion_keeps_opaque_and_foreign_instructions() {
+        use super::*;
+        for prefix in ["w", "q"] {
+            let xml = format!(
+                r#"<{prefix}:r xmlns:{prefix}="{W_NS}" xmlns:x="urn:foreign"><{prefix}:instrText x:note="direct"> PAGE </{prefix}:instrText><x:instrText>FOREIGN</x:instrText><{prefix}:pict><x:box><{prefix}:r><{prefix}:instrText>NESTED</{prefix}:instrText></{prefix}:r></x:box></{prefix}:pict></{prefix}:r>"#
+            );
+            let run = CT_R::from_xml_fragment_checked(xml.as_bytes()).unwrap();
+            let deleted = deleted_run_xml(&run).unwrap();
+            assert_eq!(
+                direct_word_element_spans(&deleted, "delInstrText")
+                    .unwrap()
+                    .len(),
+                1,
+                "{deleted}"
+            );
+            assert_eq!(
+                direct_word_element_spans(&deleted, "instrText")
+                    .unwrap()
+                    .len(),
+                0,
+                "{deleted}"
+            );
+            let baseline = run_xml(&run).unwrap();
+            let word = word_element_starts(&baseline).unwrap();
+            for span in direct_element_spans(&baseline).unwrap() {
+                if word.contains(&span.start)
+                    && element_local_name(&baseline[span.clone()]) == "instrText"
+                {
+                    continue;
+                }
+                assert!(
+                    deleted.contains(&baseline[span]),
+                    "an opaque/foreign source child changed: {deleted}"
+                );
+            }
+            assert!(deleted.contains("x:note=\"direct\""), "{deleted}");
+        }
+    }
+
+    #[test]
+    fn issue425_destination_repair_significant_shared_run_root_requires_proof() {
+        use super::*;
+        let inner = |result| {
+            format!(
+                r#"<w:p xmlns:x="urn:producer"><w:r x:root="significant"><w:t>Before.</w:t><w:fldChar w:fldCharType="begin"/><w:instrText> PAGE </w:instrText><w:fldChar w:fldCharType="separate"/><w:t>{result}</w:t><w:fldChar w:fldCharType="end"/><w:t>After.</w:t></w:r></w:p>"#
+            )
+        };
+        let mut original = issue425_guard_fixture(&inner("1"), "original");
+        let before = original.to_bytes().unwrap();
+        let edited = issue425_guard_fixture(&inner("2"), "original");
+        let error = original
+            .compare_with_options(
+                &edited,
+                "Occurrence",
+                "2026-10-01T12:00:00Z",
+                &ComparisonOptions {
+                    ignore_formatting: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("significant shared field run-root correspondence"),
+            "{error}"
+        );
+        assert_eq!(original.to_bytes().unwrap(), before);
+        let identical = issue425_guard_fixture(&inner("1"), "original");
+        original
+            .compare_with_options(
+                &identical,
+                "Occurrence",
+                "2026-10-01T12:00:00Z",
+                &ComparisonOptions {
+                    ignore_formatting: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(original.to_bytes().unwrap(), before);
+    }
+
+    #[test]
+    fn issue425_destination_repair_resolver_transports_actual_leaf_occurrences() {
+        use super::*;
+        use crate::revision::{
+            Resolution, RevisionScope, resolve_story_xml, resolve_story_xml_with_leaf_ranges,
+        };
+        for prefix in ["w", "q"] {
+            let xml = format!(
+                r#"<{prefix}:document xmlns:{prefix}="{W_NS}" xmlns:w="urn:foreign"><{prefix}:body><!--prefix--><{prefix}:p><{prefix}:ins {prefix}:id="7" {prefix}:author="A" {prefix}:date="2026-10-01T12:00:00Z" xmlns="urn:shadow"><{prefix}:r><{prefix}:t x="a">New</{prefix}:t></{prefix}:r></{prefix}:ins><{prefix}:del {prefix}:id="8" {prefix}:author="A" {prefix}:date="2026-10-01T12:00:00Z"><{prefix}:r><{prefix}:delText>Old</{prefix}:delText></{prefix}:r></{prefix}:del></{prefix}:p><!--suffix--></{prefix}:body></{prefix}:document>"#
+            );
+            // The canonical case must bind its own Word prefix, independently of the alias shadow case.
+            let xml = if prefix == "w" {
+                xml.replace(r#" xmlns:w="urn:foreign""#, "")
+            } else {
+                xml
+            };
+            let xml = format!("<?xml version=\"1.0\"?>{xml}");
+            let leaf = |local: &str| {
+                let start = xml.find(&format!("<{prefix}:{local}")).unwrap();
+                let end = xml[start..].find(&format!("</{prefix}:{local}>")).unwrap()
+                    + start
+                    + format!("</{prefix}:{local}>").len();
+                start..end
+            };
+            let leaves = vec![leaf("t"), leaf("delText")];
+            for resolution in [Resolution::Accept, Resolution::Reject] {
+                let old =
+                    resolve_story_xml(xml.as_bytes(), resolution, RevisionScope::All).unwrap();
+                let (output, count, mapped) = resolve_story_xml_with_leaf_ranges(
+                    xml.as_bytes(),
+                    resolution,
+                    RevisionScope::All,
+                    &leaves,
+                )
+                .unwrap();
+                assert_eq!(
+                    crate::revision::modeled_revision_count(xml.as_bytes()).unwrap(),
+                    2
+                );
+                assert_eq!(old.1, 2, "positive must actually select both revisions");
+                assert_eq!(count, 2);
+                assert_eq!((output.clone(), count), old);
+                policy_diagnostic(
+                    "occurrence_resolver_positive",
+                    serde_json::json!({
+                    "prefix":prefix,"resolution":if matches!(resolution, Resolution::Accept) { "Accept" } else { "Reject" },"source":xml,
+                    "output":String::from_utf8_lossy(&output),"count":count,
+                    "leaves":leaves.iter().map(|s|[s.start,s.end]).collect::<Vec<_>>(),
+                    "mapped":mapped.iter().map(|s|s.as_ref().map(|s|[s.start,s.end])).collect::<Vec<_>>() }),
+                );
+                let kept = usize::from(matches!(resolution, Resolution::Reject));
+                assert!(
+                    mapped[1 - kept].is_none(),
+                    "removed descendant was validated but must publish no interval"
+                );
+                let span = mapped[kept].clone().unwrap();
+                let fragment = std::str::from_utf8(&output[span]).unwrap();
+                assert!(fragment.starts_with(&format!("<{prefix}:t")), "{fragment}");
+                assert!(fragment.contains(if kept == 0 { "New" } else { "Old" }));
+            }
+            let opaque = format!(
+                r#"<root xmlns:{prefix}="{W_NS}" xmlns:w="urn:foreign">prefix<{prefix}:p><{prefix}:ins {prefix}:id="7" {prefix}:author="A" {prefix}:date="2026-10-01T12:00:00Z" xmlns="urn:shadow"><{prefix}:r><{prefix}:t x="a">New</{prefix}:t></{prefix}:r></{prefix}:ins><{prefix}:del {prefix}:id="8" {prefix}:author="A" {prefix}:date="2026-10-01T12:00:00Z"><{prefix}:r><{prefix}:delText>Old</{prefix}:delText></{prefix}:r></{prefix}:del></{prefix}:p>suffix</root>"#
+            );
+            let opaque = if prefix == "w" {
+                opaque.replace(r#" xmlns:w="urn:foreign""#, "")
+            } else {
+                opaque
+            };
+            let opaque = format!("<?xml version=\"1.0\"?>{opaque}");
+            let opaque_leaves = ["t", "delText"]
+                .iter()
+                .map(|local| {
+                    let start = opaque.find(&format!("<{prefix}:{local}")).unwrap();
+                    let close = format!("</{prefix}:{local}>");
+                    start..start + opaque[start..].find(&close).unwrap() + close.len()
+                })
+                .collect::<Vec<_>>();
+            for resolution in [Resolution::Accept, Resolution::Reject] {
+                assert_eq!(
+                    crate::revision::modeled_revision_count(opaque.as_bytes()).unwrap(),
+                    0
+                );
+                let old =
+                    resolve_story_xml(opaque.as_bytes(), resolution, RevisionScope::All).unwrap();
+                let (output, count, mapped) = resolve_story_xml_with_leaf_ranges(
+                    opaque.as_bytes(),
+                    resolution,
+                    RevisionScope::All,
+                    &opaque_leaves,
+                )
+                .unwrap();
+                assert_eq!(old, (opaque.as_bytes().to_vec(), 0));
+                assert_eq!((output.clone(), count), old);
+                assert_eq!(
+                    mapped,
+                    opaque_leaves.iter().cloned().map(Some).collect::<Vec<_>>()
+                );
+                policy_diagnostic(
+                    "occurrence_resolver_opaque_negative",
+                    serde_json::json!({"prefix":prefix,"resolution":if matches!(resolution, Resolution::Accept) { "Accept" } else { "Reject" },"count":count,"unchanged":output==opaque.as_bytes(),"mapped":mapped.iter().map(|s|s.as_ref().map(|s|[s.start,s.end])).collect::<Vec<_>>() }),
+                );
+            }
+            for invalid in [
+                std::iter::once(0..1).collect::<Vec<_>>(),
+                vec![leaves[0].clone(), leaves[0].clone()],
+                vec![leaves[1].clone(), leaves[0].clone()],
+                std::iter::once(0..xml.len()).collect::<Vec<_>>(),
+                std::iter::once(xml.len()..xml.len() + 1).collect::<Vec<_>>(),
+            ] {
+                assert!(
+                    resolve_story_xml_with_leaf_ranges(
+                        xml.as_bytes(),
+                        Resolution::Accept,
+                        RevisionScope::All,
+                        &invalid
+                    )
+                    .is_err()
+                );
+            }
+        }
+        for leaf in [
+            "<x:t xmlns:x=\"urn:foreign\">Wrong</x:t>",
+            "<w:t>Text</w:t>",
+        ] {
+            let xml = format!(r#"<root xmlns:w="{W_NS}">{leaf}</root>"#);
+            let start = xml.find(leaf).unwrap();
+            assert!(
+                resolve_story_xml_with_leaf_ranges(
+                    xml.as_bytes(),
+                    Resolution::Accept,
+                    RevisionScope::All,
+                    std::slice::from_ref(&(start..start + leaf.len()))
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn issue425_destination_repair_authored_facts_cannot_be_removed_from_either_guard() {
+        use super::*;
+        let options = ComparisonOptions {
+            ignore_formatting: true,
+            ignore_whitespace: true,
+            ..Default::default()
+        };
+        let identity = |inner: &str| {
+            let document = issue425_guard_fixture(inner, "original");
+            let markers = comparison_text_box_markers(&document, &document, &[], &options).unwrap();
+            normalized_package(&document, &[], &options, &markers).unwrap()
+        };
+        let baseline = r#"<w:p xmlns:x="urn:producer"><w:r><w:t x:unknown="same">Repeated.</w:t><w:t x:unknown="same">Repeated.</w:t><w:t x:unknown="empty"/><w:t x:unknown="empty"/><w:t xml:space="preserve" x:unknown="space"> </w:t></w:r></w:p>"#;
+        let expected = identity(baseline);
+        for changed in [
+            baseline.replacen(r#" x:unknown="same""#, "", 1),
+            baseline.replacen(r#"<w:t x:unknown="empty"/>"#, "", 1),
+            baseline.replace(r#"x:unknown="space""#, r#"x:unknown="changed""#),
+            baseline.replace("urn:producer", "urn:changed"),
+        ] {
+            let actual = identity(&changed);
+            assert_ne!(actual, expected);
+            for (direction, input) in [("acceptance", "edited"), ("rejection", "original")] {
+                assert!(
+                    comparison_postcondition_error(direction, input, &actual, &expected)
+                        .to_string()
+                        .contains("item[0]")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn issue425_projection_cannot_join_tokens_or_reorder_empty_facts() {
+        use super::*;
+        for granularity in [ComparisonGranularity::Run, ComparisonGranularity::Word] {
+            let options = ComparisonOptions {
+                ignore_formatting: true,
+                ignore_whitespace: true,
+                granularity,
+                ..Default::default()
+            };
+            let identity = |inner: &str| {
+                let document = issue425_guard_fixture(inner, "original");
+                let markers =
+                    comparison_text_box_markers(&document, &document, &[], &options).unwrap();
+                normalized_package(&document, &[], &options, &markers).unwrap()
+            };
+            let baseline = r#"<w:p xmlns:x="urn:producer"><w:r><w:t x:unknown="same">A much.</w:t><w:t x:unknown="A"/><w:t x:unknown="B"/></w:r></w:p>"#;
+            let expected = identity(baseline);
+            for changed in [
+                baseline.replace("A much.", "Amuch."),
+                baseline.replacen(r#"<w:t x:unknown="A"/>"#, "", 1),
+                baseline.replace(r#"x:unknown="A""#, r#"x:unknown="changed""#),
+                baseline.replace(
+                    r#"<w:t x:unknown="A"/><w:t x:unknown="B"/>"#,
+                    r#"<w:t x:unknown="B"/><w:t x:unknown="A"/>"#,
+                ),
+                baseline.replace(
+                    r#"<w:t x:unknown="A"/>"#,
+                    r#"<w:t x:unknown="A"/><w:t x:unknown="A"/>"#,
+                ),
+            ] {
+                let actual = identity(&changed);
+                assert_ne!(actual, expected);
+                for (direction, input) in [("acceptance", "edited"), ("rejection", "original")] {
+                    assert!(
+                        comparison_postcondition_error(direction, input, &actual, &expected)
+                            .to_string()
+                            .contains("item[0]")
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn issue425_projection_terminal_child_budget_preserves_raw_suffix_and_barriers() {
+        use super::*;
+        let make = |middle: &str, suffix: &str, properties: &str| {
+            format!(
+                r#"<w:document xmlns:w="{W_NS}" xmlns:x="urn:producer"><w:body><w:p><w:r><w:rPr><w:b/></w:rPr><w:t x:unknown="same">A</w:t>{middle}</w:r><w:r><w:rPr>{properties}</w:rPr><w:t x:unknown="same">B</w:t>{suffix}</w:r></w:p></w:body></w:document>"#
+            )
+        };
+        let suffix = r#"<w:t x:unknown="empty-A"/><w:t x:unknown="empty-B"/>"#;
+        for (middle, suffix, properties, success) in [
+            ("", suffix, "<w:b/>", true),
+            (
+                "",
+                r#"<w:t x:unknown="empty"/><w:t x:unknown="empty"/>"#,
+                "<w:b/>",
+                true,
+            ),
+            ("<x:barrier/>", suffix, "<w:b/>", false),
+            ("", suffix, "<w:i/>", false),
+        ] {
+            let xml = make(middle, suffix, properties);
+            let leaves = ["A", "B"]
+                .into_iter()
+                .enumerate()
+                .map(|(i, value)| {
+                    let raw = format!(r#"<w:t x:unknown="same">{value}</w:t>"#);
+                    let start = xml.find(&raw).unwrap();
+                    LeafPublication {
+                        range: start..start + raw.len(),
+                        owner: 1,
+                        ordinal: 0,
+                        scalars: i..i + 1,
+                        source: r#"<w:t x:unknown="same">AB</w:t>"#.into(),
+                        context: vec![
+                            ("xmlns:w".into(), W_NS.into()),
+                            ("xmlns:x".into(), "urn:producer".into()),
+                        ],
+                        payload: value.into(),
+                        physical: (1, 0, i..i + 1),
+                        domains: [Some((1, 0, 2)), Some((2, 0, 2))],
+                        actions: vec![
+                            ([Some(0..1), Some(0..1)], GranularAction::Equal),
+                            ([Some(1..2), Some(1..2)], GranularAction::Equal),
+                        ],
+                    }
+                })
+                .collect::<Vec<_>>();
+            let mapped = leaves
+                .iter()
+                .map(|leaf| Some(leaf.range.clone()))
+                .collect::<Vec<_>>();
+            let restored = restore_resolved_leaf_occurrences(xml.as_bytes(), &leaves, &mapped);
+            if success {
+                let restored = restored.unwrap();
+                assert!(
+                    restored.contains(&format!(r#"<w:t x:unknown="same">AB</w:t>{suffix}</w:r>"#))
+                );
+                assert_eq!(restored.matches("<w:r>").count(), 1);
+            } else {
+                assert!(restored.is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn issue425_projection_source_separators_and_multiple_raw_empties_survive_both_routes() {
+        use super::*;
+        let mut failures = Vec::new();
+        for controlled in [false, true] {
+            for case in ["distinct", "identical", "width", "edges", "punctuation"] {
+                for granularity in [
+                    ComparisonGranularity::Run,
+                    ComparisonGranularity::Word,
+                    ComparisonGranularity::Character,
+                ] {
+                    let label = format!("separator-suffix/{controlled}/{case}/{granularity:?}");
+                    let _scope = PolicyDiagnosticScope::enter("separator-suffix-case", &label);
+                    let inner = |edited| {
+                        let text = if edited {
+                            match case {
+                                "width" => "New tail.",
+                                "edges" => "  New longer.  ",
+                                "punctuation" => "New? !",
+                                _ => "New longer.",
+                            }
+                        } else {
+                            match case {
+                                "width" => "Old  tail.",
+                                _ => "Old.",
+                            }
+                        };
+                        let suffix = match case {
+                            "distinct" => r#"<w:t x:unknown="empty-A"/><w:t x:unknown="empty-B"/>"#,
+                            "identical" => r#"<w:t x:unknown="empty"/><w:t x:unknown="empty"/>"#,
+                            _ => "",
+                        };
+                        let style = if edited { "i" } else { "b" };
+                        let run = format!(
+                            r#"<w:r><w:rPr><w:{style}/></w:rPr><w:t x:unknown="same">{text}</w:t>{suffix}<w:t x:unknown="neighbor">Same.</w:t></w:r><w:r><w:t>Free.</w:t></w:r>"#
+                        );
+                        let content = if controlled {
+                            format!("<w:sdt><w:sdtPr/><w:sdtContent>{run}</w:sdtContent></w:sdt>")
+                        } else {
+                            run
+                        };
+                        format!(r#"<w:p xmlns:x="urn:producer">{content}</w:p>"#)
+                    };
+                    let mut compared = issue425_guard_fixture(&inner(false), "original");
+                    let edited = issue425_guard_fixture(&inner(true), "original");
+                    let inventory = policy3_text_metadata_inventory(&edited);
+                    if let Err(error) = compared.compare_with_options(
+                        &edited,
+                        "Separator",
+                        "2026-10-01T12:00:00Z",
+                        &ComparisonOptions {
+                            ignore_formatting: true,
+                            ignore_whitespace: true,
+                            granularity,
+                            ..Default::default()
+                        },
+                    ) {
+                        failures.push(format!("{label}: {error}"));
+                        continue;
+                    }
+                    let tracked = compared.to_bytes().unwrap();
+                    for accept in [true, false] {
+                        let observed =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                let mut resolved = Document::from_bytes(&tracked).unwrap();
+                                if accept {
+                                    resolved.accept_revisions_by_author("Separator").unwrap();
+                                } else {
+                                    resolved.reject_revisions_by_author("Separator").unwrap();
+                                }
+                                let reopened =
+                                    Document::from_bytes(&resolved.to_bytes().unwrap()).unwrap();
+                                assert_eq!(policy3_text_metadata_inventory(&reopened), inventory);
+                                let xml = std::str::from_utf8(
+                                    reopened.package.get_part(&reopened.doc_part_name).unwrap(),
+                                )
+                                .unwrap();
+                                let suffix = match case {
+                                    "distinct" => {
+                                        r#"<w:t x:unknown="empty-A"/><w:t x:unknown="empty-B"/>"#
+                                    }
+                                    "identical" => {
+                                        r#"<w:t x:unknown="empty"/><w:t x:unknown="empty"/>"#
+                                    }
+                                    _ => "",
+                                };
+                                if !suffix.is_empty() {
+                                    let at = xml.find(suffix).expect("exact ordered raw suffix");
+                                    let run = xml[..at].rfind("<w:r>").unwrap();
+                                    assert!(!xml[run..at].contains("</w:r>"));
+                                    assert!(xml[run..at].contains(r#"<w:t x:unknown="same">"#));
+                                    assert!(xml[run..at].contains("<w:b"));
+                                }
+                                if case == "width" {
+                                    assert!(
+                                        xml.contains(if accept {
+                                            "New  tail."
+                                        } else {
+                                            "Old  tail."
+                                        }),
+                                        "{xml}"
+                                    );
+                                }
+                                assert!(!xml.contains("<w:i/"), "{xml}");
+                                assert!(reopened.story_revisions().unwrap().is_empty());
+                            }));
+                        policy_diagnostic(
+                            "separator_suffix_semantic_row",
+                            serde_json::json!({"case":case,"controlled":controlled,"granularity":format!("{:?}",granularity),"accept":accept,"passed":observed.is_ok()}),
+                        );
+                        if observed.is_err() {
+                            failures.push(format!("{label}/{accept}: resolution assertion"));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn issue425_destination_repair_clean_fields_preserve_modeled_values_and_source() {
+        use super::*;
+        let mut failures = Vec::new();
+        for kind in ["simple", "complex", "shared"] {
+            for ignore in [false, true] {
+                for change in ["instruction", "result"] {
+                    let inner = |edited| {
+                        let instruction = if edited && change == "instruction" {
+                            "DATE"
+                        } else {
+                            "PAGE"
+                        };
+                        let result = if edited && change == "result" {
+                            "2"
+                        } else {
+                            "1"
+                        };
+                        let field = if kind == "simple" {
+                            format!(
+                                r#"<w:fldSimple w:instr="{instruction}"><w:r><w:t>{result}</w:t></w:r></w:fldSimple>"#
+                            )
+                        } else if kind == "shared" {
+                            format!(
+                                r#"<w:r><w:rPr x:note="shared"><w:b/></w:rPr><w:t x:unknown="before">Before.</w:t><w:fldChar w:fldCharType="begin"/><w:instrText> {instruction} </w:instrText><w:fldChar w:fldCharType="separate"/><w:t>{result}</w:t><w:fldChar w:fldCharType="end"/><w:t x:unknown="after">After.</w:t></w:r>"#
+                            )
+                        } else {
+                            format!(
+                                r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> {instruction} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>{result}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+                            )
+                        };
+                        format!(
+                            r#"<w:p xmlns:x="urn:producer">{field}<w:r><w:t x:unknown="later">Later.</w:t></w:r></w:p>"#
+                        )
+                    };
+                    let mut original = issue425_guard_fixture(&inner(false), "original");
+                    let edited = issue425_guard_fixture(&inner(true), "original");
+                    let label = format!("clean/{kind}/{ignore}/{change}");
+                    let _case = PolicyDiagnosticScope::enter("clean-field-semantic-case", &label);
+                    if (kind == "complex" && !ignore && change == "result")
+                        || (kind == "shared" && ignore && change == "instruction")
+                        || (kind == "simple" && !ignore && change == "instruction")
+                    {
+                        destination_diagnostic_case(
+                            &label,
+                            issue425_guard_fixture(&inner(false), "original"),
+                            issue425_guard_fixture(&inner(true), "original"),
+                            ComparisonOptions {
+                                ignore_formatting: true,
+                                ignore_fields: ignore,
+                                ..Default::default()
+                            },
+                        );
+                    }
+                    let observed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let before = original.to_bytes().unwrap();
+                        let mut compared = original;
+                        compared
+                            .compare_with_options(
+                                &edited,
+                                "Occurrence",
+                                "2026-10-01T12:00:00Z",
+                                &ComparisonOptions {
+                                    ignore_formatting: true,
+                                    ignore_fields: ignore,
+                                    ..Default::default()
+                                },
+                            )
+                            .unwrap();
+                        if ignore {
+                            assert_eq!(
+                                compared.to_bytes().unwrap(),
+                                before,
+                                "ignored clean field must be an exact no-op"
+                            );
+                        }
+                        for accept in [true, false] {
+                            let mut resolved =
+                                Document::from_bytes(&compared.to_bytes().unwrap()).unwrap();
+                            if accept {
+                                resolved.accept_revisions_by_author("Occurrence").unwrap();
+                            } else {
+                                resolved.reject_revisions_by_author("Occurrence").unwrap();
+                            }
+                            let reopened =
+                                Document::from_bytes(&resolved.to_bytes().unwrap()).unwrap();
+                            occurrence_fixture_artifact(&reopened, "clean-field-resolved");
+                            assert_eq!(
+                                policy3_text_metadata_inventory(&reopened),
+                                policy3_text_metadata_inventory(&edited)
+                            );
+                            let raw = String::from_utf8_lossy(
+                                reopened.package.get_part(&reopened.doc_part_name).unwrap(),
+                            );
+                            let instruction = if accept && !ignore && change == "instruction" {
+                                "DATE"
+                            } else {
+                                "PAGE"
+                            };
+                            let value = if accept && !ignore && change == "result" {
+                                "2"
+                            } else {
+                                "1"
+                            };
+                            assert!(raw.contains(instruction), "{raw}");
+                            assert!(raw.contains(&format!(">{value}</w:t>")), "{raw}");
+                            assert!(!raw.contains("Occurrence"), "resolved new revisions remain");
+                        }
+                    }));
+                    policy_diagnostic(
+                        "occurrence_clean_semantic",
+                        serde_json::json!({"label":label,"passed":observed.is_ok()}),
+                    );
+                    if observed.is_err() {
+                        failures.push(label);
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn issue425_destination_repair_authored_leaf_multiplicity_is_preserved() {
+        use super::*;
+        for middle in [
+            "",
+            r#"<w:r><w:t x:unknown="empty"/></w:r>"#,
+            r#"<w:r><w:t x:unknown="empty"/><w:t x:unknown="empty"/></w:r>"#,
+            r#"<w:r><w:t xml:space="preserve"> </w:t></w:r>"#,
+        ] {
+            let inner = |edited| {
+                format!(
+                    r#"<w:p xmlns:x="urn:producer"><w:r><w:t x:unknown="same">{}</w:t></w:r>{middle}<w:r><w:t x:unknown="same">Repeated.</w:t></w:r><w:r><w:t x:unknown="different">Repeated.</w:t></w:r></w:p>"#,
+                    if edited { "New words." } else { "Old words." }
+                )
+            };
+            let mut original = issue425_guard_fixture(&inner(false), "original");
+            let edited = issue425_guard_fixture(&inner(true), "original");
+            let expected = policy3_text_metadata_inventory(&edited);
+            original
+                .compare_with_options(
+                    &edited,
+                    "Occurrence",
+                    "2026-10-01T12:00:00Z",
+                    &ComparisonOptions {
+                        ignore_formatting: true,
+                        ignore_whitespace: true,
+                        granularity: ComparisonGranularity::Word,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            for accept in [true, false] {
+                let mut resolved = Document::from_bytes(&original.to_bytes().unwrap()).unwrap();
+                if accept {
+                    resolved.accept_revisions_by_author("Occurrence").unwrap();
+                } else {
+                    resolved.reject_revisions_by_author("Occurrence").unwrap();
+                }
+                let reopened = Document::from_bytes(&resolved.to_bytes().unwrap()).unwrap();
+                assert_eq!(
+                    policy3_text_metadata_inventory(&reopened),
+                    expected,
+                    "{middle} accept={accept}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn issue425_destination_repair_shared_inner_field_source_measurements() {
+        use super::*;
+        for ignore in [false, true] {
+            for change in ["instruction", "result", "result-metadata", "multiplicity"] {
+                let inner = |edited| {
+                    let field = |instruction: &str, result: &str, note: &str| {
+                        format!(
+                            r#"<w:fldChar w:fldCharType="begin"/><w:instrText> {instruction} </w:instrText><w:fldChar w:fldCharType="separate"/><w:t x:result="{note}">{result}</w:t><w:fldChar w:fldCharType="end"/>"#
+                        )
+                    };
+                    let first = field(
+                        if edited && change == "instruction" {
+                            "DATE"
+                        } else {
+                            "PAGE"
+                        },
+                        "1",
+                        if edited && change == "result-metadata" {
+                            "after"
+                        } else {
+                            "same"
+                        },
+                    );
+                    let second = if change != "multiplicity" || edited {
+                        field(
+                            "PAGE",
+                            if edited && change == "result" {
+                                "3"
+                            } else {
+                                "2"
+                            },
+                            "second",
+                        )
+                    } else {
+                        String::new()
+                    };
+                    format!(
+                        r#"<w:p xmlns:x="urn:producer"><w:r><w:rPr x:note="actual-shared-shell"><w:b/></w:rPr><w:t x:unknown="before">Before.</w:t>{first}<w:t x:unknown="middle">Middle.</w:t>{second}<w:t x:unknown="later">After.</w:t></w:r></w:p>"#
+                    )
+                };
+                destination_diagnostic_case(
+                    &format!("prerepair-shared-field/{ignore}/{change}"),
+                    issue425_guard_fixture(&inner(false), "original"),
+                    issue425_guard_fixture(&inner(true), "original"),
+                    ComparisonOptions {
+                        ignore_formatting: true,
+                        ignore_fields: ignore,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn issue425_destination_repair_prerepair_measurements() {
+        use super::*;
+        for kind in ["simple", "complex"] {
+            for ignore in [false, true] {
+                for change in [
+                    "clean-instruction",
+                    "clean-result",
+                    "result-metadata",
+                    "multiplicity",
+                    "repeated-result",
+                ] {
+                    let inner = |edited| {
+                        let field = |instruction: &str, result: &str, note: Option<&str>| {
+                            let attrs = note
+                                .map(|note| format!(r#" x:result="{note}""#))
+                                .unwrap_or_default();
+                            if kind == "simple" {
+                                format!(
+                                    r#"<w:fldSimple w:instr="{instruction}"><w:r><w:t{attrs}>{result}</w:t></w:r></w:fldSimple>"#
+                                )
+                            } else {
+                                format!(
+                                    r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> {instruction} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t{attrs}>{result}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+                                )
+                            }
+                        };
+                        let first = field(
+                            if edited && change == "clean-instruction" {
+                                "DATE"
+                            } else {
+                                "PAGE"
+                            },
+                            if edited && change == "clean-result" {
+                                "2"
+                            } else {
+                                "1"
+                            },
+                            if change == "result-metadata" {
+                                Some(if edited { "after" } else { "same" })
+                            } else {
+                                None
+                            },
+                        );
+                        let next = if change == "repeated-result" {
+                            field(
+                                "PAGE",
+                                if edited { "3" } else { "2" },
+                                Some("unchanged-second"),
+                            )
+                        } else if change == "multiplicity" && edited {
+                            field("PAGE", "2", None)
+                        } else {
+                            String::new()
+                        };
+                        let later = if change.starts_with("clean-") {
+                            "<w:r><w:t>After.</w:t></w:r>".to_owned()
+                        } else {
+                            r#"<w:r><w:t x:unknown="later">After.</w:t></w:r>"#.to_owned()
+                        };
+                        format!(r#"<w:p xmlns:x="urn:producer">{first}{next}{later}</w:p>"#)
+                    };
+                    destination_diagnostic_case(
+                        &format!("prerepair-field/{kind}/{ignore}/{change}"),
+                        issue425_guard_fixture(&inner(false), "original"),
+                        issue425_guard_fixture(&inner(true), "original"),
+                        ComparisonOptions {
+                            ignore_formatting: true,
+                            ignore_fields: ignore,
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn issue425_destination_repair_significant_metadata_edits_refuse_atomically() {
+        use super::*;
+        let mut failures = Vec::new();
+        for owner in ["r", "p", "row", "control", "field-result"] {
+            let inner = |edited| {
+                let value = if edited { "after" } else { "same" };
+                let run = if owner == "r" {
+                    format!(r#"<w:r x:unknown="{value}"><w:t>Stable.</w:t></w:r>"#)
+                } else {
+                    "<w:r><w:t>Stable.</w:t></w:r>".to_owned()
+                };
+                match owner {
+                    "p" => {
+                        format!(r#"<w:p xmlns:x="urn:producer" x:unknown="{value}">{run}</w:p>"#)
+                    }
+                    "row" => format!(
+                        r#"<w:tbl xmlns:x="urn:producer"><w:tr x:unknown="{value}"><w:tc><w:p>{run}</w:p></w:tc></w:tr></w:tbl><w:p/>"#
+                    ),
+                    "control" => format!(
+                        r#"<w:p xmlns:x="urn:producer"><w:sdt x:unknown="{value}"><w:sdtPr/><w:sdtContent>{run}</w:sdtContent></w:sdt></w:p>"#
+                    ),
+                    "field-result" => format!(
+                        r#"<w:p xmlns:x="urn:producer"><w:fldSimple w:instr="PAGE"><w:r><w:t x:unknown="{value}">1</w:t></w:r></w:fldSimple></w:p>"#
+                    ),
+                    _ => format!(r#"<w:p xmlns:x="urn:producer">{run}</w:p>"#),
+                }
+            };
+            let mut original = issue425_guard_fixture(&inner(false), "original");
+            let edited = issue425_guard_fixture(&inner(true), "original");
+            let before = original.to_bytes().unwrap();
+            let pointer = match &original.document.body.content[0] {
+                BodyContent::Paragraph(p) => p.as_ref() as *const _ as usize,
+                _ => unreachable!(),
+            };
+            let result = original.compare_with_options(
+                &edited,
+                "Destination",
+                "2026-10-01T12:00:00Z",
+                &ComparisonOptions {
+                    ignore_formatting: true,
+                    ..Default::default()
+                },
+            );
+            policy_diagnostic(
+                "destination_required_metadata_refusal",
+                serde_json::json!({"owner":owner,"result":format!("{result:?}"),"bytes_equal":before==original.to_bytes().unwrap()}),
+            );
+            match result {
+                Ok(_) => failures.push(format!(
+                    "{owner}: significant unsupported metadata edit falsely succeeded"
+                )),
+                Err(error) => {
+                    assert!(error.to_string().contains("body"), "{owner}: {error}");
+                    assert_eq!(before, original.to_bytes().unwrap());
+                    assert_eq!(
+                        pointer,
+                        match &original.document.body.content[0] {
+                            BodyContent::Paragraph(p) => p.as_ref() as *const _ as usize,
+                            _ => 0,
+                        }
+                    );
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn issue425_destination_repair_fragment_boundaries_preserve_metadata() {
+        use super::*;
+        let mut failures = Vec::new();
+        for granularity in [
+            ComparisonGranularity::Run,
+            ComparisonGranularity::Word,
+            ComparisonGranularity::Character,
+        ] {
+            for shape in ["pure-text", "empty-metadata", "whitespace-metadata"] {
+                let _case = PolicyDiagnosticScope::enter(
+                    "fragment-semantic-case",
+                    &format!("{shape}/{granularity:?}"),
+                );
+                let inner = |edited| {
+                    let text = if edited { "New words." } else { "Old words." };
+                    let style = if edited { "i" } else { "b" };
+                    let content = match shape {
+                        "pure-text" => format!(
+                            r#"<w:r><w:t xml:space="preserve">{}</w:t></w:r><w:r><w:rPr><w:{style}/></w:rPr><w:t x:unknown="same">{text}</w:t></w:r>"#,
+                            if edited { "   " } else { " " }
+                        ),
+                        "empty-metadata" => format!(
+                            r#"<w:r><w:t x:unknown="same"/></w:r><w:r><w:t>{text}</w:t></w:r>"#
+                        ),
+                        _ => format!(
+                            r#"<w:r><w:t xml:space="preserve" x:unknown="same">{}</w:t></w:r><w:r><w:t>{text}</w:t></w:r>"#,
+                            if edited { "   " } else { " " }
+                        ),
+                    };
+                    format!(r#"<w:p xmlns:x="urn:producer">{content}</w:p>"#)
+                };
+                let mut original = issue425_guard_fixture(&inner(false), "original");
+                let edited = issue425_guard_fixture(&inner(true), "original");
+                let result = original.compare_with_options(
+                    &edited,
+                    "Destination",
+                    "2026-10-01T12:00:00Z",
+                    &ComparisonOptions {
+                        ignore_formatting: true,
+                        ignore_whitespace: true,
+                        granularity,
+                        ..Default::default()
+                    },
+                );
+                policy_diagnostic(
+                    "destination_required_fragment_public",
+                    serde_json::json!({"shape":shape,"granularity":format!("{granularity:?}"),"result":format!("{result:?}")}),
+                );
+                if let Err(error) = result {
+                    failures.push(format!("{shape}/{granularity:?}: {error}"));
+                    continue;
+                }
+                let tracked = original.to_bytes().unwrap();
+                for accept in [true, false] {
+                    let mut resolved = Document::from_bytes(&tracked).unwrap();
+                    if accept {
+                        resolved.accept_revisions_by_author("Destination").unwrap();
+                    } else {
+                        resolved.reject_revisions_by_author("Destination").unwrap();
+                    }
+                    let reopened = Document::from_bytes(&resolved.to_bytes().unwrap()).unwrap();
+                    let inventory = policy3_text_metadata_inventory(&reopened);
+                    assert!(
+                        !inventory.is_empty(),
+                        "{shape}/{granularity:?}/{accept}: metadata lost"
+                    );
+                    assert!(
+                        inventory
+                            .iter()
+                            .all(|(uri, value)| uri == "urn:producer" && value == "same")
+                    );
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn issue425_destination_repair_source_pair_admission_diagnostics() {
+        use super::*;
+        let mut failures = Vec::new();
+        for shape in [
+            "inverse-whitespace",
+            "unequal-lengths",
+            "repeated-leaves",
+            "empty-boundary",
+        ] {
+            let inner = |edited: bool| {
+                let style = if edited { "i" } else { "b" };
+                let content = match shape {
+                    "inverse-whitespace" => format!(
+                        r#"<w:r><w:t xml:space="preserve" x:unknown="space">{}</w:t></w:r><w:r><w:t>{}</w:t></w:r>"#,
+                        if edited { " " } else { "   " },
+                        if edited { "New words." } else { "Old words." }
+                    ),
+                    "unequal-lengths" => format!(
+                        r#"<w:r><w:rPr><w:{style}/></w:rPr><w:t x:unknown="same">{}</w:t></w:r>"#,
+                        if edited {
+                            "A much longer word."
+                        } else {
+                            "Old."
+                        }
+                    ),
+                    "repeated-leaves" => format!(
+                        r#"<w:r><w:rPr><w:{style}/></w:rPr><w:t x:unknown="same">Same.</w:t><w:t x:unknown="same">{}</w:t></w:r>"#,
+                        if edited { "Same longer." } else { "Same." }
+                    ),
+                    _ => format!(
+                        r#"<w:r><w:rPr><w:{style}/></w:rPr><w:t x:unknown="same">{}</w:t><w:t x:unknown="empty"/><w:t x:unknown="same">Same.</w:t></w:r>"#,
+                        if edited { "New longer." } else { "Old." }
+                    ),
+                };
+                format!(r#"<w:p xmlns:x="urn:producer">{content}</w:p>"#)
+            };
+            for granularity in [
+                ComparisonGranularity::Run,
+                ComparisonGranularity::Word,
+                ComparisonGranularity::Character,
+            ] {
+                destination_diagnostic_case(
+                    &format!("fifth-admission/{shape}/{granularity:?}"),
+                    issue425_guard_fixture(&inner(false), "original"),
+                    issue425_guard_fixture(&inner(true), "original"),
+                    ComparisonOptions {
+                        ignore_formatting: true,
+                        ignore_whitespace: true,
+                        granularity,
+                        ..Default::default()
+                    },
+                );
+                let mut compared = issue425_guard_fixture(&inner(false), "original");
+                let edited = issue425_guard_fixture(&inner(true), "original");
+                let expected = policy3_text_metadata_inventory(&edited);
+                let result = compared.compare_with_options(
+                    &edited,
+                    "Pair",
+                    "2026-10-01T12:00:00Z",
+                    &ComparisonOptions {
+                        ignore_formatting: true,
+                        ignore_whitespace: true,
+                        granularity,
+                        ..Default::default()
+                    },
+                );
+                if let Err(error) = result {
+                    failures.push(format!("{shape}/{granularity:?}: {error}"));
+                    continue;
+                }
+                let tracked = compared.to_bytes().unwrap();
+                for accept in [true, false] {
+                    let observed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let mut resolved = Document::from_bytes(&tracked).unwrap();
+                        if accept {
+                            resolved.accept_revisions_by_author("Pair").unwrap();
+                        } else {
+                            resolved.reject_revisions_by_author("Pair").unwrap();
+                        }
+                        let reopened = Document::from_bytes(&resolved.to_bytes().unwrap()).unwrap();
+                        assert_eq!(
+                            policy3_text_metadata_inventory(&reopened),
+                            expected,
+                            "{shape}/{granularity:?}/{accept}"
+                        );
+                        let source = reopened.package.get_part(&reopened.doc_part_name).unwrap();
+                        let owner = crate::document::scan_story_owners(source, StoryKind::Body)
+                            .unwrap()
+                            .into_iter()
+                            .find(|owner| owner.kind == StoryKind::TextBox)
+                            .unwrap();
+                        let actual = std::str::from_utf8(&source[owner.full.clone()]).unwrap();
+                        let mut reader = NsReader::from_reader(source);
+                        let mut in_text = false;
+                        let mut text = String::new();
+                        loop {
+                            match reader.read_event().unwrap() {
+                                Event::Start(root) => {
+                                    in_text = owner
+                                        .full
+                                        .contains(&(reader.buffer_position() as usize))
+                                        && root.local_name().as_ref() == b"t"
+                                        && matches!(reader.resolver().resolve_element(root.name()).0,
+                                        ResolveResult::Bound(uri) if uri.as_ref()==W_NS.as_bytes())
+                                }
+                                Event::Text(value) if in_text => {
+                                    text.push_str(&value.decode().unwrap())
+                                }
+                                Event::End(_) => in_text = false,
+                                Event::Eof => break,
+                                _ => {}
+                            }
+                        }
+                        let expected_text = match (shape, accept) {
+                            ("inverse-whitespace", true) => "New words.",
+                            ("inverse-whitespace", false) => "Old words.",
+                            ("unequal-lengths", true) => "A much longer word.",
+                            ("unequal-lengths", false) => "Old.",
+                            ("repeated-leaves", true) => "Same.Same longer.",
+                            ("repeated-leaves", false) => "Same.Same.",
+                            ("empty-boundary", true) => "New longer.Same.",
+                            ("empty-boundary", false) => "Old.Same.",
+                            _ => unreachable!(),
+                        };
+                        // Word/Run token separation matters. Character keeps scalar policy.
+                        if granularity != ComparisonGranularity::Character {
+                            assert_eq!(
+                                text.trim(),
+                                expected_text,
+                                "{shape}/{granularity:?}/{accept}"
+                            );
+                        } else {
+                            assert_eq!(
+                                text.chars()
+                                    .filter(|c| !c.is_whitespace())
+                                    .collect::<String>(),
+                                expected_text
+                                    .chars()
+                                    .filter(|c| !c.is_whitespace())
+                                    .collect::<String>()
+                            );
+                        }
+                        if shape == "empty-boundary" {
+                            assert_eq!(actual.matches(r#"<w:t x:unknown="empty"/>"#).count(), 1);
+                        }
+                        if shape != "inverse-whitespace" {
+                            let xml = String::from_utf8_lossy(
+                                reopened.package.get_part(&reopened.doc_part_name).unwrap(),
+                            );
+                            assert!(
+                                xml.contains("<w:b"),
+                                "{shape}/{granularity:?}/{accept}: {xml}"
+                            );
+                            assert!(
+                                !xml.contains("<w:i/"),
+                                "{shape}/{granularity:?}/{accept}: {xml}"
+                            );
+                        }
+                    }));
+                    policy_diagnostic(
+                        "two_input_semantic_row",
+                        serde_json::json!({"shape":shape,"granularity":format!("{granularity:?}"),"accept":accept,"passed":observed.is_ok()}),
+                    );
+                    if observed.is_err() {
+                        failures.push(format!(
+                            "{shape}/{granularity:?}/{accept}: resolution assertion"
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn issue425_projection_rejects_missing_and_repeated_action_proofs() {
+        use super::*;
+        let xml = format!(
+            r#"<w:document xmlns:w="{W_NS}" xmlns:x="urn:producer"><w:body><w:p><w:r><w:t x:unknown="same">Text</w:t></w:r></w:p></w:body></w:document>"#
+        );
+        let start = xml.find("<w:t ").unwrap();
+        let end = start + xml[start..].find("</w:t>").unwrap() + 6;
+        let source = xml[start..end].to_owned();
+        let leaf = LeafPublication {
+            range: start..end,
+            owner: 1,
+            ordinal: 0,
+            scalars: 0..4,
+            source,
+            context: vec![
+                ("xmlns:w".into(), W_NS.into()),
+                ("xmlns:x".into(), "urn:producer".into()),
+            ],
+            payload: "Text".into(),
+            physical: (1, 0, 0..4),
+            domains: [Some((1, 0, 4)), Some((2, 0, 4))],
+            actions: vec![([Some(0..4), Some(0..4)], GranularAction::Equal)],
+        };
+        assert!(
+            restore_resolved_leaf_occurrences(
+                xml.as_bytes(),
+                std::slice::from_ref(&leaf),
+                &[Some(start..end)]
+            )
+            .is_ok()
+        );
+        for side in 0..2 {
+            let mut missing = leaf.clone();
+            missing.actions[0].0[side] = Some(0..3);
+            assert!(
+                restore_resolved_leaf_occurrences(xml.as_bytes(), &[missing], &[Some(start..end)])
+                    .is_err()
+            );
+            let mut repeated = leaf.clone();
+            let mut inputs = [None, None];
+            inputs[side] = Some(0..1);
+            repeated.actions.push((
+                inputs,
+                if side == 0 {
+                    GranularAction::Preserve
+                } else {
+                    GranularAction::Drop
+                },
+            ));
+            assert!(
+                restore_resolved_leaf_occurrences(xml.as_bytes(), &[repeated], &[Some(start..end)])
+                    .is_err()
+            );
+        }
+        assert!(
+            restore_resolved_leaf_occurrences(
+                xml.as_bytes(),
+                &[leaf.clone(), leaf],
+                &[Some(start..end), Some(start..end)]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn issue425_simple_result_whole_field_retains_its_source_policy() {
+        use super::*;
+        let make = |edited| {
+            issue425_guard_fixture(
+                &format!(
+                    r#"<w:p xmlns:x="urn:producer"><w:fldSimple w:instr="{}" w:dirty="true" x:root="kept"><w:r><w:rPr><w:{}/></w:rPr><w:t x:unknown="result">{}</w:t></w:r></w:fldSimple><w:r><w:t>Tail</w:t></w:r></w:p>"#,
+                    if edited { " PAGE " } else { "PAGE" },
+                    if edited { "i" } else { "b" },
+                    if edited { "2" } else { "1" }
+                ),
+                "original",
+            )
+        };
+        let mut failures = Vec::new();
+        for ignore_formatting in [false, true] {
+            let mut original = make(false);
+            let edited = make(true);
+            // Read the actual admitted physical textbox source for field identity.
+            let field_model = |document: &Document| {
+                let source = document.package.get_part(&document.doc_part_name).unwrap();
+                let owner = crate::document::scan_story_owners(source, StoryKind::Body)
+                    .unwrap()
+                    .into_iter()
+                    .find(|owner| owner.kind == StoryKind::TextBox)
+                    .unwrap();
+                let xml = std::str::from_utf8(&source[owner.full.clone()]).unwrap();
+                let inner = element_inner_range_any_prefix(xml, "txbxContent").unwrap();
+                let parent =
+                    publication_parent_at(std::str::from_utf8(source).unwrap(), owner.full.start)
+                        .unwrap();
+                let bindings = actual_root_bindings(xml, &parent).unwrap();
+                let content = xml[inner.clone()].to_owned();
+                (
+                    story_document(&content, &bindings).unwrap(),
+                    content,
+                    bindings,
+                    owner.full.start + inner.start,
+                )
+            };
+            let left = field_model(&original);
+            let right = field_model(&edited);
+            let fields = [&left.0, &right.0].map(|model| {
+                let BodyContent::Paragraph(p) = &model.body.content[0] else {
+                    panic!("field fixture owner")
+                };
+                run_field(&p.runs[0]).unwrap()
+            });
+            assert_eq!(
+                fields[0].effective_instruction(),
+                fields[1].effective_instruction()
+            );
+            let options = ComparisonOptions {
+                ignore_formatting,
+                ..Default::default()
+            };
+            let mut metadata = Metadata {
+                author: "DirectField",
+                timestamp: "2026-10-01T12:00:00Z",
+                options: &options,
+                ids: IdAllocator::new(HashSet::new()),
+                existing_revisions: false,
+                source_frames: Vec::new(),
+                projected_textbox_noop: false,
+                leaf_capture: false,
+                paired_field_story: None,
+                leaf_publications: Vec::new(),
+                field_conversions: Vec::new(),
+            };
+            for (role, ((model, content, bindings, base), document)) in
+                [(&left, &original), (&right, &edited)]
+                    .into_iter()
+                    .enumerate()
+            {
+                let part = document.package.get_part(&document.doc_part_name).unwrap();
+                let mut sources = SourceSnapshots {
+                    input_role: role,
+                    story: format!("textbox:{}", document.doc_part_name),
+                    part_base: Some(*base),
+                    part_len: Some(part.len()),
+                    part_hash: Some(Sha256::digest(part).into()),
+                    ..Default::default()
+                };
+                sources
+                    .body(
+                        model,
+                        (
+                            content,
+                            &story_content_spans(content, bindings).unwrap(),
+                            bindings,
+                        ),
+                        &HeldRevisions::default(),
+                    )
+                    .unwrap();
+                metadata.source_frames.push(sources);
+            }
+            let direct = compare_field_xml(fields[0], fields[1], &mut metadata).unwrap();
+            assert_eq!(direct.matches("<w:del ").count(), 1);
+            assert_eq!(direct.matches("<w:ins ").count(), 1);
+            policy_diagnostic(
+                "two_input_field_admission",
+                serde_json::json!({"ignore_formatting":ignore_formatting,"effective_left":format!("{:?}",fields[0].effective_instruction()),"effective_right":format!("{:?}",fields[1].effective_instruction()),"direct":direct}),
+            );
+            if let Err(error) = original.compare_with_options(
+                &edited,
+                "FieldPolicy",
+                "2026-10-01T12:00:00Z",
+                &options,
+            ) {
+                failures.push(format!("{ignore_formatting}: {error}"));
+                continue;
+            }
+            let tracked = original.to_bytes().unwrap();
+            for accept in [true, false] {
+                let observed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut resolved = Document::from_bytes(&tracked).unwrap();
+                    if accept {
+                        resolved.accept_revisions_by_author("FieldPolicy").unwrap();
+                    } else {
+                        resolved.reject_revisions_by_author("FieldPolicy").unwrap();
+                    }
+                    let reopened = Document::from_bytes(&resolved.to_bytes().unwrap()).unwrap();
+                    occurrence_fixture_artifact(&reopened, "mode-field-resolved");
+                    let xml = String::from_utf8_lossy(
+                        reopened.package.get_part(&reopened.doc_part_name).unwrap(),
+                    );
+                    assert!(xml.contains("x:root=\"kept\""), "{xml}");
+                    assert!(xml.contains("x:unknown=\"result\""), "{xml}");
+                    assert!(xml.contains("w:dirty=\"true\""), "{xml}");
+                    let instruction = if accept && !ignore_formatting {
+                        "w:instr=\" PAGE \""
+                    } else {
+                        "w:instr=\"PAGE\""
+                    };
+                    assert!(xml.contains(instruction), "{xml}");
+                    assert!(
+                        xml.contains(if accept { ">2</w:t>" } else { ">1</w:t>" }),
+                        "{xml}"
+                    );
+                    assert!(xml.contains(if accept { "<w:i" } else { "<w:b" }), "{xml}");
+                    assert!(reopened.story_revisions().unwrap().is_empty());
+                }));
+                policy_diagnostic(
+                    "two_input_field_resolution",
+                    serde_json::json!({"ignore_formatting":ignore_formatting,"accept":accept,"passed":observed.is_ok()}),
+                );
+                if observed.is_err() {
+                    failures.push(format!("{ignore_formatting}/{accept}: field source oracle"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn issue425_destination_option_metadata_diagnostics() {
+        use super::*;
+        let run = |text: &str, style: &str| {
+            format!(
+                r#"<w:r><w:rPr x:note="retained w:token"><w:{style}/><x:opaque/></w:rPr><w:t>{text}</w:t></w:r>"#
+            )
+        };
+        // All five publication families, with genuine public local-word setup.
+        for publisher in [
+            "ordinary",
+            "granular",
+            "complex",
+            "control",
+            "control-granular",
+        ] {
+            for namespace in ["canonical", "alias", "default", "local-shadow"] {
+                let body = |edited| {
+                    let value = run(
+                        if edited { "New." } else { "Old." },
+                        if edited { "i" } else { "b" },
+                    );
+                    match publisher {
+                        "control" | "control-granular" => format!(
+                            "<w:p><w:sdt><w:sdtPr/><w:sdtContent>{value}</w:sdtContent></w:sdt></w:p>"
+                        ),
+                        "complex" => format!(
+                            r#"<w:p><w:hyperlink w:anchor="here">{value}</w:hyperlink></w:p>"#
+                        ),
+                        _ => format!("<w:p>{value}</w:p>"),
+                    }
+                };
+                let options = ComparisonOptions {
+                    ignore_formatting: publisher.contains("granular"),
+                    granularity: if publisher.contains("granular") {
+                        ComparisonGranularity::Word
+                    } else {
+                        ComparisonGranularity::Run
+                    },
+                    ..Default::default()
+                };
+                destination_diagnostic_case(
+                    &format!("publisher/{publisher}/{namespace}"),
+                    destination_diagnostic_document(&body(false), namespace),
+                    destination_diagnostic_document(&body(true), namespace),
+                    options,
+                );
+            }
+        }
+        // Direct preserve/equal/unpaired and structural row publications.
+        for namespace in ["canonical", "alias", "default", "local-shadow"] {
+            for operation in ["preserve", "equal", "insert", "delete", "row"] {
+                let body = |edited| {
+                    let first = run(
+                        "Keep.",
+                        if operation == "equal" && edited {
+                            "i"
+                        } else {
+                            "b"
+                        },
+                    );
+                    let extra = if (operation == "insert" && edited)
+                        || (operation == "delete" && !edited)
+                    {
+                        run("Additional.", "b")
+                    } else {
+                        String::new()
+                    };
+                    if operation == "row" {
+                        format!(
+                            "<w:tbl><w:tblGrid/><w:tr><w:tc><w:p>{first}</w:p></w:tc></w:tr>{}</w:tbl><w:p/>",
+                            if edited {
+                                format!(
+                                    "<w:tr><w:tc><w:p>{}</w:p></w:tc></w:tr>",
+                                    run("NewCell.", "i")
+                                )
+                            } else {
+                                String::new()
+                            }
+                        )
+                    } else {
+                        format!(
+                            "<w:p>{first}{extra}</w:p><w:p><w:r><w:t>{}</w:t></w:r></w:p>",
+                            if edited { "NewAnchor" } else { "OldAnchor" }
+                        )
+                    }
+                };
+                destination_diagnostic_case(
+                    &format!("direct/{operation}/{namespace}"),
+                    destination_diagnostic_document(&body(false), namespace),
+                    destination_diagnostic_document(&body(true), namespace),
+                    ComparisonOptions::default(),
+                );
+            }
+        }
+        let textbox = |inner: &str| issue425_guard_fixture(inner, "original");
+        for namespace in ["alias", "default", "local-shadow"] {
+            for equal in [false, true] {
+                let body = |edited| {
+                    format!(
+                        r#"<w:p><w:r><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml"><v:textbox><w:txbxContent><w:p><w:r><w:rPr x:note="w:token"><w:{}/><x:opaque x:note="w:token"/></w:rPr><w:t>{}</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape></w:pict></w:r></w:p>"#,
+                        if edited { "i" } else { "b" },
+                        if edited && !equal { "New." } else { "Old." }
+                    )
+                };
+                destination_diagnostic_case(
+                    &format!("textbox-property/{namespace}/{equal}"),
+                    destination_diagnostic_document(&body(false), namespace),
+                    destination_diagnostic_document(&body(true), namespace),
+                    ComparisonOptions {
+                        ignore_formatting: true,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+        // Actual raw metadata length and preceding policy-ignored whitespace.
+        for placement in ["leaf-length", "preceding-neighbor"] {
+            for ignore in [false, true] {
+                for change in ["same", "whitespace", "real"] {
+                    let inner = |edited| {
+                        let text = if placement == "leaf-length" && edited && change == "whitespace"
+                        {
+                            "Old  words."
+                        } else if edited && change == "real" {
+                            "New words."
+                        } else {
+                            "Old words."
+                        };
+                        let preceding = if placement == "preceding-neighbor" {
+                            if edited && change == "whitespace" {
+                                "   "
+                            } else {
+                                " "
+                            }
+                        } else {
+                            ""
+                        };
+                        format!(
+                            r#"<w:p><w:r><w:t xml:space="preserve">{preceding}</w:t></w:r><w:r><w:rPr><w:{}/></w:rPr><w:t x:unknown="same">{text}</w:t></w:r></w:p>"#,
+                            if edited { "i" } else { "b" }
+                        )
+                    };
+                    // The host supplies x for the actual content metadata.
+                    let make = |edited| {
+                        let d = textbox(&inner(edited));
+                        let xml =
+                            String::from_utf8_lossy(d.package.get_part(&d.doc_part_name).unwrap())
+                                .replace(
+                                    "<w:txbxContent>",
+                                    "<w:txbxContent xmlns:x=\"urn:producer\">",
+                                );
+                        let mut p = d.package;
+                        p.set_part("/word/document.xml", xml.into_bytes());
+                        Document::from_package(p).unwrap()
+                    };
+                    destination_diagnostic_case(
+                        &format!("whitespace/{placement}/{ignore}/{change}"),
+                        make(false),
+                        make(true),
+                        ComparisonOptions {
+                            ignore_formatting: true,
+                            ignore_whitespace: ignore,
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
+        }
+        // Physical simple and complex field source, independently changed values.
+        for kind in ["simple", "complex"] {
+            for ignore in [false, true] {
+                for change in ["same", "instruction", "result", "metadata"] {
+                    for attribute in ["w:unknown", "x:unknown"] {
+                        let inner = |edited| {
+                            let instruction = if edited && change == "instruction" {
+                                "DATE"
+                            } else {
+                                "PAGE"
+                            };
+                            let result = if edited && change == "result" {
+                                "2"
+                            } else {
+                                "1"
+                            };
+                            let metadata = if edited && change == "metadata" {
+                                "after"
+                            } else {
+                                "same"
+                            };
+                            let field = if kind == "simple" {
+                                format!(
+                                    r#"<w:fldSimple w:instr="{instruction}" {attribute}="{metadata}"><w:r><w:t x:result="same">{result}</w:t></w:r></w:fldSimple>"#
+                                )
+                            } else {
+                                format!(
+                                    r#"<w:r><w:fldChar w:fldCharType="begin" {attribute}="{metadata}"/></w:r><w:r><w:instrText> {instruction} </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t x:result="same">{result}</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#
+                                )
+                            };
+                            format!(
+                                r#"<w:p xmlns:x="urn:producer">{field}<w:r><w:rPr><w:{}/></w:rPr><w:t x:unknown="later">After.</w:t></w:r></w:p>"#,
+                                if edited { "i" } else { "b" }
+                            )
+                        };
+                        destination_diagnostic_case(
+                            &format!("field/{kind}/{ignore}/{change}/{attribute}"),
+                            textbox(&inner(false)),
+                            textbox(&inner(true)),
+                            ComparisonOptions {
+                                ignore_formatting: true,
+                                ignore_fields: ignore,
+                                ..Default::default()
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        // Root facts stay root facts, including repeated/split owner controls.
+        for root in ["r", "p"] {
+            for attribute in ["w:unknown", "x:unknown"] {
+                for change in ["same", "metadata", "text", "both"] {
+                    for shape in ["neighbor", "repeat", "split"] {
+                        let inner = |edited| {
+                            let metadata = if edited && matches!(change, "metadata" | "both") {
+                                "after"
+                            } else {
+                                "same"
+                            };
+                            let text = if edited && matches!(change, "text" | "both") {
+                                "New words."
+                            } else {
+                                "Old words."
+                            };
+                            let attrs = format!(r#" {attribute}="{metadata}""#);
+                            let style = if edited { "i" } else { "b" };
+                            let content = if shape == "split" && edited {
+                                let (first, last) = text.split_once(' ').unwrap();
+                                format!(
+                                    r#"<w:r{}><w:rPr><w:{style}/></w:rPr><w:t xml:space="preserve">{first} </w:t></w:r><w:r{}><w:rPr><w:{style}/></w:rPr><w:t>{last}</w:t></w:r>"#,
+                                    if root == "r" { &attrs } else { "" },
+                                    if root == "r" { &attrs } else { "" }
+                                )
+                            } else {
+                                format!(
+                                    r#"<w:r{}><w:rPr><w:{style}/></w:rPr><w:t>{text}</w:t></w:r>"#,
+                                    if root == "r" { &attrs } else { "" }
+                                )
+                            };
+                            format!(
+                                r#"<w:p xmlns:x="urn:producer"{}><w:r><w:t>Neighbor.</w:t></w:r>{content}{}</w:p>"#,
+                                if root == "p" { &attrs } else { "" },
+                                if shape == "repeat" {
+                                    format!(
+                                        r#"<w:r><w:rPr><w:{style}/></w:rPr><w:t>Old words.</w:t></w:r>"#
+                                    )
+                                } else {
+                                    String::new()
+                                }
+                            )
+                        };
+                        destination_diagnostic_case(
+                            &format!("root/{root}/{attribute}/{change}/{shape}"),
+                            textbox(&inner(false)),
+                            textbox(&inner(true)),
+                            ComparisonOptions {
+                                ignore_formatting: true,
+                                ..Default::default()
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        for namespace in ["alias", "default", "local-shadow"] {
+            for root in ["r", "p"] {
+                let body = |edited| {
+                    format!(
+                        r#"<w:p{}><w:r{}><w:rPr><w:b w:val="{}"/></w:rPr><w:t>Stable.</w:t></w:r></w:p><w:p><w:r><w:t>{}</w:t></w:r></w:p>"#,
+                        if root == "p" {
+                            r#" x:note="w:token""#
+                        } else {
+                            ""
+                        },
+                        if root == "r" {
+                            r#" x:note="w:token""#
+                        } else {
+                            ""
+                        },
+                        if edited { "1" } else { "true" },
+                        if edited { "NewAnchor" } else { "OldAnchor" }
+                    )
+                };
+                destination_diagnostic_case(
+                    &format!("root-scope/{root}/{namespace}/typed-normalization"),
+                    destination_diagnostic_document(&body(false), namespace),
+                    destination_diagnostic_document(&body(true), namespace),
+                    ComparisonOptions {
+                        ignore_formatting: true,
+                        ..Default::default()
+                    },
+                );
+            }
+        }
+        // Bounded container audit: do not infer a global result from one type.
+        for owner in ["table", "row", "cell", "control", "hyperlink"] {
+            for attribute in ["w:unknown", "x:unknown"] {
+                for changed in [false, true] {
+                    let inner = |edited| {
+                        let value = if edited && changed { "after" } else { "same" };
+                        let attrs = format!(r#" {attribute}="{value}""#);
+                        let run = format!(
+                            r#"<w:r><w:rPr><w:{} w:val="true"/></w:rPr><w:t>Stable.</w:t></w:r>"#,
+                            if edited { "i" } else { "b" }
+                        );
+                        match owner {
+                            "control" => format!(
+                                r#"<w:p xmlns:x="urn:producer"><w:sdt{attrs}><w:sdtPr/><w:sdtContent>{run}</w:sdtContent></w:sdt></w:p>"#
+                            ),
+                            "hyperlink" => format!(
+                                r#"<w:p xmlns:x="urn:producer"><w:hyperlink w:anchor="here"{attrs}>{run}</w:hyperlink></w:p>"#
+                            ),
+                            _ => format!(
+                                r#"<w:tbl xmlns:x="urn:producer"{}><w:tblGrid/><w:tr{}><w:tc{}><w:p>{run}</w:p></w:tc></w:tr></w:tbl><w:p/>"#,
+                                if owner == "table" { &attrs } else { "" },
+                                if owner == "row" { &attrs } else { "" },
+                                if owner == "cell" { &attrs } else { "" }
+                            ),
+                        }
+                    };
+                    destination_diagnostic_case(
+                        &format!("container/{owner}/{attribute}/{changed}"),
+                        textbox(&inner(false)),
+                        textbox(&inner(true)),
+                        ComparisonOptions {
+                            ignore_formatting: true,
+                            ..Default::default()
+                        },
+                    );
+                }
+            }
         }
     }
 }

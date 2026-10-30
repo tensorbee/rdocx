@@ -935,7 +935,10 @@ impl SdtOwner {
             Self::Body | Self::Cell => matches!(local, b"p" | b"tbl"),
             Self::Table => local == b"tr",
             Self::Row => local == b"tc",
-            Self::Inline => local == b"r",
+            Self::Inline => matches!(
+                local,
+                b"r" | b"fldSimple" | b"ins" | b"del" | b"moveFrom" | b"moveTo"
+            ),
         }
     }
 
@@ -989,6 +992,13 @@ struct InlineRunSource {
     raw_xml: Vec<u8>,
 }
 
+pub(crate) struct InlineFieldProjection {
+    pub(crate) paragraph: CT_P,
+    pub(crate) run_coverage: Vec<Range<usize>>,
+    source: Vec<u8>,
+    content_spans: Vec<Range<usize>>,
+}
+
 impl CT_Sdt {
     /// Project complex legacy fields owned by direct inline runs.
     #[doc(hidden)]
@@ -1003,34 +1013,24 @@ impl CT_Sdt {
     /// Project direct-run legacy fields with their starting content boundary.
     #[doc(hidden)]
     pub fn inline_legacy_form_fields_with_content_indices(&self) -> Result<Vec<(usize, Field)>> {
-        let Some(paragraph) = self.inline_runs_as_paragraph()? else {
+        let Some(projection) = self.inline_runs_as_paragraph()? else {
             return Ok(Vec::new());
         };
+        let paragraph = &projection.paragraph;
+        let coverage = &projection.run_coverage;
         let mut fields = Vec::new();
-        let mut source_cursor = 0usize;
-        for field in paragraph.runs.iter().flat_map(|run| run.content.iter()) {
-            if let RunContent::Field(field) = field {
-                let mut owned = Vec::new();
-                append_inline_legacy_fields(field, &mut owned)?;
-                if owned.is_empty() {
-                    continue;
+        for (run_index, run) in paragraph.runs.iter().enumerate() {
+            for content in &run.content {
+                if let RunContent::Field(field) = content {
+                    let mut owned = Vec::new();
+                    append_inline_legacy_fields(field, &mut owned)?;
+                    let span = coverage.get(run_index).ok_or_else(|| {
+                        OxmlError::InvalidValue(
+                            "inline legacy owner has no physical source association".into(),
+                        )
+                    })?;
+                    fields.extend(owned.into_iter().map(|field| (span.start, field)));
                 }
-                let source = field
-                    .source_replacement()?
-                    .map(|(source, _)| source)
-                    .ok_or_else(|| {
-                        OxmlError::MissingElement("retained inline field source".to_owned())
-                    })?;
-                let relative = self.inline_run_sources[source_cursor..]
-                    .iter()
-                    .position(|run| source.starts_with(&run.raw_xml))
-                    .ok_or_else(|| {
-                        OxmlError::MissingElement("inline field start run".to_owned())
-                    })?;
-                let source_index = source_cursor + relative;
-                let content_index = self.inline_run_sources[source_index].content_index;
-                source_cursor = source_index + 1;
-                fields.extend(owned.into_iter().map(|field| (content_index, field)));
             }
         }
         Ok(fields)
@@ -1043,9 +1043,29 @@ impl CT_Sdt {
         ordinal: usize,
         value: LegacyFormFieldValue,
     ) -> Result<bool> {
-        let Some(mut paragraph) = self.inline_runs_as_paragraph()? else {
+        self.preflight_inline_fact_copy()?;
+        let mut candidate = self.clone();
+        if !candidate.set_inline_legacy_form_value_staged(ordinal, value)? {
+            return Ok(false);
+        }
+        *self = candidate;
+        Ok(true)
+    }
+
+    fn set_inline_legacy_form_value_staged(
+        &mut self,
+        ordinal: usize,
+        value: LegacyFormFieldValue,
+    ) -> Result<bool> {
+        let Some(projection) = self.inline_runs_as_paragraph()? else {
             return Ok(false);
         };
+        let InlineFieldProjection {
+            mut paragraph,
+            run_coverage: coverage,
+            source,
+            content_spans,
+        } = projection;
         let mut remaining = ordinal;
         let mut changed = false;
         for run in &mut paragraph.runs {
@@ -1064,61 +1084,200 @@ impl CT_Sdt {
         if !changed {
             return Ok(false);
         }
+        paragraph.normalize_field_owners()?;
+        let mut plans = Vec::new();
         let mut field_edits = Vec::new();
-        for field in paragraph.runs.iter().flat_map(|run| run.content.iter()) {
-            if let RunContent::Field(field) = field
-                && let Some((source, replacement)) = field.source_replacement()?
-                && source != replacement
+        let mut run_index = 0usize;
+        while run_index < paragraph.runs.len() {
+            let original_span = coverage.get(run_index).cloned().ok_or_else(|| {
+                OxmlError::InvalidValue("inline legacy run lacks its physical source extent".into())
+            })?;
+            let mut logical_end = run_index + 1;
+            while logical_end < coverage.len() && coverage[logical_end] == original_span {
+                logical_end += 1;
+            }
+            let canonical = original_span.end == original_span.start + 1
+                && matches!(self.content.get(original_span.start), Some(SdtContent::Run(run)) if matches!(run.content.as_slice(), [RunContent::Field(_)]));
+            if canonical {
+                if logical_end != run_index + 1
+                    || !matches!(
+                        paragraph.runs[run_index].content.as_slice(),
+                        [RunContent::Field(_)]
+                    )
+                {
+                    return Err(OxmlError::InvalidValue(
+                        "canonical inline field changed its actual logical owner cardinality"
+                            .into(),
+                    ));
+                }
+                plans.push((
+                    original_span,
+                    vec![SdtContent::Run(paragraph.runs[run_index].clone())],
+                    Vec::new(),
+                ));
+            } else {
+                let mut replacements = Vec::new();
+                let associated =
+                    paragraph.field_source_replacements_at(run_index, &mut replacements)?;
+                if associated != logical_end - run_index {
+                    return Err(OxmlError::InvalidValue(
+                        "legacy field source group changed its complete physical coverage".into(),
+                    ));
+                }
+                if !replacements.is_empty() {
+                    if replacements.len() != 1 {
+                        return Err(OxmlError::InvalidValue(
+                            "legacy physical span has ambiguous replacement owners".into(),
+                        ));
+                    }
+                    let (original, replacement) = replacements.pop().expect("checked source group");
+                    let first = content_spans
+                        .get(original_span.start)
+                        .ok_or_else(|| {
+                            OxmlError::InvalidValue("legacy source start is missing".into())
+                        })?
+                        .start;
+                    let last = content_spans
+                        .get(original_span.end - 1)
+                        .ok_or_else(|| {
+                            OxmlError::InvalidValue("legacy source end is missing".into())
+                        })?
+                        .end;
+                    if source.get(first..last) != Some(original.as_slice()) {
+                        return Err(OxmlError::InvalidValue("legacy replacement does not match its actual complete source occurrence".into()));
+                    }
+                    if original != replacement {
+                        if self.content[original_span.clone()]
+                            .iter()
+                            .any(|child| match child {
+                                SdtContent::ContentControl(_) => true,
+                                SdtContent::Run(run) => run
+                                    .content
+                                    .iter()
+                                    .any(|content| matches!(content, RunContent::Field(_))),
+                                _ => false,
+                            })
+                            || self
+                                .revisions
+                                .iter()
+                                .any(|(at, _)| original_span.contains(at))
+                        {
+                            return Err(OxmlError::InvalidValue("unproved legacy physical replacement crosses an independently owned field/control/revision".into()));
+                        }
+                        let mut reader = Reader::from_reader(replacement.as_slice());
+                        reader.config_mut().trim_text(false);
+                        let mut children = Vec::new();
+                        let mut sources = Vec::new();
+                        let mut buffer = Vec::new();
+                        loop {
+                            let event = reader.read_event_into(&mut buffer)?;
+                            match event {
+                                Event::Start(child) | Event::Empty(child) => {
+                                    let empty = replacement.get(
+                                        (reader.buffer_position() as usize).saturating_sub(2)
+                                            ..reader.buffer_position() as usize,
+                                    ) == Some(b"/>");
+                                    let scope =
+                                        word_prefixes_at(&child, &self.content_word_prefixes)?;
+                                    let raw = if empty {
+                                        capture_empty_element(&child)?
+                                    } else {
+                                        capture_element(&mut reader, &child)?
+                                    };
+                                    if is_word_element(child.name().as_ref(), b"r", &scope) {
+                                        let run =
+                                            parse_inline_run(&raw, &self.content_word_prefixes)?;
+                                        sources.push(InlineRunSource {
+                                            content_index: children.len(),
+                                            original: run.clone(),
+                                            raw_xml: raw,
+                                        });
+                                        children.push(SdtContent::Run(run));
+                                    } else {
+                                        children.push(SdtContent::RawXml(raw));
+                                    }
+                                }
+                                Event::Eof => break,
+                                event => children.push(SdtContent::RawXml(event_to_raw(event)?)),
+                            }
+                            buffer.clear();
+                        }
+                        field_edits.push((original, replacement));
+                        plans.push((original_span, children, sources));
+                    }
+                }
+            }
+            run_index = logical_end;
+        }
+        plans.sort_by_key(|(span, _, _)| span.start);
+        for (span, children, mut replacements) in plans.into_iter().rev() {
+            let old_count = span.len();
+            let new_count = children.len();
+            // Canonical fields retain their immutable lookup source. Physical
+            // fallback records are replaced only at the proved top-level extent.
+            if replacements.is_empty()
+                && old_count == 1
+                && new_count == 1
+                && matches!(children[0], SdtContent::Run(ref run) if matches!(run.content.as_slice(), [RunContent::Field(_)]))
             {
-                field_edits.push((source.to_vec(), replacement));
+                self.content.splice(span, children);
+                continue;
             }
-        }
-        let mut writer = Writer::new(Vec::new());
-        paragraph.to_xml(&mut writer)?;
-        let xml = writer.into_inner();
-        let start = xml
-            .iter()
-            .position(|byte| *byte == b'>')
-            .map(|index| index + 1)
-            .ok_or_else(|| OxmlError::MissingElement("w:p start tag".to_owned()))?;
-        let end = xml
-            .windows(b"</w:p>".len())
-            .rposition(|window| window == b"</w:p>")
-            .ok_or_else(|| OxmlError::MissingElement("w:p end tag".to_owned()))?;
-        let replacements = inline_run_fragments(&xml[start..end])?;
-        let run_count = self
-            .content
-            .iter()
-            .filter(|content| matches!(content, SdtContent::Run(_)))
-            .count();
-        if replacements.len() != run_count {
-            return Err(OxmlError::InvalidValue(format!(
-                "inline content-control run count changed from {run_count} to {}",
-                replacements.len()
-            )));
-        }
-        let mut replacements = replacements.into_iter();
-        let mut sources = Vec::with_capacity(run_count);
-        for (content_index, content) in self.content.iter_mut().enumerate() {
-            if matches!(content, SdtContent::Run(_)) {
-                let raw_xml = replacements
-                    .next()
-                    .expect("replacement count was checked above");
-                let run = parse_inline_run(&raw_xml, &self.content_word_prefixes)?;
-                *content = SdtContent::Run(run.clone());
-                sources.push(InlineRunSource {
-                    content_index,
-                    original: run,
-                    raw_xml,
-                });
+            self.inline_run_sources
+                .retain(|record| !span.contains(&record.content_index));
+            for record in &mut self.inline_run_sources {
+                if record.content_index >= span.end {
+                    record.content_index = record.content_index - old_count + new_count;
+                }
             }
+            for (at, _) in &mut self.revisions {
+                if *at >= span.end {
+                    *at = *at - old_count + new_count;
+                }
+            }
+            for record in &mut replacements {
+                record.content_index += span.start;
+            }
+            self.inline_run_sources.extend(replacements);
+            self.content.splice(span, children);
         }
-        self.inline_run_sources = sources;
+        self.inline_run_sources
+            .sort_by_key(|record| record.content_index);
         self.pending_inline_field_edits = field_edits;
         Ok(true)
     }
 
-    fn inline_runs_as_paragraph(&self) -> Result<Option<CT_P>> {
+    fn preflight_inline_fact_copy(&self) -> Result<()> {
+        crate::document::admit_word_model(crate::document::WordOwner::Control(self))?;
+        let mut borrowed_runs = Vec::new();
+        self.collect_runs(&mut borrowed_runs);
+        let mut controls = vec![self];
+        let mut legacy_revisions = Vec::new();
+        while let Some(control) = controls.pop() {
+            borrowed_runs.extend(control.original_resource_runs());
+            legacy_revisions.extend(control.revisions.iter().map(|(_, revision)| revision));
+            for child in &control.content {
+                if let SdtContent::ContentControl(child) = child {
+                    controls.push(child);
+                }
+            }
+        }
+        while let Some(revision) = legacy_revisions.pop() {
+            if let crate::revision::RevisionContent::Runs(runs) = revision.content() {
+                borrowed_runs.extend(runs);
+            }
+            legacy_revisions.extend(
+                revision
+                    .nested_revisions()
+                    .iter()
+                    .map(|(_, revision)| revision),
+            );
+        }
+        crate::text::preflight_inline_field_copies(&borrowed_runs)?;
+        Ok(())
+    }
+
+    pub(crate) fn inline_runs_as_paragraph(&self) -> Result<Option<InlineFieldProjection>> {
         if !self
             .content
             .iter()
@@ -1126,72 +1285,121 @@ impl CT_Sdt {
         {
             return Ok(None);
         }
-        let mut writer = Writer::new(Vec::new());
-        let existing_prefix = self
-            .content_word_prefixes
-            .iter()
-            .find(|prefix| !prefix.starts_with('\0'))
-            .cloned();
-        let root_name = existing_prefix.as_deref().map_or_else(
-            || "w:p".to_owned(),
-            |prefix| {
-                if prefix.is_empty() {
-                    "p".to_owned()
-                } else {
-                    format!("{prefix}:p")
+        self.preflight_inline_fact_copy()?;
+        let mut prepared = self.clone();
+        prepared.normalize_field_owners()?;
+        let mut source = Vec::new();
+        let mut spans = Vec::new();
+        let mut physical_runs = Vec::new();
+        let mut facts = Vec::new();
+        for (index, child) in std::mem::take(&mut prepared.content)
+            .into_iter()
+            .enumerate()
+        {
+            let start = source.len();
+            let mut writer = Writer::new(Vec::new());
+            let child = match child {
+                SdtContent::Run(run) => {
+                    if matches!(run.content.as_slice(), [RunContent::Field(_)])
+                        && let Some(original) = self
+                            .inline_run_sources
+                            .iter()
+                            .find(|record| record.content_index == index)
+                    {
+                        writer.get_mut().extend_from_slice(&original.raw_xml);
+                    } else {
+                        self.write_inline_child(&mut writer, index, &run)?;
+                    }
+                    physical_runs.push(Some(writer.get_ref().clone()));
+                    SdtContent::Run(run)
                 }
-            },
-        );
-        let mut root = BytesStart::new(root_name.clone());
-        if existing_prefix.is_none() {
-            root.push_attribute(("xmlns:w", W_NS));
-        }
-        for (prefix, namespace) in namespace_bindings(&self.content_word_prefixes) {
-            if existing_prefix.is_none() && prefix == "w" {
-                continue;
-            }
-            let attribute = if prefix.is_empty() {
-                "xmlns".to_owned()
-            } else {
-                format!("xmlns:{prefix}")
+                SdtContent::ContentControl(control) => {
+                    control.to_xml(&mut writer)?;
+                    physical_runs.push(None);
+                    SdtContent::ContentControl(control)
+                }
+                SdtContent::RawXml(raw) => {
+                    if let Some((_, revision)) =
+                        prepared.revisions.iter().find(|(at, _)| *at == index)
+                    {
+                        revision.write_xml(&mut writer)?;
+                    } else {
+                        writer.get_mut().extend_from_slice(&raw);
+                    }
+                    physical_runs.push(None);
+                    SdtContent::RawXml(writer.get_ref().clone())
+                }
+                SdtContent::Paragraph(paragraph) => {
+                    paragraph.to_xml(&mut writer)?;
+                    physical_runs.push(None);
+                    SdtContent::RawXml(writer.get_ref().clone())
+                }
+                SdtContent::Table(table) => {
+                    table.to_xml(&mut writer)?;
+                    physical_runs.push(None);
+                    SdtContent::RawXml(writer.get_ref().clone())
+                }
+                SdtContent::Row(row) => {
+                    row.to_xml(&mut writer)?;
+                    physical_runs.push(None);
+                    SdtContent::RawXml(writer.get_ref().clone())
+                }
+                SdtContent::Cell(cell) => {
+                    cell.to_xml(&mut writer)?;
+                    physical_runs.push(None);
+                    SdtContent::RawXml(writer.get_ref().clone())
+                }
             };
-            root.push_attribute((attribute.as_str(), namespace.as_str()));
+            source.extend_from_slice(&writer.into_inner());
+            spans.push(start..source.len());
+            facts.push(child);
         }
-        writer.write_event(Event::Start(root))?;
-        for (content_index, content) in self.content.iter().enumerate() {
-            if let SdtContent::Run(run) = content {
-                if let Some(source) = self.inline_run_source(content_index, run) {
-                    writer.get_mut().write_all(&source.raw_xml)?;
-                } else {
-                    run.to_xml(&mut writer)?;
-                }
-            }
-        }
-        writer.write_event(Event::End(BytesEnd::new(root_name)))?;
-        let xml = writer.into_inner();
-        let mut reader = Reader::from_reader(xml.as_slice());
-        let mut buffer = Vec::new();
-        loop {
-            match reader.read_event_into(&mut buffer)? {
-                Event::Start(start) if matches_local_name(start.name().as_ref(), b"p") => {
-                    let prefixes = word_prefixes_at(&start, &self.content_word_prefixes)?;
-                    return Ok(Some(CT_P::from_xml_with_prefixes_and_root(
-                        &mut reader,
-                        &prefixes,
-                        Some(&start),
-                    )?));
-                }
-                Event::Eof => return Ok(None),
-                _ => {}
-            }
-            buffer.clear();
-        }
+        let (paragraph, _, _, coverage) = crate::text::inline_field_paragraph_from_facts(
+            facts,
+            prepared.revisions,
+            physical_runs,
+            &source,
+            &spans,
+            &self.content_word_prefixes,
+            false,
+        )?;
+        Ok(Some(InlineFieldProjection {
+            paragraph,
+            run_coverage: coverage,
+            source,
+            content_spans: spans,
+        }))
     }
 
     fn inline_run_source(&self, content_index: usize, run: &CT_R) -> Option<&InlineRunSource> {
-        self.inline_run_sources
-            .iter()
-            .find(|source| source.content_index == content_index && source.original == *run)
+        self.inline_run_sources.iter().find(|source| {
+            source.content_index == content_index
+                && source.original == *run
+                && match run.content.as_slice() {
+                    [RunContent::Field(field)] => field
+                        .source_replacement()
+                        .ok()
+                        .flatten()
+                        .is_some_and(|(_, current)| current == source.raw_xml),
+                    _ => true,
+                }
+        })
+    }
+
+    fn write_inline_child<W: Write>(
+        &self,
+        writer: &mut Writer<W>,
+        content_index: usize,
+        run: &CT_R,
+    ) -> Result<()> {
+        if let Some(source) = self.inline_run_source(content_index, run) {
+            writer.get_mut().write_all(&source.raw_xml)?;
+        } else if let [RunContent::Field(field)] = run.content.as_slice() {
+            crate::text::write_run_field(writer, field, None, run.properties.as_ref())?;
+        } else {
+            run.to_xml(writer)?;
+        }
+        Ok(())
     }
 
     /// Return staged source edits for complex fields owned by direct runs.
@@ -1274,6 +1482,200 @@ impl CT_Sdt {
                 self.revisions.get(index)?.1.accepted_run_segments(rest)
             }
             AcceptedRunPathSegment::Run(_) => None,
+        }
+    }
+
+    pub(crate) fn accepted_run_segments_mut(
+        &mut self,
+        path: &[AcceptedRunPathSegment],
+    ) -> Option<&mut CT_R> {
+        let (first, rest) = path.split_first()?;
+        match *first {
+            AcceptedRunPathSegment::Run(index) if rest.is_empty() => {
+                match self.content.get_mut(index)? {
+                    SdtContent::Run(run) => Some(run),
+                    _ => None,
+                }
+            }
+            AcceptedRunPathSegment::ContentControl(index) => match self.content.get_mut(index)? {
+                SdtContent::ContentControl(control) => control.accepted_run_segments_mut(rest),
+                _ => None,
+            },
+            AcceptedRunPathSegment::Revision(index) => self
+                .revisions
+                .get_mut(index)?
+                .1
+                .accepted_run_segments_mut(rest),
+            AcceptedRunPathSegment::Run(_) => None,
+        }
+    }
+
+    pub(crate) fn has_changed_field_owners(&self) -> bool {
+        self.content.iter().any(|content| match content {
+            SdtContent::Run(run) => run.content.iter().any(|content| {
+                matches!(content,
+                RunContent::Field(field) if field.source_has_pending_changes())
+            }),
+            SdtContent::ContentControl(control) => control.has_changed_field_owners(),
+            SdtContent::Paragraph(paragraph) => paragraph.has_changed_field_owners(),
+            _ => false,
+        }) || self.revisions.iter().any(|(_, revision)| {
+            revision
+                .content_paragraph()
+                .is_some_and(CT_P::has_changed_field_owners)
+        })
+    }
+
+    pub(crate) fn normalize_field_owners(&mut self) -> Result<()> {
+        for content in &mut self.content {
+            match content {
+                SdtContent::Run(run) => {
+                    for content in &mut run.content {
+                        if let RunContent::Field(field) = content {
+                            field.normalize_cached_result_owner()?;
+                        }
+                    }
+                }
+                SdtContent::ContentControl(control) => control.normalize_field_owners()?,
+                SdtContent::Paragraph(paragraph) => paragraph.normalize_field_owners()?,
+                _ => {}
+            }
+        }
+        for (_, revision) in &mut self.revisions {
+            revision.normalize_pending_fields()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn append_ordered_comment_ranges(
+        &self,
+        accepted: &mut usize,
+        output: &mut Vec<crate::text::CommentRangeMarker>,
+    ) {
+        for boundary in 0..=self.content.len() {
+            for (_, revision) in self.revisions.iter().filter(|(at, _)| *at == boundary) {
+                if matches!(
+                    revision.kind(),
+                    crate::revision::RevisionKind::Insertion
+                        | crate::revision::RevisionKind::MoveTo
+                ) && let Some(paragraph) = revision.content_paragraph()
+                {
+                    paragraph.append_ordered_comment_ranges(accepted, output);
+                }
+            }
+            match self.content.get(boundary) {
+                Some(SdtContent::Run(_)) => *accepted += 1,
+                Some(SdtContent::ContentControl(control)) => {
+                    control.append_ordered_comment_ranges(accepted, output)
+                }
+                Some(SdtContent::RawXml(raw)) => {
+                    if let Some(marker) = crate::text::raw_comment_range_marker(
+                        raw,
+                        &self.content_word_prefixes,
+                        *accepted,
+                    ) {
+                        output.push(marker);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    pub(crate) fn insert_ordered_result_comment_ranges(
+        &mut self,
+        path: &[AcceptedRunPathSegment],
+        ranges: &[crate::text::CommentRangeMarker],
+    ) -> Result<bool> {
+        let Some((first, rest)) = path.split_first() else {
+            return Ok(false);
+        };
+        match *first {
+            AcceptedRunPathSegment::Run(base) if rest.is_empty() => {
+                let mut insertions = Vec::new();
+                for marker in ranges {
+                    let (name, id, offset) = match marker {
+                        crate::text::CommentRangeMarker::Start { id, run_index, .. } => {
+                            ("commentRangeStart", *id, *run_index)
+                        }
+                        crate::text::CommentRangeMarker::End { id, run_index, .. } => {
+                            ("commentRangeEnd", *id, *run_index)
+                        }
+                    };
+                    let boundary = base.checked_add(offset).ok_or_else(|| {
+                        OxmlError::InvalidValue("annotation control boundary overflow".into())
+                    })?;
+                    if boundary > self.content.len() {
+                        return Ok(false);
+                    }
+                    let raw = format!("<w:{name} xmlns:w=\"{W_NS}\" w:id=\"{id}\"/>").into_bytes();
+                    insertions.push((boundary, SdtContent::RawXml(raw)));
+                }
+                // Reverse insertion preserves requested order at equal boundaries.
+                for (boundary, child) in insertions.into_iter().rev() {
+                    if !self.insert_content(boundary, vec![child]) {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            AcceptedRunPathSegment::ContentControl(index) => match self.content.get_mut(index) {
+                Some(SdtContent::ContentControl(control)) => {
+                    control.insert_ordered_result_comment_ranges(rest, ranges)
+                }
+                _ => Ok(false),
+            },
+            AcceptedRunPathSegment::Revision(index) => match self
+                .revisions
+                .get_mut(index)
+                .and_then(|(_, revision)| revision.ordered_paragraph_mut())
+            {
+                Some(paragraph) => paragraph.insert_ordered_result_comment_ranges(rest, ranges),
+                None => Ok(false),
+            },
+            AcceptedRunPathSegment::Run(_) => Ok(false),
+        }
+    }
+
+    pub(crate) fn replace_ordered_result_slot(
+        &mut self,
+        path: &[AcceptedRunPathSegment],
+        replacement: Vec<CT_R>,
+    ) -> Result<bool> {
+        let Some((first, rest)) = path.split_first() else {
+            return Ok(false);
+        };
+        match *first {
+            AcceptedRunPathSegment::Run(index) if rest.is_empty() => {
+                if !matches!(self.content.get(index), Some(SdtContent::Run(_))) {
+                    return Ok(false);
+                }
+                let count = replacement.len();
+                self.remove_content(index);
+                Ok(self.insert_content(
+                    index,
+                    replacement
+                        .into_iter()
+                        .map(SdtContent::Run)
+                        .collect::<Vec<_>>(),
+                ) && count <= self.content.len())
+            }
+            AcceptedRunPathSegment::ContentControl(index) => match self.content.get_mut(index) {
+                Some(SdtContent::ContentControl(control)) => {
+                    control.replace_ordered_result_slot(rest, replacement)
+                }
+                _ => Ok(false),
+            },
+            AcceptedRunPathSegment::Revision(index) => {
+                let Some((_, revision)) = self.revisions.get_mut(index) else {
+                    return Ok(false);
+                };
+                let Some(paragraph) = revision.ordered_paragraph_mut() else {
+                    return Ok(false);
+                };
+                paragraph.replace_ordered_result_slot(rest, replacement)
+            }
+            AcceptedRunPathSegment::Run(_) => Ok(false),
         }
     }
 
@@ -1712,11 +2114,7 @@ impl CT_Sdt {
                 SdtContent::Row(row) => row.to_xml(writer)?,
                 SdtContent::Cell(cell) => cell.to_xml(writer)?,
                 SdtContent::Run(run) => {
-                    if let Some(source) = self.inline_run_source(content_index, run) {
-                        writer.get_mut().write_all(&source.raw_xml)?;
-                    } else {
-                        run.to_xml(writer)?;
-                    }
+                    self.write_inline_child(writer, content_index, run)?;
                 }
                 SdtContent::ContentControl(sdt) => sdt.to_xml(writer)?,
                 SdtContent::RawXml(raw) => {
@@ -1859,39 +2257,33 @@ impl From<StorySdtOwner> for SdtOwner {
     }
 }
 
-fn inline_run_fragments(xml: &[u8]) -> Result<Vec<Vec<u8>>> {
-    let mut reader = Reader::from_reader(xml);
-    reader.config_mut().trim_text(false);
-    let mut runs = Vec::new();
-    let mut buffer = Vec::new();
-    loop {
-        match reader.read_event_into(&mut buffer)? {
-            Event::Start(start) if matches_local_name(start.name().as_ref(), b"r") => {
-                runs.push(capture_element(&mut reader, &start)?);
-            }
-            Event::Empty(start) if matches_local_name(start.name().as_ref(), b"r") => {
-                runs.push(capture_empty_element(&start)?);
-            }
-            Event::Eof => return Ok(runs),
-            _ => {}
-        }
-        buffer.clear();
-    }
-}
-
 fn parse_inline_run(xml: &[u8], inherited: &[String]) -> Result<CT_R> {
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(false);
     let mut buffer = Vec::new();
     loop {
-        match reader.read_event_into(&mut buffer)? {
-            Event::Start(start) if matches_local_name(start.name().as_ref(), b"r") => {
+        let event = reader.read_event_into(&mut buffer)?;
+        let empty = matches!(event, Event::Empty(_));
+        match event {
+            Event::Start(start) | Event::Empty(start) => {
                 let prefixes = word_prefixes_at(&start, inherited)?;
-                return CT_R::from_xml_with_prefixes_and_root(&mut reader, &prefixes, Some(&start));
-            }
-            Event::Empty(start) if matches_local_name(start.name().as_ref(), b"r") => {
-                let prefixes = word_prefixes_at(&start, inherited)?;
-                return CT_R::from_empty_root(&start, &prefixes);
+                if is_word_element(start.name().as_ref(), b"fldSimple", &prefixes) {
+                    return crate::text::parse_simple_field(xml, &prefixes)?
+                        .map(|field| crate::text::field_run(field, None))
+                        .ok_or_else(|| {
+                            OxmlError::InvalidValue("unsupported inline simple field".into())
+                        });
+                }
+                if is_word_element(start.name().as_ref(), b"r", &prefixes) {
+                    return if empty {
+                        CT_R::from_empty_root(&start, &prefixes)
+                    } else {
+                        CT_R::from_xml_with_prefixes_and_root(&mut reader, &prefixes, Some(&start))
+                    };
+                }
+                return Err(OxmlError::InvalidValue(
+                    "inline control child is not a Word run or simple field".into(),
+                ));
             }
             Event::Eof => return Err(OxmlError::MissingElement("inline control run".to_owned())),
             _ => {}
@@ -1978,6 +2370,24 @@ fn append_modeled_content_child(
             cell.retain_root_attributes(child, &prefixes)?;
             content.push(SdtContent::Cell(cell));
         }
+        (b"fldSimple", _) => {
+            let raw_xml = if empty {
+                capture_empty_element(child)?
+            } else {
+                capture_element(reader, child)?
+            };
+            if let Some(field) = crate::text::parse_simple_field(&raw_xml, &prefixes)? {
+                let run = crate::text::field_run(field, None);
+                inline_run_sources.push(InlineRunSource {
+                    content_index: content.len(),
+                    original: run.clone(),
+                    raw_xml,
+                });
+                content.push(SdtContent::Run(run));
+            } else {
+                content.push(SdtContent::RawXml(raw_xml));
+            }
+        }
         (b"r", _) => {
             let (run, raw_xml) = if empty {
                 (
@@ -2024,6 +2434,164 @@ fn append_retained_sdt_content(
     });
 }
 
+// Preserve one source occurrence for each complete projected inline owner.
+fn project_complete_inline_fields(
+    content: &mut Vec<SdtContent>,
+    revisions: &mut Vec<(usize, CT_Revision)>,
+    inline_sources: &mut Vec<InlineRunSource>,
+    source: &[u8],
+    spans: &[Range<usize>],
+    prefixes: &[String],
+) -> Result<()> {
+    let mut complete_candidate = false;
+    for record in inline_sources.iter() {
+        if crate::text::pure_complex_marker_run(&record.raw_xml, prefixes, "begin")? {
+            complete_candidate = true;
+            break;
+        }
+    }
+    if !complete_candidate {
+        return Ok(());
+    }
+    let kinds = content
+        .iter()
+        .map(|child| match child {
+            SdtContent::Run(_) => 0u8,
+            SdtContent::ContentControl(_) => 1,
+            SdtContent::RawXml(_) => 2,
+            _ => 3,
+        })
+        .collect::<Vec<_>>();
+    if kinds.contains(&3) {
+        return Err(OxmlError::InvalidValue(
+            "non-inline model in qualified inline field projection".into(),
+        ));
+    }
+    let revision_indices = revisions
+        .iter()
+        .map(|(at, _)| *at)
+        .collect::<std::collections::HashSet<_>>();
+    let mut originals = std::mem::take(inline_sources)
+        .into_iter()
+        .map(|record| (record.content_index, record))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut physical_runs = vec![None; content.len()];
+    for (index, record) in &mut originals {
+        physical_runs[*index] = Some(std::mem::take(&mut record.raw_xml));
+    }
+    let (paragraph, run_sources, comments, _) = crate::text::inline_field_paragraph_from_facts(
+        std::mem::take(content),
+        std::mem::take(revisions),
+        physical_runs,
+        source,
+        spans,
+        prefixes,
+        true,
+    )?;
+    let mut runs = paragraph.runs.into_iter().zip(run_sources);
+    let mut controls = paragraph
+        .content_controls
+        .into_iter()
+        .map(|(_, _, _, control)| control);
+    let mut raw = paragraph.extra_xml.into_iter().map(|(_, raw)| raw);
+    let mut remaining_revisions = paragraph
+        .revisions
+        .into_iter()
+        .map(|(_, _, revision)| revision);
+    let mut comments = comments
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut physical = 0usize;
+    while physical < kinds.len() {
+        let new_index = content.len();
+        match kinds[physical] {
+            0 => {
+                let (run, raw_source) = runs.next().ok_or_else(|| {
+                    OxmlError::InvalidValue("inline projected run occurrence disappeared".into())
+                })?;
+                let raw_source = raw_source.ok_or_else(|| {
+                    OxmlError::InvalidValue("inline projected run extent is unproved".into())
+                })?;
+                let start = spans[physical].start;
+                let end = start.checked_add(raw_source.len()).ok_or_else(|| {
+                    OxmlError::InvalidValue("inline source extent overflow".into())
+                })?;
+                if source.get(start..end) != Some(raw_source.as_slice()) {
+                    return Err(OxmlError::InvalidValue(
+                        "inline projected field does not own its actual physical source occurrence"
+                            .into(),
+                    ));
+                }
+                let last = spans[physical..]
+                    .iter()
+                    .position(|span| span.end == end)
+                    .map(|offset| physical + offset)
+                    .ok_or_else(|| {
+                        OxmlError::InvalidValue(
+                            "inline projected field ends inside a physical child".into(),
+                        )
+                    })?;
+                let record = if last == physical {
+                    let mut original = originals.remove(&physical).ok_or_else(|| {
+                        OxmlError::InvalidValue(
+                            "inline original run source slot disappeared".into(),
+                        )
+                    })?;
+                    original.content_index = new_index;
+                    original.raw_xml = raw_source;
+                    original
+                } else {
+                    InlineRunSource {
+                        content_index: new_index,
+                        original: run.clone(),
+                        raw_xml: raw_source,
+                    }
+                };
+                inline_sources.push(record);
+                content.push(SdtContent::Run(run));
+                physical = last + 1;
+            }
+            1 => {
+                content.push(SdtContent::ContentControl(controls.next().ok_or_else(
+                    || OxmlError::InvalidValue("inline outside control source disappeared".into()),
+                )?));
+                physical += 1;
+            }
+            2 => {
+                let bytes = comments
+                    .remove(&physical)
+                    .or_else(|| raw.next())
+                    .ok_or_else(|| {
+                        OxmlError::InvalidValue("inline outside raw source disappeared".into())
+                    })?;
+                if revision_indices.contains(&physical) {
+                    revisions.push((
+                        new_index,
+                        remaining_revisions.next().ok_or_else(|| {
+                            OxmlError::InvalidValue(
+                                "inline outside revision source disappeared".into(),
+                            )
+                        })?,
+                    ));
+                }
+                content.push(SdtContent::RawXml(bytes));
+                physical += 1;
+            }
+            _ => unreachable!(),
+        }
+    }
+    if runs.next().is_some()
+        || controls.next().is_some()
+        || raw.next().is_some()
+        || remaining_revisions.next().is_some()
+    {
+        return Err(OxmlError::InvalidValue(
+            "inline projection left an unconsumed current/source occurrence".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn parse_content(
     reader: &mut Reader<&[u8]>,
     inherited: &[String],
@@ -2031,9 +2599,14 @@ fn parse_content(
     inline_run_sources: &mut Vec<InlineRunSource>,
     owner: SdtOwner,
 ) -> Result<Vec<SdtContent>> {
+    let physical_source = *reader.get_ref();
+    let source_origin = reader.buffer_position() as usize;
+    let mut physical_spans = Vec::new();
     let mut content = Vec::new();
     let mut buffer = Vec::new();
     loop {
+        let physical_start = reader.buffer_position() as usize - source_origin;
+        let content_before = content.len();
         match reader.read_event_into(&mut buffer) {
             Ok(Event::Start(child)) => {
                 let prefixes = word_prefixes_at(&child, inherited)?;
@@ -2043,6 +2616,7 @@ fn parse_content(
                     b"tr".as_slice(),
                     b"tc".as_slice(),
                     b"r".as_slice(),
+                    b"fldSimple".as_slice(),
                 ]
                 .into_iter()
                 .find(|local| is_word_element(child.name().as_ref(), local, &prefixes));
@@ -2081,6 +2655,7 @@ fn parse_content(
                     b"tr".as_slice(),
                     b"tc".as_slice(),
                     b"r".as_slice(),
+                    b"fldSimple".as_slice(),
                 ]
                 .into_iter()
                 .find(|local| is_word_element(child.name().as_ref(), local, &prefixes));
@@ -2110,7 +2685,25 @@ fn parse_content(
             Ok(event) => append_retained_sdt_content(&mut content, None, event_to_raw(event)?),
             Err(error) => return Err(error.into()),
         }
+        if owner == SdtOwner::Inline {
+            if content.len() != content_before + 1 {
+                return Err(OxmlError::InvalidValue(
+                    "inline physical source child cardinality changed during parse".into(),
+                ));
+            }
+            physical_spans.push(physical_start..reader.buffer_position() as usize - source_origin);
+        }
         buffer.clear();
+    }
+    if owner == SdtOwner::Inline {
+        project_complete_inline_fields(
+            &mut content,
+            revisions,
+            inline_run_sources,
+            physical_source,
+            &physical_spans,
+            inherited,
+        )?;
     }
     Ok(content)
 }

@@ -2855,6 +2855,11 @@ changes return an error before mutation. Resolution covers the main document,
 headers, footers, comments, normal footnotes, endnotes, and nested text boxes.
 `Document::revisions` remains main-story-only, while
 `Document::story_revisions` lists exactly the revisions these methods resolve.
+Qualified source revision traversal includes an actual simple-field result under
+an admitted hyperlink owner. This does not promote that otherwise opaque lower
+hyperlink child into a typed Field or borrowed main-document revision handle.
+Source snapshots, CLI and Python listing/counting use the shared source scanner.
+The existing lower borrowed projection retains its modeled-only domain.
 These eight methods are additive on `rdocx::Document`.
 `rdocx-cli revision accept|reject` exposes the all-story resolution boundary
 with mutually exclusive id, exact-author, or paired date selectors. An omitted
@@ -2903,8 +2908,49 @@ existing output. Inside supported inline controls, retained raw children keep
 their physical text ownership on both sides through accept, reject and reopen.
 No comparison option or existing public signature changes. The additive doc-hidden
 lower native `properties::protected_source_residual(xml, inherited_bindings)`
-bridge supplies opaque source identity to the facade. It adds no model field,
-authoring operation or Python/WASM method. Owning readers distinguish modeled
+bridge supplies opaque source identity to the facade. The native-only
+`CT_P::field_source_run_fragments_at(&self, run_idx: usize)` bridge returns
+`Result<Option<(usize, Vec<Option<Vec<u8>>>)>>` for one intact eligible shared
+field span. Positive coverage equals the ordered vector length. Outside entries
+retain actual materialized run bytes, while field entries are absent. An absent,
+changed or unproved span returns no mapping. Both bridges are implementation
+carriers with no new model field, authoring operation or Python/WASM method.
+The run fragments are operation-local source, not a persistent exchange format.
+Private comparison frames retain actual run templates and parent namespace
+bindings beside scoped snapshots. Existing insertion publishers keep edited
+content authority separate from left-side formatting and shell authority.
+Namespace closure follows relocation, while source children retained in an
+equivalent destination keep their exact bytes and authored declarations.
+Original physical raw-slot ordinals and boundaries travel through private
+word/character attribution and merging. Whole and fragmented publishers select
+source occurrences explicitly by input role and owner, including an empty
+selection. Ordered multiplicity and generated role coverage are validated before
+publication. Root declaration movement is a consistency check after source
+identity is established. It is never a byte-search identity mechanism. Changed
+typed atoms retain generated authority and unchanged typed restoration requires
+an actual source association and a checked transformation. Private typed selections
+also retain Unicode-scalar subranges for proved pure-text fragments. The actual
+immediate output parent, including a planned revision wrapper, controls namespace
+relocation in ordinary, granular, nested and controlled run publication. Fresh
+wrapper scope comes from the same allocator policy as generated Word markup.
+Paired text-box preflight refuses significant metadata edits without a tracking
+publisher, while the independent guard keeps actual root, content and field facts
+at option-normalized coverage. Empty and whitespace-only facts remain boundaries. Positive run-root facts retain
+coverage semantics across physical run partitions. Other authored leaf, field and
+structural facts retain ordered occurrence multiplicity. Actual emitted pure-text
+leaf intervals travel through the existing selective resolver with source ordinal
+and scalar provenance, then complete compatible source occurrences are restored
+before paired-host publication. This internal transport supplies no expected-model
+facts to either reconstruction guard. Simple field metadata views separate their
+actual root and associated result-run owners. Shared outside-field source leaves
+retain attributes during materialization. Direct instruction deletion leaves opaque
+textbox and foreign descendants under their existing source authority.
+Unknown field and result metadata stays significant with `ignore_fields=True`.
+A shared field span with significant run-root metadata and unproved per-slot
+correspondence retains exact unchanged source and refuses changed inner source.
+Existing logical field comparisons precede the ordinary formatting-ignore return.
+Owned root provenance removes only proved extraction additions before temporary
+resolution, including comparisons that allocate temporary IDs. Owning readers distinguish modeled
 values from omitted source metadata before protected-owner raw passthrough.
 Unknown Word and producer attributes, unsupported known-key values, full opaque
 events and effective bindings remain checked. Known numeric/toggle normalization
@@ -2939,10 +2985,19 @@ cuts at bookmark and comment range boundaries so inserted text stays on its
 edited side of a marker.
 Whole inserted, deleted and moved hyperlink paragraphs keep the hyperlink shell
 outside revisions and track its content inside. Resolved hyperlink targets and
-display text survive save and reopen. Empty whole-paragraph hyperlinks and simple
-fields outside a complex field carried whole remain explicit atomic refusals.
-Nested captured Word hyperlinks are also refused atomically, keeping wrapper
-call depth bounded to one paragraph and one direct hyperlink owner.
+display text survive save and reopen. Empty whole-paragraph hyperlinks and
+standalone simple shells on the framed paragraph/field/hyperlink path remain
+explicit atomic refusals without a complete complex field carried whole. Fields
+inside atomic controls or opaque drawings remain within that payload's lifetime,
+and independent textbox fields do not borrow body carriage. Publisher and
+admission share the same qualified frame path. Nested captured Word hyperlinks
+remain refused even across a field or control. The iterative owner walk retains
+the admitted XML/model depth and source-copy budgets.
+Typed complex-field discovery also requires the begin and end runs' actual
+physical parent to match before probing an isolated excerpt. Sibling revision
+wrappers remain distinct even with equal metadata. A cross-wrapper field stays
+preserved and untyped until supported context is restored by resolution. This
+changes no public method or signature and does not suppress source parse errors.
 Edits before retained tables carry the changed paragraph's own mark, and a
 removed mark before a retained table requires no content to remain. Opaque
 children and meaningful raw gaps prevent that removal. Empty paragraphs can gain
@@ -4719,3 +4774,83 @@ a valid new signed package. Input and existing destinations remain unchanged.
 ## Native ZIP error compatibility
 
 OpcError::Zip exposes zip::result::ZipError from the version9 dependency, replacing its zip8 type identity. Native Word and PowerPoint error families continue to carry that OPC error. This is an accepted pre-1.0 source-compatibility boundary for downstream construction, matching and From conversions. No new wrapper error or method is introduced. Python retains the existing package/error mappings.
+
+Paired textbox projection selects actual ordered source run and content-leaf pairs
+before scalar fragmentation, including Run with ignored whitespace. Inner scalar
+alignment and grouping keep those source and raw/control boundaries. Paired pieces
+use original formatting, while genuinely unpaired inserted owners keep edited
+formatting. Physical emitted provenance, logical occurrence, policy shell and
+explicit ignored Drop coverage remain distinct. Restoration consumes actual resolved
+payload and complete policy action coverage, never expected text. A checked paired
+host owns its inner field replacement. Same-instruction fields retain the original
+shell and actual edited result authority. Instruction or form changes select the
+actual complete edited field without converting a simple side. A private context
+identifies that checked source pair and interval. Scalar leaf capture alone grants
+no field publication authority.
+
+Ordinary same-instruction, same-form comparison tracks changes inside the actual
+field result owners. A simple field keeps its original root, lexical instruction,
+flags and schema-ordered fldData. An instruction or simple/complex form change
+publishes two complete standard complex spans. Clean simple source is mapped only
+when every carrier fact is consumed. Unknown carrier attributes refuse conversion.
+An unchanged or result-only field retains its existing source policy. Global Field
+equality remains form-insensitive, so local source-form dispatch precedes equality.
+Both resolved directions retain complex representation after a conversion. Each
+local witness identifies actual input story, owner, logical slot, complete physical
+span and the two allocated publication IDs. Independent acceptance and rejection
+guards inspect actual resolved owners, semantic values and source facts. Only that
+checked occurrence receives a representation exception. Other owners and facts
+retain strict comparison.
+
+Field source facts omit properties only below proved current Word paragraph and
+run owners. Foreign or unknown wrappers, fldData, prior revisions and drawing
+subtrees retain their opaque descendant bytes, including property lookalikes.
+An opaque-only edit remains observable when formatting is ignored. Physical part
+origins follow proved table, row, cell and control child boundaries through checked
+namespace closure offsets. A missing physical extent never grants a conversion
+exception. Exact unchanged owner bytes and their required namespace bindings can
+bypass detachment. Extra unused bindings do not rewrite packed field runs.
+
+The lower Field owns one ordered result paragraph behind copy-on-write storage.
+Mutable descendant access detaches that current owner before the reference escapes.
+Checked normalization prepares current result, revision text, nested cache and source
+aliases atomically. Qualified hyperlink-owned simple results retain this same ordered
+authority, including their actual accepted target and child graph. Stored legacy projections describe the last normalized owner.
+Read consumers prepare a current owner once per operation and retain actual source
+and result-slot correspondence. The native doc-hidden
+`Field::cached_result_physical_runs` borrows already parsed contiguous cache facts
+for comparison and independent graph checks. A pending scalar override retires
+original legacy facts. This physical view does not require text equality with a
+legacy scalar display. Paired opaque tab/break source and unwrapped deletion-text
+retain their established display policy through the separate consistency-filtered
+cache/segment readers. Semantic cache borrowing additionally requires significant
+typed payload, a note/comment reference, a child Field or actual run properties.
+Plain text and SoftHyphen-only caches without properties remain absent from that
+semantic view. A physical-only simple cache without a child cannot suppress a
+direct scalar clear through a coincidentally equal typed display. No Python or WASM method is added. Revision view controls tracked versus accepted
+content, while computed display precedence remains with the field consumer.
+Qualified inline controls reuse the canonical projector over already parsed facts
+for complete isolated complex spans and retain the complete physical extent in the
+existing source record. Current simple and complex virtual fields publish at their
+actual control boundary. Shared, partial, crossing and unproved shapes keep their
+previous physical representation. Resource admission checks complete composite
+source/current payload facts before construction, copying and normalization. Shared
+Field addresses retain path-sensitive admission facts to bound repeated traversal.
+
+A paired occurrence retains independent original and edited scalar domains. Action
+coverage is validated separately for each input, including original-only Preserve
+and edited-only Drop. Every emitted leaf retains physical provenance independently
+of the logical pair. Membership is selected from either actual input owner and
+slot, without inventing counterpart scalar coordinates. Assembly consumes actual
+resolved payload only. Field evidence distinguishes ordinary outer source replacement
+from admitted inner field comparison and its original source shell.
+
+Within a proved paired metadata text occurrence, Run and Word projection publishes
+an actual source-backed ignored separator when omitting it would join surviving
+content tokens during assembly. The action is Insert with its edited interval and
+original paired formatting. Existing original whitespace width, leading/trailing
+ignored units and Character policy remain unchanged. Raw events between emitted
+text edges remain barriers. An actual suffix after the right text edge stays with
+that source owner. Restoration keeps the actual terminal run and its independent
+raw suffix in place, edits only proved member children and retires earlier runs
+only after complete child coverage proves they contain no independent event.

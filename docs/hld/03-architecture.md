@@ -1391,10 +1391,21 @@ is deleted and inserted whole, which Word needs to accept or reject it. A
 whole deleted, inserted, or moved paragraph carries its bookmarks and comment
 ranges inside its revision wrappers. Hyperlink shells remain outside the
 wrappers, which track their own children, so whole hyperlink paragraphs can be
-inserted, deleted or moved. Simple fields still require a complex field carried
-whole around them. Empty whole-paragraph hyperlinks remain refused. Captured
-nested Word hyperlinks remain unsupported and are refused before deeper wrapping.
-Wrapper calls are bounded to the paragraph and one direct hyperlink owner. Comparison
+inserted, deleted or moved. Simple shells left outside run wrappers require a
+complete complex field carried whole around them. Their actual shells,
+instructions, flags and first fldData stay outside run revisions, with legal
+result payloads tracked inside.
+Publisher and carriage admission share the actual qualified frame path from a
+supplied paragraph through simple fields and hyperlinks. A field inside an
+atomic SDT or opaque drawing remains within that payload's lifetime. Independent
+textbox fields do not need or borrow the surrounding body carrier. Range-growth
+events and complete carriage proof share qualified marker and structural-domain
+facts, so opaque marker-shaped descendants cannot close a real body field.
+The same-form owner walk is iterative, follows actual paragraph/field/hyperlink
+and qualified inline-control grammar, and preserves opaque descendants. It emits
+one output without copying each nested subtree back through its ancestors.
+Empty whole-paragraph hyperlinks remain refused. Captured nested Word hyperlinks
+remain unsupported even across an intervening field or control owner. Comparison
 also refuses when the two sides of such a run share a bookmark or comment range,
 or a moved paragraph holds one, since the redline would hold it twice. Expanded
 Word names distinguish typed owners from foreign lookalikes, whose raw bytes
@@ -1449,6 +1460,61 @@ namespace, without rebinding retained producer XML. Private comparison frames
 retain both input sides' actual property sources beside typed formatting
 precedence. Frames reference only live immutable parse owners, while owned
 pre-marker snapshots travel through final, moved and controlled paragraphs.
+For an intact shared physical field span, the lower parser's doc-hidden
+`CT_P::field_source_run_fragments_at` supplies ordered outside-run source
+fragments and field slots with exact modeled coverage. The facade uses those
+actual shells for ordinary run-property ownership. It does not infer physical
+owners from field counts or serialize the typed projection as source. Changed
+or unproved spans return no source mapping. Control snapshots correlate all
+owned reader events, including raw marker boundaries, in their actual order. Run
+snapshots keep exact physical or materialized templates beside their scoped XML
+and actual parent bindings. Inserted content uses the edited source authority,
+while left-side properties and retained shells keep their own authority. A
+publisher removes only extraction-added root closure after proving the retained
+destination scope. Authored declarations and opaque payload bytes stay exact. Physical
+raw-child identity is the input role, parsed owner, original raw ordinal and
+boundary. Attribution and merging retain that identity beside emitted raw slots
+and typed atoms. Publication receives explicit whole or fragment selections and
+checks their ordered coverage before restoring a selected source occurrence.
+Namespace closure is checked only as a representation of that occurrence. It
+never chooses identity by bytes or a closure-equivalent value. Root metadata,
+modeled comment records, alternate-content projections and private text-box
+markers retain their separate roles. Current/prior property authority stays
+independent of content occurrence identity. The five run publication paths receive
+the actual immediate output-parent scope. Revision payloads use the allocator's
+same qualification decision, after a faithful unwrapped publication has checked
+for an exact no-op. Required replacements publish again under the planned revision
+parent without allocating probe IDs. Scalar subranges retain the original typed
+ordinal through splitting and merging. A proved pure-text fragment keeps its
+actual qualified shell and attributes, while opaque mixed-event leaves without
+such correspondence refuse.
+
+Temporary paired-host text fragments carry actual emitted leaf intervals with
+input-owner, original ordinal and scalar coverage. The existing selective revision
+resolver transports those intervals through its actual keep, remove and namespace
+opening operations. Complete compatible partitions restore their source leaf before
+the resolved host is spliced. Independent guards consume the published source, not
+the transport. Authored empty and whitespace leaves retain separate occurrences.
+Only positive run-root facts coalesce as coverage. Content, field and structural
+facts retain ordered occurrence multiplicity, including all zero-width facts.
+Simple field read views separate the actual field shell from associated result-run
+owners using the existing classifier. Shared outside-field fragments retain actual
+leaf attributes. Deletion instruction conversion owns direct qualified instruction
+children and does not recurse into opaque textbox hosts.
+
+The admitted paired text-box path inventories nonformatting root, content and
+field facts with the existing owning classifier. Root-only views retain the actual
+owner opening and scope. Field views retain real parent grammar and exclude only
+separately governed Word property roles. Comparison preflight refuses unsupported
+significant metadata changes at the physical location. The independent guard
+checks option-normalized coverage, exact opaque facts and boundary multiplicity.
+Ignored modeled fields do not suppress unknown field or result metadata. Shared
+field spans with significant run-root facts and unproved per-slot correspondence
+remain exact when unchanged and refuse changed inner source. Their physical roots
+are inventoried once, without deriving logical root ownership from a span ID.
+Source frames retain exact root and parent provenance for ordinary structural
+owners, and remove extraction-only closure before temporary resolution. The same
+owned provenance remains valid when temporary comparison IDs are nonempty.
 Property deltas retain source root QNames, opaque attributes and complete
 child slots, including unknown children. Ordinary and final properties share
 that source authority. A complete prior run-property owner replaces formatting
@@ -2570,3 +2636,103 @@ The three direct ZIP consumers are oxml-opc, rdocx and rpptx. They use zip9.0.3 
 ZIP9 also selects its upstream macOS/BSD-only nix0.31.3 dependency with fs and
 disabled defaults, plus cfg_aliases0.2.2 for that dependency build. They do not
 add a ZIP codec and remain subject to actual target, license and MSRV checks.
+
+Paired textbox projection selects actual ordered source run and content-leaf pairs
+before scalar fragmentation, including Run with ignored whitespace. Inner scalar
+alignment and grouping keep those source and raw/control boundaries. Paired pieces
+use original formatting, while genuinely unpaired inserted owners keep edited
+formatting. Physical emitted provenance, logical occurrence, policy shell and
+explicit ignored Drop coverage remain distinct. Restoration consumes actual resolved
+payload and complete policy action coverage, never expected text. A checked paired
+host owns its inner field replacement. Same-instruction fields retain the original
+shell and actual edited result authority. Instruction or form changes select the
+actual complete edited field without converting a simple side. A private context
+identifies that checked source pair and interval. Scalar leaf capture alone grants
+no field publication authority.
+
+Ordinary same-instruction, same-form comparison tracks changes inside the actual
+field result owners. A simple field keeps its original root, lexical instruction,
+flags and schema-ordered fldData. An instruction or simple/complex form change
+publishes two complete standard complex spans. Clean simple source is mapped only
+when every carrier fact is consumed. Unknown carrier attributes refuse conversion.
+An unchanged or result-only field retains its existing source policy. Global Field
+equality remains form-insensitive, so local source-form dispatch precedes equality.
+Both resolved directions retain complex representation after a conversion. Each
+local witness identifies actual input story, owner, logical slot, complete physical
+span and the two allocated publication IDs. Independent acceptance and rejection
+guards inspect actual resolved owners, semantic values and source facts. Only that
+checked occurrence receives a representation exception. Other owners and facts
+retain strict comparison.
+
+Whole-field carriage uses a separate same-form custody proof, never an ordinary
+conversion witness. Selected resolution inventories only originally complete,
+qualified D3 carriers that own actual simple shells, plus their proved nested
+complex occurrences. Own begin/separate/end marker occurrences belong to one
+actual carrier. All three surviving permits cache-only changes, including an empty
+simple result. Removing all three requires every owned payload to be selected for
+removal, with no unselected prior custody. Only then may the actual nested simple
+shells retire. Mixed marker survival or surviving payload with removed markers
+refuses atomically, without selecting sibling IDs or inventing field unlinking.
+The shared private preflight applies to both main-document and related-story
+render entries. Existing rendering owns paragraph merges and namespace transport,
+and actual selected revision elements remain the counting authority. Already
+unmodeled incomplete imports confer no retirement authority and are preserved.
+
+Field source facts omit properties only below proved current Word paragraph and
+run owners. Foreign or unknown wrappers, fldData, prior revisions and drawing
+subtrees retain their opaque descendant bytes, including property lookalikes.
+Typed complex-field excerpts require the begin and end runs to share one
+physical parent. Equal revision metadata does not make sibling wrappers one
+parser context. Cross-parent marker sequences remain preserved source rather
+than being reparsed as detached typed fields. Intrinsic field completeness and
+template ranges remain independent, and normal discovery resumes after actual
+revision resolution restores a supported context.
+An opaque-only edit remains observable when formatting is ignored. Physical part
+origins follow proved table, row, cell and control child boundaries through checked
+namespace closure offsets. A missing physical extent never grants a conversion
+exception. Exact unchanged owner bytes and their required namespace bindings can
+bypass detachment. Extra unused bindings do not rewrite packed field runs.
+
+The lower Field owns one ordered result paragraph behind copy-on-write storage.
+Mutable descendant access detaches that current owner before the reference escapes.
+Checked normalization prepares current result, revision text, nested cache and source
+aliases atomically. Qualified hyperlink-owned simple results retain this same ordered
+authority, including their actual accepted target and child graph. Stored legacy projections describe the last normalized owner.
+Read consumers prepare a current owner once per operation and retain actual source
+and result-slot correspondence. The native doc-hidden
+`Field::cached_result_physical_runs` borrows already parsed contiguous cache facts
+for comparison and independent graph checks. A pending scalar override retires
+original legacy facts. This physical view does not require text equality with a
+legacy scalar display. Paired opaque tab/break source and unwrapped deletion-text
+retain their established display policy through the separate consistency-filtered
+cache/segment readers. Semantic cache borrowing additionally requires significant
+typed payload, a note/comment reference, a child Field or actual run properties.
+Plain text and SoftHyphen-only caches without properties remain absent from that
+semantic view. A physical-only simple cache without a child cannot suppress a
+direct scalar clear through a coincidentally equal typed display. No Python or WASM method is added. Revision view controls tracked versus accepted
+content, while computed display precedence remains with the field consumer.
+Qualified inline controls reuse the canonical projector over already parsed facts
+for complete isolated complex spans and retain the complete physical extent in the
+existing source record. Current simple and complex virtual fields publish at their
+actual control boundary. Shared, partial, crossing and unproved shapes keep their
+previous physical representation. Resource admission checks complete composite
+source/current payload facts before construction, copying and normalization. Shared
+Field addresses retain path-sensitive admission facts to bound repeated traversal.
+
+A paired occurrence retains independent original and edited scalar domains. Action
+coverage is validated separately for each input, including original-only Preserve
+and edited-only Drop. Every emitted leaf retains physical provenance independently
+of the logical pair. Membership is selected from either actual input owner and
+slot, without inventing counterpart scalar coordinates. Assembly consumes actual
+resolved payload only. Field evidence distinguishes ordinary outer source replacement
+from admitted inner field comparison and its original source shell.
+
+Within a proved paired metadata text occurrence, Run and Word projection publishes
+an actual source-backed ignored separator when omitting it would join surviving
+content tokens during assembly. The action is Insert with its edited interval and
+original paired formatting. Existing original whitespace width, leading/trailing
+ignored units and Character policy remain unchanged. Raw events between emitted
+text edges remain barriers. An actual suffix after the right text edge stays with
+that source owner. Restoration keeps the actual terminal run and its independent
+raw suffix in place, edits only proved member children and retires earlier runs
+only after complete child coverage proves they contain no independent event.

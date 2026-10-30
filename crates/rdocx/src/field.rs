@@ -3830,7 +3830,7 @@ impl Document {
                 cache.comment_ranges
             };
             let mut old_references = Vec::new();
-            collect_ref_cached_note_references(&source.field, &mut old_references);
+            collect_ref_cached_note_references(&source.field, &mut old_references)?;
             for run in &mut runs {
                 if source.suppress_copied_references {
                     run.content.retain(|content| {
@@ -9206,7 +9206,7 @@ fn parse_dynamic_toc_fields(
         let field = parse_dynamic_toc_field(xml, span)?;
         let mut evaluator = Evaluator::new(document, &context);
         evaluator.ensure_numbering_layout_for_field(&field)?;
-        match evaluator.evaluate_field(&field, "main", &paragraphs, span.begin_paragraph) {
+        match evaluator.evaluate_field(&field, "main", &paragraphs, span.begin_paragraph, None) {
             FieldOutcome::TableOfContents(toc) => output.push(Some(toc)),
             FieldOutcome::KeepStored { diagnostic } => {
                 diagnostics.push((span.field_start, diagnostic));
@@ -10034,7 +10034,7 @@ fn discover_toc_sources(
                         continue;
                     }
                     let outcome =
-                        evaluator.evaluate_field(field, "main", &paragraphs, paragraph_index);
+                        evaluator.evaluate_field(field, "main", &paragraphs, paragraph_index, None);
                     if field.instruction.name == "SEQ"
                         && let Some(identifier) = field.instruction.arguments.first()
                         && field_argument_text(identifier).is_some_and(|name| {
@@ -13532,17 +13532,86 @@ struct TextBoxCachePatch {
     updated: usize,
 }
 
-fn collect_ref_cached_note_references(field: &Field, output: &mut Vec<(StoryKind, i32)>) {
-    if let Some(runs) = field.cached_result_runs() {
-        for content in runs.iter().flat_map(|run| &run.content) {
-            match content {
-                RunContent::FootnoteRef { id, .. } => output.push((StoryKind::Footnote, *id)),
-                RunContent::EndnoteRef { id, .. } => output.push((StoryKind::Endnote, *id)),
-                RunContent::Field(field) => collect_ref_cached_note_references(field, output),
-                _ => {}
+/// Preflight before copying a current Field. The boolean identifies unchanged
+/// imported facts whose established raw preservation bypasses semantic editing.
+pub(crate) fn preflight_current_field(field: &Field) -> Result<bool> {
+    if let Err(error) = field.validate_for_attachment() {
+        if field
+            .source_replacement()?
+            .is_some_and(|(original, current)| original == current)
+        {
+            return Ok(true);
+        }
+        return Err(error.into());
+    }
+    Ok(false)
+}
+
+/// Freeze one complete current Field tree for this read operation. Recursive
+/// consumers borrow its already-normalized descendants instead of restaging each
+/// subtree. Only required retained result projections get separate owned CT_Ps.
+pub(crate) fn prepared_current_field(field: &Field) -> Result<Field> {
+    fn normalize(field: &mut Field) -> Result<()> {
+        for argument in field.instruction.arguments.iter_mut().chain(
+            field
+                .instruction
+                .switches
+                .iter_mut()
+                .filter_map(|switch| switch.argument.as_mut()),
+        ) {
+            if let FieldArgument::Nested(child) = argument {
+                normalize(child)?;
             }
         }
+        let count = field.cached_fields_in_source_order().len();
+        for index in 0..count {
+            let child = field.cached_field_mut(index).ok_or_else(|| {
+                Error::Other("current field preparation lost its actual cached slot".into())
+            })?;
+            normalize(child)?;
+        }
+        field.normalize_cached_result_owner()?;
+        Ok(())
     }
+    if preflight_current_field(field)? {
+        return Ok(field.clone());
+    }
+    let mut current = field.clone();
+    normalize(&mut current)?;
+    Ok(current)
+}
+
+fn collect_ref_cached_note_references(
+    field: &Field,
+    output: &mut Vec<(StoryKind, i32)>,
+) -> Result<()> {
+    fn collect(field: &Field, output: &mut Vec<(StoryKind, i32)>) -> Result<()> {
+        let prepared = field.cached_result_owner_projection()?;
+        let owned_runs = prepared.as_ref().map(|paragraph| {
+            paragraph
+                .accepted_run_paths()
+                .into_iter()
+                .filter_map(|path| paragraph.accepted_run(&path))
+                .collect::<Vec<_>>()
+        });
+        let runs = owned_runs
+            .as_deref()
+            .map(|runs| runs.to_vec())
+            .or_else(|| field.cached_result_runs().map(|runs| runs.iter().collect()));
+        if let Some(runs) = runs {
+            for content in runs.into_iter().flat_map(|run| &run.content) {
+                match content {
+                    RunContent::FootnoteRef { id, .. } => output.push((StoryKind::Footnote, *id)),
+                    RunContent::EndnoteRef { id, .. } => output.push((StoryKind::Endnote, *id)),
+                    RunContent::Field(field) => collect(field, output)?,
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+    let current = prepared_current_field(field)?;
+    collect(&current, output)
 }
 
 fn ref_note_reference_counts(package: &OpcPackage) -> Result<HashMap<(StoryKind, i32), usize>> {
@@ -14383,7 +14452,7 @@ fn ref_comment_replacement_ids(
     };
     let mut run = CT_R::new("");
     run.content = vec![RunContent::Field(field.clone())];
-    append_ref_cached_run(&run, &mut old)?;
+    append_ref_cached_run(&run, None, false, &mut old)?;
     let source_ids = ref_comment_reference_ids(source)?;
     let old_ids = ref_comment_reference_ids(&old)?;
     if old_ids.is_empty() {
@@ -14668,18 +14737,37 @@ fn ref_cache_marker_at(marker: &CommentRangeMarker, position: usize) -> Result<C
     }
 }
 
-fn append_ref_cached_run(run: &CT_R, cache: &mut RefBookmarkCache) -> Result<()> {
+fn append_ref_cached_run(
+    run: &CT_R,
+    inherited: Option<&rdocx_oxml::properties::CT_RPr>,
+    already_prepared: bool,
+    cache: &mut RefBookmarkCache,
+) -> Result<()> {
     if let [RunContent::Field(field)] = run.content.as_slice() {
-        if let Some(runs) = field.cached_result_runs() {
+        // Normalize a private current owner before deriving both its runs and
+        // annotation graph. Pending caller state remains unpublished.
+        let current = if already_prepared {
+            None
+        } else {
+            Some(prepared_current_field(field)?)
+        };
+        let field = current.as_ref().unwrap_or(field);
+        let prepared = field.cached_result_owner_projection()?;
+        let owned_runs = prepared.as_ref().map(|paragraph| {
+            paragraph
+                .accepted_run_paths()
+                .into_iter()
+                .filter_map(|path| paragraph.accepted_run(&path))
+                .collect::<Vec<_>>()
+        });
+        let runs =
+            owned_runs.or_else(|| field.cached_result_runs().map(|runs| runs.iter().collect()));
+        if let Some(runs) = runs {
             let base = cache.runs.len();
             let mut boundaries = Vec::with_capacity(runs.len() + 1);
             for child in runs {
                 boundaries.push(cache.runs.len());
-                let mut child = child.clone();
-                if child.properties.is_none() {
-                    child.properties = run.properties.clone();
-                }
-                append_ref_cached_run(&child, cache)?;
+                append_ref_cached_run(child, run.properties.as_ref().or(inherited), true, cache)?;
             }
             boundaries.push(cache.runs.len());
             for marker in field.cached_result_comment_ranges() {
@@ -14702,12 +14790,15 @@ fn append_ref_cached_run(run: &CT_R, cache: &mut RefBookmarkCache) -> Result<()>
             let segments = field.cached_display_segments();
             if segments.is_empty() {
                 let mut stored = CT_R::new(&field.cached_result);
-                stored.properties = run.properties.clone();
+                stored.properties = run.properties.clone().or_else(|| inherited.cloned());
                 cache.runs.push(stored);
             } else {
                 for (text, properties) in segments {
                     let mut stored = CT_R::new(text);
-                    stored.properties = properties.cloned().or_else(|| run.properties.clone());
+                    stored.properties = properties
+                        .cloned()
+                        .or_else(|| run.properties.clone())
+                        .or_else(|| inherited.cloned());
                     cache.runs.push(stored);
                 }
             }
@@ -14721,7 +14812,11 @@ fn append_ref_cached_run(run: &CT_R, cache: &mut RefBookmarkCache) -> Result<()>
             "REF f mixed field target lacks a source-qualified cache boundary".into(),
         ));
     } else {
-        cache.runs.push(run.clone());
+        let mut run = run.clone();
+        if run.properties.is_none() {
+            run.properties = inherited.cloned();
+        }
+        cache.runs.push(run);
     }
     Ok(())
 }
@@ -14739,7 +14834,7 @@ fn append_ref_target_paragraph(
     let mut boundaries = Vec::with_capacity(selected.len() + 1);
     for run in selected {
         boundaries.push(cache.runs.len());
-        append_ref_cached_run(run, cache)?;
+        append_ref_cached_run(run, None, false, cache)?;
     }
     boundaries.push(cache.runs.len());
     if !paragraph.comment_ranges.is_empty() {
@@ -15241,7 +15336,7 @@ impl<'a> Evaluator<'a> {
             for run in accepted_toc_runs(paragraph) {
                 for content in &run.run.content {
                     if let RunContent::Field(field) = content {
-                        self.evaluate_field(field, story, paragraphs, paragraph_index);
+                        self.evaluate_field(field, story, paragraphs, paragraph_index, None);
                     }
                 }
             }
@@ -15365,19 +15460,53 @@ impl<'a> Evaluator<'a> {
         Ok(())
     }
 
+    fn record_field_preparation_failure(&mut self, field: &Field, message: &str) -> FieldOutcome {
+        let outcome = keep(message);
+        self.visible_results
+            .push(self.general_context || matches!(field.instruction.name.as_str(), "SEQ" | "REF"));
+        self.results.push(FieldEvaluation {
+            field_index: self.results.len(),
+            instruction: field.instruction.raw.clone(),
+            cached_result: field.cached_result.clone(),
+            outcome: outcome.clone(),
+        });
+        outcome
+    }
+
     fn evaluate_field(
         &mut self,
         field: &Field,
         story: &str,
         paragraphs: &[&CT_P],
         paragraph_index: usize,
+        occurrence: Option<(Option<oxml_layout::FieldSource>, bool)>,
     ) -> FieldOutcome {
-        let instruction = field.effective_instruction();
         let previous_source = self.current_field_source;
-        self.current_field_source = self
-            .field_sources
-            .get(&(std::ptr::from_ref(field) as usize))
-            .copied();
+        let (source, locked) = occurrence.unwrap_or_else(|| {
+            (
+                self.field_sources
+                    .get(&(std::ptr::from_ref(field) as usize))
+                    .copied(),
+                self.locked_fields
+                    .contains(&(std::ptr::from_ref(field) as usize)),
+            )
+        });
+        let prepared = if occurrence.is_some() {
+            None
+        } else {
+            match prepared_current_field(field) {
+                Ok(current) => Some(current),
+                Err(error) => {
+                    return self.record_field_preparation_failure(
+                        field,
+                        &format!("field preparation failed: {error}"),
+                    );
+                }
+            }
+        };
+        let field = prepared.as_ref().unwrap_or(field);
+        let instruction = field.effective_instruction();
+        self.current_field_source = source;
         let result_index = self.results.len();
         let visible = self.general_context || matches!(instruction.name.as_str(), "SEQ" | "REF");
         self.visible_results.push(visible);
@@ -15389,30 +15518,29 @@ impl<'a> Evaluator<'a> {
         });
 
         self.nested_outcomes.push(BTreeMap::new());
-        self.evaluate_nested_fields(field, &instruction, story, paragraphs, paragraph_index);
-        let mut outcome = if !visible {
+        let nested = self.evaluate_nested_fields(
+            field,
+            &instruction,
+            story,
+            paragraphs,
+            paragraph_index,
+            locked,
+        );
+        let mut outcome = if let Err(error) = nested {
+            keep(&format!("field occurrence association failed: {error}"))
+        } else if !visible {
             keep("ordinary field is outside its established evaluation context")
-        } else if self
-            .locked_fields
-            .contains(&(std::ptr::from_ref(field) as usize))
-        {
+        } else if locked {
             keep("locked field retains its stored display")
         } else if instruction.name == "SEQ" && self.sequence_snapshot.is_some() {
             match self
-                .field_sources
-                .get(&(std::ptr::from_ref(field) as usize))
-                .copied()
+                .current_field_source
                 .and_then(|source| self.sequence_snapshot.as_ref()?.field_value(source))
             {
                 Some(Ok(value)) => FieldOutcome::Resolved(value.to_owned()),
                 Some(Err(message)) => keep(message),
                 None => keep("SEQ lacks a unique physical accepted source"),
             }
-        } else if self
-            .locked_fields
-            .contains(&(std::ptr::from_ref(field) as usize))
-        {
-            keep("locked field retains its stored display")
         } else {
             self.evaluate_instruction(&instruction, story, paragraphs, paragraph_index)
         };
@@ -15422,8 +15550,9 @@ impl<'a> Evaluator<'a> {
             && matches!(outcome, FieldOutcome::Resolved(_))
         {
             let mut old_references = Vec::new();
-            collect_ref_cached_note_references(field, &mut old_references);
-            if !old_references.is_empty() {
+            if let Err(error) = collect_ref_cached_note_references(field, &mut old_references) {
+                outcome = keep(&error.to_string());
+            } else if !old_references.is_empty() {
                 let qualification = (|| -> Result<()> {
                     if self.ref_note_counts.is_none() {
                         self.ref_note_counts =
@@ -15592,66 +15721,122 @@ impl<'a> Evaluator<'a> {
         story: &str,
         paragraphs: &[&CT_P],
         paragraph_index: usize,
-    ) {
-        // Effective instructions own cloned nested operands. Bind those clones
-        // through their actual structured source slots, never instruction text.
-        let effective_nested = field.effective_nested_fields_in_source_order(instruction);
+        inherited_locked: bool,
+    ) -> Result<()> {
+        // Canonical source indices are preorder occurrences under this actual
+        // outer source. Resolve effective clones through argument/switch slots,
+        // not by equal text, count-only zips or shared child addresses.
+        let parent_source = self.current_field_source;
         let original_nested = field.nested_fields_in_source_order();
-        let mut aliases = Vec::new();
-        if effective_nested.len() == original_nested.len() {
-            for (original, effective) in original_nested.iter().zip(&effective_nested) {
-                let mut original_fields = Vec::new();
-                let mut effective_fields = Vec::new();
-                collect_preorder_fields(original, false, &mut original_fields);
-                collect_preorder_fields(effective, false, &mut effective_fields);
-                if original_fields.len() == effective_fields.len() {
-                    for ((original, _), (effective, _)) in
-                        original_fields.into_iter().zip(effective_fields)
-                    {
-                        let key = std::ptr::from_ref(effective) as usize;
-                        aliases.push(key);
-                        if self
-                            .locked_fields
-                            .contains(&(std::ptr::from_ref(original) as usize))
-                        {
-                            self.locked_fields.insert(key);
-                        } else {
-                            self.locked_fields.remove(&key);
-                        }
-                        if let Some(source) = self
-                            .field_sources
-                            .get(&(std::ptr::from_ref(original) as usize))
-                            .copied()
-                        {
-                            self.field_sources.insert(key, source);
-                        } else {
-                            self.field_sources.remove(&key);
-                        }
-                    }
-                }
-            }
+        let mut next = match parent_source {
+            Some(source) => Some(
+                source
+                    .index
+                    .checked_add(1)
+                    .ok_or_else(|| Error::Other("field source index overflow".into()))?,
+            ),
+            None => None,
+        };
+        let mut instruction_sources = Vec::new();
+        for original in &original_nested {
+            instruction_sources.push(next);
+            let mut subtree = Vec::new();
+            collect_preorder_fields(original, false, &mut subtree);
+            let count = u32::try_from(subtree.len())
+                .map_err(|_| Error::Other("field source count overflow".into()))?;
+            next = match next {
+                Some(index) => Some(
+                    index
+                        .checked_add(count)
+                        .ok_or_else(|| Error::Other("field source index overflow".into()))?,
+                ),
+                None => None,
+            };
         }
-        for nested in effective_nested
-            .into_iter()
-            .chain(field.cached_fields_in_source_order())
-        {
-            let key = std::ptr::from_ref(nested) as usize;
-            if !self
-                .nested_outcomes
-                .last()
-                .is_some_and(|outcomes| outcomes.contains_key(&key))
+        let mut selected = HashSet::new();
+        for effective in field.effective_nested_fields_in_source_order(instruction) {
+            let original = instruction.arguments.iter().enumerate().find_map(|(slot, argument)| {
+                matches!(argument, FieldArgument::Nested(child) if std::ptr::eq(child.as_ref(), effective))
+                    .then(|| field.instruction.arguments.get(slot)).flatten()
+            }).or_else(|| instruction.switches.iter().enumerate().find_map(|(slot, switch)| {
+                matches!(&switch.argument, Some(FieldArgument::Nested(child)) if std::ptr::eq(child.as_ref(), effective))
+                    .then(|| field.instruction.switches.get(slot).and_then(|switch| switch.argument.as_ref())).flatten()
+            }));
+            let Some(FieldArgument::Nested(original)) = original else {
+                return Err(Error::Other(
+                    "effective nested field has no current instruction slot".into(),
+                ));
+            };
+            let position = original_nested
+                .iter()
+                .position(|candidate| std::ptr::eq(*candidate, original.as_ref()))
+                .ok_or_else(|| {
+                    Error::Other("effective nested field has no active source occurrence".into())
+                })?;
+            if !selected.insert(position)
+                || original.as_ref() != effective
+                || original.form() != effective.form()
+                || original.source_owner_id() != effective.source_owner_id()
             {
-                let outcome = self.evaluate_field(nested, story, paragraphs, paragraph_index);
-                self.nested_outcomes
-                    .last_mut()
-                    .expect("field evaluation frame exists")
-                    .insert(key, outcome);
+                return Err(Error::Other(
+                    "effective instruction slot association is not injective".into(),
+                ));
             }
+            let source = parent_source
+                .zip(instruction_sources[position])
+                .map(|(parent, index)| oxml_layout::FieldSource {
+                    node: parent.node,
+                    index,
+                });
+            let outcome = self.evaluate_field(
+                effective,
+                story,
+                paragraphs,
+                paragraph_index,
+                Some((source, inherited_locked || effective.locked() == Some(true))),
+            );
+            self.nested_outcomes
+                .last_mut()
+                .expect("field evaluation frame exists")
+                .insert(std::ptr::from_ref(effective) as usize, outcome);
         }
-        for key in aliases {
-            self.field_sources.remove(&key);
-            self.locked_fields.remove(&key);
+        if selected.len() != original_nested.len() {
+            return Err(Error::Other(
+                "effective instruction source association is incomplete".into(),
+            ));
         }
+        for nested in field.cached_fields_in_source_order() {
+            let source = parent_source
+                .zip(next)
+                .map(|(parent, index)| oxml_layout::FieldSource {
+                    node: parent.node,
+                    index,
+                });
+            let outcome = self.evaluate_field(
+                nested,
+                story,
+                paragraphs,
+                paragraph_index,
+                Some((source, inherited_locked || nested.locked() == Some(true))),
+            );
+            self.nested_outcomes
+                .last_mut()
+                .expect("field evaluation frame exists")
+                .insert(std::ptr::from_ref(nested) as usize, outcome);
+            let mut subtree = Vec::new();
+            collect_preorder_fields(nested, false, &mut subtree);
+            let count = u32::try_from(subtree.len())
+                .map_err(|_| Error::Other("field source count overflow".into()))?;
+            next = match next {
+                Some(index) => Some(
+                    index
+                        .checked_add(count)
+                        .ok_or_else(|| Error::Other("field source index overflow".into()))?,
+                ),
+                None => None,
+            };
+        }
+        Ok(())
     }
 
     fn evaluate_ref(
@@ -15817,7 +16002,8 @@ impl<'a> Evaluator<'a> {
                 {
                     outcome.clone()
                 } else {
-                    let outcome = self.evaluate_field(field, story, paragraphs, paragraph_index);
+                    let outcome =
+                        self.evaluate_field(field, story, paragraphs, paragraph_index, None);
                     self.nested_outcomes
                         .last_mut()
                         .expect("field evaluation frame exists")
@@ -17463,10 +17649,16 @@ fn append_control_field_source_replacements(
             SdtContent::Paragraph(paragraph) => {
                 output.extend(staged_paragraph_field_source_replacements(paragraph)?);
             }
+            SdtContent::Run(run) => {
+                if let [RunContent::Field(field)] = run.content.as_slice()
+                    && let Some((source, replacement)) = field.source_replacement()?
+                {
+                    output.push((source.to_vec(), replacement));
+                }
+            }
             SdtContent::Table(_)
             | SdtContent::Row(_)
             | SdtContent::Cell(_)
-            | SdtContent::Run(_)
             | SdtContent::RawXml(_) => {}
         }
     }
@@ -17964,6 +18156,7 @@ fn apply_updates_to_field(
     if update.is_none() && !field.cached_fields_in_source_order().is_empty() {
         field.refresh_cached_field_projection();
     }
+    field.normalize_cached_result_owner()?;
     Ok(())
 }
 
