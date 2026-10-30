@@ -3249,13 +3249,26 @@ The next-wave read-only refresh also found PR428 rebased onto released main24af9
 
 ##### User-added release preparation, 2026-10-29
 
-The user requests both0.16.xand0.14.xrelease lines at the end of S96. F-X275is admitted and its bounded design approved by root. Fresh exact24registry entries show .4occupied and .5absent, and .5origin tags are absent. Prepare Word0.16.5andshared/PowerPoint0.14.5, preserving published .4notes and F-X270completion. Its formal dependency is F-X270done. All F-X271through274final acceptance still gates sprint closure and release readiness, without a false hosted-CI-before-version dependency cycle.
+The user initially requested retained0.16.x/0.14.xrelease lines, then explicitly selected Word0.17.0andshared/PowerPoint0.15.0on2026-10-30after the Issue429compatibility investigation. F-X275now follows the amended approved strict SemVer contract, preserving .5preparation as historical evidence and published .4notes/F-X270completion unchanged. Its formal dependency remains F-X270done. All F-X271through274final acceptance still gates closure and release readiness.
 
 | F-ID | Title | Size |
 |------|-------|------|
-| F-X275 | Prepare Word 0.16.5 and PowerPoint 0.14.5 patch releases | L |
+| F-X275 | Prepare Word 0.17.0 and shared/PowerPoint 0.15.0 with strict SemVer gates | L |
 
 The original12to17developer-day estimate and four-contract intake cap remain historical. User-authorized bounded release preparation adds provisional2to3developer-days, for14to20combined with one shared final qualification union. No product criterion is removed. All carrier, note, HLD and archive measurement edits precede the deciding versioned-source full gate, actual normal CI and build-only wheels rehearsal. Source availability uses only the actual validated F-X271canonical checkpoint. No second tracker, source-push exception, tag or publication is created. Both releases follow close-sprint under separate exact-main approvals, shared/PowerPoint first.
+
+##### User-added Issue 429, 2026-10-30
+
+
+On2026-10-30the user explicitly added [Issue429](https://github.com/tensorbee/rdocx/issues/429), requested strict SemVer release cycles and repair of the old compatible line where feasible, and authorized an eventual reporter reply with an apology. The later instruction requires the repair and actual validation before any comment. No comment has been posted. This is new authorized intake, not a claim of implemented acceptance or a change to completed F-X267/F-X270 history.
+
+The published oxml-opc0.14.3 archive has public HashMap<String,Vec<u8>> parts, concrete set_part(Vec<u8>) and remove_part returning Option<Vec<u8>>. Published0.14.4 and the prepared0.14.5 source instead expose Arc-backed parts and removal plus a generic setter. Actual identical external callers compile against the checksum-verified0.14.3 archive and fail against0.14.4 on parts/removal with E0308 and setter Vec.into() inference with E0283. An Arc-specific caller has the opposite result. Thus one field cannot preserve both accidentally divergent published APIs. The existing0.14.5 carrier preparation is not compatibility acceptance or permission to ship it unchanged.
+
+The official cargo-semver-checks0.51.0 default-feature patch comparison of those actual archives returned success with229checks passed and31skipped despite the compiler-proven type breaks. Its documented type-change coverage limitation requires a stable external-consumer compile canary alongside the tool. A latest-only0.14.4 baseline would also miss the older compatible contract. The future gate must retain the last known-compatible0.14.3 and the accidental0.14.4 divergence explicitly, inventory published compatible baselines per crate, fail closed on incomplete checks and preserve CLI/binding/behavior checks. Never label the conflicting old/new API baselines universally compatible or suppress findings to retain a patch number.
+
+Q-S96-03is answered on2026-10-30: the user explicitly selected preparation of Word0.17.0andshared/PowerPoint0.15.0. Published .3Vec and .4Arc contracts cannot both be restored by a Vec-only compatible patch. The two exact reporter clients compile against0.14.3, which is a narrow verified workaround, not a universal package backport. Root adopted the amended F-X275contract for all compatible/yanked/equal numeric baselines, pinned three-host default/all API views, external compiler canaries and authenticated incremental proof reuse in existing carriers. Publication and an optional only-OPC.4yank remain separately held exact actions. The authorized429apology stays unsent until implemented repairs and deciding validations pass.
+
+Raw issue identity, checksum-verified archives, six actual compiler outcomes, the tool log and immutable receipt/supplement are retained under /private/tmp/rdocx-s96-run-refresh/issue429-intake-v1. Root read and independently checked the two read-only API/gate reports. The answered version decision adds the amended implementation and qualification work. The prior14to20developer-day estimate predates it. F-X275 and sprint release readiness remain held for implementation of the approved compatibility contract, its concrete repair, scoped regressions, independent microscope, executable release gate and final integrated evidence. The reporter reply must describe only the validated outcome and remains unsent until then.
 
 #### Sprint S97, Fillable PDF forms
 
@@ -4021,3 +4034,55 @@ The user adds F-X237 to S92 for the reported Python0.16.1 table-cell performance
 ## S95.4 release preparation intake, 2026-10-27
 
 F-X270 is admitted under the user's existing post-story release-preparation instruction and no-question recommended-choice policy. Fresh exact-family registry and remote-tag inventories select0.16.4/0.14.4 within the previously retained0.16.x/0.14.x lines. Published0.16.3/0.14.3 are immutable. Preserve their notes and all earlier evidence. This adds bounded requested release preparation to the eight integrated product stories, whose complete acceptance remains mandatory. F-X263 is done and supplies the existing release machinery. Hosted source availability follows the canonical reviewed clean-sprint checkpoint, not a red-gate publication shortcut. Publication remains held for separate exact-main approval and any user login. The original eight-story estimates remain historical and are not silently revised into actual effort.
+
+## Issue430 added footnote comparison intake
+
+On2026-10-30the user added [Issue430](https://github.com/tensorbee/rdocx/issues/430) to
+this sprint. Actual reporter is lawrenceakka. The issue was updated at
+2026-10-30T10:46:20Zand has no comments or linked contribution at this intake. The
+reported environment is PyPIrdocx0.16.4, macOSarm64 and Python3.14. Those producer
+facts and the exact script are reported inputs, not reproduced acceptance. Root
+read the issue and independently authenticated the15member intake packet at
+/private/tmp/rdocx-s96-run-refresh/issue430-intake-v1. Unrelated historical PR search
+hits are excluded. No external message was posted or authorized for430.
+
+F-X272owns this comparison contract amendment. Retain all five rows: inserted
+middle paragraph plus new note, removal of the final normal note, the existing
+note-text-edit positive, excluded-note reference consistency, and preservation
+of the following unchanged paragraph. F-X275owns eventual Word-family release
+notes and credit after actual implementation and validation. F-X273is a composed
+layout consumer, not the comparison fix owner. No second tracker or plan is added.
+
+Q-S96-04is open contract closure for normal-note identity, standard tracked note
+representation and selected accept/reject package lifecycle. Existing positional
+note pairing and story-count guards cannot simply be removed. Preserve separator
+owners, existing revisions, opaque data and source authority. First/last note part,
+relationship and content-type state must reproduce the selected input after
+resolution. Preserve documented ignored-story left bias unless explicitly amended,
+while requiring coherent references or a precise atomic refusal for excluded
+topology changes. The following-paragraph rewrite is a separate acceptance row
+and needs a no-note insertion control before attributing a cause.
+
+The approved prior F-X272repair remains active. This additional contract is not
+implemented or accepted by its existing256case packet. Close the representation,
+identity and lifecycle design before implementing this extension. Exact public
+Python reproduction, Rust/CLI consumers, source/lifecycle controls and native
+Word/schema saved-artifact evidence remain due. Reuse existing regression and
+Python carriers, without another binary or source file.
+
+The earlier14to20developer-day estimate predates both429and430. The430addition is
+material comparison, OPC graph, revision-lifecycle and native qualification work.
+Reestimate after its design closes rather than preserving the old estimate by
+dropping a reported row. Other S96stories, the strict SemVer work and429reporter
+reply hold remain in force. Publication still requires sprint close and separate
+reviewed-main approvals.
+
+The exact published producer reproduction is now executed once on an isolated
+Python3.14.7/macOSarm64venv with checksum-pinned PyPIrdocx0.16.4. It reproduces both
+reported error messages and the2revision note-text-edit control. Exactly two
+supplemental compares show that ignored notes produce reference3without owner3,
+while both that case and the no-note insertion preserve the payment paragraph
+with zero revisions. Keep the secondary rewrite row as not reproduced, with its
+narrow positive structural controls and native/unreduced qualification still due.
+The root-authenticated report is issue430-public-repro-v1/REPORT.md under the
+existing TEMP evidence root. This is published-producer RED, not current acceptance.

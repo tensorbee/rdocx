@@ -843,5 +843,10 @@ HLD14 contract before adopting contributor changes.
 | F-X272 | Preserve existing revisions during document comparison | S96 | L | in-progress |
 | F-X273 | Repair header body clearance and complete TOC navigation | S96 | L | done |
 | F-X274 | Honor section and field page-number formats | S96 | M | in-progress |
-| F-X275 | Prepare Word 0.16.5 and PowerPoint 0.14.5 patch releases | S96 | L | in-progress |
+| F-X275 | Prepare Word 0.17.0 and shared/PowerPoint 0.15.0 with strict SemVer gates | S96 | L | in-progress |
+
 <!-- AUTOGEN:backlog-MX END -->
+
+Issue430is admitted under the existing in-progress F-X272. Its footnote topology,
+ignored-story consistency and paragraph alignment rows require the pending amended
+contract and actual validation. The existing plan and S96plan hold that work.
