@@ -20993,7 +20993,8 @@ struct StoredElement {
     presentation: bool,
     /// For an `a:tbl`, the `a:gridCol` count and the rows read so far.
     table: Option<(usize, usize)>,
-    /// For an `a:tr`, the `a:tc` read so far.
+    /// For an `a:tr`, the grid columns its `a:tc` cover so far, each cell
+    /// counting its `gridSpan`.
     cells: usize,
 }
 
@@ -21056,7 +21057,18 @@ fn stored_slide_part_issues(part: &str, xml: &[u8], issues: &mut Vec<ValidationI
                         .last_mut()
                         .filter(|open| local_part(&open.name) == "tr")
                 {
-                    row.cells += 1;
+                    // LibreOffice writes a spanning cell without the hMerge
+                    // cells that follow it, so a cell covers its gridSpan.
+                    let span = element
+                        .attributes()
+                        .flatten()
+                        .find(|attribute| attribute.key.as_ref() == b"gridSpan")
+                        .and_then(|attribute| {
+                            std::str::from_utf8(&attribute.value).ok()?.parse().ok()
+                        })
+                        .filter(|span: &usize| *span > 0)
+                        .unwrap_or(1);
+                    row.cells += span;
                 }
                 if matches!(event, XmlEvent::Start(_)) {
                     stack.push(StoredElement {
@@ -21070,12 +21082,12 @@ fn stored_slide_part_issues(part: &str, xml: &[u8], issues: &mut Vec<ValidationI
             XmlEvent::End(_) => {
                 if let Some(row) = stack.pop().filter(|open| local_part(&open.name) == "tr")
                     && let Some((columns, rows)) = stack.iter().rev().find_map(|open| open.table)
-                    && row.cells != columns
+                    && row.cells < columns
                 {
                     issue(
                         &stack,
                         format!(
-                            "table row {rows} holds {} a:tc for {columns} a:gridCol",
+                            "table row {rows} covers {} of its {columns} a:gridCol",
                             row.cells
                         ),
                     );

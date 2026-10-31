@@ -37306,7 +37306,7 @@ fn issue435_validate_presentation_file_reports_stored_faults() {
                 let end = cell + xml[cell..].find("</a:tc>").unwrap() + "</a:tc>".len();
                 format!("{}{}", &xml[..cell], &xml[end..])
             },
-            "table row 1 holds 1 a:tc for 2 a:gridCol",
+            "table row 1 covers 1 of its 2 a:gridCol",
         ),
     ];
     for (part, edit, expected) in cases {
@@ -37320,6 +37320,31 @@ fn issue435_validate_presentation_file_reports_stored_faults() {
             "{expected}: {issues:?}"
         );
     }
+}
+
+#[test]
+fn issue435_a_spanned_row_without_hmerge_cells_covers_its_grid() {
+    // LibreOffice writes a cell with gridSpan and leaves out the hMerge cells
+    // after it, so the row holds fewer a:tc than the grid has columns.
+    let base = issue435_deck();
+    let slide = "ppt/slides/slide1.xml";
+    let spanned = issue435_edit(&base, slide, |xml| {
+        let row = xml.find("<a:tr ").unwrap();
+        let cell = row + xml[row..].find("<a:tc>").unwrap();
+        let second = cell + xml[cell..].find("</a:tc>").unwrap() + "</a:tc>".len();
+        let end = second + xml[second..].find("</a:tc>").unwrap() + "</a:tc>".len();
+        format!(
+            "{}<a:tc gridSpan=\"2\">{}{}",
+            &xml[..cell],
+            &xml[cell + "<a:tc>".len()..second],
+            &xml[end..]
+        )
+    });
+    let issues = issue435_issues(&spanned);
+    assert!(
+        !issues.iter().any(|issue| issue.contains("a:gridCol")),
+        "{issues:?}"
+    );
 }
 
 #[test]
