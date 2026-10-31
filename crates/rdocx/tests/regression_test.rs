@@ -408691,3 +408691,75 @@ fn issue434_inserted_lists_keep_their_own_numbering() {
         (1, 1)
     );
 }
+
+#[test]
+fn issue434_inserted_document_keeps_its_default_formatting() {
+    let mut destination = Document::new();
+    destination.add_paragraph("A body text.");
+    let destination_bytes = destination.to_bytes().unwrap();
+    let font = |document: &Document, text: &str| {
+        let paragraph = document
+            .paragraphs()
+            .into_iter()
+            .find(|paragraph| paragraph.text() == text)
+            .unwrap();
+        let style_id = paragraph
+            .style_id()
+            .map(str::to_owned)
+            .unwrap_or_else(|| "Normal".to_owned());
+        let style = document.style(&style_id).unwrap();
+        let run = style.run_properties().cloned().unwrap_or_default();
+        (run.font_ascii, run.sz.map(|size| size.0))
+    };
+    let mut defaults = Document::new();
+    defaults
+        .set_default_font_name_value(Some("Georgia"))
+        .unwrap();
+    defaults
+        .set_default_font_size_value(Some(Length::pt(14.0)))
+        .unwrap();
+    defaults.add_paragraph("B body text.");
+    let output = issue434_insert(
+        &destination_bytes,
+        &defaults,
+        FragmentConflictPolicy::reuse_equivalent(),
+    );
+    assert_eq!(
+        font(&output, "B body text."),
+        (Some("Georgia".to_owned()), Some(28))
+    );
+    assert_ne!(font(&output, "A body text.").0.as_deref(), Some("Georgia"));
+
+    let mut normal = Document::new();
+    normal
+        .set_style(StyleBuilder::paragraph("Normal", "Normal").font("Georgia"))
+        .unwrap();
+    normal.add_paragraph("B body text.");
+    for policy in [
+        FragmentConflictPolicy::reuse_equivalent(),
+        FragmentConflictPolicy::rename_all(),
+    ] {
+        let output = issue434_insert(&destination_bytes, &normal, policy);
+        assert_eq!(
+            font(&output, "B body text.").0.as_deref(),
+            Some("Georgia"),
+            "{policy:?}"
+        );
+        assert_ne!(font(&output, "A body text.").0.as_deref(), Some("Georgia"));
+    }
+
+    // An equal default style leaves the inserted paragraphs as they were.
+    let mut plain = Document::new();
+    plain.add_paragraph("B body text.");
+    let output = issue434_insert(
+        &destination_bytes,
+        &plain,
+        FragmentConflictPolicy::reuse_equivalent(),
+    );
+    assert!(
+        !output
+            .part_xml("word/document.xml")
+            .unwrap()
+            .contains("Merge1")
+    );
+}

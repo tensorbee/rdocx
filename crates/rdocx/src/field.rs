@@ -6059,6 +6059,37 @@ fn remap_fragment_style_collisions(
         .chain(fragment.styles.styles.iter())
         .map(|style| style.style_id.clone())
         .collect::<HashSet<_>>();
+    let source_default = fragment
+        .styles
+        .styles
+        .iter()
+        .position(|style| style.is_default && style.style_type == StyleType::Paragraph);
+    // The destination's document defaults replace the fragment's, so the
+    // fragment's own defaults go into its default paragraph style, which then
+    // differs from the destination's and is copied under a new id.
+    if let (Some(index), Some(defaults)) = (source_default, &fragment.styles.doc_defaults)
+        && destination
+            .styles
+            .doc_defaults
+            .as_ref()
+            .is_none_or(|existing| existing.rpr != defaults.rpr || existing.ppr != defaults.ppr)
+    {
+        let (rpr, ppr) = (defaults.rpr.clone(), defaults.ppr.clone());
+        let style = &mut fragment.styles.styles[index];
+        if let Some(mut merged) = rpr {
+            if let Some(own) = &style.rpr {
+                merged.merge_from(own);
+            }
+            style.rpr = Some(merged);
+        }
+        if let Some(mut merged) = ppr {
+            if let Some(own) = &style.ppr {
+                merged.merge_from(own);
+            }
+            style.ppr = Some(merged);
+        }
+    }
+    let source_default = source_default.map(|index| fragment.styles.styles[index].style_id.clone());
     for style in &fragment.styles.styles {
         let Some(existing) = destination.styles.get_by_id(&style.style_id) else {
             continue;
@@ -6151,6 +6182,11 @@ fn remap_fragment_style_collisions(
         for element in [b"pStyle".as_slice(), b"rStyle", b"tblStyle"] {
             patch_word_value(fragment_xml, element, old, new)?;
         }
+    }
+    // A paragraph that names no style takes the default paragraph style, so
+    // it names the renamed copy of the fragment's.
+    if let Some(renamed) = source_default.and_then(|id| replacements.get(&id)) {
+        *fragment_xml = style_unstyled_paragraphs(fragment_xml, renamed)?;
     }
     for kind in [StoryKind::Footnote, StoryKind::Endnote] {
         let stories = fragment.stories()?;
@@ -6251,6 +6287,144 @@ fn remap_rich_rows(
         item.row = row;
     }
     Ok(())
+}
+
+/// Give every Word paragraph of `xml` that has no `w:pStyle` the paragraph
+/// style `style_id`, as the first child of its `w:pPr`.
+fn style_unstyled_paragraphs(xml: &[u8], style_id: &str) -> Result<Vec<u8>> {
+    /// An open element, and for a paragraph or its properties the facts the
+    /// edit needs.
+    enum Open {
+        Paragraph {
+            prefix: String,
+            content: usize,
+            seen_child: bool,
+        },
+        Properties {
+            prefix: String,
+            content: usize,
+            styled: bool,
+        },
+        Other,
+    }
+    let style = |prefix: &str| {
+        let value = quick_xml::escape::escape(style_id);
+        if prefix.is_empty() {
+            format!(r#"<pStyle xmlns:w="{W_NS}" w:val="{value}"/>"#)
+        } else {
+            format!(r#"<{prefix}:pStyle {prefix}:val="{value}"/>"#)
+        }
+    };
+    let qualified = |prefix: &str, local: &str| {
+        if prefix.is_empty() {
+            local.to_owned()
+        } else {
+            format!("{prefix}:{local}")
+        }
+    };
+    let properties = |prefix: &str| {
+        let name = qualified(prefix, "pPr");
+        format!("<{name}>{}</{name}>", style(prefix))
+    };
+    let mut reader = NsReader::from_reader(xml);
+    let mut buffer = Vec::new();
+    let mut stack = Vec::<Open>::new();
+    // (start, end, replacement) spans, in document order.
+    let mut edits = Vec::<(usize, usize, String)>::new();
+    loop {
+        let before = reader.buffer_position() as usize;
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| Error::Other(format!("invalid fragment paragraph XML: {error}")))?;
+        let after = reader.buffer_position() as usize;
+        match event {
+            Event::Start(ref node) | Event::Empty(ref node) => {
+                let empty = matches!(event, Event::Empty(_));
+                let (namespace, local) = reader.resolver().resolve_element(node.name());
+                let word = namespace_is_word(&namespace);
+                let local = local.as_ref().to_vec();
+                let prefix = node
+                    .name()
+                    .prefix()
+                    .map(|prefix| String::from_utf8_lossy(prefix.as_ref()).into_owned())
+                    .unwrap_or_default();
+                let mut first_child = None;
+                match stack.last_mut() {
+                    Some(Open::Paragraph {
+                        prefix: paragraph_prefix,
+                        content,
+                        seen_child,
+                    }) if !*seen_child => {
+                        *seen_child = true;
+                        first_child = Some((paragraph_prefix.clone(), *content));
+                    }
+                    Some(Open::Properties { styled, .. })
+                        if word && local.as_slice() == b"pStyle" =>
+                    {
+                        *styled = true;
+                    }
+                    _ => {}
+                }
+                let is_properties = word && local.as_slice() == b"pPr";
+                if let Some((paragraph_prefix, content)) = &first_child
+                    && !is_properties
+                {
+                    edits.push((*content, *content, properties(paragraph_prefix)));
+                }
+                if word && local.as_slice() == b"p" {
+                    if empty {
+                        let name = qualified(&prefix, "p");
+                        let start = String::from_utf8_lossy(&xml[before..after - 2]).into_owned();
+                        edits.push((
+                            before,
+                            after,
+                            format!("{start}>{}</{name}>", properties(&prefix)),
+                        ));
+                    } else {
+                        stack.push(Open::Paragraph {
+                            prefix,
+                            content: after,
+                            seen_child: false,
+                        });
+                    }
+                } else if is_properties && first_child.is_some() {
+                    if empty {
+                        edits.push((before, after, properties(&prefix)));
+                    } else {
+                        stack.push(Open::Properties {
+                            prefix,
+                            content: after,
+                            styled: false,
+                        });
+                    }
+                } else if !empty {
+                    stack.push(Open::Other);
+                }
+            }
+            Event::End(_) => match stack.pop() {
+                Some(Open::Paragraph {
+                    prefix,
+                    content,
+                    seen_child: false,
+                }) => edits.push((content, content, properties(&prefix))),
+                Some(Open::Properties {
+                    prefix,
+                    content,
+                    styled: false,
+                }) => edits.push((content, content, style(&prefix))),
+                _ => {}
+            },
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    let mut output = xml.to_vec();
+    edits.sort_by_key(|(start, _, _)| *start);
+    for (start, end, replacement) in edits.into_iter().rev() {
+        output.splice(start..end, replacement.into_bytes());
+    }
+    Ok(output)
 }
 
 fn patch_word_value(xml: &mut Vec<u8>, element_local: &[u8], old: &str, new: &str) -> Result<()> {

@@ -15329,6 +15329,40 @@ def test_issue434_revisions_carry_their_text():
                           kind=revision.kind, text='thirty').text == 'thirty'
 
 
+def _issue434_font(document, text):
+    styles = document.part_xml('word/styles.xml')
+    paragraph = re.search(
+        rf'<w:p\b(?:(?!</w:p>).)*{re.escape(text)}.*?</w:p>', document.part_xml('word/document.xml'), re.S
+    ).group(0)
+    named = re.search(r'<w:pStyle w:val="([^"]+)"/>', paragraph)
+    style_id = named.group(1) if named else 'Normal'
+    style = re.search(rf'<w:style [^>]*w:styleId="{style_id}".*?</w:style>', styles, re.S).group(0)
+    font = re.search(r'<w:rFonts [^>]*w:ascii="([^"]+)"', style)
+    if font:
+        return font.group(1)
+    return re.search(r'<w:rPrDefault>.*?<w:rFonts [^>]*w:ascii="([^"]+)"', styles, re.S).group(1)
+
+
+@pytest.mark.parametrize('case', ['defaults', 'normal', 'named'])
+def test_issue434_insert_document_keeps_the_inserted_default_formatting(case):
+    import rdocx
+    a = rdocx.Document()
+    a.add_paragraph('A body text.')
+    b = rdocx.Document()
+    if case == 'defaults':
+        b.default_font_name = 'Georgia'
+        b.default_font_size = rdocx.Pt(14)
+    else:
+        b.set_style('Normal', font_name='Georgia')
+    b.add_paragraph('B body text.')
+    if case == 'named':
+        b.paragraphs[0].style = 'Normal'
+    out = rdocx.Document.from_bytes(a.to_bytes())
+    out.insert_document(b, at=1)
+    assert _issue434_font(out, 'B body text.') == 'Georgia'
+    assert _issue434_font(out, 'A body text.') != 'Georgia'
+
+
 def test_issue434_insert_document_keeps_each_inserted_list_on_its_own():
     import rdocx
 

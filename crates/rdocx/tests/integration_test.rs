@@ -30731,7 +30731,8 @@ fn same_id_default_copies_once_nondefault() {
     assert_eq!(defaults, ["Normal"]);
     let copy = target.style("NormalMerge1").unwrap();
     assert!(!copy.is_default());
-    assert_eq!(fx265_paragraph_styles(&target), ["", ""]);
+    // The inserted paragraph names no style, so it names the renamed copy.
+    assert_eq!(fx265_paragraph_styles(&target), ["", "NormalMerge1"]);
     let mut reopened = fx265_save_reopen(&mut target);
     assert!(
         fx265_style_elements(&mut reopened)
