@@ -15327,3 +15327,21 @@ def test_issue434_revisions_carry_their_text():
     revision = original.revisions[0]
     assert rdocx.Revision(id=revision.id, author=revision.author, timestamp=revision.timestamp,
                           kind=revision.kind, text='thirty').text == 'thirty'
+
+
+def test_issue434_insert_document_keeps_each_inserted_list_on_its_own():
+    import rdocx
+
+    def chapter(title):
+        document = rdocx.Document()
+        document.add_heading(title, 1)
+        for step in range(2):
+            document.add_numbered_list_item(f'{title}, step {step + 1}')
+        return document
+
+    document = chapter('Chapter A')
+    for title in ('Chapter B', 'Chapter C'):
+        document.insert_document(chapter(title), at=len(document.paragraphs) + len(document.tables))
+    numbers = re.findall(r'>(\d+\.)<', document.render_page_to_svg(0).svg)
+    assert numbers == ['1.', '2.'] * 3
+    assert len({paragraph.numbering[0] for paragraph in document.paragraphs if paragraph.numbering}) == 3

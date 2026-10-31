@@ -5711,6 +5711,7 @@ fn import_fragment_content_with_state(
         insert_at,
         &fragment,
         policy.reuse_numbering(),
+        policy.reuse_list_instances(),
         source_owned_numbering,
     )?;
     let typed = document.document.body.content.drain(insert_at..).collect();

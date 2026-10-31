@@ -1366,6 +1366,7 @@ pub struct DocumentFragment {
 pub struct FragmentConflictPolicy {
     reuse_equivalent_styles: bool,
     reuse_equivalent_numbering: bool,
+    reuse_list_instances: bool,
     reuse_equivalent_related_parts: bool,
 }
 
@@ -1375,6 +1376,7 @@ impl FragmentConflictPolicy {
         Self {
             reuse_equivalent_styles: true,
             reuse_equivalent_numbering: true,
+            reuse_list_instances: true,
             reuse_equivalent_related_parts: true,
         }
     }
@@ -1384,6 +1386,7 @@ impl FragmentConflictPolicy {
         Self {
             reuse_equivalent_styles: false,
             reuse_equivalent_numbering: false,
+            reuse_list_instances: false,
             reuse_equivalent_related_parts: false,
         }
     }
@@ -1400,6 +1403,16 @@ impl FragmentConflictPolicy {
         self
     }
 
+    /// Select whether a list that paragraphs number directly may continue an
+    /// equivalent list instance of the destination, when numbering is reused.
+    /// Without it each such list keeps an instance and a definition of its
+    /// own, as a whole inserted document's lists restart. Numbering that a
+    /// style links is reused either way.
+    pub const fn with_list_instance_reuse(mut self, reuse: bool) -> Self {
+        self.reuse_list_instances = reuse;
+        self
+    }
+
     /// Select whether equivalent relationship-reached leaf parts are reused.
     pub const fn with_related_part_reuse(mut self, reuse: bool) -> Self {
         self.reuse_equivalent_related_parts = reuse;
@@ -1412,6 +1425,10 @@ impl FragmentConflictPolicy {
 
     pub(crate) const fn reuse_numbering(self) -> bool {
         self.reuse_equivalent_numbering
+    }
+
+    pub(crate) const fn reuse_list_instances(self) -> bool {
+        self.reuse_list_instances
     }
 
     pub(crate) const fn reuse_related_parts(self) -> bool {
@@ -43242,7 +43259,7 @@ impl Document {
         index: usize,
         other: &Document,
     ) -> Result<()> {
-        self.insert_document_content_staged_with_numbering_policy(index, other, false, false)
+        self.insert_document_content_staged_with_numbering_policy(index, other, false, false, false)
             .map(|_| ())
     }
 
@@ -43251,12 +43268,14 @@ impl Document {
         index: usize,
         other: &Document,
         reuse_equivalent_numbering: bool,
+        reuse_list_instances: bool,
         source_owned_numbering: bool,
     ) -> Result<HashMap<u32, u32>> {
         self.insert_document_content_staged_with_numbering_policy(
             index,
             other,
             reuse_equivalent_numbering,
+            reuse_list_instances,
             source_owned_numbering,
         )
     }
@@ -43266,6 +43285,7 @@ impl Document {
         index: usize,
         other: &Document,
         reuse_equivalent_numbering: bool,
+        reuse_list_instances: bool,
         source_owned_numbering: bool,
     ) -> Result<HashMap<u32, u32>> {
         self.reserve_merge_bundles(other)?;
@@ -43284,6 +43304,7 @@ impl Document {
             other,
             insert_at,
             reuse_equivalent_numbering,
+            reuse_list_instances,
             source_owned_numbering,
         )
     }
@@ -43297,7 +43318,7 @@ impl Document {
             .body
             .content
             .extend(other.document.body.content.iter().cloned());
-        self.remap_merged_numbering(other, start_idx, false, false)
+        self.remap_merged_numbering(other, start_idx, false, false, false)
             .map(|_| ())
     }
 
@@ -43439,6 +43460,7 @@ impl Document {
         other: &Document,
         start_idx: usize,
         reuse_equivalent: bool,
+        reuse_list_instances: bool,
         source_owned_numbering: bool,
     ) -> Result<HashMap<u32, u32>> {
         if source_owned_numbering {
@@ -43448,12 +43470,31 @@ impl Document {
             return Ok(HashMap::new());
         };
         let existing_numbering = self.numbering.clone();
+        // Two equal list instances are still two lists. Without list
+        // instance reuse, a list that paragraphs number directly keeps an
+        // instance and a definition of its own and restarts, as Word joins
+        // instances of one definition. Numbering that a style links, such as
+        // heading numbering, may still continue an equivalent one.
+        let style_linked = other
+            .styles
+            .styles
+            .iter()
+            .filter_map(|style| style.ppr.as_ref()?.num_id)
+            .collect::<HashSet<_>>();
+        let directly_numbered = other_numbering
+            .nums
+            .iter()
+            .filter(|num| !reuse_list_instances && !style_linked.contains(&num.num_id))
+            .map(|num| num.abstract_num_id)
+            .collect::<HashSet<_>>();
         let mut abstract_remap = HashMap::new();
         let mut new_abstract_ids = HashSet::new();
         for abs_num in &other_numbering.abstract_nums {
             let new_id = existing_numbering
                 .as_ref()
-                .filter(|_| reuse_equivalent)
+                .filter(|_| {
+                    reuse_equivalent && !directly_numbered.contains(&abs_num.abstract_num_id)
+                })
                 .and_then(|numbering| {
                     numbering.abstract_nums.iter().find_map(|existing| {
                         equivalent_abstract_numbering(existing, abs_num)
@@ -43485,7 +43526,9 @@ impl Document {
             let mapped_abstract = abstract_remap[&num.abstract_num_id];
             let new_id = existing_numbering
                 .as_ref()
-                .filter(|_| reuse_equivalent)
+                .filter(|_| {
+                    reuse_equivalent && (reuse_list_instances || style_linked.contains(&num.num_id))
+                })
                 .and_then(|numbering| {
                     numbering.nums.iter().find_map(|existing| {
                         equivalent_numbering_instance(existing, num, mapped_abstract)

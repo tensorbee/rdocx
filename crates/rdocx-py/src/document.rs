@@ -13220,7 +13220,11 @@ impl PyDocument {
             .import_fragment(
                 &destination,
                 &fragment,
-                policy.map(|p| p.inner).unwrap_or_default(),
+                // The lists of a whole inserted document restart, as its own.
+                policy
+                    .map(|p| p.inner)
+                    .unwrap_or_default()
+                    .with_list_instance_reuse(false),
             )
             .map_err(|e| rdocx_to_pyerr(py, e))?;
         self.publish_api_candidate(py, candidate, "Document.insert_document")

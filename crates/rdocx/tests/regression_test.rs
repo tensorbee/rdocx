@@ -408622,3 +408622,72 @@ fn issue434_story_revisions_carry_their_text() {
         ]
     );
 }
+
+fn issue434_insert(
+    destination: &[u8],
+    source: &Document,
+    policy: FragmentConflictPolicy,
+) -> Document {
+    let mut output = Document::from_bytes(destination).unwrap();
+    let body = f254_story(source, StoryKind::Body);
+    let items = source.story_items(&body).unwrap();
+    let fragment = DocumentFragment::from_range(
+        source,
+        items[0].location(),
+        &ContentLocation::end(body),
+        false,
+    )
+    .unwrap();
+    let target = f254_story(&output, StoryKind::Body);
+    output
+        .import_fragment(&ContentLocation::end(target), &fragment, policy)
+        .unwrap();
+    Document::from_bytes(&output.to_bytes().unwrap()).unwrap()
+}
+
+#[test]
+fn issue434_inserted_lists_keep_their_own_numbering() {
+    let chapter = |title: &str| {
+        let mut document = Document::new();
+        document.add_paragraph(title);
+        document.add_numbered_list_item(&format!("{title} one"), 0);
+        document.add_numbered_list_item(&format!("{title} two"), 0);
+        document
+    };
+    let insert_chapters = |policy: FragmentConflictPolicy| {
+        let mut output = chapter("A");
+        for title in ["B", "C"] {
+            output = issue434_insert(&output.to_bytes().unwrap(), &chapter(title), policy);
+        }
+        let numbering = output
+            .paragraphs()
+            .iter()
+            .filter_map(|paragraph| paragraph.numbering())
+            .map(|(num_id, _)| num_id)
+            .collect::<Vec<_>>();
+        let definitions = output
+            .part_xml("word/numbering.xml")
+            .unwrap()
+            .matches("<w:abstractNum ")
+            .count();
+        (numbering, definitions)
+    };
+    let (numbering, definitions) =
+        insert_chapters(FragmentConflictPolicy::reuse_equivalent().with_list_instance_reuse(false));
+    assert_eq!(numbering.len(), 6);
+    assert_eq!(
+        numbering.iter().collect::<HashSet<_>>().len(),
+        3,
+        "{numbering:?}"
+    );
+    assert_eq!(numbering[0], numbering[1]);
+    assert_eq!(numbering[2], numbering[3]);
+    // Each list has its own definition, which Word does not join.
+    assert_eq!(definitions, 3);
+    // A fragment import keeps reusing an equivalent list by default.
+    let (numbering, definitions) = insert_chapters(FragmentConflictPolicy::reuse_equivalent());
+    assert_eq!(
+        (numbering.iter().collect::<HashSet<_>>().len(), definitions),
+        (1, 1)
+    );
+}
