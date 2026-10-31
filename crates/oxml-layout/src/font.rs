@@ -220,6 +220,9 @@ pub struct MultilingualTextSegment {
     y_offsets: Vec<f64>,
     clusters: Vec<GlyphCluster>,
     break_after: bool,
+    kerning: Option<bool>,
+    legacy_shaping: bool,
+    hyphenation_language: Option<String>,
 }
 
 impl MultilingualTextSegment {
@@ -238,6 +241,42 @@ impl MultilingualTextSegment {
         clusters: Vec<GlyphCluster>,
         break_after: bool,
     ) -> Result<Self> {
+        Self::new_with_legacy_shaping(
+            base,
+            logical_index,
+            language,
+            script,
+            direction,
+            bidi_level,
+            x_advances,
+            y_advances,
+            x_offsets,
+            y_offsets,
+            clusters,
+            break_after,
+            false,
+        )
+    }
+
+    // Legacy guess-property shaping may order glyphs independently of layout
+    // bidi levels. Validate full cluster coverage in its actual monotone order.
+    // Public construction and genuine rich callers retain strict parity.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_legacy_shaping(
+        base: TextSegment,
+        logical_index: usize,
+        language: Option<String>,
+        script: TextScript,
+        direction: TextDirection,
+        bidi_level: u8,
+        x_advances: Vec<f64>,
+        y_advances: Vec<f64>,
+        x_offsets: Vec<f64>,
+        y_offsets: Vec<f64>,
+        clusters: Vec<GlyphCluster>,
+        break_after: bool,
+        legacy_shaping: bool,
+    ) -> Result<Self> {
         let glyph_count = base.glyph_ids.len();
         let char_count = base.text.chars().count();
         let valid_level = unicode_bidi::Level::new(bidi_level).is_ok();
@@ -254,13 +293,20 @@ impl MultilingualTextSegment {
                 &y_offsets,
                 base.width,
             )
-            || !cluster_ranges_are_valid(&clusters, glyph_count, char_count, bidi_level % 2 == 1)
+            || !(cluster_ranges_are_valid(&clusters, glyph_count, char_count, bidi_level % 2 == 1)
+                || (legacy_shaping
+                    && cluster_ranges_are_valid(
+                        &clusters,
+                        glyph_count,
+                        char_count,
+                        bidi_level.is_multiple_of(2),
+                    )))
         {
             return Err(LayoutError::Layout(
                 "invalid multilingual glyph positioning or cluster range".to_owned(),
             ));
         }
-        Ok(Self {
+        let mut span = Self {
             base,
             logical_index,
             language,
@@ -273,7 +319,136 @@ impl MultilingualTextSegment {
             y_offsets,
             clusters,
             break_after,
-        })
+            kerning: None,
+            legacy_shaping,
+            hyphenation_language: None,
+        };
+        if legacy_shaping {
+            span.normalize_legacy_storage();
+        }
+        Ok(span)
+    }
+
+    /// Replace only compatible base/advance data while retaining shaping context.
+    #[doc(hidden)]
+    pub fn with_base_and_advances(
+        mut self,
+        base: TextSegment,
+        x_advances: Vec<f64>,
+    ) -> Result<Self> {
+        if base.text != self.base.text
+            || base.font_id != self.base.font_id
+            || base.font_size.to_bits() != self.base.font_size.to_bits()
+            || base.direction != self.base.direction
+            || base.glyph_ids != self.base.glyph_ids
+            || base.advances.len() != base.glyph_ids.len()
+            || x_advances.len() != base.glyph_ids.len()
+            || !base.advances.iter().all(|value| value.is_finite())
+            || !position_values_are_finite(
+                &x_advances,
+                &self.y_advances,
+                &self.x_offsets,
+                &self.y_offsets,
+                base.width,
+            )
+            || !(cluster_ranges_are_valid(
+                &self.clusters,
+                base.glyph_ids.len(),
+                base.text.chars().count(),
+                self.bidi_level % 2 == 1,
+            ) || (self.legacy_shaping
+                && cluster_ranges_are_valid(
+                    &self.clusters,
+                    base.glyph_ids.len(),
+                    base.text.chars().count(),
+                    self.bidi_level.is_multiple_of(2),
+                )))
+        {
+            return Err(LayoutError::Layout(
+                "incompatible multilingual base or advance replacement".into(),
+            ));
+        }
+        self.base = base;
+        self.x_advances = x_advances;
+        if self.legacy_shaping {
+            self.normalize_legacy_storage();
+        }
+        Ok(self)
+    }
+
+    #[doc(hidden)]
+    pub fn with_hyphenation_language(mut self, language: Option<String>) -> Self {
+        self.hyphenation_language = language;
+        if self.legacy_shaping {
+            self.normalize_legacy_storage();
+        }
+        self
+    }
+
+    /// Preserve the shaped payload while assigning its actual assembly order
+    /// and the source producer's split, reflow and paint convention.
+    #[doc(hidden)]
+    pub fn with_logical_index_and_legacy_shaping(
+        mut self,
+        logical_index: usize,
+        legacy_shaping: bool,
+    ) -> Self {
+        self.logical_index = logical_index;
+        self.legacy_shaping = legacy_shaping;
+        if legacy_shaping {
+            self.normalize_legacy_storage();
+        }
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn uses_legacy_shaping(&self) -> bool {
+        self.legacy_shaping
+    }
+
+    #[doc(hidden)]
+    pub fn kerning_override(&self) -> Option<bool> {
+        self.kerning
+    }
+
+    pub(crate) fn hyphenation_language(&self) -> Option<&str> {
+        self.hyphenation_language.as_deref()
+    }
+
+    pub(crate) fn inherit_shaping_context(mut self, source: &Self) -> Self {
+        self.kerning = source.kerning;
+        self.legacy_shaping = source.legacy_shaping;
+        self.hyphenation_language = source.hyphenation_language.clone();
+        if self.legacy_shaping {
+            self.normalize_legacy_storage();
+        }
+        self
+    }
+
+    fn normalize_legacy_storage(&mut self) {
+        self.x_advances = std::mem::take(&mut self.x_advances)
+            .into_boxed_slice()
+            .into_vec();
+        self.y_advances = std::mem::take(&mut self.y_advances)
+            .into_boxed_slice()
+            .into_vec();
+        self.x_offsets = std::mem::take(&mut self.x_offsets)
+            .into_boxed_slice()
+            .into_vec();
+        self.y_offsets = std::mem::take(&mut self.y_offsets)
+            .into_boxed_slice()
+            .into_vec();
+        self.clusters = std::mem::take(&mut self.clusters)
+            .into_boxed_slice()
+            .into_vec();
+        self.language = self
+            .language
+            .take()
+            .map(|value| value.into_boxed_str().into_string());
+        self.hyphenation_language = self
+            .hyphenation_language
+            .take()
+            .map(|value| value.into_boxed_str().into_string());
     }
 
     pub fn text(&self) -> &str {
@@ -411,6 +586,7 @@ struct ShapingKey {
     font_id: FontId,
     text: String,
     size_bits: u64,
+    kerning: Option<bool>,
 }
 
 struct ShapingMemo {
@@ -461,19 +637,20 @@ impl ShapingMemo {
             self.bytes = self.bytes.saturating_sub(evicted_bytes);
         }
         self.bytes += entry_bytes;
-        let fingerprint = shaping_fingerprint(key.font_id, &key.text, key.size_bits);
+        let fingerprint = shaping_fingerprint(key.font_id, &key.text, key.size_bits, key.kerning);
         self.entries
             .push_back((key, shaped, entry_bytes, fingerprint));
     }
 }
 
-fn shaping_fingerprint(font_id: FontId, text: &str, size_bits: u64) -> u64 {
+fn shaping_fingerprint(font_id: FontId, text: &str, size_bits: u64, kerning: Option<bool>) -> u64 {
     use std::hash::{Hash, Hasher};
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     font_id.hash(&mut hasher);
     text.hash(&mut hasher);
     size_bits.hash(&mut hasher);
+    kerning.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -2282,6 +2459,28 @@ impl FontManager {
 
     /// Shape a text string using HarfRust. Returns glyph IDs and advances.
     pub fn shape_text(&self, font_id: FontId, text: &str, size_pt: f64) -> Result<ShapedText> {
+        self.shape_text_with_override(font_id, text, size_pt, None)
+    }
+
+    /// Shape with an explicit per-request kerning feature, without changing defaults.
+    #[doc(hidden)]
+    pub fn shape_text_with_kerning(
+        &self,
+        font_id: FontId,
+        text: &str,
+        size_pt: f64,
+        enabled: bool,
+    ) -> Result<ShapedText> {
+        self.shape_text_with_override(font_id, text, size_pt, Some(enabled))
+    }
+
+    fn shape_text_with_override(
+        &self,
+        font_id: FontId,
+        text: &str,
+        size_pt: f64,
+        kerning: Option<bool>,
+    ) -> Result<ShapedText> {
         // HarfRust cannot derive segment properties from an empty buffer, and
         // there is nothing to shape anyway.
         if text.is_empty() {
@@ -2296,8 +2495,9 @@ impl FontManager {
             font_id,
             text: text.to_owned(),
             size_bits: size_pt.to_bits(),
+            kerning,
         };
-        let fingerprint = shaping_fingerprint(key.font_id, &key.text, key.size_bits);
+        let fingerprint = shaping_fingerprint(key.font_id, &key.text, key.size_bits, key.kerning);
         let mut memo = match self.shaping_memo.lock() {
             Ok(memo) => memo,
             Err(poisoned) => {
@@ -2327,45 +2527,12 @@ impl FontManager {
             memo.misses += 1;
         }
 
-        let font = self.get_font(font_id)?;
-
-        let face = harfrust::FontRef::from_index(&font.data, font.face_index)
-            .map_err(|e| LayoutError::Shaping(format!("failed to read font face: {e}")))?;
-
-        let shaper = font
-            .shaper_data
-            .shaper(&face)
-            .instance(font.shaper_instance.as_ref())
-            .build();
-
-        let mut buffer = harfrust::UnicodeBuffer::new();
-        buffer.push_str(text);
-        // Infer direction, script and language from the text. Unlike rustybuzz,
-        // HarfRust does not do this implicitly and panics on an unset direction.
-        buffer.guess_segment_properties();
-
-        let output = shaper.shape(buffer, harfrust::ShapeOptions::default());
-        let infos = output.glyph_infos();
-        let positions = output.glyph_positions();
-
-        let upem = font.units_per_em as f64;
-        let scale = size_pt / upem;
-
-        let mut glyph_ids = Vec::with_capacity(infos.len());
-        let mut advances = Vec::with_capacity(positions.len());
-        let mut total_width = 0.0;
-
-        for (info, pos) in infos.iter().zip(positions.iter()) {
-            glyph_ids.push(info.glyph_id as u16);
-            let advance = pos.x_advance as f64 * scale;
-            advances.push(advance);
-            total_width += advance;
-        }
-
+        let positioned = self.shape_legacy(font_id, text, size_pt, kerning, false)?;
+        let width = positioned.x_advances.iter().sum();
         let shaped = ShapedText {
-            glyph_ids,
-            advances,
-            width: total_width,
+            glyph_ids: positioned.glyph_ids,
+            advances: positioned.x_advances,
+            width,
         };
         memo.insert(key, shaped.clone());
         Ok(shaped)
@@ -2401,10 +2568,10 @@ impl FontManager {
         self.shape_multilingual_with_levels(
             segment,
             language,
-            &break_offsets,
+            (&break_offsets, &break_offsets),
             &levels,
             0,
-            (false, false, &mut Vec::new()),
+            (false, false, None, false, &mut Vec::new()),
         )
     }
 
@@ -2431,6 +2598,45 @@ impl FontManager {
         no_wrap: bool,
         requests: &[(bool, bool)],
     ) -> Result<(Vec<MultilingualTextSegment>, Vec<String>)> {
+        self.shape_paragraph_with_features(segments, base_direction, no_wrap, requests, None, false)
+    }
+
+    /// Shape explicit occurrence-aligned kerning without changing neutral callers.
+    #[doc(hidden)]
+    pub fn shape_paragraph_with_kerning(
+        &mut self,
+        segments: Vec<(TextSegment, Option<String>)>,
+        base_direction: TextDirection,
+        no_wrap: bool,
+        enabled: &[bool],
+        legacy_shaping: bool,
+    ) -> Result<Vec<MultilingualTextSegment>> {
+        if enabled.len() != segments.len() {
+            return Err(LayoutError::Shaping(
+                "kerning request count differs from styled runs".into(),
+            ));
+        }
+        let caps = vec![(false, false); segments.len()];
+        self.shape_paragraph_with_features(
+            segments,
+            base_direction,
+            no_wrap,
+            &caps,
+            Some(enabled),
+            legacy_shaping,
+        )
+        .map(|(spans, _)| spans)
+    }
+
+    fn shape_paragraph_with_features(
+        &mut self,
+        segments: Vec<(TextSegment, Option<String>)>,
+        base_direction: TextDirection,
+        no_wrap: bool,
+        requests: &[(bool, bool)],
+        kerning: Option<&[bool]>,
+        legacy_shaping: bool,
+    ) -> Result<(Vec<MultilingualTextSegment>, Vec<String>)> {
         if requests.iter().any(|(small, all)| *small && *all) {
             return Err(LayoutError::Shaping(
                 "conflicting all-caps and small-caps request".to_owned(),
@@ -2455,7 +2661,7 @@ impl FontManager {
                 start
             })
             .collect::<Vec<_>>();
-        if paragraph_text.is_empty() {
+        if paragraph_text.is_empty() && kerning.is_none() {
             return Ok((Vec::new(), diagnostics));
         }
         let paragraph_level = match base_direction {
@@ -2478,12 +2684,37 @@ impl FontManager {
         };
         let mut logical_index = 0usize;
         let mut shaped = Vec::new();
-        for (((segment, language), byte_offset), (small_caps, all_caps)) in segments
+        for (occurrence, (((segment, language), byte_offset), (small_caps, all_caps))) in segments
             .into_iter()
             .zip(segment_starts)
             .zip(requests.iter().copied())
+            .enumerate()
         {
             let byte_end = byte_offset + segment.text.len();
+            if segment.text.is_empty()
+                && let Some(kerning) = kerning
+            {
+                let base = segment;
+                let mut span = MultilingualTextSegment::new_with_legacy_shaping(
+                    base,
+                    logical_index,
+                    language,
+                    TextScript::Common,
+                    base_direction,
+                    paragraph_level.number(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    false,
+                    legacy_shaping,
+                )?;
+                span.kerning = Some(kerning[occurrence]);
+                logical_index += 1;
+                shaped.push(span);
+                continue;
+            }
             if !segment.text.is_empty() {
                 let forced_levels = (segment.direction != TextDirection::Auto)
                     .then(|| {
@@ -2493,18 +2724,35 @@ impl FontManager {
                 let levels = forced_levels
                     .as_deref()
                     .unwrap_or(&bidi.levels[byte_offset..byte_end]);
-                let break_offsets = paragraph_breaks
-                    .iter()
-                    .filter(|offset| (byte_offset + 1..=byte_end).contains(*offset))
-                    .map(|offset| offset - byte_offset)
-                    .collect();
+                let shaping_offsets = if legacy_shaping {
+                    unicode_linebreak::linebreaks(&segment.text)
+                        .map(|(offset, _)| offset)
+                        .collect()
+                } else {
+                    paragraph_breaks
+                        .iter()
+                        .filter(|offset| (byte_offset + 1..=byte_end).contains(*offset))
+                        .map(|offset| offset - byte_offset)
+                        .collect()
+                };
+                let published_offsets = if no_wrap {
+                    &paragraph_breaks
+                } else {
+                    &shaping_offsets
+                };
                 let spans = self.shape_multilingual_with_levels(
                     segment,
                     language.as_deref(),
-                    &break_offsets,
+                    (&shaping_offsets, published_offsets),
                     levels,
                     logical_index,
-                    (small_caps, all_caps, &mut diagnostics),
+                    (
+                        small_caps,
+                        all_caps,
+                        kerning.map(|values| values[occurrence]),
+                        legacy_shaping,
+                        &mut diagnostics,
+                    ),
                 )?;
                 logical_index += spans.len();
                 shaped.extend(spans);
@@ -2513,27 +2761,32 @@ impl FontManager {
         Ok((shaped, diagnostics))
     }
 
-    /// `break_offsets` are the line break opportunities within the segment,
-    /// as byte offsets. An offset at its end lets a line end after it.
+    /// Shaping cuts and published line opportunities use segment byte offsets.
+    /// Legacy no-wrap retains old shaping chunks without permitting soft breaks.
     fn shape_multilingual_with_levels(
         &mut self,
         segment: TextSegment,
         language: Option<&str>,
-        break_offsets: &HashSet<usize>,
+        break_offsets: (&HashSet<usize>, &HashSet<usize>),
         levels: &[unicode_bidi::Level],
         logical_index_base: usize,
-        caps: (bool, bool, &mut Vec<String>),
+        caps: (bool, bool, Option<bool>, bool, &mut Vec<String>),
     ) -> Result<Vec<MultilingualTextSegment>> {
-        let (small_caps, all_caps, diagnostics) = caps;
+        let (small_caps, all_caps, kerning, legacy_shaping, diagnostics) = caps;
+        let (shaping_offsets, published_offsets) = break_offsets;
         let grapheme_boundaries = icu_segmenter::GraphemeClusterSegmenter::new()
             .segment_str(&segment.text)
             .collect::<Vec<_>>();
         // Spaces before a break opportunity get a span of their own, so a
         // line can let them hang past its end.
-        let hanging_starts = break_offsets
-            .iter()
-            .map(|offset| segment.text[..*offset].trim_end_matches(' ').len())
-            .collect::<HashSet<_>>();
+        let hanging_starts = if legacy_shaping {
+            HashSet::new()
+        } else {
+            shaping_offsets
+                .iter()
+                .map(|offset| segment.text[..*offset].trim_end_matches(' ').len())
+                .collect::<HashSet<_>>()
+        };
 
         let mut logical_ranges = Vec::<(usize, usize, TextScript, unicode_bidi::Level)>::new();
         let mut start = 0usize;
@@ -2549,13 +2802,15 @@ impl FontManager {
                 script
             };
             let level = levels[grapheme_start];
-            if grapheme_start > start && (script != current_script || level != current_level) {
+            if grapheme_start > start
+                && ((!legacy_shaping && script != current_script) || level != current_level)
+            {
                 logical_ranges.push((start, grapheme_start, current_script, current_level));
                 start = grapheme_start;
             }
             current_script = script;
             current_level = level;
-            if (break_offsets.contains(&grapheme_end) || hanging_starts.contains(&grapheme_end))
+            if (shaping_offsets.contains(&grapheme_end) || hanging_starts.contains(&grapheme_end))
                 && grapheme_end < segment.text.len()
             {
                 logical_ranges.push((start, grapheme_end, current_script, current_level));
@@ -2577,12 +2832,16 @@ impl FontManager {
             for window in boundaries.windows(2) {
                 let grapheme_start = window[0];
                 let grapheme_end = window[1];
-                let font_id = self.font_for_multilingual_span(
-                    segment.font_id,
-                    &segment.text[grapheme_start..grapheme_end],
-                    segment.bold,
-                    segment.italic,
-                );
+                let font_id = if legacy_shaping {
+                    segment.font_id
+                } else {
+                    self.font_for_multilingual_span(
+                        segment.font_id,
+                        &segment.text[grapheme_start..grapheme_end],
+                        segment.bold,
+                        segment.italic,
+                    )
+                };
                 if let Some(current_font) = range_font
                     && current_font != font_id
                 {
@@ -2623,6 +2882,7 @@ impl FontManager {
                     segment.font_size,
                     (script, language, direction),
                     true,
+                    kerning,
                 )?;
                 plain.glyph_ids != caps.glyph_ids
             } else {
@@ -2699,13 +2959,18 @@ impl FontManager {
             } else {
                 text.to_owned()
             };
-            let mut positioned = self.shape_explicit_with_small_caps(
-                font_id,
-                &rendered,
-                size_pt,
-                (script, language, direction),
-                feature_applies,
-            )?;
+            let mut positioned = if legacy_shaping {
+                self.shape_legacy(font_id, &rendered, size_pt, kerning, true)?
+            } else {
+                self.shape_explicit_with_small_caps(
+                    font_id,
+                    &rendered,
+                    size_pt,
+                    (script, language, direction),
+                    feature_applies,
+                    kerning,
+                )?
+            };
             if fallback {
                 let mut owners = Vec::new();
                 for (index, character) in text.chars().enumerate() {
@@ -2760,10 +3025,12 @@ impl FontManager {
             base.glyph_ids = positioned.glyph_ids;
             base.advances = positioned.x_advances.clone();
             base.width = positioned.x_advances.iter().sum();
-            base.ascent = metrics.ascent;
-            base.descent = metrics.descent;
-            base.line_gap = metrics.line_gap;
-            logical.push(MultilingualTextSegment::new(
+            if !legacy_shaping {
+                base.ascent = metrics.ascent;
+                base.descent = metrics.descent;
+                base.line_gap = metrics.line_gap;
+            }
+            let mut span = MultilingualTextSegment::new_with_legacy_shaping(
                 base,
                 logical_index_base + logical_index,
                 language.map(str::to_owned),
@@ -2775,8 +3042,11 @@ impl FontManager {
                 positioned.x_offsets,
                 positioned.y_offsets,
                 positioned.clusters,
-                break_offsets.contains(&end),
-            )?);
+                published_offsets.contains(&end),
+                legacy_shaping,
+            )?;
+            span.kerning = kerning;
+            logical.push(span);
         }
 
         Ok(logical)
@@ -2803,6 +3073,174 @@ impl FontManager {
             .unwrap_or(preferred)
     }
 
+    fn shape_in_context(
+        &self,
+        owner: &MultilingualTextSegment,
+        text: &str,
+    ) -> Result<PositionedShape> {
+        let base = owner.base();
+        if owner.legacy_shaping {
+            self.shape_legacy(base.font_id, text, base.font_size, owner.kerning, true)
+        } else {
+            self.shape_explicit_with_small_caps(
+                base.font_id,
+                text,
+                base.font_size,
+                (owner.script, owner.language.as_deref(), owner.direction),
+                false,
+                owner.kerning,
+            )
+        }
+    }
+
+    pub(crate) fn context_character_spacing(&self, owner: &MultilingualTextSegment) -> Result<f64> {
+        let shape = self.shape_in_context(owner, owner.text())?;
+        Ok(
+            if shape.x_advances.len() == owner.x_advances.len() && !shape.x_advances.is_empty() {
+                (owner.width() - shape.x_advances.iter().sum::<f64>())
+                    / shape.x_advances.len() as f64
+            } else {
+                0.0
+            },
+        )
+    }
+
+    pub(crate) fn context_prefix_width(
+        &self,
+        owner: &MultilingualTextSegment,
+        byte_end: usize,
+    ) -> Result<f64> {
+        let characters = owner.text()[..byte_end].chars().count() as u32;
+        if owner
+            .clusters
+            .iter()
+            .all(|cluster| cluster.char_end <= characters || cluster.char_start >= characters)
+        {
+            return Ok(owner
+                .clusters
+                .iter()
+                .filter(|cluster| cluster.char_end <= characters)
+                .flat_map(|cluster| {
+                    &owner.x_advances[cluster.glyph_start as usize..cluster.glyph_end as usize]
+                })
+                .sum());
+        }
+        let shape = self.shape_in_context(owner, &owner.text()[..byte_end])?;
+        Ok(shape.x_advances.iter().sum::<f64>()
+            + self.context_character_spacing(owner)? * shape.x_advances.len() as f64)
+    }
+
+    pub(crate) fn reshape_context_segment(
+        &self,
+        owner: &MultilingualTextSegment,
+        mut base: TextSegment,
+        spacing: f64,
+    ) -> Result<MultilingualTextSegment> {
+        let positioned = if owner.legacy_shaping {
+            self.shape_legacy(
+                base.font_id,
+                &base.text,
+                base.font_size,
+                owner.kerning,
+                true,
+            )?
+        } else {
+            self.shape_explicit_with_small_caps(
+                base.font_id,
+                &base.text,
+                base.font_size,
+                (owner.script, owner.language.as_deref(), owner.direction),
+                false,
+                owner.kerning,
+            )?
+        };
+        let x_advances = positioned
+            .x_advances
+            .iter()
+            .map(|advance| advance + spacing)
+            .collect::<Vec<_>>();
+        base.glyph_ids = positioned.glyph_ids;
+        base.advances = x_advances.clone();
+        base.width = x_advances.iter().sum();
+        MultilingualTextSegment::new_with_legacy_shaping(
+            base,
+            owner.logical_index,
+            owner.language.clone(),
+            owner.script,
+            owner.direction,
+            owner.bidi_level,
+            x_advances,
+            positioned.y_advances,
+            positioned.x_offsets,
+            positioned.y_offsets,
+            positioned.clusters,
+            owner.break_after,
+            owner.legacy_shaping,
+        )
+        .map(|span| span.inherit_shaping_context(owner))
+    }
+
+    fn shape_legacy(
+        &self,
+        font_id: FontId,
+        text: &str,
+        size_pt: f64,
+        kerning: Option<bool>,
+        rich: bool,
+    ) -> Result<PositionedShape> {
+        let font = self.get_font(font_id)?;
+        let face = harfrust::FontRef::from_index(&font.data, font.face_index)
+            .map_err(|error| LayoutError::Shaping(format!("failed to read font face: {error}")))?;
+        let shaper = font
+            .shaper_data
+            .shaper(&face)
+            .instance(font.shaper_instance.as_ref())
+            .build();
+        let mut buffer = harfrust::UnicodeBuffer::new();
+        buffer.push_str(text);
+        buffer.guess_segment_properties();
+        let feature = kerning.map(|enabled| {
+            harfrust::Feature::new(harfrust::Tag::new(b"kern"), u32::from(enabled), ..)
+        });
+        let options = match feature.as_ref() {
+            Some(feature) => {
+                harfrust::ShapeOptions::default().features(std::slice::from_ref(feature))
+            }
+            None => harfrust::ShapeOptions::default(),
+        };
+        let output = shaper.shape(buffer, options);
+        let infos = output.glyph_infos();
+        let scale = size_pt / f64::from(font.units_per_em);
+        Ok(PositionedShape {
+            glyph_ids: infos.iter().map(|info| info.glyph_id as u16).collect(),
+            x_advances: output
+                .glyph_positions()
+                .iter()
+                .map(|position| f64::from(position.x_advance) * scale)
+                .collect(),
+            y_advances: if rich {
+                vec![0.0; infos.len()]
+            } else {
+                Vec::new()
+            },
+            x_offsets: if rich {
+                vec![0.0; infos.len()]
+            } else {
+                Vec::new()
+            },
+            y_offsets: if rich {
+                vec![0.0; infos.len()]
+            } else {
+                Vec::new()
+            },
+            clusters: if rich {
+                glyph_clusters(infos, text)
+            } else {
+                Vec::new()
+            },
+        })
+    }
+
     fn shape_explicit(
         &self,
         font_id: FontId,
@@ -2818,6 +3256,7 @@ impl FontManager {
             size_pt,
             (script, language, direction),
             false,
+            None,
         )
     }
 
@@ -2828,6 +3267,7 @@ impl FontManager {
         size_pt: f64,
         properties: (TextScript, Option<&str>, TextDirection),
         small_caps: bool,
+        kerning: Option<bool>,
     ) -> Result<PositionedShape> {
         let (script, language, direction) = properties;
         let font = self.get_font(font_id)?;
@@ -2848,12 +3288,18 @@ impl FontManager {
         if let Some(language) = language.and_then(harfrust::Language::new) {
             buffer.set_language(language);
         }
-        let features = [harfrust::Feature::new(harfrust::Tag::new(b"smcp"), 1, ..)];
-        let options = if small_caps {
-            harfrust::ShapeOptions::default().features(&features)
-        } else {
-            harfrust::ShapeOptions::default()
-        };
+        let mut features = Vec::with_capacity(2);
+        if small_caps {
+            features.push(harfrust::Feature::new(harfrust::Tag::new(b"smcp"), 1, ..));
+        }
+        if let Some(enabled) = kerning {
+            features.push(harfrust::Feature::new(
+                harfrust::Tag::new(b"kern"),
+                u32::from(enabled),
+                ..,
+            ));
+        }
+        let options = harfrust::ShapeOptions::default().features(&features);
         let output = shaper.shape(buffer, options);
         let infos = output.glyph_infos();
         let positions = output.glyph_positions();
@@ -4721,6 +5167,286 @@ for feature in ['smcp=0','smcp=1']:
         let replacement_id = fm.resolve_font(Some("Carlito"), false, false).unwrap();
         fm.shape_text(replacement_id, "exact text", 11.0).unwrap();
         assert_eq!(fm.shaping_memo_counts().1, 1);
+        let mut explicit = FontManager::new_deterministic().unwrap();
+        let face = explicit
+            .resolve_font(Some("Carlito"), false, false)
+            .unwrap();
+        let default = explicit.shape_text(face, "AVATAR To", 20.0).unwrap();
+        let off = explicit
+            .shape_text_with_kerning(face, "AVATAR To", 20.0, false)
+            .unwrap();
+        let on = explicit
+            .shape_text_with_kerning(face, "AVATAR To", 20.0, true)
+            .unwrap();
+        assert_eq!(default.glyph_ids, on.glyph_ids);
+        assert_eq!(default.advances, on.advances);
+        assert!(off.width > on.width);
+        for _ in 0..2 {
+            assert_eq!(
+                explicit
+                    .shape_text(face, "AVATAR To", 20.0)
+                    .unwrap()
+                    .advances,
+                default.advances
+            );
+            assert_eq!(
+                explicit
+                    .shape_text_with_kerning(face, "AVATAR To", 20.0, false)
+                    .unwrap()
+                    .advances,
+                off.advances
+            );
+            assert_eq!(
+                explicit
+                    .shape_text_with_kerning(face, "AVATAR To", 20.0, true)
+                    .unwrap()
+                    .advances,
+                on.advances
+            );
+        }
+        assert_eq!(explicit.shaping_memo_counts().2, 3);
+        let base = multilingual_test_segment(&mut explicit, "AVATAR", 20.0, None);
+        assert!(
+            explicit
+                .shape_paragraph_with_kerning(
+                    vec![(base.clone(), None)],
+                    TextDirection::LeftToRight,
+                    false,
+                    &[],
+                    true
+                )
+                .is_err()
+        );
+        let mut language = String::with_capacity(2048);
+        language.push_str("en-US");
+        let mut span = explicit
+            .shape_paragraph_with_kerning(
+                vec![(base, Some(language))],
+                TextDirection::LeftToRight,
+                false,
+                &[false],
+                true,
+            )
+            .unwrap()
+            .remove(0);
+        assert_eq!(span.kerning_override(), Some(false));
+        assert!(span.uses_legacy_shaping());
+        assert_eq!(span.x_advances.capacity(), span.x_advances.len());
+        assert_eq!(span.y_advances.capacity(), span.y_advances.len());
+        assert_eq!(span.x_offsets.capacity(), span.x_offsets.len());
+        assert_eq!(span.y_offsets.capacity(), span.y_offsets.len());
+        assert_eq!(span.clusters.capacity(), span.clusters.len());
+        assert_eq!(span.language.as_ref().unwrap().capacity(), 5);
+        let mut language = String::with_capacity(4096);
+        language.push_str("en-US");
+        span = span.with_hyphenation_language(Some(language));
+        assert_eq!(span.hyphenation_language.as_ref().unwrap().capacity(), 5);
+        let mut advances = Vec::with_capacity(2048);
+        advances.extend_from_slice(span.x_advances());
+        let replacement = span.base().clone();
+        let span = span.with_base_and_advances(replacement, advances).unwrap();
+        assert_eq!(span.x_advances.capacity(), span.x_advances.len());
+        assert_eq!(span.hyphenation_language(), Some("en-US"));
+        let mut incompatible = span.base().clone();
+        incompatible.text.push('x');
+        assert!(
+            span.clone()
+                .with_base_and_advances(incompatible, span.x_advances().to_vec())
+                .is_err()
+        );
+        let mut invalid = span.x_advances().to_vec();
+        invalid[0] = f64::NAN;
+        assert!(
+            span.clone()
+                .with_base_and_advances(span.base().clone(), invalid)
+                .is_err()
+        );
+        for legacy in [false, true] {
+            let base = multilingual_test_segment(&mut explicit, "ab cd", 20.0, None);
+            let nowrap = explicit
+                .shape_paragraph_with_kerning(
+                    vec![(base.clone(), None)],
+                    TextDirection::LeftToRight,
+                    true,
+                    &[false],
+                    legacy,
+                )
+                .unwrap();
+            assert!(
+                nowrap.iter().all(|span| !span.break_after()),
+                "no-wrap provider exposes a soft break in legacy={legacy}"
+            );
+            let wrapped = explicit
+                .shape_paragraph_with_kerning(
+                    vec![(base, None)],
+                    TextDirection::LeftToRight,
+                    false,
+                    &[false],
+                    legacy,
+                )
+                .unwrap();
+            let mut bytes = 0;
+            assert!(wrapped.iter().any(|span| {
+                bytes += span.text().len();
+                bytes == 3 && span.break_after()
+            }));
+        }
+        // Empty styled occurrences retain context without inventing a break.
+        for legacy in [false, true] {
+            for no_wrap in [false, true] {
+                for texts in [&[][..], &[""][..], &["ab", "", "cd"][..]] {
+                    let segments = texts
+                        .iter()
+                        .map(|text| {
+                            (
+                                multilingual_test_segment(&mut explicit, text, 20.0, None),
+                                None,
+                            )
+                        })
+                        .collect();
+                    let spans = explicit
+                        .shape_paragraph_with_kerning(
+                            segments,
+                            TextDirection::LeftToRight,
+                            no_wrap,
+                            &vec![false; texts.len()],
+                            legacy,
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        spans.iter().map(|span| span.text()).collect::<String>(),
+                        texts.concat()
+                    );
+                    assert_eq!(
+                        spans.iter().filter(|span| span.text().is_empty()).count(),
+                        texts.iter().filter(|text| text.is_empty()).count()
+                    );
+                    assert!(
+                        spans
+                            .iter()
+                            .filter(|span| span.text().is_empty())
+                            .all(|span| !span.break_after()),
+                        "empty occurrence invents a break in legacy={legacy}, no_wrap={no_wrap}"
+                    );
+                    if no_wrap {
+                        assert!(spans.iter().all(|span| !span.break_after()));
+                    }
+                }
+            }
+        }
+        let generic = MultilingualTextSegment::new(
+            span.base().clone(),
+            span.logical_index(),
+            Some({
+                let mut value = String::with_capacity(2048);
+                value.push_str("en");
+                value
+            }),
+            span.script(),
+            span.direction(),
+            span.bidi_level(),
+            span.x_advances().to_vec(),
+            span.y_advances().to_vec(),
+            span.x_offsets().to_vec(),
+            span.y_offsets().to_vec(),
+            span.clusters().to_vec(),
+            span.break_after(),
+        )
+        .unwrap();
+        assert!(!generic.uses_legacy_shaping());
+        assert_eq!(generic.kerning_override(), None);
+        assert_eq!(generic.language.as_ref().unwrap().capacity(), 2048);
+        // Legacy shaping uses the old Unicode chunks, never an extra script buffer.
+        let node = crate::SourceNodeId::new(77).unwrap();
+        for (text, chunks) in [
+            ("ΑVТoA\u{301}ΩЖfi", vec!["ΑVТoA\u{301}ΩЖfi"]),
+            ("ΑVТoA\u{301}—ΩЖfi", vec!["ΑVТoA\u{301}", "—", "ΩЖfi"]),
+        ] {
+            for no_wrap in [false, true] {
+                for enabled in [false, true] {
+                    let mut base = multilingual_test_segment(
+                        &mut explicit,
+                        text,
+                        11.0,
+                        Some(SourceSpan {
+                            node,
+                            char_start: 10,
+                            char_end: 10 + text.chars().count() as u32,
+                        }),
+                    );
+                    base.font_id = face;
+                    let shaped = explicit
+                        .shape_text_with_kerning(face, text, 11.0, enabled)
+                        .unwrap();
+                    base.glyph_ids = shaped.glyph_ids;
+                    base.advances = shaped.advances;
+                    base.width = shaped.width;
+                    let spans = explicit
+                        .shape_paragraph_with_kerning(
+                            vec![(base, None)],
+                            TextDirection::Auto,
+                            no_wrap,
+                            &[enabled],
+                            true,
+                        )
+                        .unwrap();
+                    assert_eq!(
+                        spans.iter().map(|span| span.text()).collect::<Vec<_>>(),
+                        chunks
+                    );
+                    let mut offset = 10;
+                    for span in spans {
+                        let reference = explicit
+                            .shape_text_with_kerning(face, span.text(), 11.0, enabled)
+                            .unwrap();
+                        assert_eq!(span.glyph_ids(), reference.glyph_ids);
+                        assert_eq!(span.x_advances(), reference.advances);
+                        assert_eq!(span.width().to_bits(), reference.width.to_bits());
+                        assert_eq!(span.break_after(), !no_wrap);
+                        assert_eq!(span.kerning_override(), Some(enabled));
+                        assert!(span.uses_legacy_shaping());
+                        let end = offset + span.text().chars().count() as u32;
+                        assert_eq!(
+                            span.base().source,
+                            Some(SourceSpan {
+                                node,
+                                char_start: offset,
+                                char_end: end
+                            })
+                        );
+                        offset = end;
+                        assert_eq!(span.x_advances.capacity(), span.x_advances.len());
+                        assert_eq!(span.clusters.capacity(), span.clusters.len());
+                    }
+                }
+            }
+        }
+        let equal = multilingual_test_segment(&mut explicit, "AVATAR", 20.0, None);
+        let empty = multilingual_test_segment(&mut explicit, "", 20.0, None);
+        let occurrences = explicit
+            .shape_paragraph_with_kerning(
+                vec![(equal.clone(), None), (empty, None), (equal, None)],
+                TextDirection::Auto,
+                true,
+                &[false, true, true],
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            occurrences
+                .iter()
+                .map(|span| span.kerning_override())
+                .collect::<Vec<_>>(),
+            vec![Some(false), Some(true), Some(true)]
+        );
+        assert_eq!(
+            occurrences
+                .iter()
+                .map(|span| span.logical_index())
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert!(occurrences.iter().all(|span| !span.break_after()));
     }
 
     #[test]
@@ -4850,6 +5576,115 @@ for feature in ['smcp=0','smcp=1']:
         let mut glyph_gap = valid.clusters().to_vec();
         glyph_gap[0].glyph_start = 1;
         assert!(rebuild(valid.bidi_level(), glyph_gap).is_err());
+
+        let base = multilingual_test_segment(&mut fm, "AVATAR", 18.0, None);
+        let mut owner = fm
+            .shape_paragraph_with_kerning(
+                vec![(base, Some("en-US".into()))],
+                TextDirection::LeftToRight,
+                false,
+                &[false],
+                false,
+            )
+            .unwrap()
+            .remove(0)
+            .with_hyphenation_language(Some("en-US".into()));
+        owner.x_advances.reserve_exact(31);
+        owner.y_advances.reserve_exact(31);
+        owner.x_offsets.reserve_exact(31);
+        owner.y_offsets.reserve_exact(31);
+        owner.clusters.reserve_exact(31);
+        owner.language.as_mut().unwrap().reserve_exact(31);
+        owner
+            .hyphenation_language
+            .as_mut()
+            .unwrap()
+            .reserve_exact(31);
+        owner.base.glyph_ids.reserve_exact(31);
+        let base_capacity = owner.base.glyph_ids.capacity();
+        let original = owner.clone();
+        let rebased = owner.with_logical_index_and_legacy_shaping(123, true);
+        assert_eq!(rebased.logical_index(), 123);
+        assert!(rebased.uses_legacy_shaping());
+        assert_eq!(
+            format!("{:?}", rebased.base()),
+            format!("{:?}", original.base())
+        );
+        assert_eq!(rebased.base.glyph_ids.capacity(), base_capacity);
+        assert_eq!(rebased.kerning_override(), Some(false));
+        assert_eq!(rebased.script(), original.script());
+        assert_eq!(rebased.direction(), original.direction());
+        assert_eq!(rebased.bidi_level(), original.bidi_level());
+        assert_eq!(rebased.break_after(), original.break_after());
+        for (actual, expected) in [
+            (&rebased.x_advances, &original.x_advances),
+            (&rebased.y_advances, &original.y_advances),
+            (&rebased.x_offsets, &original.x_offsets),
+            (&rebased.y_offsets, &original.y_offsets),
+        ] {
+            assert_eq!(actual, expected);
+            assert_eq!(actual.capacity(), actual.len());
+        }
+        assert_eq!(rebased.clusters, original.clusters);
+        assert_eq!(rebased.clusters.capacity(), rebased.clusters.len());
+        for (actual, expected) in [
+            (&rebased.language, &original.language),
+            (
+                &rebased.hyphenation_language,
+                &original.hyphenation_language,
+            ),
+        ] {
+            assert_eq!(actual, expected);
+            assert_eq!(
+                actual.as_ref().unwrap().capacity(),
+                actual.as_ref().unwrap().len()
+            );
+        }
+        let rich = rebased.with_logical_index_and_legacy_shaping(7, false);
+        assert_eq!(rich.logical_index(), 7);
+        assert!(!rich.uses_legacy_shaping());
+        assert_eq!(rich.kerning_override(), Some(false));
+        assert_eq!(rich.glyph_ids(), original.glyph_ids());
+
+        // Layout bidi and guessed glyph order are independent only for a
+        // positively selected legacy constructor. Public new stays strict.
+        let opposite_level = valid.bidi_level() ^ 1;
+        assert!(rebuild(opposite_level, valid.clusters().to_vec()).is_err());
+        let legacy_rebuild = |level, clusters| {
+            MultilingualTextSegment::new_with_legacy_shaping(
+                valid.base().clone(),
+                valid.logical_index(),
+                valid.language().map(str::to_owned),
+                valid.script(),
+                valid.direction(),
+                level,
+                valid.x_advances().to_vec(),
+                valid.y_advances().to_vec(),
+                valid.x_offsets().to_vec(),
+                valid.y_offsets().to_vec(),
+                clusters,
+                valid.break_after(),
+                true,
+            )
+        };
+        let legacy = legacy_rebuild(opposite_level, valid.clusters().to_vec()).unwrap();
+        assert_eq!(legacy.bidi_level(), opposite_level);
+        assert!(legacy.uses_legacy_shaping());
+        assert_eq!(legacy.glyph_ids(), valid.glyph_ids());
+        assert_eq!(legacy.clusters(), valid.clusters());
+        let unchanged = legacy
+            .clone()
+            .with_base_and_advances(legacy.base().clone(), legacy.x_advances().to_vec())
+            .unwrap();
+        assert_eq!(unchanged.bidi_level(), opposite_level);
+        assert_eq!(unchanged.clusters(), valid.clusters());
+        assert!(legacy_rebuild(255, valid.clusters().to_vec()).is_err());
+        let mut gap = valid.clusters().to_vec();
+        gap[0].glyph_start = 1;
+        assert!(legacy_rebuild(opposite_level, gap).is_err());
+        let mut outside = valid.clusters().to_vec();
+        outside.last_mut().unwrap().char_end = 3;
+        assert!(legacy_rebuild(opposite_level, outside).is_err());
     }
 
     #[test]
@@ -4967,7 +5802,8 @@ for feature in ['smcp=0','smcp=1']:
         let font = fm.resolve_font(Some("Carlito"), false, false).unwrap();
         fm.shape_text(font, "first collision candidate", 11.0)
             .unwrap();
-        let forced = shaping_fingerprint(font, "second collision candidate", 11.0f64.to_bits());
+        let forced =
+            shaping_fingerprint(font, "second collision candidate", 11.0f64.to_bits(), None);
         fm.shaping_memo.lock().unwrap().entries[0].3 = forced;
 
         fm.shape_text(font, "second collision candidate", 11.0)
@@ -5016,6 +5852,7 @@ for feature in ['smcp=0','smcp=1']:
                     font_id: FontId(0),
                     text: std::iter::repeat_n(suffix, 9 * 1024 * 1024).collect(),
                     size_bits: 11.0f64.to_bits(),
+                    kerning: None,
                 },
                 ShapedText {
                     glyph_ids: Vec::new(),
