@@ -69,37 +69,67 @@ class SprintWorkflowTests(unittest.TestCase):
 
     def test_semver_native_setup_accepts_canonical_rustup_proxy_without_byte_identity(self):
         target='x86_64-unknown-linux-gnu'
-        for disposition in ('valid','wrong-current','wrong-pinned','wrong-bare'):
+        for disposition in ('valid','wrong-current','wrong-pinned','wrong-bare',
+                            'alias','alias-wrong-current','alias-wrong-pinned','alias-wrong-bare',
+                            'alias-wrong-host','alias-wrong-override','alias-missing-manager',
+                            'alias-copied-manager','alias-foreign-tool','direct'):
             with self.subTest(disposition=disposition),tempfile.TemporaryDirectory() as directory:
                 root=Path(directory);rust=root/'sysroot/bin';cargo_home=root/'cargo-home';proxies=cargo_home/'bin';payload=root/'payload'
                 for folder in (rust,proxies,payload):folder.mkdir(parents=True)
                 for name in ('rustc','cargo','rustdoc'):
                     (rust/name).write_bytes(('actual qualified '+name).encode());(rust/name).chmod(0o700);(proxies/name).write_bytes(('independent proxy '+name).encode());(proxies/name).chmod(0o700)
-                (proxies/'rustup').write_bytes(b'canonical rustup distinct bytes');(proxies/'rustup').chmod(0o700)
+                manager=proxies/'rustup';manager.write_bytes(b'canonical rustup distinct bytes');manager.chmod(0o700)
+                env={'PATH':str(proxies),'CARGO_HOME':str(cargo_home)}
+                if disposition.startswith('alias'):
+                    backend=root/'backend/runtime-core';backend.parent.mkdir();backend.write_bytes(b'shared executable backend');backend.chmod(0o700)
+                    for name in ('rustc','cargo','rustdoc'):
+                        (proxies/name).unlink();(proxies/name).symlink_to(backend)
+                    manager.unlink();external=root/'external';external.mkdir();manager=external/'rustup';manager.symlink_to(backend)
+                    env['PATH']=str(proxies)+os.pathsep+str(external)
+                    if disposition=='alias-copied-manager':
+                        manager.unlink();manager.write_bytes(backend.read_bytes());manager.chmod(0o700)
+                        self.assertEqual(workflow._semver_hash(manager),workflow._semver_hash(backend))
+                        self.assertNotEqual(manager.resolve(),backend.resolve())
+                    elif disposition=='alias-foreign-tool':
+                        foreign=root/'foreign';foreign.mkdir();(foreign/'rustc').symlink_to(backend)
+                        env['PATH']=str(foreign)+os.pathsep+env['PATH']
+                    elif disposition=='alias-missing-manager':manager.unlink()
+                    elif disposition=='alias-wrong-override':env['RUSTC']=str(root/'foreign-rustc')
+                elif disposition=='direct':env['PATH']=str(rust)
                 calls=[]
                 def run(argv,cwd,env,destination,name,timeout=3600):
                     calls.append([str(a) for a in argv]);destination=Path(destination);destination.mkdir(exist_ok=True)
                     if name=='sysroot':text=str(rust.parent)+'\n'
                     elif name=='tool':text='cargo-semver-checks 0.51.0\n'
                     elif len(argv)>1 and argv[1]=='which':
-                        wrong=disposition=='wrong-current' and '--toolchain' not in argv or disposition=='wrong-pinned' and '--toolchain' in argv
+                        self.assertEqual(str(argv[0]),str(manager),'invoke the lexical rustup alias, not its backend basename')
+                        wrong=disposition.endswith('wrong-current') and '--toolchain' not in argv or disposition.endswith('wrong-pinned') and '--toolchain' in argv
                         text=str((root/'foreign' if wrong else rust)/argv[-1])+'\n'
                     else:
-                        tool=Path(argv[0]).name;text=tool+' 1.97.1\n'+('host: '+target+'\n' if tool=='rustc' else '')
-                        if disposition=='wrong-bare' and name.startswith('inherited-'):text+='foreign actual proxy output\n'
+                        tool=Path(argv[0]).name;host='aarch64-apple-darwin' if disposition=='alias-wrong-host' else target
+                        text=tool+' 1.97.1\n'+('host: '+host+'\n' if tool=='rustc' else '')
+                        if disposition.endswith('wrong-bare') and name.startswith('inherited-'):text+='foreign actual proxy output\n'
                     (destination/(name+'.stdout')).write_text(text);(destination/(name+'.stderr')).write_text('')
                     return {'argv':[str(a) for a in argv],'exit':0,'timed_out':False,'launch_error':None}
-                env={'PATH':str(proxies),'CARGO_HOME':str(cargo_home)}
-                if disposition!='valid':
+                if disposition not in ('valid','alias','direct'):
                     with patch.object(workflow,'_semver_run',side_effect=run),self.assertRaises(ValueError):workflow._semver_native_setup('/unused-pinned-tool',target,payload,env)
-                    inputs=workflow._semver_read(payload/'setup/tool-resolution-input.json');self.assertEqual(inputs['inherited']['rustc']['sha256'],workflow._semver_hash(proxies/'rustc'))
+                    inputs=workflow._semver_read(payload/'setup/tool-resolution-input.json');self.assertIn('sha256',inputs['inherited']['rustc'])
+                    self.assertFalse((payload/'setup/inner-tools.json').exists())
                     continue
                 with patch.object(workflow,'_semver_run',side_effect=run):observed=workflow._semver_native_setup('/unused-pinned-tool',target,payload,env)
                 self.assertEqual(set(observed),{'rustc','cargo','rustdoc'})
                 self.assertEqual(Path(workflow.shutil.which('cargo',path=env['PATH'])).resolve(),(rust/'cargo').resolve())
-                self.assertTrue(any('--toolchain' in argv and '1.97.1' in argv for argv in calls))
-                inputs=workflow._semver_read(payload/'setup/tool-resolution-input.json');self.assertEqual(inputs['inherited']['rustc']['sha256'],workflow._semver_hash(proxies/'rustc'))
-                self.assertNotEqual(workflow._semver_hash(proxies/'rustc'),workflow._semver_hash(proxies/'rustup'))
+                inputs=workflow._semver_read(payload/'setup/tool-resolution-input.json');self.assertIn('sha256',inputs['inherited']['rustc'])
+                if disposition=='direct':
+                    self.assertFalse(any(len(argv)>1 and argv[1]=='which' for argv in calls))
+                else:
+                    self.assertEqual(sum('--toolchain' in argv and '1.97.1' in argv for argv in calls),3)
+                    if disposition=='valid':self.assertNotEqual(workflow._semver_hash(proxies/'rustc'),workflow._semver_hash(manager))
+                    else:
+                        self.assertEqual(inputs['inherited']['rustc']['resolved_path'],inputs['inherited']['rustup']['resolved_path'])
+                        self.assertEqual(sum(len(argv)>1 and argv[1]=='which' for argv in calls),6)
+                        resolution=workflow._semver_read(payload/'setup/inner-tools.json')
+                        self.assertTrue(all(row['manager_provenance']=='shared-proxy-backend' for row in resolution.values()))
 
     def test_semver_canary_fetch_qualifies_complete_cache_then_locked_offline_graph(self):
         for failure in (None,'fetch-failure','changed-lock'):

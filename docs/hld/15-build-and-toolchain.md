@@ -736,7 +736,11 @@ Generated current and baseline projects, locks, library JSON, effective features
 and original Cargo cwd are retained separately. Canonical Rustup proxies are
 qualified by their actual Cargo-home paths, current and explicit pinned-toolchain
 selection and observed bare-tool agreement with the concrete native sysroot.
-Proxy byte identity is not assumed, and arbitrary PATH tools remain refused.
+Proxy byte identity is not assumed. An external Rustup manager is admitted only
+when it resolves to the canonical proxy's concrete backend and its retained SHA
+and byte count agree. Canonical managers may retain distinct proxy bytes. Manager
+invocation keeps the lexical rustup alias for multicall dispatch. Arbitrary PATH
+tools and copied managers at a different backend remain refused.
 Compiler witnesses retain their actual check lock, then acquire all locked target
 dependencies through bounded successful fetch before unchanged offline metadata.
 The lock, configuration, command and raw fetch observations remain bound through

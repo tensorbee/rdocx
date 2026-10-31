@@ -2431,18 +2431,26 @@ def _semver_native_setup(tool, target, payload, env):
             raise ValueError('inherited tool identity could not be retained: '+name)
         if actual!=Path(fact['path']):
             rustup=inherited['rustup']
-            if Path(path).absolute()!=canonical_bin/(name+suffix) or rustup is None or Path(rustup).absolute()!=canonical_bin/('rustup'+suffix):
+            if Path(path).absolute()!=canonical_bin/(name+suffix) or rustup is None:
                 raise ValueError('bare inner tool differs from canonical Rustup/qualified toolchain: '+name)
+            rustup_identity=identity(rustup)
+            if 'sha256' not in rustup_identity:
+                raise ValueError('Rustup manager identity could not be retained')
+            canonical_manager=Path(rustup).absolute()==canonical_bin/('rustup'+suffix)
+            if not canonical_manager and (
+                rustup_identity['resolved_path']!=resolution['inherited']['resolved_path']
+                or rustup_identity['sha256']!=resolution['inherited']['sha256']
+                or rustup_identity['bytes']!=resolution['inherited']['bytes']
+            ):
+                raise ValueError('external Rustup manager differs from canonical proxy backend: '+name)
             for mode,arguments in (('current',['which',name]),('pinned',['which','--toolchain','1.97.1',name])):
                 process=_semver_run([rustup,*arguments],REPO,env,setup,'resolve-'+mode+'-'+name,120)
                 _semver_success(process)
                 selected=Path((setup/('resolve-'+mode+'-'+name+'.stdout')).read_text().strip()).resolve()
                 if selected!=Path(fact['path']):
                     raise ValueError('rustup '+mode+' selection differs from qualified compiler: '+name)
-            rustup_identity=identity(rustup)
-            if 'sha256' not in rustup_identity:
-                raise ValueError('canonical Rustup identity could not be retained')
-            resolution.update(kind='canonical-rustup-proxy',rustup=rustup_identity)
+            resolution.update(kind='canonical-rustup-proxy',rustup=rustup_identity,
+                manager_provenance='canonical-path' if canonical_manager else 'shared-proxy-backend')
         options=['-Vv'] if name=='rustc' else ['-V']
         bare=_semver_run([path,*options],REPO,env,setup,'inherited-'+name,120)
         _semver_success(bare)

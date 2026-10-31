@@ -563,3 +563,38 @@ The validated F271external-ci-source-availability handoff was consumed at integr
 Expanded pending gates are the existing selected Test, MSRV, Word/presentation fidelity, Python, WASM, hash, package, lint, docs, prose and supply-chain CI union, all three native SemVer producers, all three signing jobs and the deciding CI gate. Completed successful exact-source CI must precede the build-only wheels rehearsal and its new completed-CI/SemVer consumer. Owner-only, schedule and fork skips do not supply that union. The normal dispatch retains owner_compatibility=false and exact source/ref/workflow commit identities. Required unused owner runner/config inputs remain nonqualifying sentinels.
 
 All implementation and scoped-review source must be frozen and clean before the narrow nonforce canonical sprint-ref push. F271A7diagnostics require their own clean review and local checks first. Every actual external run and attempt remains pending until observed. No ledger completion, dependency unblocking, baseline update, main merge, tag, reporter comment, yank or publication follows from local readiness.
+
+
+## Native manager alias technical clarification
+
+Actual reviewed-source CI41162658315Macjob124423398135fails the first native
+setup repair at its manager lexical-location guard. Diagnostic artifact
+13027467958is authenticated at SHA256
+7a29296c34ef33771bf19e9359fa1234ec8a94a1c8077ce45f8a97094d9ffa15.
+The three inherited tools already have their exact canonical Cargo-home proxy
+paths. Those tools and the inherited external rustup manager all resolve to
+one concrete executable, with identical retained SHA and size. This is not
+evidence of registry-isolated Cargo home or arbitrary compiler provenance.
+
+Under existing A5native qualification, retain the direct tool branch and
+canonical manager branch. Additionally admit an external inherited manager
+only when it resolves to the same concrete executable as the exact canonical
+proxy and retained SHA/size agree. Preserve the lexical rustup invocation so
+multicall dispatch does not select rustup-init. Still require current and
+explicit pinned Rustup selections, actual bare-output agreement, native target,
+compiler version/overrides, tool integrity and final concrete PATH preparation.
+No vendor path/version allowlist, home rewrite, byte-only copy admission or
+arbitrary PATH relaxation is authorized. Existing distinct-byte canonical
+manager installations remain supported.
+
+Extend existing setup tests with actual generic alias topology, unrelated
+external manager with identical copied bytes, foreign tool paths sharing the
+backend, and wrong current/pinned/bare/native-host controls. Capture actual
+current-source RED before this second bounded repair and affected GREEN after.
+Retain first14local PASS as historical, not hosted qualification. Independent
+designer reassessment REPORT SHA256
+6c7982fbb2baef1d7fa293241a727f2de2ebdea7d703d63b8549c41f1370ce64
+provides the cause and shared-caller closure. A repeated same-invariant failure
+requires reassessment before a third patch. Existing HLD15 impact records
+this clarification, with every other plan/public/budget/gate boundary unchanged.
+Actual fresh source-qualified Mac and complete CI/signing acceptance remain due.
