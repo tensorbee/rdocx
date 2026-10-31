@@ -11,7 +11,7 @@ use quick_xml::{Reader, Writer, XmlVersion};
 use rdocx_oxml::content_control::{CT_Sdt, SdtContent};
 use rdocx_oxml::document::{BodyContent, CT_Document};
 use rdocx_oxml::namespace::W_NS;
-use rdocx_oxml::properties::CT_PPr;
+use rdocx_oxml::properties::{CT_PPr, CT_RPr};
 use rdocx_oxml::shared::ST_PageOrientation;
 use rdocx_oxml::table::{CT_Row, CT_Tbl, CT_TblPr, CT_Tc, CT_TrPr, CellContent};
 use rdocx_oxml::text::{
@@ -4200,6 +4200,18 @@ fn compare_paragraph(
     }
     let detached = detach_field_spans(original, original_source)?;
     let original_source = detached.as_deref().or(original_source);
+    if let (Some(left), Some(right)) = (plain_text_spans(original), plain_text_spans(edited))
+        && left == right
+    {
+        return unchanged_runs_paragraph(
+            original,
+            edited,
+            original_source,
+            location,
+            metadata,
+            diagnostics,
+        );
+    }
     if uses_attributed_run_path(metadata.options) {
         return compare_granular_paragraph(
             original,
@@ -4349,6 +4361,121 @@ fn compare_paragraph(
     Ok(output)
 }
 
+/// The text of a paragraph that holds only plain text runs, with the text of
+/// adjacent runs of the same formatting joined, so two paragraphs that differ
+/// only by where their runs split compare equal. None for any other content,
+/// which keeps its own comparison.
+fn plain_text_spans(paragraph: &CT_P) -> Option<Vec<(Option<&CT_RPr>, String)>> {
+    let plain = paragraph.hyperlinks.is_empty()
+        && paragraph.comment_ranges.is_empty()
+        && paragraph.bookmark_markers.is_empty()
+        && paragraph.content_controls.is_empty()
+        && paragraph.revisions.is_empty()
+        && paragraph.equations.is_empty()
+        && paragraph.rubies.is_empty()
+        && paragraph
+            .extra_xml
+            .iter()
+            .all(|(position, raw)| CT_P::raw_is_root_attributes(*position, raw));
+    if !plain {
+        return None;
+    }
+    let mut spans = Vec::<(Option<&CT_RPr>, String)>::new();
+    for run in &paragraph.runs {
+        if !run.alt_drawings.is_empty()
+            || !run
+                .extra_xml_positions
+                .iter()
+                .all(|&position| CT_R::raw_child_is_root_attributes(position))
+        {
+            return None;
+        }
+        let properties = run.properties.as_ref();
+        for content in &run.content {
+            // Edge whitespace without the space flag reads differently from
+            // the same text with it, so such a run keeps its own comparison.
+            let RunContent::Text(text) = content else {
+                return None;
+            };
+            if has_edge_whitespace(&text.text) && !text.preserve_space {
+                return None;
+            }
+            match spans.last_mut() {
+                Some((last, joined)) if *last == properties => joined.push_str(&text.text),
+                _ => spans.push((properties, text.text.clone())),
+            }
+        }
+    }
+    Some(spans)
+}
+
+/// A plain text paragraph with each stretch of adjacent runs of the same
+/// formatting as one run, which signatures read so that where runs split
+/// does not change them. None when there is nothing to join.
+fn merged_plain_paragraph(paragraph: &CT_P) -> Option<CT_P> {
+    let spans = plain_text_spans(paragraph)?;
+    if spans.len() == paragraph.runs.len()
+        && paragraph.runs.iter().all(|run| run.content.len() == 1)
+    {
+        return None;
+    }
+    let mut merged = paragraph.clone();
+    merged.runs = spans
+        .into_iter()
+        .map(|(properties, text)| CT_R {
+            properties: properties.cloned(),
+            content: vec![RunContent::Text(CT_Text {
+                preserve_space: has_edge_whitespace(&text),
+                text,
+            })],
+            extra_xml: Vec::new(),
+            extra_xml_positions: Vec::new(),
+            alt_drawings: Vec::new(),
+        })
+        .collect();
+    Some(merged)
+}
+
+/// The original paragraph with its own runs, for an edited paragraph whose
+/// runs hold the same text and formatting split at other places.
+fn unchanged_runs_paragraph(
+    original: &CT_P,
+    edited: &CT_P,
+    original_source: Option<&str>,
+    location: &str,
+    metadata: &mut Metadata<'_>,
+    diagnostics: &mut Vec<ComparisonDiagnostic>,
+) -> Result<String> {
+    let (mut output, paragraph_close) = paragraph_shell(original_source)?;
+    output.push_str(&paragraph_properties_xml(
+        original,
+        edited,
+        location,
+        metadata,
+        diagnostics,
+    )?);
+    match original_source {
+        Some(source) => {
+            let spans = modeled_paragraph_run_spans(original, source)?;
+            if spans.len() != original.runs.len() {
+                return Err(Error::Other(format!(
+                    "comparison could not correlate paragraph run owners at {location}"
+                )));
+            }
+            for span in spans {
+                output.push_str(&source[span]);
+            }
+        }
+        None => {
+            for run in &original.runs {
+                output.push_str(&paragraph_owned_run_xml(run)?);
+            }
+        }
+    }
+    output.push_str(&paragraph_close);
+    Ok(output)
+}
+
 fn paragraph_shell(source: Option<&str>) -> Result<(String, String)> {
     let Some(source) = source else {
         return Ok(("<w:p>".to_owned(), "</w:p>".to_owned()));
@@ -4479,8 +4606,17 @@ fn compare_granular_paragraph(
         );
     }
 
-    let original_units = attributed_run_units(&original.runs, metadata.options);
-    let edited_units = attributed_run_units(&edited.runs, metadata.options);
+    let mut original_units = attributed_run_units(&original.runs, metadata.options);
+    let mut edited_units = attributed_run_units(&edited.runs, metadata.options);
+    // Plain text paragraphs only, which the postconditions read with their
+    // runs of one formatting joined, so the characters written for a split
+    // word read back as that word.
+    if metadata.options.granularity == ComparisonGranularity::Word
+        && plain_text_spans(original).is_some()
+        && plain_text_spans(edited).is_some()
+    {
+        split_words_across_runs(&mut original_units, &mut edited_units);
+    }
     let original_signatures = original_units
         .iter()
         .map(attributed_unit_signature)
@@ -5243,6 +5379,73 @@ fn compare_granular_controls(
         )?);
     }
     replace_direct_word_elements(output, "sdt", &control_replacements)
+}
+
+/// Split into characters, on both sides, every word that a run boundary
+/// splits on either side, and every whole word with the same text.
+///
+/// Word units never cross a run, so a word split over two runs on one side
+/// and whole on the other would not align, and would be deleted and inserted
+/// again. Character units of such a word align whatever the run boundaries.
+fn split_words_across_runs(
+    original: &mut Vec<AttributedRunUnit>,
+    edited: &mut Vec<AttributedRunUnit>,
+) {
+    let is_word = |unit: &AttributedRunUnit| {
+        unit_plain_text(unit)
+            .and_then(|text| text.chars().next())
+            .is_some_and(|character| character.is_alphanumeric() || character == '_')
+    };
+    // The units of each word that spans more than one unit, and its text.
+    let split_words = |units: &[AttributedRunUnit]| {
+        let mut split = HashSet::new();
+        let mut words = HashSet::new();
+        let mut start = 0;
+        while start < units.len() {
+            let mut end = start;
+            while end < units.len() && is_word(&units[end]) {
+                end += 1;
+            }
+            if end - start > 1 {
+                split.extend(start..end);
+                words.insert(
+                    units[start..end]
+                        .iter()
+                        .filter_map(unit_plain_text)
+                        .collect::<String>(),
+                );
+            }
+            start = end.max(start + 1);
+        }
+        (split, words)
+    };
+    let (original_split, mut words) = split_words(original);
+    let (edited_split, edited_words) = split_words(edited);
+    if words.is_empty() && edited_words.is_empty() {
+        return;
+    }
+    words.extend(edited_words);
+    for (units, split) in [(original, original_split), (edited, edited_split)] {
+        let mut output = Vec::with_capacity(units.len());
+        for (index, unit) in units.drain(..).enumerate() {
+            let characters = unit_plain_text(&unit)
+                .filter(|text| split.contains(&index) || (is_word(&unit) && words.contains(*text)))
+                .map(|text| text.chars().map(String::from).collect::<Vec<_>>());
+            let Some(characters) = characters else {
+                output.push(unit);
+                continue;
+            };
+            for character in characters {
+                let mut piece = unit.clone();
+                piece.run.content = vec![RunContent::Text(CT_Text {
+                    text: character,
+                    preserve_space: false,
+                })];
+                output.push(piece);
+            }
+        }
+        *units = output;
+    }
 }
 
 fn attributed_run_units(runs: &[CT_R], options: &ComparisonOptions) -> Vec<AttributedRunUnit> {
@@ -8120,6 +8323,9 @@ fn body_signature(content: &BodyContent) -> String {
 }
 
 fn paragraph_signature(paragraph: &CT_P) -> String {
+    if let Some(merged) = merged_plain_paragraph(paragraph) {
+        return paragraph_signature(&merged);
+    }
     let numbering = paragraph_numbering(paragraph);
     let extra_xml = paragraph
         .extra_xml
@@ -8568,6 +8774,9 @@ enum ParagraphToken {
 /// Ignored units are kept only where they touch a boundary token, so a
 /// marker on either side of ignored content still differs.
 fn paragraph_tokens(paragraph: &CT_P, options: &ComparisonOptions) -> Vec<String> {
+    if let Some(merged) = merged_plain_paragraph(paragraph) {
+        return paragraph_tokens(&merged, options);
+    }
     let attributed = uses_attributed_run_path(options);
     let units = if attributed {
         attributed_run_units(&paragraph.runs, options)

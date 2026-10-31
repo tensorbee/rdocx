@@ -408491,6 +408491,97 @@ fn issue434_new_comments_part_holds_word_comment_markup() {
     assert_eq!(texts, ["Why thirty?\nSecond line", "Agreed"]);
 }
 
+fn issue434_redline(
+    original: &[u8],
+    edited: &Document,
+    granularity: rdocx::ComparisonGranularity,
+) -> (usize, Vec<String>, Vec<String>) {
+    let mut redline = Document::from_bytes(original).unwrap();
+    redline
+        .compare_with_options(
+            edited,
+            "Reviewer",
+            "2026-10-30T12:00:00Z",
+            &rdocx::ComparisonOptions {
+                granularity,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let xml = redline.part_xml("word/document.xml").unwrap();
+    let texts = |open: &str, close: &str| {
+        xml.split(open)
+            .skip(1)
+            .map(|rest| {
+                let inner = &rest[rest.find('>').unwrap() + 1..rest.find(close).unwrap()];
+                let mut text = String::new();
+                let mut in_tag = false;
+                for character in inner.chars() {
+                    match character {
+                        '<' => in_tag = true,
+                        '>' => in_tag = false,
+                        _ if !in_tag => text.push(character),
+                        _ => {}
+                    }
+                }
+                text
+            })
+            .collect::<Vec<_>>()
+    };
+    (
+        redline.story_revisions().unwrap().len(),
+        texts("<w:del ", "</w:del>"),
+        texts("<w:ins ", "</w:ins>"),
+    )
+}
+
+#[test]
+fn issue434_compare_reads_text_split_over_runs_of_one_formatting_as_one() {
+    let mut original = Document::new();
+    original.add_paragraph("Each invoice is paid within thirty days.");
+    let edited = |tail: &str| {
+        let mut document = Document::new();
+        document.add_paragraph("Each invoi").add_run(tail);
+        document
+    };
+    let mut same = edited("ce is paid within thirty days.");
+    let (original_bytes, same_bytes) = (original.to_bytes().unwrap(), same.to_bytes().unwrap());
+    for granularity in [
+        rdocx::ComparisonGranularity::Run,
+        rdocx::ComparisonGranularity::Word,
+        rdocx::ComparisonGranularity::Character,
+    ] {
+        assert_eq!(
+            issue434_redline(&original_bytes, &same, granularity).0,
+            0,
+            "{granularity:?}"
+        );
+        // The other direction, a split original, compares equal too.
+        assert_eq!(
+            issue434_redline(&same_bytes, &original, granularity).0,
+            0,
+            "{granularity:?}"
+        );
+    }
+    let changed = edited("ce is paid within sixty days.");
+    let (count, deleted, inserted) = issue434_redline(
+        &original_bytes,
+        &changed,
+        rdocx::ComparisonGranularity::Word,
+    );
+    assert_eq!(
+        (count, deleted, inserted),
+        (2, vec!["thirty".to_owned()], vec!["sixty".to_owned()])
+    );
+    // A run of other formatting is still a change.
+    let mut bold = Document::new();
+    let mut paragraph = bold.add_paragraph("Each invoi");
+    paragraph
+        .add_run("ce is paid within thirty days.")
+        .bold(true);
+    assert!(issue434_redline(&original_bytes, &bold, rdocx::ComparisonGranularity::Word).0 > 0);
+}
+
 #[test]
 fn issue434_story_revisions_carry_their_text() {
     let mut original = Document::new();

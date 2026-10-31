@@ -15284,6 +15284,32 @@ def test_issue434_new_comments_part_uses_word_comment_markup():
     assert [comment.text for comment in document.comments] == ['Why thirty?', 'Agreed']
 
 
+@pytest.mark.parametrize('granularity', ['run', 'word', 'character'])
+def test_issue434_compare_ignores_where_runs_of_one_formatting_split(granularity):
+    import rdocx
+    original = rdocx.Document()
+    original.add_paragraph('Each invoice is paid within thirty days.')
+    data = original.to_bytes()
+
+    def edited(tail):
+        document = rdocx.Document()
+        document.add_paragraph('Each invoi').add_run(tail)
+        return document
+
+    redline = rdocx.Document.from_bytes(data)
+    redline.compare(edited('ce is paid within thirty days.'), 'R', '2026-10-30T12:00:00Z',
+                    granularity=granularity)
+    assert redline.revisions == ()
+    redline = rdocx.Document.from_bytes(data)
+    redline.compare(edited('ce is paid within sixty days.'), 'R', '2026-10-30T12:00:00Z',
+                    granularity=granularity)
+    texts = [(revision.kind, revision.text) for revision in redline.revisions]
+    if granularity == 'word':
+        assert texts == [('deletion', 'thirty'), ('insertion', 'sixty')]
+    else:
+        assert texts
+
+
 def test_issue434_revisions_carry_their_text():
     import rdocx
     original = rdocx.Document()
