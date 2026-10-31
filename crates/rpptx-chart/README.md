@@ -15,11 +15,11 @@ exact re-export of the shared ChartML model and renderer.
 
 ## Measured footprint and speed
 
-The archive row is a historical 0.14.5 observation. Current 0.15.0 archive measurements remain pending.
+The archive row uses `cargo package --locked --allow-dirty --no-verify` with all 22 local package patches. Compilation and publication verification are separate gates.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: rpptx-chart | 6,841 compressed bytes, 21,809 member bytes, 6 members | 0.14.5 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rpptx-chart` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-29 |
+| Crates.io archive: rpptx-chart | 6,893 compressed bytes, 21,968 member bytes, 6 members | 0.15.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --allow-dirty --no-verify` | Tracked `rpptx-chart` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-31 |
 
 ## Use it when
 

@@ -16,11 +16,11 @@ and geometry.
 
 The archive row is regenerated from the package that carries this README.
 
-The archive row is a historical 0.14.5 observation. Current 0.15.0 archive measurements remain pending.
+The archive row uses `cargo package --locked --allow-dirty --no-verify` with all 22 local package patches. Compilation and publication verification are separate gates.
 
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
-| Crates.io archive: oxml-chart | 120,150 compressed bytes, 748,108 member bytes, 6 members | 0.14.5 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `oxml-chart` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-29 |
+| Crates.io archive: oxml-chart | 120,200 compressed bytes, 748,267 member bytes, 6 members | 0.15.0 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo package --locked --allow-dirty --no-verify` | Tracked `oxml-chart` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-31 |
 
 ## Use it when
 
