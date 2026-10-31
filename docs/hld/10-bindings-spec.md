@@ -2908,7 +2908,14 @@ existing output. Inside supported inline controls, retained raw children keep
 their physical text ownership on both sides through accept, reject and reopen.
 No comparison option or existing public signature changes. The additive doc-hidden
 lower native `properties::protected_source_residual(xml, inherited_bindings)`
-bridge supplies opaque source identity to the facade. The native-only
+bridge supplies opaque source identity to the facade. Ordinary comparison proof
+inputs omit the established qualified paragraph, run and row producer identities,
+including physical field runs. This does not remove attributes from output XML or
+weaken held-revision preservation. Unknown attributes, foreign lookalikes and scopes
+on surviving residual facts remain significant. Imported unsupported field programs
+retain their exact source while existing result setters and renderers keep stored
+display. Current nested edits and new-field constructors remain strictly checked,
+with existing XML, ownership and resource guards. The native-only
 `CT_P::field_source_run_fragments_at(&self, run_idx: usize)` bridge returns
 `Result<Option<(usize, Vec<Option<Vec<u8>>>)>>` for one intact eligible shared
 field span. Positive coverage equals the ordered vector length. Outside entries

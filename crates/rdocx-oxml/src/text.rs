@@ -1801,13 +1801,41 @@ impl Field {
     pub fn validate_for_attachment(&self) -> Result<()> {
         crate::document::admit_word_model(crate::document::WordOwner::Field(self))?;
         self.normalization_work_budget()?;
+        // Imported programs can be opaque while their retained source is valid XML.
+        // Select the emitted program before checking operands. Retired values
+        // remain covered by the model and resource admission above.
+        // Raw selection can trim whitespace during parsing. Validate the active
+        // untrimmed raw value, while a structured edit retires that spelling.
+        if instruction_structure_eq(&self.instruction, self.original_instruction()) {
+            oxml_core::xml::reject_non_xml_characters("field instruction", &self.instruction.raw)?;
+        }
         let instruction = self.effective_instruction();
-        validate_raw_field_instruction(&instruction.raw)?;
-        FieldInstruction::new(
-            &instruction.name,
-            instruction.arguments,
-            instruction.switches,
-        )?;
+        oxml_core::xml::reject_non_xml_characters("field instruction", &instruction.raw)?;
+        for argument in instruction.arguments.iter().chain(
+            instruction
+                .switches
+                .iter()
+                .filter_map(|switch| switch.argument.as_ref()),
+        ) {
+            match argument {
+                FieldArgument::Text(value) => {
+                    oxml_core::xml::reject_non_xml_characters("field argument", value)?
+                }
+                FieldArgument::Nested(child) => child.validate_for_attachment()?,
+            }
+        }
+        let preserved = matches!(self.source.as_ref(), FieldSource::Parsed { original_instruction, .. }
+            if self.instruction.raw == original_instruction.raw
+                && instruction_structure_eq(&self.instruction, original_instruction)
+                && instruction_source_identity_eq(&self.instruction, original_instruction));
+        if !preserved {
+            validate_raw_field_instruction(&instruction.raw)?;
+            validate_authored_instruction_parts(
+                &instruction.name,
+                &instruction.arguments,
+                &instruction.switches,
+            )?;
+        }
         if let Some(runs) = self.typed_cache() {
             validate_cached_field_runs(runs)?;
         }
@@ -2939,36 +2967,20 @@ impl FieldInstruction {
         arguments: Vec<FieldArgument>,
         switches: Vec<FieldSwitch>,
     ) -> Result<Self> {
-        if !valid_field_token(name) || name.starts_with('\\') {
-            return Err(OxmlError::InvalidValue("invalid field name".into()));
-        }
         for argument in arguments.iter().chain(
             switches
                 .iter()
                 .filter_map(|switch| switch.argument.as_ref()),
         ) {
-            match argument {
-                FieldArgument::Text(value) => {
-                    oxml_core::xml::reject_non_xml_characters("field argument", value)?
-                }
-                FieldArgument::Nested(field) => field.validate_for_attachment()?,
+            if let FieldArgument::Nested(field) = argument {
+                field.validate_for_attachment()?;
             }
         }
+        validate_authored_instruction_parts(name, &arguments, &switches)?;
         let name = name.to_uppercase();
         let mut switches = switches;
         for switch in &mut switches {
-            if !(valid_field_token(&switch.name) || switch.name == "!")
-                || switch.name.contains('\\')
-            {
-                return Err(OxmlError::InvalidValue("invalid field switch name".into()));
-            }
             switch.name = switch.name.to_ascii_lowercase();
-            if switch.argument.is_some() && switch_is_known_flag(&name, &switch.name) {
-                return Err(OxmlError::InvalidValue(format!(
-                    "field switch {} does not take an argument",
-                    switch.name
-                )));
-            }
         }
         let mut instruction = Self {
             raw: String::new(),
@@ -2979,6 +2991,72 @@ impl FieldInstruction {
         instruction.raw = canonical_instruction_text(&instruction);
         Ok(instruction)
     }
+}
+
+// Strict authoring applies to the whole operand program, including a parsed child
+// inserted into a new parent. Borrow descendants rather than cloning each tree.
+fn validate_authored_instruction_parts(
+    name: &str,
+    arguments: &[FieldArgument],
+    switches: &[FieldSwitch],
+) -> Result<()> {
+    let mut pending = vec![(name, arguments, switches)];
+    while let Some((name, arguments, switches)) = pending.pop() {
+        if !valid_field_token(name) || name.starts_with('\\') {
+            return Err(OxmlError::InvalidValue("invalid field name".into()));
+        }
+        let canonical_name = name.to_uppercase();
+        for switch in switches {
+            if !(valid_field_token(&switch.name) || switch.name == "!")
+                || switch.name.contains('\\')
+            {
+                return Err(OxmlError::InvalidValue("invalid field switch name".into()));
+            }
+            if switch.argument.is_some()
+                && switch_is_known_flag(&canonical_name, &switch.name.to_ascii_lowercase())
+            {
+                return Err(OxmlError::InvalidValue(format!(
+                    "field switch {} does not take an argument",
+                    switch.name
+                )));
+            }
+        }
+        for argument in arguments.iter().chain(
+            switches
+                .iter()
+                .filter_map(|switch| switch.argument.as_ref()),
+        ) {
+            match argument {
+                FieldArgument::Text(value) => {
+                    oxml_core::xml::reject_non_xml_characters("field argument", value)?
+                }
+                FieldArgument::Nested(field) => {
+                    validate_raw_field_instruction(&field.effective_instruction_text())?;
+                    if field.instruction.raw != field.original_instruction().raw
+                        && instruction_structure_eq(
+                            &field.instruction,
+                            field.original_instruction(),
+                        )
+                    {
+                        // A raw-only assignment retires the old structured program.
+                        let current = parse_field_instruction(&field.instruction.raw);
+                        validate_authored_instruction_parts(
+                            &current.name,
+                            &current.arguments,
+                            &current.switches,
+                        )?;
+                    } else {
+                        pending.push((
+                            &field.instruction.name,
+                            &field.instruction.arguments,
+                            &field.instruction.switches,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn valid_field_token(value: &str) -> bool {
@@ -22924,6 +23002,153 @@ mod tests {
 
     #[test]
     fn effective_instruction_text_matches_raw_structured_and_nested_edits() {
+        // An unchanged imported program is not newly authored grammar.
+        let imported = parse_paragraph(
+            r#"<w:fldSimple w:instr="PAGE \* &quot;roman"><w:r><w:t>STORED</w:t></w:r></w:fldSimple>"#,
+        );
+        let opaque = parsed_field(&imported, 0);
+        assert!(Field::from_raw(r#"PAGE \* "roman"#, FieldForm::Simple, vec![]).is_err());
+        assert!(
+            Field::new(r#"PAGE \* "roman"#, "stored")
+                .validate_for_attachment()
+                .is_err()
+        );
+        assert!(
+            FieldInstruction::new(
+                "IF",
+                vec![FieldArgument::Nested(Box::new(opaque.clone()))],
+                vec![]
+            )
+            .is_err()
+        );
+        let mut edited = opaque.clone();
+        edited.instruction.raw.push('\u{1}');
+        assert!(edited.validate_for_attachment().is_err());
+        let mut edited = opaque.clone();
+        edited
+            .instruction
+            .arguments
+            .push(FieldArgument::Text("changed".into()));
+        // Structured edits remain checked authoring, never imported-preserve.
+        edited.instruction.name = "bad+name".into();
+        assert!(edited.validate_for_attachment().is_err());
+        let nested_import = parse_paragraph(concat!(
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> IF </w:instrText></w:r>"#,
+            r#"<w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> MERGEFIELD Name </w:instrText></w:r>"#,
+            r#"<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>Name</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+            r#"<w:r><w:instrText> \* "opaque </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>stored</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r>"#,
+        ));
+        let original_nested = parsed_field(&nested_import, 0);
+        let mut changed_child = original_nested.clone();
+        let child = changed_child
+            .instruction
+            .arguments
+            .iter_mut()
+            .find_map(|argument| match argument {
+                FieldArgument::Nested(child) => Some(child),
+                _ => None,
+            })
+            .expect("actual nested instruction operand");
+        child.instruction.raw = r#"PAGE \* "bad"#.into();
+        assert!(changed_child.validate_for_attachment().is_err());
+        let mut substituted = original_nested.clone();
+        let child = substituted
+            .instruction
+            .arguments
+            .iter_mut()
+            .find_map(|argument| match argument {
+                FieldArgument::Nested(child) => Some(child),
+                _ => None,
+            })
+            .unwrap();
+        let replacement = parse_paragraph(
+            r#"<w:fldSimple w:instr="MERGEFIELD Name"><w:r><w:t>Name</w:t></w:r></w:fldSimple>"#,
+        );
+        **child = parsed_field(&replacement, 0).clone();
+        assert!(substituted.validate_for_attachment().is_err());
+        let formula =
+            parse_paragraph(r#"<w:fldSimple w:instr="=2+3"><w:r><w:t>5</w:t></w:r></w:fldSimple>"#);
+        let formula = parsed_field(&formula, 0);
+        assert!(
+            Field::from_instruction(
+                FieldInstruction {
+                    raw: "IF".into(),
+                    name: "IF".into(),
+                    arguments: vec![FieldArgument::Nested(Box::new(formula.clone()))],
+                    switches: vec![],
+                },
+                FieldForm::Complex,
+                vec![]
+            )
+            .is_err()
+        );
+        let mut valid_raw_edit = formula.clone();
+        valid_raw_edit.instruction.raw = "AUTHOR".into();
+        assert!(
+            FieldInstruction::new(
+                "IF",
+                vec![FieldArgument::Nested(Box::new(valid_raw_edit))],
+                vec![]
+            )
+            .is_ok()
+        );
+        let mut active_raw = opaque.clone();
+        active_raw.instruction.raw = "AUTHOR\u{b}".into();
+        assert!(
+            active_raw.validate_for_attachment().is_err(),
+            "active raw XML-invalid whitespace cannot be hidden by trim"
+        );
+        assert!(
+            FieldInstruction::new(
+                "IF",
+                vec![FieldArgument::Nested(Box::new(active_raw))],
+                vec![]
+            )
+            .is_err()
+        );
+        // Validation follows the writer's selected program, not retired operands.
+        let mut retired_child = original_nested.clone();
+        retired_child.instruction.raw = "AUTHOR".into();
+        let child = retired_child
+            .instruction
+            .arguments
+            .iter_mut()
+            .find_map(|argument| match argument {
+                FieldArgument::Nested(child) => Some(child),
+                _ => None,
+            })
+            .unwrap();
+        child.instruction.raw = r#"PAGE \* "bad"#.into();
+        assert_eq!(retired_child.effective_instruction().name, "AUTHOR");
+        let retired_child_result = retired_child.validate_for_attachment();
+        let mut retired_text = Field::new("IF \u{1}", "stored");
+        retired_text.instruction.raw = "AUTHOR".into();
+        let retired_text_result = retired_text.validate_for_attachment();
+        let mut retired_raw = opaque.clone();
+        retired_raw.instruction.raw.push('\u{1}');
+        retired_raw.instruction.name = "AUTHOR".into();
+        retired_raw.instruction.arguments.clear();
+        retired_raw.instruction.switches.clear();
+        assert_eq!(retired_raw.effective_instruction().raw, "AUTHOR");
+        let retired_raw_result = retired_raw.validate_for_attachment();
+        let selected_results = [
+            ("raw retires child", retired_child_result),
+            ("raw retires text", retired_text_result),
+            ("structured retires raw", retired_raw_result),
+        ];
+        assert!(
+            selected_results.iter().all(|(_, result)| result.is_ok()),
+            "{selected_results:?}"
+        );
+        let before = serialized_paragraph(&imported);
+        opaque
+            .validate_for_attachment()
+            .expect("unchanged imported opaque program");
+        original_nested
+            .validate_for_attachment()
+            .expect("unchanged imported nested program");
+        assert_eq!(serialized_paragraph(&imported), before);
+
         let paragraph = parse_paragraph(
             r#"<w:fldSimple w:instr="  MERGEFIELD Name \* MERGEFORMAT  "><w:r><w:t>stored</w:t></w:r></w:fldSimple>"#,
         );

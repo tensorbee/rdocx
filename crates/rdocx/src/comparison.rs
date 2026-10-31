@@ -4515,51 +4515,72 @@ struct SourceMetadata {
     field_records: HashMap<usize, (usize, usize, Option<usize>)>,
 }
 
-fn source_root_metadata(xml: &str, inherited: &NamespaceBindings) -> Result<Vec<String>> {
-    let (opening, closing) = paragraph_shell(Some(xml))?;
-    let shell = format!("{opening}{closing}");
-    let closed = actual_field_source_fragment(&shell, inherited)?;
+// Ordinary proof inputs omit only the existing qualified producer identities.
+// The original source and the strict held-owner residual bridge stay untouched.
+fn ordinary_identity_filtered_source(xml: &str, inherited: &NamespaceBindings) -> Result<String> {
+    let closed = actual_field_source_fragment(xml, inherited)?;
     let mut reader = NsReader::from_str(&closed);
     let (namespace, event) = reader
         .read_resolved_event()
         .map_err(|error| Error::Other(error.to_string()))?;
-    if matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == W_NS.as_bytes())
-        && let Event::Start(root) = event
-        && root.local_name().as_ref() == b"tr"
-    {
-        // These qualified producer identities are already excluded by the row
-        // comparison policy. Other root attributes remain protected facts.
-        let mut filtered = root.clone().into_owned();
-        filtered.clear_attributes();
-        for attribute in root.attributes() {
-            let attribute = attribute.map_err(|error| Error::Other(error.to_string()))?;
-            let (namespace, local) = reader.resolver().resolve_attribute(attribute.key);
-            let identity = match namespace {
-                ResolveResult::Bound(Namespace(uri)) if uri == W_NS.as_bytes() => matches!(
-                    local.as_ref(),
-                    b"rsidR" | b"rsidTr" | b"rsidRPr" | b"rsidDel"
-                ),
-                ResolveResult::Bound(Namespace(uri))
-                    if uri == b"http://schemas.microsoft.com/office/word/2010/wordml" =>
-                {
-                    matches!(local.as_ref(), b"paraId" | b"textId")
-                }
-                _ => false,
-            };
-            if !identity {
-                filtered.push_attribute(attribute);
-            }
-        }
-        let mut writer = Writer::new(Vec::new());
-        writer.write_event(Event::Start(filtered))?;
-        writer.write_event(Event::End(root.to_end()))?;
-        return Ok(rdocx_oxml::properties::protected_source_residual(
-            &writer.into_inner(),
-            inherited,
-        )?);
+    let empty = matches!(event, Event::Empty(_));
+    let (Event::Start(root) | Event::Empty(root)) = event else {
+        return Ok(closed);
+    };
+    if !matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == W_NS.as_bytes()) {
+        return Ok(closed);
     }
+    let owner = root.local_name();
+    let mut filtered = root.clone().into_owned();
+    filtered.clear_attributes();
+    for attribute in root.attributes() {
+        let attribute = attribute.map_err(|error| Error::Other(error.to_string()))?;
+        let (namespace, local) = reader.resolver().resolve_attribute(attribute.key);
+        let identity = match namespace {
+            ResolveResult::Bound(Namespace(uri)) if uri == W_NS.as_bytes() => {
+                match owner.as_ref() {
+                    b"p" => matches!(
+                        local.as_ref(),
+                        b"rsidRPr" | b"rsidR" | b"rsidDel" | b"rsidP" | b"rsidRDefault"
+                    ),
+                    b"r" => matches!(local.as_ref(), b"rsidRPr" | b"rsidDel" | b"rsidR"),
+                    b"tr" => matches!(
+                        local.as_ref(),
+                        b"rsidR" | b"rsidTr" | b"rsidRPr" | b"rsidDel"
+                    ),
+                    _ => false,
+                }
+            }
+            ResolveResult::Bound(Namespace(uri))
+                if uri == b"http://schemas.microsoft.com/office/word/2010/wordml" =>
+            {
+                matches!(owner.as_ref(), b"p" | b"tr")
+                    && matches!(local.as_ref(), b"paraId" | b"textId")
+            }
+            _ => false,
+        };
+        if !identity {
+            filtered.push_attribute(attribute);
+        }
+    }
+    let tail = reader.buffer_position() as usize;
+    let mut writer = Writer::new(Vec::new());
+    writer.write_event(if empty {
+        Event::Empty(filtered)
+    } else {
+        Event::Start(filtered)
+    })?;
+    writer
+        .get_mut()
+        .extend_from_slice(&closed.as_bytes()[tail..]);
+    String::from_utf8(writer.into_inner()).map_err(utf8_error)
+}
+
+fn source_root_metadata(xml: &str, inherited: &NamespaceBindings) -> Result<Vec<String>> {
+    let (opening, closing) = paragraph_shell(Some(xml))?;
+    let filtered = ordinary_identity_filtered_source(&format!("{opening}{closing}"), inherited)?;
     Ok(rdocx_oxml::properties::protected_source_residual(
-        shell.as_bytes(),
+        filtered.as_bytes(),
         inherited,
     )?)
 }
@@ -4605,10 +4626,25 @@ fn source_without_text_properties(xml: &str, inherited: &NamespaceBindings) -> R
     let mut owners = Vec::<(Vec<u8>, bool)>::new();
     let mut omitted = None;
     let mut spans = Vec::new();
+    let mut identity_edits = Vec::new();
     let property = |word: bool, local: &[u8], owners: &[(Vec<u8>, bool)]| {
         word && owners.last().is_some_and(|(parent, admitted)| {
             *admitted && matches!((parent.as_slice(), local), (b"r", b"rPr") | (b"p", b"pPr"))
         })
+    };
+    let admitted_owner = |word: bool, local: &[u8], owners: &[(Vec<u8>, bool)]| {
+        word && match owners.last() {
+            None => local == b"p",
+            Some((parent, true)) => match parent.as_slice() {
+                b"p" | b"fldSimple" => matches!(local, b"r" | b"fldSimple" | b"hyperlink" | b"sdt"),
+                b"hyperlink" | b"sdtContent" => {
+                    matches!(local, b"r" | b"fldSimple" | b"sdt")
+                }
+                b"sdt" => local == b"sdtContent",
+                _ => false,
+            },
+            Some((_, false)) => false,
+        }
     };
     loop {
         let before = reader.buffer_position() as usize;
@@ -4625,28 +4661,39 @@ fn source_without_text_properties(xml: &str, inherited: &NamespaceBindings) -> R
                 }
                 // Only the current field-result routes expose modeled properties.
                 // An opaque ancestor, prior revision or drawing stays opaque.
-                let admitted = word
-                    && match owners.last() {
-                        None => local.as_slice() == b"p",
-                        Some((parent, true)) => match parent.as_slice() {
-                            b"p" | b"fldSimple" => matches!(
-                                local.as_slice(),
-                                b"r" | b"fldSimple" | b"hyperlink" | b"sdt"
-                            ),
-                            b"hyperlink" | b"sdtContent" => {
-                                matches!(local.as_slice(), b"r" | b"fldSimple" | b"sdt")
-                            }
-                            b"sdt" => local.as_slice() == b"sdtContent",
-                            _ => false,
-                        },
-                        Some((_, false)) => false,
-                    };
+                let admitted = admitted_owner(word, &local, &owners);
+                if admitted && omitted.is_none() && matches!(local.as_slice(), b"p" | b"r") {
+                    let after = reader.buffer_position() as usize;
+                    let shell = format!(
+                        "{}</{}>",
+                        &closed[before..after],
+                        std::str::from_utf8(element.name().as_ref()).map_err(utf8_error)?
+                    );
+                    let filtered = ordinary_identity_filtered_source(
+                        &shell,
+                        &resolved_source_bindings(&reader)?,
+                    )?;
+                    let opening_end = element_opening(&filtered)?.0;
+                    identity_edits.push((before..after, filtered[..opening_end].to_owned()));
+                }
                 owners.push((local, admitted));
             }
             Event::Empty(element)
                 if omitted.is_none() && property(word, element.local_name().as_ref(), &owners) =>
             {
                 spans.push(before..reader.buffer_position() as usize);
+            }
+            Event::Empty(element)
+                if omitted.is_none()
+                    && admitted_owner(word, element.local_name().as_ref(), &owners)
+                    && element.local_name().as_ref() == b"r" =>
+            {
+                let after = reader.buffer_position() as usize;
+                let filtered = ordinary_identity_filtered_source(
+                    &closed[before..after],
+                    &resolved_source_bindings(&reader)?,
+                )?;
+                identity_edits.push((before..after, filtered));
             }
             Event::End(_) => {
                 owners.pop();
@@ -4662,8 +4709,11 @@ fn source_without_text_properties(xml: &str, inherited: &NamespaceBindings) -> R
         }
     }
     let mut output = closed;
-    for span in spans.into_iter().rev() {
-        output.replace_range(span, "");
+    let mut edits = identity_edits;
+    edits.extend(spans.into_iter().map(|span| (span, String::new())));
+    edits.sort_by_key(|(span, _)| span.start);
+    for (span, replacement) in edits.into_iter().rev() {
+        output.replace_range(span, &replacement);
     }
     Ok(output)
 }
@@ -20432,6 +20482,65 @@ mod tests {
 
     #[test]
     fn a_packed_field_result_is_read_as_one_run_per_part() {
+        for (owner, identities) in [
+            (
+                "p",
+                r#"q:rsidR="00112233" q:rsidRPr="11223344" q:rsidDel="22334455" q:rsidP="33445566" q:rsidRDefault="44556677" i:paraId="55667788" i:textId="66778899""#,
+            ),
+            (
+                "r",
+                r#"q:rsidR="00112233" q:rsidRPr="11223344" q:rsidDel="22334455""#,
+            ),
+            (
+                "tr",
+                r#"q:rsidR="00112233" q:rsidTr="11223344" i:paraId="55667788""#,
+            ),
+        ] {
+            let plain = format!(
+                r#"<q:{owner} xmlns:q="{W_NS}" xmlns:i="http://schemas.microsoft.com/office/word/2010/wordml"></q:{owner}>"#
+            );
+            let identified =
+                plain.replacen(">", &format!(r#" {identities} xmlns="urn:incidental">"#), 1);
+            assert_eq!(
+                super::source_root_metadata(&plain, &vec![]).unwrap(),
+                super::source_root_metadata(&identified, &vec![]).unwrap(),
+                "{owner} ignores only qualified producer identities"
+            );
+            let foreign = identified
+                .replace("00112233", "changed")
+                .replace(&format!("xmlns:q=\"{W_NS}\""), "xmlns:q=\"urn:foreign\"");
+            assert_ne!(
+                super::source_root_metadata(&identified, &vec![]).unwrap(),
+                super::source_root_metadata(&foreign, &vec![]).unwrap()
+            );
+            let unknown = plain.replacen(">", " q:future=\"kept\">", 1);
+            assert_ne!(
+                super::source_root_metadata(&plain, &vec![]).unwrap(),
+                super::source_root_metadata(&unknown, &vec![]).unwrap()
+            );
+        }
+        let field_view = format!(
+            r#"<w:p xmlns:w="{W_NS}"><w:r/><w:fldSimple w:instr="PAGE"><w:r><w:t>1</w:t></w:r></w:fldSimple></w:p>"#
+        );
+        let identified_view = field_view.replace("<w:r", r#"<w:r w:rsidR="00112233""#);
+        for complex in [false, true] {
+            let facts = |view: &str| {
+                super::field_source_metadata(
+                    &super::source_without_text_properties(view, &vec![]).unwrap(),
+                    complex,
+                )
+                .unwrap()
+            };
+            assert_eq!(facts(&field_view), facts(&identified_view));
+            let opaque = field_view.replace(
+                "</w:p>",
+                r#"<x:opaque xmlns:x="urn:opaque"><w:r w:rsidR="00112233"/></x:opaque></w:p>"#,
+            );
+            assert_ne!(
+                facts(&opaque),
+                facts(&opaque.replace("00112233", "different"))
+            );
+        }
         for w in ["w", "q"] {
             let shell = format!(r#"<{w}:r {w}:rsidR="00AB12CD"><{w}:rPr><{w}:b/></{w}:rPr>"#);
             let close = format!("</{w}:r>");

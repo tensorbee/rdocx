@@ -939,6 +939,14 @@ Complex fields expose ordered cached-display segments with each segment's
 direct run properties. Native callers construct either representation through
 checked raw instructions or typed arguments and switches, using `CT_R` values
 for ordered cached content. Typed operands cannot inject instruction tokens.
+Existing parsed fields can retain an unsupported instruction when its raw spelling,
+structure and nested source identities remain unchanged. Each current nested
+instruction is independently checked, including raw-only edits. Validation follows
+the writer's selected raw or structured program. Retired operands remain part of
+model and resource admission but do not supply the emitted program. Reading, rendering
+and changing a retained result do not re-author that imported program. XML character,
+model, namespace, resource, cache and legacy-owner checks still apply. New or edited
+programs and checked constructors keep strict grammar across all nested operands.
 Unknown switch operands are quoted on write and recognized as quoted or nested
 operands on read. Known flag switches keep their positional-operand grammar.
 This enriches the pre-1.0 projection of ambiguous unknown producer switches
@@ -1449,7 +1457,11 @@ typed equality is supplemented by the lower layer's doc-hidden
 modeled values, while complete source events retain omitted attributes, payloads,
 order, multiplicity and namespace context. Unsupported values on otherwise known
 keys remain source residuals. Known-only default omission does not shift residual
-owner slots. Opaque roots admit namespace declaration movement only after
+owner slots. Ordinary non-held proof projections exclude only qualified producer
+identities for actual Word paragraph, run and row roots, including field-carried
+physical runs. This removes an identity-only residual fact and its incidental scope,
+without pruning namespaces from surviving opaque facts. Original emitted XML and
+strict held-owner residuals remain unchanged. Opaque roots admit namespace declaration movement only after
 positive expanded root/attribute and effective-scope identity. Their encoded
 non-declaration attributes, root shape and all remaining opaque bytes stay
 significant, including descendant-local declarations and event order. Revision
