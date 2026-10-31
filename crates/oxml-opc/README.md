@@ -16,6 +16,8 @@ files.
 
 The archive row is regenerated from the package that carries this README.
 
+The archive row is a historical 0.14.5 observation. Current 0.15.0 archive measurements remain pending.
+
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
 | Crates.io archive: oxml-opc | 117,616 compressed bytes, 477,731 member bytes, 12 members | 0.14.5 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `oxml-opc` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-29 |
@@ -45,4 +47,4 @@ assert_eq!(content_types.defaults["xml"], "application/xml");
 # Ok::<(), oxml_opc::OpcError>(())
 ```
 
-Add `oxml-opc = "0.14.5"` to your dependencies. Start with the [package API documentation](https://docs.rs/oxml-opc).
+Add `oxml-opc = "0.15.0"` to your dependencies. Start with the [package API documentation](https://docs.rs/oxml-opc).

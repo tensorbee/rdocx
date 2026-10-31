@@ -37,6 +37,8 @@ Signing publishes before reporting, so this error can leave a valid new output.
 
 ## Measured footprint and speed
 
+The archive row is a historical 0.14.5 observation. Current 0.15.0 archive measurements remain pending.
+
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
 | Crates.io archive: rpptx-cli | 67,536 compressed bytes, 310,592 member bytes, 8 members | 0.14.5 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rpptx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-29 |
@@ -52,7 +54,7 @@ It uses `oxml-cli-support` for shared command conventions and the real `rpptx` f
 ## Example
 
 ```sh
-cargo install rpptx-cli --version '^0.14.5'
+cargo install rpptx-cli --version '^0.15.0'
 rpptx inspect deck.pptx --json
 rpptx text deck.pptx --json
 rpptx outline deck.pptx --notes

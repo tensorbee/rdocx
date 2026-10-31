@@ -16,6 +16,8 @@ rendering pipelines.
 
 ## Measured footprint and speed
 
+The archive row is a historical 0.14.5 observation. Current 0.15.0 archive measurements remain pending.
+
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
 | Crates.io archive: rpptx-render | 86,984 compressed bytes, 477,031 member bytes, 8 members | 0.14.5 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rpptx-render` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-29 |
@@ -42,4 +44,4 @@ let missing = relationships.get(RelScope::Slide, "rId1");
 assert!(missing.is_err());
 ```
 
-Add `rpptx-render = "0.14.5"` to your dependencies. See the [rendering API](https://docs.rs/rpptx-render) for input and output types.
+Add `rpptx-render = "0.15.0"` to your dependencies. See the [rendering API](https://docs.rs/rpptx-render) for input and output types.

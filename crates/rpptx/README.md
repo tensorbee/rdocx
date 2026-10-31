@@ -26,6 +26,8 @@ presentation, notes, handout, PDF, and animation outputs.
 
 ## Measured footprint and speed
 
+The archive row is a historical 0.14.5 observation. Current 0.15.0 archive measurements remain pending.
+
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
 | Crates.io archive: rpptx | 762,699 compressed bytes, 4,061,273 member bytes, 16 members | 0.14.5 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rpptx` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-29 |
@@ -52,14 +54,14 @@ let bytes = deck.to_bytes()?;
 
 ```toml
 [dependencies]
-rpptx = "0.14.5"
+rpptx = "0.15.0"
 ```
 
 Enable native encryption and signing explicitly:
 
 ```toml
 [dependencies]
-rpptx = { version = "0.14.5", features = ["agile-encryption", "digital-signatures"] }
+rpptx = { version = "0.15.0", features = ["agile-encryption", "digital-signatures"] }
 ```
 
 ## Licensed font embedding

@@ -3724,11 +3724,11 @@ Python package signatures are unchanged. Debug `_inventory_work` and
 `_commit_work` exist only on debug builds and are not stable exports.
 
 Current source prepares the exact seven-package Word Rust family, `rdocx`
-Python distribution, `rdocx-wasm` and inherited support carriers at0.16.5.
+Python distribution, `rdocx-wasm` and inherited support carriers at0.17.0.
 The exact fifteen-package shared OOXML and PowerPoint family plus `rpptx-py`
-and its Python distribution are prepared at0.14.5. The separate unpublished
+and its Python distribution are prepared at0.15.0. The separate unpublished
 `rpptx-wasm` npm carrier remains0.12.1. Word's current dependency pins require
-shared0.14.5, so the shared family precedes Word publication. Preparation is
+shared0.15.0, so the shared family precedes Word publication. Preparation is
 local metadata and artifact verification, without registry publication or tag
 authority. The previous unified v0.16.4 and rpptx-v0.14.4 releases remain
 immutable at reviewed main24af95d3d94c25e95f61a75e7e21f18fa95b6363.

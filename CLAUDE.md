@@ -12,7 +12,7 @@ A Rust workspace for Office Open XML. Three families of crates:
 - **`oxml-*`**, format-neutral OOXML infrastructure. The OPC container, units,
   DrawingML, image handling, layout primitives, the PDF backend.
 - **`rdocx-*`**, WordprocessingML. A shipped port of `python-docx`, prepared at
-  0.16.5 across the exact seven-package stable family and Python distribution.
+  0.17.0 across the exact seven-package stable family and Python distribution.
   The previous complete family release was 0.16.4. The immutable v0.11.0
   attempt published only `rdocx-opc` and `rdocx-oxml`. Historical releases
   remain available.

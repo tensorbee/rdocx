@@ -37,6 +37,8 @@ already own one of those boundaries.
 Archive size is regenerated from tracked package contents. The performance
 rows are the enforced release-mode bounds plus one dated observation.
 
+The archive row is a historical 0.16.5 observation. Current 0.17.0 archive measurements remain pending.
+
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
 | Crates.io archive: rdocx | 4,139,012 compressed bytes, 54,306,876 member bytes, 37 members | 0.16.5 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rdocx` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-29 |
@@ -142,7 +144,7 @@ Most Rust applications need only the facade:
 
 ```toml
 [dependencies]
-rdocx = "0.16.5"
+rdocx = "0.17.0"
 ```
 
 Bundled metric-compatible fonts are always available through deterministic
@@ -151,14 +153,14 @@ features when an application must use only the bundled set:
 
 ```toml
 [dependencies]
-rdocx = { version = "0.16.5", default-features = false }
+rdocx = { version = "0.17.0", default-features = false }
 ```
 
 Native encryption and signing APIs are opt-in:
 
 ```toml
 [dependencies]
-rdocx = { version = "0.16.5", features = ["agile-encryption", "digital-signatures"] }
+rdocx = { version = "0.17.0", features = ["agile-encryption", "digital-signatures"] }
 ```
 
 The workspace requires Rust 1.93 or newer and uses edition 2024.
@@ -168,7 +170,7 @@ The workspace requires Rust 1.93 or newer and uses edition 2024.
 Install the CLI version from the same stable family:
 
 ```sh
-cargo install rdocx-cli --version '^0.16.5'
+cargo install rdocx-cli --version '^0.17.0'
 ```
 
 Common commands:

@@ -44,6 +44,8 @@ Signing publishes before reporting, so this error can leave a valid new output.
 
 ## Measured footprint and speed
 
+The archive row is a historical 0.16.5 observation. Current 0.17.0 archive measurements remain pending.
+
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
 | Crates.io archive: rdocx-cli | 116,673 compressed bytes, 542,184 member bytes, 8 members | 0.16.5 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rdocx-cli` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-29 |
@@ -62,7 +64,7 @@ conventions with `rpptx-cli` through `oxml-cli-support`.
 ## Example
 
 ```sh
-cargo install rdocx-cli --version '^0.16.5'
+cargo install rdocx-cli --version '^0.17.0'
 
 rdocx inspect report.docx
 rdocx text report.docx

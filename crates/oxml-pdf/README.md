@@ -17,6 +17,8 @@ images.
 Archive size is regenerated from tracked package contents. The performance
 rows are the enforced release-mode bounds plus one dated observation.
 
+The archive row is a historical 0.14.5 observation. Current 0.15.0 archive measurements remain pending.
+
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
 | Crates.io archive: oxml-pdf | 86,559 compressed bytes, 406,477 member bytes, 14 members | 0.14.5 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `oxml-pdf` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-29 |
@@ -46,4 +48,4 @@ let pdf = render_to_pdf(&layout);
 assert!(pdf.starts_with(b"%PDF-"));
 ```
 
-Add `oxml-pdf = "0.14.5"` and `oxml-layout = "0.14.5"` to your dependencies. See the [renderer API](https://docs.rs/oxml-pdf) for the accepted layout model.
+Add `oxml-pdf = "0.15.0"` and `oxml-layout = "0.15.0"` to your dependencies. See the [renderer API](https://docs.rs/oxml-pdf) for the accepted layout model.

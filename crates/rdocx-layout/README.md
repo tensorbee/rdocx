@@ -16,6 +16,8 @@ sections, and retains source provenance.
 
 ## Measured footprint and speed
 
+The archive row is a historical 0.16.5 observation. Current 0.17.0 archive measurements remain pending.
+
 | Measurement | Value | Version | Platform | Build mode | Input | Command | Statistic | Measured on |
 |---|---|---|---|---|---|---|---|---|
 | Crates.io archive: rdocx-layout | 407,983 compressed bytes, 2,235,061 member bytes, 15 members | 0.16.5 | macOS 26.6.2, Apple M5 Max, arm64 | `cargo publish --workspace --dry-run --allow-dirty --locked` | Tracked `rdocx-layout` package inventory | `python3 scripts/readme_doctests.py --record-measurements` | gzip archive bytes, tar member bytes, tar member count | 2026-10-29 |
@@ -60,5 +62,5 @@ fn page_count(input: &LayoutInput) -> Result<usize> {
 
 ```toml
 [dependencies]
-rdocx-layout = "0.16.5"
+rdocx-layout = "0.17.0"
 ```

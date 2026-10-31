@@ -179,26 +179,26 @@ README_CASES = (
 
 README_REQUIRED_TEXT = {
     REPO_ROOT / "README.md": (
-        'rdocx = "0.16.5"',
-        'rdocx = { version = "0.16.5", default-features = false }',
+        'rdocx = "0.17.0"',
+        'rdocx = { version = "0.17.0", default-features = false }',
         "rdocx convert report.docx --to pdf -o report.pdf",
         "rdocx convert report.docx --to html -o report.html",
         "rdocx convert report.docx --to md -o report.md",
         'rdocx replace report.docx --placeholder "Draft" --value "Final" -o final.docx',
     ),
     REPO_ROOT / "crates/rdocx-cli/README.md": (
-        "cargo install rdocx-cli --version '^0.16.5'",
+        "cargo install rdocx-cli --version '^0.17.0'",
         "rdocx convert report.docx --to pdf -o report.pdf",
     ),
-    REPO_ROOT / "crates/rdocx-html/README.md": ('rdocx-html = "0.16.5"',),
-    REPO_ROOT / "crates/rdocx-layout/README.md": ('rdocx-layout = "0.16.5"',),
+    REPO_ROOT / "crates/rdocx-html/README.md": ('rdocx-html = "0.17.0"',),
+    REPO_ROOT / "crates/rdocx-layout/README.md": ('rdocx-layout = "0.17.0"',),
     REPO_ROOT / "crates/rdocx-opc/README.md": (
-        'rdocx-opc = "0.16.5"',
+        'rdocx-opc = "0.17.0"',
         "use rdocx_opc::OpcPackage;",
     ),
-    REPO_ROOT / "crates/rdocx-oxml/README.md": ('rdocx-oxml = "0.16.5"',),
+    REPO_ROOT / "crates/rdocx-oxml/README.md": ('rdocx-oxml = "0.17.0"',),
     REPO_ROOT / "crates/rdocx-pdf/README.md": (
-        'rdocx-pdf = "0.16.5"',
+        'rdocx-pdf = "0.17.0"',
         "use rdocx_pdf::render_to_pdf;",
     ),
     REPO_ROOT / "crates/oxml-cli-support/README.md": (
@@ -233,7 +233,7 @@ README_REQUIRED_TEXT = {
     REPO_ROOT / "crates/oxml-chart/README.md": ("AxisId::new(10_000_001)?",),
     REPO_ROOT / "crates/rpptx-chart/README.md": ("AxisId::new(10_000_001)?",),
     REPO_ROOT / "crates/rpptx-cli/README.md": (
-        "cargo install rpptx-cli --version '^0.14.5'",
+        "cargo install rpptx-cli --version '^0.15.0'",
         "rpptx convert deck.pptx --to pdf -o deck.pdf",
     ),
     REPO_ROOT / "crates/rpptx-py/README.md": (
@@ -416,6 +416,7 @@ ARCHIVE_MEASUREMENTS = {
     "rpptx-oxml": (218_680, 1_386_209, 20),
     "rpptx-render": (86_984, 477_031, 8),
 }
+# Historical observed archive versions. Update only after genuine archive remeasurement.
 PACKAGE_VERSIONS = {
     **{name: "0.14.5" for name, _ in LOCAL_PATCHES if not name.startswith("rdocx")},
     **{name: "0.16.5" for name, _ in LOCAL_PATCHES if name.startswith("rdocx")},

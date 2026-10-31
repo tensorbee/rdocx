@@ -1,10 +1,10 @@
 # Changelog
 
-## v0.16.5
+## v0.17.0
 
 ### Highlights
 
-Word0.16.5 improves section page numbering, header and footer clearance, TOC navigation through merged tables, and comparison of documents containing existing revisions. The seven Rust packages, CLI and Python distribution share this version. Comparison and imported-format limits remain explicit below.
+Word0.17.0 improves section page numbering, header and footer clearance, TOC navigation through merged tables, and comparison of documents containing existing revisions. The seven Rust packages, CLI and Python distribution share this version. Comparison and imported-format limits remain explicit below.
 
 ### Added
 
@@ -20,7 +20,9 @@ Existing comparison operations can retain unchanged revision-bearing owners whil
 
 ### Compatibility
 
-No public signature migration is required. Word packages now require shared OOXML0.14.5. Retaining old revisions is bounded owner preservation, rather than unrestricted native Word Compare behavior. Edits, moves or deletion touching a revision-bearing paragraph, whole table or block control, or changed revised section properties remain refused. For those cases, retain the original redline separately, resolve the relevant author or revision IDs on independent copies with the checked APIs, then compare those baselines. Resolving those copies discards the resolved tracked markup.
+Word0.17.0 requires shared OOXML0.15.0 and moves its publicly reachable shared Rust types to a new minor line. The OPC `parts` map stores `Arc<Vec<u8>>`, and `remove_part` returns `Option<Arc<Vec<u8>>>`, including through the `rdocx_opc` re-export. Direct map insertion and owned removal callers must use the Arc contract. Pass a `Vec<u8>` directly to generic `set_part`, rather than an ambiguous `Vec.into()` expression. Python signatures are unchanged. Retaining old revisions is bounded owner preservation, rather than unrestricted native Word Compare behavior. Edits, moves or deletion touching a revision-bearing paragraph, whole table or block control, or changed revised section properties remain refused. For those cases, retain the original redline separately, resolve the relevant author or revision IDs on independent copies with the checked APIs, then compare those baselines. Resolving those copies discards the resolved tracked markup.
+
+The new minor lines make the public contract distinction explicit after the breaking change reported in [#429](https://github.com/tensorbee/rdocx/issues/429). Published OPC0.14.3 and0.14.4 expose conflicting Vec and Arc contracts. Deliberately selecting OPC0.14.3 restores source type-check compatibility for the exact published jubarte-redlines0.13.0 and0.14.0 clients that were examined. This is a bounded workaround, not a universal0.14patch, runtime guarantee or completed registry rollback. Existing0.14.4 locks need deliberate recovery, and dependencies requiring at least0.14.4 cannot fall back to0.14.3. No yank or publication is implied.
 
 Roman formatting remains bounded to1through3999 and alphabetic formatting to4096characters. Unsupported imported number formats and chapter-dependent numbering remain preserved and diagnostic. Native Word observations outside these bounds do not extend support. Imported notes without a source reference marker remain unmarked. Newly authored add_footnote content includes an explicit styled marker, matching the existing note creation operations. Ordinary frames exclude drop caps, and exact tbRl body corrections do not promise general vertical-text parity. General native Word layout equivalence is not claimed.
 
@@ -29,11 +31,13 @@ Roman formatting remains bounded to1through3999 and alphabetic formatting to4096
 - [@set2374](https://github.com/set2374) reported the section PAGE-format behavior in [#423](https://github.com/tensorbee/rdocx/issues/423).
 - [@hadim](https://github.com/hadim) reported header clearance, existing-revision comparison and merged-cell TOC failures in [#424](https://github.com/tensorbee/rdocx/issues/424), [#425](https://github.com/tensorbee/rdocx/issues/425) and [#426](https://github.com/tensorbee/rdocx/issues/426), and supplied [PR427](https://github.com/tensorbee/rdocx/pull/427) and [PR428](https://github.com/tensorbee/rdocx/pull/428). Their reference implementations were adapted and hardened with additional owner, source, pagination and refusal checks.
 
-## rpptx-v0.14.5
+- [@arthrod](https://github.com/arthrod) reported the incompatible OPC release in [#429](https://github.com/tensorbee/rdocx/issues/429), prompting the new minor boundaries and bounded old-line recovery guidance.
+
+## rpptx-v0.15.0
 
 ### Highlights
 
-PowerPoint0.14.5 aligns the fifteen shared OOXML and PowerPoint Rust packages, CLI and Python distribution for the post-S96 release. This family adds no new PowerPoint product feature in S96.
+PowerPoint0.15.0 aligns the fifteen shared OOXML and PowerPoint Rust packages, CLI and Python distribution for the post-S96 release. This family adds no new PowerPoint product feature in S96.
 
 ### Added
 
@@ -41,15 +45,15 @@ No new PowerPoint authoring or rendering API is included in this release.
 
 ### Fixed
 
-No new PowerPoint-specific user-facing fix is included. Word comparison, page-number and layout repairs belong to the separate Word0.16.5 family.
+No new PowerPoint-specific user-facing fix is included. Word comparison, page-number and layout repairs belong to the separate Word0.17.0 family.
 
 ### Compatibility
 
-No public signature migration is required. The selected shared OOXML and PowerPoint packages and Python distribution use0.14.5 together. Existing rendering limitations remain. The separate unpublished rpptx-wasm carrier stays0.12.1, and npm publication is outside this release.
+The selected shared OOXML and PowerPoint packages and Python distribution use0.15.0 together. The new minor retains the Arc-backed OPC map and removal contract, with direct Vec inputs for generic `set_part` calls. Published0.14.3 Vec clients and0.14.4 Arc clients cannot both be preserved by one universal compatible0.14patch. [#429](https://github.com/tensorbee/rdocx/issues/429) prompted this explicit version boundary. The exact examined jubarte clients can deliberately select OPC0.14.3 for source type-check recovery. Existing0.14.4 locks and exact or minimum0.14.4 dependencies retain their stated recovery limits. This release does not perform a registry rollback. Existing rendering limitations remain. The separate unpublished rpptx-wasm carrier stays0.12.1, and npm publication is outside this release.
 
 ### Contributors
 
-No new external PowerPoint issue or pull-request contribution is included in the reviewed S96 range. Credits in earlier published sections remain with their original releases.
+- [@arthrod](https://github.com/arthrod) reported the shared OPC compatibility failure in [#429](https://github.com/tensorbee/rdocx/issues/429). This family carries the explicit shared minor boundary and bounded recovery guidance. Earlier published credits remain with their original releases.
 
 ## v0.16.4
 
