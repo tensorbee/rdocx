@@ -66960,9 +66960,11 @@ mod tests {
         assert_eq!(extracted_logical_lines("word", &word_pdf), expected_word);
         // Requested bold variable CJK selects weight 700 instead of the default Thin face.
         // Paired source-bound captures isolate the instance advance and outline change.
+        // F-X273 applies omitted Word kerning as off in both Word raster controls.
+        // Explicit kern=1 restores their previous rasters byte for byte.
         assert_eq!(
             rendered_pdf_page_sha("word", &word_pdf),
-            "6b0dd949e017453379f25dde824d2d0dadd108afc3ce99a1c09dc81045960c16"
+            "c8b5b951219c4b8ea4d8e5f5d4c91eda51bd649e25b4a29a475b5a689288a546"
         );
 
         // The all-regular control retains the same three-run segmentation and default face.
@@ -66988,7 +66990,7 @@ mod tests {
         );
         assert_eq!(
             rendered_pdf_page_sha("word-regular", &regular_pdf),
-            "f902ee1e9e2198ea4ebe172004d8e7f0e69ecf45d98c63fa02bbd93564e64a0b"
+            "a1e7c2043c8aedaea64e815796e962856e12a63bdb5619ce56ec4c82961e50b3"
         );
 
         let presentation_pdf = presentation

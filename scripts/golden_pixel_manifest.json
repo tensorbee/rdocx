@@ -4,41 +4,41 @@
     "command": "pdftoppm",
     "version": "pdftoppm version 26.01.0"
   },
-  "reason": "F-X233 intentional paragraph frame geometry and owned flow. Exact independently reviewed contract invoice proposal quote RGBA buffers change, same1275x1650 at150DPI using actual Poppler26.01.0. Three other page-one buffers remain exact; native Word geometry and genuine Base attribution retained.",
+  "reason": "F-X273 intentional selected header/footer clearance and explicit Word kerning policy. All seven page1 decoded RGBA buffers change at unchanged1275x1650 and150DPI using pinned Poppler26.01.0. Reviewed text placement, quote table movement and invoice Tax-row pagination explain all changed pixels. Final PDFs are byte-identical to inspected raster inputs. Native Word and final hosted qualification remain pending.",
   "samples": {
     "contract": {
       "height": 1650,
-      "rgba_sha256": "7c036a31da8463b4118d178ef7a5c6e948a8177934150a779482517564685b64",
+      "rgba_sha256": "fce2b58a478d5660449936797ab58efe710e237d5a0e9de83fddae2386694360",
       "width": 1275
     },
     "feature_showcase": {
       "height": 1650,
-      "rgba_sha256": "2c32f6b5d0befdde243d37872ed815b444a503f93bbcb149625768b334296c8a",
+      "rgba_sha256": "5eccbcd5eac58c7532d1e4ab9e99ea6bb7d50f8077b5d92f5257849234d90b4f",
       "width": 1275
     },
     "invoice": {
       "height": 1650,
-      "rgba_sha256": "37104f02e2b314e1a1cba622314dbcf9246fc39529b67dc5a99ece415c0b15a9",
+      "rgba_sha256": "d987d18532d94a398f075de36c213c33e0a3f44c7e7170ae84c238905e57c425",
       "width": 1275
     },
     "letter": {
       "height": 1650,
-      "rgba_sha256": "416bc89c782dbd63fcfe37dbd5fcb1312da6e7676d8cb033141003d6ae4cd3e6",
+      "rgba_sha256": "da80e85b472f1f0b6ceb50d5d9b6ca696286ed14e68c6b153628f7902910e406",
       "width": 1275
     },
     "proposal": {
       "height": 1650,
-      "rgba_sha256": "7d43e40416f1d16752d959aba588bd8ab40f9278dd9d0cbd0051acbdd6968db9",
+      "rgba_sha256": "beb6afd8e18e652a9bc5e190b0071422c19d466bb9f44c65ef78003289eea98d",
       "width": 1275
     },
     "quote": {
       "height": 1650,
-      "rgba_sha256": "f7c7dbc42a35432d7bc06f7462d7787d714d9f4ce6e0d15c519565025ab79f1c",
+      "rgba_sha256": "6a03f85012bfe25684d14ac0098562799ec16b75f84415a53605f4730b9c8e15",
       "width": 1275
     },
     "report": {
       "height": 1650,
-      "rgba_sha256": "8e1f83d71ad0e1a2aa58ba0d257a31be42049892918fbf69dcf11c4097d5f49b",
+      "rgba_sha256": "a4cea515e8ea1ca4642b0e0771378dd80765027d451418532683de6ba44f4358",
       "width": 1275
     }
   }
