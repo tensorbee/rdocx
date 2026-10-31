@@ -6991,8 +6991,7 @@ mod tests {
             br#"<w:background xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" w:color="123456"/>"#
                 .to_vec(),
         );
-        let defaults = document
-            .styles
+        let defaults = std::sync::Arc::make_mut(&mut document.styles)
             .doc_defaults
             .as_mut()
             .and_then(|defaults| defaults.rpr.as_mut())

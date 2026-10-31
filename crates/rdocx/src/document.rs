@@ -7217,7 +7217,11 @@ pub struct Document {
     /// value. Reopen keeps it only when the reopened part bytes match. It is
     /// not a chain of older documents.
     main_part_blocks: Option<MainPartBlocks>,
-    pub(crate) styles: CT_Styles,
+    pub(crate) styles: Arc<CT_Styles>,
+    /// The styles part bytes the last flush read and their parsed model. A
+    /// staged clone shares both, so a flush that finds the same bytes and the
+    /// same model skips the parse, the comparison and the serialization.
+    styles_part_parse: Option<(Arc<Vec<u8>>, Arc<CT_Styles>)>,
     pub(crate) numbering: Option<CT_Numbering>,
     /// Boxed, because debug builds keep many copies of `Document` on deep
     /// stacks, and the fifteen-field model would otherwise grow every one.
@@ -22353,7 +22357,7 @@ impl Document {
             body_namespace_bindings: Vec::new(),
             plain_local_edit_blocked: false,
             unsavable_body_edit_cache: OnceLock::from(None),
-            styles,
+            styles: Arc::new(styles),
             numbering: None,
             core_properties,
             application_properties,
@@ -22407,6 +22411,7 @@ impl Document {
             parsed: None,
             main_body_scans: Arc::new(Mutex::new(MainBodyScans::default())),
             main_part_blocks: None,
+            styles_part_parse: None,
         }
     }
 
@@ -22468,6 +22473,7 @@ impl Document {
             parsed: self.parsed.clone(),
             main_body_scans: Arc::clone(&self.main_body_scans),
             main_part_blocks: self.main_part_blocks.clone(),
+            styles_part_parse: self.styles_part_parse.clone(),
             unsavable_body_edit_cache: self
                 .unsavable_body_edit_cache
                 .get()
@@ -24347,7 +24353,7 @@ impl Document {
     }
 
     fn from_opened_package(package: OpcPackage, read_from_bytes: bool) -> Result<Self> {
-        Self::from_package_reusing(package, read_from_bytes, None, None, None)
+        Self::from_package_reusing(package, read_from_bytes, None, None, None, None)
     }
 
     fn from_package_reusing(
@@ -24356,6 +24362,7 @@ impl Document {
         staged: Option<(&DocumentIdentifiers, &Parsed)>,
         blocks: Option<&MainPartBlocks>,
         writer_blocks: Option<&MainPartBlocks>,
+        styles_read: Option<(Arc<Vec<u8>>, Arc<CT_Styles>)>,
     ) -> Result<Self> {
         let (doc_part_name, _) = validated_word_package_class(&package)?;
 
@@ -24410,14 +24417,21 @@ impl Document {
             Some(OpcPackage::resolve_rel_target(&doc_part_name, &rel.target))
         };
 
-        // Try to load styles, remembering where they came from.
+        // Try to load styles, remembering where they came from. A staged
+        // reopen whose styles part keeps the bytes it read reuses their parse.
         let styles_part_name = resolve_part(rel_types::STYLES);
-        let styles = match styles_part_name
+        let (styles, styles_part_parse) = match styles_part_name
             .as_deref()
-            .and_then(|p| package.get_part(p))
+            .and_then(|p| package.get_part_shared(p))
         {
-            Some(styles_xml) => CT_Styles::from_xml(styles_xml)?,
-            None => CT_Styles::new_default(),
+            Some(bytes) => {
+                let parsed = match styles_read {
+                    Some((read, parsed)) if Arc::ptr_eq(&read, bytes) => parsed,
+                    _ => Arc::new(CT_Styles::from_xml(bytes)?),
+                };
+                (Arc::clone(&parsed), Some((Arc::clone(bytes), parsed)))
+            }
+            None => (Arc::new(CT_Styles::new_default()), None),
         };
 
         // Try to load numbering definitions
@@ -24661,6 +24675,7 @@ impl Document {
                 ..MainBodyScans::default()
             })),
             main_part_blocks: None,
+            styles_part_parse,
         })
     }
 
@@ -25130,6 +25145,7 @@ impl Document {
         let embedded_invalidated_signatures = self.embedded_invalidated_signatures.clone();
         let package_signatures_invalidated = self.package_signatures_invalidated;
         let opened = self.parsed.as_deref().filter(|_| in_memory);
+        let styles_read = self.styles_part_parse.clone();
         let mut reopened = match opened {
             Some(opened) => Self::from_package_reusing(
                 self.package.reread(&opened.package)?,
@@ -25137,6 +25153,7 @@ impl Document {
                 Some((&provenance, opened)),
                 carried_blocks.as_ref(),
                 carried_scans.serialized.as_ref(),
+                styles_read,
             )?,
             None => {
                 let mut output = std::io::Cursor::new(Vec::new());
@@ -25778,13 +25795,38 @@ impl Document {
     }
 
     /// Write the in-memory document/styles back into the OPC package parts.
+    /// Whether the styles model differs from the styles part, as parsing the
+    /// part and comparing would answer. The parse is memoized on the part's
+    /// shared bytes. When the model equals it, the model takes the parsed
+    /// `Arc`, so the next flush of an unchanged model compares two pointers.
+    fn styles_differ_from_part(&mut self, styles_part: &str) -> bool {
+        let Some(bytes) = self.package.get_part_shared(styles_part).cloned() else {
+            return true;
+        };
+        let parsed = match &self.styles_part_parse {
+            Some((read, parsed)) if Arc::ptr_eq(read, &bytes) => Arc::clone(parsed),
+            _ => match CT_Styles::from_xml(&bytes) {
+                Ok(parsed) => Arc::new(parsed),
+                Err(_) => {
+                    self.styles_part_parse = None;
+                    return true;
+                }
+            },
+        };
+        let differ = !Arc::ptr_eq(&parsed, &self.styles) && *parsed != *self.styles;
+        if !differ {
+            self.styles = Arc::clone(&parsed);
+        }
+        self.styles_part_parse = Some((bytes, parsed));
+        differ
+    }
+
     pub(crate) fn flush_to_package(&mut self) -> Result<()> {
         self.flush_document_to_package()?;
 
         // Serialize the styles part. A document opened without one still gets
         // rdocx's defaults written out, so make sure it is reachable: an
         // unreferenced, untyped part would simply be ignored by Word.
-        let styles_xml = self.styles.to_xml()?;
         let styles_part_name = self.styles_part_name.clone();
         let styles_part = self
             .reserve_document_part_bundle(
@@ -25797,13 +25839,9 @@ impl Document {
                 Error::Other(format!("styles relationship allocation failed: {error}"))
             })?;
         self.styles_part_name = Some(styles_part.clone());
-        let styles_changed = self
-            .package
-            .get_part(&styles_part)
-            .and_then(|xml| CT_Styles::from_xml(xml).ok())
-            .as_ref()
-            != Some(&self.styles);
+        let styles_changed = self.styles_differ_from_part(&styles_part);
         if styles_changed {
+            let styles_xml = self.styles.to_xml()?;
             let styles_xml = if let Some(source) = self.package.get_part(&styles_part) {
                 retain_styles_root_attributes(source, styles_xml)?
             } else {
@@ -37919,8 +37957,7 @@ impl Document {
         }
         let mut candidate = self.clone_for_staging();
         candidate.reserve_styles_bundle()?;
-        let defaults = candidate
-            .styles
+        let defaults = Arc::make_mut(&mut candidate.styles)
             .doc_defaults
             .get_or_insert_with(Default::default);
         let properties = defaults.rpr.get_or_insert_with(Default::default);
@@ -37979,8 +38016,7 @@ impl Document {
         }
         let mut candidate = self.clone_for_staging();
         candidate.reserve_styles_bundle()?;
-        let defaults = candidate
-            .styles
+        let defaults = Arc::make_mut(&mut candidate.styles)
             .doc_defaults
             .get_or_insert_with(Default::default);
         let properties = defaults.rpr.get_or_insert_with(Default::default);
@@ -38009,8 +38045,7 @@ impl Document {
         }
         let mut candidate = self.clone_for_staging();
         candidate.reserve_styles_bundle()?;
-        candidate
-            .styles
+        Arc::make_mut(&mut candidate.styles)
             .doc_defaults
             .get_or_insert_with(Default::default)
             .ppr = properties;
@@ -39229,7 +39264,7 @@ impl Document {
             )));
         }
 
-        let properties = candidate.styles.styles[style_index]
+        let properties = Arc::make_mut(&mut candidate.styles).styles[style_index]
             .ppr
             .get_or_insert_with(CT_PPr::default);
         properties.num_id = Some(num_id);
@@ -39346,7 +39381,7 @@ impl Document {
 
         candidate.reserve_styles_bundle()?;
         candidate.reserve_numbering_bundle()?;
-        let properties = candidate.styles.styles[style_index]
+        let properties = Arc::make_mut(&mut candidate.styles).styles[style_index]
             .ppr
             .as_mut()
             .expect("the exact style link was validated above");
@@ -39423,9 +39458,9 @@ impl Document {
         }
         let linked_style = authored.linked_style.clone();
         let style_id = authored.style_id.clone();
-        candidate.styles.styles.push(authored);
+        Arc::make_mut(&mut candidate.styles).styles.push(authored);
         update_reciprocal_style_link(
-            &mut candidate.styles,
+            Arc::make_mut(&mut candidate.styles),
             &style_id,
             None,
             linked_style.as_deref(),
@@ -39479,9 +39514,9 @@ impl Document {
         }
         let style_id = authored.style_id.clone();
         let new_link = authored.linked_style.clone();
-        candidate.styles.styles[index] = authored;
+        Arc::make_mut(&mut candidate.styles).styles[index] = authored;
         update_reciprocal_style_link(
-            &mut candidate.styles,
+            Arc::make_mut(&mut candidate.styles),
             &style_id,
             old_link.as_deref(),
             new_link.as_deref(),
@@ -39513,7 +39548,11 @@ impl Document {
                 style_type.to_str()
             )));
         }
-        for (position, style) in candidate.styles.styles.iter_mut().enumerate() {
+        for (position, style) in Arc::make_mut(&mut candidate.styles)
+            .styles
+            .iter_mut()
+            .enumerate()
+        {
             if style.style_type == style_type {
                 style.is_default = position == index;
             }
@@ -39571,8 +39610,7 @@ impl Document {
 
         let mut candidate = self.clone_for_staging();
         candidate.reserve_styles_bundle()?;
-        candidate
-            .styles
+        Arc::make_mut(&mut candidate.styles)
             .styles
             .retain(|style| style.style_id != style_id);
         style::validate_style_graph_change(&self.styles, &candidate.styles)?;
@@ -39604,7 +39642,7 @@ impl Document {
                         .is_some_and(|(name, common)| name.eq_ignore_ascii_case(common))
             });
             if !defined {
-                candidate.styles.styles.push(common);
+                Arc::make_mut(&mut candidate.styles).styles.push(common);
                 added += 1;
             }
         }
@@ -39764,7 +39802,7 @@ impl Document {
                     ));
                 }
             } else {
-                candidate.styles.styles.push(definition);
+                Arc::make_mut(&mut candidate.styles).styles.push(definition);
             }
         }
         style::validate_style_graph(&candidate.styles)?;
@@ -43361,7 +43399,7 @@ impl Document {
         let source = self.styles.clone();
         for style in &other.styles.styles {
             if self.styles.get_by_id(&style.style_id).is_none() {
-                self.styles.styles.push(style.clone());
+                Arc::make_mut(&mut self.styles).styles.push(style.clone());
             }
         }
         style::validate_style_graph_change(&source, &self.styles).map(|_| ())
@@ -43516,8 +43554,7 @@ impl Document {
             let Some(mapped_num_id) = num_remap.get(&source_num_id).copied() else {
                 continue;
             };
-            let Some(destination_style) = self
-                .styles
+            let Some(destination_style) = Arc::make_mut(&mut self.styles)
                 .styles
                 .iter_mut()
                 .find(|style| style.style_id == source_style.style_id)
@@ -45849,7 +45886,7 @@ impl Document {
 
         rdocx_html::HtmlInput {
             document: self.document.clone(),
-            styles: self.styles.clone(),
+            styles: CT_Styles::clone(&self.styles),
             numbering: self.numbering.clone(),
             images,
             hyperlink_urls,
@@ -46460,7 +46497,7 @@ impl Document {
 
         // Rendering may consume a sole effects-only default without changing
         // either authored style part or merging the effects style catalogue.
-        let mut layout_styles = self.styles.clone();
+        let mut layout_styles = CT_Styles::clone(&self.styles);
         if layout_styles.get_default(StyleType::Table).is_none() {
             let effects = self.package.get_part_rels(&self.doc_part_name).and_then(|rels| {
                 let mut candidates = rels.items.iter().filter(|rel| {
@@ -65092,7 +65129,7 @@ mod tests {
         source.layout().expect("prime source engine");
         receiver.layout().expect("prime receiver engine");
 
-        receiver.styles = CT_Styles::new();
+        receiver.styles = Arc::new(CT_Styles::new());
         receiver.invalidate_layout();
         assert!(!receiver.transfer_reusable_layout_from(&mut source));
         assert!(
@@ -72158,8 +72195,7 @@ mod tests {
     #[test]
     fn numbering_graph_rejects_each_one_sided_style_link() {
         let mut document = Document::new();
-        let normal = document
-            .styles
+        let normal = Arc::make_mut(&mut document.styles)
             .styles
             .iter_mut()
             .find(|style| style.style_id == "Normal")
@@ -72169,8 +72205,7 @@ mod tests {
             ..CT_PPr::default()
         });
         assert!(document.validate_numbering_graph().is_err());
-        document
-            .styles
+        Arc::make_mut(&mut document.styles)
             .styles
             .iter_mut()
             .find(|style| style.style_id == "Normal")
@@ -72570,8 +72605,7 @@ mod tests {
         let instance_id = document
             .add_numbering_instance(definition_id, &[NumberingLevelOverride::new(0).start(4)])
             .unwrap();
-        document
-            .styles
+        Arc::make_mut(&mut document.styles)
             .styles
             .iter_mut()
             .find(|style| style.style_id == "Normal")
@@ -72637,8 +72671,7 @@ mod tests {
             .add_numbering_definition(&[ListLevel::decimal()])
             .unwrap();
         let instance_id = source.add_numbering_instance(definition_id, &[]).unwrap();
-        source
-            .styles
+        Arc::make_mut(&mut source.styles)
             .styles
             .iter_mut()
             .find(|style| style.style_id == "Normal")
@@ -73124,8 +73157,7 @@ mod tests {
             keep_next: Some(true),
             ..Default::default()
         });
-        let default_style = doc
-            .styles
+        let default_style = Arc::make_mut(&mut doc.styles)
             .styles
             .iter_mut()
             .find(|style| style.style_id == "Normal")
@@ -75904,6 +75936,60 @@ mod tests {
             .package
             .set_part(&missed.doc_part_name, xml.into_bytes());
         assert_save_matches_old_order("replaced main bytes", &opened, &missed);
+    }
+
+    #[test]
+    fn issue437_edits_keep_the_styles_parse_and_the_styles_part() {
+        let mut source = Document::new();
+        source.add_paragraph("Intro text");
+        source.add_table(3, 2);
+        source
+            .table_mut(0)
+            .unwrap()
+            .cell(0, 0)
+            .unwrap()
+            .set_text("r0c0");
+        let mut document = Document::from_bytes(&source.to_bytes().unwrap()).unwrap();
+        let part = document.styles_part_name.clone().unwrap();
+        let styles = Arc::clone(&document.styles);
+        let bytes = Arc::clone(document.package.get_part_shared(&part).unwrap());
+        let unchanged = |document: &Document, what: &str| {
+            assert!(
+                Arc::ptr_eq(&document.styles, &styles),
+                "{what} parsed the styles again"
+            );
+            assert!(
+                Arc::ptr_eq(document.package.get_part_shared(&part).unwrap(), &bytes),
+                "{what} rewrote the styles part"
+            );
+        };
+        assert_eq!(document.try_replace_text("r0c0", "edited").unwrap(), 1);
+        unchanged(&document, "try_replace_text");
+        document.add_empty_table_row(0).unwrap();
+        unchanged(&document, "add_empty_table_row");
+        let saved = document.to_bytes().unwrap();
+        unchanged(&document, "to_bytes");
+        assert_eq!(
+            Document::from_bytes(&saved)
+                .unwrap()
+                .table(0)
+                .unwrap()
+                .row_count(),
+            4
+        );
+
+        // A real style edit still reaches the saved part.
+        let (style, _, _) = crate::style::StyleBuilder::paragraph("Issue437", "Issue 437").build();
+        Arc::make_mut(&mut document.styles).styles.push(style);
+        let saved = document.to_bytes().unwrap();
+        assert!(
+            Document::from_bytes(&saved)
+                .unwrap()
+                .styles
+                .styles
+                .iter()
+                .any(|style| style.style_id == "Issue437")
+        );
     }
 
     #[test]
@@ -79151,7 +79237,7 @@ mod odttf_tests {
     #[test]
     fn fx200_absent_default_getters_and_clears_do_not_materialize_defaults() {
         let mut document = Document::new();
-        document.styles.doc_defaults = None;
+        Arc::make_mut(&mut document.styles).doc_defaults = None;
         let before = document.to_bytes().unwrap();
         assert!(document.default_font_name().is_none() && document.default_font_size().is_none());
         document.set_default_font_name_value(None).unwrap();

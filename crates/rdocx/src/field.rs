@@ -5788,8 +5788,7 @@ fn prune_document_fragment_dependencies(fragment: &mut Document, selected: &[u8]
     // dependency closure. A later definition is neither a dependency nor
     // compared with the destination style.
     let mut defined = HashSet::new();
-    fragment
-        .styles
+    std::sync::Arc::make_mut(&mut fragment.styles)
         .styles
         .retain(|style| defined.insert(style.style_id.clone()));
     let mut body_xml = selected.to_vec();
@@ -5826,7 +5825,7 @@ fn prune_document_fragment_dependencies(fragment: &mut Document, selected: &[u8]
                 .cloned(),
             );
         }
-        let mut retained_styles = fragment.styles.clone();
+        let mut retained_styles = rdocx_oxml::styles::CT_Styles::clone(&fragment.styles);
         retained_styles
             .styles
             .retain(|style| used_styles.contains(&style.style_id));
@@ -5857,8 +5856,7 @@ fn prune_document_fragment_dependencies(fragment: &mut Document, selected: &[u8]
             break;
         }
     }
-    fragment
-        .styles
+    std::sync::Arc::make_mut(&mut fragment.styles)
         .styles
         .retain(|style| used_styles.contains(&style.style_id));
     if let Some(numbering) = fragment.numbering.as_mut() {
@@ -6102,7 +6100,7 @@ fn remap_fragment_style_collisions(
     if replacements.is_empty() {
         return Ok(false);
     }
-    for style in &mut fragment.styles.styles {
+    for style in &mut std::sync::Arc::make_mut(&mut fragment.styles).styles {
         if let Some(replacement) = replacements.get(&style.style_id) {
             style.style_id = replacement.clone();
             // A renamed copy is not the destination default. The destination
@@ -10189,7 +10187,9 @@ fn ensure_toc_entry_styles(
             .unwrap_or_else(|| {
                 let (style, _, _) =
                     style::StyleBuilder::paragraph(&canonical_id, &format!("TOC {level}")).build();
-                document.styles.styles.push(style);
+                std::sync::Arc::make_mut(&mut document.styles)
+                    .styles
+                    .push(style);
                 canonical_id
             });
         let effective = style::resolve_paragraph_properties(Some(&style_id), &document.styles);
@@ -22275,7 +22275,9 @@ mod tests {
             let styles = format!(
                 r#"<w:styles xmlns:w="{word}" xmlns:f="urn:fragment"><w:style w:type="paragraph" w:styleId="ImportedNumberStyle" f:owner="same"><w:name w:val="Imported"/><w:pPr f:keep="same"><w:numPr><w:numId w:val="{num_id}" f:keep="{keep}"><f:payload value="kept&#32;exact"><w:numId w:val="9"/></f:payload></w:numId></w:numPr></w:pPr></w:style></w:styles>"#
             );
-            document.styles = rdocx_oxml::styles::CT_Styles::from_xml(styles.as_bytes()).unwrap();
+            document.styles = std::sync::Arc::new(
+                rdocx_oxml::styles::CT_Styles::from_xml(styles.as_bytes()).unwrap(),
+            );
             document
         };
         let destination = build(1, 12, "A");
@@ -25245,7 +25247,9 @@ fn generated_ensure_styles(document: &mut Document, sources: &[GeneratedTableSou
                 ..Default::default()
             });
         }
-        document.styles.styles.push(style);
+        std::sync::Arc::make_mut(&mut document.styles)
+            .styles
+            .push(style);
     }
 }
 

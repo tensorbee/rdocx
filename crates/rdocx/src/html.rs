@@ -5495,8 +5495,7 @@ mod tests {
     fn fx217_named_template_styles_keep_their_existing_identities() {
         use crate::StyleBuilder;
         let mut template = Document::new();
-        template
-            .styles
+        std::sync::Arc::make_mut(&mut template.styles)
             .styles
             .retain(|style| style.style_id != "Quote" && style.style_id != "Heading1");
         template

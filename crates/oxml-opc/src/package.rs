@@ -539,6 +539,13 @@ impl OpcPackage {
         self.parts.get(key).map(|data| data.as_slice())
     }
 
+    /// The shared bytes of the part [`Self::get_part`] finds. A clone of the
+    /// package shares them, so `Arc::ptr_eq` proves the bytes are unchanged.
+    pub fn get_part_shared(&self, part_name: &str) -> Option<&Arc<Vec<u8>>> {
+        let key = deterministic_part_key(&self.parts, part_name)?;
+        self.parts.get(key)
+    }
+
     /// Return whether a case-equivalent normalized part name exists.
     pub fn contains_part(&self, part_name: &str) -> bool {
         deterministic_part_key(&self.parts, part_name).is_some()

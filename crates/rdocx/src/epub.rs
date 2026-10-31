@@ -4646,7 +4646,7 @@ mod tests {
     fn epub_bounds_projection_trees_and_relationships_before_cloning() {
         let mut styles = Document::new();
         let template = styles.styles.styles[0].clone();
-        styles.styles.styles = vec![template; MAX_STYLE_ITEMS + 1];
+        std::sync::Arc::make_mut(&mut styles.styles).styles = vec![template; MAX_STYLE_ITEMS + 1];
         let error = styles.to_epub_bytes().err().unwrap().to_string();
         assert!(error.contains("too many styles"));
 
@@ -5389,7 +5389,7 @@ mod tests {
     #[test]
     fn epub_reports_background_cell_shading_and_visible_default_style_losses() {
         let mut inert = Document::new();
-        inert.styles.doc_defaults = None;
+        std::sync::Arc::make_mut(&mut inert.styles).doc_defaults = None;
         inert.add_paragraph("inert default");
         let inert_result = inert.to_epub_bytes().unwrap();
         assert!(
@@ -5413,10 +5413,10 @@ mod tests {
         }
 
         let mut preservation_only = Document::new();
-        preservation_only.styles = rdocx_oxml::styles::CT_Styles::from_xml(
+        preservation_only.styles = std::sync::Arc::new(rdocx_oxml::styles::CT_Styles::from_xml(
             br#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rPrChange w:id="1" w:author="a"><w:rPr><w:b/></w:rPr></w:rPrChange><w:foreign/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:pPrChange w:id="2" w:author="a"><w:pPr><w:spacing w:after="120"/></w:pPr></w:pPrChange><w:foreign/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:pPr><w:pPrChange w:id="3" w:author="a"><w:pPr><w:spacing w:after="120"/></w:pPr></w:pPrChange><w:foreign/></w:pPr><w:rPr><w:rPrChange w:id="4" w:author="a"><w:rPr><w:i/></w:rPr></w:rPrChange><w:foreign/></w:rPr></w:style></w:styles>"#,
         )
-        .unwrap();
+        .unwrap());
         preservation_only.add_paragraph("preservation only");
         let preservation_result = preservation_only.to_epub_bytes().unwrap();
         assert!(
@@ -5428,8 +5428,7 @@ mod tests {
 
         let mut document = Document::new();
         document.document.background_xml = Some(b"<w:background w:color=\"112233\"/>".to_vec());
-        let default_style = document
-            .styles
+        let default_style = std::sync::Arc::make_mut(&mut document.styles)
             .styles
             .iter_mut()
             .find(|style| style.style_type == StyleType::Paragraph && style.is_default)
@@ -6021,19 +6020,19 @@ mod tests {
         let path = root.join("book.epub");
         let mut document = Document::new();
         document.document.background_xml = Some(b"<w:background w:color=\"F0F0F0\"/>".to_vec());
-        document.styles.doc_defaults = Some(rdocx_oxml::styles::CT_DocDefaults {
-            source_xml: None,
-            ppr: Some(CT_PPr {
-                space_after: Some(Twips(120)),
-                ..Default::default()
-            }),
-            rpr: Some(CT_RPr {
-                italic: Some(true),
-                ..Default::default()
-            }),
-        });
-        let default_style = document
-            .styles
+        std::sync::Arc::make_mut(&mut document.styles).doc_defaults =
+            Some(rdocx_oxml::styles::CT_DocDefaults {
+                source_xml: None,
+                ppr: Some(CT_PPr {
+                    space_after: Some(Twips(120)),
+                    ..Default::default()
+                }),
+                rpr: Some(CT_RPr {
+                    italic: Some(true),
+                    ..Default::default()
+                }),
+            });
+        let default_style = std::sync::Arc::make_mut(&mut document.styles)
             .styles
             .iter_mut()
             .find(|style| style.style_type == StyleType::Paragraph && style.is_default)
@@ -6443,7 +6442,7 @@ mod tests {
                 ),
                 _ => (String::new(), String::new(), String::new()),
             };
-            document.styles = rdocx_oxml::styles::CT_Styles::from_xml(format!(r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{defaults}{base}<w:style w:type='paragraph' w:styleId='Selected'>{selected}</w:style></w:styles>"#).as_bytes()).unwrap();
+            document.styles = std::sync::Arc::new(rdocx_oxml::styles::CT_Styles::from_xml(format!(r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{defaults}{base}<w:style w:type='paragraph' w:styleId='Selected'>{selected}</w:style></w:styles>"#).as_bytes()).unwrap());
             let mut first = document.add_paragraph("first source item");
             first.set_style("Selected");
             if layer == "direct" {
@@ -6577,7 +6576,7 @@ mod tests {
             } else {
                 style_body
             };
-            document.styles = CT_Styles::from_xml(format!(r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:z="urn:table-counter-preservation">{base}<w:style w:type='table' w:styleId='SelectedTable'{default} xmlns:z='urn:table-counter-preservation' z:keep='style'>{selected}<z:stylePayload>exact</z:stylePayload></w:style></w:styles>"#).as_bytes()).unwrap();
+            document.styles = std::sync::Arc::new(CT_Styles::from_xml(format!(r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:z="urn:table-counter-preservation">{base}<w:style w:type='table' w:styleId='SelectedTable'{default} xmlns:z='urn:table-counter-preservation' z:keep='style'>{selected}<z:stylePayload>exact</z:stylePayload></w:style></w:styles>"#).as_bytes()).unwrap());
             document
                 .add_paragraph("first source item")
                 .set_numbering(number, 0);
