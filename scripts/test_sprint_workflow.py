@@ -31,6 +31,119 @@ from scripts import sprint_workflow as workflow
 
 class SprintWorkflowTests(unittest.TestCase):
 
+    def assert_semver_ci_signer_write_scope(self, ci):
+        self.assertEqual(self.yaml_direct_lines(self.yaml_block(ci,'permissions:'),2),('contents: read',))
+        self.assertFalse(any('write-all' in line for line in self.operative_lines(ci)))
+        job_section=self.yaml_block(ci,'jobs:')
+        jobs=re.findall(r'^  ([a-z][a-z0-9-]*):$',job_section,re.MULTILINE)
+        self.assertIn('semver-sign',jobs)
+        for key in jobs:
+            block=self.yaml_block(job_section,'  '+key+':')
+            if key=='semver-sign':
+                permissions=self.yaml_direct_lines(self.yaml_block(block,'    permissions:'),6)
+                self.assertEqual(len(permissions),4)
+                self.assertEqual(set(permissions),{'contents: read','actions: read','id-token: write','attestations: write'})
+            else:
+                self.assertFalse(any('id-token: write' in line or 'attestations: write' in line for line in self.operative_lines(block)),key)
+
+    def test_semver_ci_permission_scope_refuses_write_outside_signer(self):
+        ci=(workflow.REPO/'.github/workflows/ci.yml').read_text();self.assert_semver_ci_signer_write_scope(ci)
+        for key in ('python-bindings','wasm','semver-linux'):
+            block=self.yaml_block(ci,'  '+key+':');mutated=block.replace('    steps:','    permissions:\n      id-token: write\n    steps:',1)
+            with self.subTest(key=key),self.assertRaises(AssertionError):self.assert_semver_ci_signer_write_scope(ci.replace(block,mutated,1))
+        for permission in ('id-token: write','attestations: write'):
+            mutated=ci.replace('      '+permission,'      '+permission.replace('write','none'),1)
+            with self.subTest(permission=permission),self.assertRaises(AssertionError):self.assert_semver_ci_signer_write_scope(mutated)
+
+    def test_semver_optional_reuse_acquisition_failure_retains_refusal_and_reacquires(self):
+        for stage in ('collection','selection','download','origin'):
+            with self.subTest(stage=stage),tempfile.TemporaryDirectory() as directory,contextlib.ExitStack() as stack:
+                destination=Path(directory)/'optional';attempt={'target':'x86_64-unknown-linux-gnu','status':'success','active_current_producer':False,'artifact':{'id':1}}
+                stack.enter_context(patch.object(workflow,'_semver_authority_location',return_value=('S96',None)))
+                collector=stack.enter_context(patch.object(workflow,'_collect_release_semver_authority',side_effect=ValueError('synthetic inventory drift') if stage=='collection' else None,return_value=({'source_identity':'source'},{'attempts':[attempt]})))
+                stack.enter_context(patch.object(workflow,'select_semver_attempt',side_effect=ValueError('synthetic incomparable attempts') if stage=='selection' else None,return_value=attempt))
+                stack.enter_context(patch.object(workflow,'_semver_download_proof',side_effect=OSError('synthetic unavailable artifact') if stage=='download' else None,return_value=Path(directory)/'proof'))
+                stack.enter_context(patch.object(workflow,'_semver_download_origin_proofs',side_effect=ValueError('synthetic origin missing') if stage=='origin' else None,return_value=[]))
+                self.assertEqual(workflow._prepare_release_semver_reuse({'scope':'all'},'x86_64-unknown-linux-gnu',destination),[])
+                record=workflow._semver_read(destination/'reuse-invalidation.json');self.assertIn('synthetic',record['error']);self.assertIn('reacquire',record['decision']);collector.assert_called_once()
+
+    def test_semver_native_setup_accepts_canonical_rustup_proxy_without_byte_identity(self):
+        target='x86_64-unknown-linux-gnu'
+        for disposition in ('valid','wrong-current','wrong-pinned','wrong-bare'):
+            with self.subTest(disposition=disposition),tempfile.TemporaryDirectory() as directory:
+                root=Path(directory);rust=root/'sysroot/bin';cargo_home=root/'cargo-home';proxies=cargo_home/'bin';payload=root/'payload'
+                for folder in (rust,proxies,payload):folder.mkdir(parents=True)
+                for name in ('rustc','cargo','rustdoc'):
+                    (rust/name).write_bytes(('actual qualified '+name).encode());(rust/name).chmod(0o700);(proxies/name).write_bytes(('independent proxy '+name).encode());(proxies/name).chmod(0o700)
+                (proxies/'rustup').write_bytes(b'canonical rustup distinct bytes');(proxies/'rustup').chmod(0o700)
+                calls=[]
+                def run(argv,cwd,env,destination,name,timeout=3600):
+                    calls.append([str(a) for a in argv]);destination=Path(destination);destination.mkdir(exist_ok=True)
+                    if name=='sysroot':text=str(rust.parent)+'\n'
+                    elif name=='tool':text='cargo-semver-checks 0.51.0\n'
+                    elif len(argv)>1 and argv[1]=='which':
+                        wrong=disposition=='wrong-current' and '--toolchain' not in argv or disposition=='wrong-pinned' and '--toolchain' in argv
+                        text=str((root/'foreign' if wrong else rust)/argv[-1])+'\n'
+                    else:
+                        tool=Path(argv[0]).name;text=tool+' 1.97.1\n'+('host: '+target+'\n' if tool=='rustc' else '')
+                        if disposition=='wrong-bare' and name.startswith('inherited-'):text+='foreign actual proxy output\n'
+                    (destination/(name+'.stdout')).write_text(text);(destination/(name+'.stderr')).write_text('')
+                    return {'argv':[str(a) for a in argv],'exit':0,'timed_out':False,'launch_error':None}
+                env={'PATH':str(proxies),'CARGO_HOME':str(cargo_home)}
+                if disposition!='valid':
+                    with patch.object(workflow,'_semver_run',side_effect=run),self.assertRaises(ValueError):workflow._semver_native_setup('/unused-pinned-tool',target,payload,env)
+                    inputs=workflow._semver_read(payload/'setup/tool-resolution-input.json');self.assertEqual(inputs['inherited']['rustc']['sha256'],workflow._semver_hash(proxies/'rustc'))
+                    continue
+                with patch.object(workflow,'_semver_run',side_effect=run):observed=workflow._semver_native_setup('/unused-pinned-tool',target,payload,env)
+                self.assertEqual(set(observed),{'rustc','cargo','rustdoc'})
+                self.assertEqual(Path(workflow.shutil.which('cargo',path=env['PATH'])).resolve(),(rust/'cargo').resolve())
+                self.assertTrue(any('--toolchain' in argv and '1.97.1' in argv for argv in calls))
+                inputs=workflow._semver_read(payload/'setup/tool-resolution-input.json');self.assertEqual(inputs['inherited']['rustc']['sha256'],workflow._semver_hash(proxies/'rustc'))
+                self.assertNotEqual(workflow._semver_hash(proxies/'rustc'),workflow._semver_hash(proxies/'rustup'))
+
+    def test_semver_canary_fetch_qualifies_complete_cache_then_locked_offline_graph(self):
+        for failure in (None,'fetch-failure','changed-lock'):
+            with self.subTest(failure=failure),tempfile.TemporaryDirectory() as directory,contextlib.ExitStack() as stack:
+                root=Path(directory).resolve();work=root/'client';work.mkdir();repository=root/'repository';source=repository/'crates/oxml-opc';source.mkdir(parents=True);rows=root/'row';rows.mkdir();fetched=False;calls=[]
+                stack.enter_context(patch.object(workflow,'REPO',repository))
+                common={'target':'x86_64-unknown-linux-gnu','rust':{name:{'path':'/'+name,'sha256':name,'version':name+' 1.97.1'} for name in ('cargo','rustc','rustdoc')},'scope':{'packages':{'oxml-opc':{'version':'0.15.0'}}},'shared_version':'0.15.0','env':{},'policy':'policy','source':{'sha256':'source'},'environment_identity':{'present_configs':{}}}
+                stack.enter_context(patch.object(workflow,'_semver_external_work',return_value=work));stack.enter_context(patch.object(workflow,'_semver_configs',return_value={}))
+                def run(argv,cwd,env,destination,name,timeout=3600):
+                    nonlocal fetched
+                    argv=[str(a) for a in argv];calls.append(argv);exit_code=0;text='';err='';cwd=Path(cwd)
+                    if argv[1]=='check':
+                        (work/'Cargo.lock').write_text('version=4\n');(work/'target').mkdir();artifact=work/'target/client.rmeta';artifact.write_bytes(b'synthetic new compiler artifact')
+                        event={'reason':'compiler-artifact','package_id':'client','manifest_path':str(work/'Cargo.toml'),'target':{'name':'rdocx_semver_canary','kind':['lib'],'crate_types':['lib'],'src_path':str(work/'src/lib.rs')},'fresh':False,'profile':{'test':False},'filenames':[str(artifact)]};text=json.dumps(event)+'\n'+json.dumps({'reason':'build-finished','success':True})+'\n'
+                    elif argv[1]=='fetch':
+                        self.assertEqual(argv,['/cargo','fetch','--locked','--manifest-path',str(work/'Cargo.toml')]);self.assertEqual(cwd,work);fetched=True
+                        if failure=='fetch-failure':exit_code=101;err='synthetic fetch failed'
+                        if failure=='changed-lock':(work/'Cargo.lock').write_text('version=3\n')
+                    elif argv[1]=='metadata':
+                        if not fetched:raise ValueError('synthetic uncached all-platform dependency')
+                        self.assertIn('--offline',argv);self.assertIn('--locked',argv)
+                        metadata={'packages':[{'id':'client','name':'rdocx-semver-canary','version':'0.0.0','manifest_path':str(work/'Cargo.toml'),'source':None,'targets':[{'kind':['lib'],'name':'rdocx_semver_canary'}]},{'id':'opc','name':'oxml-opc','version':'0.15.0','manifest_path':str(source/'Cargo.toml'),'source':None} ]};text=json.dumps(metadata)
+                    else:self.fail('unexpected synthetic command '+str(argv))
+                    stdout=Path(destination)/(name+'.stdout');stderr=Path(destination)/(name+'.stderr');stdout.write_text(text);stderr.write_text(err);process={'argv':argv,'cwd':str(cwd),'exit':exit_code,'timed_out':False,'launch_error':None,'stdout_sha256':workflow._semver_hash(stdout),'stderr_sha256':workflow._semver_hash(stderr)};workflow._semver_write(Path(destination)/(name+'.process.json'),process);return process
+                stack.enter_context(patch.object(workflow,'_semver_run',side_effect=run))
+                if failure:
+                    with self.assertRaises(ValueError):workflow._semver_canary_row('declared-arc','current-candidate',source,common,rows)
+                    self.assertTrue((rows/'failed-retention.json').is_file());continue
+                result=workflow._semver_canary_row('declared-arc','current-candidate',source,common,rows)
+                self.assertEqual([argv[1] for argv in calls],['check','fetch','metadata'])
+                self.assertEqual(workflow._semver_hash(workflow._semver_bound_file(rows,result['fetch']['lock_before'])),result['files']['lock']['sha256'])
+                facts,key=workflow._semver_row_identity('canary','oxml-opc','0.15.0','current-candidate','default',common,{'canary':'declared-arc'})
+                row={'key':key,'kind':'canary','input':facts,'status':'success','result':result};receipt={**common,'environment':{'configs':{}}}
+                self.assertEqual(workflow._semver_validate_row(row,rows,receipt),row)
+                broken=copy.deepcopy(row);broken['result']['fetch']['lock_before']['sha256']='0'*64
+                with self.assertRaises(ValueError):workflow._semver_validate_row(broken,rows,receipt)
+                # Retained hashes remain valid while the claimed command/lock role is wrong.
+                process=workflow._semver_read(workflow._semver_bound_file(rows,result['fetch']['process']));process['argv']+=['--target',common['target']]
+                workflow._semver_write(rows/'targeted-fetch.process.json',process)
+                broken=copy.deepcopy(row);broken['result']['fetch']['process']=workflow._semver_existing_ref(rows,'targeted-fetch.process.json')
+                with self.assertRaisesRegex(ValueError,'command/context'):workflow._semver_validate_row(broken,rows,receipt)
+                broken=copy.deepcopy(row);broken['result']['fetch']['lock_before']['producer_path']=str(source/'Cargo.lock')
+                with self.assertRaisesRegex(ValueError,'source role'):workflow._semver_validate_row(broken,rows,receipt)
+
     def test_semver_collector_setup_failure_invalidates_prior_real_complete_context(self):
         for failed in ('mkdtemp','raw-directory'):
             with self.subTest(failed=failed),self._semver_owned_authority_fixture() as fixture:
@@ -2020,11 +2133,12 @@ class SprintWorkflowTests(unittest.TestCase):
             ("contents: read",),
         )
         operative_ci = self.operative_lines(ci)
-        self.assertFalse(any("id-token:" in line for line in operative_ci))
+        self.assert_semver_ci_signer_write_scope(ci)
         self.assertFalse(any("write-all" in line for line in operative_ci))
         self.assertFalse(any("PYTEST_ADDOPTS" in line for line in operative_ci))
 
         job = self.yaml_block(ci, "  python-bindings:")
+        self.assertFalse(any("id-token:" in line or "attestations: write" in line for line in self.operative_lines(job)))
         direct = self.yaml_direct_lines(job, 4)
         self.assertEqual(
             direct,
@@ -3899,10 +4013,11 @@ class SprintWorkflowTests(unittest.TestCase):
             ("contents: read",),
         )
         operative_ci = self.operative_lines(ci)
-        self.assertFalse(any("id-token:" in line for line in operative_ci))
+        self.assert_semver_ci_signer_write_scope(ci)
         self.assertFalse(any("write-all" in line for line in operative_ci))
 
         job = self.yaml_block(ci, "  wasm:")
+        self.assertFalse(any("id-token:" in line or "attestations: write" in line for line in self.operative_lines(job)))
         self.assertEqual(
             self.yaml_direct_lines(job, 4),
             (
@@ -4947,7 +5062,7 @@ class SprintWorkflowTests(unittest.TestCase):
         self.assert_no_success_short_circuit(self.yaml_run_lines(validate))
 
         family = self.yaml_block(publish, "  release-assets:")
-        self.assertIn("needs: [cli-assets, build-wheels, build-sdists]", family)
+        self.assertIn("needs: [cli-assets, build-wheels, build-sdists, semver-evidence]", family)
         self.assertIn('assert len(subjects) == 13', family)
         self.assertIn('assert len(list(python.iterdir())) == 7', family)
         self.assertIn('SHA256SUMS', family)
@@ -6715,7 +6830,7 @@ class SprintWorkflowTests(unittest.TestCase):
         mutations = (
             text.replace("| 2026-09-19 |", "|  |", 1),
             text.replace("| 2026-09-19 |", "| 19 September 2026 |", 1),
-            text.replace("| 0.16.5 |", "| 9.9.9 |", 1),
+            text.replace("| 0.17.0 |", "| 9.9.9 |", 1),
             text.replace("| rdocx 0.14.0 |", "| rdocx 9.9.9 |", 1),
         )
         self.assertFalse(readme_doctests.valid_measurement_date("2026-99-99"))

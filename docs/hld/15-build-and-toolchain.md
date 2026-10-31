@@ -733,7 +733,16 @@ Fresh owned SemVer checkouts enforce `core.autocrlf=false` through checkout-step
 Git environment configuration. Measured bytes must equal canonical Git blobs.
 Local differing bytes are refused without normalization or global Git changes.
 Generated current and baseline projects, locks, library JSON, effective features
-and original Cargo cwd are retained separately. A failed tool or compiler row
+and original Cargo cwd are retained separately. Canonical Rustup proxies are
+qualified by their actual Cargo-home paths, current and explicit pinned-toolchain
+selection and observed bare-tool agreement with the concrete native sysroot.
+Proxy byte identity is not assumed, and arbitrary PATH tools remain refused.
+Compiler witnesses retain their actual check lock, then acquire all locked target
+dependencies through bounded successful fetch before unchanged offline metadata.
+The lock, configuration, command and raw fetch observations remain bound through
+portable evidence consumption. Optional reuse acquisition failure is retained
+and reacquires fresh rows, while mandatory deciding collectors still refuse.
+ A failed tool or compiler row
 retains available diagnostic bytes and cannot be silently omitted.
 
 Deciding CI, build-only wheels, full verification and release callers acquire

@@ -2390,6 +2390,17 @@ def cmd_release_semver(args):
 def _semver_native_setup(tool, target, payload, env):
     setup = Path(payload)/'setup'
     setup.mkdir()
+    cargo_home=Path(env.get('CARGO_HOME',str(Path.home()/'.cargo'))).absolute()
+    canonical_bin=cargo_home/'bin'
+    def identity(path):
+        if path is None:return {'path':None}
+        path=Path(path)
+        try:
+            return {'path':str(path.absolute()),'resolved_path':str(path.resolve()),'sha256':_semver_hash(path),'bytes':path.stat().st_size}
+        except OSError as error:
+            return {'path':str(path.absolute()),'error':type(error).__name__+': '+str(error)}
+    inherited={name:shutil.which(name,path=env.get('PATH')) for name in ('rustc','cargo','rustdoc','rustup')}
+    _semver_write(setup/'tool-resolution-input.json',{'cargo_home':str(cargo_home),'inherited':{name:identity(path) for name,path in inherited.items()}})
     sysroot = _semver_run(['rustc','--print','sysroot'], REPO, env, setup, 'sysroot', 120)
     _semver_success(sysroot)
     rust = Path((setup/'sysroot.stdout').read_text().strip())/'bin'
@@ -2409,25 +2420,35 @@ def _semver_native_setup(tool, target, payload, env):
             raise ValueError('SemVer target is not the actual native compiler host')
         binaries[name] = {'path':str(executable.resolve()),'sha256':_semver_hash(executable),'version':text}
     resolutions={}
+    suffix='.exe' if os.name=='nt' else ''
     for name,fact in binaries.items():
-        inherited=shutil.which(name,path=env.get('PATH'))
-        if inherited is None:
+        path=inherited[name]
+        if path is None:
             raise ValueError('missing inherited inner tool resolution: '+name)
-        actual=Path(inherited).resolve()
+        actual=Path(path).resolve()
+        resolution={'inherited':identity(path),'qualified_path':fact['path'],'sha256':fact['sha256'],'kind':'direct'}
+        if 'sha256' not in resolution['inherited']:
+            raise ValueError('inherited tool identity could not be retained: '+name)
         if actual!=Path(fact['path']):
-            rustup=shutil.which('rustup',path=env.get('PATH'))
-            if actual.stem=='rustup':
-                proxy=actual
-            elif rustup is not None and _semver_hash(actual)==_semver_hash(Path(rustup).resolve()):
-                proxy=Path(rustup).resolve()
-            else:
-                raise ValueError('bare inner tool differs from qualified toolchain: '+name)
-            resolution=_semver_run([proxy,'which',name],REPO,env,setup,'resolve-'+name,120)
-            _semver_success(resolution)
-            selected=Path((setup/('resolve-'+name+'.stdout')).read_text().strip()).resolve()
-            if selected!=Path(fact['path']):
-                raise ValueError('rustup inner tool selects different concrete compiler: '+name)
-        resolutions[name]={'inherited_path':inherited,'qualified_path':fact['path'],'sha256':fact['sha256']}
+            rustup=inherited['rustup']
+            if Path(path).absolute()!=canonical_bin/(name+suffix) or rustup is None or Path(rustup).absolute()!=canonical_bin/('rustup'+suffix):
+                raise ValueError('bare inner tool differs from canonical Rustup/qualified toolchain: '+name)
+            for mode,arguments in (('current',['which',name]),('pinned',['which','--toolchain','1.97.1',name])):
+                process=_semver_run([rustup,*arguments],REPO,env,setup,'resolve-'+mode+'-'+name,120)
+                _semver_success(process)
+                selected=Path((setup/('resolve-'+mode+'-'+name+'.stdout')).read_text().strip()).resolve()
+                if selected!=Path(fact['path']):
+                    raise ValueError('rustup '+mode+' selection differs from qualified compiler: '+name)
+            rustup_identity=identity(rustup)
+            if 'sha256' not in rustup_identity:
+                raise ValueError('canonical Rustup identity could not be retained')
+            resolution.update(kind='canonical-rustup-proxy',rustup=rustup_identity)
+        options=['-Vv'] if name=='rustc' else ['-V']
+        bare=_semver_run([path,*options],REPO,env,setup,'inherited-'+name,120)
+        _semver_success(bare)
+        if (setup/('inherited-'+name+'.stdout')).read_text()!=fact['version']:
+            raise ValueError('actual inherited tool output differs from qualified compiler: '+name)
+        resolutions[name]=resolution
     env['PATH']=str(rust)+os.pathsep+env.get('PATH','')
     env['RUSTC']=binaries['rustc']['path'];env['RUSTDOC']=binaries['rustdoc']['path']
     for name in binaries:
@@ -2637,6 +2658,11 @@ def _semver_canary_row(canary, subject, source_root, common, row_directory):
         process = _semver_run([common['rust']['cargo']['path'],'check','--manifest-path',work/'Cargo.toml',
             '--target',common['target'],'--message-format=json'],work,common['env'],row_directory,'cargo-check')
         client_lock_before=_semver_hash(work/'Cargo.lock')
+        lock_before_fetch=_semver_keep(work/'Cargo.lock',row_directory,'client-before-fetch/Cargo.lock')
+        fetch=_semver_run([common['rust']['cargo']['path'],'fetch','--locked','--manifest-path',work/'Cargo.toml'],work,common['env'],row_directory,'client-fetch',300)
+        _semver_success(fetch)
+        if _semver_hash(work/'Cargo.lock')!=client_lock_before or _semver_configs(work)!=client_configs:
+            raise ValueError('all-target cache acquisition changed client lock/configuration')
         metadata = _semver_metadata(work/'Cargo.toml',work,common['rust']['cargo']['path'],common['env'],row_directory,'client-metadata')
         if _semver_hash(work/'Cargo.lock')!=client_lock_before:
             raise ValueError('post-check metadata changed external client lock')
@@ -2665,7 +2691,8 @@ def _semver_canary_row(canary, subject, source_root, common, row_directory):
                 artifact_refs.append(_semver_keep(artifact['path'],row_directory,'client/artifacts/'+Path(artifact['path']).name))
         return {'process':process,'diagnostics':actual,'client':client,'files':files,'artifacts':artifact_refs,
                 'metadata_file':'client-metadata.stdout','metadata':_semver_existing_ref(row_directory,'client-metadata.stdout'),
-                'metadata_process':_semver_existing_ref(row_directory,'client-metadata.process.json'),'feature_mode':'default','configs':client_configs,
+                'metadata_process':_semver_existing_ref(row_directory,'client-metadata.process.json'),
+                'fetch':{'process':_semver_existing_ref(row_directory,'client-fetch.process.json'),'stdout':_semver_existing_ref(row_directory,'client-fetch.stdout'),'stderr':_semver_existing_ref(row_directory,'client-fetch.stderr'),'lock_before':lock_before_fetch},'feature_mode':'default','configs':client_configs,
                 'source_root':str(source_root),'client_root':str(work)}
     except BaseException as error:
         retain_work=True
@@ -3236,6 +3263,15 @@ def _semver_validate_row(row, directory, receipt):
         expected_metadata_argv=[origin['rust']['cargo']['path'],'metadata','--locked','--format-version','1','--manifest-path',str(_semver_path(result['client_root'],target)/'Cargo.toml'),'--offline']
         if observed_metadata['argv']!=expected_metadata_argv or observed_metadata['cwd']!=result['client_root'] or observed_metadata['stdout_sha256']!=result['metadata']['sha256']:
             raise ValueError('canary graph was not frozen under exact client command/context')
+        fetch=result['fetch']
+        fetch_process=_semver_read(_semver_bound_file(directory,fetch['process']))
+        _semver_success(fetch_process)
+        expected_fetch_argv=[origin['rust']['cargo']['path'],'fetch','--locked','--manifest-path',str(_semver_path(result['client_root'],target)/'Cargo.toml')]
+        if fetch_process['argv']!=expected_fetch_argv or fetch_process['cwd']!=result['client_root'] or _semver_hash(_semver_bound_file(directory,fetch['stdout']))!=fetch_process['stdout_sha256'] or _semver_hash(_semver_bound_file(directory,fetch['stderr']))!=fetch_process['stderr_sha256']:
+            raise ValueError('canary all-target cache acquisition command/context/raw output differs')
+        expected_client_lock=_semver_path(result['client_root'],target)/'Cargo.lock'
+        if _semver_path(fetch['lock_before']['producer_path'],target)!=expected_client_lock or _semver_path(result['files']['lock']['producer_path'],target)!=expected_client_lock or _semver_hash(_semver_bound_file(directory,fetch['lock_before']))!=result['files']['lock']['sha256']:
+            raise ValueError('canary cache acquisition changed original check lock or its source role')
         source=_semver_path(result['source_root'],target)
         opc=[p for p in metadata['packages'] if p['name']=='oxml-opc']
         if len(opc)!=1 or opc[0]['source'] is not None:
@@ -3475,19 +3511,23 @@ def _prepare_release_semver_evidence(scope, destination):
 
 
 def _prepare_release_semver_reuse(scope, target, destination):
-    """Acquire available prior signed rows, never turn absence/failure into evidence success."""
-    scope=_semver_scope(scope) if isinstance(scope,str) else scope
-    sprint,_state=_semver_authority_location(())
-    context,catalog=_collect_release_semver_authority(sprint,scope)
-    choices=[a for a in catalog['attempts'] if a['target']==target and a['status']=='success' and not a.get('active_current_producer') and a.get('artifact')]
-    if not choices:return []
-    chosen=select_semver_attempt([{**a,'row_key':'reuse-'+target,'input_sha256':context['source_identity']} for a in choices])
-    # Failed relevant later rows are filtered by exact input when the execute handler authenticates reuse.
-    proof=_semver_download_proof(chosen,Path(destination)/target)
+    """Optional acquisition failure invalidates reuse, never mandatory fresh proof."""
     try:
+        scope=_semver_scope(scope) if isinstance(scope,str) else scope
+        sprint,_state=_semver_authority_location(())
+        context,catalog=_collect_release_semver_authority(sprint,scope)
+        choices=[a for a in catalog['attempts'] if a['target']==target and a['status']=='success' and not a.get('active_current_producer') and a.get('artifact')]
+        if not choices:return []
+        chosen=select_semver_attempt([{**a,'row_key':'reuse-'+target,'input_sha256':context['source_identity']} for a in choices])
+        proof=_semver_download_proof(chosen,Path(destination)/target)
         return _semver_download_origin_proofs([proof],catalog,Path(destination)/'origins')
-    except (ValueError,OSError) as error:
-        _semver_write(Path(destination)/'reuse-invalidation.json',{'error':type(error).__name__+': '+str(error),'decision':'reacquire all missing or invalidated rows'})
+    except (ValueError,OSError,KeyError,TypeError,subprocess.SubprocessError) as error:
+        refusal={'error':type(error).__name__+': '+str(error),'decision':'reacquire all missing or invalidated rows'}
+        try:
+            _semver_write(Path(destination)/'reuse-invalidation.json',refusal)
+        except OSError as retention_error:
+            print('optional SemVer reuse refusal retention failed: '+str(retention_error),file=sys.stderr)
+        print('optional SemVer reuse invalidated: '+refusal['error'],file=sys.stderr)
         return []
 
 
