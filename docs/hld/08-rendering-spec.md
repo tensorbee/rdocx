@@ -1864,6 +1864,10 @@ controls aggregate the blocks projected from that direct body owner. Preserved
 unlaid content remains addressable through an empty fragment slice.
 
 The body owner is a private result-local overlay on shared layout blocks.
+Structure assignment synchronizes an owned paragraph's captured semantics after
+assigning its physical paragraph or list identity. Paint and page continuations
+consume that exact assigned identity. A present companion remains authoritative,
+including an explicit absent identity at other publication boundaries.
 `PositionedElement` and the renderer input remain unchanged. Recorded restart
 state retains the sidecar with its exact pages, accounts for its capacity under
 the existing aggregate cache ceiling, and combines cached prefix and suffix

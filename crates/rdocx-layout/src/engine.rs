@@ -10599,9 +10599,14 @@ fn assign_shared_document_structure(
                     lists.clear();
                     assign_shared_table_structure(&mut builder, block, semantics, root);
                 }
-                SharedLayoutBlock::Owned { block, .. } => match block.as_mut() {
+                SharedLayoutBlock::Owned {
+                    block, semantics, ..
+                } => match block.as_mut() {
                     LayoutBlock::Paragraph(paragraph) => {
                         assign_owned_paragraph_structure(&mut builder, paragraph, root, &mut lists);
+                        if let Some(semantics) = semantics {
+                            semantics.structure_id = paragraph.structure_id;
+                        }
                     }
                     LayoutBlock::Table(table) => {
                         lists.clear();
@@ -22185,6 +22190,119 @@ mod tests {
                 .iter()
                 .any(|page| has_semantic_mark(&page.elements))
         );
+
+        // An Owned paragraph's pre-assignment companion must not turn body
+        // prose or a continued list item into an Artifact during painting.
+        fn text_marks(
+            elements: &[PositionedElement],
+            inherited: Option<StructureId>,
+            marks: &mut Vec<(String, Option<StructureId>)>,
+        ) {
+            for element in elements {
+                match element {
+                    PositionedElement::MarkedContent {
+                        structure,
+                        children,
+                        ..
+                    } => {
+                        text_marks(children, *structure, marks);
+                    }
+                    PositionedElement::Group(group) => {
+                        text_marks(&group.children, inherited, marks);
+                    }
+                    PositionedElement::Text(run) => marks.push((run.text.clone(), inherited)),
+                    _ => {}
+                }
+            }
+        }
+
+        let mut owned_input = make_input_with_text("sharedcontrol");
+        let owned_body = CT_P::from_xml_fragment(
+            format!(
+                "<w:p xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:bookmarkStart w:id=\"1\" w:name=\"owned\"/><w:r><w:t xml:space=\"preserve\">{}</w:t></w:r><w:bookmarkEnd w:id=\"1\"/></w:p>",
+                "ownedbody ".repeat(600)
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        assert!(!paragraph_is_cache_safe(&owned_body, &owned_input.styles));
+        owned_input.document.body.add_paragraph(owned_body);
+        let mut list_body = CT_P::new();
+        list_body.add_run(&"listbody ".repeat(600));
+        list_body.properties = Some(CT_PPr {
+            num_id: Some(1),
+            num_ilvl: Some(0),
+            ..Default::default()
+        });
+        assert!(!paragraph_is_cache_safe(&list_body, &owned_input.styles));
+        owned_input.document.body.add_paragraph(list_body);
+        owned_input.numbering = Some(rdocx_oxml::numbering::CT_Numbering::from_xml(
+            br#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num></w:numbering>"#,
+        ).unwrap());
+        let mut owned_engine = Engine::new_deterministic().unwrap();
+        let cold = owned_engine.layout_with_provenance(&owned_input).unwrap();
+        let warm = owned_engine.layout_with_provenance(&owned_input).unwrap();
+        let fresh = Engine::new_deterministic()
+            .unwrap()
+            .layout_with_provenance(&owned_input)
+            .unwrap();
+        assert_eq!(owned_engine.last_shared_block_counts, (1, 0));
+        assert_eq!(format!("{cold:?}"), format!("{warm:?}"));
+        assert_eq!(format!("{warm:?}"), format!("{fresh:?}"));
+        for result in [&cold.0, &warm.0, &fresh.0] {
+            let structure = result.structure.as_ref().unwrap();
+            for (word, continued, list) in [
+                ("sharedcontrol", false, false),
+                ("ownedbody", true, false),
+                ("listbody", true, true),
+            ] {
+                let mut identities = std::collections::HashSet::new();
+                let mut pages = 0;
+                for page in &result.pages {
+                    let mut marks = Vec::new();
+                    text_marks(&page.elements, None, &mut marks);
+                    let selected = marks
+                        .iter()
+                        .filter(|(text, _)| text.split_whitespace().any(|token| token == word))
+                        .collect::<Vec<_>>();
+                    pages += usize::from(!selected.is_empty());
+                    for (_, identity) in selected {
+                        identities.insert(identity.unwrap_or_else(|| {
+                            panic!("{word} body paint lost its assigned structure")
+                        }));
+                    }
+                }
+                assert!(
+                    pages > usize::from(continued),
+                    "{word} paints its continuations"
+                );
+                assert_eq!(
+                    identities.len(),
+                    1,
+                    "{word} keeps one physical paragraph owner"
+                );
+                let identity = *identities.iter().next().unwrap();
+                let paragraph = structure
+                    .nodes
+                    .iter()
+                    .find(|node| node.id == identity)
+                    .unwrap();
+                assert_eq!(paragraph.role, StructureRole::Paragraph);
+                let parent = structure
+                    .nodes
+                    .iter()
+                    .find(|node| node.children.contains(&identity))
+                    .unwrap();
+                assert_eq!(
+                    parent.role,
+                    if list {
+                        StructureRole::ListItem
+                    } else {
+                        StructureRole::Document
+                    }
+                );
+            }
+        }
     }
 
     fn safe_table(text: &str) -> CT_Tbl {
