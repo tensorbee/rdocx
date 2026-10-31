@@ -2728,8 +2728,15 @@ the list has one entry per resolved revision. A compared comment package
 change uses one private package revision, reported under the main story,
 because its added or removed comment may have no surviving comment owner.
 The list length equals the count from `accept_all` and `reject_all`.
+`StoryRevision::text` gives the text a revision inserts, deletes or moves, and
+for a run, paragraph or table property change the text of the run, paragraph
+or table it reformats, with tabs as `\t` and breaks as `\n`. It is empty for a
+paragraph mark, a section property change and the comment package revision.
 `rdocx-cli revision list` and Python `Document.revisions` expose this all-story
-listing. WASM load and save paths preserve the revision XML without a revision
+listing, the text as the `text` field of each `--json` record and the
+`Revision.text` attribute. Each surface keeps its own spelling of the kind, the
+CLI in kebab case like its other JSON values (`run-property-change`) and Python
+in snake case (`run_property_change`). WASM load and save paths preserve the revision XML without a revision
 inspection method.
 
 Native Word paragraph handles expose

@@ -408490,3 +408490,44 @@ fn issue434_new_comments_part_holds_word_comment_markup() {
         .collect::<Vec<_>>();
     assert_eq!(texts, ["Why thirty?\nSecond line", "Agreed"]);
 }
+
+#[test]
+fn issue434_story_revisions_carry_their_text() {
+    let mut original = Document::new();
+    original.add_paragraph("Pay within thirty days.");
+    original.add_paragraph("Late fees apply.");
+    let mut edited = Document::new();
+    edited.add_paragraph("Pay within sixty days.");
+    edited
+        .add_paragraph("")
+        .add_run("Late fees apply.")
+        .bold(true);
+    original
+        .compare_with_options(
+            &edited,
+            "Reviewer",
+            "2026-10-30T12:00:00Z",
+            &rdocx::ComparisonOptions {
+                granularity: rdocx::ComparisonGranularity::Word,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let revisions = original
+        .story_revisions()
+        .unwrap()
+        .iter()
+        .map(|revision| (revision.kind(), revision.text().to_owned()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        revisions,
+        [
+            (RevisionKind::Deletion, "thirty".to_owned()),
+            (RevisionKind::Insertion, "sixty".to_owned()),
+            (
+                RevisionKind::RunPropertyChange,
+                "Late fees apply.".to_owned()
+            ),
+        ]
+    );
+}

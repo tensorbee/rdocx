@@ -97,6 +97,7 @@ pub struct StoryRevision {
     author: String,
     timestamp: Option<String>,
     kind: RevisionKind,
+    text: String,
 }
 
 fn comment_comparison_record(
@@ -153,6 +154,7 @@ pub(crate) fn comment_comparison_revision(
             author: metadata.author,
             timestamp: metadata.timestamp,
             kind: metadata.kind,
+            text: String::new(),
         }),
     )
 }
@@ -180,6 +182,14 @@ impl StoryRevision {
 
     pub fn kind(&self) -> RevisionKind {
         self.kind
+    }
+
+    /// Return the text this revision inserts, deletes or moves, or for a run,
+    /// paragraph or table property change the text of the run, paragraph or
+    /// table it reformats. Tabs read as `\t` and breaks as `\n`. Empty for a
+    /// paragraph mark, a section property change and a comment revision.
+    pub fn text(&self) -> &str {
+        &self.text
     }
 }
 
@@ -415,8 +425,9 @@ pub(crate) fn story_part_revisions(
     let tree = XmlTree::parse(source)?;
     tree.elements
         .iter()
-        .filter_map(|element| Some((element.start, element.revision.as_ref()?)))
-        .map(|(start, metadata)| {
+        .enumerate()
+        .filter_map(|(index, element)| Some((index, element.start, element.revision.as_ref()?)))
+        .map(|(index, start, metadata)| {
             let (_, story) = owners
                 .iter()
                 .filter(|(span, _)| span.contains(&start))
@@ -432,6 +443,7 @@ pub(crate) fn story_part_revisions(
                 author: metadata.author.clone(),
                 timestamp: metadata.timestamp.clone(),
                 kind: metadata.kind,
+                text: tree.revision_text(index, metadata.kind)?,
             })
         })
         .collect()
@@ -464,6 +476,62 @@ impl RevisionScope<'_> {
                 .and_then(|value| Instant::parse(value).ok())
                 .is_some_and(|instant| *start <= instant && instant <= *end),
         }
+    }
+}
+
+impl XmlTree<'_> {
+    /// The text that the revision element at `index` holds, or for a
+    /// property change the text of the run, paragraph or table that owns the
+    /// changed properties.
+    fn revision_text(&self, index: usize, kind: RevisionKind) -> Result<String> {
+        let grandparent = |index: usize| {
+            self.elements[index]
+                .parent
+                .and_then(|parent| self.elements[parent].parent)
+        };
+        let owner = match kind {
+            RevisionKind::RunPropertyChange
+            | RevisionKind::ParagraphPropertyChange
+            | RevisionKind::TablePropertyChange => grandparent(index),
+            RevisionKind::SectionPropertyChange => None,
+            _ => Some(index),
+        };
+        let mut text = String::new();
+        if let Some(owner) = owner {
+            self.collect_text(owner, &mut text)?;
+        }
+        Ok(text)
+    }
+
+    fn collect_text(&self, index: usize, text: &mut String) -> Result<()> {
+        let element = &self.elements[index];
+        let in_run = element
+            .parent
+            .is_some_and(|parent| self.elements[parent].word && self.elements[parent].local == "r");
+        if element.word {
+            match element.local.as_str() {
+                "t" | "delText" => {
+                    if !element.empty {
+                        let raw = std::str::from_utf8(
+                            &self.source[element.open_end..element.close_start],
+                        )
+                        .map_err(|error| Error::Other(error.to_string()))?;
+                        text.push_str(
+                            &quick_xml::escape::unescape(raw)
+                                .map_err(|error| Error::Other(error.to_string()))?,
+                        );
+                    }
+                    return Ok(());
+                }
+                "tab" if in_run => text.push('\t'),
+                "br" | "cr" if in_run => text.push('\n'),
+                _ => {}
+            }
+        }
+        for &child in &element.children {
+            self.collect_text(child, text)?;
+        }
+        Ok(())
     }
 }
 

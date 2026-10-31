@@ -406,6 +406,7 @@ class Revision:
         timestamp: str | None,
         kind: str,
         story: Story | None = None,
+        text: str = "",
     ) -> Revision: ...
     @property
     def id(self) -> int: ...
@@ -417,6 +418,8 @@ class Revision:
     def kind(self) -> str: ...
     @property
     def story(self) -> Story | None: ...
+    @property
+    def text(self) -> str: ...
 
 
 @_final

@@ -1701,6 +1701,7 @@ pub fn revision_list(file: &Path, json_output: bool) -> Result<()> {
                 "timestamp": revision.timestamp(),
                 "kind": revision_kind_label(revision.kind()),
                 "story": story_json(revision.story()),
+                "text": revision.text(),
             })
         })
         .collect::<Vec<_>>();

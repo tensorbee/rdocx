@@ -15282,3 +15282,22 @@ def test_issue434_new_comments_part_uses_word_comment_markup():
     styles = document.part_xml('word/styles.xml')
     assert 'w:styleId="CommentText"' in styles and 'w:styleId="CommentReference"' in styles
     assert [comment.text for comment in document.comments] == ['Why thirty?', 'Agreed']
+
+
+def test_issue434_revisions_carry_their_text():
+    import rdocx
+    original = rdocx.Document()
+    original.add_paragraph('Pay within thirty days.')
+    original.add_paragraph('Late fees apply.')
+    edited = rdocx.Document()
+    edited.add_paragraph('Pay within sixty days.')
+    edited.add_paragraph('Late fees apply.').runs[0].font.bold = True
+    original.compare(edited, 'Reviewer', '2026-10-30T12:00:00Z', granularity='word')
+    assert [(revision.kind, revision.text) for revision in original.revisions] == [
+        ('deletion', 'thirty'),
+        ('insertion', 'sixty'),
+        ('run_property_change', 'Late fees apply.'),
+    ]
+    revision = original.revisions[0]
+    assert rdocx.Revision(id=revision.id, author=revision.author, timestamp=revision.timestamp,
+                          kind=revision.kind, text='thirty').text == 'thirty'
