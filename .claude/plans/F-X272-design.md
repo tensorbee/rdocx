@@ -2693,3 +2693,83 @@ and resolved counts, and unchanged lower opaque disposition. Typed Field form/ca
 assertions apply to the already-modeled direct D3 cases. Preserve unknown children,
 prior properties and drawing barriers. Existing source-copy/model admission remains
 unchanged. No new public method or general arbitrary subtree editing is authorized.
+
+
+## Current CI imported-program and ordinary identity boundary
+
+Root adopts this technical clarification of existing A3/A6, C1/C5and the retained
+raw/current-cache contracts after actual B7Python failures. It does not change
+Q-S96-01/Q-S96-02, implement pending Issue430, add a public API or broaden the
+held-revision policy. The complete15-failure diagnostic and independent ordinary
+projection/imported-instruction assessments remain under the existing TEMP root.
+
+An unchanged imported unsupported instruction is preserved source, not newly
+authored program grammar. The existing Field validation owner may distinguish
+actual Parsed source with current raw equal to immutable original raw, existing
+instruction_structure_eq and instruction_source_identity_eq, matching the writer's
+existing source predicate. These helpers alone do not check nested raw edits.
+Validate every current nested instruction child through its own qualified boundary.
+Always retain XML-character, model/namespace, ownership/resource/work-budget,
+current/new typed-cache, result and legacy kind/value checks. Skip only strict
+authoring grammar for the exact unchanged imported program. No token-alphabet
+expansion, formula evaluation, name-specific exception or catch-all error fallback
+is authorized. Preserve original raw XML and all source owners.
+
+Keep New and edited instruction paths strict, including checked from_raw,
+from_instruction and FieldInstruction::new. A newly authored parent must not
+accidentally inherit its parsed child's preservation permission. Review all
+existing authoring callers and add the actual new-parent/parsed-opaque-child
+discriminator. A small private borrowed grammar factor is permitted if required
+to retain one policy owner, without a new public method/type/flag or cross-crate
+API. Preserve admission before clones, finite work and existing charge rules.
+
+Concrete consumers are Field::validate_for_attachment, ordered-result
+normalization/publication, facade preflight_current_field/prepared_current_field
+and the existing engine field projection. The imported malformed quoted PAGE
+reaches existing unsupported display/cache diagnostics rather than failing the
+authoring preflight. The legacy FORMTEXT literal setter changes only the requested
+result. Its instruction-region calculated child remains exact, its old result
+child is removed only where selected, ffData defaults and bookmark/marker order
+remain exact, and held/fresh/reopened values retain their established semantics.
+F-X274unsupported-source/native requirements remain separately deciding.
+
+Ordinary clean-comparison proofs must use precise namespace-qualified producer
+identity policy for their actual owner: the five CT_PWord rsids, two existing
+w14paragraph identities, the three CT_RWord rsids and the current tridentity set.
+Factor the existing row filter into one private owner-specific root-fragment
+projection, preserving all inner bytes. Reuse it across ordinary p/r/trroot
+shells and simple/complex field physical-run and shared-root proof paths. Do not
+use the unrelated all-attribute run-root deduplication helper as an identity rule.
+Actual source/emitted XML, lower protected_source_residual and HeldRevisions
+remain unchanged and strict. Preserve genuine unknown Word/foreign attributes,
+alias/shadowed namespace distinctions, opaque elements/events and all scopes on
+surviving residual facts. No generic unused-binding/default-namespace pruning
+algorithm is authorized.
+
+The exact Issue158first replacement preserves first-title paragraph bytes but
+changes inherited default namespace declarations. Its measured guard item0diff
+is only incidental scope on p/rproducer-identity residuals. This is not a changed
+rsidvalue, and it is not permission to ignore namespace context generally. The
+lower bridge emits that known-root scope only with surviving residual attributes,
+so excluding ordinary identity-only facts can remove their accidental scope
+carrier. Validate that actual case and the complete fresh-binding workflow, not
+only a synthetic identity matrix. Original input SHA256is
+d05f9c753c00eb804c6e345126ef7a1f7a4fc635d2c9b653b829922030cd875e.
+
+Before source repair, capture actual pre-repair semantic RED for the new lower
+discriminators. Cover exact source/raw/structure/child identity, nested raw-only
+edits, source-owner substitution, strict new parent, XML-character and legacy
+refusals, real stored SVG and cache diagnostics, all18identity matrix rows,
+qualified aliases/foreign lookalikes and unchanged held revisions. Batch relevant
+cases in existing test carriers. Then acquire a fresh successful installed Python
+artifact and run every affected existing field/identity row plus the full
+Issue158workflow with the authenticated original fixture. No old wheel qualifies
+current Rust. Native, schema, full suite, archives, CLI and final risk riders
+remain pending for the integrated source. HLD03/10remain the impact list.
+
+Contract closure confirms existing callable APIs, current preserved-source versus
+new-authoring roles, ordinary versus held proof consumers, precise source identity,
+atomic refusals and local/final evidence. No new public signature, unsupported
+XML creation or unresolved user product choice is introduced. Root grants an
+implementation lease only after the current canonical writer and review phases
+return control.

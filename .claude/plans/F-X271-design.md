@@ -31,6 +31,7 @@ Update only the existing roadmap policy's expected future set from 97/98/99 to 9
 | Linux oracle identity | `download_archive(Path) -> None`, `safe_extract(Path, Path) -> Path`, `verify_soffice(Path) -> None`, `install() -> None` | Existing Linux installer used by Test, MSRV, Word/presentation fidelity | Retrieve, hash, bounded extract, install, version, actual gate |
 | macOS oracle identity | Existing rpptx installed-Python CI step | Existing DMG checksum and exact soffice identity | Retrieve, bound, hash, readonly mount, installed suite |
 | Sprint placement | `test_m23_m24_roadmap_has_no_duplicate_or_dangling_story` | Same HLD/backlog/roadmap inputs, revised authorized set only | Current plan and final completion metadata |
+| Script oracle policy | Existing `build_multi_script_fixtures(output: Path)` and accepted-copy/render/score callers | Explicit kern1 on all36runs at24pt in the shared enabled intersection | Generate, actual accepted byte copy, Rust and Writer render, all-five score and separate bidi evidence |
 
 ## Behavior contracts and evidence
 
@@ -55,6 +56,7 @@ No formal dependency. Tool restoration is the execution prerequisite for the fin
 | A3 | Wrong digest/version, oversize, traversal, non-file, missing package | Refusal before installation/use, no escape writes | Installer and workflow | Existing failure controls in `test_sprint_workflow.py` | Integrated policy suite |
 | A4 | Current revised roadmap | Unique complete placements accepted, duplicate/missing/dependency mutations rejected | Sprint policy | `test_m23_m24_roadmap_has_no_duplicate_or_dangling_story` | Final-state metadata policies |
 | A5 | Actual integrated source | Previously retrieval-blocked jobs execute and succeed with exact pins | Test, MSRV, Word fidelity, rpptx Python, CI gate | None, hosted-only evidence | New source-bound run/job IDs required, preserve old failures |
+| A8 | Five generated script fixtures | Explicit shared enabled-kerning policy, all36runs retain qualified text/font/language/size/direction and accepted-copy identity | Word script oracle tooling and final F-X273 consumer | Existing fixture-inventory body plus retained exact acceptor and five-page diagnostic | Actual final-source full Word fidelity and bidi evidence, unchanged thresholds, native default-policy debt remains separate |
 
 ## Test matrix
 
@@ -63,6 +65,7 @@ No formal dependency. Tool restoration is the execution prerequisite for the fin
 | C1 | Linux and macOS actual downloads | Different platform hashes, same exact release/build identity | Changing URL to latest or trusting HEAD |
 | C2 | Good archive versus digest/version mismatch and each extraction bound | Only authenticated safe inputs usable | Disabling integrity or bounds to get CI green |
 | C3 | New roadmap set versus duplicate/missing/dangling stories | Valid plan accepted, mutations fail | Deleting policy assertions |
+| C4 | All36script runs with kern1 versus absent, zero or above-size mutation | Exact enabled-policy XML, unchanged text/font/language/size/direction/geometry and byte-exact accepted copies | Comparing unlike defaults or silently narrowing the qualified script inventory |
 
 ## Rejected alternatives
 
@@ -79,11 +82,13 @@ Final sprint: full `python3 -m unittest scripts.test_sprint_workflow`, actual au
 
 ## HLD impact
 
+- `docs/hld/12-testing-strategy.md`
+- `docs/hld/14-development-backlog.md`
 - `docs/hld/15-build-and-toolchain.md`
 
 ## Risk routing
 
-External oracle comparison adds exact version/build/input provenance and actual supported-target installation. Completion/status policy adds final affected metadata checks. Shared tooling consumers add Linux/macOS route checks. No product parser, unit conversion, public binding or crate graph change. Final hash/pixel union still applies to S96.
+External oracle comparison adds exact version/build/input provenance and actual supported-target installation. Completion/status policy adds final affected metadata checks. Shared tooling consumers add Linux/macOS route checks. No product parser, unit conversion, public binding or crate graph change. Final hash/pixel union still applies to S96. A8 also creates deterministic qualified run-property XML, so preserve schema placement, source text and the existing ZIP recipe while proving the exact accepted-copy boundary. No product parser is changed.
 
 ## Hash harness
 
@@ -96,8 +101,9 @@ Expected unchanged,49 hashes and 7 deterministic pixel cases. This tooling/polic
 - [x] Add macOS retrieval bound and preserve readonly mount checks.
 - [x] Repair only the outdated roadmap expectation, retain negative controls.
 - [x] Run unique scoped checks and independent zero-finding microscope.
-- [x] Update listed HLD intent before final gate.
+- [x] Reconcile every currently listed HLD impact before final gate, including A8 intent.
 - [x] Implement and independently review A7 public diagnostic retention without changing its deadline or stages.
+- [x] Implement and independently review A8 shared-policy script fixtures and their exact coverage declaration.
 - [ ] Obtain actual final-source hosted acceptance, retaining pending status until observed.
 
 ## Open questions
@@ -171,8 +177,8 @@ destination on every failure. Create the invocation-owned temporary exclusively
 and unlink only after ownership is established. A stale or colliding foreign
 .download must be refused and left untouched. No broad cleanup is added.
 
-Implement in the existing fetcher and scripts/test_sprint_workflow.py. HLD15is
-already the sole HLD impact. Extend its current retrieval intent before verify.
+Implement in the existing fetcher and scripts/test_sprint_workflow.py. For A6, HLD15 owns
+the retrieval intent. Extend its current retrieval intent before verify.
 Finite local tests in the existing carrier cover initial transient then success,
 partial read then complete retry,3attempt exhaustion, allowed/terminal status and
 TLS/DNS/reason controls, checksum/silent-EOF refusal, transient-looking local write
@@ -211,7 +217,7 @@ A7 consumer: the existing public authoring conformance integration test in crate
 
 Before repair, capture a genuine synthetic old-source RED for the same diagnostic requirement. Mock the known public child raising TimeoutExpired, without Cargo, network, oracle or native execution. Cover mixed bytes/text fields, non-UTF8 bytes, empty bytes/text and None, list/tuple command representation and the actual timeout value. Assert phase/argv/timeout/partial streams survive in the deciding failure and no mock command is rerun. Verify the unchanged300second subprocess call and public invocation inputs. Add controls that a nonzero child retains its actual return code, command and both streams, and incomplete public output cannot pass. Discriminate the three unique ordered public source checkpoints while retaining both deterministic render calls. Verify that marker absence is not reported as a proven build/lock diagnosis. Keep the normal integration carrier enabled and its success requirement intact. Preserve the prior failed hosted observation and each source-bound local outcome.
 
-Implement diagnostics in the existing script and its existing HarnessSelfTests. The existing Rust integration carrier may be adjusted only if needed to retain/display the actual diagnostic while preserving its public invocation and success contract. ci.yml changes require a later observed cause that earns the specific change. Do not preemptively alter workflow timeouts, jobs, caches, target directories or stage selection. HLD15 remains the sole HLD impact, documenting failure attribution and the unchanged requirement for actual host qualification.
+Implement diagnostics in the existing script and its existing HarnessSelfTests. The existing Rust integration carrier may be adjusted only if needed to retain/display the actual diagnostic while preserving its public invocation and success contract. ci.yml changes require a later observed cause that earns the specific change. Do not preemptively alter workflow timeouts, jobs, caches, target directories or stage selection. For A7, HLD15 documents failure attribution and the unchanged requirement for actual host qualification.
 
 ### Actual cause and completion gate
 
@@ -225,3 +231,70 @@ A7 closes only with a clean actual final-source MSRV public-conformance result a
 A7local diagnostics pass12existing harness self-tests and the existing CI/privacy wiring test, with actual synthetic old-source failures retained. F271all-pass5 reports zero defects and smells. This qualifies diagnostic retention only. The original MSRV timeout remains failed, its runtime cause is unproved, and actual final-source public conformance and the complete CI union remain pending. Existing installer/retry review and input proof remain limited to their applicable unchanged scope.
 
 The existing consumed source-availability handoff establishes its historical integration fact. A renewed canonical checkpoint must authenticate fresh clean reviewed source, workflow bytes, remote/ref/SHA and ancestry. Existing F271/F275progress and S96run state record the expanded pending native/signing/CI and build-only wheels gates before any push. Old1431results do not qualify current.17/.15source. No new worker handoff or completion is inferred, and native Word, full/hash/pixel/installed/WASM/oracle acceptance remains due.
+
+
+## A8, Explicit shared-policy script oracle fixtures
+
+Root adopts this bounded technical revision under the user's explicit requirement
+to repair failed CI before publication. F-X271 remains approved and in-progress.
+The independent technical assessment and process check select this current
+oracle-tooling story. F-X273 retains its genuine historical provider-prefix done
+fact, its approved sole-HLD08 contract and every outstanding native obligation.
+No product API, Word default, font, threshold, skip, output baseline or release
+authority changes through A8. No unresolved user product choice remains.
+
+The current B7 Word fidelity result fails the original Arabic and bidirectional
+fixtures after the approved K1 policy begins honoring absent Word kerning as off.
+Retain that actual failed run41149328813 and all original inputs and measurements.
+Pinned LibreOffice26.2.5.2 DomainMapper.cxx maps w:kern to a Boolean, with zero
+false and any nonzero true, and does not implement Word's size threshold. Thus
+authored zero is not a common enabling control. Use an explicit w:kern value1
+in every generated run at the existing24point size, or48half-points. This selects
+enabled kerning under both Word's threshold and Writer's Boolean policies.
+
+This is an explicit fixture-input and coverage amendment. The five-page oracle
+gate covers shaping, language, font, bidi and geometry with enabled kerning. It
+does not qualify absent, zero, above-size or inherited Word kerning semantics.
+Keep those original K1 controls and named actual native Word observations
+independently deciding. Missing native evidence remains pending and cannot be
+replaced by the amended oracle gate. Preserve the original diagnostic absent
+fixtures and B7 failures without relabeling them successful.
+
+The callable owner remains build_multi_script_fixtures(output: Path) in existing
+scripts/docx_ssim_harness.py, returning its existing list of fixture dictionaries.
+Only add the explicit kern property in its existing four single-script and one
+mixed bidi builders. All36runs retain text, family, language, nominal and complex
+size, direction and paragraph geometry. Add a discriminator to the existing
+fixture-inventory test body, not a new file or test binary. It must reject absent,
+zero and a value beyond the font size, while preserving the existing complete
+fixture/text/font/language/bidi inventory checks. Capture actual unchanged-builder
+RED for that new requirement before implementing, then GREEN.
+
+The accepted-copy stage remains the exact current ACCEPTOR_SOURCE and
+prepare_accepted_document path. Prove the generated minimal inputs have no
+revisions and that all five actual accepted copies retain every byte, including
+all36kern properties. Do not bypass that path in the deciding gate. Preserve the
+exact pinned LibreOffice/Poppler/font inventories, rendering and acceptance stages,
+DPI, one-pixel white-canvas policy,95percent SSIM threshold,80percent page coverage
+and separate bidi qualification. No missing page, label, font or script is dropped.
+
+The TEMP-only diagnostics in fx273-b7-render-diagnostic-v1 include all five
+authored value1inputs, unchanged-source acceptor executions with byte-exact
+copies, a source-bound frozen Rust producer and actual pinned macOS oracle outputs.
+All five diagnostic scores equal the earlier Linux calibration values, with no
+threshold change. This supports the technical policy intersection, not a full
+harness, current Linux, repaired-source or native Word pass. The independent
+assessment is fx273-script-fixture-alignment-contract-readonly-v1.
+
+The consumer map and local matrix include A8, and the regression test gate remains
+unchanged. Contract closure confirms unchanged callable signatures, all36qualified
+run owners, exact accepted-copy ownership, explicit enabled-policy coverage and
+separate default-policy/native obligations. The product-facing decisions remain
+unchanged and no material question remains. Update HLD12 to state
+the explicit enabled-policy coverage, HLD14's current F-X271 scope and HLD15's
+CI qualification boundary. Keep HLD prose about current intent rather than a
+change log. Scoped fixture/static checks and a fresh independent F-X271 microscope
+are required. Final actual source-qualified hosted Word fidelity must execute all
+five amended pages and the unchanged complete harness. The final S96 union still
+requires native Word, all F-X273 riders and successful complete CI before wheels.
+No dispatch, push, completion or publication follows from this design adoption.
