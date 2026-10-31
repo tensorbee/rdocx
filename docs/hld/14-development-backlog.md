@@ -8726,6 +8726,8 @@ Preparation adds no product API or algorithm. Require actual current-source22-pa
 
 Restore the exact LibreOffice 26.2.5.2 oracle for Linux and macOS CI without upgrading the viewer, weakening TLS/checksums, skipping gates or silently changing executable identity. Current stable URLs return 404before Test, MSRV, Word fidelity and rpptx installed tests. Official old-release HEAD candidates return200but are not authenticated archives. Verify actual platform bytes, safe bounded extraction and executable version against retained independent pins before switching retrieval. Preserve failed CI logs. Reconcile the existing hard-coded roadmap policy with the authorized whole-number sprint shift, and keep metadata/classification policies meaningful. Scope is tooling/policy only. Source scripts and workflow changes belong to later implementation, not the analysis intake. Require current-head CI successors to run the previously blocked gates.
 
+The oracle-tooling boundary also requires explicit shared enabled-kerning policy in the five generated script fixtures. Preserve their text, fonts, language, direction, geometry, complete accepted-copy path, exact oracle identities and existing SSIM/coverage and bidi gates. Word absent, zero, threshold and inheritance behavior retains its separate K1 controls and native qualification. This alignment does not authorize a Word default change or a successful verdict for earlier failed fixtures.
+
 ### F-X272, Preserve existing revisions during document comparison
 
 **Sprint**: S96

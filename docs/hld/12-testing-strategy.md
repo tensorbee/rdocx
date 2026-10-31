@@ -2973,14 +2973,29 @@ trend are scored evidence rather than orchestration failures.
 The same harness source-builds five one-page Word fixtures for Arabic,
 Devanagari, Thai, Simplified Chinese, and mixed bidirectional text. Each uses an
 approved deterministic Noto family, complete `w:lang` attributes, 24 point
-text, and exact 24 point line spacing. The bidirectional page also carries an
-RTL paragraph base, explicit RTL and LTR runs, logical start and end indents,
-and start justification. Unlike the five-document trend, these five pages have
-a hard raw luminance SSIM gate of at least 0.95 on at least 80 percent of pages.
-The reviewed evidence passes five of five pages with scores 0.956809869,
-0.972241230, 0.997558968, 0.997294132, and 0.992810907 respectively. The TSV
-records each page and the JSON records fixture identities, coverage, threshold,
-and per-document page counts.
+text, and exact 24 point line spacing. Every one of the36runs explicitly sets
+qualified `w:kern w:val="1"` with nominal and complex size48half-points. This
+selects enabled kerning under both Word's size-threshold policy and the pinned
+Writer's nonzero Boolean policy. It qualifies the shared enabled domain only.
+Absent, zero, above-size and inherited Word kerning retain separate K1controls
+and actual native Word qualification.
+
+The bidirectional page also carries an RTL paragraph base, explicit RTL and LTR
+runs, logical start and end indents, and start justification. Unlike the
+five-document trend, these five pages have a hard raw luminance SSIM gate of at
+least 0.95 on at least 80 percent of pages. Separate bidi evidence requires every
+bidirectional page to reach0.95. The unchanged accepted-copy stage precedes
+Writer export. The generated minimal inputs have no revisions and their accepted
+copies preserve every byte, including all36qualified kern properties.
+
+The retained earlier omitted-property calibration recorded five passing pages
+with scores0.956809869,0.972241230,0.997558968,0.997294132and0.992810907.
+Those historical scores do not qualify the explicit-policy input domain at a
+new source. The final source-qualified harness and hosted gate must execute all
+five current fixtures with the same tools, fonts, normalization and thresholds.
+The TSV records each page and the JSON records fixture identities, coverage,
+threshold, and per-document page counts. Original failed inputs and measurements
+remain separate from these current acceptance requirements.
 
 The Writer oracle registers the three fixed Noto files and one checked-in
 oracle-only static Thin instance of the exact bundled Noto Sans SC subset. The

@@ -1214,8 +1214,16 @@ JSON and TSV evidence. The harness rejects corpus or tool drift, renderer or
 oracle failure, zero output, and a missing or empty evidence artifact. It
 records page-count and dimension differences through union-index SSIM scoring
 and does not fail solely because the five-document 0.95 on 80 percent trend is
-missed. The four source-built complex-script pages separately require raw SSIM
-of at least 0.95 on at least 80 percent of pages. The aggregate CI gate requires
+missed. The five source-built script pages separately require raw SSIM of at
+least0.95on at least80percent of pages, with every bidirectional page reaching
+0.95in its separate evidence check. All36runs explicitly request qualified
+kern1at24pt, the shared enabled-kerning intersection of Word and pinned Writer.
+Text, four font slots, language, nominal and complex size, direction, paragraph
+geometry and deterministic ZIP ownership stay fixed. This oracle domain does
+not qualify absent, zero, above-size or inherited Word kerning, whose native K1
+controls remain independently deciding. The final source-qualified hosted gate
+must execute all five fixtures and the complete existing harness. Diagnostic
+fixture scores do not substitute for that run. The aggregate CI gate requires
 success when the path filter selects the job.
 The harness prepares each Writer input through a locked, offline helper that
 calls the existing `rdocx::Document::accept_all` API. It reopens the resulting
