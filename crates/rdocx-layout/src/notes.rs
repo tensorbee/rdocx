@@ -100,6 +100,7 @@ struct NoteEntry {
 
 #[derive(Debug, Clone)]
 pub(crate) struct NoteRenderParagraph {
+    pub paint: std::sync::Arc<crate::block::WordParagraphPaint>,
     pub border_gap_before: f64,
     pub block: ParagraphBlock,
     pub direction: TextDirection,
@@ -216,7 +217,7 @@ impl NoteRegistry {
                                 MainStoryLayoutItem::Paragraph(paragraph, path) => {
                                     let source =
                                         sources.and_then(|sources| sources.id(&story, &path));
-                                    let (mut block, direction) =
+                                    let (mut block, direction, mut paint) =
                                         layout_paragraph_with_source_and_direction(
                                             paragraph,
                                             note_width,
@@ -231,9 +232,9 @@ impl NoteRegistry {
                                             None,
                                         )?;
                                     if let Some(registry) = sources {
-                                        registry.bind_text_boxes(&mut block, source)?;
+                                        registry.bind_text_boxes(&mut block, &mut paint, source)?;
                                     }
-                                    vec![(block, direction)]
+                                    vec![(block, direction, paint)]
                                 }
                                 MainStoryLayoutItem::Table(table, path) => {
                                     let (table, semantics) =
@@ -262,13 +263,13 @@ impl NoteRegistry {
                                             .map(sect_pr_to_geometry)
                                             .unwrap_or_default(),
                                         media.media(),
-                                    )
+                                    )?
                                     .into_iter()
-                                    .map(|block| (block, TextDirection::Auto))
+                                    .map(|(block, paint)| (block, TextDirection::Auto, paint))
                                     .collect()
                                 }
                             };
-                            for (block, direction) in laid_out_blocks {
+                            for (block, direction, paint) in laid_out_blocks {
                                 let first = lines.len();
                                 if let Some(color) = block.change_bar
                                     && !block.lines.is_empty()
@@ -278,6 +279,7 @@ impl NoteRegistry {
                                 lines.extend(block.lines.iter().cloned());
                                 let last = lines.len();
                                 render_paragraphs.push(NoteRenderParagraph {
+                                    paint: std::sync::Arc::new(paint),
                                     border_gap_before: 0.0,
                                     block,
                                     direction,

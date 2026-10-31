@@ -1731,25 +1731,27 @@ fn layout_cell_content(
         match item {
             CellContent::Paragraph(para) => {
                 let source = sources.and_then(|sources| sources.id(story, &source_path));
-                let (mut block, reflow_direction) = engine::layout_paragraph_with_source_in_table(
-                    para,
-                    available_width,
-                    styles,
-                    input,
-                    media,
-                    fm,
-                    num_state,
-                    diagnostics,
-                    source,
-                    table_style_ppr,
-                    table_style_rpr,
-                    doc_grid,
-                )?;
+                let (mut block, reflow_direction, mut paint) =
+                    engine::layout_paragraph_with_source_in_table(
+                        para,
+                        available_width,
+                        styles,
+                        input,
+                        media,
+                        fm,
+                        num_state,
+                        diagnostics,
+                        source,
+                        table_style_ppr,
+                        table_style_rpr,
+                        doc_grid,
+                    )?;
                 if let Some(registry) = sources {
-                    registry.bind_text_boxes(&mut block, source)?;
+                    registry.bind_text_boxes(&mut block, &mut paint, source)?;
                 }
                 blocks.push(CellBlock::Paragraph(block));
                 semantics.push(CellBlockSemantics::Paragraph(ParagraphSemantics {
+                    paint: std::sync::Arc::new(paint),
                     tb_rl_exact_baseline: None,
                     border_group_before: false,
                     source_node: source,
@@ -1863,25 +1865,27 @@ fn layout_control_cell_content(
         match content {
             SdtContent::Paragraph(paragraph) => {
                 let source = sources.and_then(|sources| sources.id(story, &source_path));
-                let (mut block, reflow_direction) = engine::layout_paragraph_with_source_in_table(
-                    paragraph,
-                    available_width,
-                    styles,
-                    input,
-                    media,
-                    fm,
-                    num_state,
-                    diagnostics,
-                    source,
-                    table_style_ppr,
-                    table_style_rpr,
-                    doc_grid,
-                )?;
+                let (mut block, reflow_direction, mut paint) =
+                    engine::layout_paragraph_with_source_in_table(
+                        paragraph,
+                        available_width,
+                        styles,
+                        input,
+                        media,
+                        fm,
+                        num_state,
+                        diagnostics,
+                        source,
+                        table_style_ppr,
+                        table_style_rpr,
+                        doc_grid,
+                    )?;
                 if let Some(registry) = sources {
-                    registry.bind_text_boxes(&mut block, source)?;
+                    registry.bind_text_boxes(&mut block, &mut paint, source)?;
                 }
                 blocks.push(CellBlock::Paragraph(block));
                 semantics.push(CellBlockSemantics::Paragraph(ParagraphSemantics {
+                    paint: std::sync::Arc::new(paint),
                     tb_rl_exact_baseline: None,
                     border_group_before: false,
                     source_node: source,

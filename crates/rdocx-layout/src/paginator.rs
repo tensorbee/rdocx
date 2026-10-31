@@ -4,21 +4,22 @@
 //! keep-lines-together, and header/footer placement.
 
 use crate::block::{
-    AnchoredContent, AnchoredDrawing, CellBlockSemantics, LayoutBlock, LayoutBlockLike,
-    ParagraphBlock, ParagraphView, RowSemantics, ShapePreset, SharedLayoutBlock, TableView,
+    AnchoredContent, AnchoredDrawing, CellBlockSemantics, FieldPaintOwner, LayoutBlock,
+    LayoutBlockLike, PaintLayers, PaintPolicies, PaintedElements, ParagraphBlock, ParagraphView,
+    RowSemantics, ShapePreset, SharedLayoutBlock, TableView, WordAnchorPaint, WordParagraphPaint,
+    WordRowPaint,
 };
 use crate::table::{CellBlock, FloatingTable, TableRow};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-#[cfg(test)]
-use oxml_layout::TextDirection;
 use oxml_layout::{
     Align, Color, FontManager, ForcedBreakKind, GlyphRun, GroupElement, LayoutLine, LineItem,
     MediaId, MultilingualGlyphRun, NoteRef, NoteStream, OutlineEntry, PageFrame, Path, Point,
-    PositionedElement, Rect, TabAlign, TabAlignedField, Transform, break_into_lines,
-    break_multilingual_into_lines,
+    PositionedElement, Rect, TabAlign, TabAlignedField, Transform,
 };
+#[cfg(test)]
+use oxml_layout::{TextDirection, break_into_lines, break_multilingual_into_lines};
 
 use rdocx_oxml::borders::{CT_BorderEdge, CT_PBdr};
 use rdocx_oxml::document::{ST_LineNumberRestart, ST_PageBorderDisplay, ST_PageBorderOffset};
@@ -312,6 +313,7 @@ pub(crate) enum HeaderFooterPlacement {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct HeaderFooterBlockSemantics {
+    pub paint: Arc<WordParagraphPaint>,
     pub direction: oxml_layout::TextDirection,
     pub border_gap: f64,
     pub flow_gap: f64,
@@ -325,7 +327,12 @@ impl HeaderFooterBlockSemantics {
     }
 
     pub(crate) fn retained_bytes(&self) -> usize {
-        let mut bytes = std::mem::size_of::<Self>();
+        let mut bytes = std::mem::size_of::<Self>().saturating_add(
+            self.paint
+                .retained_bytes()
+                .and_then(|bytes| bytes.checked_add(2 * std::mem::size_of::<usize>()))
+                .unwrap_or(usize::MAX),
+        );
         if let HeaderFooterPlacement::Frame { properties, .. } = &self.placement {
             bytes = bytes.saturating_add(std::mem::size_of_val(properties.as_ref()));
             for value in [
@@ -418,6 +425,7 @@ fn story_flow_height(
 /// immutable throughout candidate preparation.
 #[derive(Debug, Clone)]
 struct PreparedFurniture {
+    paints: Vec<Option<Arc<WordParagraphPaint>>>,
     blocks: Vec<ParagraphBlock>,
     before_lines: Vec<Vec<f64>>,
     origin: f64,
@@ -441,6 +449,7 @@ impl PreparedFurniture {
                 self.origin,
                 self.height,
                 &self.blocks,
+                &self.paints,
                 &self.before_lines,
                 &self.starts,
                 &self.placements,
@@ -454,10 +463,20 @@ impl PreparedFurniture {
 fn locate_furniture(
     blocks: Vec<ParagraphBlock>,
     before_lines: Vec<Vec<f64>>,
+    paints: Option<Vec<Option<Arc<WordParagraphPaint>>>>,
     facts: Option<&[HeaderFooterBlockSemantics]>,
     geometry: &PageGeometry,
     origin: f64,
 ) -> PreparedFurniture {
+    let paints = paints.unwrap_or_else(|| {
+        (0..blocks.len())
+            .map(|index| {
+                facts
+                    .and_then(|facts| facts.get(index))
+                    .map(|facts| Arc::clone(&facts.paint))
+            })
+            .collect()
+    });
     let mut starts = vec![origin; blocks.len()];
     let mut placements = vec![None; blocks.len()];
     let mut wraps = Vec::new();
@@ -577,6 +596,7 @@ fn locate_furniture(
         after = paragraph.space_after;
     }
     PreparedFurniture {
+        paints,
         blocks,
         before_lines,
         origin,
@@ -603,6 +623,7 @@ fn prepare_furniture(
     let mut previous = locate_furniture(
         original.to_vec(),
         vec![Vec::new(); original.len()],
+        None,
         facts,
         geometry,
         origin,
@@ -623,6 +644,7 @@ fn prepare_furniture(
         let obstacles = locate_furniture(
             previous.blocks.clone(),
             previous.before_lines.clone(),
+            Some(previous.paints.clone()),
             facts,
             geometry,
             origin,
@@ -630,6 +652,13 @@ fn prepare_furniture(
         .wraps;
         let mut blocks = original.to_vec();
         let mut before_lines = vec![Vec::new(); original.len()];
+        let mut paints = (0..original.len())
+            .map(|index| {
+                facts
+                    .and_then(|facts| facts.get(index))
+                    .map(|facts| Arc::clone(&facts.paint))
+            })
+            .collect::<Vec<_>>();
         let mut y = origin;
         let mut after: f64 = 0.0;
         for (index, source) in original.iter().enumerate() {
@@ -641,7 +670,10 @@ fn prepare_furniture(
             if entry.is_none_or(|entry| matches!(entry.placement, HeaderFooterPlacement::Flow))
                 && let Some(reflowed) = reflow_around_wraps(
                     source,
-                    entry.map_or(oxml_layout::TextDirection::Auto, |entry| entry.direction),
+                    (
+                        entry.map_or(oxml_layout::TextDirection::Auto, |entry| entry.direction),
+                        entry.map(|entry| entry.paint.as_ref()),
+                    ),
                     &obstacles,
                     y - geometry.margin_top,
                     geometry,
@@ -649,13 +681,14 @@ fn prepare_furniture(
                     WrapReflowPolicy::Furniture,
                 )?
             {
+                paints[index] = reflowed.paint.map(Arc::new);
                 blocks[index] = reflowed.paragraph;
                 before_lines[index] = reflowed.before_lines;
             }
             y += blocks[index].content_height() + before_lines[index].iter().sum::<f64>();
             after = source.space_after;
         }
-        let current = locate_furniture(blocks, before_lines, facts, geometry, origin);
+        let current = locate_furniture(blocks, before_lines, Some(paints), facts, geometry, origin);
         let state = current.state();
         // This validates both the offered obstacles and the footer origin at
         // the actual resulting line/placement state, not just equal heights.
@@ -682,7 +715,17 @@ pub struct Section {
     pub page_number_start: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct WordLineNumberStyle {
+    pub font_id: Option<oxml_layout::FontId>,
+    pub size: f64,
+    pub bold: bool,
+    pub italic: bool,
+    pub kerning: bool,
+}
+
 pub(crate) struct SharedSection {
+    pub line_number_style: Option<WordLineNumberStyle>,
     pub written_tb_rl_band: bool,
     pub modern_footnote_layout: bool,
     pub footnote_layout_like_word8: bool,
@@ -711,7 +754,146 @@ pub(crate) struct FurnitureFailure {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PagePaintBoundary {
+    pub behind_end: usize,
+    pub regular_end: usize,
+    pub body_front_end: usize,
+    pub furniture_front_end: usize,
+    pub elements_len: usize,
+}
+
+impl PagePaintBoundary {
+    pub(crate) fn validate(self, elements_len: usize) -> oxml_layout::Result<()> {
+        if self.behind_end > self.regular_end
+            || self.regular_end > self.body_front_end
+            || self.body_front_end > self.furniture_front_end
+            || self.furniture_front_end > self.elements_len
+            || self.elements_len != elements_len
+        {
+            return Err(oxml_layout::LayoutError::Layout(
+                "inconsistent physical page paint boundary".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct PagePaintRecords {
+    pub policies: Vec<PaintPolicies>,
+    pub boundaries: Vec<PagePaintBoundary>,
+}
+
+impl PagePaintRecords {
+    pub(crate) fn validate(&self, pages: &[PageFrame]) -> oxml_layout::Result<()> {
+        if self.policies.len() != pages.len() || self.boundaries.len() != pages.len() {
+            return Err(oxml_layout::LayoutError::Layout(
+                "page paint companion count mismatch".into(),
+            ));
+        }
+        for ((page, policies), boundary) in pages.iter().zip(&self.policies).zip(&self.boundaries) {
+            policies.validate(&page.elements)?;
+            boundary.validate(page.elements.len())?;
+        }
+        Ok(())
+    }
+
+    fn neutral(pages: &[PageFrame]) -> oxml_layout::Result<Self> {
+        let mut records = Self::default();
+        for page in pages {
+            let (_, policies) = PaintedElements::neutral(page.elements.clone())?.into_parts()?;
+            let len = page.elements.len();
+            records.policies.push(policies);
+            records.boundaries.push(PagePaintBoundary {
+                behind_end: 0,
+                regular_end: len,
+                body_front_end: len,
+                furniture_front_end: len,
+                elements_len: len,
+            });
+        }
+        Ok(records)
+    }
+
+    fn append_late(
+        &mut self,
+        pages: &mut [PageFrame],
+        mut layers: PaintLayers,
+    ) -> oxml_layout::Result<()> {
+        self.validate(pages)?;
+        let index = pages.len().checked_sub(1).ok_or_else(|| {
+            oxml_layout::LayoutError::Layout("late notes have no owning page".into())
+        })?;
+        let mut boundary = self.boundaries[index];
+        let mut painted = PaintedElements::from_parts(
+            std::mem::take(&mut pages[index].elements),
+            std::mem::take(&mut self.policies[index]),
+        )?;
+        let count = layers.behind.len();
+        painted.splice_at(
+            &[],
+            boundary.behind_end..boundary.behind_end,
+            &mut layers.behind,
+        )?;
+        boundary.behind_end = boundary
+            .behind_end
+            .checked_add(count)
+            .ok_or_else(|| oxml_layout::LayoutError::Layout("late note paint overflow".into()))?;
+        boundary.regular_end = boundary
+            .regular_end
+            .checked_add(count)
+            .ok_or_else(|| oxml_layout::LayoutError::Layout("late note paint overflow".into()))?;
+        boundary.body_front_end = boundary
+            .body_front_end
+            .checked_add(count)
+            .ok_or_else(|| oxml_layout::LayoutError::Layout("late note paint overflow".into()))?;
+        boundary.furniture_front_end = boundary
+            .furniture_front_end
+            .checked_add(count)
+            .ok_or_else(|| oxml_layout::LayoutError::Layout("late note paint overflow".into()))?;
+        let count = layers.regular.len();
+        painted.splice_at(
+            &[],
+            boundary.regular_end..boundary.regular_end,
+            &mut layers.regular,
+        )?;
+        boundary.regular_end = boundary
+            .regular_end
+            .checked_add(count)
+            .ok_or_else(|| oxml_layout::LayoutError::Layout("late note paint overflow".into()))?;
+        boundary.body_front_end = boundary
+            .body_front_end
+            .checked_add(count)
+            .ok_or_else(|| oxml_layout::LayoutError::Layout("late note paint overflow".into()))?;
+        boundary.furniture_front_end = boundary
+            .furniture_front_end
+            .checked_add(count)
+            .ok_or_else(|| oxml_layout::LayoutError::Layout("late note paint overflow".into()))?;
+        let count = layers.front.len();
+        painted.splice_at(
+            &[],
+            boundary.body_front_end..boundary.body_front_end,
+            &mut layers.front,
+        )?;
+        boundary.body_front_end = boundary
+            .body_front_end
+            .checked_add(count)
+            .ok_or_else(|| oxml_layout::LayoutError::Layout("late note paint overflow".into()))?;
+        boundary.furniture_front_end = boundary
+            .furniture_front_end
+            .checked_add(count)
+            .ok_or_else(|| oxml_layout::LayoutError::Layout("late note paint overflow".into()))?;
+        boundary.elements_len = painted.len();
+        boundary.validate(painted.len())?;
+        (pages[index].elements, self.policies[index]) = painted.into_parts()?;
+        self.boundaries[index] = boundary;
+        Ok(())
+    }
+}
+
 pub(crate) struct RecordedPagination {
+    pub paint: PagePaintRecords,
     pub furniture_failure: Option<FurnitureFailure>,
     pub pages: Vec<PageFrame>,
     pub outlines: Vec<OutlineEntry>,
@@ -729,6 +911,7 @@ pub(crate) struct PageFlowSpace {
 }
 
 pub(crate) struct SharedPagination {
+    pub paint: PagePaintRecords,
     pub furniture_failure: Option<FurnitureFailure>,
     pub page_sections: Vec<crate::WordPageSection>,
     pub pages: Vec<PageFrame>,
@@ -817,6 +1000,16 @@ pub(crate) fn paginate_shared_sections(
     let media = media.media();
     if sections.is_empty() {
         return SharedPagination {
+            paint: PagePaintRecords {
+                policies: vec![PaintPolicies::default()],
+                boundaries: vec![PagePaintBoundary {
+                    behind_end: 0,
+                    regular_end: 0,
+                    body_front_end: 0,
+                    furniture_front_end: 0,
+                    elements_len: 0,
+                }],
+            },
             furniture_failure: None,
             page_sections: vec![crate::WordPageSection {
                 physical_page: 1,
@@ -840,6 +1033,7 @@ pub(crate) fn paginate_shared_sections(
             section.title_pg,
             section.footnotes_beneath_text,
             section.written_tb_rl_band,
+            section.line_number_style,
             fm,
             media,
             notes,
@@ -853,6 +1047,7 @@ pub(crate) fn paginate_shared_sections(
                 collect_endnote_refs(&result.pages, notes, section.geometry.content_width());
             if let Err(failure) = append_endnote_pages_at_document_end(
                 &mut result.pages,
+                &mut result.paint,
                 notes,
                 section.geometry.clone(),
                 result.last_flow_space,
@@ -868,6 +1063,7 @@ pub(crate) fn paginate_shared_sections(
             }
         }
         return SharedPagination {
+            paint: result.paint,
             furniture_failure: result.furniture_failure,
             page_sections: result
                 .pages
@@ -889,6 +1085,7 @@ pub(crate) fn paginate_shared_sections(
     let mut furniture_failure = None;
     let mut page_sections = Vec::new();
     let mut pages = Vec::new();
+    let mut paint = PagePaintRecords::default();
     let mut outlines = Vec::new();
     let mut body_fragments = Vec::new();
     let mut page_offset = 0;
@@ -922,6 +1119,7 @@ pub(crate) fn paginate_shared_sections(
             section.title_pg,
             section.footnotes_beneath_text,
             section.written_tb_rl_band,
+            section.line_number_style,
             fm,
             media,
             notes,
@@ -961,6 +1159,7 @@ pub(crate) fn paginate_shared_sections(
             endnotes_placed.extend(&ordered);
             match append_ordered_endnote_pages(
                 &mut result.pages,
+                &mut result.paint,
                 &ordered,
                 notes,
                 boundary.geometry.clone(),
@@ -1027,6 +1226,8 @@ pub(crate) fn paginate_shared_sections(
         });
         last_flow_space = result.last_flow_space;
         page_offset += result.pages.len();
+        paint.policies.append(&mut result.paint.policies);
+        paint.boundaries.append(&mut result.paint.boundaries);
         pages.append(&mut result.pages);
         outlines.append(&mut result.outlines);
         body_fragments.append(&mut result.body_fragments);
@@ -1036,6 +1237,7 @@ pub(crate) fn paginate_shared_sections(
         page.page_number = index + 1;
     }
     SharedPagination {
+        paint,
         furniture_failure,
         page_sections,
         pages,
@@ -1076,6 +1278,7 @@ pub(crate) fn paginate_shared_single_section_recorded(
         next_header_page_number: section.page_number_start.unwrap_or(1),
     });
     let context = PassContext {
+        line_number_style: section.line_number_style,
         written_tb_rl_band: section.written_tb_rl_band,
         geometry: section.geometry.clone(),
         header_footer: section.header_footer.as_ref(),
@@ -1102,6 +1305,7 @@ pub(crate) fn paginate_shared_single_section_recorded(
         checkpoints.insert(0, checkpoint);
     }
     RecordedPagination {
+        paint: result.paint,
         furniture_failure: result.furniture_failure,
         pages: result.pages,
         outlines: result.outlines,
@@ -1291,6 +1495,7 @@ fn paginate_with_media<B: LayoutBlockLike>(
         title_pg,
         false,
         false,
+        None,
         _fm,
         media,
         notes,
@@ -1310,6 +1515,7 @@ fn paginate_with_media_recorded<B: LayoutBlockLike>(
     title_pg: bool,
     footnotes_beneath_text: bool,
     written_tb_rl_band: bool,
+    line_number_style: Option<WordLineNumberStyle>,
     _fm: &FontManager,
     media: &HashMap<MediaId, ImageData>,
     notes: &NoteRegistry,
@@ -1318,6 +1524,7 @@ fn paginate_with_media_recorded<B: LayoutBlockLike>(
     continuous_sections: Option<&[SharedSection]>,
 ) -> PassResult {
     let context = PassContext {
+        line_number_style,
         written_tb_rl_band,
         geometry,
         header_footer,
@@ -1351,6 +1558,7 @@ fn paginate_with_media_recorded<B: LayoutBlockLike>(
 
 /// One pagination pass, and what it learned about paragraph-relative wraps.
 struct PassResult {
+    paint: PagePaintRecords,
     furniture_failure: Option<FurnitureFailure>,
     pages: Vec<PageFrame>,
     outlines: Vec<OutlineEntry>,
@@ -1366,6 +1574,7 @@ struct PassResult {
 /// Built once and borrowed twice, so the eight-value argument list appears in
 /// one place rather than at each call.
 struct PassContext<'a> {
+    line_number_style: Option<WordLineNumberStyle>,
     written_tb_rl_band: bool,
     geometry: PageGeometry,
     header_footer: Option<&'a HeaderFooterContent>,
@@ -1398,6 +1607,7 @@ fn paginate_pass_from<B: LayoutBlockLike>(
 ) -> PassResult {
     if first_block_index >= blocks.len() && !is_first_page {
         return PassResult {
+            paint: PagePaintRecords::default(),
             furniture_failure: None,
             pages: Vec::new(),
             outlines: Vec::new(),
@@ -1415,6 +1625,7 @@ fn paginate_pass_from<B: LayoutBlockLike>(
         context.title_pg,
         context.footnotes_beneath_text,
         context.written_tb_rl_band,
+        context.line_number_style,
         context.media,
         context.notes,
         context.fm,
@@ -1427,6 +1638,12 @@ fn paginate_pass_from<B: LayoutBlockLike>(
 
     pager.continuous_sections = context.continuous_sections;
     for (block_idx, block) in blocks.iter().enumerate().skip(first_block_index) {
+        if !block.paint_owner_valid() {
+            pager
+                .pending_furniture_failure
+                .get_or_insert_with(|| "Word paragraph lacks its source paint companion".into());
+            break;
+        }
         if let Some(sections) = context.continuous_sections {
             let mut end = 0;
             let previous_member = pager.active_member;
@@ -1579,6 +1796,10 @@ fn paginate_pass_from<B: LayoutBlockLike>(
     };
     let body_fragments = std::mem::take(&mut pager.body_fragments);
     PassResult {
+        paint: PagePaintRecords {
+            policies: std::mem::take(&mut pager.page_policies),
+            boundaries: std::mem::take(&mut pager.page_boundaries),
+        },
         furniture_failure,
         pages,
         outlines,
@@ -1704,6 +1925,35 @@ fn split_simple_table_row(
             .sum::<f64>();
         rest_height = rest_height
             .max(remaining_content + rest_cell.margin_bottom + rest_cell.border_band_bottom);
+        if let Some(lines) = split_lines {
+            let CellBlock::Paragraph(original) = &cell.blocks[count] else {
+                return None;
+            };
+            if let Some(CellBlockSemantics::Paragraph(companion)) = first_semantics
+                .as_mut()
+                .and_then(|row| row.cells.get_mut(cell_index))
+                .and_then(|cell| cell.blocks.get_mut(count))
+            {
+                companion.paint = Arc::new(
+                    companion
+                        .paint
+                        .for_line_range(&original.lines, 0..lines)
+                        .ok()?,
+                );
+            }
+            if let Some(CellBlockSemantics::Paragraph(companion)) = rest_semantics
+                .as_mut()
+                .and_then(|row| row.cells.get_mut(cell_index))
+                .and_then(|cell| cell.blocks.get_mut(count))
+            {
+                companion.paint = Arc::new(
+                    companion
+                        .paint
+                        .for_line_range(&original.lines, lines..original.lines.len())
+                        .ok()?,
+                );
+            }
+        }
         if let Some(row_semantics) = &mut first_semantics {
             row_semantics.cells[cell_index]
                 .blocks
@@ -1744,7 +1994,7 @@ fn paint_flowed_table_row(
     if let Some(body_index) = body_index {
         pager.record_body_fragment(body_index, table_x, row_y, table.table_width, row.height);
     }
-    render_table_row(
+    pager.accept_layers(render_table_row(
         row,
         semantics,
         &table.col_widths,
@@ -1755,12 +2005,10 @@ fn paint_flowed_table_row(
         pager.page_number,
         table.borders.as_ref(),
         table.bidi_visual,
-        &mut pager.elements,
-        &mut pager.behind_elements,
         pager.media,
         draw_top_border,
         draw_bottom_border,
-    );
+    ));
     pager.cursor_y += row.height;
     pager.previous_space_after = 0.0;
     pager.mark_content();
@@ -1778,7 +2026,36 @@ fn repeat_table_headers(
             let semantics = table
                 .semantics
                 .and_then(|semantics| semantics.rows.get(header_index));
-            paint_flowed_table_row(pager, table, row, semantics, body_index, true, true);
+            let scoped = semantics
+                .map(|semantics| semantics.with_repetition_scope(pager.next_repetition_scope))
+                .transpose();
+            let scoped = match scoped {
+                Ok(value) => value.flatten(),
+                Err(error) => {
+                    pager
+                        .pending_furniture_failure
+                        .get_or_insert(error.to_string());
+                    return;
+                }
+            };
+            if scoped.is_some() {
+                let Some(next) = pager.next_repetition_scope.checked_add(1) else {
+                    pager
+                        .pending_furniture_failure
+                        .get_or_insert("repeated field paint scope overflow".into());
+                    return;
+                };
+                pager.next_repetition_scope = next;
+            }
+            paint_flowed_table_row(
+                pager,
+                table,
+                row,
+                scoped.as_ref().or(semantics),
+                body_index,
+                true,
+                true,
+            );
         }
     }
 }
@@ -1800,6 +2077,14 @@ const LINE_NUMBER_FONT_SIZE: f64 = 9.0;
 
 /// Helper struct to track page state during pagination.
 struct Pager<'a> {
+    next_repetition_scope: u64,
+    element_policies: PaintPolicies,
+    behind_policies: PaintPolicies,
+    front_elements: Vec<PositionedElement>,
+    front_policies: PaintPolicies,
+    page_policies: Vec<PaintPolicies>,
+    page_boundaries: Vec<PagePaintBoundary>,
+    line_number_style: Option<WordLineNumberStyle>,
     written_tb_rl_band: bool,
     pages: Vec<PageFrame>,
     elements: Vec<PositionedElement>,
@@ -1835,7 +2120,7 @@ struct Pager<'a> {
     /// Body lines placed on this page, in placement order, for line numbering.
     numbered_lines: Vec<NumberedLine>,
     /// The number the next body line of this section receives.
-    next_line_number: u32,
+    next_line_number: u64,
     continuous_sections: Option<&'a [SharedSection]>,
     active_member: usize,
     pending_continuous_footnote_break: bool,
@@ -1907,6 +2192,7 @@ impl<'a> Pager<'a> {
         title_pg: bool,
         footnotes_beneath_text: bool,
         written_tb_rl_band: bool,
+        line_number_style: Option<WordLineNumberStyle>,
         media: &'a HashMap<MediaId, ImageData>,
         notes: &'a NoteRegistry,
         fm: &'a FontManager,
@@ -1916,15 +2202,22 @@ impl<'a> Pager<'a> {
         is_first_page: bool,
         stop_at: Option<PaginationCheckpoint>,
     ) -> Self {
-        let next_line_number = geometry
-            .line_numbers
-            .as_ref()
-            .map_or(1, |numbering| numbering.start);
+        let next_line_number = geometry.line_numbers.as_ref().map_or(1, |numbering| {
+            u64::from(numbering.start) + u64::from(line_number_style.is_some())
+        });
         let mut pager = Pager {
+            line_number_style,
             written_tb_rl_band,
             pages: Vec::new(),
             elements: Vec::new(),
             behind_elements: Vec::new(),
+            front_elements: Vec::new(),
+            next_repetition_scope: 1,
+            element_policies: PaintPolicies::default(),
+            behind_policies: PaintPolicies::default(),
+            front_policies: PaintPolicies::default(),
+            page_policies: Vec::new(),
+            page_boundaries: Vec::new(),
             cursor_y: 0.0,
             page_number: first_page_number,
             header_page_number: first_header_page_number,
@@ -1981,6 +2274,7 @@ impl<'a> Pager<'a> {
     /// and whose header and footer stay within its margins, gets its own
     /// geometry back unchanged, which is the path most documents take.
     fn begin_page(&mut self) {
+        self.next_repetition_scope = 1;
         self.track_index = 0;
         let mut page = self.section_geometry.without_columns();
         if self.section_geometry.mirror_margins && self.header_page_number.is_multiple_of(2) {
@@ -2043,7 +2337,8 @@ impl<'a> Pager<'a> {
         if let Some(numbering) = self.section_geometry.line_numbers.as_ref()
             && numbering.restart == ST_LineNumberRestart::NewPage
         {
-            self.next_line_number = numbering.start;
+            self.next_line_number =
+                u64::from(numbering.start) + u64::from(self.line_number_style.is_some());
         }
         self.apply_active_track();
     }
@@ -2377,6 +2672,7 @@ impl<'a> Pager<'a> {
         self.is_first_page = self.page_number == first;
         self.footnotes_beneath_text = member.footnotes_beneath_text;
         self.section_geometry = member.geometry.clone();
+        self.line_number_style = member.line_number_style;
         self.written_tb_rl_band = member.written_tb_rl_band;
         let track = self.track_index;
         self.begin_page();
@@ -2572,10 +2868,16 @@ impl<'a> Pager<'a> {
     fn place_anchored(
         &mut self,
         anchored: &[AnchoredDrawing],
+        paint: Option<&WordParagraphPaint>,
         para_top: f64,
         indent_left: f64,
         block_idx: usize,
     ) {
+        if paint.is_some_and(|paint| paint.anchors.len() != anchored.len()) {
+            self.pending_furniture_failure
+                .get_or_insert("Word anchor producer count mismatch".into());
+            return;
+        }
         for (anchor_idx, a) in anchored.iter().enumerate() {
             let rect = anchored_rect(
                 a,
@@ -2601,13 +2903,49 @@ impl<'a> Pager<'a> {
                 self.page_wraps.push(placed);
             }
 
-            let mut produced = anchored_elements(a, rect, &self.geometry, self.media);
+            let owner = paint.map_or(AnchorPaintOwner::Neutral, |paint| {
+                AnchorPaintOwner::Word(&paint.anchors[anchor_idx])
+            });
+            let result =
+                anchored_elements(a, owner, rect, &self.geometry, self.media).map(|produced| {
+                    let mut layers = PaintLayers::default();
+                    if a.behind_doc {
+                        layers.behind = produced;
+                    } else {
+                        layers.front = produced;
+                    }
+                    layers
+                });
+            self.accept_layers(result);
+        }
+    }
 
-            if a.behind_doc {
-                self.behind_elements.append(&mut produced);
-            } else {
-                self.elements.append(&mut produced);
+    fn accept_note(&mut self, result: oxml_layout::Result<(f64, PaintLayers)>) -> f64 {
+        match result {
+            Ok((height, layers)) => {
+                self.accept_layers(Ok(layers));
+                height
             }
+            Err(error) => {
+                self.pending_furniture_failure
+                    .get_or_insert(error.to_string());
+                0.0
+            }
+        }
+    }
+
+    fn accept_layers(&mut self, result: oxml_layout::Result<PaintLayers>) {
+        let result = result.and_then(|layers| {
+            self.element_policies
+                .append(&mut self.elements, layers.regular)?;
+            self.behind_policies
+                .append(&mut self.behind_elements, layers.behind)?;
+            self.front_policies
+                .append(&mut self.front_elements, layers.front)
+        });
+        if let Err(error) = result {
+            self.pending_furniture_failure
+                .get_or_insert(error.to_string());
         }
     }
 
@@ -2673,7 +3011,7 @@ impl<'a> Pager<'a> {
             if let Some(body_index) = body_index {
                 self.record_body_fragment(body_index, placed.rect.x, row_y, width, row.height);
             }
-            render_table_row(
+            self.accept_layers(render_table_row(
                 row,
                 table
                     .semantics
@@ -2686,12 +3024,10 @@ impl<'a> Pager<'a> {
                 self.page_number,
                 table.borders.as_ref(),
                 table.bidi_visual,
-                &mut self.elements,
-                &mut self.behind_elements,
                 self.media,
                 true,
                 true,
-            );
+            ));
             row_y += row.height;
         }
 
@@ -2770,8 +3106,7 @@ impl<'a> Pager<'a> {
         };
 
         if let Some((note, render)) = authored_separator {
-            draw_note(
-                &mut self.elements,
+            self.accept_note(draw_note(
                 &self.geometry,
                 note,
                 render,
@@ -2780,7 +3115,7 @@ impl<'a> Pager<'a> {
                 false,
                 separator_y,
                 self.page_number,
-            );
+            ));
         } else {
             self.elements.push(PositionedElement::Line {
                 start: Point {
@@ -2803,8 +3138,7 @@ impl<'a> Pager<'a> {
             else {
                 continue;
             };
-            cursor_y += draw_note(
-                &mut self.elements,
+            cursor_y += self.accept_note(draw_note(
                 &self.geometry,
                 note,
                 render,
@@ -2813,13 +3147,12 @@ impl<'a> Pager<'a> {
                 continued,
                 cursor_y,
                 self.page_number,
-            );
+            ));
         }
         if !self.pending_notes.is_empty()
             && let Some((note, render)) = continuation_notice
         {
-            draw_note(
-                &mut self.elements,
+            self.accept_note(draw_note(
                 &self.geometry,
                 note,
                 render,
@@ -2828,7 +3161,7 @@ impl<'a> Pager<'a> {
                 false,
                 cursor_y,
                 self.page_number,
-            );
+            ));
         }
     }
 
@@ -2844,15 +3177,40 @@ impl<'a> Pager<'a> {
         let mut children = Vec::new();
         for line in placed {
             let value = self.next_line_number;
-            self.next_line_number = self.next_line_number.saturating_add(1);
-            if !value.is_multiple_of(numbering.count_by) {
+            self.next_line_number = if self.line_number_style.is_some() {
+                self.next_line_number.saturating_add(1)
+            } else {
+                self.next_line_number
+                    .saturating_add(1)
+                    .min(u64::from(u32::MAX))
+            };
+            if !value.is_multiple_of(u64::from(numbering.count_by)) {
                 continue;
             }
-            let Some(font_id) = numbering.font_id else {
+            let (font_id, font_size, bold, italic, kerning) = match self.line_number_style {
+                Some(style) => (
+                    style.font_id,
+                    style.size,
+                    style.bold,
+                    style.italic,
+                    Some(style.kerning),
+                ),
+                None => (numbering.font_id, LINE_NUMBER_FONT_SIZE, false, false, None),
+            };
+            let Some(font_id) = font_id else {
                 continue;
             };
+            if !font_size.is_finite() || font_size <= 0.0 {
+                continue;
+            }
             let text = value.to_string();
-            let Ok(shaped) = self.fm.shape_text(font_id, &text, LINE_NUMBER_FONT_SIZE) else {
+            let shaped = match kerning {
+                Some(enabled) => self
+                    .fm
+                    .shape_text_with_kerning(font_id, &text, font_size, enabled),
+                None => self.fm.shape_text(font_id, &text, font_size),
+            };
+            let Ok(shaped) = shaped else {
                 continue;
             };
             children.push(PositionedElement::Text(GlyphRun {
@@ -2865,14 +3223,14 @@ impl<'a> Pager<'a> {
                     y: self.geometry.margin_top + line.baseline,
                 },
                 font_id,
-                font_size: LINE_NUMBER_FONT_SIZE,
+                font_size,
                 glyph_ids: shaped.glyph_ids,
                 advances: shaped.advances,
                 text,
                 source: None,
                 color: Color::BLACK,
-                bold: false,
-                italic: false,
+                bold,
+                italic,
                 field_kind: None,
                 field_source: None,
                 note: None,
@@ -2944,10 +3302,24 @@ impl<'a> Pager<'a> {
         if dy <= 0.0 {
             return;
         }
+        let translated = (|| {
+            self.element_policies
+                .translate_annotation_roots(&self.elements, 0.0, dy)?;
+            self.behind_policies
+                .translate_annotation_roots(&self.behind_elements, 0.0, dy)?;
+            self.front_policies
+                .translate_annotation_roots(&self.front_elements, 0.0, dy)
+        })();
+        if let Err(error) = translated {
+            self.pending_furniture_failure
+                .get_or_insert(error.to_string());
+            return;
+        }
         for element in self
             .elements
             .iter_mut()
             .chain(self.behind_elements.iter_mut())
+            .chain(self.front_elements.iter_mut())
         {
             translate_element_tree(element, 0.0, dy);
         }
@@ -2986,18 +3358,35 @@ impl<'a> Pager<'a> {
         let Some(transform) = self.body_rotation_transform() else {
             return;
         };
-        for elements in [&mut self.elements, &mut self.behind_elements] {
-            if elements.is_empty() {
-                continue;
-            }
-            let children = std::mem::take(elements);
-            elements.push(PositionedElement::Group(GroupElement {
+        let result = (|| {
+            wrap_paint_suffix(
+                &mut self.elements,
+                &mut self.element_policies,
+                0,
                 transform,
-                clip: None,
-                opacity: 1.0,
-                effects: Vec::new(),
-                children,
-            }));
+                None,
+                false,
+            )?;
+            wrap_paint_suffix(
+                &mut self.behind_elements,
+                &mut self.behind_policies,
+                0,
+                transform,
+                None,
+                false,
+            )?;
+            wrap_paint_suffix(
+                &mut self.front_elements,
+                &mut self.front_policies,
+                0,
+                transform,
+                None,
+                false,
+            )
+        })();
+        if let Err(error) = result {
+            self.pending_furniture_failure
+                .get_or_insert(error.to_string());
         }
     }
 
@@ -3125,84 +3514,116 @@ impl<'a> Pager<'a> {
             note_top: self.content_height - self.reserved_height() + band_offset,
         });
         self.place_page_notes();
-        let mut all_elements = Vec::new();
-        // A frame with `w:zOrder="back"` goes down before anything else, and
-        // one in front is appended after the footer. The vector is drained by
-        // whichever of the two appends runs.
-        let mut page_borders = self.page_border_elements();
-        if !self
-            .page_geometry
-            .page_borders
-            .as_ref()
-            .is_some_and(|frame| frame.in_front)
-        {
-            all_elements.append(&mut page_borders);
+        let composed =
+            (|| -> oxml_layout::Result<(PageFrame, PaintPolicies, PagePaintBoundary)> {
+                if let Some(reason) = self.pending_furniture_failure.take() {
+                    return Err(oxml_layout::LayoutError::Layout(reason));
+                }
+                let mut header = if let (Some(hf), Some(prepared)) =
+                    (self.header_footer, &self.prepared_header)
+                {
+                    let variant = self.story_variant(hf);
+                    render_hf_blocks(
+                        prepared,
+                        self.header_footer_semantics
+                            .map(|facts| facts.header(variant)),
+                        &self.furniture_geometry,
+                        self.page_number,
+                        self.media,
+                    )?
+                } else {
+                    PaintLayers::default()
+                };
+                let mut footer = if let (Some(hf), Some(prepared)) =
+                    (self.header_footer, &self.prepared_footer)
+                {
+                    let variant = self.story_variant(hf);
+                    render_hf_blocks(
+                        prepared,
+                        self.header_footer_semantics
+                            .map(|facts| facts.footer(variant)),
+                        &self.furniture_geometry,
+                        self.page_number,
+                        self.media,
+                    )?
+                } else {
+                    PaintLayers::default()
+                };
+                let mut all = PaintedElements::default();
+                let mut page_borders = PaintedElements::non_field(self.page_border_elements())?;
+                if !self
+                    .page_geometry
+                    .page_borders
+                    .as_ref()
+                    .is_some_and(|frame| frame.in_front)
+                {
+                    all.append(&mut page_borders)?;
+                }
+                if let Some(hf) = self.header_footer
+                    && let Some(watermark) = hf.watermark(self.story_variant(hf))
+                {
+                    all.push_non_field(PositionedElement::Group(watermark.clone()))?;
+                }
+                all.append(&mut PaintedElements::from_parts(
+                    std::mem::take(&mut self.behind_elements),
+                    std::mem::take(&mut self.behind_policies),
+                )?)?;
+                all.append(&mut header.behind)?;
+                all.append(&mut footer.behind)?;
+                let behind_end = all.len();
+                all.append(&mut header.regular)?;
+                let mut separators = Vec::new();
+                self.draw_column_separators(&mut separators);
+                all.append(&mut PaintedElements::non_field(separators)?)?;
+                all.append(&mut PaintedElements::from_parts(
+                    std::mem::take(&mut self.elements),
+                    std::mem::take(&mut self.element_policies),
+                )?)?;
+                all.append(&mut footer.regular)?;
+                let regular_end = all.len();
+                all.append(&mut PaintedElements::from_parts(
+                    std::mem::take(&mut self.front_elements),
+                    std::mem::take(&mut self.front_policies),
+                )?)?;
+                let body_front_end = all.len();
+                all.append(&mut header.front)?;
+                all.append(&mut footer.front)?;
+                let furniture_front_end = all.len();
+                all.append(&mut page_borders)?;
+                let elements_len = all.len();
+                let boundary = PagePaintBoundary {
+                    behind_end,
+                    regular_end,
+                    body_front_end,
+                    furniture_front_end,
+                    elements_len,
+                };
+                boundary.validate(elements_len)?;
+                let (elements, policies) = all.into_parts()?;
+                let mut page = PageFrame::new(
+                    self.page_number,
+                    self.page_geometry.page_width,
+                    self.page_geometry.page_height,
+                    elements,
+                );
+                page.displayed_page_number = self.header_page_number;
+                Ok((page, policies, boundary))
+            })();
+        match composed {
+            Ok((page, policies, boundary)) => {
+                self.pages.push(page);
+                self.page_policies.push(policies);
+                self.page_boundaries.push(boundary);
+            }
+            Err(error) => {
+                self.furniture_failure.get_or_insert(FurnitureFailure {
+                    section: self.page_member.unwrap_or(self.active_member),
+                    page: self.page_number,
+                    reason: error.to_string(),
+                });
+                return;
+            }
         }
-
-        if let Some(hf) = self.header_footer
-            && let Some(watermark) = hf.watermark(self.story_variant(hf))
-        {
-            all_elements.push(PositionedElement::Group(watermark.clone()));
-        }
-
-        // behindDoc drawings render underneath everything else on the page.
-        all_elements.append(&mut self.behind_elements);
-        let furniture_behind_index = all_elements.len();
-        let mut furniture_behind = Vec::new();
-        let mut furniture_front = Vec::new();
-
-        if let (Some(hf), Some(prepared)) = (self.header_footer, &self.prepared_header) {
-            let variant = self.story_variant(hf);
-            render_hf_blocks(
-                prepared,
-                self.header_footer_semantics
-                    .map(|facts| facts.header(variant)),
-                &self.furniture_geometry,
-                self.page_number,
-                (
-                    &mut all_elements,
-                    &mut furniture_behind,
-                    &mut furniture_front,
-                ),
-                self.media,
-            );
-        }
-
-        self.draw_column_separators(&mut all_elements);
-        all_elements.append(&mut self.elements);
-
-        if let (Some(hf), Some(prepared)) = (self.header_footer, &self.prepared_footer) {
-            let variant = self.story_variant(hf);
-            render_hf_blocks(
-                prepared,
-                self.header_footer_semantics
-                    .map(|facts| facts.footer(variant)),
-                &self.furniture_geometry,
-                self.page_number,
-                (
-                    &mut all_elements,
-                    &mut furniture_behind,
-                    &mut furniture_front,
-                ),
-                self.media,
-            );
-        }
-
-        all_elements.splice(
-            furniture_behind_index..furniture_behind_index,
-            furniture_behind,
-        );
-        all_elements.append(&mut furniture_front);
-        all_elements.append(&mut page_borders);
-
-        let mut page = PageFrame::new(
-            self.page_number,
-            self.page_geometry.page_width,
-            self.page_geometry.page_height,
-            all_elements,
-        );
-        page.displayed_page_number = self.header_page_number;
-        self.pages.push(page);
         self.page_number += 1;
         self.header_page_number += 1;
         self.cursor_y = 0.0;
@@ -3297,42 +3718,76 @@ impl<'a> Pager<'a> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum AnchorPaintOwner<'a> {
+    Word(&'a WordAnchorPaint),
+    Neutral,
+}
+
 fn anchored_elements(
     anchor: &AnchoredDrawing,
+    owner: AnchorPaintOwner<'_>,
     rect: Rect,
     geometry: &PageGeometry,
     media: &HashMap<MediaId, ImageData>,
-) -> Vec<PositionedElement> {
-    let mut produced = Vec::new();
-    match &anchor.content {
-        AnchoredContent::Image { media_id } => {
+) -> oxml_layout::Result<PaintedElements> {
+    let mut produced = PaintedElements::default();
+    match (&anchor.content, owner) {
+        (
+            AnchoredContent::Image { media_id },
+            AnchorPaintOwner::Neutral | AnchorPaintOwner::Word(WordAnchorPaint::Image),
+        ) => {
             let image = media.get(media_id);
-            produced.push(PositionedElement::Image {
+            produced.push_non_field(PositionedElement::Image {
                 rect,
                 data: image.map_or_else(Vec::new, |image| image.data.clone()),
                 content_type: image.map_or_else(String::new, |image| image.content_type.clone()),
                 media_id: *media_id,
-            });
+            })?;
         }
-        AnchoredContent::Group(group) => {
+        (
+            AnchoredContent::Group(group),
+            owner @ (AnchorPaintOwner::Neutral
+            | AnchorPaintOwner::Word(WordAnchorPaint::Group { .. })),
+        ) => {
             let mut positioned = group.clone();
-            positioned.transform = positioned.transform.then(oxml_layout::Transform {
+            positioned.transform = positioned.transform.then(Transform {
                 e: rect.x,
                 f: rect.y,
-                ..oxml_layout::Transform::IDENTITY
+                ..Transform::IDENTITY
             });
-            produced.push(PositionedElement::Group(positioned));
+            let elements = vec![PositionedElement::Group(positioned)];
+            produced = match owner {
+                AnchorPaintOwner::Neutral => PaintedElements::neutral(elements)?,
+                AnchorPaintOwner::Word(WordAnchorPaint::Group { policies }) => {
+                    let PositionedElement::Group(mut shell) =
+                        elements.into_iter().next().expect("one group")
+                    else {
+                        unreachable!()
+                    };
+                    let child = PaintedElements::from_parts(
+                        std::mem::take(&mut shell.children),
+                        policies.clone(),
+                    )?;
+                    child.wrap(PositionedElement::Group(shell))?
+                }
+                _ => unreachable!(),
+            };
         }
-        AnchoredContent::Shape { preset, fill, text } => {
+        (
+            AnchoredContent::Shape { preset, fill, text },
+            owner @ (AnchorPaintOwner::Neutral
+            | AnchorPaintOwner::Word(WordAnchorPaint::Shape { .. })),
+        ) => {
             match (preset, fill) {
                 (ShapePreset::Rect, Some(color)) => {
-                    produced.push(PositionedElement::FilledRect {
+                    produced.push_non_field(PositionedElement::FilledRect {
                         rect,
                         color: *color,
-                    });
+                    })?
                 }
                 (ShapePreset::Line, Some(color)) => {
-                    produced.push(PositionedElement::Line {
+                    produced.push_non_field(PositionedElement::Line {
                         start: Point {
                             x: rect.x,
                             y: rect.y,
@@ -3344,16 +3799,29 @@ fn anchored_elements(
                         width: 1.0,
                         color: *color,
                         dash_pattern: None,
-                    });
+                    })?
                 }
                 _ => {}
             }
-            produced.extend(render_shape_text(text, geometry, rect, media));
+            let paragraphs = match owner {
+                AnchorPaintOwner::Word(WordAnchorPaint::Shape { paragraphs }) => {
+                    Some(paragraphs.as_slice())
+                }
+                _ => None,
+            };
+            produced.append(&mut render_shape_text(
+                text, paragraphs, geometry, rect, media,
+            )?)?;
+        }
+        _ => {
+            return Err(oxml_layout::LayoutError::Layout(
+                "Word anchor paint variant mismatch".into(),
+            ));
         }
     }
     if anchor.rotation_degrees != 0.0 {
-        produced = vec![PositionedElement::Group(oxml_layout::GroupElement {
-            transform: oxml_layout::Transform::rotate_about(
+        produced = produced.wrap(PositionedElement::Group(GroupElement {
+            transform: Transform::rotate_about(
                 anchor.rotation_degrees,
                 rect.x + rect.width / 2.0,
                 rect.y + rect.height / 2.0,
@@ -3361,20 +3829,24 @@ fn anchored_elements(
             clip: None,
             opacity: 1.0,
             effects: Vec::new(),
-            children: produced,
-        })];
+            children: Vec::new(),
+        }))?;
     }
-    produced
-        .into_iter()
-        .map(|element| PositionedElement::MarkedContent {
+    let mut result = PaintedElements::default();
+    while produced.len() > 0 {
+        let child = produced.splice_at(&[], 0..1, &mut PaintedElements::default())?;
+        result.append(&mut child.wrap(PositionedElement::MarkedContent {
             structure: anchor.structure_id,
-            children: vec![element],
-        })
-        .collect()
+            children: Vec::new(),
+        })?)?;
+    }
+    Ok(result)
 }
 
 fn push_multilingual_text(
     elements: &mut Vec<PositionedElement>,
+    policies: &mut PaintPolicies,
+    owner: FieldPaintOwner,
     segment: &oxml_layout::MultilingualTextSegment,
     x: f64,
     baseline: f64,
@@ -3382,7 +3854,7 @@ fn push_multilingual_text(
     line_height: f64,
     source_node: Option<Option<oxml_layout::SourceNodeId>>,
     justify_extra: f64,
-) -> f64 {
+) -> oxml_layout::Result<f64> {
     let base = segment.base();
     let segment_spaces = if justify_extra > 0.0 {
         segment
@@ -3428,46 +3900,50 @@ fn push_multilingual_text(
         }),
         None => base.source,
     };
-    elements.push(PositionedElement::MultilingualText(MultilingualGlyphRun {
-        origin: Point {
-            x,
-            y: adjusted_baseline,
-        },
-        font_id: segment.font_id(),
-        font_size: base.font_size,
-        glyph_ids: segment.glyph_ids().to_vec(),
-        x_advances,
-        y_advances: segment.y_advances().to_vec(),
-        x_offsets: segment.x_offsets().to_vec(),
-        y_offsets: segment.y_offsets().to_vec(),
-        clusters: segment.clusters().to_vec(),
-        logical_text: segment.text().to_owned(),
-        logical_index: segment.logical_index(),
-        source,
-        script: segment.script(),
-        language: segment.language().map(str::to_owned),
-        direction: segment.direction(),
-        bidi_level: segment.bidi_level(),
-        color: base.color,
-        bold: base.bold,
-        italic: base.italic,
-        field_kind: base.field_kind,
-        field_source: match source_node {
-            Some(source_node) => base.field_source.and_then(|mut field_source| {
-                field_source.node = source_node?;
-                Some(field_source)
-            }),
-            None => base.field_source,
-        },
-        note: base.note,
-        note_reference_source: match source_node {
-            Some(source_node) => base.note_reference_source.and_then(|mut source| {
-                source.node = source_node?;
-                Some(source)
-            }),
-            None => base.note_reference_source,
-        },
-    }));
+    policies.emit(
+        elements,
+        PositionedElement::MultilingualText(MultilingualGlyphRun {
+            origin: Point {
+                x,
+                y: adjusted_baseline,
+            },
+            font_id: segment.font_id(),
+            font_size: base.font_size,
+            glyph_ids: segment.glyph_ids().to_vec(),
+            x_advances,
+            y_advances: segment.y_advances().to_vec(),
+            x_offsets: segment.x_offsets().to_vec(),
+            y_offsets: segment.y_offsets().to_vec(),
+            clusters: segment.clusters().to_vec(),
+            logical_text: segment.text().to_owned(),
+            logical_index: segment.logical_index(),
+            source,
+            script: segment.script(),
+            language: segment.language().map(str::to_owned),
+            direction: segment.direction(),
+            bidi_level: segment.bidi_level(),
+            color: base.color,
+            bold: base.bold,
+            italic: base.italic,
+            field_kind: base.field_kind,
+            field_source: match source_node {
+                Some(source_node) => base.field_source.and_then(|mut field_source| {
+                    field_source.node = source_node?;
+                    Some(field_source)
+                }),
+                None => base.field_source,
+            },
+            note: base.note,
+            note_reference_source: match source_node {
+                Some(source_node) => base.note_reference_source.and_then(|mut source| {
+                    source.node = source_node?;
+                    Some(source)
+                }),
+                None => base.note_reference_source,
+            },
+        }),
+        owner,
+    )?;
     if let Some(underline) = base.underline {
         let underline_y = adjusted_baseline + base.descent * 0.3;
         let (thickness, second) = crate::convert::underline_strokes(underline, base.font_size);
@@ -3528,7 +4004,7 @@ fn push_multilingual_text(
             url: url.clone(),
         });
     }
-    effective_width
+    Ok(effective_width)
 }
 
 /// Draw one note, or one slice of one, with its top edge at `top`.
@@ -3536,7 +4012,6 @@ fn push_multilingual_text(
 /// Returns the height consumed. Shared by the page foot and the document end
 /// so the two regions cannot drift apart in how a note looks.
 fn draw_note(
-    elements: &mut Vec<PositionedElement>,
     geometry: &PageGeometry,
     note: &NoteLayout,
     render: &[NoteRenderParagraph],
@@ -3545,7 +4020,9 @@ fn draw_note(
     continued: bool,
     top: f64,
     page_number: usize,
-) -> f64 {
+) -> oxml_layout::Result<(f64, PaintLayers)> {
+    let mut elements = Vec::new();
+    let mut layers = PaintLayers::default();
     let baseline = top + note.lines.get(first).map_or(0.0, |line| line.ascent);
 
     // A continuation does not repeat the marker.
@@ -3572,6 +4049,11 @@ fn draw_note(
         }));
     }
 
+    layers
+        .regular
+        .append(&mut PaintedElements::non_field(std::mem::take(
+            &mut elements,
+        ))?)?;
     let mut cursor_y = top;
     let selected = first..first.saturating_add(count);
     let note_geometry = PageGeometry {
@@ -3603,9 +4085,11 @@ fn draw_note(
         } else {
             lines
         };
-        render_paragraph_lines(
+        layers.append(&mut render_paragraph_lines(
             painted_lines,
             ParagraphView {
+                line_start: local_start,
+                paint: Some(&paragraph.paint),
                 baseline_policy: None,
                 line_gaps: &[],
                 border_group_before: false,
@@ -3621,9 +4105,8 @@ fn draw_note(
                 local_end == paragraph.block.lines.len(),
                 if start > selected.start { gap } else { 0.0 },
             ),
-            elements,
             &empty_media,
-        );
+        )?)?;
         cursor_y += lines.iter().map(|line| line.height).sum::<f64>();
     }
 
@@ -3653,11 +4136,14 @@ fn draw_note(
             *color,
             geometry,
             page_number,
-            elements,
+            &mut elements,
         );
     }
 
-    cursor_y - top
+    layers
+        .regular
+        .append(&mut PaintedElements::non_field(elements)?)?;
+    Ok((cursor_y - top, layers))
 }
 
 /// Append the document's endnotes as pages after the last body page.
@@ -3692,6 +4178,7 @@ impl<'a> EndnoteFurniture<'a> {
             self.section.title_pg,
             self.section.footnotes_beneath_text,
             false,
+            self.section.line_number_style,
             self.media,
             notes,
             self.fm,
@@ -3740,12 +4227,17 @@ pub fn append_endnote_pages(
         });
     }
 
-    let _ = append_ordered_endnote_pages(pages, &ordered, notes, geometry, 0, 1, None, None);
+    if let Ok(mut paint) = PagePaintRecords::neutral(pages) {
+        let _ = append_ordered_endnote_pages(
+            pages, &mut paint, &ordered, notes, geometry, 0, 1, None, None,
+        );
+    }
 }
 
 /// Flow document-end endnotes into the measured free band of the final body page.
 pub(crate) fn append_endnote_pages_at_document_end(
     pages: &mut Vec<PageFrame>,
+    paint: &mut PagePaintRecords,
     notes: &NoteRegistry,
     geometry: PageGeometry,
     flow_space: Option<PageFlowSpace>,
@@ -3757,7 +4249,7 @@ pub(crate) fn append_endnote_pages_at_document_end(
         .filter(|reference| !excluded.contains(reference))
         .collect::<Vec<_>>();
     append_ordered_endnote_pages(
-        pages, &ordered, notes, geometry, 0, 1, flow_space, furniture,
+        pages, paint, &ordered, notes, geometry, 0, 1, flow_space, furniture,
     )?;
     Ok(())
 }
@@ -3785,6 +4277,7 @@ fn collect_endnote_refs(pages: &[PageFrame], notes: &NoteRegistry, width: f64) -
 
 pub(crate) fn append_endnote_pages_for_references(
     pages: &mut Vec<PageFrame>,
+    paint: &mut PagePaintRecords,
     references: &[NoteRef],
     notes: &NoteRegistry,
     geometry: PageGeometry,
@@ -3805,6 +4298,7 @@ pub(crate) fn append_endnote_pages_for_references(
 
     append_ordered_endnote_pages(
         pages,
+        paint,
         &ordered,
         notes,
         geometry,
@@ -3816,8 +4310,21 @@ pub(crate) fn append_endnote_pages_for_references(
     Ok(())
 }
 
+fn endnote_paint_failure(
+    error: oxml_layout::LayoutError,
+    furniture: Option<&EndnoteFurniture<'_>>,
+    page: usize,
+) -> FurnitureFailure {
+    FurnitureFailure {
+        section: furniture.map_or(0, |owner| owner.section_index),
+        page,
+        reason: error.to_string(),
+    }
+}
+
 fn append_ordered_endnote_pages(
     pages: &mut Vec<PageFrame>,
+    paint: &mut PagePaintRecords,
     ordered: &[NoteRef],
     notes: &NoteRegistry,
     mut geometry: PageGeometry,
@@ -3826,6 +4333,9 @@ fn append_ordered_endnote_pages(
     flow_space: Option<PageFlowSpace>,
     furniture: Option<&EndnoteFurniture<'_>>,
 ) -> Result<Option<PageFlowSpace>, FurnitureFailure> {
+    paint
+        .validate(pages)
+        .map_err(|error| endnote_paint_failure(error, furniture, preceding_page_count + 1))?;
     if ordered.is_empty() {
         return Ok(flow_space);
     }
@@ -3875,7 +4385,7 @@ fn append_ordered_endnote_pages(
     } else {
         geometry.content_height()
     };
-    let mut elements: Vec<PositionedElement> = Vec::new();
+    let mut painted_notes = PaintLayers::default();
     let mut cursor_y = if reuse_last {
         flow_space.map_or(0.0, |space| space.body_bottom + NOTE_SEPARATOR_OFFSET * 2.0)
     } else {
@@ -3883,34 +4393,38 @@ fn append_ordered_endnote_pages(
     };
     if reuse_last {
         if let Some((note, render)) = authored_separator {
-            draw_note(
-                &mut elements,
-                &geometry,
-                note,
-                render,
-                0,
-                note.lines.len(),
-                false,
-                geometry.margin_top + cursor_y - NOTE_SEPARATOR_OFFSET,
-                pages
-                    .last()
-                    .map_or(preceding_page_count + 1, |page| page.page_number),
-            );
+            painted_notes
+                .accept_note(draw_note(
+                    &geometry,
+                    note,
+                    render,
+                    0,
+                    note.lines.len(),
+                    false,
+                    geometry.margin_top + cursor_y - NOTE_SEPARATOR_OFFSET,
+                    pages
+                        .last()
+                        .map_or(preceding_page_count + 1, |page| page.page_number),
+                ))
+                .map_err(|error| endnote_paint_failure(error, furniture, page_number))?;
             cursor_y += separator_height;
         } else {
-            elements.push(PositionedElement::Line {
-                start: Point {
-                    x: geometry.margin_left,
-                    y: geometry.margin_top + cursor_y - NOTE_SEPARATOR_OFFSET,
-                },
-                end: Point {
-                    x: geometry.margin_left + geometry.content_width() * 0.33,
-                    y: geometry.margin_top + cursor_y - NOTE_SEPARATOR_OFFSET,
-                },
-                width: 0.5,
-                color: Color::BLACK,
-                dash_pattern: None,
-            });
+            painted_notes
+                .regular
+                .push_non_field(PositionedElement::Line {
+                    start: Point {
+                        x: geometry.margin_left,
+                        y: geometry.margin_top + cursor_y - NOTE_SEPARATOR_OFFSET,
+                    },
+                    end: Point {
+                        x: geometry.margin_left + geometry.content_width() * 0.33,
+                        y: geometry.margin_top + cursor_y - NOTE_SEPARATOR_OFFSET,
+                    },
+                    width: 0.5,
+                    color: Color::BLACK,
+                    dash_pattern: None,
+                })
+                .map_err(|error| endnote_paint_failure(error, furniture, page_number))?;
         }
     } else if let Some((note, render)) = authored_separator
         && ordered
@@ -3921,53 +4435,83 @@ fn append_ordered_endnote_pages(
                 note.height() + NOTE_SEPARATOR_OFFSET + line.height <= content_height
             })
     {
-        draw_note(
-            &mut elements,
-            &geometry,
-            note,
-            render,
-            0,
-            note.lines.len(),
-            false,
-            geometry.margin_top,
-            pages
-                .last()
-                .map_or(preceding_page_count + 1, |page| page.page_number + 1),
-        );
+        painted_notes
+            .accept_note(draw_note(
+                &geometry,
+                note,
+                render,
+                0,
+                note.lines.len(),
+                false,
+                geometry.margin_top,
+                pages
+                    .last()
+                    .map_or(preceding_page_count + 1, |page| page.page_number + 1),
+            ))
+            .map_err(|error| endnote_paint_failure(error, furniture, page_number))?;
         cursor_y += separator_height + NOTE_SEPARATOR_OFFSET;
     }
     let mut reuse_pending = reuse_last;
 
     let page_width = geometry.page_width;
     let page_height = geometry.page_height;
-    let mut flush = |elements: &mut Vec<PositionedElement>,
+    let mut flush = |layers: &mut PaintLayers,
                      page_number: &mut usize,
                      displayed_page_number: &mut usize,
-                     current_pager: &mut Option<Pager<'_>>| {
+                     current_pager: &mut Option<Pager<'_>>|
+     -> Result<(), FurnitureFailure> {
+        let fail = |error| endnote_paint_failure(error, furniture, *page_number);
         if reuse_pending {
-            if let Some(page) = pages.last_mut() {
-                page.elements.append(elements);
-            }
+            paint
+                .append_late(pages, std::mem::take(layers))
+                .map_err(fail)?;
             reuse_pending = false;
         } else if let Some(mut pager) = current_pager.take() {
-            pager.elements = std::mem::take(elements);
+            pager.accept_layers(Ok(std::mem::take(layers)));
             pager.has_content_flag = true;
             pager.finish_page_outright();
-            if let Some(page) = pager.pages.into_iter().next() {
-                pages.push(page);
+            if let Some(failure) = pager.furniture_failure.take() {
+                return Err(failure);
             }
+            if pager.pages.len() != 1
+                || pager.page_policies.len() != 1
+                || pager.page_boundaries.len() != 1
+            {
+                return Err(fail(oxml_layout::LayoutError::Layout(
+                    "endnote page paint owner count mismatch".into(),
+                )));
+            }
+            pages.append(&mut pager.pages);
+            paint.policies.append(&mut pager.page_policies);
+            paint.boundaries.append(&mut pager.page_boundaries);
         } else {
-            let mut page = PageFrame::new(
-                *page_number,
-                page_width,
-                page_height,
-                std::mem::take(elements),
-            );
+            let layers = std::mem::take(layers);
+            let behind_end = layers.behind.len();
+            let regular_end = behind_end
+                .checked_add(layers.regular.len())
+                .ok_or_else(|| {
+                    fail(oxml_layout::LayoutError::Layout(
+                        "endnote paint overflow".into(),
+                    ))
+                })?;
+            let painted = layers.flatten().map_err(fail)?;
+            let len = painted.len();
+            let (elements, policies) = painted.into_parts().map_err(fail)?;
+            let mut page = PageFrame::new(*page_number, page_width, page_height, elements);
             page.displayed_page_number = *displayed_page_number;
             pages.push(page);
+            paint.policies.push(policies);
+            paint.boundaries.push(PagePaintBoundary {
+                behind_end,
+                regular_end,
+                body_front_end: len,
+                furniture_front_end: len,
+                elements_len: len,
+            });
         }
         *page_number += 1;
         *displayed_page_number = displayed_page_number.saturating_add(1);
+        Ok(())
     };
 
     for &note_ref in ordered {
@@ -4010,11 +4554,11 @@ fn append_ordered_endnote_pages(
                     count = 1;
                 } else {
                     flush(
-                        &mut elements,
+                        &mut painted_notes,
                         &mut page_number,
                         &mut displayed_page_number,
                         &mut current_pager,
-                    );
+                    )?;
                     cursor_y = 0.0;
                     current_pager = furniture
                         .map(|context| {
@@ -4040,62 +4584,67 @@ fn append_ordered_endnote_pages(
                             };
                         line.height + notice_height <= available_after_separator + 0.01
                     }) {
-                        draw_note(
-                            &mut elements,
-                            &geometry,
-                            special,
-                            special_render,
-                            0,
-                            special.lines.len(),
-                            false,
-                            geometry.margin_top,
-                            page_number,
-                        );
+                        painted_notes
+                            .accept_note(draw_note(
+                                &geometry,
+                                special,
+                                special_render,
+                                0,
+                                special.lines.len(),
+                                false,
+                                geometry.margin_top,
+                                page_number,
+                            ))
+                            .map_err(|error| {
+                                endnote_paint_failure(error, furniture, page_number)
+                            })?;
                         cursor_y += special.height() + NOTE_SEPARATOR_OFFSET;
                     }
                     continue;
                 }
             }
 
-            cursor_y += draw_note(
-                &mut elements,
-                &geometry,
-                note,
-                render,
-                first,
-                count,
-                continued,
-                geometry.margin_top + cursor_y,
-                page_number,
-            );
+            cursor_y += painted_notes
+                .accept_note(draw_note(
+                    &geometry,
+                    note,
+                    render,
+                    first,
+                    count,
+                    continued,
+                    geometry.margin_top + cursor_y,
+                    page_number,
+                ))
+                .map_err(|error| endnote_paint_failure(error, furniture, page_number))?;
             if first + count < note.lines.len()
                 && let Some((special, special_render)) = notice
                 && cursor_y + special.height() <= content_height + 0.01
             {
-                cursor_y += draw_note(
-                    &mut elements,
-                    &geometry,
-                    special,
-                    special_render,
-                    0,
-                    special.lines.len(),
-                    false,
-                    geometry.margin_top + cursor_y,
-                    page_number,
-                );
+                cursor_y += painted_notes
+                    .accept_note(draw_note(
+                        &geometry,
+                        special,
+                        special_render,
+                        0,
+                        special.lines.len(),
+                        false,
+                        geometry.margin_top + cursor_y,
+                        page_number,
+                    ))
+                    .map_err(|error| endnote_paint_failure(error, furniture, page_number))?;
             }
             first += count;
             continued = true;
         }
     }
 
-    if !elements.is_empty() {
+    if painted_notes.behind.len() + painted_notes.regular.len() + painted_notes.front.len() > 0 {
         flush(
-            &mut elements,
+            &mut painted_notes,
             &mut page_number,
             &mut displayed_page_number,
             &mut current_pager,
-        );
+        )?;
     }
     let offset = geometry.margin_top - authored_margin_top;
     Ok(Some(PageFlowSpace {
@@ -4200,20 +4749,24 @@ fn translate_element_shallow(element: &mut PositionedElement, dx: f64, dy: f64) 
 /// shape, which keeps all the justification and indent handling in one place.
 fn render_shape_text(
     text: &[ParagraphBlock],
+    owners: Option<&[WordParagraphPaint]>,
     geometry: &PageGeometry,
     rect: Rect,
     media: &HashMap<MediaId, ImageData>,
-) -> Vec<PositionedElement> {
-    if text.is_empty() {
-        return Vec::new();
+) -> oxml_layout::Result<PaintedElements> {
+    if owners.is_some_and(|owners| owners.len() != text.len()) {
+        return Err(oxml_layout::LayoutError::Layout(
+            "Word shape paragraph owner count mismatch".into(),
+        ));
     }
-
-    let mut local = Vec::new();
+    let mut local = PaintLayers::default();
     let mut y = 0.0;
-    for para in text {
-        render_paragraph_lines(
+    for (index, para) in text.iter().enumerate() {
+        local.append(&mut render_paragraph_lines(
             &para.lines,
             ParagraphView {
+                line_start: 0,
+                paint: owners.map(|owners| &owners[index]),
                 baseline_policy: None,
                 line_gaps: &[],
                 border_group_before: false,
@@ -4225,27 +4778,19 @@ fn render_shape_text(
             geometry,
             y,
             (true, true, 0.0),
-            &mut local,
             media,
-        );
+        )?)?;
         y += para.content_height();
     }
-
-    // render_paragraph_lines works in content-area coordinates, so undo the
-    // margin it applied and then move onto the shape.
     let dx = rect.x - geometry.margin_left;
     let dy = rect.y - geometry.margin_top;
-    for element in &mut local {
+    let mut local = local.flatten()?;
+    for element in local.coordinate_elements_mut() {
         translate_element_shallow(element, dx, dy);
     }
-    local
+    Ok(local)
 }
 
-/// Resolve a horizontal anchor offset against the frame it is measured from.
-///
-/// An offset says nothing on its own. The same number lands somewhere
-/// different depending on the frame, and treating every offset as a page
-/// coordinate put anchored drawings in the corner of the sheet.
 fn frame_h(rel: ST_RelativeFromH, g: &PageGeometry, indent_left: f64) -> (f64, f64) {
     let text_width = g.page_width - g.margin_left - g.margin_right;
     match rel {
@@ -4439,6 +4984,7 @@ fn line_reservations(
 }
 
 struct WrapReflow {
+    paint: Option<WordParagraphPaint>,
     paragraph: ParagraphBlock,
     before_lines: Vec<f64>,
 }
@@ -4451,13 +4997,15 @@ struct WrapReflow {
 /// the paragraph it already has.
 fn reflow_around_wraps(
     para: &ParagraphBlock,
-    reflow_direction: oxml_layout::TextDirection,
+    context: (oxml_layout::TextDirection, Option<&WordParagraphPaint>),
     wraps: &[PlacedWrap],
     para_top: f64,
     geometry: &PageGeometry,
     fm: &FontManager,
     policy: WrapReflowPolicy,
 ) -> Result<Option<WrapReflow>, String> {
+    let (reflow_direction, word_paint) = context;
+    let mut paint = word_paint.cloned();
     if wraps.is_empty() {
         return Ok(None);
     }
@@ -4517,23 +5065,34 @@ fn reflow_around_wraps(
         params.line_prefix_widths = required.prefix.clone();
         params.line_suffix_widths = required.suffix.clone();
 
-        let reflowed = if reflow_direction != oxml_layout::TextDirection::Auto
-            || reflow_items.iter().any(|item| {
-                matches!(item, oxml_layout::InlineItem::MultilingualText(_))
-                    || matches!(
-                        item,
-                        oxml_layout::InlineItem::Text(segment)
-                            | oxml_layout::InlineItem::HyphenatedText { segment, .. }
-                            | oxml_layout::InlineItem::Marker(segment)
-                            if segment.direction != oxml_layout::TextDirection::Auto
-                    )
-            }) {
-            break_multilingual_into_lines(reflow_items, &params, fm, reflow_direction)
-        } else {
-            break_into_lines(reflow_items, &params, fm)
-        };
-        let mut reflowed =
-            reflowed.map_err(|error| format!("furniture line reflow failed: {error}"))?;
+        let rich = word_paint.map_or_else(
+            || {
+                reflow_direction != oxml_layout::TextDirection::Auto
+                    || reflow_items.iter().any(|item| {
+                        matches!(item, oxml_layout::InlineItem::MultilingualText(_))
+                            || matches!(
+                                item,
+                                oxml_layout::InlineItem::Text(segment)
+                                    | oxml_layout::InlineItem::HyphenatedText { segment, .. }
+                                    | oxml_layout::InlineItem::Marker(segment)
+                                    if segment.direction != oxml_layout::TextDirection::Auto
+                            )
+                    })
+            },
+            |paint| paint.rich_layout,
+        );
+        let (mut reflowed, origins) = oxml_layout::line::break_into_lines_with_opaque_origins(
+            reflow_items,
+            &params,
+            fm,
+            rich.then_some(reflow_direction),
+        )
+        .map_err(|error| format!("furniture line reflow failed: {error}"))?;
+        if let Some(paint) = &mut paint {
+            paint
+                .bind_annotation_origins(&reflowed, &origins)
+                .map_err(|error| error.to_string())?;
+        }
         // The re-break went through the generic line breaker, which knows
         // nothing about Word's line measure or the section grid, so both are
         // applied again over its result, as they were to the first break. It
@@ -4579,6 +5138,7 @@ fn reflow_around_wraps(
     // proved later gaps separately to both occupied-band paint and pricing.
     adjusted.add_border_padding();
     Ok(Some(WrapReflow {
+        paint,
         paragraph: adjusted,
         before_lines: line_gaps,
     }))
@@ -4592,6 +5152,8 @@ fn paginate_paragraph<B: LayoutBlockLike>(
     pager: &mut Pager,
 ) {
     let para = ParagraphView {
+        line_start: 0,
+        paint: para.paint,
         baseline_policy: para
             .semantics
             .and_then(|semantics| semantics.tb_rl_exact_baseline)
@@ -4612,19 +5174,30 @@ fn paginate_paragraph<B: LayoutBlockLike>(
             .then(|| {
                 reflow_around_wraps(
                     para.block,
-                    para.reflow_direction,
+                    (
+                        para.reflow_direction,
+                        para.paint
+                            .or_else(|| para.semantics.map(|semantics| semantics.paint.as_ref())),
+                    ),
                     &wraps,
                     para_top,
                     &pager.geometry,
                     pager.fm,
                     WrapReflowPolicy::Body,
                 )
-                .ok()
-                .flatten()
+                .map_err(|reason| {
+                    pager.pending_furniture_failure.get_or_insert(reason);
+                })
             })
-            .flatten()
+            .transpose()
+    };
+    let reflowed = match reflowed {
+        Ok(value) => value.flatten(),
+        Err(()) => return,
     };
     let para = reflowed.as_ref().map_or(para, |reflowed| ParagraphView {
+        line_start: 0,
+        paint: reflowed.paint.as_ref().or(para.paint),
         baseline_policy: para.baseline_policy,
         line_gaps: &reflowed.before_lines,
         border_group_before: para.border_group_before,
@@ -4772,17 +5345,23 @@ fn paginate_paragraph<B: LayoutBlockLike>(
 
     // Anchored drawings resolve against the paragraph's position, so place
     // them now that the page and the cursor are settled.
-    pager.place_anchored(&para.anchored, pager.cursor_y, para.indent_left, block_idx);
+    pager.place_anchored(
+        &para.anchored,
+        para.paint
+            .or_else(|| para.semantics.map(|semantics| semantics.paint.as_ref())),
+        pager.cursor_y,
+        para.indent_left,
+        block_idx,
+    );
 
-    render_paragraph_lines(
+    pager.accept_layers(render_paragraph_lines(
         &para.lines,
         para,
         &pager.geometry,
         pager.cursor_y,
         (true, true, border_gap),
-        &mut pager.elements,
         pager.media,
-    );
+    ));
     pager.record_numbered_lines(
         &para.lines,
         para,
@@ -4889,16 +5468,22 @@ fn render_para_split(
     };
     pager.cursor_y += space_before;
     // A split paragraph anchors its drawings to where it starts.
-    pager.place_anchored(&para.anchored, pager.cursor_y, para.indent_left, block_idx);
-    render_paragraph_lines(
+    pager.place_anchored(
+        &para.anchored,
+        para.paint
+            .or_else(|| para.semantics.map(|semantics| semantics.paint.as_ref())),
+        pager.cursor_y,
+        para.indent_left,
+        block_idx,
+    );
+    pager.accept_layers(render_paragraph_lines(
         &para.lines[..split_at],
         para,
         &pager.geometry,
         pager.cursor_y,
         (true, false, border_gap),
-        &mut pager.elements,
         pager.media,
-    );
+    ));
     pager.record_numbered_lines(
         &para.lines[..split_at],
         para,
@@ -4992,8 +5577,28 @@ fn render_para_split(
             reflow: para.reflow.clone(),
             content_offset_top: 0.0,
         };
+        let continuation_paint = para
+            .paint
+            .or_else(|| para.semantics.map(|semantics| semantics.paint.as_ref()))
+            .map(|paint| {
+                let mut selected = paint.for_line_range(&para.lines, split_at..para.lines.len())?;
+                selected.anchors.clear();
+                Ok::<_, oxml_layout::LayoutError>(selected)
+            })
+            .transpose();
+        let continuation_paint = match continuation_paint {
+            Ok(paint) => paint,
+            Err(error) => {
+                pager
+                    .pending_furniture_failure
+                    .get_or_insert(error.to_string());
+                return;
+            }
+        };
         render_para_split(
             ParagraphView {
+                line_start: 0,
+                paint: continuation_paint.as_ref(),
                 baseline_policy: para.baseline_policy,
                 line_gaps: &[],
                 border_group_before: para.border_group_before,
@@ -5021,15 +5626,17 @@ fn render_para_split(
             remaining_height,
         );
     }
-    render_paragraph_lines(
+    pager.accept_layers(render_paragraph_lines(
         remaining_lines,
-        para,
+        ParagraphView {
+            line_start: para.line_start + split_at,
+            ..para
+        },
         &pager.geometry,
         0.0,
         (false, true, 0.0),
-        &mut pager.elements,
         pager.media,
-    );
+    ));
     pager.record_numbered_lines(remaining_lines, para, 0.0, false);
     render_change_bar(
         para.block,
@@ -5193,10 +5800,23 @@ fn render_paragraph_lines(
     geometry: &PageGeometry,
     start_y: f64,
     fragment: (bool, bool, f64),
-    elements: &mut Vec<PositionedElement>,
     media: &HashMap<MediaId, ImageData>,
-) {
-    let first_element = elements.len();
+) -> oxml_layout::Result<PaintLayers> {
+    let mut elements = Vec::new();
+    let mut policies = PaintPolicies::default();
+    let mut layers = PaintLayers::default();
+    let first_element = 0;
+    let word_paint = para
+        .paint
+        .or_else(|| para.semantics.map(|semantics| semantics.paint.as_ref()));
+    if word_paint.is_some_and(|paint| !paint.rows.is_empty())
+        && lines.len() != para.block.lines.len()
+    {
+        return Err(oxml_layout::LayoutError::Layout(
+            "prepainted Word rows cannot be structurally reflowed".into(),
+        ));
+    }
+    let mut structural_count = 0usize;
     // A drawing this paragraph must clear rather than flow beside pushes its
     // first line down. `content_height` already counts the same offset.
     let mut y = start_y + para.content_offset_top;
@@ -5227,10 +5847,13 @@ fn render_paragraph_lines(
                     - bottom_padding,
             },
             fragment,
-            elements,
+            &mut elements,
         );
     }
     for (index, framed_line) in lines.iter().enumerate() {
+        let owner_line = para.line_start.checked_add(index).ok_or_else(|| {
+            oxml_layout::LayoutError::Layout("paragraph paint line overflow".into())
+        })?;
         y += para.line_gaps.get(index).copied().unwrap_or(0.0);
         let top = if index == 0 { top_padding } else { 0.0 };
         let bottom = if index + 1 == lines.len() {
@@ -5305,7 +5928,41 @@ fn render_paragraph_lines(
 
         for (visual_item, item) in line.items.iter().enumerate() {
             match item {
-                LineItem::Text(seg) | LineItem::Marker(seg) => {
+                LineItem::MultilingualText(segment) if !segment.uses_legacy_shaping() => {
+                    let first = elements.len();
+                    x += push_multilingual_text(
+                        &mut elements,
+                        &mut policies,
+                        word_field_owner(word_paint, Some(segment), None)?,
+                        segment,
+                        x,
+                        baseline_y,
+                        geometry.margin_top + y,
+                        line.height,
+                        para.source_node(),
+                        if ink.contains(&visual_item) {
+                            justify_extra
+                        } else {
+                            0.0
+                        },
+                    )?;
+                    let element_position = (first..elements.len())
+                        .find(|position| {
+                            matches!(elements[*position], PositionedElement::MultilingualText(_))
+                        })
+                        .expect("rich text rendering emits its positioned text");
+                    text_provenance.push(ReflowTextProvenance {
+                        element_position,
+                        visual_item,
+                        kind: ReflowTextProvenanceKind::Multilingual,
+                    });
+                }
+                LineItem::Text(_) | LineItem::Marker(_) | LineItem::MultilingualText(_) => {
+                    let seg = match item {
+                        LineItem::Text(segment) | LineItem::Marker(segment) => segment,
+                        LineItem::MultilingualText(segment) => segment.base(),
+                        _ => unreachable!("matched a text paint owner"),
+                    };
                     let adjusted_baseline = baseline_y - seg.baseline_offset;
                     // Word does not widen, underline, strike or highlight the
                     // spaces hanging past the end of a line.
@@ -5341,50 +5998,67 @@ fn render_paragraph_lines(
                         seg.advances.clone()
                     };
 
-                    elements.push(PositionedElement::Text(GlyphRun {
-                        origin: Point {
-                            x,
-                            y: adjusted_baseline,
-                        },
-                        font_id: seg.font_id,
-                        font_size: seg.font_size,
-                        glyph_ids: seg.glyph_ids.clone(),
-                        advances,
-                        text: seg.text.clone(),
-                        source: match para.source_node() {
-                            Some(source_node) => seg.source.and_then(|mut source| {
-                                source.node = source_node?;
-                                Some(source)
-                            }),
-                            None => seg.source,
-                        },
-                        color: seg.color,
-                        bold: seg.bold,
-                        italic: seg.italic,
-                        field_kind: seg.field_kind,
-                        field_source: match para.source_node() {
-                            Some(source_node) => seg.field_source.and_then(|mut field_source| {
-                                field_source.node = source_node?;
-                                Some(field_source)
-                            }),
-                            None => seg.field_source,
-                        },
-                        note: seg.note,
-                        note_reference_source: match para.source_node() {
-                            Some(source_node) => {
-                                seg.note_reference_source.and_then(|mut source| {
+                    let owner = match item {
+                        LineItem::MultilingualText(segment) => {
+                            word_field_owner(word_paint, Some(segment), None)?
+                        }
+                        _ => {
+                            if seg.field_kind.is_some() || seg.field_source.is_some() {
+                                structural_count += 1;
+                            }
+                            word_field_owner(word_paint, None, Some(seg))?
+                        }
+                    };
+                    policies.emit(
+                        &mut elements,
+                        PositionedElement::Text(GlyphRun {
+                            origin: Point {
+                                x,
+                                y: adjusted_baseline,
+                            },
+                            font_id: seg.font_id,
+                            font_size: seg.font_size,
+                            glyph_ids: seg.glyph_ids.clone(),
+                            advances,
+                            text: seg.text.clone(),
+                            source: match para.source_node() {
+                                Some(source_node) => seg.source.and_then(|mut source| {
                                     source.node = source_node?;
                                     Some(source)
-                                })
-                            }
-                            None => seg.note_reference_source,
-                        },
-                        tab_aligned: tab_aligned[visual_item].map(|mut field| {
-                            field.start += x_offset;
-                            field.end += x_offset;
-                            field
+                                }),
+                                None => seg.source,
+                            },
+                            color: seg.color,
+                            bold: seg.bold,
+                            italic: seg.italic,
+                            field_kind: seg.field_kind,
+                            field_source: match para.source_node() {
+                                Some(source_node) => {
+                                    seg.field_source.and_then(|mut field_source| {
+                                        field_source.node = source_node?;
+                                        Some(field_source)
+                                    })
+                                }
+                                None => seg.field_source,
+                            },
+                            note: seg.note,
+                            note_reference_source: match para.source_node() {
+                                Some(source_node) => {
+                                    seg.note_reference_source.and_then(|mut source| {
+                                        source.node = source_node?;
+                                        Some(source)
+                                    })
+                                }
+                                None => seg.note_reference_source,
+                            },
+                            tab_aligned: tab_aligned[visual_item].map(|mut field| {
+                                field.start += x_offset;
+                                field.end += x_offset;
+                                field
+                            }),
                         }),
-                    }));
+                        owner,
+                    )?;
                     text_provenance.push(ReflowTextProvenance {
                         element_position: elements.len() - 1,
                         visual_item,
@@ -5493,33 +6167,6 @@ fn render_paragraph_lines(
                     _accumulated_extra += segment_extra;
                     x += effective_width;
                 }
-                LineItem::MultilingualText(segment) => {
-                    let first = elements.len();
-                    x += push_multilingual_text(
-                        elements,
-                        segment,
-                        x,
-                        baseline_y,
-                        geometry.margin_top + y,
-                        line.height,
-                        para.source_node(),
-                        if ink.contains(&visual_item) {
-                            justify_extra
-                        } else {
-                            0.0
-                        },
-                    );
-                    let element_position = (first..elements.len())
-                        .find(|position| {
-                            matches!(elements[*position], PositionedElement::MultilingualText(_))
-                        })
-                        .expect("rich text rendering emits its positioned text");
-                    text_provenance.push(ReflowTextProvenance {
-                        element_position,
-                        visual_item,
-                        kind: ReflowTextProvenanceKind::Multilingual,
-                    });
-                }
                 LineItem::Tab { width, leader, .. } => {
                     if let Some(leader_seg) = leader {
                         // Render the pre-shaped leader text
@@ -5585,8 +6232,76 @@ fn render_paragraph_lines(
                         f: group_y,
                         ..oxml_layout::Transform::IDENTITY
                     });
-                    let group = PositionedElement::Group(positioned);
-                    elements.push(group);
+                    if let Some(annotation) = word_paint
+                        .map(|paint| paint.annotation_at(owner_line, visual_item))
+                        .transpose()?
+                        .flatten()
+                    {
+                        let base_count = annotation.policies.field_count();
+                        let child = PaintedElements::from_parts(
+                            std::mem::take(&mut positioned.children),
+                            annotation.policies.clone(),
+                        )?;
+                        let (roots, mut root_policies) = child
+                            .wrap(PositionedElement::Group(positioned))?
+                            .into_parts()?;
+                        root_policies.attach_annotation(
+                            &roots,
+                            &[0],
+                            Arc::clone(&annotation.recipe),
+                            annotation.kind,
+                            base_count,
+                            [
+                                x.to_bits(),
+                                baseline_y.to_bits(),
+                                (geometry.margin_top + y).to_bits(),
+                                line.height.to_bits(),
+                            ],
+                        )?;
+                        policies.append(
+                            &mut elements,
+                            PaintedElements::from_parts(roots, root_policies)?,
+                        )?;
+                    } else if let Some(row) = word_paint.and_then(|paint| {
+                        paint
+                            .rows
+                            .iter()
+                            .find(|row| row.line == owner_line && row.item == visual_item)
+                    }) {
+                        if row.children_len != positioned.children.len()
+                            || row.behind_end > row.flow_end
+                            || row.flow_end > row.children_len
+                            || positioned.opacity != 1.0
+                            || !positioned.effects.is_empty()
+                        {
+                            return Err(oxml_layout::LayoutError::Layout(
+                                "invalid prepainted Word row owner".into(),
+                            ));
+                        }
+                        let mut child = PaintedElements::from_parts(
+                            std::mem::take(&mut positioned.children),
+                            row.policies.clone(),
+                        )?;
+                        let front = child.split_off(row.flow_end)?;
+                        let regular = child.split_off(row.behind_end)?;
+                        let shell = PositionedElement::Group(positioned);
+                        layers.behind.append(&mut child.wrap(shell.clone())?)?;
+                        layers.front.append(&mut front.wrap(shell.clone())?)?;
+                        policies.append(&mut elements, regular.wrap(shell)?)?;
+                    } else {
+                        policies.append(
+                            &mut elements,
+                            if word_paint.is_some() {
+                                PaintedElements::non_field(vec![PositionedElement::Group(
+                                    positioned,
+                                )])?
+                            } else {
+                                PaintedElements::neutral(vec![PositionedElement::Group(
+                                    positioned,
+                                )])?
+                            },
+                        )?;
+                    }
                     x += width;
                 }
                 LineItem::Figure {
@@ -5631,10 +6346,18 @@ fn render_paragraph_lines(
                             continue;
                         }
                     };
-                    elements.push(PositionedElement::MarkedContent {
+                    let marked = vec![PositionedElement::MarkedContent {
                         structure: *structure_id,
                         children: vec![figure],
-                    });
+                    }];
+                    policies.append(
+                        &mut elements,
+                        if word_paint.is_some() {
+                            PaintedElements::non_field(marked)?
+                        } else {
+                            PaintedElements::neutral(marked)?
+                        },
+                    )?;
                     x += item.width();
                 }
                 _ => x += item.width(),
@@ -5647,7 +6370,7 @@ fn render_paragraph_lines(
             .collect::<Vec<_>>();
         if let Some(logical_elements) = para.reflow.as_deref().and_then(|reflow| {
             logical_reflow_elements(
-                elements,
+                &elements,
                 &text_provenance,
                 &tab_provenance,
                 &reflow.items,
@@ -5655,15 +6378,22 @@ fn render_paragraph_lines(
                 para.source_node(),
             )
         }) {
-            for (position, element) in text_positions.iter().copied().zip(logical_elements) {
-                elements[position] = element;
-            }
+            let permutation = logical_elements
+                .iter()
+                .map(|position| {
+                    text_positions.binary_search(position).map_err(|_| {
+                        oxml_layout::LayoutError::Layout("invalid logical glyph permutation".into())
+                    })
+                })
+                .collect::<oxml_layout::Result<Vec<_>>>()?;
+            policies.permute(&mut elements, &text_positions, &permutation)?;
             y += line.height + bottom;
             continue;
         }
         let mut leading = Vec::new();
-        let mut logical_groups = Vec::<((u32, u32, u32), Vec<PositionedElement>)>::new();
-        for element in text_positions.iter().map(|index| elements[*index].clone()) {
+        let mut logical_groups = Vec::<((u32, u32, u32), Vec<usize>)>::new();
+        for position in &text_positions {
+            let element = &elements[*position];
             let source = match &element {
                 PositionedElement::Text(run) => run.source,
                 PositionedElement::MultilingualText(run) => run.source,
@@ -5672,12 +6402,12 @@ fn render_paragraph_lines(
             if let Some(source) = source {
                 logical_groups.push((
                     (source.node.get(), source.char_start, source.char_end),
-                    vec![element],
+                    vec![*position],
                 ));
             } else if let Some((_, group)) = logical_groups.last_mut() {
-                group.push(element);
+                group.push(*position);
             } else {
-                leading.push(element);
+                leading.push(*position);
             }
         }
         if logical_groups.is_empty() {
@@ -5685,17 +6415,20 @@ fn render_paragraph_lines(
                 .into_iter()
                 .filter(|index| matches!(elements[*index], PositionedElement::MultilingualText(_)))
                 .collect::<Vec<_>>();
-            let mut logical_runs = rich_positions
-                .iter()
-                .map(|index| elements[*index].clone())
-                .collect::<Vec<_>>();
-            logical_runs.sort_by_key(|element| match element {
+            let mut logical_runs = rich_positions.to_vec();
+            logical_runs.sort_by_key(|position| match &elements[*position] {
                 PositionedElement::MultilingualText(run) => run.logical_index,
                 _ => unreachable!("rich positions contain only multilingual text"),
             });
-            for (position, element) in rich_positions.into_iter().zip(logical_runs) {
-                elements[position] = element;
-            }
+            let permutation = logical_runs
+                .iter()
+                .map(|position| {
+                    rich_positions
+                        .binary_search(position)
+                        .expect("selected rich slot")
+                })
+                .collect::<Vec<_>>();
+            policies.permute(&mut elements, &rich_positions, &permutation)?;
         } else {
             logical_groups.sort_by_key(|(key, _)| *key);
             let logical_elements = leading
@@ -5706,41 +6439,104 @@ fn render_paragraph_lines(
                         .flat_map(|(_, elements)| elements),
                 )
                 .collect::<Vec<_>>();
-            for (position, element) in text_positions.into_iter().zip(logical_elements) {
-                elements[position] = element;
-            }
+            let permutation = logical_elements
+                .iter()
+                .map(|position| {
+                    text_positions
+                        .binary_search(position)
+                        .expect("selected logical slot")
+                })
+                .collect::<Vec<_>>();
+            policies.permute(&mut elements, &text_positions, &permutation)?;
         }
 
         y += line.height;
     }
 
-    if let Some(structure_id) = para.structure_id() {
-        let produced = elements.split_off(first_element);
-        elements.extend(produced.into_iter().map(|element| match &element {
-            PositionedElement::Text(run) if !(run.text.is_empty() && run.glyph_ids.is_empty()) => {
-                PositionedElement::MarkedContent {
-                    structure: Some(structure_id),
-                    children: vec![element],
-                }
-            }
-            PositionedElement::MultilingualText(_) => PositionedElement::MarkedContent {
-                structure: Some(structure_id),
-                children: vec![element],
-            },
-            PositionedElement::Image { .. } | PositionedElement::Group(_) => {
-                PositionedElement::MarkedContent {
-                    structure: None,
-                    children: vec![element],
-                }
-            }
-            PositionedElement::MarkedContent { .. } => element,
-            PositionedElement::LinkAnnotation { .. } => element,
-            _ => PositionedElement::MarkedContent {
-                structure: None,
-                children: vec![element],
-            },
-        }));
+    if word_paint.is_some_and(|paint| structural_count > paint.structural_count) {
+        return Err(oxml_layout::LayoutError::Layout(
+            "Word structural producer count mismatch".into(),
+        ));
     }
+    let mut regular = PaintedElements::from_parts(elements, policies)?;
+    if let Some(structure_id) = para.structure_id() {
+        for position in first_element..regular.len() {
+            let structure = match &regular.elements()[position] {
+                PositionedElement::Text(run) if run.text.is_empty() && run.glyph_ids.is_empty() => {
+                    continue;
+                }
+                PositionedElement::Text(_) | PositionedElement::MultilingualText(_) => {
+                    Some(structure_id)
+                }
+                PositionedElement::MarkedContent { .. }
+                | PositionedElement::LinkAnnotation { .. } => continue,
+                _ => None,
+            };
+            let detached =
+                regular.splice_at(&[], position..position + 1, &mut PaintedElements::default())?;
+            let mut wrapped = detached.wrap(PositionedElement::MarkedContent {
+                structure,
+                children: Vec::new(),
+            })?;
+            regular.splice_at(&[], position..position, &mut wrapped)?;
+        }
+    }
+    layers.regular.append(&mut regular)?;
+    Ok(layers)
+}
+
+fn word_field_owner(
+    paint: Option<&WordParagraphPaint>,
+    segment: Option<&oxml_layout::MultilingualTextSegment>,
+    plain: Option<&oxml_layout::TextSegment>,
+) -> oxml_layout::Result<FieldPaintOwner> {
+    let Some(paint) = paint else {
+        return Ok(FieldPaintOwner::Neutral);
+    };
+    if paint.plain_field_policy.is_none() {
+        if plain
+            .is_some_and(|segment| segment.field_kind.is_some() || segment.field_source.is_some())
+            || segment.is_some_and(|segment| {
+                segment.base().field_kind.is_some() || segment.base().field_source.is_some()
+            })
+        {
+            return Err(oxml_layout::LayoutError::Layout(
+                "Word field lacks known producer context".into(),
+            ));
+        }
+        return Ok(FieldPaintOwner::Word {
+            kern: false,
+            legacy: true,
+            occurrence: None,
+        });
+    }
+    let (kern, legacy) = if let Some(segment) = segment {
+        (
+            segment.kerning_override().ok_or_else(|| {
+                oxml_layout::LayoutError::Layout("Word span lacks explicit shaping context".into())
+            })?,
+            segment.uses_legacy_shaping(),
+        )
+    } else {
+        paint.plain_field_policy.ok_or_else(|| {
+            oxml_layout::LayoutError::Layout(
+                "Word plain field lacks structural producer context".into(),
+            )
+        })?
+    };
+    let occurrence = segment.and_then(|segment| {
+        paint
+            .field_occurrences
+            .iter()
+            .find_map(|(index, occurrence)| {
+                (*index == segment.logical_index()).then_some(*occurrence)
+            })
+    });
+    Ok(FieldPaintOwner::Word {
+        kern,
+        legacy,
+        occurrence,
+    })
 }
 
 fn logical_reflow_elements(
@@ -5750,7 +6546,7 @@ fn logical_reflow_elements(
     logical_items: &[oxml_layout::InlineItem],
     base_direction: oxml_layout::TextDirection,
     source_node: Option<Option<oxml_layout::SourceNodeId>>,
-) -> Option<Vec<PositionedElement>> {
+) -> Option<Vec<usize>> {
     let has_source_less_text =
         provenance
             .iter()
@@ -5837,7 +6633,7 @@ fn logical_reflow_elements(
             }
         }?;
         known_visual_ranks.push((item_provenance.visual_item, key.0));
-        ranked.push((key, visual_order, element));
+        ranked.push((key, visual_order, item_provenance.element_position));
     }
 
     let tab_ranks = logical_tab_ranks(tabs, &known_visual_ranks, logical_items, base_direction)?;
@@ -5849,7 +6645,7 @@ fn logical_reflow_elements(
         ranked.push((
             (logical_index, 0, 0),
             visual_order,
-            elements[item_provenance.element_position].clone(),
+            item_provenance.element_position,
         ));
     }
     ranked.sort_by_key(|(key, visual_order, _)| (*key, *visual_order));
@@ -6268,34 +7064,33 @@ fn render_frame_blocks(
     rect: Rect,
     geometry: &PageGeometry,
     page_number: usize,
-    elements: &mut Vec<PositionedElement>,
-    behind: &mut Vec<PositionedElement>,
-    front: &mut Vec<PositionedElement>,
     media: &HashMap<MediaId, ImageData>,
-) {
+) -> oxml_layout::Result<PaintLayers> {
+    let mut layers = PaintLayers::default();
     let frame = PageGeometry {
         margin_left: rect.x,
         margin_right: geometry.page_width - rect.x - rect.width,
         margin_top: rect.y,
         ..geometry.clone()
     };
-    let mut children = Vec::new();
+    let mut children = PaintedElements::default();
     let mut y = 0.0;
     for (paragraph, facts) in blocks.iter().zip(facts) {
         y += facts.flow_gap;
-        place_cell_anchored(
+        layers.append(&mut place_cell_anchored(
             &paragraph.anchored,
+            Some(&facts.paint),
             geometry,
             &frame,
             y,
             paragraph.indent_left,
-            front,
-            behind,
             media,
-        );
-        render_paragraph_lines(
+        )?)?;
+        let mut painted = render_paragraph_lines(
             &paragraph.lines,
             ParagraphView {
+                line_start: 0,
+                paint: Some(&facts.paint),
                 baseline_policy: None,
                 line_gaps: &[],
                 border_group_before: false,
@@ -6307,26 +7102,33 @@ fn render_frame_blocks(
             &frame,
             y,
             (true, true, facts.border_gap),
-            &mut children,
             media,
-        );
+        )?;
+        children.append(&mut painted.regular)?;
+        layers.behind.append(&mut painted.behind)?;
+        layers.front.append(&mut painted.front)?;
+        let mut bars = Vec::new();
         render_change_bar(
             paragraph,
             rect.y + y - geometry.margin_top,
             paragraph.content_height(),
             geometry,
             page_number,
-            &mut children,
+            &mut bars,
         );
+        children.append(&mut PaintedElements::non_field(bars)?)?;
         y += paragraph.content_height();
     }
-    elements.push(PositionedElement::Group(GroupElement {
-        transform: Transform::IDENTITY,
-        clip: None,
-        opacity: 1.0,
-        effects: Vec::new(),
-        children,
-    }));
+    layers
+        .regular
+        .append(&mut children.wrap(PositionedElement::Group(GroupElement {
+            transform: Transform::IDENTITY,
+            clip: None,
+            opacity: 1.0,
+            effects: Vec::new(),
+            children: Vec::new(),
+        }))?)?;
+    Ok(layers)
 }
 
 /// Price and paint only real furniture flow. Positioned owners retain their page context.
@@ -6335,14 +7137,14 @@ fn render_hf_blocks(
     directions: Option<&[HeaderFooterBlockSemantics]>,
     geometry: &PageGeometry,
     page_number: usize,
-    layers: (
-        &mut Vec<PositionedElement>,
-        &mut Vec<PositionedElement>,
-        &mut Vec<PositionedElement>,
-    ),
     media: &HashMap<MediaId, ImageData>,
-) {
-    let (elements, behind, front) = layers;
+) -> oxml_layout::Result<PaintLayers> {
+    let mut layers = PaintLayers::default();
+    if directions.is_some_and(|facts| facts.len() != prepared.blocks.len()) {
+        return Err(oxml_layout::LayoutError::Layout(
+            "Word furniture owner count mismatch".into(),
+        ));
+    }
     let blocks = &prepared.blocks;
     for (index, para) in blocks.iter().enumerate() {
         let facts = directions.and_then(|values| values.get(index));
@@ -6353,17 +7155,14 @@ fn render_hf_blocks(
                     let end = index + paragraphs;
                     let frame_facts =
                         &directions.expect("frame facts accompany blocks")[index..end];
-                    render_frame_blocks(
+                    layers.append(&mut render_frame_blocks(
                         &blocks[index..end],
                         frame_facts,
                         prepared.placements[index].expect("prepared frame"),
                         geometry,
                         page_number,
-                        elements,
-                        behind,
-                        front,
                         media,
-                    );
+                    )?)?;
                     continue;
                 }
                 HeaderFooterPlacement::FrameContinuation => continue,
@@ -6373,7 +7172,7 @@ fn render_hf_blocks(
                     row,
                 } => {
                     let rect = prepared.placements[index].expect("prepared table row");
-                    render_table_row(
+                    layers.append(&mut render_table_row(
                         &table.rows[*row],
                         semantics.rows.get(*row),
                         &table.col_widths,
@@ -6384,31 +7183,30 @@ fn render_hf_blocks(
                         page_number,
                         table.borders.as_ref(),
                         table.bidi_visual,
-                        elements,
-                        behind,
                         media,
                         *row == 0,
                         *row + 1 == table.rows.len(),
-                    );
+                    )?)?;
                     continue;
                 }
                 HeaderFooterPlacement::Flow => {}
             }
         }
         let border_gap = facts.map_or(0.0, |facts| facts.border_gap);
-        place_cell_anchored(
+        layers.append(&mut place_cell_anchored(
             &para.anchored,
+            prepared.paints.get(index).and_then(Option::as_deref),
             geometry,
             geometry,
             y - geometry.margin_top,
             para.indent_left,
-            front,
-            behind,
             media,
-        );
-        render_paragraph_lines(
+        )?)?;
+        layers.append(&mut render_paragraph_lines(
             &para.lines,
             ParagraphView {
+                line_start: 0,
+                paint: prepared.paints.get(index).and_then(Option::as_deref),
                 baseline_policy: None,
                 line_gaps: &prepared.before_lines[index],
                 border_group_before: false,
@@ -6421,18 +7219,22 @@ fn render_hf_blocks(
             geometry,
             y - geometry.margin_top,
             (true, true, border_gap),
-            elements,
             media,
-        );
+        )?)?;
+        let mut bars = Vec::new();
         render_change_bar(
             para,
             y - geometry.margin_top,
             prepared.block_height(index),
             geometry,
             page_number,
-            elements,
+            &mut bars,
         );
+        layers
+            .regular
+            .append(&mut PaintedElements::non_field(bars)?)?;
     }
+    Ok(layers)
 }
 
 /// Keep a related-story table's row geometry and cell clipping in its
@@ -6442,7 +7244,7 @@ pub(crate) fn story_table_rows(
     semantics: &crate::block::TableSemantics,
     geometry: &PageGeometry,
     media: &HashMap<MediaId, ImageData>,
-) -> Vec<ParagraphBlock> {
+) -> oxml_layout::Result<Vec<(ParagraphBlock, WordParagraphPaint)>> {
     let local_geometry = PageGeometry {
         margin_top: 0.0,
         margin_left: 0.0,
@@ -6455,9 +7257,7 @@ pub(crate) fn story_table_rows(
         .iter()
         .enumerate()
         .map(|(index, row)| {
-            let mut children = Vec::new();
-            let mut behind = Vec::new();
-            render_table_row(
+            let painted = render_table_row(
                 row,
                 semantics.rows.get(index),
                 &table.col_widths,
@@ -6468,13 +7268,18 @@ pub(crate) fn story_table_rows(
                 1,
                 table.borders.as_ref(),
                 table.bidi_visual,
-                &mut children,
-                &mut behind,
                 media,
                 index == 0,
                 index + 1 == table.rows.len(),
-            );
-            behind.extend(children);
+            )?;
+            let behind_end = painted.behind.len();
+            let flow_end = behind_end
+                .checked_add(painted.regular.len())
+                .ok_or_else(|| {
+                    oxml_layout::LayoutError::Layout("Word row paint length overflow".into())
+                })?;
+            let (children, policies) = painted.flatten()?.into_parts()?;
+            let children_len = children.len();
             let line = LayoutLine {
                 items: vec![LineItem::Group {
                     width: table.table_width,
@@ -6485,7 +7290,7 @@ pub(crate) fn story_table_rows(
                         clip: None,
                         opacity: 1.0,
                         effects: Vec::new(),
-                        children: behind,
+                        children,
                     },
                 }],
                 width: table.table_width,
@@ -6498,7 +7303,7 @@ pub(crate) fn story_table_rows(
                 is_last: true,
                 forced_break_after: None,
             };
-            crate::block::build_paragraph_block(
+            let paragraph = crate::block::build_paragraph_block(
                 vec![line],
                 0.0,
                 0.0,
@@ -6511,7 +7316,21 @@ pub(crate) fn story_table_rows(
                 true,
                 false,
                 false,
-            )
+            );
+            Ok((
+                paragraph,
+                WordParagraphPaint {
+                    rows: vec![WordRowPaint {
+                        line: 0,
+                        item: 0,
+                        behind_end,
+                        flow_end,
+                        children_len,
+                        policies,
+                    }],
+                    ..Default::default()
+                },
+            ))
         })
         .collect()
 }
@@ -6528,12 +7347,46 @@ fn render_table_row(
     page_number: usize,
     table_borders: Option<&rdocx_oxml::table::CT_TblBorders>,
     bidi: bool,
-    elements: &mut Vec<PositionedElement>,
-    behind_elements: &mut Vec<PositionedElement>,
     media: &HashMap<MediaId, ImageData>,
     draw_top_border: bool,
     draw_bottom_border: bool,
-) {
+) -> oxml_layout::Result<PaintLayers> {
+    if let Some(semantics) = row_semantics
+        && (semantics.cells.len() != row.cells.len()
+            || row
+                .cells
+                .iter()
+                .zip(&semantics.cells)
+                .any(|(cell, semantics)| {
+                    cell.blocks.len() != semantics.blocks.len()
+                        || cell
+                            .blocks
+                            .iter()
+                            .zip(&semantics.blocks)
+                            .any(|(block, semantics)| {
+                                !matches!(
+                                    (block, semantics),
+                                    (
+                                        crate::table::CellBlock::Paragraph(_),
+                                        CellBlockSemantics::Paragraph(_)
+                                    ) | (
+                                        crate::table::CellBlock::Table(_),
+                                        CellBlockSemantics::Table(_)
+                                    )
+                                )
+                            })
+                }))
+    {
+        return Err(oxml_layout::LayoutError::Layout(
+            "Word table paint companion mismatch".into(),
+        ));
+    }
+    let mut elements = Vec::new();
+    let mut policies = PaintPolicies::default();
+    let mut behind_elements = Vec::new();
+    let mut behind_policies = PaintPolicies::default();
+    let mut front_elements = Vec::new();
+    let mut front_policies = PaintPolicies::default();
     let mut cell_x = table_x + row.offset_left;
     let num_cells = row.cells.len();
 
@@ -6581,17 +7434,21 @@ fn render_table_row(
             cell.is_last_row,
             draw_top_border,
             draw_bottom_border,
-            elements,
+            &mut elements,
         );
 
         let content_element_start = elements.len();
         let behind_element_start = behind_elements.len();
+        let front_element_start = front_elements.len();
         // A change bar is drawn at the page margin and an anchored drawing
         // resolves against a page frame, so both are page furniture. They are
         // collected apart from the cell's own content and appended after the
         // rotation below, or a rotated cell would carry them off the page.
         let mut cell_furniture = Vec::new();
         let mut behind_furniture = Vec::new();
+        let mut behind_furniture_policies = PaintPolicies::default();
+        let mut front_furniture = Vec::new();
+        let mut front_furniture_policies = PaintPolicies::default();
         let mut change_bar_drawn = false;
         // The cell's own upright band, built once for a rotated cell.
         let upright_band = cell.rotation.map(|_| PageGeometry {
@@ -6642,9 +7499,11 @@ fn render_table_row(
                         page_width: box_x + box_width - cell.margin_right,
                         ..geometry.without_columns()
                     };
-                    render_paragraph_lines(
+                    let painted = render_paragraph_lines(
                         &paragraph.lines,
                         ParagraphView {
+                            line_start: 0,
+                            paint: None,
                             baseline_policy: None,
                             line_gaps: &[],
                             border_group_before: semantics
@@ -6675,9 +7534,11 @@ fn render_table_row(
                                 0.0
                             },
                         ),
-                        elements,
                         media,
-                    );
+                    )?;
+                    policies.append(&mut elements, painted.regular)?;
+                    behind_policies.append(&mut behind_elements, painted.behind)?;
+                    front_policies.append(&mut front_elements, painted.front)?;
                     // A horizontal cell keeps the interleaved painted order
                     // and the frame it always had. A rotated cell's change bar
                     // and anchored drawings are page furniture that must not
@@ -6687,14 +7548,6 @@ fn render_table_row(
                     // in. That band is the only page-space statement of where
                     // the cell is.
                     let rotated = cell.rotation.is_some();
-                    let (anchor_front, anchor_behind): (
-                        &mut Vec<PositionedElement>,
-                        &mut Vec<PositionedElement>,
-                    ) = if rotated {
-                        (&mut cell_furniture, &mut behind_furniture)
-                    } else {
-                        (elements, behind_elements)
-                    };
                     // The upright band is built once per rotated cell rather
                     // than per paragraph, and a horizontal cell borrows the
                     // geometry it already built instead of cloning it.
@@ -6707,16 +7560,22 @@ fn render_table_row(
                         (content_y, paragraph.content_height())
                     };
                     let furniture_geometry = upright_band.as_ref().unwrap_or(&cell_geometry);
-                    place_cell_anchored(
+                    let anchored = place_cell_anchored(
                         &paragraph.anchored,
+                        semantics.map(|semantics| semantics.paint.as_ref()),
                         written_geometry,
                         furniture_geometry,
                         furniture_y,
                         paragraph.indent_left,
-                        anchor_front,
-                        anchor_behind,
                         media,
-                    );
+                    )?;
+                    if rotated {
+                        front_furniture_policies.append(&mut front_furniture, anchored.front)?;
+                        behind_furniture_policies.append(&mut behind_furniture, anchored.behind)?;
+                    } else {
+                        front_policies.append(&mut front_elements, anchored.front)?;
+                        behind_policies.append(&mut behind_elements, anchored.behind)?;
+                    }
                     // A rotated cell's bar spans the whole row band, so it is
                     // drawn once however many revised paragraphs the cell
                     // holds. The flag records that a bar was drawn, not that a
@@ -6729,7 +7588,11 @@ fn render_table_row(
                             furniture_height,
                             geometry,
                             page_number,
-                            anchor_front,
+                            if rotated {
+                                &mut cell_furniture
+                            } else {
+                                &mut elements
+                            },
                         );
                         change_bar_drawn |= rotated && paragraph.change_bar.is_some();
                     }
@@ -6743,7 +7606,7 @@ fn render_table_row(
                     let nested_x = box_x + cell.margin_left + table.table_indent;
                     let mut nested_y = geometry.margin_top + content_y;
                     for (nested_row_index, nested_row) in table.rows.iter().enumerate() {
-                        render_table_row(
+                        let nested = render_table_row(
                             nested_row,
                             semantics.and_then(|semantics| semantics.rows.get(nested_row_index)),
                             &table.col_widths,
@@ -6754,12 +7617,13 @@ fn render_table_row(
                             page_number,
                             table.borders.as_ref(),
                             table.bidi_visual,
-                            elements,
-                            behind_elements,
                             media,
                             true,
                             true,
-                        );
+                        )?;
+                        policies.append(&mut elements, nested.regular)?;
+                        behind_policies.append(&mut behind_elements, nested.behind)?;
+                        front_policies.append(&mut front_elements, nested.front)?;
                         nested_y += nested_row.height;
                     }
                     content_y += table.total_height();
@@ -6774,24 +7638,40 @@ fn render_table_row(
                 cell_x + cell.width / 2.0,
                 band_y + band_height / 2.0,
             );
-            let rotate = |source: &mut Vec<PositionedElement>, start: usize| {
-                let children = source.split_off(start);
-                if !children.is_empty() {
-                    source.push(PositionedElement::Group(GroupElement {
-                        transform,
-                        clip: None,
-                        opacity: 1.0,
-                        effects: Vec::new(),
-                        children,
-                    }));
-                }
-            };
-            rotate(elements, content_element_start);
-            rotate(behind_elements, behind_element_start);
+            wrap_paint_suffix(
+                &mut elements,
+                &mut policies,
+                content_element_start,
+                transform,
+                None,
+                false,
+            )?;
+            wrap_paint_suffix(
+                &mut behind_elements,
+                &mut behind_policies,
+                behind_element_start,
+                transform,
+                None,
+                false,
+            )?;
+            wrap_paint_suffix(
+                &mut front_elements,
+                &mut front_policies,
+                front_element_start,
+                transform,
+                None,
+                false,
+            )?;
         }
         elements.append(&mut cell_furniture);
-        behind_elements.append(&mut behind_furniture);
-
+        behind_policies.append(
+            &mut behind_elements,
+            PaintedElements::from_parts(behind_furniture, behind_furniture_policies)?,
+        )?;
+        front_policies.append(
+            &mut front_elements,
+            PaintedElements::from_parts(front_furniture, front_furniture_policies)?,
+        )?;
         if cell.clip_content {
             let clip = Some(Path::rect(Rect {
                 x: cell_x,
@@ -6799,27 +7679,63 @@ fn render_table_row(
                 width: cell.width,
                 height: paint_height,
             }));
-            let children = elements.split_off(content_element_start);
-            elements.push(PositionedElement::Group(GroupElement {
-                transform: Transform::IDENTITY,
-                clip: clip.clone(),
-                opacity: 1.0,
-                effects: Vec::new(),
-                children,
-            }));
-            let children = behind_elements.split_off(behind_element_start);
-            if !children.is_empty() {
-                behind_elements.push(PositionedElement::Group(GroupElement {
-                    transform: Transform::IDENTITY,
-                    clip,
-                    opacity: 1.0,
-                    effects: Vec::new(),
-                    children,
-                }));
-            }
+            wrap_paint_suffix(
+                &mut elements,
+                &mut policies,
+                content_element_start,
+                Transform::IDENTITY,
+                clip.clone(),
+                true,
+            )?;
+            wrap_paint_suffix(
+                &mut behind_elements,
+                &mut behind_policies,
+                behind_element_start,
+                Transform::IDENTITY,
+                clip.clone(),
+                false,
+            )?;
+            wrap_paint_suffix(
+                &mut front_elements,
+                &mut front_policies,
+                front_element_start,
+                Transform::IDENTITY,
+                clip,
+                false,
+            )?;
         }
         cell_x += cell.width;
     }
+    Ok(PaintLayers {
+        behind: PaintedElements::from_parts(behind_elements, behind_policies)?,
+        regular: PaintedElements::from_parts(elements, policies)?,
+        front: PaintedElements::from_parts(front_elements, front_policies)?,
+    })
+}
+
+fn wrap_paint_suffix(
+    elements: &mut Vec<PositionedElement>,
+    policies: &mut PaintPolicies,
+    start: usize,
+    transform: Transform,
+    clip: Option<Path>,
+    keep_empty: bool,
+) -> oxml_layout::Result<()> {
+    policies.validate(elements)?;
+    let mut painted =
+        PaintedElements::from_parts(std::mem::take(elements), std::mem::take(policies))?;
+    let children = painted.split_off(start)?;
+    if children.len() > 0 || keep_empty {
+        painted.append(&mut children.wrap(PositionedElement::Group(GroupElement {
+            transform,
+            clip,
+            opacity: 1.0,
+            effects: Vec::new(),
+            children: Vec::new(),
+        }))?)?;
+    }
+    (*elements, *policies) = painted.into_parts()?;
+    Ok(())
 }
 
 fn anchored_rect(
@@ -6857,15 +7773,23 @@ fn anchored_rect(
 
 fn place_cell_anchored(
     anchors: &[AnchoredDrawing],
+    paint: Option<&WordParagraphPaint>,
     page_geometry: &PageGeometry,
     cell_geometry: &PageGeometry,
     paragraph_top: f64,
     paragraph_indent: f64,
-    elements: &mut Vec<PositionedElement>,
-    behind_elements: &mut Vec<PositionedElement>,
     media: &HashMap<MediaId, ImageData>,
-) {
-    for anchor in anchors {
+) -> oxml_layout::Result<PaintLayers> {
+    if paint.is_some_and(|paint| paint.anchors.len() != anchors.len()) {
+        return Err(oxml_layout::LayoutError::Layout(
+            "Word anchor producer count mismatch".into(),
+        ));
+    }
+    let mut layers = PaintLayers::default();
+    for (index, anchor) in anchors.iter().enumerate() {
+        let owner = paint.map_or(AnchorPaintOwner::Neutral, |paint| {
+            AnchorPaintOwner::Word(&paint.anchors[index])
+        });
         let rect = anchored_rect(
             anchor,
             page_geometry,
@@ -6873,13 +7797,14 @@ fn place_cell_anchored(
             paragraph_top,
             paragraph_indent,
         );
-        let mut produced = anchored_elements(anchor, rect, page_geometry, media);
+        let mut produced = anchored_elements(anchor, owner, rect, page_geometry, media)?;
         if anchor.behind_doc {
-            behind_elements.append(&mut produced);
+            layers.behind.append(&mut produced)?;
         } else {
-            elements.append(&mut produced);
+            layers.front.append(&mut produced)?;
         }
     }
+    Ok(layers)
 }
 
 /// Render borders for a table cell.
@@ -7497,7 +8422,7 @@ mod tests {
 
         let reflowed = reflow_around_wraps(
             &paragraph,
-            TextDirection::RightToLeft,
+            (TextDirection::RightToLeft, None),
             &[wrap],
             0.0,
             &PageGeometry::default(),
@@ -7571,22 +8496,31 @@ mod tests {
             paragraph_mark: None,
         }));
         let mut elements = Vec::new();
-        render_paragraph_lines(
-            &paragraph.lines,
-            ParagraphView {
-                baseline_policy: None,
-                line_gaps: &[],
-                border_group_before: false,
-                block: &paragraph,
-                semantics: None,
-                reflow_direction: TextDirection::RightToLeft,
-                reflow_allowed: true,
-            },
-            &PageGeometry::default(),
-            0.0,
-            (true, true, 0.0),
-            &mut elements,
-            &HashMap::new(),
+        elements.extend(
+            render_paragraph_lines(
+                &paragraph.lines,
+                ParagraphView {
+                    line_start: 0,
+                    paint: None,
+                    baseline_policy: None,
+                    line_gaps: &[],
+                    border_group_before: false,
+                    block: &paragraph,
+                    semantics: None,
+                    reflow_direction: TextDirection::RightToLeft,
+                    reflow_allowed: true,
+                },
+                &PageGeometry::default(),
+                0.0,
+                (true, true, 0.0),
+                &HashMap::new(),
+            )
+            .expect("checked paragraph paint")
+            .flatten()
+            .expect("checked paragraph layers")
+            .into_parts()
+            .expect("checked paragraph map")
+            .0,
         );
 
         let extracted = elements
@@ -7666,22 +8600,31 @@ mod tests {
         }));
 
         let mut elements = Vec::new();
-        render_paragraph_lines(
-            &paragraph.lines,
-            ParagraphView {
-                baseline_policy: None,
-                line_gaps: &[],
-                border_group_before: false,
-                block: &paragraph,
-                semantics: None,
-                reflow_direction: TextDirection::RightToLeft,
-                reflow_allowed: true,
-            },
-            &PageGeometry::default(),
-            0.0,
-            (true, true, 0.0),
-            &mut elements,
-            &HashMap::new(),
+        elements.extend(
+            render_paragraph_lines(
+                &paragraph.lines,
+                ParagraphView {
+                    line_start: 0,
+                    paint: None,
+                    baseline_policy: None,
+                    line_gaps: &[],
+                    border_group_before: false,
+                    block: &paragraph,
+                    semantics: None,
+                    reflow_direction: TextDirection::RightToLeft,
+                    reflow_allowed: true,
+                },
+                &PageGeometry::default(),
+                0.0,
+                (true, true, 0.0),
+                &HashMap::new(),
+            )
+            .expect("checked paragraph paint")
+            .flatten()
+            .expect("checked paragraph layers")
+            .into_parts()
+            .expect("checked paragraph map")
+            .0,
         );
 
         let text = elements
@@ -7763,6 +8706,7 @@ mod tests {
                 paragraph_mark: None,
             }));
             let semantics = ParagraphSemantics {
+                paint: Arc::new(WordParagraphPaint::default()),
                 tb_rl_exact_baseline: None,
                 border_group_before: false,
                 source_node: Some(source_node),
@@ -7770,22 +8714,31 @@ mod tests {
                 reflow_direction: TextDirection::RightToLeft,
             };
             let mut elements = Vec::new();
-            render_paragraph_lines(
-                &paragraph.lines,
-                ParagraphView {
-                    baseline_policy: None,
-                    line_gaps: &[],
-                    border_group_before: false,
-                    block: &paragraph,
-                    semantics: Some(&semantics),
-                    reflow_direction: TextDirection::RightToLeft,
-                    reflow_allowed: true,
-                },
-                &PageGeometry::default(),
-                0.0,
-                (true, true, 0.0),
-                &mut elements,
-                &HashMap::new(),
+            elements.extend(
+                render_paragraph_lines(
+                    &paragraph.lines,
+                    ParagraphView {
+                        line_start: 0,
+                        paint: None,
+                        baseline_policy: None,
+                        line_gaps: &[],
+                        border_group_before: false,
+                        block: &paragraph,
+                        semantics: Some(&semantics),
+                        reflow_direction: TextDirection::RightToLeft,
+                        reflow_allowed: true,
+                    },
+                    &PageGeometry::default(),
+                    0.0,
+                    (true, true, 0.0),
+                    &HashMap::new(),
+                )
+                .expect("checked paragraph paint")
+                .flatten()
+                .expect("checked paragraph layers")
+                .into_parts()
+                .expect("checked paragraph map")
+                .0,
             );
 
             let text = elements
@@ -7829,6 +8782,7 @@ mod tests {
             let mut paragraph = make_para(1, 12.0);
             paragraph.lines[0].items = vec![LineItem::Text(marker)];
             let semantics = ParagraphSemantics {
+                paint: Arc::new(WordParagraphPaint::default()),
                 tb_rl_exact_baseline: None,
                 border_group_before: false,
                 source_node: Some(rebound),
@@ -7836,22 +8790,31 @@ mod tests {
                 reflow_direction: direction,
             };
             let mut elements = Vec::new();
-            render_paragraph_lines(
-                &paragraph.lines,
-                ParagraphView {
-                    baseline_policy: None,
-                    line_gaps: &[],
-                    border_group_before: false,
-                    block: &paragraph,
-                    semantics: Some(&semantics),
-                    reflow_direction: direction,
-                    reflow_allowed: false,
-                },
-                &PageGeometry::default(),
-                0.0,
-                (true, true, 0.0),
-                &mut elements,
-                &HashMap::new(),
+            elements.extend(
+                render_paragraph_lines(
+                    &paragraph.lines,
+                    ParagraphView {
+                        line_start: 0,
+                        paint: None,
+                        baseline_policy: None,
+                        line_gaps: &[],
+                        border_group_before: false,
+                        block: &paragraph,
+                        semantics: Some(&semantics),
+                        reflow_direction: direction,
+                        reflow_allowed: false,
+                    },
+                    &PageGeometry::default(),
+                    0.0,
+                    (true, true, 0.0),
+                    &HashMap::new(),
+                )
+                .expect("checked paragraph paint")
+                .flatten()
+                .expect("checked paragraph layers")
+                .into_parts()
+                .expect("checked paragraph map")
+                .0,
             );
             let references = elements
                 .iter()
@@ -8097,6 +9060,7 @@ mod tests {
             paragraph_mark: None,
         }));
         let semantics = ParagraphSemantics {
+            paint: Arc::new(WordParagraphPaint::default()),
             tb_rl_exact_baseline: None,
             border_group_before: false,
             source_node: Some(rebound),
@@ -8104,22 +9068,31 @@ mod tests {
             reflow_direction: TextDirection::RightToLeft,
         };
         let mut elements = Vec::new();
-        render_paragraph_lines(
-            &paragraph.lines,
-            ParagraphView {
-                baseline_policy: None,
-                line_gaps: &[],
-                border_group_before: false,
-                block: &paragraph,
-                semantics: Some(&semantics),
-                reflow_direction: TextDirection::RightToLeft,
-                reflow_allowed: true,
-            },
-            &PageGeometry::default(),
-            0.0,
-            (true, true, 0.0),
-            &mut elements,
-            &HashMap::new(),
+        elements.extend(
+            render_paragraph_lines(
+                &paragraph.lines,
+                ParagraphView {
+                    line_start: 0,
+                    paint: None,
+                    baseline_policy: None,
+                    line_gaps: &[],
+                    border_group_before: false,
+                    block: &paragraph,
+                    semantics: Some(&semantics),
+                    reflow_direction: TextDirection::RightToLeft,
+                    reflow_allowed: true,
+                },
+                &PageGeometry::default(),
+                0.0,
+                (true, true, 0.0),
+                &HashMap::new(),
+            )
+            .expect("checked paragraph paint")
+            .flatten()
+            .expect("checked paragraph layers")
+            .into_parts()
+            .expect("checked paragraph map")
+            .0,
         );
 
         let text = elements
@@ -8237,22 +9210,31 @@ mod tests {
                 paragraph_mark: None,
             }));
             let mut elements = Vec::new();
-            render_paragraph_lines(
-                &paragraph.lines,
-                ParagraphView {
-                    baseline_policy: None,
-                    line_gaps: &[],
-                    border_group_before: false,
-                    block: &paragraph,
-                    semantics: None,
-                    reflow_direction: TextDirection::RightToLeft,
-                    reflow_allowed: true,
-                },
-                &PageGeometry::default(),
-                0.0,
-                (true, true, 0.0),
-                &mut elements,
-                &HashMap::new(),
+            elements.extend(
+                render_paragraph_lines(
+                    &paragraph.lines,
+                    ParagraphView {
+                        line_start: 0,
+                        paint: None,
+                        baseline_policy: None,
+                        line_gaps: &[],
+                        border_group_before: false,
+                        block: &paragraph,
+                        semantics: None,
+                        reflow_direction: TextDirection::RightToLeft,
+                        reflow_allowed: true,
+                    },
+                    &PageGeometry::default(),
+                    0.0,
+                    (true, true, 0.0),
+                    &HashMap::new(),
+                )
+                .expect("checked paragraph paint")
+                .flatten()
+                .expect("checked paragraph layers")
+                .into_parts()
+                .expect("checked paragraph map")
+                .0,
             );
 
             let text = elements
@@ -8354,22 +9336,31 @@ mod tests {
         }));
 
         let mut elements = Vec::new();
-        render_paragraph_lines(
-            &paragraph.lines,
-            ParagraphView {
-                baseline_policy: None,
-                line_gaps: &[],
-                border_group_before: false,
-                block: &paragraph,
-                semantics: None,
-                reflow_direction: TextDirection::RightToLeft,
-                reflow_allowed: true,
-            },
-            &PageGeometry::default(),
-            0.0,
-            (true, true, 0.0),
-            &mut elements,
-            &HashMap::new(),
+        elements.extend(
+            render_paragraph_lines(
+                &paragraph.lines,
+                ParagraphView {
+                    line_start: 0,
+                    paint: None,
+                    baseline_policy: None,
+                    line_gaps: &[],
+                    border_group_before: false,
+                    block: &paragraph,
+                    semantics: None,
+                    reflow_direction: TextDirection::RightToLeft,
+                    reflow_allowed: true,
+                },
+                &PageGeometry::default(),
+                0.0,
+                (true, true, 0.0),
+                &HashMap::new(),
+            )
+            .expect("checked paragraph paint")
+            .flatten()
+            .expect("checked paragraph layers")
+            .into_parts()
+            .expect("checked paragraph map")
+            .0,
         );
 
         let text_runs = elements
@@ -8459,22 +9450,31 @@ mod tests {
         }));
 
         let mut elements = Vec::new();
-        render_paragraph_lines(
-            &paragraph.lines,
-            ParagraphView {
-                baseline_policy: None,
-                line_gaps: &[],
-                border_group_before: false,
-                block: &paragraph,
-                semantics: None,
-                reflow_direction: TextDirection::RightToLeft,
-                reflow_allowed: true,
-            },
-            &PageGeometry::default(),
-            0.0,
-            (true, true, 0.0),
-            &mut elements,
-            &HashMap::new(),
+        elements.extend(
+            render_paragraph_lines(
+                &paragraph.lines,
+                ParagraphView {
+                    line_start: 0,
+                    paint: None,
+                    baseline_policy: None,
+                    line_gaps: &[],
+                    border_group_before: false,
+                    block: &paragraph,
+                    semantics: None,
+                    reflow_direction: TextDirection::RightToLeft,
+                    reflow_allowed: true,
+                },
+                &PageGeometry::default(),
+                0.0,
+                (true, true, 0.0),
+                &HashMap::new(),
+            )
+            .expect("checked paragraph paint")
+            .flatten()
+            .expect("checked paragraph layers")
+            .into_parts()
+            .expect("checked paragraph map")
+            .0,
         );
 
         let text = elements
@@ -8521,22 +9521,31 @@ mod tests {
         let mut elements = Vec::new();
         let media = HashMap::new();
 
-        render_paragraph_lines(
-            &paragraph.lines,
-            ParagraphView {
-                baseline_policy: None,
-                line_gaps: &[],
-                border_group_before: false,
-                block: &paragraph,
-                semantics: None,
-                reflow_direction: TextDirection::Auto,
-                reflow_allowed: true,
-            },
-            &PageGeometry::default(),
-            0.0,
-            (true, true, 0.0),
-            &mut elements,
-            &media,
+        elements.extend(
+            render_paragraph_lines(
+                &paragraph.lines,
+                ParagraphView {
+                    line_start: 0,
+                    paint: None,
+                    baseline_policy: None,
+                    line_gaps: &[],
+                    border_group_before: false,
+                    block: &paragraph,
+                    semantics: None,
+                    reflow_direction: TextDirection::Auto,
+                    reflow_allowed: true,
+                },
+                &PageGeometry::default(),
+                0.0,
+                (true, true, 0.0),
+                &media,
+            )
+            .expect("checked paragraph paint")
+            .flatten()
+            .expect("checked paragraph layers")
+            .into_parts()
+            .expect("checked paragraph map")
+            .0,
         );
 
         assert_eq!(elements.len(), 2);
@@ -9551,16 +10560,21 @@ mod tests {
         };
         let mut foreground = Vec::new();
         let mut behind = Vec::new();
-        place_cell_anchored(
-            &[anchor(false)],
-            &page,
-            &cell,
-            30.0,
-            0.0,
-            &mut foreground,
-            &mut behind,
-            &HashMap::new(),
-        );
+        {
+            let mut painted = place_cell_anchored(
+                &[anchor(false)],
+                None,
+                &page,
+                &cell,
+                30.0,
+                0.0,
+                &HashMap::new(),
+            )
+            .expect("neutral cell anchor paint");
+            painted.regular.append(&mut painted.front).unwrap();
+            foreground.extend(painted.regular.into_parts().unwrap().0);
+            behind.extend(painted.behind.into_parts().unwrap().0);
+        };
         let PositionedElement::MarkedContent { children, .. } = &foreground[0] else {
             panic!("foreground anchor remains marked content");
         };
@@ -9574,16 +10588,21 @@ mod tests {
         let mut character_anchor = anchor(false);
         character_anchor.rel_h = ST_RelativeFromH::Character;
         let mut character_elements = Vec::new();
-        place_cell_anchored(
-            &[character_anchor],
-            &page,
-            &cell,
-            30.0,
-            12.0,
-            &mut character_elements,
-            &mut behind,
-            &HashMap::new(),
-        );
+        {
+            let mut painted = place_cell_anchored(
+                &[character_anchor],
+                None,
+                &page,
+                &cell,
+                30.0,
+                12.0,
+                &HashMap::new(),
+            )
+            .expect("neutral cell anchor paint");
+            painted.regular.append(&mut painted.front).unwrap();
+            character_elements.extend(painted.regular.into_parts().unwrap().0);
+            behind.extend(painted.behind.into_parts().unwrap().0);
+        };
         let PositionedElement::MarkedContent { children, .. } = &character_elements[0] else {
             panic!("character anchor remains marked content");
         };
@@ -9592,16 +10611,21 @@ mod tests {
         };
         assert_eq!(rect.x, 217.0, "character origin includes paragraph indent");
 
-        place_cell_anchored(
-            &[anchor(true)],
-            &page,
-            &cell,
-            30.0,
-            0.0,
-            &mut foreground,
-            &mut behind,
-            &HashMap::new(),
-        );
+        {
+            let mut painted = place_cell_anchored(
+                &[anchor(true)],
+                None,
+                &page,
+                &cell,
+                30.0,
+                0.0,
+                &HashMap::new(),
+            )
+            .expect("neutral cell anchor paint");
+            painted.regular.append(&mut painted.front).unwrap();
+            foreground.extend(painted.regular.into_parts().unwrap().0);
+            behind.extend(painted.behind.into_parts().unwrap().0);
+        };
         assert_eq!(foreground.len(), 1);
         assert_eq!(behind.len(), 1);
         let mut page_order = behind;
@@ -9610,6 +10634,66 @@ mod tests {
             panic!("behind anchor remains marked content");
         };
         assert!(matches!(children[0], PositionedElement::FilledRect { .. }));
+
+        // A same-page late note inserts into each saved physical layer, ahead
+        // of front furniture and the front page border, with exact companions.
+        let element = |index: usize| PositionedElement::FilledRect {
+            rect: Rect {
+                x: index as f64,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            color: Color::BLACK,
+        };
+        let mut pages = vec![PageFrame::new(
+            1,
+            100.0,
+            100.0,
+            (0..5).map(element).collect(),
+        )];
+        let mut records = PagePaintRecords::neutral(&pages).unwrap();
+        records.boundaries[0] = PagePaintBoundary {
+            behind_end: 1,
+            regular_end: 2,
+            body_front_end: 3,
+            furniture_front_end: 4,
+            elements_len: 5,
+        };
+        let layers = PaintLayers {
+            behind: PaintedElements::non_field(vec![element(10)]).unwrap(),
+            regular: PaintedElements::non_field(vec![element(11)]).unwrap(),
+            front: PaintedElements::non_field(vec![element(12)]).unwrap(),
+        };
+        records.append_late(&mut pages, layers).unwrap();
+        let order = pages[0]
+            .elements
+            .iter()
+            .map(|element| match element {
+                PositionedElement::FilledRect { rect, .. } => rect.x as usize,
+                _ => unreachable!(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(order, vec![0, 10, 1, 11, 2, 12, 3, 4]);
+        assert_eq!(
+            records.boundaries[0],
+            PagePaintBoundary {
+                behind_end: 2,
+                regular_end: 4,
+                body_front_end: 6,
+                furniture_front_end: 7,
+                elements_len: 8
+            }
+        );
+        records.validate(&pages).unwrap();
+        let before = format!("{pages:?}");
+        records.boundaries[0].regular_end = 1;
+        assert!(
+            records
+                .append_late(&mut pages, PaintLayers::default())
+                .is_err()
+        );
+        assert_eq!(format!("{pages:?}"), before);
     }
 
     #[test]
@@ -9653,23 +10737,27 @@ mod tests {
             offset_left: 0.0,
         };
         let mut elements = Vec::new();
-        render_table_row(
-            &row,
-            None,
-            &[40.0],
-            10.0,
-            20.0,
-            &PageGeometry::default(),
-            &PageGeometry::default(),
-            0,
-            None,
-            false,
-            &mut elements,
-            &mut Vec::new(),
-            &HashMap::new(),
-            true,
-            true,
-        );
+        {
+            let mut painted = render_table_row(
+                &row,
+                None,
+                &[40.0],
+                10.0,
+                20.0,
+                &PageGeometry::default(),
+                &PageGeometry::default(),
+                0,
+                None,
+                false,
+                &HashMap::new(),
+                true,
+                true,
+            )
+            .expect("checked table row paint");
+            painted.regular.append(&mut painted.front).unwrap();
+            elements.extend(painted.regular.into_parts().unwrap().0);
+            Vec::new().extend(painted.behind.into_parts().unwrap().0);
+        };
         let [PositionedElement::Group(group)] = elements.as_slice() else {
             panic!("exact cell content is one clipped group: {elements:?}");
         };
@@ -10100,6 +11188,7 @@ mod tests {
         let shared = |block: Arc<ParagraphBlock>| SharedLayoutBlock::Paragraph {
             block,
             semantics: crate::block::ParagraphSemantics {
+                paint: Arc::new(WordParagraphPaint::default()),
                 tb_rl_exact_baseline: None,
                 border_group_before: false,
                 source_node: None,
@@ -10144,6 +11233,14 @@ mod tests {
     #[test]
     fn fx233_group_bridge_stops_at_new_page() {
         let owned = |paragraph| SharedLayoutBlock::Owned {
+            semantics: Some(crate::block::ParagraphSemantics {
+                paint: Arc::new(WordParagraphPaint::default()),
+                tb_rl_exact_baseline: None,
+                border_group_before: false,
+                source_node: None,
+                structure_id: None,
+                reflow_direction: TextDirection::Auto,
+            }),
             block: Box::new(LayoutBlock::Paragraph(paragraph)),
             reflow_direction: TextDirection::Auto,
             border_group_before: false,
@@ -10346,11 +11443,14 @@ mod tests {
             }];
             let reflow = reflow_around_wraps(
                 &original,
-                if rich {
-                    TextDirection::RightToLeft
-                } else {
-                    TextDirection::Auto
-                },
+                (
+                    if rich {
+                        TextDirection::RightToLeft
+                    } else {
+                        TextDirection::Auto
+                    },
+                    None,
+                ),
                 &wraps,
                 10.0,
                 &geometry,
@@ -10361,11 +11461,14 @@ mod tests {
             .unwrap();
             let repeated = reflow_around_wraps(
                 &original,
-                if rich {
-                    TextDirection::RightToLeft
-                } else {
-                    TextDirection::Auto
-                },
+                (
+                    if rich {
+                        TextDirection::RightToLeft
+                    } else {
+                        TextDirection::Auto
+                    },
+                    None,
+                ),
                 &wraps,
                 10.0,
                 &geometry,
@@ -10385,26 +11488,35 @@ mod tests {
             );
             let raw = format!("{:?}", reflow.paragraph.lines);
             let mut elements = Vec::new();
-            render_paragraph_lines(
-                &reflow.paragraph.lines,
-                ParagraphView {
-                    baseline_policy: Some((12.0, true, &fm)),
-                    line_gaps: &reflow.before_lines,
-                    border_group_before: false,
-                    block: &reflow.paragraph,
-                    semantics: None,
-                    reflow_direction: if rich {
-                        TextDirection::RightToLeft
-                    } else {
-                        TextDirection::Auto
+            elements.extend(
+                render_paragraph_lines(
+                    &reflow.paragraph.lines,
+                    ParagraphView {
+                        line_start: 0,
+                        paint: None,
+                        baseline_policy: Some((12.0, true, &fm)),
+                        line_gaps: &reflow.before_lines,
+                        border_group_before: false,
+                        block: &reflow.paragraph,
+                        semantics: None,
+                        reflow_direction: if rich {
+                            TextDirection::RightToLeft
+                        } else {
+                            TextDirection::Auto
+                        },
+                        reflow_allowed: false,
                     },
-                    reflow_allowed: false,
-                },
-                &geometry,
-                10.0,
-                (true, true, 0.0),
-                &mut elements,
-                &HashMap::new(),
+                    &geometry,
+                    10.0,
+                    (true, true, 0.0),
+                    &HashMap::new(),
+                )
+                .expect("checked paragraph paint")
+                .flatten()
+                .expect("checked paragraph layers")
+                .into_parts()
+                .expect("checked paragraph map")
+                .0,
             );
             let mut glyphs = 0;
             let mut boxes = 0;
@@ -10540,22 +11652,31 @@ mod tests {
             }];
             let group_raw = format!("{:?}", grouped.lines);
             let mut painted = Vec::new();
-            render_paragraph_lines(
-                &grouped.lines[..1],
-                ParagraphView {
-                    baseline_policy: Some((12.0, true, &fm)),
-                    line_gaps: &[],
-                    border_group_before: false,
-                    block: &grouped,
-                    semantics: None,
-                    reflow_direction: TextDirection::Auto,
-                    reflow_allowed: false,
-                },
-                &geometry,
-                10.0,
-                (true, true, 0.0),
-                &mut painted,
-                &HashMap::new(),
+            painted.extend(
+                render_paragraph_lines(
+                    &grouped.lines[..1],
+                    ParagraphView {
+                        line_start: 0,
+                        paint: None,
+                        baseline_policy: Some((12.0, true, &fm)),
+                        line_gaps: &[],
+                        border_group_before: false,
+                        block: &grouped,
+                        semantics: None,
+                        reflow_direction: TextDirection::Auto,
+                        reflow_allowed: false,
+                    },
+                    &geometry,
+                    10.0,
+                    (true, true, 0.0),
+                    &HashMap::new(),
+                )
+                .expect("checked paragraph paint")
+                .flatten()
+                .expect("checked paragraph layers")
+                .into_parts()
+                .expect("checked paragraph map")
+                .0,
             );
             let mut found = 0;
             oxml_layout::walk(&painted, &mut |element, transform| {
@@ -10596,22 +11717,31 @@ mod tests {
             let mut graphic_paints = Vec::new();
             for policy in [None, Some((12.0, true, &fm))] {
                 let mut painted = Vec::new();
-                render_paragraph_lines(
-                    &graphic.lines[..1],
-                    ParagraphView {
-                        baseline_policy: policy,
-                        line_gaps: &[],
-                        border_group_before: false,
-                        block: &graphic,
-                        semantics: None,
-                        reflow_direction: TextDirection::Auto,
-                        reflow_allowed: false,
-                    },
-                    &geometry,
-                    10.0,
-                    (true, true, 0.0),
-                    &mut painted,
-                    &HashMap::new(),
+                painted.extend(
+                    render_paragraph_lines(
+                        &graphic.lines[..1],
+                        ParagraphView {
+                            line_start: 0,
+                            paint: None,
+                            baseline_policy: policy,
+                            line_gaps: &[],
+                            border_group_before: false,
+                            block: &graphic,
+                            semantics: None,
+                            reflow_direction: TextDirection::Auto,
+                            reflow_allowed: false,
+                        },
+                        &geometry,
+                        10.0,
+                        (true, true, 0.0),
+                        &HashMap::new(),
+                    )
+                    .expect("checked paragraph paint")
+                    .flatten()
+                    .expect("checked paragraph layers")
+                    .into_parts()
+                    .expect("checked paragraph map")
+                    .0,
                 );
                 graphic_paints.push(format!("{painted:?}"));
             }
@@ -10706,14 +11836,14 @@ mod tests {
             let mut elements = Vec::new();
             let mut behind = Vec::new();
             let mut front = Vec::new();
-            render_hf_blocks(
-                &prepared,
-                Some(&facts),
-                &geometry,
-                1,
-                (&mut elements, &mut behind, &mut front),
-                &HashMap::new(),
-            );
+            {
+                let painted =
+                    render_hf_blocks(&prepared, Some(&facts), &geometry, 1, &HashMap::new())
+                        .expect("checked furniture paint");
+                elements.extend(painted.regular.into_parts().unwrap().0);
+                behind.extend(painted.behind.into_parts().unwrap().0);
+                front.extend(painted.front.into_parts().unwrap().0);
+            };
             let mut glyphs = 0;
             let mut multilingual = 0;
             let mut highlights = 0;
@@ -10869,14 +11999,14 @@ mod tests {
                 let mut elements = Vec::new();
                 let mut behind = Vec::new();
                 let mut front = Vec::new();
-                render_hf_blocks(
-                    &prepared,
-                    Some(&facts),
-                    &geometry,
-                    1,
-                    (&mut elements, &mut behind, &mut front),
-                    &HashMap::new(),
-                );
+                {
+                    let painted =
+                        render_hf_blocks(&prepared, Some(&facts), &geometry, 1, &HashMap::new())
+                            .expect("checked furniture paint");
+                    elements.extend(painted.regular.into_parts().unwrap().0);
+                    behind.extend(painted.behind.into_parts().unwrap().0);
+                    front.extend(painted.front.into_parts().unwrap().0);
+                };
                 let obstacle = prepared.wraps[0].rect;
                 let mut flow = Vec::new();
                 let mut following = Vec::new();
@@ -11084,7 +12214,7 @@ mod tests {
         let geometry = PageGeometry::default();
         let adjusted = reflow_around_wraps(
             &paragraph,
-            TextDirection::Auto,
+            (TextDirection::Auto, None),
             std::slice::from_ref(&wrap),
             0.0,
             &geometry,
@@ -11100,7 +12230,7 @@ mod tests {
         );
         let repeated = reflow_around_wraps(
             &adjusted,
-            TextDirection::Auto,
+            (TextDirection::Auto, None),
             std::slice::from_ref(&wrap),
             0.0,
             &geometry,
@@ -11115,22 +12245,31 @@ mod tests {
             format!("{:?}", repeated.lines)
         );
         let mut elements = Vec::new();
-        render_paragraph_lines(
-            &adjusted.lines,
-            ParagraphView {
-                baseline_policy: None,
-                line_gaps: &[],
-                block: &adjusted,
-                border_group_before: false,
-                semantics: None,
-                reflow_direction: TextDirection::Auto,
-                reflow_allowed: false,
-            },
-            &geometry,
-            0.0,
-            (true, true, 0.0),
-            &mut elements,
-            &HashMap::new(),
+        elements.extend(
+            render_paragraph_lines(
+                &adjusted.lines,
+                ParagraphView {
+                    line_start: 0,
+                    paint: None,
+                    baseline_policy: None,
+                    line_gaps: &[],
+                    block: &adjusted,
+                    border_group_before: false,
+                    semantics: None,
+                    reflow_direction: TextDirection::Auto,
+                    reflow_allowed: false,
+                },
+                &geometry,
+                0.0,
+                (true, true, 0.0),
+                &HashMap::new(),
+            )
+            .expect("checked paragraph paint")
+            .flatten()
+            .expect("checked paragraph layers")
+            .into_parts()
+            .expect("checked paragraph map")
+            .0,
         );
         assert!(
             elements
@@ -11146,12 +12285,12 @@ mod tests {
         assert!(
             reflow_around_wraps(
                 &paragraph,
-                TextDirection::Auto,
+                (TextDirection::Auto, None),
                 &[wrap],
                 0.0,
                 &geometry,
                 &fm,
-                WrapReflowPolicy::Body,
+                WrapReflowPolicy::Body
             )
             .map(|result| result.map(|reflowed| reflowed.paragraph))
             .unwrap()
@@ -11195,7 +12334,7 @@ mod tests {
         };
         let adjusted = reflow_around_wraps(
             &paragraph,
-            TextDirection::Auto,
+            (TextDirection::Auto, None),
             std::slice::from_ref(&wrap),
             0.0,
             &PageGeometry::default(),
@@ -11207,7 +12346,7 @@ mod tests {
         .unwrap();
         let repeated = reflow_around_wraps(
             &adjusted,
-            TextDirection::Auto,
+            (TextDirection::Auto, None),
             &[wrap],
             0.0,
             &PageGeometry::default(),
@@ -11235,22 +12374,31 @@ mod tests {
         segment.highlight = Some(Color::from_hex("FFFF00"));
         paragraph.lines[0].items = vec![LineItem::Text(segment)];
         let mut elements = Vec::new();
-        render_paragraph_lines(
-            &paragraph.lines,
-            ParagraphView {
-                baseline_policy: None,
-                line_gaps: &[],
-                border_group_before: false,
-                block: &paragraph,
-                semantics: None,
-                reflow_direction: TextDirection::Auto,
-                reflow_allowed: false,
-            },
-            &PageGeometry::default(),
-            0.0,
-            (true, true, 0.0),
-            &mut elements,
-            &HashMap::new(),
+        elements.extend(
+            render_paragraph_lines(
+                &paragraph.lines,
+                ParagraphView {
+                    line_start: 0,
+                    paint: None,
+                    baseline_policy: None,
+                    line_gaps: &[],
+                    border_group_before: false,
+                    block: &paragraph,
+                    semantics: None,
+                    reflow_direction: TextDirection::Auto,
+                    reflow_allowed: false,
+                },
+                &PageGeometry::default(),
+                0.0,
+                (true, true, 0.0),
+                &HashMap::new(),
+            )
+            .expect("checked paragraph paint")
+            .flatten()
+            .expect("checked paragraph layers")
+            .into_parts()
+            .expect("checked paragraph map")
+            .0,
         );
         let highlight = elements
             .iter()
@@ -11619,6 +12767,7 @@ mod tests {
             false,
             false,
             false,
+            None,
             &media,
             &notes,
             &fm,
@@ -11667,6 +12816,7 @@ mod tests {
                 false,
                 false,
                 false,
+                None,
                 &media,
                 &notes,
                 &fm,
@@ -11700,6 +12850,7 @@ mod tests {
         ];
 
         let context = PassContext {
+            line_number_style: None,
             written_tb_rl_band: false,
             geometry: PageGeometry::default(),
             header_footer: None,

@@ -933,6 +933,96 @@ cannot cover them. Table cells retain stored normal-autofit scale and line
 spacing reduction in their resolved text. Shape-to-fit cannot resize an
 independently owned cell extent and is not applied to cell rendering.
 
+**Word shaping and positioned fields.** The effective run cascade resolves Word's
+`w:kern` threshold against nominal `w:sz`, before superscript and annotation scaling.
+An omitted threshold disables kerning. Ordinary Word spans retain explicit on/off
+context through legacy Unicode shaping chunks, wrapping and automatic hyphenation.
+Atomic list labels retain whole-marker shaping and grouping. Structural field markers
+retain their synthetic zero-advance glyphs. Neutral and PowerPoint shaping defaults
+remain separate from the Word producer.
+
+In mixed rich paragraphs, the actual plain computed-field producers retain their
+own legacy factory contexts. The original eligible rich batch remains rich.
+Checked source-order assembly assigns global span ordinals through the neutral
+hidden `with_logical_index_and_legacy_shaping` operation. The old rich-shaped Latin
+hyphenatable results retain their initial glyphs and acquire their former legacy
+split, reflow and Text paint convention. Legacy carriers use former Text bidi
+selection and plain word/whitespace tokenization, including internal trailing
+spaces. They do not enter rich-only shaped-level rebuilding or hanging-space
+ordinal comparisons. Genuine rich spans retain those rich behaviors.
+Right, centre and decimal tabs scan trailing spaces and numeric prefixes only
+for legacy carriers, using their own shaping context. Genuine rich spans keep
+the prior opaque tab fallback, including generic default and explicit-kerning
+nonlegacy owners.
+
+Explicit legacy construction validates complete cluster coverage in the guessed
+glyph order independently of layout bidi parity. It preserves both the glyph
+payload and the layout levels. Default public construction and genuine rich
+output retain parity-coupled validation. Legacy Word owners publish plain Text.
+A contradictory legacy owner on a rich positioned field refuses replacement
+rather than publishing an invalid MultilingualGlyphRun.
+
+Private paragraph owners carry field-only paint policies beside the public layout
+models. Checked emission records every field glyph leaf's exact tree path before its
+source shaping context is erased. Subtree splices, permutations, wrappers and late
+field expansion/removal move the companion with the actual glyph storage. Missing
+ownership refuses layout. Raw and substituted page caches retain separate maps.
+Legacy span cache admission additionally requires the actual private Word producer,
+with exact policy/language identity and allocation charges. Rich, anchored and opaque
+Group cache exclusions remain in force.
+
+Stored field annotations retain an operation-local owner before cached runs split.
+Only base-result glyphs carry field roles. Brackets, emphasis marks and other
+annotation decoration remain non-field paint. The shared doc-hidden
+`line::break_into_lines_with_opaque_origins` function returns the existing layout
+lines and exact top-level Group/Figure input slots, captured through construction,
+line flush and the actual rich bidi permutation. The Word consumer binds its
+private annotation recipes through those slots. It does not match output text,
+geometry or source spans to recover ownership.
+
+Late field replacement regenerates the complete first annotation occurrence and
+removes its continuation decorations in the current traversal order. Ordinary and
+annotated fragments of the same owner share that transaction. Empty stored owners
+retain an owned zero-width Group and empty qualified base leaf, including the
+ordinary caret's exact or Word external-leading metrics. An empty final STYLEREF
+removes the entire annotation root. Repeated table headers mint a private paint
+scope for each actual repeat, including another column on the same physical page.
+Split continuations share the scope and a new physical page resets it. Recipes,
+origins, policies and repeat identities are part of retained equality and byte
+accounting. Existing rich and Group cache exclusions remain in force.
+
+Floating front drawings occupy a physical page layer after regular body and note
+text. Table rows carry explicit behind/regular/front child intervals, preserving their
+existing clips and transforms. Furniture retains its existing front priority. Late
+endnotes insert at captured page boundaries before front paint. Line-number artifacts
+move with their body band once. These composition rules do not claim native validation
+for unsupported nested anchors or replace the retained native qualification gates.
+
+**Word line numbers.** Generated section labels resolve document-default run
+properties, the uniquely named `Normal` paragraph style and the uniquely named
+`line number` character style once per layout. Primary names are trimmed and case
+sensitive. Each role follows actual-ID basedOn edges of its own type and stops
+at missing, cyclic, wrong-type or Word-ignored style IDs. Ambiguous or malformed
+roles record bounded diagnostics and preserve the source. The nearest property
+within each chain supplies that level. Non-toggle properties cascade in that
+order. Document-default true dominates bold and italic, otherwise the paragraph
+and character levels combine by XOR. Body direct formatting does not style labels.
+
+The same private face, positive nominal size, weight and explicit kerning decision
+drive label shaping, right-alignment width and painted glyphs. Missing size uses
+11 pt. Invalid size or unavailable face paints no number while the logical
+counter advances. Kerning is enabled by a present half-point threshold no larger
+than the nominal half-point size. Public neutral pagination keeps its existing
+9 pt default shaping and start interpretation.
+
+Word numbering requires explicit countBy. Omitted countBy disables labels without
+rewriting source. Explicit zero retains rendering compatibility as one. The
+source start is a skipped count, so the first logical value is start plus one,
+then countBy selects values. A wide private counter covers every parser-admitted
+u32 start without a source clamp. Values beyond Word's documented range are
+compatibility behavior rather than a native parity claim. Labels remain artifacts
+on the recorded body baseline and follow the existing page/section ownership.
+
 **Vertical Word text.** `w:tcPr/w:textDirection` and `w:sectPr/w:textDirection`
 lower onto the same transposed box and `Group` rotation the shape path uses.
 `lrTb` is the horizontal path, unchanged and with no group. `tbRl` and `tbRlV`
@@ -1325,6 +1415,15 @@ Formatting and extent changes preserve existing logical Python handles.
 Reports carry the operation's owned font contribution diagnostics and separate
 accepted Q/S trial facts from the actual current persisted trial. A report is
 read-only and never refreshes an owner implicitly.
+
+The explicit legacy Word shaping provider preserves old per-segment Unicode
+shaping chunks without adding script-only buffers. Actual bidi-level changes and
+explicit-direction resolution remain barriers. Shaping cuts remain selected even
+when wrapping is disabled, while no-wrap spans publish no soft break. Empty
+occurrences retain their source context without a break. Generic and nonlegacy
+rich/PowerPoint shaping retain their existing script, language, fallback and caps
+policies. This bounded provider correction does not complete main Word policy
+wiring, positioned field companions, R4 composition or native qualification.
 
 ## Performance
 

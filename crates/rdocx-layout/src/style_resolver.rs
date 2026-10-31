@@ -617,6 +617,115 @@ pub fn resolve_run_properties(
     effective
 }
 
+/// Generated section labels use named Word roles, independently of body defaults.
+pub(crate) fn line_number_properties(
+    styles: &CT_Styles,
+    diagnostics: &mut Vec<oxml_layout::Diagnostic>,
+) -> CT_RPr {
+    let defaults = styles
+        .doc_defaults
+        .as_ref()
+        .and_then(|defaults| defaults.rpr.as_ref());
+    let normal = line_number_style_level(styles, "Normal", StyleType::Paragraph, diagnostics);
+    let character =
+        line_number_style_level(styles, "line number", StyleType::Character, diagnostics);
+    let mut effective = defaults.cloned().unwrap_or_default();
+    effective.merge_from(&normal);
+    effective.merge_from(&character);
+    let toggle = |default: Option<bool>, paragraph: Option<bool>, character: Option<bool>| {
+        Some(default == Some(true) || (paragraph.unwrap_or(false) ^ character.unwrap_or(false)))
+    };
+    effective.bold = toggle(
+        defaults.and_then(|rpr| rpr.bold),
+        normal.bold,
+        character.bold,
+    );
+    effective.italic = toggle(
+        defaults.and_then(|rpr| rpr.italic),
+        normal.italic,
+        character.italic,
+    );
+    effective
+}
+
+fn line_number_style_level(
+    styles: &CT_Styles,
+    name: &str,
+    kind: StyleType,
+    diagnostics: &mut Vec<oxml_layout::Diagnostic>,
+) -> CT_RPr {
+    let named = styles
+        .styles
+        .iter()
+        .filter(|style| {
+            style
+                .name
+                .as_deref()
+                .is_some_and(|value| value.trim() == name)
+        })
+        .collect::<Vec<_>>();
+    if named.iter().any(|style| style.style_type != kind) {
+        diagnostics.push(oxml_layout::Diagnostic {
+            message: format!("line-number style role {name:?} has a wrong-type declaration"),
+        });
+    }
+    let candidates = named
+        .into_iter()
+        .filter(|style| style.style_type == kind)
+        .collect::<Vec<_>>();
+    if candidates.len() > 1 {
+        diagnostics.push(oxml_layout::Diagnostic {
+            message: format!("line-number style role {name:?} is ambiguous"),
+        });
+        return CT_RPr::default();
+    }
+    let mut current = candidates.first().copied();
+    let mut chain = Vec::new();
+    let mut seen = HashSet::new();
+    while let Some(style) = current {
+        if matches!(
+            style.style_id.as_str(),
+            "DefaultParagraphFont" | "NoList" | "TableNormal"
+        ) {
+            break;
+        }
+        if !seen.insert(style.style_id.as_str()) {
+            diagnostics.push(oxml_layout::Diagnostic {
+                message: format!("line-number style role {name:?} has a basedOn cycle"),
+            });
+            break;
+        }
+        chain.push(style);
+        let Some(parent) = style.based_on.as_deref() else {
+            break;
+        };
+        match styles.get_by_id(parent) {
+            Some(parent) if parent.style_type == kind => current = Some(parent),
+            _ => {
+                diagnostics.push(oxml_layout::Diagnostic {
+                    message: format!(
+                        "line-number style role {name:?} has a missing or wrong-type basedOn owner"
+                    ),
+                });
+                break;
+            }
+        }
+    }
+    let mut properties = CT_RPr::default();
+    for style in chain.into_iter().rev() {
+        if let Some(rpr) = &style.rpr {
+            properties.merge_from(rpr);
+        }
+    }
+    properties
+}
+
+pub(crate) fn word_kerning_enabled(properties: &CT_RPr) -> bool {
+    properties
+        .kern
+        .is_some_and(|threshold| threshold.0 <= properties.sz.map_or(22, |size| size.0))
+}
+
 fn character_style_id<'a>(style_id: &'a str, styles: &'a CT_Styles) -> Option<&'a str> {
     let style = styles.get_by_id(style_id)?;
     match style.style_type {
@@ -2348,6 +2457,133 @@ mod tests {
         assert_eq!(rpr.sz, Some(HalfPoint(26)));
         assert_eq!(rpr.bold, Some(true));
         assert_eq!(rpr.color, Some("2E74B5".to_string()));
+
+        let parse = |content: &str| {
+            CT_Styles::from_xml(format!(r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{content}</w:styles>"#).as_bytes()).unwrap()
+        };
+        let mut generated = parse(
+            r#"<w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="22"/><w:rFonts w:ascii="Arial"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:styleId="PARENT"><w:name w:val="parent"/><w:rPr><w:b/><w:i/><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="not-a-built-in-id"><w:name w:val=" Normal "/><w:basedOn w:val="PARENT"/><w:rPr><w:b w:val="0"/></w:rPr></w:style><w:style w:type="character" w:styleId="character-parent"><w:name w:val="ordinary"/><w:rPr><w:b/><w:i/><w:kern w:val="32"/></w:rPr></w:style><w:style w:type="character" w:styleId="arbitrary"><w:name w:val="line number"/><w:basedOn w:val="character-parent"/></w:style>"#,
+        );
+        let original_xml = generated.to_xml().unwrap();
+        let mut diagnostics = Vec::new();
+        let ink = line_number_properties(&generated, &mut diagnostics);
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            (
+                ink.font_ascii.as_deref(),
+                ink.sz,
+                ink.bold,
+                ink.italic,
+                ink.kern
+            ),
+            (
+                Some("Arial"),
+                Some(HalfPoint(32)),
+                Some(true),
+                Some(false),
+                Some(HalfPoint(32))
+            )
+        );
+        assert!(
+            word_kerning_enabled(&ink),
+            "the nominal half-point tie enables kerning"
+        );
+        assert_eq!(generated.to_xml().unwrap(), original_xml);
+        for threshold in [
+            None,
+            Some(HalfPoint(0)),
+            Some(HalfPoint(31)),
+            Some(HalfPoint(32)),
+            Some(HalfPoint(33)),
+        ] {
+            let properties = CT_RPr {
+                kern: threshold,
+                sz: Some(HalfPoint(32)),
+                ..Default::default()
+            };
+            assert_eq!(
+                word_kerning_enabled(&properties),
+                threshold.is_some_and(|value| value.0 <= 32)
+            );
+        }
+        // Document-default true is dominant, otherwise paragraph/character toggles combine.
+        for (default, normal, character, expected) in [
+            (false, true, true, false),
+            (true, true, true, true),
+            (false, true, false, true),
+            (false, false, false, false),
+        ] {
+            let xml = format!(
+                r#"<w:docDefaults><w:rPrDefault><w:rPr><w:b w:val="{}"/><w:i w:val="{}"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:styleId="normal"><w:name w:val="Normal"/><w:rPr><w:b w:val="{}"/><w:i w:val="{}"/></w:rPr></w:style><w:style w:type="character" w:styleId="line"><w:name w:val="line number"/><w:rPr><w:b w:val="{}"/><w:i w:val="{}"/></w:rPr></w:style>"#,
+                u8::from(default),
+                u8::from(default),
+                u8::from(normal),
+                u8::from(normal),
+                u8::from(character),
+                u8::from(character)
+            );
+            let properties = line_number_properties(&parse(&xml), &mut Vec::new());
+            assert_eq!(
+                (properties.bold, properties.italic),
+                (Some(expected), Some(expected))
+            );
+        }
+        // Ignored IDs stop before their own properties and their basedOn edge.
+        generated
+            .styles
+            .iter_mut()
+            .find(|style| style.style_id == "character-parent")
+            .unwrap()
+            .style_id = "DefaultParagraphFont".into();
+        generated
+            .styles
+            .iter_mut()
+            .find(|style| style.name.as_deref() == Some("line number"))
+            .unwrap()
+            .based_on = Some("DefaultParagraphFont".into());
+        let properties = line_number_properties(&generated, &mut Vec::new());
+        assert_eq!(
+            (properties.bold, properties.italic, properties.kern),
+            (Some(false), Some(true), None)
+        );
+        // Duplicate primary names omit only that role, not document defaults or the other role.
+        let duplicate = generated
+            .styles
+            .iter()
+            .find(|style| style.name.as_deref() == Some("line number"))
+            .unwrap()
+            .clone();
+        generated.styles.push(duplicate);
+        let mut diagnostics = Vec::new();
+        let properties = line_number_properties(&generated, &mut diagnostics);
+        assert_eq!(properties.sz, Some(HalfPoint(32)));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|item| item.message.contains("ambiguous"))
+        );
+        let unrelated = parse(
+            r#"<w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="unrelated"/><w:rPr><w:sz w:val="72"/></w:rPr></w:style><w:style w:type="character" w:styleId="wrong"><w:name w:val="Normal"/></w:style>"#,
+        );
+        let mut diagnostics = Vec::new();
+        assert_eq!(
+            line_number_properties(&unrelated, &mut diagnostics).sz,
+            Some(HalfPoint(22))
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|item| item.message.contains("wrong-type"))
+        );
+        let cycle = parse(
+            r#"<w:style w:type="paragraph" w:styleId="a"><w:name w:val="Normal"/><w:basedOn w:val="b"/><w:rPr><w:sz w:val="32"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="b"><w:name w:val="parent"/><w:basedOn w:val="a"/><w:rPr><w:sz w:val="22"/></w:rPr></w:style>"#,
+        );
+        let mut diagnostics = Vec::new();
+        assert_eq!(
+            line_number_properties(&cycle, &mut diagnostics).sz,
+            Some(HalfPoint(32))
+        );
+        assert_eq!(diagnostics.len(), 1);
     }
 
     #[test]
