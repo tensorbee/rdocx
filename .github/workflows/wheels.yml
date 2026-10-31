@@ -678,10 +678,48 @@ jobs:
             dist/*.zip
           if-no-files-found: error
 
+  semver-evidence:
+    name: Verify exact-source SemVer and completed CI
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        env:
+          GIT_CONFIG_COUNT: 1
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+      - name: Acquire pinned native policy tools
+        shell: bash
+        run: |
+          python -B - <<'PYTOOLS'
+          import os
+          from pathlib import Path
+          from scripts import sprint_workflow as w
+          tools=w._prepare_release_semver_tools(w._semver_host(),Path(os.environ['RUNNER_TEMP'])/'semver-tools')
+          with open(os.environ['GITHUB_PATH'],'a') as stream: stream.write(str(Path(tools['gh']).parent)+'\n')
+          PYTOOLS
+      - name: Consume independently collected completed CI authority
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python -B - <<'PYRELEASE'
+          import os, subprocess, sys
+          from pathlib import Path
+          from scripts import sprint_workflow as w
+          scope=os.environ['GITHUB_REF_NAME'] if os.environ['GITHUB_EVENT_NAME']=='push' else 'all'
+          proofs=w._prepare_release_semver_evidence(scope,Path(os.environ['RUNNER_TEMP'])/'semver-consume')
+          argv=[sys.executable,'-B','scripts/sprint_workflow.py','release-semver',scope,'--check-evidence',*[str(p) for p in proofs]]
+          argv.append('--release-candidate' if scope!='all' else '--refresh-registry')
+          subprocess.run(argv,check=True)
+          PYRELEASE
+
   release-assets:
     name: Verify unified release assets
     if: github.event_name == 'push'
-    needs: [cli-assets, build-wheels, build-sdists]
+    needs: [cli-assets, build-wheels, build-sdists, semver-evidence]
     runs-on: ubuntu-24.04
     permissions:
       contents: read

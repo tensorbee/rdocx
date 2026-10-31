@@ -20,6 +20,11 @@ Existing comparison operations can retain unchanged revision-bearing owners whil
 
 ### Compatibility
 
+Tracking a simple field's instruction change uses schema-valid complex field
+markers. After accepting or rejecting that tracked change, `Field.is_complex`
+can therefore be true even when the input used a simple field. This approved representation consequence applies specifically to tracked
+instruction changes. Final native Word qualification remains pending.
+
 Word0.17.0 requires shared OOXML0.15.0 and moves its publicly reachable shared Rust types to a new minor line. The OPC `parts` map stores `Arc<Vec<u8>>`, and `remove_part` returns `Option<Arc<Vec<u8>>>`, including through the `rdocx_opc` re-export. Direct map insertion and owned removal callers must use the Arc contract. Pass a `Vec<u8>` directly to generic `set_part`, rather than an ambiguous `Vec.into()` expression. Python signatures are unchanged. Retaining old revisions is bounded owner preservation, rather than unrestricted native Word Compare behavior. Edits, moves or deletion touching a revision-bearing paragraph, whole table or block control, or changed revised section properties remain refused. For those cases, retain the original redline separately, resolve the relevant author or revision IDs on independent copies with the checked APIs, then compare those baselines. Resolving those copies discards the resolved tracked markup.
 
 The new minor lines make the public contract distinction explicit after the breaking change reported in [#429](https://github.com/tensorbee/rdocx/issues/429). Published OPC0.14.3 and0.14.4 expose conflicting Vec and Arc contracts. Deliberately selecting OPC0.14.3 restores source type-check compatibility for the exact published jubarte-redlines0.13.0 and0.14.0 clients that were examined. This is a bounded workaround, not a universal0.14patch, runtime guarantee or completed registry rollback. Existing0.14.4 locks need deliberate recovery, and dependencies requiring at least0.14.4 cannot fall back to0.14.3. No yank or publication is implied.

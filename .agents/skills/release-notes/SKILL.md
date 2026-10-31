@@ -7,6 +7,6 @@ description: "Prepare and validate meaningful reviewed release notes in CHANGELO
 
 Canonical source: `.claude/commands/release-notes.md`.
 
-Source SHA-256: `5e28ae9f17c8fd1709d27889908a1415cbcdd9ef9bdc93abe5a4b91c84ef4012`.
+Source SHA-256: `3a749b1b20529c252035e0e6c66cb2dcde3298d4ca200bb788accf8d7fb22a77`.
 
 Read the canonical source in full before acting, and follow it with whatever tools this host provides. Treat any invocation arguments as arguments to that workflow. Where it names another slash command, follow the repository skill of the same name. Where it says to ask with `AskUserQuestion`, ask through this host's own question mechanism. `.claude/WORKFLOW.md` wins on any process question. Do not edit this generated adapter.

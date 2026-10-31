@@ -829,12 +829,342 @@ jobs:
             --config-sha "$F_X227_CONFIG_SHA" \
             --qualification-wait-seconds 1800
 
+  semver-linux:
+    name: SemVer native (linux-x86_64)
+    if: github.repository == 'tensorbee/rdocx' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.owner_compatibility != true))
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact_id: ${{ steps.native.outputs.artifact-id }}
+      artifact_digest: ${{ steps.native.outputs.artifact-digest }}
+      packet_sha256: ${{ steps.execute.outputs.packet_sha256 }}
+      input_identity: ${{ steps.execute.outputs.input_identity }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        env:
+          GIT_CONFIG_COUNT: 1
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+      - name: Bind reviewed dispatch source
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          WORKFLOW_SHA: ${{ inputs.workflow_sha }}
+        run: |
+          test "$SOURCE_SHA" = "$GITHUB_SHA"
+          test "$SOURCE_REF" = "$GITHUB_REF"
+          test "$WORKFLOW_SHA" = "$GITHUB_WORKFLOW_SHA"
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.97.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+      - name: Acquire pinned native policy tools
+        shell: bash
+        run: |
+          python -B - <<'PYTOOLS'
+          import os
+          from pathlib import Path
+          from scripts import sprint_workflow as w
+          tools=w._prepare_release_semver_tools(w._semver_host(),Path(os.environ['RUNNER_TEMP'])/'semver-tools')
+          with open(os.environ['GITHUB_PATH'],'a') as stream: stream.write(str(Path(tools['gh']).parent)+'\n')
+          PYTOOLS
+      - name: Execute exact native compatibility rows
+        id: execute
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python -B - <<'PYEXEC'
+          import os, subprocess, sys
+          from pathlib import Path
+          from scripts import sprint_workflow as w
+          target='x86_64-unknown-linux-gnu'
+          root=Path(os.environ['RUNNER_TEMP'])
+          reuse=w._prepare_release_semver_reuse('all',target,root/'semver-reuse')
+          tool=root/'semver-tools'/('cargo-semver-checks.exe' if target.endswith('msvc') else 'cargo-semver-checks')
+          output=root/'semver-native'
+          argv=[sys.executable,'-B','scripts/sprint_workflow.py','release-semver','all','--target',target,'--tool',str(tool),'--output',str(output)]
+          for directory in reuse: argv.extend(['--reuse-evidence',str(directory)])
+          subprocess.run(argv,check=True)
+          packet=w._semver_read(output/'packet.json'); receipt=w._semver_read(output/'receipt.json')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as stream:
+              stream.write('packet_sha256='+packet['sha256']+'\ninput_identity='+receipt['source']['sha256']+'\n')
+          PYEXEC
+      - name: Upload immutable native subject
+        id: native
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: semver-native-x86_64-unknown-linux-gnu-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/semver-native/semver-x86_64-unknown-linux-gnu.tar
+          if-no-files-found: error
+      - name: Retain failed native diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: semver-diagnostics-x86_64-unknown-linux-gnu-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/semver-native
+            .claude/scratch/semver-authority
+          if-no-files-found: warn
+
+  semver-macos:
+    name: SemVer native (macos-arm64)
+    if: github.repository == 'tensorbee/rdocx' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.owner_compatibility != true))
+    runs-on: macos-26
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact_id: ${{ steps.native.outputs.artifact-id }}
+      artifact_digest: ${{ steps.native.outputs.artifact-digest }}
+      packet_sha256: ${{ steps.execute.outputs.packet_sha256 }}
+      input_identity: ${{ steps.execute.outputs.input_identity }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        env:
+          GIT_CONFIG_COUNT: 1
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+      - name: Bind reviewed dispatch source
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          WORKFLOW_SHA: ${{ inputs.workflow_sha }}
+        run: |
+          test "$SOURCE_SHA" = "$GITHUB_SHA"
+          test "$SOURCE_REF" = "$GITHUB_REF"
+          test "$WORKFLOW_SHA" = "$GITHUB_WORKFLOW_SHA"
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.97.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+      - name: Acquire pinned native policy tools
+        shell: bash
+        run: |
+          python -B - <<'PYTOOLS'
+          import os
+          from pathlib import Path
+          from scripts import sprint_workflow as w
+          tools=w._prepare_release_semver_tools(w._semver_host(),Path(os.environ['RUNNER_TEMP'])/'semver-tools')
+          with open(os.environ['GITHUB_PATH'],'a') as stream: stream.write(str(Path(tools['gh']).parent)+'\n')
+          PYTOOLS
+      - name: Execute exact native compatibility rows
+        id: execute
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python -B - <<'PYEXEC'
+          import os, subprocess, sys
+          from pathlib import Path
+          from scripts import sprint_workflow as w
+          target='aarch64-apple-darwin'
+          root=Path(os.environ['RUNNER_TEMP'])
+          reuse=w._prepare_release_semver_reuse('all',target,root/'semver-reuse')
+          tool=root/'semver-tools'/('cargo-semver-checks.exe' if target.endswith('msvc') else 'cargo-semver-checks')
+          output=root/'semver-native'
+          argv=[sys.executable,'-B','scripts/sprint_workflow.py','release-semver','all','--target',target,'--tool',str(tool),'--output',str(output)]
+          for directory in reuse: argv.extend(['--reuse-evidence',str(directory)])
+          subprocess.run(argv,check=True)
+          packet=w._semver_read(output/'packet.json'); receipt=w._semver_read(output/'receipt.json')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as stream:
+              stream.write('packet_sha256='+packet['sha256']+'\ninput_identity='+receipt['source']['sha256']+'\n')
+          PYEXEC
+      - name: Upload immutable native subject
+        id: native
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: semver-native-aarch64-apple-darwin-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/semver-native/semver-aarch64-apple-darwin.tar
+          if-no-files-found: error
+      - name: Retain failed native diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: semver-diagnostics-aarch64-apple-darwin-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/semver-native
+            .claude/scratch/semver-authority
+          if-no-files-found: warn
+
+  semver-windows:
+    name: SemVer native (windows-x86_64)
+    if: github.repository == 'tensorbee/rdocx' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.owner_compatibility != true))
+    runs-on: windows-2025
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact_id: ${{ steps.native.outputs.artifact-id }}
+      artifact_digest: ${{ steps.native.outputs.artifact-digest }}
+      packet_sha256: ${{ steps.execute.outputs.packet_sha256 }}
+      input_identity: ${{ steps.execute.outputs.input_identity }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        env:
+          GIT_CONFIG_COUNT: 1
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+      - name: Bind reviewed dispatch source
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          WORKFLOW_SHA: ${{ inputs.workflow_sha }}
+        run: |
+          test "$SOURCE_SHA" = "$GITHUB_SHA"
+          test "$SOURCE_REF" = "$GITHUB_REF"
+          test "$WORKFLOW_SHA" = "$GITHUB_WORKFLOW_SHA"
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.97.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+      - name: Acquire pinned native policy tools
+        shell: bash
+        run: |
+          python -B - <<'PYTOOLS'
+          import os
+          from pathlib import Path
+          from scripts import sprint_workflow as w
+          tools=w._prepare_release_semver_tools(w._semver_host(),Path(os.environ['RUNNER_TEMP'])/'semver-tools')
+          with open(os.environ['GITHUB_PATH'],'a') as stream: stream.write(str(Path(tools['gh']).parent)+'\n')
+          PYTOOLS
+      - name: Execute exact native compatibility rows
+        id: execute
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python -B - <<'PYEXEC'
+          import os, subprocess, sys
+          from pathlib import Path
+          from scripts import sprint_workflow as w
+          target='x86_64-pc-windows-msvc'
+          root=Path(os.environ['RUNNER_TEMP'])
+          reuse=w._prepare_release_semver_reuse('all',target,root/'semver-reuse')
+          tool=root/'semver-tools'/('cargo-semver-checks.exe' if target.endswith('msvc') else 'cargo-semver-checks')
+          output=root/'semver-native'
+          argv=[sys.executable,'-B','scripts/sprint_workflow.py','release-semver','all','--target',target,'--tool',str(tool),'--output',str(output)]
+          for directory in reuse: argv.extend(['--reuse-evidence',str(directory)])
+          subprocess.run(argv,check=True)
+          packet=w._semver_read(output/'packet.json'); receipt=w._semver_read(output/'receipt.json')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as stream:
+              stream.write('packet_sha256='+packet['sha256']+'\ninput_identity='+receipt['source']['sha256']+'\n')
+          PYEXEC
+      - name: Upload immutable native subject
+        id: native
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: semver-native-x86_64-pc-windows-msvc-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/semver-native/semver-x86_64-pc-windows-msvc.tar
+          if-no-files-found: error
+      - name: Retain failed native diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: semver-diagnostics-x86_64-pc-windows-msvc-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/semver-native
+            .claude/scratch/semver-authority
+          if-no-files-found: warn
+
+  semver-sign:
+    name: SemVer sign (${{ matrix.target }})
+    if: github.repository == 'tensorbee/rdocx' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.owner_compatibility != true))
+    needs: [semver-linux, semver-macos, semver-windows]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {target: x86_64-unknown-linux-gnu, producer: semver-linux}
+          - {target: aarch64-apple-darwin, producer: semver-macos}
+          - {target: x86_64-pc-windows-msvc, producer: semver-windows}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        env:
+          GIT_CONFIG_COUNT: 1
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+      - name: Acquire pinned native policy tools
+        shell: bash
+        run: |
+          python -B - <<'PYTOOLS'
+          import os
+          from pathlib import Path
+          from scripts import sprint_workflow as w
+          tools=w._prepare_release_semver_tools(w._semver_host(),Path(os.environ['RUNNER_TEMP'])/'semver-tools')
+          with open(os.environ['GITHUB_PATH'],'a') as stream: stream.write(str(Path(tools['gh']).parent)+'\n')
+          PYTOOLS
+      - name: Select fixed completed native producer subject
+        id: subject
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCER_OUTPUTS: ${{ toJSON(needs[matrix.producer].outputs) }}
+          NATIVE_TARGET: ${{ matrix.target }}
+        run: |
+          python -B - <<'PYSIGN'
+          import json, os
+          from pathlib import Path
+          from scripts import sprint_workflow as w
+          selection=w._prepare_release_semver_signing(os.environ['NATIVE_TARGET'],json.loads(os.environ['PRODUCER_OUTPUTS']),Path(os.environ['RUNNER_TEMP'])/'semver-sign')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as stream:
+              stream.write('path='+selection['packet']+'\nname='+selection['subject_name']+'\n')
+          PYSIGN
+      - name: Attest only the selected fixed native packet
+        id: attestation
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.subject.outputs.path }}
+          subject-name: ${{ steps.subject.outputs.name }}
+      - name: Retain unchanged signed bundle
+        shell: bash
+        env:
+          BUNDLE: ${{ steps.attestation.outputs.bundle-path }}
+          SUBJECT: ${{ steps.subject.outputs.path }}
+        run: |
+          python -B - <<'PYBUNDLE'
+          import os, shutil
+          from pathlib import Path
+          shutil.copyfile(os.environ['BUNDLE'],Path(os.environ['SUBJECT']).parent/'bundle.json')
+          PYBUNDLE
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: semver-proof-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.subject.outputs.path }}
+            ${{ runner.temp }}/semver-sign/subject/bundle.json
+          if-no-files-found: error
+
   ci-gate:
     name: CI gate
     if: always()
     needs:
       - changes
       - owner-compatibility
+      - semver-linux
+      - semver-macos
+      - semver-windows
+      - semver-sign
       - no-default-features
       - release-regressions
       - clippy
@@ -851,10 +1181,18 @@ jobs:
       - supply-chain
       - prose
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     steps:
       - name: Validate filtered jobs
         shell: bash
         env:
+          SEMVER_REQUIRED: ${{ github.repository == 'tensorbee/rdocx' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.owner_compatibility != true)) }}
+          SEMVER_LINUX: ${{ needs['semver-linux'].result }}
+          SEMVER_MACOS: ${{ needs['semver-macos'].result }}
+          SEMVER_WINDOWS: ${{ needs['semver-windows'].result }}
+          SEMVER_SIGN: ${{ needs['semver-sign'].result }}
           OWNER_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.owner_compatibility == true }}
           OWNER_RESULT: ${{ needs['owner-compatibility'].result }}
           NO_DEFAULT_FEATURES_RESULT: ${{ needs['no-default-features'].result }}
@@ -898,6 +1236,9 @@ jobs:
             esac
           }
 
+          for result in "$SEMVER_LINUX" "$SEMVER_MACOS" "$SEMVER_WINDOWS" "$SEMVER_SIGN"; do
+            if [ "$SEMVER_REQUIRED" = "true" ]; then test "$result" = "success"; else test "$result" = "skipped"; fi
+          done
           if [ "$OWNER_MODE" = "true" ]; then
             test "$OWNER_RESULT" = "success"
             test "$CHANGES_RESULT" = "skipped"
@@ -949,3 +1290,34 @@ jobs:
           check_result "$hash_harness_selected" "$HASH_HARNESS_RESULT" hash-harness
           check_result "$supply_chain_selected" "$SUPPLY_CHAIN_RESULT" supply-chain
           check_result "$prose_selected" "$PROSE_RESULT" prose
+      - name: Checkout exact deciding source
+        if: github.repository == 'tensorbee/rdocx' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.owner_compatibility != true))
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        env:
+          GIT_CONFIG_COUNT: 1
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+      - name: Acquire pinned native policy tools
+        if: github.repository == 'tensorbee/rdocx' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.owner_compatibility != true))
+        shell: bash
+        run: |
+          python -B - <<'PYTOOLS'
+          import os
+          from pathlib import Path
+          from scripts import sprint_workflow as w
+          tools=w._prepare_release_semver_tools(w._semver_host(),Path(os.environ['RUNNER_TEMP'])/'semver-tools')
+          with open(os.environ['GITHUB_PATH'],'a') as stream: stream.write(str(Path(tools['gh']).parent)+'\n')
+          PYTOOLS
+      - name: Consume actual completed signed native union
+        if: github.repository == 'tensorbee/rdocx' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.owner_compatibility != true))
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python -B - <<'PYGATE'
+          import os, subprocess, sys
+          from pathlib import Path
+          from scripts import sprint_workflow as w
+          proofs=w._prepare_release_semver_evidence('all',Path(os.environ['RUNNER_TEMP'])/'semver-consume')
+          subprocess.run([sys.executable,'-B','scripts/sprint_workflow.py','release-semver','all','--check-evidence',*[str(p) for p in proofs],'--refresh-registry'],check=True)
+          PYGATE

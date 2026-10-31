@@ -3733,6 +3733,14 @@ local metadata and artifact verification, without registry publication or tag
 authority. The previous unified v0.16.4 and rpptx-v0.14.4 releases remain
 immutable at reviewed main24af95d3d94c25e95f61a75e7e21f18fa95b6363.
 
+The existing release workflow consumes authenticated native compatibility and
+completed final-source CI before publication. Rust registry membership derives
+from `RELEASE_CRATES`, with twenty libraries and two binary-only CLIs. Binding
+and WASM carriers retain their independent existing checks. Default/all Rust
+API views do not replace installed Python calls, typing, CLI identities or
+behavioral compatibility. First-minor empty-line applicability is explicit.
+
+
 **maturin, mixed Rust and Python layout**, so type stubs and enum shims have a
 home. `python-source = "python"`, `module-name = "rdocx._rdocx"`,
 `features = ["pyo3/extension-module"]`. The rpptx package uses the parallel

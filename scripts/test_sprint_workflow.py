@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
 import fnmatch
 import hashlib
 import io
@@ -29,6 +30,701 @@ from scripts import sprint_workflow as workflow
 
 
 class SprintWorkflowTests(unittest.TestCase):
+
+    def test_semver_collector_setup_failure_invalidates_prior_real_complete_context(self):
+        for failed in ('mkdtemp','raw-directory'):
+            with self.subTest(failed=failed),self._semver_owned_authority_fixture() as fixture:
+                workflow._collect_release_semver_authority('S96',fixture['scope'])
+                self.assertEqual(workflow._load_release_semver_authority('S96',fixture['scope'])[0]['status'],'complete')
+                error=OSError('synthetic acquisition setup failure')
+                real_mkdir=Path.mkdir
+                def mkdir(path,*args,**kwargs):
+                    if path.name=='raw':raise error
+                    return real_mkdir(path,*args,**kwargs)
+                failure=patch.object(workflow.tempfile,'mkdtemp',side_effect=error) if failed=='mkdtemp' else patch.object(Path,'mkdir',mkdir)
+                with failure,self.assertRaises(OSError) as raised:workflow._collect_release_semver_authority('S96',fixture['scope'])
+                self.assertIs(raised.exception,error)
+                self.assertEqual(workflow.load('S96')['semver_authority']['status'],'incomplete')
+                with self.assertRaisesRegex(ValueError,'absent/incomplete'):workflow._load_release_semver_authority('S96',fixture['scope'])
+                self._assert_semver_preserved_prior_state(fixture)
+
+    def test_semver_process_retains_actual_exit_raw_bytes_and_timeout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            row=workflow._semver_run([sys.executable,'-B','-c','import sys; print("observed"); print("diagnostic",file=sys.stderr); sys.exit(7)'],root,dict(os.environ),root/'failed','child',10)
+            self.assertEqual(row['exit'],7);self.assertFalse(row['timed_out']);self.assertIsNone(row['launch_error'])
+            self.assertEqual((root/'failed/child.stdout').read_bytes(),b'observed\n')
+            self.assertEqual(row['stderr_sha256'],workflow._semver_hash(root/'failed/child.stderr'))
+            self.assertTrue(row['started'].endswith('Z'));self.assertTrue(row['completed'].endswith('Z'))
+            with self.assertRaises(ValueError):workflow._semver_success(row)
+            timed=workflow._semver_run([sys.executable,'-B','-c','import time; time.sleep(10)'],root,dict(os.environ),root/'timed','child',0.03)
+            self.assertTrue(timed['timed_out']);self.assertNotEqual(timed['exit'],0)
+            self.assertEqual(workflow._semver_read(root/'timed/child.process.json'),timed)
+
+    def test_semver_empty_line_scope_still_refuses_current_suppression(self):
+        scope=workflow._semver_scope('all')
+        self.assertEqual(len(scope['packages']),22)
+        query=next(iter(workflow.SEMVER_QUERY_POLICY))
+        for owner in ('package','workspace'):
+            package={};workspace={};table=package if owner=='package' else workspace
+            table['metadata']={'cargo-semver-checks':{'lints':{query:'allow'}}}
+            with self.subTest(owner=owner),self.assertRaisesRegex(ValueError,'override forbidden'):
+                workflow.check_no_semver_overrides(package,workspace,workflow.SEMVER_QUERY_POLICY,role='current')
+        real_read=Path.read_text
+        def changed(path,*args,**kwargs):
+            text=real_read(path,*args,**kwargs)
+            if path==workflow.REPO/'crates/oxml-opc/Cargo.toml':text+='\n[package.metadata.cargo-semver-checks.lints]\n'+query+'="allow"\n'
+            return text
+        with patch.object(Path,'read_text',changed),self.assertRaisesRegex(ValueError,'override forbidden'):
+            workflow._semver_scope('all')
+
+    def test_semver_positive_canary_preserves_native_and_portable_artifact_roles(self):
+        for target in (None,'x86_64-unknown-linux-gnu','x86_64-pc-windows-msvc'):
+            with self.subTest(target=target),tempfile.TemporaryDirectory() as directory:
+                physical=Path(directory);(physical/'src').mkdir();(physical/'target').mkdir()
+                (physical/'src/lib.rs').write_bytes(workflow.SEMVER_CANARY_SOURCES['declared-arc']);(physical/'Cargo.toml').write_text('[package]\nname="client"\nversion="0.0.0"\n');(physical/'target/client.rmeta').write_bytes(b'synthetic real retained bytes')
+                if target is None:root=physical
+                else:root=workflow._semver_path('C:/native/client' if target.endswith('msvc') else '/native/client',target)
+                source=root/'src/lib.rs';manifest=root/'Cargo.toml';artifact=root/'target/client.rmeta'
+                client={'root':str(root),'source_sha256':hashlib.sha256(workflow.SEMVER_CANARY_SOURCES['declared-arc']).hexdigest(),'package_id':'client','target_name':'client','artifact_root':str(root/'target'),'subject':'current-candidate','expected':'compile-pass'}
+                event={'reason':'compiler-artifact','package_id':'client','manifest_path':str(manifest),'target':{'name':'client','kind':['lib'],'crate_types':['lib'],'src_path':str(source)},'fresh':False,'profile':{'test':False},'filenames':[str(artifact)]}
+                raw=(json.dumps(event)+'\n'+json.dumps({'reason':'build-finished','success':True})+'\n').encode()
+                process={'cwd':str(root),'exit':0,'timed_out':False,'launch_error':None}
+                kwargs={} if target is None else {'producer_target':target,'retained':{source:physical/'src/lib.rs',manifest:physical/'Cargo.toml',artifact:physical/'target/client.rmeta'}}
+                result=workflow.release_semver_canary_diagnostics('declared-arc',client,raw,process,**kwargs)
+                self.assertEqual(result['outcome'],'compile-pass');self.assertEqual(result['artifacts'][0][0]['sha256'],workflow._semver_hash(physical/'target/client.rmeta'))
+                event['fresh']=True;bad=(json.dumps(event)+'\n'+json.dumps({'reason':'build-finished','success':True})+'\n').encode()
+                with self.assertRaises(ValueError):workflow.release_semver_canary_diagnostics('declared-arc',client,bad,process,**kwargs)
+
+    def test_semver_generated_side_valid_hash_role_swaps_are_refused_on_both_path_platforms(self):
+        for target,prefix in [('x86_64-unknown-linux-gnu','/producer'),('x86_64-pc-windows-msvc','C:/producer')]:
+            with self.subTest(target=target),tempfile.TemporaryDirectory() as directory:
+                root=Path(directory);project=prefix+'/generated';source=prefix+'/source';library='oxml_opc';json_path=project+'/target/'+target+'/doc/'+library+'.json'
+                def kept(name,data,producer):
+                    (root/name).write_bytes(data)
+                    return {'path':name,'producer_path':producer,'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()}
+                manifest=('[package]\nname="placeholder"\n[workspace]\n[dependencies]\noxml-opc={path='+json.dumps(source)+'}\n').encode()
+                refs={'manifest':kept('manifest',manifest,project+'/Cargo.toml'),'lock':kept('lock',b'[[package]]\nname="oxml-opc"\nversion="0.15.0"\n',project+'/Cargo.lock'),'lib':kept('lib',b'pub use oxml_opc::*;',project+'/lib.rs')}
+                document={'crate_version':'0.15.0','index':{'0':{'name':library}},'root':0,'format_version':55}
+                refs['json']=kept('doc',json.dumps(document).encode(),json_path)
+                metadata={'target_directory':project+'/target','packages':[{'id':'subject','name':'oxml-opc','version':'0.15.0','source':None,'manifest_path':source+'/Cargo.toml','targets':[{'name':library,'kind':['lib']}],'features':{}}],'resolve':{'nodes':[{'id':'subject','features':[]}]}}
+                refs['metadata']=kept('metadata',json.dumps(metadata).encode(),prefix+'/metadata.stdout')
+                process={'exit':0,'timed_out':False,'launch_error':None,'cwd':prefix,'argv':['cargo','metadata','--locked','--offline','--manifest-path',project+'/Cargo.toml'],'stdout_sha256':refs['metadata']['sha256']}
+                refs['metadata_process']=kept('process',json.dumps(process).encode(),prefix+'/metadata.process.json')
+                side={**refs,'generation_before':None,'generation_after':{'sha256':refs['manifest']['sha256']},'source_root':source,'project':project,'configuration_cwd':prefix,'target':project+'/target','subject_package_id':'subject','library':library,'effective_features':[],'requested_features':[],'available_features':[],'json_path':json_path,'json_format':55}
+                self.assertEqual(workflow._semver_validate_side(root,side,'oxml-opc','0.15.0',target,'default',prefix),side)
+                for role in ('manifest','lock','lib','json'):
+                    broken=copy.deepcopy(side);broken[role]['producer_path']=prefix+'/another-source/'+role
+                    with self.subTest(role=role),self.assertRaisesRegex(ValueError,'role join'):
+                        workflow._semver_validate_side(root,broken,'oxml-opc','0.15.0',target,'default',prefix)
+
+    def test_semver_newer_owner_dispatch_does_not_poison_earlier_normal_catalog(self):
+        with self._semver_owned_authority_fixture(owner=True) as fixture:
+            actual=workflow._semver_api.side_effect
+            def api(endpoint,destination,sequence,**kwargs):
+                rewritten=endpoint.replace('/runs/100/','/runs/101/')
+                pages,observation=actual(rewritten,destination,sequence,**kwargs)
+                payload=pages[0]
+                if endpoint.endswith('/runs?per_page=100'):
+                    earlier=copy.deepcopy(payload['workflow_runs'][0]);earlier['id']=100
+                    payload['workflow_runs'].append(earlier);payload['total_count']=2
+                elif '/runs/100/' in endpoint:
+                    if 'jobs?' in endpoint:
+                        payload['jobs']=[j for j in payload['jobs'] if j['name']!='Owner unchanged compatibility corpus'];payload['total_count']=len(payload['jobs'])
+                    elif 'artifacts?' in endpoint:
+                        for artifact in payload['artifacts']:artifact['name']=artifact['name'].replace('-101-1','-100-1')
+                    else:payload['id']=100
+                raw=Path(destination)/observation['synthetic_file'];raw.unlink();workflow._semver_write(raw,payload)
+                return [payload],observation
+            with patch.object(workflow,'_semver_api',side_effect=api):
+                _,catalog=workflow._collect_release_semver_authority('S96',fixture['scope'])
+            self.assertEqual([a['run_id'] for a in catalog['excluded_owner_attempts']],[101])
+            self.assertEqual({a['run_id'] for a in catalog['attempts']},{'100'})
+            self.assertEqual({a['status'] for a in catalog['attempts']},{'success'})
+
+    def _semver_attestation_fixture(self):
+        expected={'packet_sha256':'a'*64,'bundle_sha256':'b'*64,'source_digest':'c'*40,'signer_digest':'d'*40,'build_config_digest':'e'*40,
+                  'source_ref':'refs/heads/sprint/s96','signer_ref':'refs/heads/reviewed-builder','run_id':1234,'run_attempt':2,
+                  'signer_workflow':'.github/workflows/ci.yml','source_workflow':'.github/workflows/ci.yml','event_name':'push','packet_subject_name':'native-semver.tar'}
+        repo='https://github.com/tensorbee/rdocx'
+        signer=repo+'/'+expected['signer_workflow']+'@'+expected['signer_ref']
+        invocation=repo+'/actions/runs/1234/attempts/2'
+        cert={'issuer':'https://token.actions.githubusercontent.com','subjectAlternativeName':signer,'buildSignerURI':signer,'buildSignerDigest':'d'*40,
+              'runnerEnvironment':'github-hosted','sourceRepositoryURI':repo,'sourceRepositoryDigest':'c'*40,'sourceRepositoryRef':expected['source_ref'],
+              'sourceRepositoryIdentifier':'1164240333','sourceRepositoryOwnerURI':'https://github.com/tensorbee','sourceRepositoryOwnerIdentifier':'263075749',
+              'buildConfigURI':repo+'/'+expected['source_workflow']+'@'+expected['source_ref'],'buildConfigDigest':'e'*40,'buildTrigger':'push','runInvocationURI':invocation}
+        predicate={'buildDefinition':{'buildType':'https://actions.github.io/buildtypes/workflow/v1','externalParameters':{'workflow':{'ref':expected['source_ref'],'repository':repo,'path':expected['source_workflow']}},
+                   'internalParameters':{'github':{'event_name':'push','repository_id':'1164240333','repository_owner_id':'263075749','runner_environment':'github-hosted'}},
+                   'resolvedDependencies':[{'uri':'git+'+repo+'@'+expected['source_ref'],'digest':{'gitCommit':'c'*40}}]},
+                   'runDetails':{'builder':{'id':signer},'metadata':{'invocationId':invocation}}}
+        verified={'mediaType':'application/vnd.dev.sigstore.verificationresult+json;version=0.1','signature':{'certificate':cert},
+                  'verifiedTimestamps':[{'type':'TimestampAuthority','uri':'https://timestamp.github.example','timestamp':'2025-01-02T03:04:05.123456789Z'}],
+                  'statement':{'_type':'https://in-toto.io/Statement/v1','subject':[{'name':'native-semver.tar','digest':{'sha256':'a'*64}}], 'predicateType':'https://slsa.dev/provenance/v1','predicate':predicate}}
+        data=[{'attestation':{'bundle':{'synthetic':'fixture only, not signed'}},'verificationResult':verified}]
+        process={'exit':0,'timed_out':False,'launch_error':None,'executable':'/trusted/gh','executable_sha256':workflow.SEMVER_GH_VERIFY_TOOLS['x86_64-unknown-linux-gnu']['executable_sha256'],'trusted_root_sha256':workflow.SEMVER_TRUSTED_ROOT_SHA256,
+                 'packet_sha256':'a'*64,'bundle_sha256':'b'*64,'packet_path':'/owned/packet.tar','bundle_path':'/owned/bundle.json','trusted_root_path':'/owned/root.jsonl'}
+        process['argv']=[process['executable'],'attestation','verify',process['packet_path'],'-R','tensorbee/rdocx','--bundle',process['bundle_path'],'--custom-trusted-root',process['trusted_root_path'],
+                         '--signer-workflow','tensorbee/rdocx/'+expected['signer_workflow'],'--signer-digest',expected['signer_digest'],'--source-digest',expected['source_digest'],'--source-ref',expected['source_ref'],
+                         '--cert-oidc-issuer','https://token.actions.githubusercontent.com','--deny-self-hosted-runners','--hostname','github.com','--format','json']
+        process.update(verifier_implementation='gh',verifier_version='2.97.0',consumer_host='x86_64-unknown-linux-gnu')
+        return data,process,expected
+
+    def test_semver_verifier_output_requires_certificate_context_and_independent_process(self):
+        def check(data,process,expected):
+            raw=json.dumps(data,separators=(',',':')).encode();process={**process,'stdout_sha256':hashlib.sha256(raw).hexdigest()}
+            policy={'implementation':'gh','version':'2.97.0','consumer_host':'x86_64-unknown-linux-gnu','executable_sha256':workflow.SEMVER_GH_VERIFY_TOOLS['x86_64-unknown-linux-gnu']['executable_sha256']}
+            return workflow.qualify_semver_attestation(raw,process,expected,verifier_policy=policy)
+        data,process,expected=self._semver_attestation_fixture()
+        self.assertTrue(check(data,process,expected)['certificate_binding_qualified'])
+        foreign=copy.deepcopy(data[0]);foreign['verificationResult']['signature']['certificate']['runInvocationURI']='foreign'
+        data.insert(0,foreign);self.assertEqual(check(data,process,expected)['matching_result_index'],1)
+        data.append(copy.deepcopy(data[1]))
+        with self.assertRaisesRegex(ValueError,'exactly one'):check(data,process,expected)
+        fields=self._semver_attestation_fixture()[0][0]['verificationResult']['signature']['certificate']
+        for field in fields:
+            for missing in (True,False):
+                with self.subTest(certificate=field,missing=missing):
+                    data,process,expected=self._semver_attestation_fixture();cert=data[0]['verificationResult']['signature']['certificate']
+                    if missing:cert.pop(field)
+                    else:cert[field]='foreign'
+                    with self.assertRaises(ValueError):check(data,process,expected)
+        for key,value in [('exit',1),('timed_out',True),('launch_error','failed'),('executable_sha256','0'*64),('trusted_root_sha256','0'*64),('packet_sha256','0'*64),('bundle_sha256','0'*64)]:
+            with self.subTest(process=key):
+                data,process,expected=self._semver_attestation_fixture();process[key]=value
+                with self.assertRaises(ValueError):check(data,process,expected)
+        for key in ('name','digest'):
+            data,process,expected=self._semver_attestation_fixture();subject=data[0]['verificationResult']['statement']['subject'][0]
+            subject[key]='foreign' if key=='name' else {'sha256':'0'*64}
+            with self.assertRaises(ValueError):check(data,process,expected)
+        data,process,expected=self._semver_attestation_fixture();data[0]['verificationResult'].pop('signature')
+        with self.assertRaises(ValueError):check(data,process,expected)
+
+    def test_semver_archive_authenticates_before_extraction_and_preserves_failed_bytes(self):
+        import gzip
+        def package(name='demo-1.2.3/Cargo.toml',kind=tarfile.REGTYPE):
+            stream=io.BytesIO()
+            with tarfile.open(fileobj=stream,mode='w:') as archive:
+                payload=b'[package]\nname="demo"\nversion="1.2.3"\n'
+                member=tarfile.TarInfo(name);member.type=kind;member.size=len(payload) if kind==tarfile.REGTYPE else 0;member.linkname='outside'
+                archive.addfile(member,io.BytesIO(payload) if member.size else None)
+            return gzip.compress(stream.getvalue())
+        class Response(io.BytesIO):
+            status=200
+            def geturl(self):return 'https://static.crates.io/crates/demo/demo-1.2.3.crate'
+        for case,raw,checksum_error in [('valid',package(),False),('checksum',package(),True),('traversal',package('../escape'),False),('symlink',package(kind=tarfile.SYMTYPE),False),('duplicate',None,False)]:
+            if raw is None:
+                stream=io.BytesIO()
+                with tarfile.open(fileobj=stream,mode='w:') as archive:
+                    for _ in range(2):
+                        content=b'[package]\nname="demo"\nversion="1.2.3"\n';member=tarfile.TarInfo('demo-1.2.3/Cargo.toml');member.size=len(content);archive.addfile(member,io.BytesIO(content))
+                raw=gzip.compress(stream.getvalue())
+            with self.subTest(case=case),tempfile.TemporaryDirectory() as directory:
+                work=Path(directory);foreign=work/'foreign';foreign.write_bytes(b'preserve')
+                opener=type('Opener',(),{'open':lambda self,*args,**kwargs:Response(raw)})()
+                with patch.object(workflow.urllib.request,'build_opener',return_value=opener):
+                    checksum='0'*64 if checksum_error else hashlib.sha256(raw).hexdigest()
+                    if case=='valid':
+                        source=workflow.release_semver_archive('demo','1.2.3',checksum,work)
+                        self.assertEqual(tomllib.loads((source/'Cargo.toml').read_text())['package']['name'],'demo')
+                    else:
+                        with self.assertRaises(ValueError):workflow.release_semver_archive('demo','1.2.3',checksum,work)
+                        self.assertEqual((work/'demo-1.2.3.crate').read_bytes(),raw)
+                        self.assertEqual(workflow._semver_read(work/'demo-1.2.3.acquisition.json')['status'],'INCOMPLETE')
+                        self.assertFalse((work/'demo-1.2.3').exists())
+                self.assertEqual(foreign.read_bytes(),b'preserve')
+
+    def _semver_protocol_fixture(self, old='0.14.3', new='0.14.4'):
+        migration=old.split('.')[1]!=new.split('.')[1]
+        phrase='major change' if migration else 'no change; assume minor' if old==new else 'minor change'
+        ids=[] if migration else [q for q,(kind,level) in workflow.SEMVER_QUERY_POLICY.items() if kind=='major' and level!='allow']
+        lines=[f'Checking oxml-opc v{old} -> v{new} ({phrase})',f'Starting {len(ids)} checks, {260-len(ids)} unnecessary']
+        lines += ['Checking dependency v1.0.0','Finished dev [unoptimized + debuginfo] target(s) in 0.10s']
+        lines += [f'PASS [   0.001s] major {q}' for q in ids]
+        lines += [f'Checked [   0.020s] {len(ids)} checks: {len(ids)} pass, {260-len(ids)} skip','Summary no semver update required','Finished [   1.000s] oxml-opc']
+        return '\n'.join(lines)+'\n'
+
+    def test_semver_pinned_query_protocol_rejects_incomplete_and_foreign_results(self):
+        parse=workflow.parse_semver_query_protocol
+        for old,new in [('0.14.3','0.14.4'),('0.14.4','0.14.4'),('0.14.4','0.15.0')]:
+            raw=self._semver_protocol_fixture(old,new)
+            got=parse('oxml-opc',old,new,workflow.SEMVER_QUERY_POLICY,raw,'',0)
+            self.assertTrue(got['protocol_complete']);self.assertEqual(len(got['nested_cargo_statuses']),2)
+            self.assertEqual(got['clean_query_results'],new!='0.15.0')
+            for changed in (raw.replace('Starting','Missing'),raw.replace('Summary','Missing'),raw.replace('Checking oxml-opc','Checking foreign'),raw+'Finished [   1.000s] oxml-opc\n',raw[:-1]):
+                with self.subTest(old=old,new=new),self.assertRaises(ValueError):parse('oxml-opc',old,new,workflow.SEMVER_QUERY_POLICY,changed,'',0)
+            for code in (1,100,101):
+                with self.subTest(code=code),self.assertRaises(ValueError):parse('oxml-opc',old,new,workflow.SEMVER_QUERY_POLICY,raw,'',code)
+        raw=self._semver_protocol_fixture();line=next(line for line in raw.splitlines() if line.startswith('PASS'))
+        for changed in (raw.replace(line,line+'\n'+line),raw.replace(line,line.replace(line.split()[-1],'foreign_query')),raw.replace(line,'')):
+            with self.assertRaises(ValueError):parse('oxml-opc','0.14.3','0.14.4',workflow.SEMVER_QUERY_POLICY,changed,'',0)
+
+    def test_semver_execute_real_packet_empty_line_and_reused_api_archive_acquisition(self):
+        for has_baseline,reuse,failed in ((False,False,False),(True,True,False),(False,False,True)):
+            with self.subTest(baseline=has_baseline,reuse=reuse,failed=failed),tempfile.TemporaryDirectory() as directory,contextlib.ExitStack() as stack:
+                root=Path(directory);repo=root/'repo';(repo/'crates/rpptx').mkdir(parents=True)
+                (repo/'crates/rpptx/Cargo.toml').write_text('[package]\nversion="0.15.0"\n')
+                output=root/'output';external=root/'external';external.mkdir()
+                scope={'scope':'all','families':{'rdocx':{},'rpptx':{}},'packages':{'oxml-opc':{'version':'0.15.0'},'rdocx':{'version':'0.17.0'}}}
+                environment={'configs':{},'flags':{}};source={'sha256':'source','files':{}}
+                rust={name:{'path':'/'+name,'sha256':name,'version':name+' 1.97.1'} for name in ('cargo','rustc','rustdoc')}
+                tool={'executable':'/tool'};target='x86_64-unknown-linux-gnu'
+                stack.enter_context(patch.object(workflow,'REPO',repo));stack.enter_context(patch.object(workflow,'git_head',return_value='head'))
+                stack.enter_context(patch.object(workflow,'_semver_host',return_value=target));stack.enter_context(patch.object(workflow,'_semver_tool_identity',return_value=tool))
+                stack.enter_context(patch.object(workflow,'_semver_environment',return_value=({},environment)));stack.enter_context(patch.object(workflow,'_semver_source',return_value=source));stack.enter_context(patch.object(workflow,'_semver_policy',return_value='policy'))
+                stack.enter_context(patch.object(workflow,'_semver_external_work',return_value=external));stack.enter_context(patch.object(workflow,'_semver_native_setup',return_value=rust));stack.enter_context(patch.object(workflow,'_semver_metadata',return_value={'packages':[]}))
+                stack.enter_context(patch.object(workflow,'select_semver_members',return_value=[{'name':'oxml-opc','version':'0.15.0','api':'library'}]))
+                selected=[{'num':'0.15.0','checksum':'c'*64}] if has_baseline else []
+                stack.enter_context(patch.object(workflow,'_semver_registry',return_value={'oxml-opc':{'baselines':selected,'applicability':'compatible-baselines' if selected else 'empty-compatible-line'}}))
+                historical={'meta':{'total':2,'next_page':None},'versions':[{'id':i+1,'crate':'oxml-opc','num':v,'yanked':False,'checksum':str(i+1)*64,'dl_path':'/api/v1/crates/oxml-opc/'+v+'/download'} for i,v in enumerate(('0.14.3','0.14.4'))]}
+                def http(url,path):workflow._semver_write(path,historical)
+                stack.enter_context(patch.object(workflow,'_semver_http',side_effect=http))
+                acquired=[]
+                def archive(crate,version,checksum,work):
+                    acquired.append(version);bundle=work/(crate+'-'+version);source_root=bundle/'source'/(crate+'-'+version);source_root.mkdir(parents=True)
+                    (source_root/'Cargo.toml').write_text('[package]\nname="'+crate+'"\nversion="'+version+'"\n');(work/(crate+'-'+version+'.crate')).write_bytes(b'synthetic compressed fixture')
+                    return source_root
+                stack.enter_context(patch.object(workflow,'release_semver_archive',side_effect=archive))
+                reused_root=root/'prior';(reused_root/'payload').mkdir(parents=True)
+                common={'target':target,'tool':tool,'rust':rust,'environment_identity':{'flags':{},'present_configs':{}},'source':source,'policy':'policy'}
+                refs={}
+                for view in ('default','all'):
+                    facts,key=workflow._semver_row_identity('api','oxml-opc','0.15.0','0.15.0',view,common,{'archive_sha256':'c'*64})
+                    refs[key]={'packet':{'owned_parent':reused_root},'facts':facts}
+                stack.enter_context(patch.object(workflow,'_semver_execute_reuse',return_value=refs))
+                def copied(reference,destination,facts):return {'key':workflow._semver_identity(facts),'kind':'api','input':facts,'status':'success','result':{'synthetic_reused':True}}
+                copier=stack.enter_context(patch.object(workflow,'_semver_copy_reused_row',side_effect=copied))
+                api=stack.enter_context(patch.object(workflow,'_semver_api_row',side_effect=AssertionError('reused/empty line must not execute API')))
+                def canary(*args):
+                    if failed:raise ValueError('synthetic compiler setup failure')
+                    return {'synthetic_compiler_only':True}
+                compiler=stack.enter_context(patch.object(workflow,'_semver_canary_row',side_effect=canary))
+                args=argparse.Namespace(target=[target],tool=['/tool'],output=[str(output)])
+                with contextlib.redirect_stdout(io.StringIO()):code=workflow._execute_release_semver(args,scope,{'directories':[root/'reuse'] if reuse else []})
+                receipt=workflow._semver_read(output/'receipt.json')
+                self.assertEqual(code,int(failed));self.assertEqual(receipt['complete'],not failed)
+                self.assertEqual(compiler.call_count,7);self.assertEqual(copier.call_count,2 if reuse else 0);api.assert_not_called()
+                self.assertEqual(set(acquired),{'0.14.3','0.14.4'}|({'0.15.0'} if has_baseline else set()))
+                if reuse:self.assertTrue((output/'payload/archives/oxml-opc-0.15.0/published.crate').is_file())
+                self.assertTrue((output/('semver-'+target+'.tar')).is_file());self.assertFalse(external.exists())
+                unpack=workflow._semver_unpack_packet(output/('semver-'+target+'.tar'),root/'unpacked')
+                self.assertEqual(unpack,receipt)
+
+    def test_semver_ci_gate_requires_actual_admitted_union_and_preserves_skips(self):
+        ci=(workflow.REPO/'.github/workflows/ci.yml').read_text()
+        gate=self.yaml_block(ci,'  ci-gate:');script=self.yaml_run_script(self.yaml_step(gate,'Validate filtered jobs'))
+        env=self.ci_gate_environment(selected={},results={});env['SEMVER_REQUIRED']='true'
+        for key in ('SEMVER_LINUX','SEMVER_MACOS','SEMVER_WINDOWS','SEMVER_SIGN'):env[key]='success'
+        got=subprocess.run(['bash','-eu','-o','pipefail','-c',script],env=env,capture_output=True,text=True)
+        self.assertEqual(got.returncode,0,got.stderr)
+        for key in ('SEMVER_LINUX','SEMVER_MACOS','SEMVER_WINDOWS','SEMVER_SIGN'):
+            for result in ('skipped','failure','cancelled'):
+                with self.subTest(key=key,result=result):
+                    got=subprocess.run(['bash','-eu','-o','pipefail','-c',script],env={**env,key:result},capture_output=True,text=True)
+                    self.assertNotEqual(got.returncode,0)
+        # A nonqualifying route cannot smuggle a successful native job into skipped mode.
+        got=subprocess.run(['bash','-eu','-o','pipefail','-c',script],env={**env,'SEMVER_REQUIRED':'false'},capture_output=True,text=True)
+        self.assertNotEqual(got.returncode,0)
+
+    def test_semver_workflow_carriers_have_fixed_subjects_and_deciding_dependencies(self):
+        ci=(workflow.REPO/'.github/workflows/ci.yml').read_text();wheels=(workflow.REPO/'.github/workflows/wheels.yml').read_text()
+        for target,policy in workflow.SEMVER_NATIVE_JOBS.items():
+            block=self.yaml_block(ci,'  '+policy['key']+':')
+            self.assertIn('runs-on: '+policy['runner'],block)
+            self.assertIn('name: '+policy['name'],block)
+            self.assertIn('actions: read',block);self.assertNotIn('id-token: write',block)
+            self.assertIn('GIT_CONFIG_VALUE_0: \'false\'',block)
+            self.assertIn('semver-native-'+target+'-${{ github.run_id }}-${{ github.run_attempt }}',block)
+            self.assertIn('_prepare_release_semver_reuse',block);self.assertIn("'release-semver','all','--target'",block)
+        signer=self.yaml_block(ci,'  semver-sign:')
+        self.assertIn('needs: [semver-linux, semver-macos, semver-windows]',signer)
+        self.assertIn('id-token: write',signer);self.assertIn('attestations: write',signer)
+        self.assertIn('toJSON(needs[matrix.producer].outputs)',signer)
+        self.assertIn('subject-name: ${{ steps.subject.outputs.name }}',signer)
+        self.assertIn('_prepare_release_semver_signing',signer)
+        gate=self.yaml_block(ci,'  ci-gate:');self.assertIn('_prepare_release_semver_evidence',gate)
+        consumer=self.yaml_block(wheels,'  semver-evidence:')
+        self.assertNotIn("if: github.event_name == 'push'",consumer)
+        self.assertIn('--release-candidate',consumer);self.assertIn('--refresh-registry',consumer)
+        self.assertIn('semver-evidence',self.yaml_block(wheels,'  release-assets:').split('    steps:',1)[0])
+        # New diagnostic transport cannot enter any distributed product checksum glob.
+        self.assertNotIn('semver-',self.yaml_block(wheels,'  build-wheels:'))
+        self.assertNotIn('semver-',self.yaml_block(wheels,'  cli-assets:'))
+    def test_semver_signed_subject_separates_bound_identities_and_refuses_invalid_associations(self):
+        target = 'x86_64-unknown-linux-gnu'
+        attempt = {'target': target, 'run_id': '101', 'run_attempt': 1, 'source_head': 'd' * 40,
+                   'source_ref': 'refs/heads/sprint/s96',
+                   'native_job': {'id': 7, 'name': workflow.SEMVER_NATIVE_JOBS[target]['name']},
+                   'native_artifact': {'id': 19, 'name': 'semver-native-' + target + '-101-1',
+                                       'digest': 'sha256:' + 'a' * 64,
+                                       'workflow_run': {'id': 101, 'head_sha': 'd' * 40}}}
+        subject = workflow._semver_signed_subject(attempt)
+        self.assertEqual(subject, 'semver-' + target + '-job7-artifact19-' + 'a' * 64 + '.tar')
+        for field in ('native-id', 'digest'):
+            with self.subTest(identity=field):
+                changed = copy.deepcopy(attempt)
+                if field == 'native-id':
+                    changed['native_job']['id'] = 8
+                else:
+                    changed['native_artifact']['digest'] = 'sha256:' + 'b' * 64
+                self.assertNotEqual(workflow._semver_signed_subject(changed), subject)
+        for field in ('target', 'name', 'digest', 'native-id', 'parent', 'head'):
+            with self.subTest(refusal=field):
+                changed = copy.deepcopy(attempt)
+                if field == 'target': changed['target'] = 'aarch64-apple-darwin'
+                elif field == 'name': changed['native_artifact']['name'] += '-swapped'
+                elif field == 'digest': changed['native_artifact']['digest'] = 'sha256:' + 'g' * 64
+                elif field == 'native-id': changed['native_job']['id'] = 0
+                elif field == 'parent': changed['native_artifact']['workflow_run']['id'] = 102
+                else: changed['native_artifact']['workflow_run']['head_sha'] = 'e' * 40
+                with self.assertRaises(ValueError): workflow._semver_signed_subject(changed)
+
+    def test_semver_windows_role_resolution_prefers_longest_prefix_and_refuses_conflicts(self):
+        target = 'x86_64-pc-windows-msvc'
+        roles = [{'producer_prefix': r'C:\work', 'role': 'workspace'},
+                 {'producer_prefix': r'C:\work\rows\one', 'role': 'generated'}]
+        self.assertEqual(workflow._semver_resolve_role(r'c:\WORK\rows\one\Cargo.toml', roles, target), 'generated')
+        self.assertEqual(workflow._semver_resolve_role(r'C:\work\rows\two\Cargo.toml', roles, target), 'workspace')
+        roles.append({'producer_prefix': r'c:\WORK\rows\ONE', 'role': 'conflict'})
+        with self.assertRaisesRegex(ValueError, 'conflicting'):
+            workflow._semver_resolve_role(r'C:\work\rows\one\Cargo.toml', roles, target)
+        with self.assertRaisesRegex(ValueError, 'no authenticated role'):
+            workflow._semver_resolve_role(r'C:\workspace\Cargo.toml', roles, target)
+
+    def test_semver_retained_metadata_and_process_paths_refuse_traversal_and_symlinks_with_valid_hashes(self):
+        with tempfile.TemporaryDirectory(prefix='f275-bound-') as directory:
+            root = Path(directory) / 'root'
+            root.mkdir()
+            outside = Path(directory) / 'outside'
+            outside.mkdir()
+            for name in ('metadata.stdout', 'metadata.process.json'):
+                with self.subTest(role=name):
+                    payload = b'{"synthetic":true}\n'
+                    (root / name).write_bytes(payload)
+                    (outside / name).write_bytes(payload)
+                    reference = {'path': name, 'sha256': hashlib.sha256(payload).hexdigest(), 'bytes': len(payload)}
+                    self.assertEqual(workflow._semver_bound_file(root, reference), root / name)
+                    (root / ('alias-' + name)).symlink_to(outside / name)
+                    (root / 'alias-dir').symlink_to(outside, target_is_directory=True) if not (root / 'alias-dir').exists() else None
+                    for path in ('../outside/' + name, 'alias-' + name, 'alias-dir/' + name):
+                        with self.subTest(path=path), self.assertRaises(ValueError):
+                            workflow._semver_bound_file(root, {**reference, 'path': path})
+
+    def test_semver_native_setup_refuses_split_inherited_path_before_tool_execution(self):
+        target = 'x86_64-unknown-linux-gnu'
+        with tempfile.TemporaryDirectory(prefix='f275-tools-') as directory:
+            root = Path(directory)
+            rust = root / 'sysroot' / 'bin'
+            other = root / 'other'
+            payload = root / 'payload'
+            for path in (rust, other, payload): path.mkdir(parents=True)
+            for name in ('rustc', 'cargo', 'rustdoc'):
+                for folder in (rust, other):
+                    binary = folder / name
+                    binary.write_text('synthetic ' + name + str(folder))
+                    binary.chmod(0o700)
+            calls = []
+            def run(argv, cwd, env, destination, name, timeout=3600):
+                calls.append(name)
+                if name == 'sysroot': output = str(rust.parent)
+                elif name in ('rustc', 'cargo', 'rustdoc'):
+                    output = name + ' 1.97.1\n' + ('host: ' + target + '\n' if name == 'rustc' else '')
+                else: self.fail('Unnecessary command reached: ' + name)
+                (Path(destination) / (name + '.stdout')).write_text(output)
+                return {'exit': 0, 'timed_out': False, 'launch_error': None}
+            with patch.object(workflow, '_semver_run', side_effect=run), self.assertRaisesRegex(ValueError, 'bare inner tool differs'):
+                workflow._semver_native_setup(root / 'unused-semver', target, payload, {'PATH': str(other)})
+            self.assertEqual(calls, ['sysroot', 'rustc', 'cargo', 'rustdoc'])
+            self.assertFalse((payload / 'setup' / 'inner-tools.json').exists())
+
+    def test_semver_packet_freeze_and_unpack_roundtrip_authenticates_actual_payload(self):
+        with tempfile.TemporaryDirectory(prefix='f275-packet-') as directory:
+            root = Path(directory)
+            output = root / 'output'
+            (output / 'payload' / 'rows').mkdir(parents=True)
+            raw = b'{"synthetic_payload_only":true}\n'
+            (output / 'payload' / 'rows' / 'row.json').write_bytes(raw)
+            receipt = {'target': 'x86_64-unknown-linux-gnu', 'complete': False}
+            packet = workflow._semver_freeze_packet(output, receipt)
+            loaded = workflow._semver_unpack_packet(packet, root / 'unpacked')
+            self.assertEqual(loaded, receipt)
+            self.assertEqual((root / 'unpacked/payload/rows/row.json').read_bytes(), raw)
+            self.assertEqual(workflow._semver_read(output / 'packet.json')['sha256'], workflow._semver_hash(packet))
+            # A changed retained payload with an unchanged receipt must be refused.
+            import tarfile
+            import io
+            damaged = root / 'damaged.tar'
+            with tarfile.open(packet) as original, tarfile.open(damaged, 'w:') as changed:
+                for member in original:
+                    data = original.extractfile(member).read()
+                    if member.name == 'payload/rows/row.json': data = b'X' * len(data)
+                    changed.addfile(member, io.BytesIO(data))
+            with self.assertRaises(ValueError): workflow._semver_unpack_packet(damaged, root / 'damaged-unpacked')
+
+    @contextlib.contextmanager
+    def _semver_owned_authority_fixture(self, *, current=False, gate_complete=True, owner=False,
+                                        source_match=True, native_outcome='success', missing_native=False):
+        with tempfile.TemporaryDirectory(prefix='f275-collector-') as directory, contextlib.ExitStack() as stack:
+            root = Path(directory)
+            scratch = root / 'scratch'
+            current_file = root / 'CURRENT_SPRINT.md'
+            current_file.write_text('# Current Sprint, S96\n\n**Validation-only**: yes\n')
+            stack.enter_context(patch.multiple(workflow, SCRATCH=scratch, CURRENT_SPRINT=current_file))
+            roles = ('scripts/sprint_workflow.py', '.github/workflows/ci.yml',
+                     '.github/workflows/wheels.yml', 'rust-toolchain.toml')
+            blobs = {name: str(index) * 40 for index, name in enumerate(roles, 1)}
+            source = {'files': {name: 'a' * 64 for name in roles}, 'sha256': 'b' * 64,
+                      'git_blobs': blobs}
+            stack.enter_context(patch.object(workflow, '_semver_source', return_value=source))
+            stack.enter_context(patch.object(workflow, '_semver_policy', return_value='c' * 64))
+            stack.enter_context(patch.object(workflow, '_semver_git_blobs', return_value=blobs))
+            def process(argv, **kwargs):
+                self.assertEqual(argv, ['git', 'rev-parse', 'HEAD'])
+                return type('Completed', (), {'stdout': 'd' * 40 + '\n'})()
+            stack.enter_context(patch.object(workflow.subprocess, 'run', side_effect=process))
+            environment = dict(os.environ)
+            for key in ('GITHUB_JOB', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT'):
+                environment.pop(key, None)
+            if current:
+                environment.update(GITHUB_JOB='ci-gate', GITHUB_RUN_ID='101', GITHUB_RUN_ATTEMPT='1')
+            stack.enter_context(patch.dict(os.environ, environment, clear=True))
+            existing = {'schema_version': workflow.SCHEMA_VERSION, 'features': {'F-X275': {'state': 'running'}},
+                        'verification': {'full': 'pending'}, 'reviewer': 'retained'}
+            workflow.save('S96', existing)
+            run = {'id': 101, 'workflow_id': 19, 'repository': {'id': 1164240333},
+                   'head_repository': {'id': 1164240333}, 'event': 'workflow_dispatch',
+                   'head_branch': 'sprint/s96', 'head_sha': 'd' * 40, 'run_attempt': 1,
+                   'status': 'completed' if gate_complete else 'in_progress',
+                   'conclusion': 'success' if gate_complete else None, 'updated_at': '2026-10-30T10:00:00Z'}
+            jobs = []
+            artifacts = []
+            for index, (target, policy) in enumerate(workflow.SEMVER_NATIVE_JOBS.items(), 1):
+                def job(name, ident, complete=True, outcome='success'):
+                    return {'id': ident, 'name': name, 'status': 'completed' if complete else 'in_progress',
+                            'conclusion': outcome if complete else None, 'started_at': '2026-10-30T09:00:00Z',
+                            'completed_at': '2026-10-30T09:30:00Z' if complete else None,
+                            'runner_group_name': 'GitHub Actions', 'labels': [policy['runner']]}
+                if not missing_native:
+                    jobs.append(job(policy['name'], index, outcome=native_outcome))
+                jobs.append(job('SemVer sign (' + target + ')', index + 10))
+                artifacts.append({'id': index + 1000, 'name': f'semver-proof-{target}-101-1', 'expired': False})
+            jobs.append(job('CI gate', 99, complete=gate_complete))
+            if owner:
+                jobs.append(job('Owner unchanged compatibility corpus', 100))
+            calls = []
+            def api(endpoint, destination, sequence, *, paginated=False):
+                calls.append(endpoint)
+                if endpoint == '/repos/tensorbee/rdocx':
+                    payload = {'id': 1164240333, 'owner': {'id': 263075749}, 'full_name': 'tensorbee/rdocx', 'private': False}
+                elif endpoint.endswith('/actions/workflows/ci.yml'):
+                    payload = {'id': 19, 'path': '.github/workflows/ci.yml'}
+                elif endpoint.endswith('/runs?per_page=100'):
+                    payload = {'total_count': 1, 'workflow_runs': [run]}
+                elif '/git/trees/' in endpoint:
+                    tree = dict(blobs)
+                    if not source_match:
+                        tree['.github/workflows/ci.yml'] = 'e' * 40
+                    payload = {'truncated': False, 'tree': [{'path': name, 'sha': digest, 'type': 'blob'} for name, digest in tree.items()]}
+                elif endpoint.endswith('/artifacts?per_page=100'):
+                    payload = {'total_count': len(artifacts), 'artifacts': artifacts}
+                elif endpoint.endswith('/attempts/1'):
+                    payload = run
+                elif endpoint.endswith('/attempts/1/jobs?per_page=100'):
+                    payload = {'total_count': len(jobs), 'jobs': jobs}
+                else:
+                    self.fail('Unexpected API endpoint: ' + endpoint)
+                raw_file = Path(destination) / f'synthetic-api-{sequence}.json'
+                workflow._semver_write(raw_file, payload)
+                return [copy.deepcopy(payload)], {'endpoint': endpoint, 'synthetic_file': raw_file.name}
+            stack.enter_context(patch.object(workflow, '_semver_api', side_effect=api))
+            yield {'root': root, 'scratch': scratch, 'existing': existing, 'calls': calls, 'scope': {'scope': 'all'}}
+
+    def _assert_semver_preserved_prior_state(self, fixture):
+        after = workflow.load('S96')
+        after.pop('semver_authority', None)
+        self.assertEqual(after, fixture['existing'])
+
+    def test_semver_collector_excludes_only_started_source_qualified_owner_attempts(self):
+        for source_match in (True, False):
+            with self.subTest(source_match=source_match), self._semver_owned_authority_fixture(owner=True, source_match=source_match) as fixture:
+                context, catalog = workflow._collect_release_semver_authority('S96', fixture['scope'])
+                self.assertEqual(context['status'], 'complete')
+                self.assertEqual(len(catalog['excluded_owner_attempts']), int(source_match))
+                self.assertEqual(catalog['attempts'], [])
+                self.assertEqual(any('/attempts/1/jobs?' in endpoint for endpoint in fixture['calls']), source_match)
+                self._assert_semver_preserved_prior_state(fixture)
+
+    def test_semver_collector_retains_normal_missing_and_failed_native_jobs(self):
+        for missing, outcome, expected in ((True, 'success', 'incomplete'), (False, 'failure', 'failed')):
+            with self.subTest(expected=expected), self._semver_owned_authority_fixture(missing_native=missing, native_outcome=outcome) as fixture:
+                _, catalog = workflow._collect_release_semver_authority('S96', fixture['scope'])
+                self.assertEqual(catalog['excluded_owner_attempts'], [])
+                self.assertEqual(len(catalog['attempts']), len(workflow.SEMVER_NATIVE_JOBS))
+                self.assertEqual({row['status'] for row in catalog['attempts']}, {expected})
+                self._assert_semver_preserved_prior_state(fixture)
+
+    def test_semver_current_gate_consumes_finished_native_and_sign_jobs_external_waits(self):
+        for current, expected in ((True, 'success'), (False, 'in_progress')):
+            with self.subTest(current=current), self._semver_owned_authority_fixture(current=current, gate_complete=False) as fixture:
+                context, catalog = workflow._collect_release_semver_authority('S96', fixture['scope'])
+                self.assertEqual(context['purpose'], 'current-gate' if current else 'external')
+                self.assertEqual(len(catalog['attempts']), len(workflow.SEMVER_NATIVE_JOBS))
+                self.assertEqual({row['status'] for row in catalog['attempts']}, {expected})
+                loaded_context, loaded_catalog = workflow._load_release_semver_authority('S96', fixture['scope'])
+                self.assertEqual(loaded_context, context)
+                self.assertEqual(loaded_catalog, catalog)
+                self._assert_semver_preserved_prior_state(fixture)
+
+    def test_semver_frozen_loader_refuses_absent_authority_without_changing_state(self):
+        with self._semver_owned_authority_fixture() as fixture:
+            before = workflow.state_path('S96').read_bytes()
+            with self.assertRaisesRegex(ValueError, 'absent/incomplete'):
+                workflow._load_release_semver_authority('S96', fixture['scope'])
+            self.assertEqual(workflow.state_path('S96').read_bytes(), before)
+
+    def test_semver_frozen_loader_refuses_mismatched_context_without_changing_state(self):
+        with self._semver_owned_authority_fixture() as fixture:
+            context, _ = workflow._collect_release_semver_authority('S96', fixture['scope'])
+            for key, replacement in (('source_identity', '0' * 64), ('policy_identity', '0' * 64), ('scope', {'scope': 'other'})):
+                with self.subTest(key=key):
+                    data = workflow.load('S96')
+                    data['semver_authority'] = {**context, key: replacement}
+                    workflow.save('S96', data)
+                    before = workflow.state_path('S96').read_bytes()
+                    with self.assertRaisesRegex(ValueError, 'context differs'):
+                        workflow._load_release_semver_authority('S96', fixture['scope'])
+                    self.assertEqual(workflow.state_path('S96').read_bytes(), before)
+            self._assert_semver_preserved_prior_state(fixture)
+
+    def test_semver_frozen_loader_refuses_evidence_state_and_catalog_aliases(self):
+        with self._semver_owned_authority_fixture() as fixture:
+            context, _ = workflow._collect_release_semver_authority('S96', fixture['scope'])
+            alias = fixture['root'] / 'evidence-alias'
+            alias.symlink_to(fixture['scratch'], target_is_directory=True)
+            for evidence, message in ((fixture['scratch'], 'aliases supplied evidence'),
+                                      (alias, 'aliases supplied evidence'),
+                                      (Path(context['catalog_path']).parent, 'catalog is inside supplied evidence')):
+                with self.subTest(evidence=evidence):
+                    before = workflow.state_path('S96').read_bytes()
+                    with self.assertRaisesRegex(ValueError, message):
+                        workflow._load_release_semver_authority('S96', fixture['scope'], [evidence])
+                    self.assertEqual(workflow.state_path('S96').read_bytes(), before)
+            self._assert_semver_preserved_prior_state(fixture)
+
+
+    def test_semver_inventory_equal_yanked_and_publication_order(self):
+        def inventory(versions):
+            return {'meta': {'total': len(versions), 'next_page': None}, 'versions': [
+                {'id': i+1, 'crate': 'oxml-opc', 'num': v, 'yanked': y, 'checksum': str(i+1)*64,
+                 'dl_path': '/api/v1/crates/oxml-opc/'+v+'/download'} for i,(v,y) in enumerate(versions)]}
+        data=inventory([('0.15.0',False),('0.15.2',True),('0.16.0',False),('0.15.1-beta.1',False)])
+        got=workflow.select_semver_inventory('oxml-opc','0.15.0',data)
+        self.assertEqual([r['num'] for r in got['baselines']],['0.15.0'])
+        self.assertTrue(got['candidate_occupied'])
+        with self.assertRaisesRegex(ValueError,'exceed'):
+            workflow.select_semver_inventory('oxml-opc','0.15.1',data,release_candidate=True)
+        self.assertTrue(workflow.select_semver_inventory('oxml-opc','0.15.3',data,release_candidate=True)['publication_checked'])
+        self.assertEqual([r['num'] for r in workflow.select_semver_inventory('oxml-opc','0.15.2',data)['baselines']],['0.15.0','0.15.2'])
+        for value in ('+0.15.0','0.015.0','0.15.0-01','0.15','٠.15.0'):
+            with self.subTest(value=value),self.assertRaises(ValueError):workflow.parse_semver(value)
+        for mutate in (lambda d:d['meta'].update(total=99),lambda d:d['meta'].update(next_page='next'),lambda d:d['versions'].append(d['versions'][0])):
+            broken=copy.deepcopy(data);mutate(broken)
+            with self.assertRaises(ValueError):workflow.select_semver_inventory('oxml-opc','0.15.0',broken)
+
+    def test_semver_actual_command_routes_execute_and_frozen_consume(self):
+        def args(**changes):
+            values=dict(scope='all',target=None,tool=None,output=None,check_evidence=[['evidence']],reuse_evidence=[],refresh_registry=0,release_candidate=0)
+            values.update(changes);return argparse.Namespace(**values)
+        scope={'scope':'all'}
+        with patch.object(workflow,'_semver_scope',return_value=scope),patch.object(workflow,'_execute_release_semver',return_value=0) as execute:
+            self.assertEqual(workflow.cmd_release_semver(args(target=['native'],tool=['tool'],output=['new'],check_evidence=None,reuse_evidence=['one','two'])),0)
+            self.assertEqual(execute.call_args.args[2]['directories'],[Path('one').resolve(),Path('two').resolve()])
+        with patch.object(workflow,'_semver_scope',return_value=scope),patch.object(workflow,'_semver_authority_location',return_value=('S96',Path('state'))),patch.object(workflow,'_load_release_semver_authority',return_value=({'authority':'independent'},{'attempts':[]})),patch.object(workflow,'_consume_release_semver',return_value={'complete':True}) as consume,contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(workflow.cmd_release_semver(args(refresh_registry=1)),0)
+            self.assertTrue(consume.call_args.kwargs['refresh_registry'])
+            self.assertFalse(consume.call_args.kwargs['release_candidate'])
+        with patch.object(workflow,'_semver_scope',side_effect=AssertionError('must validate mode first')):
+            with contextlib.redirect_stderr(io.StringIO()):self.assertEqual(workflow.cmd_release_semver(args(reuse_evidence=['forbidden'])),2)
+
+    def test_semver_reuse_requires_original_immutable_row_and_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);context={k:{} for k in ('tool','rust','source','target','policy','producer','environment')}
+            original={'input':{'crate':'x'},'result':{'complete':True},'status':'success'}
+            copied={**original,'origin_context':context,'reused_from':{'packet_sha256':'old','original_attempt':'old-attempt','original_row':'row'}}
+            packets=[]
+            for digest,attempt,row in [('old','old-attempt',original),('new','new-attempt',copied)]:
+                path=root/digest/'payload';path.mkdir(parents=True);workflow._semver_write(path/'row.json',row)
+                packets.append({'root':path.parent,'packet_sha256':digest,'attempt':{'id':attempt},'receipt':{**context,'rows':{'row':{'path':'row.json'}}}})
+            by_digest={p['packet_sha256']:p for p in packets}
+            self.assertTrue(workflow._semver_check_reused_origin(packets[1],'row',by_digest))
+            with self.assertRaisesRegex(ValueError,'missing'):workflow._semver_check_reused_origin(packets[1],'row',{'new':packets[1]})
+            copied['result']={'complete':'relabeled'};(root/'new/payload/row.json').unlink();workflow._semver_write(root/'new/payload/row.json',copied)
+            with self.assertRaisesRegex(ValueError,'differs'):workflow._semver_check_reused_origin(packets[1],'row',by_digest)
+
+    def test_semver_execute_reuse_filters_latest_failure_and_releases_unused_roots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);packets=[]
+            for index in range(2):
+                owned=root/str(index);owned.mkdir()
+                packets.append({'owned_parent':owned,'packet_sha256':str(index),'attempt':{'id':str(index)},'receipt':{'rows':{'r'+str(index):{'input':{'row':index}}}}})
+            with patch.object(workflow,'_semver_authority_location',return_value=('S96',None)),patch.object(workflow,'_load_release_semver_authority',return_value=({},{})),patch.object(workflow,'_semver_verified_directories',return_value=packets),patch.object(workflow,'_semver_check_reused_origin',return_value=True),patch.object(workflow,'_semver_attempt_for_row',side_effect=[{'id':'0'},ValueError('newer failure')]):
+                reused=workflow._semver_execute_reuse({'scope':'all'},[root])
+            self.assertEqual(set(reused),{'r0'});self.assertTrue(packets[0]['owned_parent'].exists());self.assertFalse(packets[1]['owned_parent'].exists())
+
+    def test_semver_frozen_consumer_requires_union_and_latest_rows_without_fetch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);packets=[];attempts=[]
+            for index,target in enumerate(workflow.SEMVER_NATIVE_TOOLS):
+                owned=root/target;owned.mkdir()
+                attempt={'id':str(index),'target':target,'current_source_equivalent':True,'source_head':'head'};attempts.append(attempt)
+                packets.append({'owned_parent':owned,'root':owned,'packet_sha256':str(index),'attempt':attempt,'receipt':{'rows':{'row':{'input':{'target':target}}}}})
+            with patch.object(workflow,'_semver_verified_directories',return_value=packets),patch.object(workflow,'select_semver_attempt',side_effect=lambda rows:rows[0]),patch.object(workflow,'_semver_required_rows',return_value={'row'}),patch.object(workflow,'_semver_check_reused_origin',return_value=True),patch.object(workflow,'_semver_attempt_for_row',side_effect=lambda catalog,row:next(a for a in attempts if a['target']==row['target'])),patch.object(workflow,'_semver_registry',side_effect=AssertionError('offline must not fetch')):
+                result=workflow._consume_release_semver({'scope':'all'},[root],{'purpose':'external','source_identity':'source','head':'head','cutoff':'frozen','catalog_sha256':'catalog'},{'attempts':attempts})
+            self.assertTrue(result['complete']);self.assertEqual(len(result['native']),3);self.assertFalse(result['registry_refreshed']);self.assertTrue(all(not p['owned_parent'].exists() for p in packets))
+
+    def test_semver_failed_retention_preserves_available_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);work=root/'client';(work/'src').mkdir(parents=True);(work/'src/lib.rs').write_bytes(b'actual failed input');(work/'Cargo.toml').write_bytes(b'actual manifest')
+            destination=root/'saved';destination.mkdir()
+            workflow._semver_preserve_failed_client(work,destination,ValueError('actual failure'))
+            self.assertEqual((destination/'failed/client/src/lib.rs').read_bytes(),b'actual failed input')
+            self.assertIn('not compile-pass',workflow._semver_read(destination/'failed-retention.json')['qualification'])
+            self.assertTrue((work/'src/lib.rs').exists())
+
+    def test_semver_git_blob_identity_preserves_actual_crlf_difference(self):
+        with tempfile.TemporaryDirectory() as directory,patch.object(workflow,'REPO',Path(directory)):
+            path=Path(directory)/'source';path.write_bytes(b'a\nb\n');lf=workflow._semver_git_blobs(['source'])
+            path.write_bytes(b'a\r\nb\r\n');crlf=workflow._semver_git_blobs(['source'])
+            self.assertNotEqual(lf,crlf);self.assertEqual(path.read_bytes(),b'a\r\nb\r\n')
+    def test_release_semver_cli_valid_evidence_mode_refuses_without_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "untrusted-evidence"
+            result = subprocess.run(
+                [sys.executable, str(workflow.REPO / "scripts/sprint_workflow.py"),
+                 "release-semver", "all", "--check-evidence", str(missing)],
+                cwd=workflow.REPO, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("authority", result.stderr.lower())
+            self.assertFalse(missing.exists())
+
+    def test_release_semver_cli_invalid_modes_do_not_create_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "must-not-exist"
+            for arguments in (
+                ["all", "--check-evidence", directory, "--release-candidate"],
+                ["all", "--target", "aarch64-apple-darwin", "--tool", "absent", "--output", str(output), "--check-evidence", directory],
+                ["all", "--target", "aarch64-apple-darwin", "--tool", "absent", "--output", str(output), "--refresh-registry"],
+                ["v0.17.0", "--check-evidence", directory, "--reuse-evidence", directory],
+            ):
+                with self.subTest(arguments=arguments):
+                    result = subprocess.run(
+                        [sys.executable, str(workflow.REPO / "scripts/sprint_workflow.py"),
+                         "release-semver", *arguments], cwd=workflow.REPO,
+                        capture_output=True, text=True,
+                    )
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertFalse(output.exists())
+
     def test_s96_release_targets_match_exact_prepared_families(self) -> None:
         root = tomllib.loads((workflow.REPO / "Cargo.toml").read_text())
         self.assertEqual(root["workspace"]["package"]["version"], "0.17.0")
@@ -604,6 +1300,11 @@ class SprintWorkflowTests(unittest.TestCase):
         environment = os.environ.copy()
         environment.update(
             {
+                "SEMVER_REQUIRED": "false",
+                "SEMVER_LINUX": "skipped",
+                "SEMVER_MACOS": "skipped",
+                "SEMVER_WINDOWS": "skipped",
+                "SEMVER_SIGN": "skipped",
                 "OWNER_MODE": "false",
                 "OWNER_RESULT": "skipped",
                 "EVENT_NAME": event_name,
@@ -858,12 +1559,17 @@ class SprintWorkflowTests(unittest.TestCase):
             "supply-chain",
             "prose",
         }
-        self.assertEqual(needs, filtered_jobs | {"changes", "owner-compatibility", "no-default-features", "release-regressions", "clippy", "fmt", "doc", "package-oxml-layout"})
+        self.assertEqual(needs, filtered_jobs | {"changes", "owner-compatibility", "no-default-features", "release-regressions", "clippy", "fmt", "doc", "package-oxml-layout", "semver-linux", "semver-macos", "semver-windows", "semver-sign"})
         step = self.yaml_step(gate, "Validate filtered jobs")
         environment = self.yaml_block(step, "        env:")
         self.assertEqual(
             self.yaml_direct_lines(environment, 10),
             (
+                "SEMVER_REQUIRED: ${{ github.repository == 'tensorbee/rdocx' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.owner_compatibility != true)) }}",
+                "SEMVER_LINUX: ${{ needs['semver-linux'].result }}",
+                "SEMVER_MACOS: ${{ needs['semver-macos'].result }}",
+                "SEMVER_WINDOWS: ${{ needs['semver-windows'].result }}",
+                "SEMVER_SIGN: ${{ needs['semver-sign'].result }}",
                 "OWNER_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.owner_compatibility == true }}",
                 "OWNER_RESULT: ${{ needs['owner-compatibility'].result }}",
                 "NO_DEFAULT_FEATURES_RESULT: ${{ needs['no-default-features'].result }}",
@@ -3896,7 +4602,7 @@ class SprintWorkflowTests(unittest.TestCase):
         self.assertNotIn("if:", python)
         self.assertIn("needs: build-cli-assets", cli_review)
         self.assertIn("expected_members = {executable, \"README.md\", \"LICENSE\"}", cli_review)
-        self.assertIn("needs: [cli-assets, build-wheels, build-sdists]", aggregate)
+        self.assertIn("needs: [cli-assets, build-wheels, build-sdists, semver-evidence]", aggregate)
         self.assertIn("git fetch --tags origin main:refs/remotes/origin/main", aggregate)
         self.assertIn('[[ "${GITHUB_SHA}" == "${main_sha}" ]]', aggregate)
         self.assertIn('git tag --points-at "${GITHUB_SHA}" --list \'s[0-9]*\'', aggregate)
@@ -9702,7 +10408,7 @@ class CompatibilityReportTests(unittest.TestCase):
     def test_owner_ci_keeps_literal_steps_and_debug_optimized_hosted_suites(self) -> None:
         text = (workflow.REPO / ".github/workflows/ci.yml").read_text()
         self.assertIn("  owner-compatibility:", text)
-        job = text.split("  owner-compatibility:", 1)[1].split("\n  ci-gate:", 1)[0]
+        job = text.split("  owner-compatibility:", 1)[1].split("\n  semver-linux:", 1)[0]
         self.assertNotIn("uses:", job)
         self.assertIn("workflow_dispatch", job)
         self.assertIn("github.actor == 'mantissaman'", job)

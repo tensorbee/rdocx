@@ -147,3 +147,25 @@ tag. If a notification fails, retain the release and report that exact record.
   artifact, incomplete attestation, or mismatched publisher identity.
 - A request to merge, move an existing tag, publish another family, or edit
   the prepared release source during this command.
+
+## Strict SemVer publication preflight
+
+Before the separate final SHA approval or any tag, obtain fresh completed CI
+and signed native authority through the same reviewed private collector used by
+`/verify --full`, selecting the requested family. Require actual final-source
+CI gate and run success with no later relevant failed attempt. A successful
+wheels rehearsal cannot replace CI. Preserve truthful H, R and M identities and
+require current main proof when the publication boundary requires it.
+
+```bash
+python3 scripts/sprint_workflow.py release-semver TAG --check-evidence DIR [DIR ...] --release-candidate
+```
+
+This consumes the authenticated default/all native suite without rerunning it,
+refreshes the selected-family complete crates.io and PyPI inventories, requires
+all selected candidates absent and strictly above every stable same-line
+version including yanked versions. An occupied version in the other family is
+not a duplicate selected candidate. Equal published versions remain mandatory
+API baselines during ordinary CI. Retain the independent owner/publisher,
+remote-tag, exact package, archive-size, installed artifact and final approval
+checks. No SemVer receipt authorizes a yank, publication, message or tag.

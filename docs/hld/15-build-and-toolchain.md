@@ -704,6 +704,33 @@ close. The shared0.15.0 family publishes before Word0.17.0 where the verified
 internal pins require it, each with its own approval at reviewed main.
 External release actions remain owned by `/release`.
 
+Strict SemVer runs in three fixed native jobs on Linux x86_64, Mac arm64 and
+Windows x86_64 with Rust1.97.1 and official archive/executable pins. Existing
+CI signing uses only fixed completed producer artifacts, binding target, job
+ID and native wrapper digest in the signed subject name. Certificate source,
+workflow, immutable repository IDs and run attempt are independently checked.
+OIDC and attestation write permissions belong only to the signing job. The
+existing owner-only corpus dispatch remains separate and nonqualifying.
+
+Fresh owned SemVer checkouts enforce `core.autocrlf=false` through checkout-step
+Git environment configuration. Measured bytes must equal canonical Git blobs.
+Local differing bytes are refused without normalization or global Git changes.
+Generated current and baseline projects, locks, library JSON, effective features
+and original Cargo cwd are retained separately. A failed tool or compiler row
+retains available diagnostic bytes and cannot be silently omitted.
+
+Deciding CI, build-only wheels, full verification and release callers acquire
+complete paginated API catalogs into the canonical current sprint state outside
+supplied evidence. They preserve existing runstate and bind exact source,
+policy, artifacts and cutoff. Frozen validation uses only local pinned gh,
+unchanged bundles and embedded approved roots, with no hidden network fetch.
+The running gate requires completed native/sign jobs without requiring its own
+future completion. External consumers require actual successful final-source
+CI and reject newer relevant failures. SemVer proof artifacts stay outside all
+product distribution directories and checksum globs. The twenty-six build-only
+payloads and four skipped publication jobs keep their existing contract.
+
+
 `/release {vX.Y.Z | rpptx-vX.Y.Z}` is the only command allowed to create or
 push a new family release tag or start crates.io or PyPI publication. It
 selects one Rust allowlist, one CLI and one Python distribution at a matching
