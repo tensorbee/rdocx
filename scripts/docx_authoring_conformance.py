@@ -54,6 +54,7 @@ use std::fs;
 use std::path::PathBuf;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    eprintln!("public authoring checkpoint: main-entry");
     let mut arguments = env::args_os().skip(1);
     let output = PathBuf::from(arguments.next().ok_or("missing output directory")?);
     if arguments.next().is_some() {
@@ -123,9 +124,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .body_items()
         .filter(|item| matches!(item, BodyItemRef::UnsupportedXml(_)))
         .count();
+    eprintln!("public authoring checkpoint: before-render-first");
     let first = reopened
         .render_page_to_png_deterministic(0, 150.0)?
         .ok_or("fixture rendered no first page")?;
+    eprintln!("public authoring checkpoint: before-render-second");
     let second = reopened
         .render_page_to_png_deterministic(0, 150.0)?
         .ok_or("fixture rendered no repeated first page")?;
@@ -597,6 +600,65 @@ def parse_public_report(path: Path) -> dict[str, int]:
     return values
 
 
+def public_consumer_failure(
+    result: subprocess.CompletedProcess[str] | subprocess.TimeoutExpired,
+    arguments: tuple[str, ...],
+    cwd: Path,
+    environment: dict[str, str],
+) -> str:
+    """Keep exact public child diagnostics before its temporary project is removed."""
+    timed_out = isinstance(result, subprocess.TimeoutExpired)
+    command = result.cmd if timed_out else result.args
+    configuration = {
+        name: environment.get(name)
+        for name in (
+            "CARGO_TARGET_DIR", "CARGO_BUILD_TARGET", "CARGO_BUILD_TARGET_DIR",
+            "CARGO_BUILD_BUILD_DIR", "CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN",
+            "RUSTC", "RUSTDOC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER",
+            "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS",
+            "RUSTDOCFLAGS", "CARGO_ENCODED_RUSTDOCFLAGS", "CARGO_BUILD_RUSTDOCFLAGS",
+        )
+    }
+    for setting in (
+        "OPT_LEVEL", "DEBUG", "SPLIT_DEBUGINFO", "STRIP", "DEBUG_ASSERTIONS",
+        "OVERFLOW_CHECKS", "LTO", "PANIC", "INCREMENTAL", "CODEGEN_UNITS", "RPATH",
+    ):
+        for prefix in ("CARGO_PROFILE_DEV_", "CARGO_PROFILE_DEV_BUILD_OVERRIDE_"):
+            name = prefix + setting
+            configuration[name] = environment.get(name)
+    fields = {
+        "argv": arguments,
+        "command": command,
+        "timeout" if timed_out else "returncode": (
+            result.timeout if timed_out else result.returncode
+        ),
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
+    entry_marker = "public authoring checkpoint: main-entry"
+    if isinstance(result.stderr, bytes):
+        entry_observed = entry_marker.encode("ascii") in result.stderr
+    else:
+        entry_observed = isinstance(result.stderr, str) and entry_marker in result.stderr
+    return "\n".join(
+        (
+            "public rdocx-only consumer timed out"
+            if timed_out else "public rdocx-only consumer failed",
+            "phase='public consumer cargo run'",
+            f"cwd={str(cwd)!r}",
+            f"host_platform={sys.platform!r}",
+            "command_profile='dev'",
+            "compiler_version='not observed at this call site'",
+            f"inherited_configuration={configuration!r} "
+            "(None means unspecified in child environment)",
+            "client entry observed in captured stderr"
+            if entry_observed else "client entry not observed in captured stderr",
+            "wait cause is not inferred from marker presence or absence",
+            *(f"{name}({type(value).__name__})={value!r}" for name, value in fields.items()),
+        )
+    )
+
+
 def run_public() -> None:
     with TemporaryDirectory(prefix="rdocx-authoring-public-") as directory:
         root = Path(directory)
@@ -612,16 +674,24 @@ def run_public() -> None:
             "CARGO_TARGET_DIR",
             str(REPO_ROOT / "target" / "docx-authoring-conformance"),
         )
-        completed = subprocess.run(
-            ("cargo", "run", "--quiet", "--offline", "--", str(output)),
-            cwd=root,
-            env=environment,
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
+        arguments = ("cargo", "run", "--quiet", "--offline", "--", str(output))
+        try:
+            completed = subprocess.run(
+                arguments,
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise ConformanceError(
+                public_consumer_failure(error, arguments, root, environment)
+            ) from error
         if completed.returncode != 0:
-            raise ConformanceError("public rdocx-only consumer failed")
+            raise ConformanceError(
+                public_consumer_failure(completed, arguments, root, environment)
+            )
 
         authored = output / "authored.docx"
         reopened = output / "reopened.docx"
@@ -1060,6 +1130,161 @@ def run_private(
 
 
 class HarnessSelfTests(unittest.TestCase):
+    def test_public_timeout_retains_typed_child_diagnostics(self) -> None:
+        cases = (
+            (
+                ["cargo", "run", "literal $(no-command); quote'"],
+                300, b"prefix\xff\x00\n", "text stderr\n",
+            ),
+            (("cargo", "run"), 12.5, "text stdout", b"binary stderr\xfe\n"),
+            (["cargo"], 300, b"", ""),
+            (("cargo",), 300, "", b""),
+            (["cargo"], 300, None, None),
+            (("cargo",), 300, None, b"public authoring checkpoint: main-entry\n"),
+        )
+        inherited = {
+            "CARGO_TARGET_DIR": "relative-target",
+            "RUSTUP_TOOLCHAIN": "1.93-test-fixture",
+            "CARGO_BUILD_TARGET": "fixture-target",
+            "CARGO_PROFILE_DEV_OPT_LEVEL": "1",
+            "CARGO_PROFILE_DEV_DEBUG_ASSERTIONS": "true",
+            "CARGO_PROFILE_DEV_OVERFLOW_CHECKS": "true",
+            "RUSTFLAGS": "--cfg fixture",
+            "UNRELATED_SECRET": "must-not-appear",
+        }
+        for command, timeout, stdout, stderr in cases:
+            with self.subTest(command=command, stdout=stdout, stderr=stderr):
+                error = subprocess.TimeoutExpired(
+                    command, timeout, output=stdout, stderr=stderr
+                )
+                with mock.patch.dict(os.environ, inherited, clear=True), mock.patch(
+                    f"{__name__}.subprocess.run", side_effect=error
+                ) as child:
+                    with self.assertRaises(
+                        (ConformanceError, subprocess.TimeoutExpired)
+                    ) as caught:
+                        run_public()
+                self.assertIsInstance(caught.exception, ConformanceError)
+                diagnostic = str(caught.exception)
+                arguments = child.call_args.args[0]
+                options = child.call_args.kwargs
+                self.assertEqual(child.call_count, 1)
+                self.assertEqual(
+                    arguments[:-1], ("cargo", "run", "--quiet", "--offline", "--")
+                )
+                self.assertEqual(arguments[-1], str(options["cwd"] / "output"))
+                self.assertEqual(options["timeout"], 300)
+                self.assertIs(options["capture_output"], True)
+                self.assertIs(options["text"], True)
+                self.assertEqual(options["env"], inherited)
+                self.assertFalse(options["cwd"].exists())
+                for fragment in (
+                    "phase='public consumer cargo run'",
+                    f"argv(tuple)={arguments!r}",
+                    f"command({type(command).__name__})={command!r}",
+                    f"timeout({type(timeout).__name__})={timeout!r}",
+                    f"stdout({type(stdout).__name__})={stdout!r}",
+                    f"stderr({type(stderr).__name__})={stderr!r}",
+                    f"cwd={str(options['cwd'])!r}",
+                    "'CARGO_TARGET_DIR': 'relative-target'",
+                    "'RUSTUP_TOOLCHAIN': '1.93-test-fixture'",
+                    "'CARGO_BUILD_TARGET': 'fixture-target'",
+                    "'CARGO_PROFILE_DEV_OPT_LEVEL': '1'",
+                    "'CARGO_PROFILE_DEV_DEBUG_ASSERTIONS': 'true'",
+                    "'CARGO_PROFILE_DEV_OVERFLOW_CHECKS': 'true'",
+                    "'RUSTC': None",
+                    "'RUSTFLAGS': '--cfg fixture'",
+                    "command_profile='dev'",
+                    "compiler_version='not observed at this call site'",
+                ):
+                    self.assertIn(fragment, diagnostic)
+                self.assertNotIn("UNRELATED_SECRET", diagnostic)
+                self.assertNotIn("must-not-appear", diagnostic)
+                self.assertNotIn("compilation proven", diagnostic)
+                self.assertNotIn("lock wait proven", diagnostic)
+                if stderr and (
+                    b"main-entry" in stderr
+                    if isinstance(stderr, bytes) else "main-entry" in stderr
+                ):
+                    self.assertIn("client entry observed in captured stderr", diagnostic)
+                else:
+                    self.assertIn("client entry not observed in captured stderr", diagnostic)
+
+    def test_public_nonzero_child_retains_streams_and_stays_failure(self) -> None:
+        def fail(arguments: tuple[str, ...], **_: object):
+            return subprocess.CompletedProcess(arguments, 17, "stdout\n", "stderr\n")
+
+        with mock.patch.dict(os.environ, {}, clear=True), mock.patch(
+            f"{__name__}.subprocess.run", side_effect=fail
+        ) as child:
+            with self.assertRaises(ConformanceError) as caught:
+                run_public()
+        options = child.call_args.kwargs
+        arguments = child.call_args.args[0]
+        diagnostic = str(caught.exception)
+        self.assertEqual(child.call_count, 1)
+        self.assertEqual(options["timeout"], 300)
+        self.assertEqual(
+            options["env"],
+            {"CARGO_TARGET_DIR": str(REPO_ROOT / "target" / "docx-authoring-conformance")},
+        )
+        for fragment in (
+            "phase='public consumer cargo run'", "returncode(int)=17",
+            f"command(tuple)={arguments!r}",
+            "stdout(str)='stdout\\n'", "stderr(str)='stderr\\n'",
+            "'RUSTUP_TOOLCHAIN': None", "'CARGO_PROFILE_DEV_OPT_LEVEL': None",
+        ):
+            self.assertIn(fragment, diagnostic)
+        self.assertFalse(options["cwd"].exists())
+        with mock.patch(
+            f"{__name__}.parse_arguments",
+            return_value=argparse.Namespace(
+                self_test=False, public=True,
+                private_required=False, private_generate_required=False,
+            ),
+        ), mock.patch(f"{__name__}.reject_tracked_or_staged_private_artifacts"), mock.patch(
+            f"{__name__}.run_public", side_effect=ConformanceError(diagnostic)
+        ), mock.patch(f"{__name__}.print") as reported:
+            self.assertEqual(main(), 1)
+        reported.assert_called_once_with(
+            f"docx_authoring_conformance: {diagnostic}", file=sys.stderr
+        )
+
+    def test_public_progress_markers_preserve_order_and_render_calls(self) -> None:
+        markers = (
+            'eprintln!("public authoring checkpoint: main-entry");',
+            'eprintln!("public authoring checkpoint: before-render-first");',
+            'eprintln!("public authoring checkpoint: before-render-second");',
+        )
+        for marker in markers:
+            self.assertEqual(PUBLIC_CONSUMER_SOURCE.count(marker), 1)
+        main_start = PUBLIC_CONSUMER_SOURCE.index("fn main()")
+        first_render = PUBLIC_CONSUMER_SOURCE.index("    let first = reopened")
+        second_render = PUBLIC_CONSUMER_SOURCE.index("    let second = reopened")
+        positions = [PUBLIC_CONSUMER_SOURCE.index(marker) for marker in markers]
+        self.assertLess(main_start, positions[0])
+        self.assertLess(positions[0], PUBLIC_CONSUMER_SOURCE.index("    let mut arguments"))
+        self.assertLess(positions[0], positions[1])
+        self.assertLess(positions[1], first_render)
+        self.assertLess(first_render, positions[2])
+        self.assertLess(positions[2], second_render)
+        self.assertEqual(
+            PUBLIC_CONSUMER_SOURCE.count(".render_page_to_png_deterministic(0, 150.0)?"), 2
+        )
+        validate_public_boundary(public_consumer_manifest(), PUBLIC_CONSUMER_SOURCE)
+
+    def test_public_zero_child_without_evidence_stays_failure(self) -> None:
+        with mock.patch(
+            f"{__name__}.subprocess.run",
+            return_value=subprocess.CompletedProcess(("cargo",), 0, "", ""),
+        ) as child:
+            with self.assertRaisesRegex(
+                ConformanceError, "public consumer evidence is incomplete"
+            ):
+                run_public()
+        self.assertEqual(child.call_count, 1)
+        self.assertEqual(child.call_args.kwargs["timeout"], 300)
+
     def test_public_boundary_rejects_private_dependencies_and_raw_bypasses(self) -> None:
         manifest = public_consumer_manifest()
         validate_public_boundary(manifest, PUBLIC_CONSUMER_SOURCE)
@@ -1231,6 +1456,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         with self.assertRaises(ConformanceError) as context:
             reject_tracked_or_staged_private_artifacts((secret,), ())
         self.assertNotIn(secret, str(context.exception))
+        with mock.patch(
+            f"{__name__}.parse_arguments",
+            return_value=argparse.Namespace(
+                self_test=False, public=False,
+                private_required=True, private_generate_required=False,
+            ),
+        ), mock.patch(
+            f"{__name__}.run_private",
+            side_effect=subprocess.TimeoutExpired(
+                ["private-command", secret], 120, output=secret, stderr=secret
+            ),
+        ), mock.patch(f"{__name__}.print") as reported:
+            self.assertEqual(main(), 1)
+        reported.assert_called_once_with(
+            "docx_authoring_conformance: external command timed out", file=sys.stderr
+        )
 
     def test_optional_and_required_private_modes_fail_closed(self) -> None:
         with TemporaryDirectory(prefix="rdocx-private-mode-test-") as directory:

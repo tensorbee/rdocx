@@ -91,7 +91,24 @@ The M23 authoring gate is owned by
 `scripts/docx_authoring_conformance.py`. CI invokes its public mode before the
 workspace test suite. That mode builds an offline temporary consumer with only
 the public `rdocx` dependency and uses the same deterministic 150 DPI render
-path twice. Its local private mode uses exact LibreOffice 26.2.5.2 build
+path twice. The public Cargo child keeps its300second timeout, original argv,
+working directory, environment and target fallback. A timeout or nonzero exit
+retains the call-site phase, exact command and typed stdout/stderr in the deciding
+failure before temporary source cleanup. Bytes use reconstructable escapes,
+including non-UTF8 bytes. Empty bytes, empty text and absent streams remain
+distinct. Only allowlisted inherited target, toolchain and dev-profile settings
+are reported, with unspecified values explicit. The diagnostic identifies the
+Python host platform without inferring an unobserved compiler version.
+
+The generated public client emits stderr checkpoints at main entry and before
+each of its two deterministic renders. Missing entry output establishes only
+that entry was not observed. It does not prove compilation or a Cargo lock wait.
+Checkpoint output narrows observed progress without diagnosing its wait cause.
+Synthetic harness checks qualify diagnostic retention only. Actual source-bound
+MSRV public conformance and clean final CI remain required to qualify the child
+execution. Private diagnostics and artifact non-disclosure remain unchanged.
+
+Its local private mode uses exact LibreOffice 26.2.5.2 build
 `cd7284b4cbbfeb507e630c1aac019f4157393acb` and pdftoppm 26.01.0 identities.
 Private source packages, digests, thresholds, and rendered evidence remain in
 the ignored local corpus directory and are never fetched by CI.
