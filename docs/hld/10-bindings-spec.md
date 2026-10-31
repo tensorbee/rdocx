@@ -2326,6 +2326,13 @@ Native Word callers can inspect comments through `Document::comments` and
 author threads through `add_comment`, `reply_to`, `resolve_comment`, and
 `remove_comment`. The additive native `add_comment_with_date` and
 `reply_to_with_date` methods accept an optional validated RFC 3339 timestamp.
+`reply_to_with_initials` also takes optional author initials, which Python
+exposes as the `initials` keyword of `reply_to` and `rdocx comment reply` as
+`--initials`. A comments part that rdocx creates declares the `mc` namespace
+and lists `w14` in `mc:Ignorable` with the paragraph ids. A new comment's
+paragraphs use the CommentText style, and the first opens with an
+`w:annotationRef` run in the CommentReference style. Both styles are defined,
+first in the styles part, when the document lacks them.
 The additive native `add_comment_on_text` anchors a comment on the zero-based,
 non-overlapping, case-sensitive occurrence of a literal text in main-story
 paragraphs, through tables and block content controls. It splits the runs at

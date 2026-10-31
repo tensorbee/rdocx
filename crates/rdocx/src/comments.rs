@@ -12,13 +12,15 @@ use rdocx_oxml::comments::{CT_Comment, CT_Comments};
 use rdocx_oxml::comments_extended::{CT_CommentEx, CT_CommentsEx};
 use rdocx_oxml::content_control::{CT_Sdt, SdtContent};
 use rdocx_oxml::document::BodyContent;
+use rdocx_oxml::properties::{CT_PPr, CT_RPr};
 use rdocx_oxml::table::{CT_Row, CT_Tbl, CT_Tc, CellContent};
-use rdocx_oxml::text::{CT_P, RangeAnchor};
+use rdocx_oxml::text::{CT_P, CT_R, RangeAnchor};
 #[cfg(test)]
-use rdocx_oxml::text::{CT_R, CommentRangeMarker, HyperlinkSpan, RunContent};
+use rdocx_oxml::text::{CommentRangeMarker, HyperlinkSpan, RunContent};
+use rdocx_oxml::units::HalfPoint;
 
 use crate::document::visit_body_paragraphs_mut;
-use crate::{ContentLocation, Document, Error, Result};
+use crate::{ContentLocation, Document, Error, Result, StyleBuilder};
 
 /// Refuses comment fields holding a character XML 1.0 cannot carry, as
 /// python-docx refuses such text.
@@ -36,6 +38,8 @@ pub(crate) const COMMENTS_CONTENT_TYPE: &str =
 pub(crate) const COMMENTS_EXTENDED_CONTENT_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.wordprocessingml.commentsExtended+xml";
 const DEFAULT_COMMENTS_PART: &str = "/word/comments.xml";
+const COMMENT_TEXT_STYLE: &str = "CommentText";
+const COMMENT_REFERENCE_STYLE: &str = "CommentReference";
 const DEFAULT_COMMENTS_EXTENDED_PART: &str = "/word/commentsExtended.xml";
 
 /// A stable insertion point between runs in a body paragraph.
@@ -1691,8 +1695,22 @@ impl Document {
         text: &str,
         date: Option<&str>,
     ) -> Result<i32> {
+        self.reply_to_with_initials(parent_id, author, None, text, date)
+    }
+
+    /// Add a reply with optional author initials and date, as
+    /// [`Self::reply_to_with_date`] adds one.
+    pub fn reply_to_with_initials(
+        &mut self,
+        parent_id: i32,
+        author: &str,
+        initials: Option<&str>,
+        text: &str,
+        date: Option<&str>,
+    ) -> Result<i32> {
+        reject_non_xml_comment(author, initials, text)?;
         let mut candidate = self.clone_for_staging();
-        let id = candidate.reply_to_staged(parent_id, author, text, date)?;
+        let id = candidate.reply_to_staged(parent_id, author, initials, text, date)?;
         candidate.flush_dirty_related_story_models()?;
         self.commit_staged_mutation(candidate);
         Ok(id)
@@ -1702,6 +1720,7 @@ impl Document {
         &mut self,
         parent_id: i32,
         author: &str,
+        initials: Option<&str>,
         text: &str,
         date: Option<&str>,
     ) -> Result<i32> {
@@ -1748,7 +1767,7 @@ impl Document {
             id,
             author: Some(author.to_owned()),
             date: date.map(str::to_owned),
-            initials: None,
+            initials: initials.map(str::to_owned),
             paragraphs,
             paragraph_ids,
             extra_attributes: Vec::new(),
@@ -1920,7 +1939,54 @@ impl Document {
         Ok(())
     }
 
+    /// Define the CommentText and CommentReference styles that new comment
+    /// paragraphs use, as Word defines them, when the document lacks them.
+    /// They go first in the styles part, so the styles part does not depend
+    /// on whether other styles were added before or after the comment.
+    fn ensure_comment_styles(&mut self) -> Result<()> {
+        let size = |half_points| CT_RPr {
+            sz: Some(HalfPoint(half_points)),
+            sz_cs: Some(HalfPoint(half_points)),
+            ..Default::default()
+        };
+        let mut missing = Vec::new();
+        if self.styles.get_by_id(COMMENT_TEXT_STYLE).is_none() {
+            let mut style = StyleBuilder::paragraph(COMMENT_TEXT_STYLE, "annotation text")
+                .priority(99)
+                .unhide_when_used(true)
+                .run_properties(size(20));
+            if self.styles.get_by_id("Normal").is_some() {
+                style = style.based_on("Normal");
+            }
+            missing.push(style);
+        }
+        if self.styles.get_by_id(COMMENT_REFERENCE_STYLE).is_none() {
+            let mut style =
+                StyleBuilder::character(COMMENT_REFERENCE_STYLE, "annotation reference")
+                    .priority(99)
+                    .semi_hidden(true)
+                    .unhide_when_used(true)
+                    .run_properties(size(16));
+            if self.styles.get_by_id("DefaultParagraphFont").is_some() {
+                style = style.based_on("DefaultParagraphFont");
+            }
+            missing.push(style);
+        }
+        if missing.is_empty() {
+            return Ok(());
+        }
+        self.reserve_styles_bundle()?;
+        let before = self.styles.clone();
+        for style in missing {
+            self.styles.styles.insert(0, style.build().0);
+        }
+        crate::style::validate_style_graph_change(&before, &self.styles)?;
+        self.invalidate_layout();
+        Ok(())
+    }
+
     fn ensure_comment_models(&mut self) -> Result<()> {
+        self.ensure_comment_styles()?;
         self.identifiers.observe_package_graph(&self.package)?;
         if self.comments.is_none() {
             self.comments = Some(CT_Comments::new());
@@ -1979,10 +2045,12 @@ impl Document {
         if self.comments.as_ref().is_some_and(|comments| {
             comments.comments.is_empty()
                 && comments.extra_xml.is_empty()
-                && comments
-                    .root_attributes
-                    .iter()
-                    .all(|(key, _)| key == "xmlns" || key.starts_with("xmlns:"))
+                && comments.root_attributes.iter().all(|(key, value)| {
+                    key == "xmlns"
+                        || key.starts_with("xmlns:")
+                        // The ignorable w14 that rdocx writes on the root.
+                        || (key == "mc:Ignorable" && value == "w14")
+                })
         }) && self.comments_owned
         {
             if let Some(part) = self.comments_part_name.take() {
@@ -2084,6 +2152,9 @@ fn para_ids(comment: &CT_Comment) -> impl Iterator<Item = &str> {
 
 /// Build one comment paragraph per line of `text`, each with a fresh
 /// `w14:paraId`, and return the last one's identifier with them.
+/// The paragraphs of a new comment, one per line of `text`, as Word writes
+/// them: each in the CommentText style, the first opening with the
+/// annotation reference mark in the CommentReference style.
 fn comment_text_paragraphs(
     text: &str,
     occupied: &mut HashSet<u32>,
@@ -2092,6 +2163,22 @@ fn comment_text_paragraphs(
     let mut paragraph_ids = Vec::new();
     for line in text.split('\n') {
         let mut paragraph = CT_P::new();
+        paragraph.properties = Some(CT_PPr {
+            style_id: Some(COMMENT_TEXT_STYLE.to_owned()),
+            ..Default::default()
+        });
+        if paragraphs.is_empty() {
+            let mut mark = CT_R::new("");
+            mark.properties = Some(CT_RPr {
+                style_id: Some(COMMENT_REFERENCE_STYLE.to_owned()),
+                ..Default::default()
+            });
+            mark.content.clear();
+            // Raw child slot 1 follows the run properties.
+            mark.extra_xml.push(b"<w:annotationRef/>".to_vec());
+            mark.extra_xml_positions.push(1);
+            paragraph.runs.push(mark);
+        }
         paragraph.add_run(line.strip_suffix('\r').unwrap_or(line));
         paragraphs.push(paragraph);
         paragraph_ids.push(Some(allocate_para_id_from_occupied(occupied)?));
@@ -3677,7 +3764,7 @@ mod tests {
     const WORD_VERSION: &str = "16.104";
     const WORD_BUILD: &str = "16.104.25121423";
     const WORD_COMMENT_CANDIDATE_SHA256: &str =
-        "b7e1f39a5af80d9928ed671fa45557d485c2c70c8761439a09df66c027274995";
+        "44aec9e091549b0c29c6e8e69070b3b4c5c90b7bb22bd364bd21eddb68f9d2ee";
 
     fn word_comment_candidate() -> Document {
         let mut document =

@@ -548,6 +548,9 @@ enum CommentCommand {
         /// Reply author
         #[arg(long)]
         author: String,
+        /// Optional reply author initials
+        #[arg(long)]
+        initials: Option<String>,
         /// Reply text, one paragraph per line
         #[arg(long)]
         text: String,
@@ -960,11 +963,21 @@ fn run_cli() {
                 file,
                 id,
                 author,
+                initials,
                 text,
                 date,
                 output,
                 json,
-            } => commands::comment_reply(&file, id, &author, &text, date.as_deref(), &output, json),
+            } => commands::comment_reply(
+                &file,
+                id,
+                &author,
+                initials.as_deref(),
+                &text,
+                date.as_deref(),
+                &output,
+                json,
+            ),
             CommentCommand::Resolve {
                 file,
                 id,

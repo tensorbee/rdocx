@@ -7397,3 +7397,39 @@ fn issue390_comment_resolution_preserves_unknown_state() {
     assert_eq!(value["comments"][0]["resolved"], json!(false));
     assert_eq!(value["comments"][0]["id"], json!(id));
 }
+
+#[test]
+fn issue434_comment_reply_takes_initials() {
+    let temp = TempWorkspace::new("issue434-reply");
+    let input = temp.path.join("input.docx");
+    let replied = temp.path.join("replied.docx");
+    let mut document = fixture_document(&["Pay within thirty days."]);
+    let root = document
+        .add_comment_on_text("thirty", 0, "Ann", Some("A"), "Why thirty?", None)
+        .unwrap();
+    document.save(&input).unwrap();
+    let root = root.to_string();
+    let output = cli(&[
+        "comment",
+        "reply",
+        path_text(&input),
+        "--id",
+        &root,
+        "--author",
+        "Bob",
+        "--initials",
+        "B",
+        "--text",
+        "Agreed",
+        "--output",
+        path_text(&replied),
+    ]);
+    assert_success(&output, "comment reply with initials");
+    let reopened = Document::open(&replied).unwrap();
+    let reply = reopened
+        .comments()
+        .into_iter()
+        .find(|comment| comment.parent_id().is_some())
+        .unwrap();
+    assert_eq!(reply.initials(), Some("B"));
+}

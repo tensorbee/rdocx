@@ -37859,7 +37859,7 @@ impl Document {
         Ok(())
     }
 
-    fn reserve_styles_bundle(&mut self) -> Result<()> {
+    pub(crate) fn reserve_styles_bundle(&mut self) -> Result<()> {
         let existing = self.styles_part_name.clone();
         let part_name = self
             .reserve_document_part_bundle(

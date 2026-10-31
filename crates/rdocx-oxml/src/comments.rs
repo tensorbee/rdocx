@@ -13,6 +13,7 @@ use crate::raw_xml::{capture_element, capture_empty_element};
 use crate::text::{CT_P, declare_w14_on_part_root};
 
 const W14_NS: &str = "http://schemas.microsoft.com/office/word/2010/wordml";
+const MC_NS: &str = "http://schemas.openxmlformats.org/markup-compatibility/2006";
 
 /// One entry in a Word comments part.
 #[derive(Debug, Clone, PartialEq)]
@@ -145,6 +146,17 @@ impl CT_Comments {
                 .any(|comment| comment.paragraph_ids.iter().any(Option::is_some))
         {
             root.push_attribute(("xmlns:w14", W14_NS));
+            // A consumer that does not understand w14 must be allowed to
+            // ignore the paragraph ids, as Word writes the root.
+            if !declared("xmlns:mc")
+                && !self
+                    .root_attributes
+                    .iter()
+                    .any(|(name, _)| name.ends_with(":Ignorable"))
+            {
+                root.push_attribute(("xmlns:mc", MC_NS));
+                root.push_attribute(("mc:Ignorable", "w14"));
+            }
         }
         push_preserved_attributes(&mut root, &self.root_attributes, true);
         writer.write_event(Event::Start(root))?;

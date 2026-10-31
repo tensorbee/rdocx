@@ -10033,7 +10033,8 @@ def test_form_protection_and_permission_composition():
     note = _story_paragraph(document, "footnote")
     note_run = next(run for run in note.runs if run.text == "note held")
     comment = _story_paragraph(document, "comment")
-    comment_run = comment.runs[0]
+    # A new comment opens with its annotation reference mark run.
+    comment_run = next(run for run in comment.runs if run.text == "comment held")
     text_box = _story_paragraph(document, "text_box")
     text_box_run = text_box.runs[0]
     held = (
@@ -15251,3 +15252,33 @@ def test_fx268_picture_normalization_reuses_actual_checked_rounds(publisher, par
     assert staging[5] <= 3 * pieces + 20, staging
     assert picture.bytes == _one_pixel_png()
     assert len(rdocx.Document.from_bytes(document.to_bytes()).pictures()) == 1
+
+
+def test_issue434_reply_takes_its_author_initials():
+    import rdocx
+    document = rdocx.Document()
+    document.add_paragraph('Pay within thirty days.')
+    root = document.add_comment_on_text('thirty', author='Ann', initials='A', text='Why thirty?')
+    reply = document.reply_to(root, author='Bob', initials='B', text='Agreed')
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert [(comment.id, comment.parent_id, comment.initials) for comment in reopened.comments] == [
+        (root, None, 'A'),
+        (reply, root, 'B'),
+    ]
+
+
+def test_issue434_new_comments_part_uses_word_comment_markup():
+    import rdocx
+    document = rdocx.Document()
+    document.add_paragraph('Pay within thirty days.')
+    root = document.add_comment_on_text('thirty', author='Ann', text='Why thirty?')
+    document.reply_to(root, author='Bob', text='Agreed')
+    xml = document.part_xml('word/comments.xml')
+    start = re.search(r'<w:comments\b[^>]*>', xml).group(0)
+    assert 'xmlns:mc=' in start and 'mc:Ignorable="w14"' in start, start
+    mark = '<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:annotationRef/></w:r>'
+    assert xml.count(mark) == 2, xml
+    assert xml.count('<w:pStyle w:val="CommentText"/>') == 2, xml
+    styles = document.part_xml('word/styles.xml')
+    assert 'w:styleId="CommentText"' in styles and 'w:styleId="CommentReference"' in styles
+    assert [comment.text for comment in document.comments] == ['Why thirty?', 'Agreed']

@@ -408406,3 +408406,87 @@ fn body_range_across_table_includes_cell_text() {
     }
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+#[test]
+fn issue434_a_reply_takes_its_author_initials() {
+    let mut document = Document::new();
+    document.add_paragraph("Pay within thirty days.");
+    let root = document
+        .add_comment_on_text("thirty", 0, "Ann", Some("A"), "Why thirty?", None)
+        .unwrap();
+    let reply = document
+        .reply_to_with_initials(root, "Bob", Some("B"), "Agreed", None)
+        .unwrap();
+    let plain = document.reply_to(root, "Cy", "Me too").unwrap();
+    let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+    let initials = reopened
+        .comments()
+        .iter()
+        .map(|comment| {
+            (
+                comment.id(),
+                comment.parent_id(),
+                comment.initials().map(str::to_owned),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        initials,
+        [
+            (root, None, Some("A".to_owned())),
+            (reply, Some(root), Some("B".to_owned())),
+            (plain, Some(root), None),
+        ]
+    );
+    assert!(
+        document
+            .reply_to_with_initials(root, "Bob", Some("\u{1}"), "Agreed", None)
+            .is_err()
+    );
+}
+
+#[test]
+fn issue434_new_comments_part_holds_word_comment_markup() {
+    let mut document = Document::new();
+    document.add_paragraph("Pay within thirty days.");
+    let root = document
+        .add_comment_on_text(
+            "thirty",
+            0,
+            "Ann",
+            Some("A"),
+            "Why thirty?\nSecond line",
+            None,
+        )
+        .unwrap();
+    document.reply_to(root, "Bob", "Agreed").unwrap();
+    let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+    let comments = reopened.part_xml("word/comments.xml").unwrap();
+    let start = &comments[comments.find("<w:comments ").unwrap()..];
+    let start = &start[..start.find('>').unwrap()];
+    assert!(
+        start.contains(r#"xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006""#),
+        "{start}"
+    );
+    assert!(start.contains(r#"mc:Ignorable="w14""#), "{start}");
+    assert_eq!(
+        comments
+            .matches(r#"<w:pStyle w:val="CommentText"/>"#)
+            .count(),
+        3,
+        "{comments}"
+    );
+    let mark =
+        r#"<w:r><w:rPr><w:rStyle w:val="CommentReference"/></w:rPr><w:annotationRef/></w:r>"#;
+    assert_eq!(comments.matches(mark).count(), 2, "{comments}");
+    let styles = reopened.part_xml("word/styles.xml").unwrap();
+    for id in ["CommentText", "CommentReference"] {
+        assert!(styles.contains(&format!(r#"w:styleId="{id}""#)), "{id}");
+    }
+    let texts = reopened
+        .comments()
+        .iter()
+        .map(|comment| comment.text())
+        .collect::<Vec<_>>();
+    assert_eq!(texts, ["Why thirty?\nSecond line", "Agreed"]);
+}

@@ -15670,18 +15670,19 @@ impl PyDocument {
         Ok(())
     }
 
-    #[pyo3(signature = (parent_id, *, author, text, date = None))]
+    #[pyo3(signature = (parent_id, *, author, text, date = None, initials = None))]
     fn reply_to(
         &mut self,
         parent_id: i32,
         author: &str,
         text: &str,
         date: Option<&str>,
+        initials: Option<&str>,
         py: Python<'_>,
     ) -> PyResult<i32> {
         let mut candidate = self.inner.clone_for_staging();
         let id = candidate
-            .reply_to_with_date(parent_id, author, text, date)
+            .reply_to_with_initials(parent_id, author, initials, text, date)
             .map_err(|error| rdocx_to_pyerr(py, error))?;
         let prepared = self.prepare_word_revision(
             py,
