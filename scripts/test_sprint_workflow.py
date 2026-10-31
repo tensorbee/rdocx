@@ -20,6 +20,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts import fetch_docx_corpus
+from scripts import fetch_pptx_corpus
 from scripts import readme_doctests
 from scripts import install_pinned_libreoffice
 from scripts import install_pinned_pandoc
@@ -2509,6 +2510,317 @@ class SprintWorkflowTests(unittest.TestCase):
                 self.assertEqual(len(test_steps), 1)
                 self.assertLess(job.index(fetch), job.index(test_steps[0]))
                 self.assertNotIn("continue-on-error", fetch)
+
+    def test_presentation_corpus_fetcher_recovers_transient_open_and_partial_reads(self) -> None:
+        import http.client
+        import urllib.error
+
+        payload = b"complete pinned presentation"
+        entry = ("test.pptx", "test-producer", hashlib.sha256(payload).hexdigest(),
+                 "https://example.com/test.pptx")
+
+        class InterruptedResponse(io.BytesIO):
+            def __init__(self, error: Exception) -> None:
+                super().__init__(b"discarded first-attempt prefix")
+                self.error = error
+                self.reads = 0
+
+            def read(self, size: int = -1) -> bytes:
+                self.reads += 1
+                if self.reads == 1:
+                    return super().read(5)
+                raise self.error
+
+        for kind in ("open", "incomplete-read", "reset-read"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory)
+                destination = output / entry[0]
+                destination.write_bytes(b"old destination")
+                first = (urllib.error.URLError(TimeoutError("temporary open timeout"))
+                         if kind == "open" else InterruptedResponse(
+                             http.client.IncompleteRead(b"unreturned partial", 20)
+                             if kind == "incomplete-read" else ConnectionResetError("temporary read reset")))
+                complete = io.BytesIO(payload)
+
+                def before_retry(_seconds: int) -> None:
+                    self.assertFalse((output / ".test.pptx.download").exists())
+                    if isinstance(first, InterruptedResponse):
+                        self.assertTrue(first.closed)
+
+                with (patch.object(fetch_pptx_corpus.urllib.request, "urlopen",
+                                   side_effect=[first, complete]) as opened,
+                      patch("time.sleep", side_effect=before_retry) as sleep,
+                      contextlib.redirect_stdout(io.StringIO()),
+                      contextlib.redirect_stderr(io.StringIO()) as failures):
+                    fetch_pptx_corpus.fetch(output, [entry])
+                self.assertEqual(destination.read_bytes(), payload)
+                self.assertEqual(opened.call_count, 2)
+                self.assertEqual([call.args for call in sleep.call_args_list], [(1,)])
+                for call in opened.call_args_list:
+                    self.assertEqual(call.args[0].full_url, entry[3])
+                    self.assertEqual(call.args[0].get_header("User-agent"), "rdocx-corpus-fetcher/1")
+                    self.assertEqual(call.kwargs, {"timeout": 60})
+                self.assertIn("test.pptx", failures.getvalue())
+                self.assertIn("1/3", failures.getvalue())
+                self.assertTrue(complete.closed)
+                if isinstance(first, InterruptedResponse):
+                    self.assertTrue(first.closed)
+                self.assertEqual(list(output.iterdir()), [destination])
+
+    def test_presentation_corpus_fetcher_classifies_only_transient_transport(self) -> None:
+        import errno
+        import http.client
+        import socket
+        import ssl
+        import urllib.error
+
+        payload = b"complete"
+        entry = ("test.pptx", "producer", hashlib.sha256(payload).hexdigest(), "https://example.com/test.pptx")
+        cycle = urllib.error.URLError("cyclic reason")
+        cycle.reason = cycle
+        class ErrorBody(io.BytesIO):
+            def read(self, _size: int = -1) -> bytes:
+                raise AssertionError("HTTP error payload must not be read")
+
+        cases = [(f"http-{code}", urllib.error.HTTPError(entry[3], code, "status", {}, ErrorBody(b"not read")),
+                  code in {429, 500, 502, 503, 504}) for code in (429, 500, 502, 503, 504, 403, 404, 501)]
+        cases.extend([
+            ("timeout", TimeoutError("timeout"), True),
+            ("reset", ConnectionResetError("reset"), True),
+            ("aborted", ConnectionAbortedError("aborted"), True),
+            ("refused", ConnectionRefusedError("refused"), True),
+            ("temporary-dns", socket.gaierror(socket.EAI_AGAIN, "again"), True),
+            ("permanent-dns", socket.gaierror(socket.EAI_NONAME, "unknown"), False),
+            ("remote-disconnected", http.client.RemoteDisconnected("closed"), True),
+            ("incomplete-read", http.client.IncompleteRead(b"prefix", 10), True),
+            ("wrapped-http", urllib.error.URLError(urllib.error.HTTPError(entry[3], 503, "status", {}, ErrorBody(b"not read"))), True),
+            ("wrapped-timeout", urllib.error.URLError(TimeoutError("wrapped")), True),
+            ("nested-timeout", urllib.error.URLError(urllib.error.URLError(TimeoutError("nested"))), True),
+            ("certificate", ssl.SSLCertVerificationError("certificate"), False),
+            ("wrapped-certificate", urllib.error.URLError(ssl.CertificateError("certificate")), False),
+            ("generic-ssl", ssl.SSLError("not a temporary transport classification"), False),
+            ("wrapped-ssl", urllib.error.URLError(ssl.SSLError("SSL")), False),
+            ("string-reason", urllib.error.URLError("timed out"), False),
+            ("cyclic-reason", cycle, False),
+            ("generic-oserror", OSError("unknown"), False),
+        ])
+        for name in ("ETIMEDOUT", "ECONNRESET", "ECONNABORTED", "ECONNREFUSED", "ENETRESET", "ENETUNREACH", "EHOSTUNREACH"):
+            if hasattr(errno, name):
+                cases.append((name, OSError(getattr(errno, name), name), True))
+        for label, error, transient in cases:
+            with self.subTest(error=label), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory)
+                response = io.BytesIO(payload)
+
+                def before_retry(_seconds: int) -> None:
+                    self.assertFalse((output / ".test.pptx.download").exists())
+                    body_error = error.reason if isinstance(error, urllib.error.URLError) and isinstance(error.reason, urllib.error.HTTPError) else error
+                    if isinstance(body_error, urllib.error.HTTPError):
+                        self.assertTrue(body_error.fp.closed)
+
+                with (patch.object(fetch_pptx_corpus.urllib.request, "urlopen", side_effect=[error, response]) as opened,
+                      patch("time.sleep", side_effect=before_retry) as sleep,
+                      contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO())):
+                    if transient:
+                        fetch_pptx_corpus.fetch(output, [entry])
+                        self.assertEqual((output / entry[0]).read_bytes(), payload)
+                    else:
+                        with self.assertRaises(type(error)) as raised:
+                            fetch_pptx_corpus.fetch(output, [entry])
+                        self.assertIs(raised.exception, error)
+                        self.assertFalse((output / entry[0]).exists())
+                self.assertEqual(opened.call_count, 2 if transient else 1)
+                self.assertEqual([call.args for call in sleep.call_args_list], [(1,)] if transient else [])
+                self.assertFalse((output / ".test.pptx.download").exists())
+                if isinstance(error, urllib.error.HTTPError):
+                    self.assertTrue(error.fp.closed)
+                if not response.closed:
+                    response.close()
+
+    def test_presentation_corpus_fetcher_exhausts_three_attempts_without_publication(self) -> None:
+        import urllib.error
+
+        payload = b"expected"
+        entry = ("test.pptx", "producer", hashlib.sha256(payload).hexdigest(), "https://example.com/test.pptx")
+        errors = [urllib.error.URLError(TimeoutError(f"timeout {i}")) for i in (1, 2, 3)]
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            destination = output / entry[0]
+            destination.write_bytes(b"old destination")
+            temporary = output / ".test.pptx.download"
+
+            def observe_delay(_seconds: int) -> None:
+                self.assertFalse(temporary.exists())
+                self.assertEqual(destination.read_bytes(), b"old destination")
+
+            with (patch.object(fetch_pptx_corpus.urllib.request, "urlopen", side_effect=errors) as opened,
+                  patch("time.sleep", side_effect=observe_delay) as sleep,
+                  contextlib.redirect_stderr(io.StringIO()) as failures):
+                with self.assertRaises(urllib.error.URLError) as raised:
+                    fetch_pptx_corpus.fetch(output, [entry])
+            self.assertIs(raised.exception, errors[-1])
+            self.assertEqual(opened.call_count, 3)
+            self.assertEqual([call.args for call in sleep.call_args_list], [(1,), (2,)])
+            self.assertEqual(destination.read_bytes(), b"old destination")
+            self.assertFalse(temporary.exists())
+            self.assertEqual(len(failures.getvalue().splitlines()), 3)
+            for attempt in (1, 2, 3):
+                self.assertIn(f"test.pptx attempt {attempt}/3", failures.getvalue())
+                self.assertIn(f"timeout {attempt}", failures.getvalue())
+
+    def test_presentation_corpus_fetcher_keeps_integrity_and_local_failures_terminal(self) -> None:
+        import urllib.error
+
+        payload = b"complete pinned bytes"
+        entry = ("test.pptx", "producer", hashlib.sha256(payload).hexdigest(), "https://example.com/test.pptx")
+        for downloaded in (b"wrong bytes", payload[:4]):
+            with self.subTest(integrity=downloaded), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory)
+                destination = output / entry[0]
+                destination.write_bytes(b"old")
+                with (patch.object(fetch_pptx_corpus.urllib.request, "urlopen", return_value=io.BytesIO(downloaded)) as opened,
+                      patch("time.sleep") as sleep,
+                      self.assertRaisesRegex(ValueError, "digest mismatch")):
+                    fetch_pptx_corpus.fetch(output, [entry])
+                self.assertEqual(opened.call_count, 1)
+                sleep.assert_not_called()
+                self.assertEqual(destination.read_bytes(), b"old")
+                self.assertFalse((output / ".test.pptx.download").exists())
+
+        for fault in ("open", "write", "close", "digest", "replace", "unlink", "error-close", "response-close"):
+            with self.subTest(local=fault), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory)
+                destination = output / entry[0]
+                destination.write_bytes(b"old")
+                temporary = output / ".test.pptx.download"
+                real_open, real_unlink, real_digest = Path.open, Path.unlink, fetch_pptx_corpus.file_digest
+
+                class LocalWriter:
+                    def __init__(self, stream: object) -> None:
+                        self.stream = stream
+
+                    def __enter__(self) -> LocalWriter:
+                        return self
+
+                    def write(self, data: bytes) -> int:
+                        if fault == "write":
+                            raise TimeoutError("local write")
+                        return self.stream.write(data)
+
+                    def __exit__(self, *_args: object) -> None:
+                        self.stream.close()
+                        if fault == "close":
+                            raise TimeoutError("local close")
+
+                def open_file(path: Path, mode: str = "r", *args: object, **kwargs: object) -> object:
+                    if path == temporary and mode == "xb":
+                        if fault == "open":
+                            raise TimeoutError("local open")
+                        return LocalWriter(real_open(path, mode, *args, **kwargs))
+                    return real_open(path, mode, *args, **kwargs)
+
+                def digest_file(path: Path) -> str:
+                    if path == temporary and fault == "digest":
+                        raise TimeoutError("local digest")
+                    return real_digest(path)
+
+                def unlink_file(path: Path, *args: object, **kwargs: object) -> None:
+                    if path == temporary and fault == "unlink":
+                        raise TimeoutError("local unlink")
+                    return real_unlink(path, *args, **kwargs)
+
+                with contextlib.ExitStack() as patches:
+                    if fault == "error-close":
+                        transport_error = urllib.error.HTTPError(entry[3], 503, "status", {}, io.BytesIO(b"error"))
+                        patches.enter_context(patch.object(transport_error, "close", side_effect=TimeoutError("local error-close")))
+                    else:
+                        transport_error = urllib.error.URLError(TimeoutError("transport"))
+                    class CloseFailure(io.BytesIO):
+                        def close(self) -> None:
+                            was_closed = self.closed
+                            super().close()
+                            if not was_closed:
+                                raise TimeoutError("local response-close")
+
+                    response = CloseFailure(payload) if fault == "response-close" else io.BytesIO(payload)
+                    opened = patches.enter_context(patch.object(fetch_pptx_corpus.urllib.request, "urlopen",
+                        side_effect=transport_error) if fault in ("unlink", "error-close") else
+                        patch.object(fetch_pptx_corpus.urllib.request, "urlopen", return_value=response))
+                    sleep = patches.enter_context(patch("time.sleep"))
+                    patches.enter_context(patch.object(Path, "open", open_file))
+                    patches.enter_context(patch.object(Path, "unlink", unlink_file))
+                    patches.enter_context(patch.object(fetch_pptx_corpus, "file_digest", digest_file))
+                    if fault == "replace":
+                        patches.enter_context(patch.object(fetch_pptx_corpus.os, "replace", side_effect=TimeoutError("local replace")))
+                    patches.enter_context(contextlib.redirect_stderr(io.StringIO()))
+                    with self.assertRaisesRegex(TimeoutError, f"local {fault}"):
+                        fetch_pptx_corpus.fetch(output, [entry])
+                    self.assertEqual(opened.call_count, 0 if fault == "open" else 1)
+                    sleep.assert_not_called()
+                self.assertEqual(destination.read_bytes(), b"old")
+                if fault == "error-close":
+                    transport_error.close()
+                if fault == "unlink":
+                    self.assertTrue(temporary.exists())
+                    real_unlink(temporary)
+                self.assertFalse(temporary.exists())
+
+    def test_presentation_corpus_fetcher_preserves_cache_and_foreign_downloads(self) -> None:
+        payload = b"cached pinned bytes"
+        entry = ("test.pptx", "producer", hashlib.sha256(payload).hexdigest(), "https://example.com/test.pptx")
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            destination = output / entry[0]
+            destination.write_bytes(payload)
+            foreign = output / ".test.pptx.download"
+            with (patch.object(fetch_pptx_corpus.urllib.request, "urlopen") as opened,
+                  patch("time.sleep") as sleep, contextlib.redirect_stdout(io.StringIO())):
+                fetch_pptx_corpus.fetch(output, [entry])
+                opened.assert_not_called()
+                sleep.assert_not_called()
+                foreign.write_bytes(b"foreign preexisting")
+                with self.assertRaisesRegex(ValueError, "unmanifested"):
+                    fetch_pptx_corpus.fetch(output, [entry])
+                self.assertEqual(foreign.read_bytes(), b"foreign preexisting")
+                opened.assert_not_called()
+            foreign.unlink()
+            destination.write_bytes(b"old destination")
+            real_open = Path.open
+
+            def collide(path: Path, mode: str = "r", *args: object, **kwargs: object) -> object:
+                if path == foreign and mode == "xb":
+                    with real_open(path, "wb") as stream:
+                        stream.write(b"foreign concurrent creator")
+                return real_open(path, mode, *args, **kwargs)
+
+            with (patch.object(Path, "open", collide),
+                  patch.object(fetch_pptx_corpus.urllib.request, "urlopen") as opened,
+                  patch("time.sleep") as sleep, self.assertRaises(FileExistsError)):
+                fetch_pptx_corpus.fetch(output, [entry])
+            opened.assert_not_called()
+            sleep.assert_not_called()
+            self.assertEqual(destination.read_bytes(), b"old destination")
+            self.assertEqual(foreign.read_bytes(), b"foreign concurrent creator")
+
+    def test_presentation_corpus_manifest_and_final_verification_stay_pinned(self) -> None:
+        entries = fetch_pptx_corpus.load_manifest(fetch_pptx_corpus.MANIFEST)
+        self.assertEqual(len(entries), 50)
+        self.assertTrue(all(row[3].startswith("https://") for row in entries))
+        payload = b"verified"
+        entry = ("test.pptx", "producer", hashlib.sha256(payload).hexdigest(), "https://example.com/test.pptx")
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            with self.assertRaisesRegex(ValueError, "missing"):
+                fetch_pptx_corpus.verify_directory(output, [entry])
+            (output / entry[0]).write_bytes(payload)
+            fetch_pptx_corpus.verify_directory(output, [entry])
+            (output / "extra.pptx").write_bytes(b"extra")
+            with self.assertRaisesRegex(ValueError, "unmanifested"):
+                fetch_pptx_corpus.verify_directory(output, [entry])
+            (output / "extra.pptx").unlink()
+            (output / entry[0]).write_bytes(b"wrong")
+            with self.assertRaisesRegex(ValueError, "digest mismatch"):
+                fetch_pptx_corpus.verify_directory(output, [entry])
 
     def test_word_corpus_fetcher_verifies_every_checksum_and_refuses_a_mismatch(
         self,

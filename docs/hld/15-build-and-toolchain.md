@@ -1113,6 +1113,22 @@ condition, successful fallback or `continue-on-error`. The complete module is
 the pull-request gate for release-family version carriers and their workflow
 contracts.
 
+The pinned PresentationML corpus fetcher retains all50manifest paths, HTTPS
+URLs and exact digests for Test, MSRV and Presentation fidelity. A missing or
+stale subject gets at most3attempts after classified transient GET/open/read
+failures, with1and2second retry delays. HTTP429/500/502/503/504, temporary
+connection or DNS failures and raised incomplete reads qualify. Certificate,
+generic SSL, permanent HTTP/DNS, string-valued reasons and unknown errors are
+terminal. Exception-valued URLError reasons are unwrapped with a cycle guard.
+The60second timeout applies to individual operations, not a total subject deadline.
+Local file open/write/close, digest, replace and cleanup failures are terminal,
+even when they resemble a transport timeout. Partial bytes are discarded and
+failed responses close before retry. Silent EOF with a wrong digest is terminal.
+Exclusive owned temporary files protect colliding foreign downloads and existing
+destinations. Atomic publication requires complete checksum-matching bytes, and
+final whole-directory verification still rejects missing or unmanifested files.
+No endpoint fallback, source replacement, broad cleanup or fidelity waiver exists.
+
 **A dedicated Presentation fidelity job** runs on Ubuntu 24.04, primes locked
 Cargo dependencies, fetches the pinned 50-deck corpus, installs LibreOffice and
 Poppler through the shared checksum-pinned installers, and runs
