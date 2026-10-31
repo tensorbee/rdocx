@@ -12141,6 +12141,51 @@ def test_issue398_controlled_cell_edit_selects_read_owner(target, operation, lea
     assert [p.text for p in reopened.tables[0].cell(0, 0).paragraphs] == expected
 
 
+@pytest.mark.parametrize("body", [0, 200])
+@pytest.mark.parametrize("row", [0, 19])
+def test_issue437_cell_paragraph_setters_do_not_restage_the_package(body, row):
+    """A cell paragraph without content controls is edited in place, as a body
+    paragraph is, so its cost does not grow with the body or the cell's row."""
+    import rdocx
+    from rdocx import _rdocx
+    from rdocx.shared import Pt
+
+    staging = getattr(_rdocx, "_staging_work", None)
+    reopen = getattr(_rdocx, "_reopen_work", None)
+    if staging is None or reopen is None:
+        pytest.skip("release build: staging and reopen counters are debug-only")
+    doc = rdocx.Document()
+    doc.add_style("TT", based_on="Normal", font_size=Pt(9))
+    table = doc.add_table(20, 3)
+    for r in range(20):
+        for c in range(3):
+            table.cell(r, c).text = f"r{r}c{c}"
+    for index in range(body):
+        doc.add_paragraph(f"body {index}")
+    paragraph = doc.tables[0].cell(row, 2).paragraphs[0]
+    paragraph_format = paragraph.paragraph_format
+    font = paragraph.runs[0].font
+    staging()
+    reopen()
+    scans = _rdocx._main_body_block_scans()
+    paragraph.alignment = 1
+    paragraph.style = "TT"
+    paragraph_format.space_after = Pt(4)
+    font.size = Pt(11)
+    assert staging() == [0] * 6
+    assert reopen() == [0] * 3
+    assert _rdocx._main_body_block_scans() == scans
+    assert paragraph.text == f"r{row}c2"
+    assert paragraph.style == "TT"
+    reopened = rdocx.Document.from_bytes(doc.to_bytes())
+    cell = reopened.tables[0].cell(row, 2).paragraphs[0]
+    assert (cell.text, cell.alignment, cell.style) == (f"r{row}c2", 1, "TT")
+    assert cell.paragraph_format.space_after == Pt(4)
+    assert cell.runs[0].font.size == Pt(11)
+    neighbour = reopened.tables[0].cell(row, 1).paragraphs[0]
+    assert (neighbour.alignment, neighbour.style) == (None, None)
+
+
 @pytest.mark.parametrize("run_count", [1, 2])
 def test_issue389_first_run_local_publication_keeps_exact_owner_lifetimes(run_count):
     import rdocx

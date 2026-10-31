@@ -69,7 +69,7 @@ impl PyRun {
         )?;
         {
             let document = self.document.borrow(py);
-            match paragraph.native(&document.inner) {
+            match document.paragraph_route(&paragraph, None) {
                 Ok(location) => {
                     let (path, owner) = document.capture_owner(
                         &crate::document::WordOwnerLocation::Run(location, self.run_path.clone()),

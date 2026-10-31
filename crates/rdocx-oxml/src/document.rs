@@ -3669,15 +3669,16 @@ impl CT_Body {
 
     /// Get an iterator over only the tables.
     pub fn tables(&self) -> impl Iterator<Item = &CT_Tbl> {
-        let mut tables = Vec::new();
-        for content in &self.content {
+        // Lazy over the body children, so `nth` stops at the table it finds.
+        self.content.iter().flat_map(|content| {
+            let mut tables = Vec::new();
             match content {
                 BodyContent::Table(table) => tables.push(table.as_ref()),
                 BodyContent::ContentControl(sdt) => sdt.collect_tables(SdtOwner::Body, &mut tables),
                 BodyContent::Paragraph(_) | BodyContent::RawXml(_) => {}
             }
-        }
-        tables.into_iter()
+            tables
+        })
     }
 
     /// Get a mutable iterator over only the tables.

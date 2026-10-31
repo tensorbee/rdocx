@@ -265,7 +265,25 @@ impl ParagraphLocation {
                 paragraph,
             } => {
                 // The mutable ordinal accessor excludes controlled paragraphs.
-                // Resolve through the same checked physical route as the reader.
+                // When its last index reaches the reader's last paragraph, the
+                // cell has none, both ordinals name the same paragraph, and it
+                // is edited in place, as a body paragraph is.
+                {
+                    let mut table = document.table_mut(*table).ok_or_else(|| {
+                        rdocx::Error::Other("table index out of range".to_owned())
+                    })?;
+                    let mut cell = table
+                        .cell(*row, *cell)
+                        .ok_or_else(|| rdocx::Error::Other("cell index out of range".to_owned()))?;
+                    let count = cell.paragraph_count();
+                    if count > 0 && cell.paragraph_mut(count - 1).is_some() {
+                        return edit(&mut cell.paragraph_mut(*paragraph).ok_or_else(|| {
+                            rdocx::Error::Other("cell paragraph index out of range".to_owned())
+                        })?);
+                    }
+                }
+                // Otherwise resolve through the same checked physical route as
+                // the reader.
                 let location =
                     document.cell_paragraph_story_location(*table, *row, *cell, *paragraph)?;
                 document.edit_story_paragraph(&location, edit)

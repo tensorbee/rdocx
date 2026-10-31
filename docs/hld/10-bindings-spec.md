@@ -4587,6 +4587,13 @@ causal lifetime semantics. Source facts do not bypass native mutation admission.
 Ordinary parsing and physical picture snapshots keep their source authority,
 and invalid replacement or save candidates fail atomically.
 
+A setter on a table cell paragraph or one of its runs edits the modeled
+paragraph in place, as the same setter on a body paragraph does, when the
+cell holds no content control. The mutable cell ordinal skips controlled
+paragraphs, so a cell with a content control keeps the checked physical route
+through `cell_paragraph_story_location`. A run handle of a cell paragraph
+takes its paragraph route from the prepared index before the native lookup.
+
 Complete Word owner snapshots use the native hidden
 `Document.story_owner_snapshots` provider across the existing crate boundary.
 Its four owned families retain full story items, physical cells, paragraph XML
