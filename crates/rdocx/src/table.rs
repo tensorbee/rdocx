@@ -675,10 +675,9 @@ pub(crate) fn validate_table_topology(table: &CT_Tbl) -> Result<()> {
 }
 
 fn cell_is_discardable_for_grid_edit(cell: &CT_Tc) -> bool {
-    let empty_content = matches!(
-        cell.content.as_slice(),
-        [CellContent::Paragraph(paragraph)] if paragraph == &CT_P::new()
-    );
+    // An empty cell Word leaves in a formatted column keeps its paragraph
+    // properties, which say nothing about content.
+    let empty_content = holds_one_empty_paragraph(cell);
     let width_only = cell.properties.as_ref().is_none_or(|properties| {
         properties.grid_span.is_none()
             && properties.h_merge.is_none()

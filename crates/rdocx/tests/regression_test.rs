@@ -408801,3 +408801,79 @@ fn issue432_literal_replacement_leaves_chart_labels_to_their_workbook() {
         assert_eq!(document.part_xml(&name).unwrap(), before, "{name}");
     }
 }
+
+#[test]
+fn issue432_a_cell_holding_only_paragraph_properties_merges_as_an_empty_cell() {
+    // Word leaves this paragraph in an empty cell of a right-aligned column,
+    // its mark formatted as the column's text.
+    let empty = r#"<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p><w:pPr><w:jc w:val="right"/><w:rPr><w:b/></w:rPr></w:pPr></w:p></w:tc>"#;
+    let total = r#"<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>Total</w:t></w:r></w:p></w:tc>"#;
+    let text = r#"<w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>Kept</w:t></w:r></w:p></w:tc>"#;
+    let grid = r#"<w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>"#;
+    let table = |rows: &str, columns: usize| {
+        let grid = if columns == 3 {
+            grid.to_owned()
+        } else {
+            r#"<w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>"#.to_owned()
+        };
+        wrap_word_body(&format!(
+            r#"<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr>{grid}{rows}</w:tbl><w:p/>"#
+        ))
+    };
+    let cell_texts = |document: &Document| {
+        let table = document.table(0).unwrap();
+        let cell = table.cell(0, 0).unwrap();
+        cell.paragraphs().map(|p| p.text()).collect::<Vec<_>>()
+    };
+
+    // A grid span absorbs the empty cell and keeps the first cell's paragraph.
+    let mut document = document_with_field_parts(
+        &table(&format!("<w:tr>{total}{empty}{text}</w:tr>"), 3),
+        None,
+        None,
+    );
+    document
+        .table_mut(0)
+        .unwrap()
+        .set_cell_grid_span_checked(0, 0, Some(2))
+        .unwrap();
+    assert_eq!(cell_texts(&document), ["Total"]);
+    assert_eq!(document.table(0).unwrap().row(0).unwrap().cell_count(), 2);
+
+    // A cell holding text is still refused.
+    let mut document = document_with_field_parts(
+        &table(&format!("<w:tr>{total}{text}{empty}</w:tr>"), 3),
+        None,
+        None,
+    );
+    let error = document
+        .table_mut(0)
+        .unwrap()
+        .set_cell_grid_span_checked(0, 0, Some(2))
+        .unwrap_err();
+    assert!(error.to_string().contains("nonempty cell"), "{error}");
+
+    // merge_cells drops it too, horizontally and vertically.
+    for (label, rows, columns, other) in [
+        (
+            "horizontal",
+            format!("<w:tr>{total}{empty}{text}</w:tr>"),
+            3,
+            (0, 1),
+        ),
+        (
+            "vertical",
+            format!("<w:tr>{total}</w:tr><w:tr>{empty}</w:tr>"),
+            1,
+            (1, 0),
+        ),
+    ] {
+        let mut document = document_with_field_parts(&table(&rows, columns), None, None);
+        document
+            .table_mut(0)
+            .unwrap()
+            .merge_cells((0, 0), other)
+            .unwrap();
+        assert_eq!(cell_texts(&document), ["Total"], "{label}");
+    }
+}

@@ -15284,3 +15284,36 @@ def test_issue432_python_links_take_the_hyperlink_character_style():
     document = rdocx.Document()
     document.add_paragraph("plain").add_run(" text")
     assert "Hyperlink" not in document.part_xml("word/document.xml")
+
+
+def test_issue432_a_cell_with_only_paragraph_properties_merges_as_empty():
+    import rdocx
+
+    def build():
+        document = rdocx.Document()
+        table = document.add_table(1, 3, style="Table Grid")
+        table.cell(0, 0).text = "Total"
+        table.cell(0, 1).paragraphs[0].alignment = rdocx.WD_ALIGN_PARAGRAPH.RIGHT
+        table.cell(0, 2).text = "Kept"
+        return document
+
+    document = build()
+    document.tables[0].set_cell_grid_span(0, 0, 2)
+    assert [p.text for p in document.tables[0].cell(0, 0).paragraphs] == ["Total"]
+    assert [c.text for c in document.tables[0].rows[0].cells] == ["Total", "Kept"]
+
+    document = build()
+    merged = document.tables[0].cell(0, 0).merge(document.tables[0].cell(0, 1))
+    assert [p.text for p in merged.paragraphs] == ["Total"]
+
+    document = rdocx.Document()
+    table = document.add_table(2, 1)
+    table.cell(0, 0).text = "Total"
+    table.cell(1, 0).paragraphs[0].alignment = rdocx.WD_ALIGN_PARAGRAPH.RIGHT
+    merged = document.tables[0].cell(0, 0).merge(document.tables[0].cell(1, 0))
+    assert [p.text for p in merged.paragraphs] == ["Total"]
+
+    # A cell that holds text is still refused.
+    document = build()
+    with pytest.raises(Exception, match="nonempty cell"):
+        document.tables[0].set_cell_grid_span(0, 1, 2)
