@@ -4594,6 +4594,14 @@ paragraphs, so a cell with a content control keeps the checked physical route
 through `cell_paragraph_story_location`. A run handle of a cell paragraph
 takes its paragraph route from the prepared index before the native lookup.
 
+A property setter on a body table cell (vertical alignment, shading, width,
+borders, margins) edits the cell in place as well. Writing the cell's first
+`w:tcPr`, or removing it, moves every item of the cell story by one, so the
+owners of that story move with it and change route bucket, and debug builds
+check them against a rebuilt inventory. `Cell.text` and `Paragraph.text` on a
+cell paragraph edit the staged candidate without a staged reopen and take
+their routes from the owner index before publishing the revision.
+
 Complete Word owner snapshots use the native hidden
 `Document.story_owner_snapshots` provider across the existing crate boundary.
 Its four owned families retain full story items, physical cells, paragraph XML

@@ -2085,14 +2085,41 @@ impl PyCell {
         let (table, row, cell) = self.validate(py)?;
         let current_related = self.current_related(py)?;
         let mut document = self.document.borrow_mut(py);
+        let edit_cell = |table: &mut rdocx::Table<'_>| {
+            let mut cell = table
+                .cell(row, cell)
+                .ok_or_else(|| rdocx::Error::Other("cell index out of range".to_owned()))?;
+            edit(&mut cell)
+        };
+        if current_related.is_none()
+            && let Some(story) = document.indexed_body_cell_story(table, row, cell)
+        {
+            // Each edit validates before it changes the cell properties, so a
+            // body table cell is edited in place, as a body paragraph is. Only
+            // writing or removing its `w:tcPr` moves the cell's items.
+            let location = TableLocation::Body(table);
+            let has_properties = |document: &rdocx::Document| {
+                location.read(document, |table| {
+                    table
+                        .cell(row, cell)
+                        .is_some_and(|cell| cell.has_properties())
+                })
+            };
+            let before =
+                has_properties(&document.inner).map_err(|error| rdocx_to_pyerr(py, error))?;
+            location
+                .edit(&mut document.inner, edit_cell)
+                .map_err(|error| rdocx_to_pyerr(py, error))?;
+            let after =
+                has_properties(&document.inner).map_err(|error| rdocx_to_pyerr(py, error))?;
+            if before != after {
+                document.move_cell_story_items(&story, if after { 1 } else { -1 });
+            }
+            return Ok(());
+        }
         let mut candidate = document.inner.clone_for_staging();
-        TableLocation::new(table, &current_related.clone())
-            .edit(&mut candidate, |table| {
-                let mut cell = table
-                    .cell(row, cell)
-                    .ok_or_else(|| rdocx::Error::Other("cell index out of range".to_owned()))?;
-                edit(&mut cell)
-            })
+        TableLocation::new(table, &current_related)
+            .edit(&mut candidate, edit_cell)
             .map_err(|error| rdocx_to_pyerr(py, error))?;
         document.adopt_property_edit(py, candidate, "Cell property edit")?;
         Ok(())
@@ -2516,24 +2543,27 @@ impl PyCell {
         let current_related = self.current_related(py)?;
         let mut document = self.document.borrow_mut(py);
         let mut candidate = document.inner.clone_for_staging();
-        match &current_related.clone() {
-            Some(_) => {
-                TableLocation::new(table, &current_related.clone()).edit(&mut candidate, |table| {
-                    table
-                        .cell(row, cell)
-                        .ok_or_else(|| rdocx::Error::Other("cell index out of range".to_owned()))?
-                        .try_set_text(value)
-                })
-            }
-            None => candidate.try_set_cell_text(table, row, cell, value),
-        }
-        .map_err(|error| rdocx_to_pyerr(py, error))?;
+        // The first paragraph's text is replaced as Paragraph.text replaces
+        // it, every anchor kept, so the publication below checks the edit
+        // without a staged reopen of the package.
+        TableLocation::new(table, &current_related)
+            .edit(&mut candidate, |table| {
+                table
+                    .cell(row, cell)
+                    .ok_or_else(|| rdocx::Error::Other("cell index out of range".to_owned()))?
+                    .try_set_text(value)
+            })
+            .map_err(|error| rdocx_to_pyerr(py, error))?;
         let prepared = document.prepare_word_revision(
             py,
             &candidate,
             "Cell.text",
-            TableLocation::new(table, &current_related)
-                .native(&document.inner)
+            document
+                .indexed_table_location(table, &current_related, None)
+                .map(Ok)
+                .unwrap_or_else(|| {
+                    TableLocation::new(table, &current_related).native(&document.inner)
+                })
                 .map(|location| crate::document::WordPublication::CellText(location, row, cell))
                 .unwrap_or(crate::document::WordPublication::Conservative),
         )?;

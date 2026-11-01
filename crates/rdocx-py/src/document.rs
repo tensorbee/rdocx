@@ -4576,6 +4576,22 @@ impl WordOwnerIndexes {
         self.by_route.retain(|_, bucket| !bucket.is_empty());
     }
 
+    /// Move owner `index` from the route bucket `from` to the bucket `to`,
+    /// after its route moved in place. A bucket keeps its owners in order.
+    fn move_route(&mut self, index: usize, from: u64, to: u64) {
+        if from == to {
+            return;
+        }
+        if let Some(bucket) = self.by_route.get_mut(&from) {
+            bucket.retain(|owner| *owner != index);
+            if bucket.is_empty() {
+                self.by_route.remove(&from);
+            }
+        }
+        let bucket = self.by_route.entry(to).or_default();
+        bucket.insert(bucket.partition_point(|owner| *owner < index), index);
+    }
+
     /// Index every owner, and return the first body table owner of each
     /// direct body slot.
     fn index_owners(
@@ -10281,6 +10297,62 @@ impl PyDocument {
         };
         let index = self.indexes.find(&self.owners, &key)?;
         Some(self.owners[index].location.clone())
+    }
+
+    /// The physical story of a direct body table cell, from the owner index.
+    pub(crate) fn indexed_body_cell_story(
+        &self,
+        table: usize,
+        row: usize,
+        cell: usize,
+    ) -> Option<rdocx::StoryId> {
+        let table = self.indexed_table_location(table, &None, None)?;
+        match self.indexed_cell_location(&table, row, cell)? {
+            WordOwnerLocation::Cell { story, .. } => Some(story),
+            _ => None,
+        }
+    }
+
+    /// Move every owner route that starts in the cell story `story` by
+    /// `delta` items, after an in-place cell property edit wrote its first
+    /// `w:tcPr` or removed it. That element comes before the cell content,
+    /// so nothing else moves, and only the route indexes change.
+    pub(crate) fn move_cell_story_items(&mut self, story: &rdocx::StoryId, delta: isize) {
+        let in_story = |owner: &rdocx::StoryId| {
+            owner.kind() == story.kind()
+                && owner.part_name() == story.part_name()
+                && owner.owner_index() == story.owner_index()
+        };
+        let moved = |location: &mut rdocx::ContentLocation| {
+            if in_story(location.story())
+                && let Some(&head) = location.index_path().first()
+            {
+                location.set_index_path_head(head.saturating_add_signed(delta));
+            }
+        };
+        for (index, owner) in self.owners.iter_mut().enumerate() {
+            if !word_owner_story(&owner.location).is_some_and(in_story) {
+                continue;
+            }
+            let from = owner.location.route_hash();
+            match &mut owner.location {
+                WordOwnerLocation::Paragraph(location)
+                | WordOwnerLocation::Run(location, _)
+                | WordOwnerLocation::Table(location)
+                | WordOwnerLocation::Hyperlink(location, _)
+                | WordOwnerLocation::Cell {
+                    table: location, ..
+                } => moved(location),
+                WordOwnerLocation::Section(_) => {}
+            }
+            self.indexes
+                .move_route(index, from, owner.location.route_hash());
+        }
+        for locations in self.indexes.cell_paragraphs.values_mut() {
+            locations.iter_mut().for_each(&moved);
+        }
+        #[cfg(debug_assertions)]
+        self.assert_word_inventory_rebuilds();
     }
 
     pub(crate) fn capture_current_view(

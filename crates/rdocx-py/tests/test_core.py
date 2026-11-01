@@ -12186,6 +12186,117 @@ def test_issue437_cell_paragraph_setters_do_not_restage_the_package(body, row):
     assert (neighbour.alignment, neighbour.style) == (None, None)
 
 
+def _issue437_body(paragraphs):
+    import rdocx
+
+    return _replace_document_body(
+        rdocx.Document(),
+        "".join(
+            f"<w:p><w:r><w:t>Body paragraph {index} with some text in it.</w:t></w:r></w:p>"
+            for index in range(paragraphs)
+        ),
+    )
+
+
+@pytest.mark.parametrize("setter", ["vertical_alignment", "shading", "width"])
+def test_issue437_cell_property_setters_do_not_grow_with_the_body(setter):
+    """A body table cell property is set in place, as a body paragraph
+    property is, so its cost does not grow with the body."""
+    import rdocx
+    from rdocx import _rdocx
+
+    value = {
+        "vertical_alignment": rdocx.WD_CELL_VERTICAL_ALIGNMENT.CENTER,
+        "shading": "D9E2F3",
+        "width": 914400,
+    }[setter]
+
+    def per_call(body):
+        doc = _issue437_body(body)
+        table = doc.add_table(10, 5)
+        cells = [table.cell(row, column) for row in range(10) for column in range(5)]
+        started = time.perf_counter()
+        for cell in cells:
+            setattr(cell, setter, value)
+        elapsed = (time.perf_counter() - started) / len(cells)
+        reopened = rdocx.Document.from_bytes(doc.to_bytes()).tables[0]
+        assert all(
+            getattr(reopened.cell(row, column), setter) is not None
+            for row in range(10)
+            for column in range(5)
+        )
+        return elapsed
+
+    def paragraph_per_call(body):
+        doc = _issue437_body(body)
+        paragraphs = doc.paragraphs[:50]
+        started = time.perf_counter()
+        for paragraph in paragraphs:
+            paragraph.alignment = 1
+        return (time.perf_counter() - started) / len(paragraphs)
+
+    small = per_call(0)
+    large = per_call(400)
+    paragraph = paragraph_per_call(400)
+    if hasattr(_rdocx, "_reopen_work"):
+        # Debug builds rebuild the whole owner inventory after a cell gains
+        # its w:tcPr, to check the moved routes, so the timing needs a
+        # release build.
+        pytest.skip("debug build: the timing comparison needs a release build")
+    assert large <= small * 1.5 + 0.0005, (
+        f"Cell.{setter} took {1000 * small:.2f} ms per call with an empty body "
+        f"and {1000 * large:.2f} ms with 400 paragraphs"
+    )
+    assert large <= paragraph * 3 + 0.0002, (
+        f"Cell.{setter} took {1000 * large:.2f} ms per call against "
+        f"{1000 * paragraph:.2f} ms for Paragraph.alignment in the same body"
+    )
+
+
+def test_issue437_cell_text_costs_what_body_paragraph_text_costs():
+    """Cell.text and a cell paragraph's text go through the same publication
+    as a body paragraph's text, without a staged reopen or a physical route
+    walk, so they cost about what Paragraph.text costs in the same body."""
+    import rdocx
+    from rdocx import _rdocx
+
+    doc = _issue437_body(400)
+    doc.add_table(4, 5)
+    targets = [(row, column) for row in range(4) for column in range(5)]
+    if hasattr(_rdocx, "_reopen_work"):
+        # Debug builds check every indexed route again through the native
+        # walk, so only the work counters are meaningful there.
+        _rdocx._reopen_work()
+        scans = _rdocx._main_body_block_scans()
+        doc.paragraphs[0].text = "b"
+        body_scans = _rdocx._main_body_block_scans() - scans
+        scans = _rdocx._main_body_block_scans()
+        doc.tables[0].cell(0, 0).text = "c"
+        assert _rdocx._reopen_work() == [0] * 3
+        assert _rdocx._main_body_block_scans() - scans <= body_scans
+        pytest.skip("debug build: the timing comparison needs a release build")
+
+    def per_call(edit):
+        started = time.perf_counter()
+        for index, (row, column) in enumerate(targets):
+            edit(index, row, column)
+        return (time.perf_counter() - started) / len(targets)
+
+    body = per_call(lambda index, row, column: setattr(doc.paragraphs[index], "text", "b"))
+    cell = per_call(lambda index, row, column: setattr(doc.tables[0].cell(row, column), "text", "c"))
+    paragraph = per_call(
+        lambda index, row, column: setattr(doc.tables[0].cell(row, column).paragraphs[0], "text", "p")
+    )
+    for name, elapsed in (("Cell.text", cell), ("cell Paragraph.text", paragraph)):
+        assert elapsed <= body * 1.5 + 0.002, (
+            f"{name} took {1000 * elapsed:.2f} ms per call against "
+            f"{1000 * body:.2f} ms for a body Paragraph.text"
+        )
+    reopened = rdocx.Document.from_bytes(doc.to_bytes())
+    assert [reopened.tables[0].cell(row, column).text for row, column in targets] == ["p"] * 20
+    assert [paragraph.text for paragraph in reopened.paragraphs[:20]] == ["b"] * 20
+
+
 @pytest.mark.parametrize("run_count", [1, 2])
 def test_issue389_first_run_local_publication_keeps_exact_owner_lifetimes(run_count):
     import rdocx

@@ -1002,8 +1002,8 @@ impl PyParagraph {
             py,
             &candidate,
             "Paragraph.text",
-            location
-                .native(&document.inner)
+            document
+                .paragraph_route(&location, None)
                 .map(crate::document::WordPublication::ParagraphText)
                 .unwrap_or(crate::document::WordPublication::Conservative),
         )?;

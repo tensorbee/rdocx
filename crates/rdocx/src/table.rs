@@ -3031,6 +3031,14 @@ pub enum CellItemRef<'a> {
 }
 
 impl<'a> CellRef<'a> {
+    /// Whether the cell writes a `w:tcPr` element, its first child.
+    pub fn has_properties(&self) -> bool {
+        self.inner
+            .properties
+            .as_ref()
+            .is_some_and(|properties| !properties.is_empty())
+    }
+
     /// Whether cell properties retain facts outside the public reader model.
     pub fn has_unmodeled_properties(&self) -> bool {
         self.inner.properties.as_ref().is_some_and(|properties| {
