@@ -40,8 +40,8 @@ regenerated, never hand-edited.
 | M22, Word depth | 12 | 12 | 0 | 0 |
 | M23, From-scratch business documents | 24 | 24 | 0 | 0 |
 | M24, Modern DOCX authoring completeness | 54 | 32 | 0 | 22 |
-| X, Cross-cutting | 297 | 275 | 4 | 14 |
-| **Total** | **628** | **557** | **4** | **63** |
+| X, Cross-cutting | 297 | 275 | 5 | 13 |
+| **Total** | **628** | **557** | **5** | **62** |
 <!-- AUTOGEN:backlog-summary END -->
 
 ## All F-IDs
@@ -844,7 +844,7 @@ HLD14 contract before adopting contributor changes.
 | F-X273 | Repair header body clearance and complete TOC navigation | S96 | L | done |
 | F-X274 | Honor section and field page-number formats | S96 | M | in-progress |
 | F-X275 | Prepare Word 0.17.0 and shared/PowerPoint 0.15.0 with strict SemVer gates | S96 | L | in-progress |
-| F-X276 | Complete rpptx fit, table rows, fit text, Markdown and slide indexing | S96 | M | pending |
+| F-X276 | Complete rpptx fit, table rows, fit text, Markdown and slide indexing | S96 | M | in-progress |
 | F-X277 | Complete Word-like markup for equations, notes, links, cells, numbering, TOC and replace | S96 | L | pending |
 | F-X278 | Complete Word rendering fidelity and font policy | S96 | L | pending |
 | F-X279 | Complete comment ranges, comparison, revisions and insert_document | S96 | L | pending |
