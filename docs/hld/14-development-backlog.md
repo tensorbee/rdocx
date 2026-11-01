@@ -8774,3 +8774,103 @@ authority. Execute, exact-row reuse and frozen evidence consumption are
 separate modes. The existing wheels consumer requires completed CI and fresh
 selected-family publication preflight. Local implementation or synthetic tests
 do not satisfy the required actual three-host and final hosted acceptance.
+
+### F-X276, Complete rpptx fit, table rows, fit text, Markdown and slide indexing
+
+**Sprint**: S96
+**Size**: M
+**Depends on**: none
+**Test gate**: regression
+**Spec reference**: `08-rendering-spec.md`, Read-only fit and count consumers, and `10-bindings-spec.md`, Python colour inputs and live font formats, CLIs and Presentation semantic text export.
+
+Complete Issue 431 and PR 438 final outcomes for rpptx fit reports, grown table rows, plain fit text, Markdown spacing and slide indexing. Historical PR head `653053058a9a9c6647732179219f40ed2725caba`, captured 2026-10-31T15:01:27Z. Duplicate shape id and notes placeholder idx report the whole deck, name each unassessable frame and why, resolve the notes placeholder by type, and `validate` prints the duplicate as a sentence. Python `ValidationIssue.message` must equal CLI Display. A cell whose row grows but the table stays on the slide is not an overflow or has a distinct status, while a table that runs off is still an overflow. Fit text names each frame by shape and cell, prints child paths as plain indices, prints context or lists shared frames once with zero exact repeats. Markdown preserves single inner spaces, uses `&#32;` only where Markdown would drop or merge a space, escapes punctuation only where it could start syntax, and keeps a repeated space entity across runs and run boundaries. `prs.slides.index(slide)` returns the zero-based position and raises `ValueError` for a slide of another presentation.
+
+Rider debt stays explicit: actual rpptx CLI and Python calls, render and PDF for fit and Markdown, hash unchanged and README measurements recorded once by the single final owner. No native PowerPoint claim follows unless separately qualified. Historical donor limitations, including per-run escaping, run-boundary `&#32;` and a notes fix that is fit measurement only, are named residuals, not desired behavior. Provider edges are none. Clean Base is mandatory before claim. F-X276 preparation V4 was accepted by the Codex preparation pass2 as a basis for later canonical design adoption, subject to normal contract approval and a clean-Base claim. That acceptance is not implementation, microscope or feature acceptance. No canonical design, approval or claim follows from this intake. Eventual implementer Grok, with owner '-' until an actual claim.
+
+### F-X277, Complete Word-like markup for equations, notes, links, cells, numbering, TOC and replace
+
+**Sprint**: S96
+**Size**: L
+**Depends on**: F-X272, approved contract for design, actual provider completion for implementation
+**Test gate**: regression
+**Spec reference**: `03-architecture.md`, physical story and note ownership, `04-opc-and-packaging.md`, note parts and package markup, and `10-bindings-spec.md`, Native Word facade stability.
+
+Complete Issue 432 and PR 441 final outcomes for Word-like written markup. Historical PR head `aca195c4412f65cfc497a955b34a3e52efd3e2e7`, captured 2026-10-31T21:11:35Z. The earlier R3 head `54e5351efd443faac6e1e21ffd351a0b68fc0985` is historical only. Every `m:rad` written by `add_equation` holds `m:deg` after `m:radPr`, empty for a square root. A note number run has `w:rPr` before the note reference, the notes part holds separator and continuation-separator notes, and a space separates the number from the text. Links written by `Paragraph.add_hyperlink`, `add_heading_hyperlink`, Markdown with a template and HTML carry `w:rStyle Hyperlink`, with the built-in style added when missing, or at least colour and underline, including the low-level Rust publishers. An empty cell's lone empty paragraph is not carried into the merged cell, and second-empty and first-empty give one paragraph while both-with-text keeps both. Cells made by `insert_column` and `add_row` get the source cell's `w:pPr` and run properties of its paragraph mark, including `w:jc center` and `w:b`. A numbering definition id returned by `add_numbering_definition` stays valid for the life of the document. `rebuild_toc()` fills a TOC that `insert_toc()` wrote before the document had headings, in both orders. Replacement and text agree on what is searched, charts are left alone, count 1, the CLI accepts `--expect 1`, and cache and workbook agree.
+
+Provider edge F-X272: design may use the approved notes contract, while implementation requires actual provider completion, including an actually approved and passed genuine local provider checkpoint where the workflow allows one. Do not manufacture completion or use an oracle-only pending gate. Residual R-A277-7 foreign single-paragraph TOC is separate and needs its own row and provider if retained. HLD03 and HLD04 are assessed. The note leading-space behavior change is verified. Hash baseline moves 5 entries.
+
+### F-X278, Complete Word rendering fidelity and font policy
+
+**Sprint**: S96
+**Size**: L
+**Depends on**: none
+**Test gate**: differential
+**Spec reference**: `08-rendering-spec.md`, Embedded face selection across exports and Native Office font consumption, and the tables, indent, borders, row-split, automatic-colour and Wingdings sections, plus a distinct `10-bindings-spec.md` font-policy subsection.
+
+Complete Issue 433 and PR 440 final outcomes for Word rendering fidelity and font policy. Historical PR head `94b8c9f15c62de00e355208ed590a7100e8263c1`, captured 2026-10-31T16:09:30Z. Word-made TOC entries with Hyperlink run style are drawn in TOC paragraph styles, black and not underlined. `w:firstLine` and `w:hanging` are one first-line-indent property, and the most specific level that sets either decides, with all four cases at 72 pt. A TableGrid table whose own `w:tblBorders` set all six edges to none is drawn with no ruled line, while the style-only table keeps 3 plus 3. `w:vAlign` does not change where a row breaks, and the row starts on page 1 and breaks within one line of the no-vAlign case. Automatic-colour text is white on black and navy, black on white. Wingdings 2 bullet U+F0A1 maps to a Unicode square, or is reported, like Wingdings and Symbol. Every entry point resolves fonts the same way for the same folder. Omission uses the bundled set. Explicit system fallback is documented and opt-in in CLI and Python. Caller fonts keep the highest priority. Substitution is reported, and one font and page count per folder holds across `rdocx convert`, `to_pdf`, `page_count` and `layout`.
+
+A278-7 remains unmet. Q-S96-07 is answered, so the font-policy choice no longer blocks it. Provider edges are none. Clean Base and F-X274's reviewed engine source are resource bases, not formal providers. HLD08 and a distinct HLD10 font-policy subsection are added. Hash baseline moves 14 automatic-colour entries. F-X273 and F-X274 affected output evidence is re-run in the final union.
+
+### F-X279, Complete comment ranges, comparison, revisions and insert_document
+
+**Sprint**: S96
+**Size**: L
+**Depends on**: F-X272, approved contract for design, actual provider completion for implementation
+**Test gate**: regression
+**Spec reference**: `03-architecture.md`, comment graph and comparison identity, `04-opc-and-packaging.md`, comment parts and package revisions, and `10-bindings-spec.md`, Native Word facade stability.
+
+Complete Issue 434 and PR 444 final outcomes for comments, comparison, revisions and insert_document. Historical PR head `fac363eb9701918ad0d9d6672e386921506b7c02`, captured 2026-10-31T17:23:44Z. After `reply_to`, the reply id has its own range start and end covering its parent's text and a reference after its parent's, and `reply_to` and `rdocx comment reply` take initials. `w:comments` root declares `mc` and lists `w14` in `mc:Ignorable`, each comment's first paragraph uses CommentText and opens with CommentReference plus `w:annotationRef`, both styles are defined when missing, and `commentsIds.xml` is optional. Two paragraphs with the same text and formatting compare equal whatever their run boundaries, with zero revisions at every granularity, and a real word edit gives one deletion and one insertion at word granularity across fields, tabs, drawings, markers and hyperlinks. Each revision record in Python and `--json` carries its text, and each kind has one snake_case spelling across both surfaces. After `insert_document`, B's paragraphs resolve to B's font and size through a renamed style, a style carrying B's defaults, or direct formatting, with the three cases agreeing. With the default policy, each inserted document's lists keep their own numbering, 1, 2, 1, 2, 1, 2, MAY reuse an equal abstract definition and MUST keep instances distinct, including the Rust default.
+
+Provider edge F-X272: design may use the approved comment-graph and comparison contract, while implementation requires actual provider completion, including an actually approved and passed genuine local provider checkpoint where the workflow allows one. Issue430 footnote lifecycle and following-paragraph alignment rows are preserved. HLD03 and HLD04 are assessed. The story declares its hash delta or unchanged. Rust `insert_document` defaults and list behavior must be resolved rather than left at donor behavior.
+
+### F-X280, Complete validation and damaged-input refusal
+
+**Sprint**: S96
+**Size**: L
+**Depends on**: F-X277 and F-X272, approved contracts for design, actual provider completion for implementation
+**Test gate**: regression
+**Spec reference**: `04-opc-and-packaging.md`, duplicate ZIP refusal, XML 1.0 open refusal, bookmark ids and stored-package validation, and `10-bindings-spec.md`, `rpptx::validate_presentation_file` and Python validation.
+
+Complete Issue 435 and PR 439 final outcomes for validation and damaged inputs. Historical PR head `7c4b5cf879014247ee370653537f9fa9745721d3` from the 18:26:06Z capture. The reviewed re-authenticated captured head `1e8e5a98c7177117ebca917e343264bc74176493`, updated 2026-10-31T18:29:26Z, supersedes it for source coverage. CI belongs only to the exact captured head and is not acceptance. `rdocx validate` exits non-zero on schema faults for order, unknown element, enum, required attribute, negative extent and `m:rad` without `m:deg`, naming the part, while the base document validates. Each dangling reference exits non-zero naming the part and dangling id for picture blip, header reference, footnote reference and `w:t` inside `w:del`, and `validate` fails every file `rdocx.Document()` refuses. Both validators exit non-zero on a malformed `docProps/app.xml` and a ZIP storing a part twice, naming the part, and on open both libraries refuse a duplicate entry name or warn and say which copy they read. `rpptx validate` exits non-zero on unknown element, missing required `name`, misordered `presentation.xml` children, missing content type and short table row, naming the part, while the base deck validates. `validate` reports a part holding U+0001 as not well-formed, and opening fails naming the part for both libraries and both `word/document.xml` and `ppt/slides/slide1.xml`, while well-formed opaque content remains verbatim and is never rewritten to `_x0001_`. Two bookmarks sharing a `w:id` open and render in the same part and across body and header, `validate` may report the duplicate, and a save may renumber the pair without weakening Issue430 ownership or collision rules. `add_textbox` and `add_shape` raise at the call for a negative width or height, and nothing is written, while zero extent stays allowed.
+
+Provider edges F-X277 for note run order and F-X272 for bookmark and footnote identity and Issue430 ownership: design may use the approved contracts, while implementation requires actual provider completion, including an actually approved and passed genuine local provider checkpoint where the workflow allows one. HLD04 and HLD10 are added. Hash unchanged.
+
+### F-X281, Complete picture, chart, export and layout fidelity
+
+**Sprint**: S96
+**Size**: XL
+**Depends on**: none
+**Test gate**: differential
+**Spec reference**: `05-drawingml-model.md`, chart title and series values, `07-inheritance-and-resolution.md`, the master-placeholder chain, `08-rendering-spec.md`, EMF, PNG, chart formats, hidden shapes, ActualText and placeholder inheritance, and `10-bindings-spec.md`, export APIs and the additive chart table.
+
+Complete Issue 436 and PR 442 final outcomes for pictures, charts, exports and layout. Historical PR head `745504503af4c3cdae724d3d66f1d9ecf34d037d`, captured 2026-10-31T16:22:37Z. EMF pictures are drawn, or until supported both libraries report the undrawn picture with a diagnostic naming the unsupported format, not a missing relationship, including the rdocx diagnostic gap. An interlaced Adam7 PNG renders like its plain copy in both libraries, with the same red pixel count, no other colour and no diagnostic, and an undecodable picture is reported as such. A bar, line or area chart with a third `c:axId` is read and drawn, ignoring an axis id that names no axis. Every script number format draws the chart with no placeholder, and an unsupported format falls back to General for labels with a diagnostic. A chart is exported as at least its title when one exists and a table of categories, series names and values in `export_markdown`, `export_html`, `to_markdown`, `to_html`, `rpptx convert --to md` and `html`, and `rdocx convert --to md` and `html`. Shapes and groups with `hidden="1"` are not drawn in render, PDF or handouts, on slides, layouts and masters. Each word of an rpptx PDF extracts with its own box, with no `/ActualText` on spans whose glyphs map through ToUnicode, or one per span holding that span's own text, including bidi-reordered lines. The right column of the default Two Content layout starts at the same height and is black in render, CLI and PDF.
+
+Provider edges are none. F-X276, F-X278 and F-X280 are resource predecessors. Clean Base is mandatory. Reject `HtmlInput::charts` as a public field and use an additive API that keeps external `HtmlInput` literals compiling. Table-cell, header, footer and text-box charts remain named consumer-map residuals, not promoted criteria. The exported value `1150` is required. The `General` number-format token is separate and remains supported. HLD05, HLD07, HLD08 and HLD10 are added. Hash unchanged. F-X273 and F-X274 affected evidence is re-run in the final union.
+
+### F-X282, Bound edit cost across styles, body and cells
+
+**Sprint**: S96
+**Size**: M
+**Depends on**: none
+**Test gate**: regression
+**Spec reference**: `03-architecture.md`, staged clones, styles sharing and package part identity, `10-bindings-spec.md`, Word checked XML owner authority, and `12-testing-strategy.md`, the F-X268 performance gates.
+
+Complete Issue 437 and PR 443 final outcomes for edit cost across styles, body and cells. Historical PR head `6dc9ed82a3c8257e187c26de8060389d472f8060`, captured 2026-10-31T16:56:34Z. `run.text`, `try_replace_text`, `add_row`, `clone_row` and a cell paragraph setter cost at most 3 times more with a 419 KB styles part than with a 6 KB one, and the equal-model flush risk is proved or explicitly refused. A setter on a cell paragraph or run costs at most 3 times more in row 40 than row 1, and at most 3 times more with 2000 body paragraphs than without, measured at the issue script boundary: the cell-place check is cold with three calls and the first included, and the body check is warm with one untimed call on each document. Warming the cell-place check is rejected because it weakens the reported first-operation cost contract, and counter evidence may complement but not replace the timing row. Filling a table cell by cell is flat per call, at most 2 times from 30 to 120 cells.
+
+Provider edges are none. Clean Base and the F-X272 measurement base are resource bases. HLD03, HLD10 and HLD12 are assessed. Hash unchanged. The F-X268 79 flat-cost gates, saved bytes and hash 49 are re-run in the final union.
+
+### F-X283, Bound whole-cell setters and Python open-replace-save cost
+
+**Sprint**: S96
+**Size**: L
+**Depends on**: none
+**Test gate**: regression
+**Spec reference**: `03-architecture.md`, staged edits and package identity, `10-bindings-spec.md`, Word checked XML owner authority and live handle routes, and `12-testing-strategy.md`, performance strategy.
+
+Complete Issue 445 and PR 443 final outcomes for whole-cell setter cost and the Python open-replace-save cost. Issue445 body SHA-256 `60e20b2e1ca33a3ff0829d10dea13e973d61278f6c6f769a90503c28e32750c1`, captured in the non-atomic Task07 window 2026-11-01T09:17:25.616049Z to 2026-11-01T09:17:27.432844Z. PR443 moved to `7b3dcd0e4a3f89c4ecc7b88718c68a9a58159ad8`, body SHA-256 `597097f97b237401ddd048147e39962d2e4ebbbdeb9f652b6d8f3d8ec4bcabe4`. CI at that head is unknown. Earlier heads, dates and pins stay historical. No source is accepted from PR443.
+
+Case 1 retains the exact 20 by 5 table, 100 cells set once sequentially, bodies 0, 500 and 2000, and no invented warmup. `Cell.text`, `Cell.vertical_alignment` and `Cell.shading` each require a distinct PASS at 2000 below 1.0 ms and at most 1.5 times the empty-body cost plus 0.05 ms. Case 2 retains 4000 paragraphs of three runs each, a bold prefix, a normal middle and an italic end, water every fourth paragraph, and 1000 replacements. Python `Document.open` plus `try_replace_text` plus `save` must cost at most 1.2 times the same-build CLI including subprocess start. Three paired trials select min(python) as the lexicographic total, opened, replaced, saved tuple by total, and compare min(command), never minima of independent stages. It qualifies an actual Linux x86_64 release wheel and matching CLI, not donor acceptance.
+
+The separate `Paragraph.text`-in-cell observation stays in the consumer and regression work list without an invented numeric criterion. The other `PyCell::edit` setters `width`, `set_border` and `set_margins` get correctness coverage, not unrequested timing promises. Held live handles, first-handle activation, mandatory open checks, atomic failure, tracked/comments/notes and saved bytes remain design obligations. The updated PR443 explicitly leaves `Cell.text` failing and case 2 upstream. This is a genuinely additional story, not an F282 repair-cycle reset. The existing 44 A-ID rows and F282's original three A-IDs and exhausted design peers remain intact.
+
+Provider edges are none. Clean Base is mandatory. Shared facade, binding and HLD files make F-X283 a resource serial after F-X282, not a formal provider edge. HLD03, HLD10 and HLD12 are assessed. Hash unchanged.

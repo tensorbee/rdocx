@@ -3270,6 +3270,243 @@ Q-S96-03is answered on2026-10-30: the user explicitly selected preparation of Wo
 
 Raw issue identity, checksum-verified archives, six actual compiler outcomes, the tool log and immutable receipt/supplement are retained under /private/tmp/rdocx-s96-run-refresh/issue429-intake-v1. Root read and independently checked the two read-only API/gate reports. The answered version decision adds the amended implementation and qualification work. The prior14to20developer-day estimate predates it. F-X275 and sprint release readiness remain held for implementation of the approved compatibility contract, its concrete repair, scoped regressions, independent microscope, executable release gate and final integrated evidence. The reporter reply must describe only the validated outcome and remains unsent until then.
 
+##### S96 new GitHub intake, 2026-10-31
+
+The user directed that all arriving issues and PRs be folded into S96, and that the fixes be prepared in the end-of-sprint release candidate. Publication remains separate. The reviewed fresh snapshot covers 2026-11-01T00:11:44.164813Z to 2026-11-01T00:12:07.586655Z. It is a dated, non-atomic read. It proves 17 open issues and 9 open PRs, namely 427, 428 and 438 to 444, as `tensorbee/rdocx` pulls with head repository `hadim/rdocx` and base repository `tensorbee/rdocx` `main` at `24af95d3d94c25e95f61a75e7e21f18fa95b6363`. No open issue was created after the inclusive cutoff 2026-10-31T19:58:48Z, and no open PR was added relative to the prior observation list. The 10 older issues outside that list, 264, 281, 377, 381, 423, 424, 425, 426, 429 and 430, are not new arrivals. Their captured `created_at` values precede the cutoff. Coherence heads matched for all 9 PRs across list, detail and end-of-window reads, with an exact coherence window of 00:12:07.168596Z to 00:12:07.586655Z.
+
+PR439 captured head is `1e8e5a98c7177117ebca917e343264bc74176493`. It supersedes the historical `7c4b5cf879014247ee370653537f9fa9745721d3` for future source coverage work. R3's old head stays historical, and no earlier donor code or CI review transfers to the new head. CI belongs only to the exact captured head and is not acceptance. All seven new PRs are open, unmerged, non-draft, red at their captured heads, with zero reviews and zero comments. None is accepted, and no donor CI result is current acceptance.
+
+| Issue | Created | Updated | Body SHA-256 | Story |
+|---|---|---|---|---|
+| [431](https://github.com/tensorbee/rdocx/issues/431) | 2026-10-31T14:19:38Z | 2026-10-31T14:19:38Z | `992ea123f7818d87ed3ef5595365085de6171952eb620782782d2a2596be90bb` | F-X276 |
+| [432](https://github.com/tensorbee/rdocx/issues/432) | 2026-10-31T14:19:39Z | 2026-10-31T16:21:35Z | `43b11e97e001b5dcec2a11ae10b83f5cd2295b7764ac1bb3e5f72b4664d47a67` | F-X277 |
+| [433](https://github.com/tensorbee/rdocx/issues/433) | 2026-10-31T14:19:56Z | 2026-10-31T16:09:28Z | `26bec5a440ed0270568d15e698007ecf78fd74b57b31aa37dd9aabc81386fee0` | F-X278 |
+| [434](https://github.com/tensorbee/rdocx/issues/434) | 2026-10-31T14:19:57Z | 2026-10-31T14:19:57Z | `9e4dcae4a526819d7a89517ef936a53a26c606df7d9b0bcb1de30cc5ca527815` | F-X279 |
+| [435](https://github.com/tensorbee/rdocx/issues/435) | 2026-10-31T14:19:58Z | 2026-10-31T14:19:58Z | `c6fc7af39d67b04aff76cdde68d682887e8963bc4fe40ab3101773ae0d556e71` | F-X280 |
+| [436](https://github.com/tensorbee/rdocx/issues/436) | 2026-10-31T14:21:00Z | 2026-10-31T14:21:00Z | `75850702c488ec662e7a73dc425204e8c0c49d84e1b497ca1dc135b5973892db` | F-X281 |
+| [437](https://github.com/tensorbee/rdocx/issues/437) | 2026-10-31T14:21:55Z | 2026-10-31T16:59:08Z | `e71a0db893a2d9c4c1c0625630420736ed82775d947cbde5dd45eba3517ff7f4` | F-X282 |
+
+| PR | Issue | Captured head | Base | Updated | Body SHA-256 | Check conclusions |
+|---|---|---|---|---|---|---|
+| [438](https://github.com/tensorbee/rdocx/pull/438) | 431 | `653053058a9a9c6647732179219f40ed2725caba` | `24af95d3d94c25e95f61a75e7e21f18fa95b6363` | 2026-10-31T15:01:27Z | `5746b1d907c961ed9998fc95b92d08b0fa0ffdaf71369f95b62cb9557cddef69` | success 9, failure 8, skipped 2 |
+| [441](https://github.com/tensorbee/rdocx/pull/441) | 432 | `aca195c4412f65cfc497a955b34a3e52efd3e2e7` | `24af95d3d94c25e95f61a75e7e21f18fa95b6363` | 2026-10-31T21:11:35Z | `5715fef5d8933330bd576203bd6a11932a77688c732669b3cd6edaefc0b102ea` | success 9, failure 7, skipped 3 |
+| [440](https://github.com/tensorbee/rdocx/pull/440) | 433 | `94b8c9f15c62de00e355208ed590a7100e8263c1` | `24af95d3d94c25e95f61a75e7e21f18fa95b6363` | 2026-10-31T16:09:30Z | `d9b9b2007579d9e12e841e11e775b5fda5fd8b4415700e3aa731f06c384d0720` | success 10, failure 7, skipped 2 |
+| [444](https://github.com/tensorbee/rdocx/pull/444) | 434 | `fac363eb9701918ad0d9d6672e386921506b7c02` | `24af95d3d94c25e95f61a75e7e21f18fa95b6363` | 2026-10-31T17:23:44Z | `636ef57d220e0a892da0ef8170916a18cc72e01b95f2c1bf39894fe98099c7fa` | success 10, failure 6, skipped 3 |
+| [439](https://github.com/tensorbee/rdocx/pull/439) | 435 | `1e8e5a98c7177117ebca917e343264bc74176493` | `24af95d3d94c25e95f61a75e7e21f18fa95b6363` | 2026-10-31T18:29:26Z | `ed4af9039fb03839a33bb83d92ab4b85c64c09a2fce789d8e380658c6b78ed61` | success 10, failure 7, skipped 2 |
+| [442](https://github.com/tensorbee/rdocx/pull/442) | 436 | `745504503af4c3cdae724d3d66f1d9ecf34d037d` | `24af95d3d94c25e95f61a75e7e21f18fa95b6363` | 2026-10-31T16:22:37Z | `465d23d296612beb9d00b544920278e4a0218b7506c475793bc395a4fc06e3d7` | success 10, failure 7, skipped 2 |
+| [443](https://github.com/tensorbee/rdocx/pull/443) | 437 | `6dc9ed82a3c8257e187c26de8060389d472f8060` | `24af95d3d94c25e95f61a75e7e21f18fa95b6363` | 2026-10-31T16:56:34Z | `cafcf7bdc824e53d58bfc8e8e37e147d8f57335686f1323468b9f41d68d50fe7` | success 10, failure 7, skipped 2 |
+
+The fresh snapshot proves only per-head check conclusions, not log causes. At the captured heads the tallies are the ones in the table above. Presentation fidelity is `skipped` for PR441 and PR444, so those captured heads do not record a retrieval failure for that job. Separately, the historical 2026-10-31T18:26:06Z R3 refresh recorded that Test, MSRV 1.93, Word fidelity, Presentation fidelity and rpptx Python stopped at the pinned LibreOffice retrieval on the then old main workflow. That narrative belongs to the earlier heads at that as-of time, not to the captured heads `1e8e5a98` or `aca195c4`. Python bindings rdocx historically failed the main `KeyError: 'producer.seed_eligible'` baseline, independently witnessed at main run `40613604611` at `24af95d3d94c25e95f61a75e7e21f18fa95b6363`, created 2026-10-28T01:12:18Z, at `crates/rdocx-py/tests/test_core.py:15243`, as an as-of 2026-10-28 historical identity. PR438 and PR441 historical Docs jobs failed on README measurement rows that differ from the approved table in `scripts/readme_doctests.py`, as recorded at the 18:26:06Z refresh. Green non-product jobs do not qualify acceptance, and there is no accepted final integrated CI evidence.
+
+The apply-check table below is the historical R3 v1 receipt at the 2026-10-31T18:26:06Z refresh. Its producer is the then-recorded PR diffs against the then-current dirty `sprint/s96` tree. It is not a current dirty-tree measurement, was not re-run, and does not describe the later stopped tree. These are conflict estimates, not validation or acceptance.
+
+| PR | Apply-check conflicts |
+|---|---|
+| 438 | `crates/rpptx-cli/README.md`, `crates/rpptx-render/README.md`, `crates/rpptx/README.md` |
+| 441 | `README.md`, `crates/rdocx-oxml/README.md`, `crates/rdocx-py/tests/test_core.py`, `crates/rdocx/src/document.rs`, `crates/rdocx/tests/regression_test.rs`, `scripts/hash_baseline.json` |
+| 440 | `README.md`, `crates/oxml-layout/README.md`, `crates/rdocx-layout/README.md`, `crates/rdocx-layout/src/engine.rs`, `crates/rdocx-layout/src/table.rs`, `crates/rdocx-oxml/README.md`, `crates/rdocx-py/tests/test_core.py`, `scripts/hash_baseline.json`, `scripts/readme_doctests.py` |
+| 444 | `README.md`, `crates/rdocx-cli/README.md`, `crates/rdocx-cli/tests/integration.rs`, `crates/rdocx-oxml/README.md`, `crates/rdocx-oxml/src/comments.rs`, `crates/rdocx-py/tests/test_core.py`, `crates/rdocx/src/comparison.rs`, `crates/rdocx/src/revision.rs`, `crates/rdocx/tests/regression_test.rs`, `scripts/readme_doctests.py` |
+| 439 | `README.md`, `crates/oxml-opc/README.md`, `crates/rdocx-cli/README.md`, `crates/rdocx-py/tests/test_core.py`, `crates/rdocx/tests/regression_test.rs`, `crates/rpptx-cli/README.md`, `crates/rpptx/README.md`, `scripts/readme_doctests.py` |
+| 442 | `README.md`, `crates/oxml-chart/README.md`, `crates/oxml-media/README.md`, `crates/oxml-pdf/README.md`, `crates/rdocx-html/README.md`, `crates/rdocx-layout/README.md`, `crates/rdocx-py/tests/test_core.py`, `crates/rdocx/tests/regression_test.rs`, `crates/rpptx-layout/README.md`, `crates/rpptx-oxml/README.md`, `crates/rpptx/README.md`, `scripts/readme_doctests.py` |
+| 443 | `README.md`, `crates/oxml-opc/README.md`, `crates/rdocx-oxml/README.md`, `scripts/readme_doctests.py` |
+
+##### Later Issue445 intake, 2026-11-01
+
+A reviewed read-only Task07 snapshot is non-atomic over 2026-11-01T09:17:25.616049Z to 2026-11-01T09:17:27.432844Z. It proves 18 pure open issues and nine open PRs. Issue445 is new with body SHA-256 `60e20b2e1ca33a3ff0829d10dea13e973d61278f6c6f769a90503c28e32750c1`. PR443 moved to `7b3dcd0e4a3f89c4ecc7b88718c68a9a58159ad8` with body SHA-256 `597097f97b237401ddd048147e39962d2e4ebbbdeb9f652b6d8f3d8ec4bcabe4`. Earlier heads, dates and pins stay historical. CI at the new PR443 head is unknown, and no CI was queried by this collection. No source is accepted from PR443. The Root final is `.claude/reviews/S96-github-task07-issue445-codex-final-1.md`, SHA-256 `b2209bd04801d8ea97a1a64d566e30b4e1b007946fd934d1c6a36fd780ad6bc4`. The DeepSeek first audit is `/private/tmp/rdocx-cross-review/github07-issue445-deepseek-peer-pass1.md`, SHA-256 `c35ecfbe40d1b5039e0c51c3741a839cfefe9ba0cb62d31dd1a101fc6f605d1c`.
+
+Issue445 registers a genuinely additional F-X283, not the already used F-283, because its consumers and lifecycle stages are distinct from F282. This is not a repair-cycle reset. The existing 44 A-ID rows, F282's original three A-IDs and its exhausted three design peers remain intact. F-X283 is pending, owner '-', with eventual author DeepSeek. It needs its own draft, approval and clean-Base claim. The user cap of three design peers then a Root final, and three implementation peers then a Root final, applies independently to this genuinely new story, starting at zero and not reusing F282's exhausted peers. It has no formal provider edge. Shared facade, binding and HLD files make it a resource serial after F-X282.
+
+Case 1 retains the exact 20 by 5 table, 100 cells set once sequentially, bodies 0, 500 and 2000, and no invented warmup. A283-1 Cell.text, A283-2 Cell.vertical_alignment and A283-3 Cell.shading each require a distinct PASS at 2000 below 1.0 ms and at most 1.5 times the empty-body cost plus 0.05 ms. A283-4 retains 4000 paragraphs, three runs each, a bold prefix, a normal middle and an italic end, water every fourth paragraph, 1000 replacements, and a Python open, replace and save total at most 1.2 times the same-build CLI including subprocess start. Three paired trials select min(python) as the lexicographic total, opened, replaced, saved tuple by total, and compare min(command), never minima of independent stages. It qualifies an actual Linux x86_64 release wheel and matching CLI, not donor acceptance.
+
+The separate Paragraph.text-in-cell observation stays in the consumer and regression work list without an invented numeric criterion. The other PyCell::edit setters width, set_border and set_margins get correctness coverage, not unrequested timing promises. Held live handles, first-handle activation, mandatory open checks, atomic failure, tracked/comments/notes and saved bytes remain design obligations. The updated PR443 explicitly leaves Cell.text failing and case 2 upstream. HLD03 staged edits and package identity, HLD10 checked Python owner and handle routes, and HLD12 performance strategy are assessed.
+
+##### Whole-story contracts
+
+Every story is pending, with owner '-' until an actual claim on a clean Base. F-X276 has eventual implementer Grok. The other six, and F-X283, have eventual implementer DeepSeek. No design is approved or created by this registration.
+
+| F-ID | Issue and PR | Size | Final outcome | Provider edges | Exclusive resources | Hash baseline |
+|---|---|---|---|---|---|---|
+| F-X276 | Issue 431, PR 438 | M | A276-1 to A276-5 final outcomes, including cross-run Markdown and run-boundary escaping, fit exit 0 and exit 1, and Python ValidationIssue.message equal to CLI Display. Actual rpptx CLI, Python, render and PDF evidence due. No native PowerPoint claim | None, clean Base only | rpptx and rpptx-cli source, rpptx test carriers, HLD08 fit section, HLD10 three sites. No rdocx test carrier | Unchanged |
+| F-X277 | Issue 432, PR 441 | L | A277-1 to A277-8 final outcomes, including styled low-level Rust hyperlinks and the two insert_toc orders. Residual R-A277-7 foreign TOC separate. Note leading-space behavior verified. HLD03 and HLD04 assessment | F-X272 approved notes contract for design, actual completion for implementation | rdocx document, table and math, Python paragraph, rdocx test carriers, HLD03, HLD04 and HLD10, hash baseline | 5 entries |
+| F-X278 | Issue 433, PR 440 | L | A278-1 to A278-7 final outcomes with the rendering residuals, and A278-7 under the answered Q-S96-07 bundled default, explicit system-fallback opt-in and caller-font priority. HLD08 rendering and font sections added. F-X273 and F-X274 affected evidence reconciled in the union | None, clean Base and F-X274 reviewed resource base | rdocx-layout engine, paginator and table, oxml-layout font, rdocx-oxml paragraph properties, rdocx test carriers, HLD08, hash baseline | 14 entries |
+| F-X279 | Issue 434, PR 444 | L | A279-1 to A279-6 final outcomes, including Word-like crossing reply ranges, snake_case revision kind on CLI JSON, and Rust insert_document defaults and lists. Issue430 rows preserved. HLD03 and HLD04 assessment | F-X272 approved comment-graph contract for design, actual completion for implementation | rdocx comments, comparison, revision, field and document, oxml comments, CLI, test carriers, HLD03, HLD04 and HLD10 | Declared delta or unchanged |
+| F-X280 | Issue 435, PR 439 | L | A280-1 to A280-7 final outcomes, including refuse-at-open for both libraries and both parts naming the part, with well-formed opaque content preserved verbatim. HLD04 and HLD10 added | F-X277 note run order and F-X272 bookmark contract, approved contracts for design, actual completion for implementation | oxml-opc package, rdocx document, CLI, Python test_core, rpptx lib and tests, HLD04 and HLD10 | Unchanged |
+| F-X281 | Issue 436, PR 442 | XL | A281-1 to A281-8 final outcomes, including chart title across the four exports and both CLI convert paths, per-word bidi boxes, and an additive chart-table API. HLD05, HLD07, HLD08 and HLD10 added. F-X273 and F-X274 evidence re-run | None, F-X276, F-X278 and F-X280 are resource predecessors | oxml-chart, oxml-pdf, oxml-media, rdocx-html, rdocx-layout engine, rdocx document and epub, rpptx carriers, test carriers, HLD05, HLD07, HLD08 and HLD10 | Unchanged |
+| F-X282 | Issue 437, PR 443 | M | A282-1 to A282-3 final outcomes, including a deterministic cold cell-place ratio at most 3. F-X268 79 flat-cost gates, saved bytes and hash 49 re-run in the union. HLD03, HLD10 and HLD12 assessment | None, clean Base and F-X272 measurement base | oxml-opc package, rdocx-oxml document, rdocx document, epub, field, html and odt, Python paragraph and run, test_core, HLD03, HLD10 and HLD12 | Unchanged |
+| F-X283 | Issue 445, PR 443 | L | A283-1 to A283-4 final outcomes, including three distinct setter PASS lines at the exact case 1 boundary and the Python-versus-CLI open-replace-save total at most 1.2. Paragraph.text-in-cell observation retained without a numeric criterion. HLD03, HLD10 and HLD12 assessed | None. Clean Base, and resource serial after F-X282 | rdocx document, Python cell and document, test_core, HLD03, HLD10 and HLD12 | Unchanged |
+
+##### Dependency graph A, provider and contract completion
+
+These edges mean the dependent story consumes a contract or behavior the provider must complete first. They are not file-sharing edges. A clean committed canonical base is a universal claim precondition, not a provider edge. Contract approval permits dependent design approval. Actual dependent implementation still requires provider completion, including an actually approved and passed genuine local provider checkpoint where the workflow allows one. No provider completion is manufactured, and an oracle-only pending gate cannot unblock a dependency.
+
+| Edge | Provider contract | Dependent work | Evidence | State |
+|---|---|---|---|---|
+| F-X277 depends on F-X272 | Normal-note identity, schema placement, custody, separator ownership and package cleanup | Issue 432 A277-2 note markup without a second note topology against open Issue430 rows | F-X272 design notes at lines 2393-2406 and 2834-2838, frozen design SHA `e37d2ded5174b69d322a053fe85b85afbedddd7448aacfb5033b5922454d9949`, as-of that stopped freeze, and CURRENT_SPRINT Issue430 | F272 in-progress, contract pending. Source peer2 increment rejected, neither done nor accepted |
+| F-X279 depends on F-X272 | Comparison, revision custody and comment graph | Issue 434 A279-1 crossing reply range and comparison acceptance | F-X272 design comment-graph A5 at line 62, frozen design SHA `e37d2ded5174b69d322a053fe85b85afbedddd7448aacfb5033b5922454d9949`, as-of that stopped freeze, and CURRENT_SPRINT Issue430 | F272 in-progress, contract pending |
+| F-X280 depends on F-X277 | Issue 432 note run order | Issue 435 A280-2 base document validates before its own fault is injected | PR439 A280-2 and PR441 A277-2 | F277 pending |
+| F-X280 depends on F-X272 | Bookmark and footnote identity and Issue430 ownership | Issue 435 A280-6 shared bookmark ids do not weaken the F272 lifecycle | F-X272 design bookmark custody at line 2835 and lines 2834-2838, frozen design SHA `e37d2ded5174b69d322a053fe85b85afbedddd7448aacfb5033b5922454d9949`, as-of that stopped freeze, and CURRENT_SPRINT Issue430 | F272 in-progress, contract pending |
+
+The F-X273 provider edge is deleted. Issue 432 A277-7 is the two `insert_toc` orders in the issue script, and the donor covers that writer path. Foreign single-paragraph TOC refusal is residual R-A277-7 with no F-X273 provider. No provider edge exists for F-X276, F-X278, F-X281, F-X282 or F-X283. Their prerequisites are the clean Base and exclusive resources, not product contracts.
+
+##### Dependency graph B, exclusive resources and scheduling
+
+Exclusive resource scheduling is separate from product dependency. One story per wave may hold the same source or test file, the same integration test binary, the hash baseline, the sprint records, or the same semantic HLD section. The hash baseline is exclusive per wave.
+
+| Constraint | Stories | Effect |
+|---|---|---|
+| F272 dirty files and the sole canonical source, build and test lease | F276 to F283 | Universal clean-Base barrier. No claim before the sole writer returns a clean committed canonical tree, and the sprint records are rebased onto the F272 Q-S96-04 text. F276, F278, F281, F282 and F283 need only this barrier |
+| F272 open notes, bookmark and comment-graph contract | F277, F279, F280 | Provider barrier on top of the clean Base |
+| `crates/rdocx-py/tests/test_core.py` and `crates/rdocx/tests/regression_test.rs` | F277, F278, F279, F280, F281, F282, F-X283 | One rdocx story per wave |
+| `scripts/hash_baseline.json` | F277 moves 5 entries, F278 moves 14, F279 declares delta or unchanged, F276, F281, F282 and F283 unchanged | At most one baseline mover per wave, so F277 and F278 cannot share a wave |
+| `crates/rdocx-layout/src/engine.rs` | F278 and F281, with F274's reviewed source as the base | F278 before F281, and F274 is a resource base, not a formal provider |
+| `crates/rdocx/src/document.rs`, `crates/rdocx/src/field.rs`, `crates/oxml-opc/src/package.rs` | F272, F277, F279, F280, F281, F282, F-X283 | Serial ordering after F272. F282 follows F277, F279, F280 and F281. F-X283 follows F282 |
+| rpptx source and tests | F276, F280, F281 | F276 first, then F280, then F281 |
+| `docs/hld/10-bindings-spec.md` | F276, F277, F278, F279, F282, F-X283, plus F280 and F281 if they add binding text | Different headings only. F277 and F279 share Native Word facade stability, so they cannot share a wave. F278's font-policy subsection must be distinct. F-X283's owner and handle route text is distinct |
+| `scripts/readme_doctests.py` and root `README.md` | F277 to F283 | README measurement rows are recorded once by F-X275 or the integrator at the final union |
+| Sprint records and `docs/hld/14-development-backlog.md` | All | The integrator writes these once. Workers do not write AS_BUILT, SPRINT_TRACKER or the HLD14 registry |
+
+F-X283 has no formal provider edge. It shares `crates/rdocx/src/document.rs`, `crates/rdocx-py/tests/test_core.py` and HLD03, HLD10 and HLD12 with F-X282, so it is a resource serial after F-X282. F-X276 with F-X278 has no shared PR file. Their HLD08 sections are distinct, and any HLD10 font-policy subsection F-X278 adds is distinct from F-X276's three sites. This is the only fully conflict-free pair. F-X276 with F-X277, F-X279 or F-X282 shares HLD10 only, with donor paragraphs in distinct headings, so these are coordination-limited later pairs. Every other pair shares test carriers, the hash baseline, document, package or README doctests.
+
+##### Acceptance matrix, all 48 A-ID obligations
+
+Every original issue case remains. A Partial or Unmet row remains an implementation obligation. Covered means historical donor coverage, not current sprint acceptance. Status counts by story are 5, 8, 7, 6, 7, 8 and 3, for 44 unique A-IDs. Issue445 adds 4 rows for F-X283, for 48 unique A-IDs. The 44 original rows remain intact. Peer2's "38" was an arithmetic error in the review, not a dropped-row defect in the author packet.
+
+**Issue 431, F-X276, 5 rows**
+
+| A-ID | Required final outcome | Historical donor limitation or residual | Status |
+|---|---|---|---|
+| A276-1 | Duplicate shape id and notes placeholder idx report the whole deck, name each unassessable frame and why, resolve the notes placeholder by type, and validate prints the duplicate as a sentence. Python ValidationIssue.message equals CLI Display | Donor keeps the Rust Debug form in Python, unused layout or master autofit frames still exit 1 instead of exit 2 with none, and the notes fix is fit measurement only | Covered historical |
+| A276-2 | A cell whose row grows but the table stays on the slide is not an overflow or has a distinct status, while a table that runs off is still an overflow | A rotated table keeps the old answer, and other cells of a table that runs off are still judged by their own box | Covered historical |
+| A276-3 | Fit text names each frame by shape and cell, prints child paths as plain indices, prints context or lists shared frames once, with zero exact repeats | None material for the issue | Covered historical |
+| A276-4 | Single inner spaces are spaces, `&#32;` only where Markdown would drop or merge a space, punctuation escaped only where it could start syntax, and a repeated space keeps its entity across runs and run boundaries | Donor escaping is per run, and a single space at a run boundary becomes `&#32;`. Cross-run whitespace and punctuation are not source-proven, so the row stays open until the design proves or fixes it | Partial historical |
+| A276-5 | `prs.slides.index(slide)` returns the zero-based position and raises `ValueError` for a slide of another presentation | None material for the issue | Covered historical |
+
+**Issue 432, F-X277, 8 rows**
+
+| A-ID | Required final outcome | Historical donor limitation or residual | Status |
+|---|---|---|---|
+| A277-1 | Every `m:rad` written by `add_equation` holds `m:deg` after `m:radPr`, empty for a square root | Imported radicals keep what they had | Covered historical |
+| A277-2 | A note number run has `w:rPr` before the note reference, the notes part holds separator and continuation-separator notes, and a space separates the number from the text | `settings.xml` does not get the `w:footnotePr` or `w:endnotePr` lists, the note paragraph does not take FootnoteText or EndnoteText style, and the leading-space behavior change must be verified | Covered historical |
+| A277-3 | Links written by `Paragraph.add_hyperlink`, `add_heading_hyperlink`, Markdown with a template and HTML carry `w:rStyle Hyperlink`, with the built-in style added when missing, or at least colour and underline, including the low-level Rust publishers | High-level Rust, HTML, Markdown and Python are covered, while low-level Rust `Paragraph::add_hyperlink` and `add_internal_hyperlink` remain unstyled unless the caller sets the id from `ensure_hyperlink_style()` | Partial historical |
+| A277-4 | An empty cell's lone empty paragraph is not carried into the merged cell, with second-empty and first-empty giving one paragraph and both-with-text keeping both | None material for the issue | Covered historical |
+| A277-5 | Cells made by `insert_column` and `add_row` get the source cell's `w:pPr` and run properties of its paragraph mark, including `w:jc center` and `w:b` | List numbering is not copied, so a new row under a numbered cell is not numbered | Covered historical |
+| A277-6 | A numbering definition id returned by `add_numbering_definition` stays valid for the life of the document, including after `add_footnote` or `add_picture` | Saved packages are unchanged, and equivalent construction orders save identical packages | Covered historical |
+| A277-7 | `rebuild_toc()` fills a TOC that `insert_toc()` wrote before the document had headings, in both orders | Foreign single-paragraph TOC refusal is residual R-A277-7, not this criterion | Covered historical |
+| A277-8 | Replacement and text agree on what is searched, charts are left alone, count 1, the CLI accepts `--expect 1`, and cache and workbook agree | To rename a chart category, change the chart data. Literal replacement no longer reaches chart labels | Covered historical |
+
+**Issue 433, F-X278, 7 rows**
+
+| A-ID | Required final outcome | Historical donor limitation or residual | Status |
+|---|---|---|---|
+| A278-1 | Word-made TOC entries with Hyperlink run style are drawn in TOC paragraph styles, black and not underlined | Heuristic based on TOC paragraph style and `_Toc` anchor, not the TOC field. A hand-typed `_Toc` link in a `toc N` paragraph loses the Hyperlink look | Covered historical |
+| A278-2 | `w:firstLine` and `w:hanging` are one first-line-indent property, and the most specific level that sets either decides, with all four cases at 72 pt | None material for the issue | Covered historical |
+| A278-3 | A TableGrid table whose own `w:tblBorders` set all six edges to none is drawn with no ruled line, while the style-only table keeps 3 plus 3 | Visible change for styles that set only some edges, and no sample has one | Covered historical |
+| A278-4 | `w:vAlign` does not change where a row breaks, and the row starts on page 1 and breaks within one line of the no-vAlign case | A short cell next to a long one is aligned within the first split part where it ends. Word placement is not checked, and LibreOffice breaks a centred row at a different line | Covered historical |
+| A278-5 | Automatic-colour text is white on black and navy, black on white | Run shading and highlighting are not the background, a nested table cell without its own fill does not inherit the outer cell, and the Word threshold is not documented | Covered historical |
+| A278-6 | Wingdings 2 bullet U+F0A1 is mapped to a Unicode square, or reported, like Wingdings and Symbol | Bounded Wingdings 2 table, circles, squares, diamonds, lozenge, checks and boxes, with diagnostics for unmapped codes, and other codes keep their code with the diagnostic | Covered historical |
+| A278-7 | Every entry point resolves fonts the same way for the same folder, bundled-only or with documented system fallback selectable in CLI and Python, substitution is reported, and one font and page count per folder across `rdocx convert`, `to_pdf`, `page_count` and `layout` | Donor leaves the case open. Current behavior differs across CLI convert and layout, Python to_pdf, and Python layout and page_count. Q-S96-07 is answered as bundled default, explicit system-fallback opt-in, and caller fonts highest. The row stays unmet | Unmet historical |
+
+**Issue 434, F-X279, 6 rows**
+
+| A-ID | Required final outcome | Historical donor limitation or residual | Status |
+|---|---|---|---|
+| A279-1 | After `reply_to`, the reply id has its own range start and end covering its parent's text and a reference after its parent's, and `reply_to` and `rdocx comment reply` take initials | Donor does not write the reply range and reference, and a nested attempt makes `Document.compare` refuse an edited document that adds such a reply. Initials are covered through `reply_to_with_initials`, Python `initials=` and CLI `--initials` | Unmet historical |
+| A279-2 | `w:comments` root declares `mc` and lists `w14` in `mc:Ignorable`, each comment's first paragraph uses CommentText and opens with CommentReference plus `w:annotationRef`, both styles are defined when missing, and `commentsIds.xml` is optional | A document without Normal or DefaultParagraphFont gets the two styles without `w:basedOn`, and the pinned Word comment candidate SHA changes so its native check should be re-run | Covered historical |
+| A279-3 | Two paragraphs with the same text and formatting compare equal whatever their run boundaries, with zero revisions at every granularity, and a real word edit gives one deletion and one insertion at word granularity across fields, tabs, drawings, markers and hyperlinks | Plain-text runs with equal `w:rPr` are covered. A split next to a field, tab, drawing, marker or hyperlink keeps the old whole-run behavior | Partial historical |
+| A279-4 | Each revision record in Python and `--json` carries its text, and each kind has one snake_case spelling across both surfaces | Revision text is covered, but Python uses snake_case while CLI JSON uses kebab case. HLD10 line 730 requires snake_case for Python revisions, so the CLI deviation is a contract defect | Partial historical |
+| A279-5 | After `insert_document`, B's paragraphs resolve to B's font and size through a renamed style, a style carrying B's defaults, or direct formatting, with the three cases agreeing | Python is covered for the default paragraph style. Character and table styles keep destination defaults, note and comment paragraphs with no style are unchanged, and Rust `Document::insert_document` keeps its destination-styles behavior | Partial historical |
+| A279-6 | With the default policy, each inserted document's lists keep their own numbering, 1, 2, 1, 2, 1, 2, MAY reuse an equal abstract definition and MUST keep instances distinct, including the Rust default | Python `insert_document` turns list-instance reuse off. Other fragment imports keep reuse on, and the Rust default is not stated as changed | Partial historical |
+
+**Issue 435, F-X280, 7 rows**
+
+| A-ID | Required final outcome | Historical donor limitation or residual | Status |
+|---|---|---|---|
+| A280-1 | `rdocx validate` exits non-zero on schema faults for order, unknown element, enum, required attribute, negative extent and `m:rad` without `m:deg`, naming the part, while the base document validates | Documented subset. Children outside `w:body`, `w:p` and `w:r` are not checked against their content model, and other enums, other math required children and foreign namespaces are not checked. The issue allows a subset if the help says what is checked | Covered historical |
+| A280-2 | Each dangling reference exits non-zero naming the part and dangling id for picture blip, header reference, footnote reference and `w:t` inside `w:del`, and `validate` fails every file `rdocx.Document()` refuses | The issue base document is built with `add_footnote`, whose run order `validate` reports, so this depends on F-X277 note run order | Partial historical |
+| A280-3 | Both validators exit non-zero on a malformed `docProps/app.xml` and a ZIP storing a part twice, naming the part, and on open both libraries refuse a duplicate entry name or warn and say which copy they read | None material for the issue | Covered historical |
+| A280-4 | `rpptx validate` exits non-zero on unknown element, missing required `name`, misordered `presentation.xml` children, missing content type and short table row, naming the part, while the base deck validates | `rpptx::validate_presentation_file` is new public API, and Python `Presentation.validate()` still checks the parsed deck, not the stored package | Covered historical |
+| A280-5 | `validate` reports a part holding U+0001 as not well-formed, and opening fails naming the part for both libraries and both `word/document.xml` and `ppt/slides/slide1.xml`, while well-formed opaque content remains verbatim | Validate half is covered for both libraries, but open and save are unmet for both. A part holding U+0001 still opens and is saved back raw. Refuse at open naming the part and never rewrite to `_x0001_` | Partial historical |
+| A280-6 | Two bookmarks sharing a `w:id` open and render in the same part and across body and header, `validate` may report the duplicate, and a save may renumber the pair without weakening Issue430 ownership or collision rules | This changes the identifier-scanning contract used by F272's footnote and bookmark lifecycle, so it depends on F-X272 | Covered historical |
+| A280-7 | `add_textbox` and `add_shape` raise at the call for a negative width or height, as `add_table` does, and nothing is written, while zero extent stays allowed | None material for the issue | Covered historical |
+
+**Issue 436, F-X281, 8 rows**
+
+| A-ID | Required final outcome | Historical donor limitation or residual | Status |
+|---|---|---|---|
+| A281-1 | EMF pictures are drawn, or until supported both libraries report the undrawn picture with a diagnostic naming the unsupported format, not a missing relationship | A bounded EMF subset is rasterised. An EMF with no record of the subset is reported by rpptx but still drawn as an empty frame without a diagnostic by rdocx. EMF is rasterised, not vector, including in the PDF, and text, clipping, BITBLT, STRETCHBLT, ALPHABLEND, dashed pens, hatched brushes, EMF+ and WMF are not drawn. The rdocx diagnostic gap is an unmet issue criterion | Partial historical |
+| A281-2 | An interlaced Adam7 PNG renders like its plain copy in both libraries, same red pixel count, no other colour, no diagnostic, and an undecodable picture is reported as such, not as a missing relationship | None material for the issue | Covered historical |
+| A281-3 | A bar, line or area chart with a third `c:axId` is read and drawn, ignoring an axis id that names no axis, with categories and no placeholder diagnostic | A third or later `c:axId` is kept verbatim after the second and ignored, a third id that names a declared axis is also ignored, and `validate` is unchanged | Covered historical |
+| A281-4 | Every script number format draws the chart with no placeholder, and an unsupported format falls back to General for labels with a diagnostic | Thousands separators, scaling commas, currency, quoted and escaped literals, sections and colour brackets are covered. Dates, times, fractions, scientific notation, conditions, General inside a section and text sections fall back with a diagnostic, which the issue allows | Covered historical |
+| A281-5 | A chart is exported as at least its title when one exists and a table of categories, series names and values in `export_markdown`, `export_html`, `to_markdown`, `to_html`, `rpptx convert --to md` and `html`, and `rdocx convert --to md` and `html` | Donor does not write the chart title because `CT_Title.text` is private and `from_xml` stores `text: None`. All four library exports and both CLI convert paths must carry the title, category, series name and value | Unmet historical |
+| A281-6 | Shapes and groups with `hidden="1"` are not drawn in render, PDF or handouts, on slides, layouts and masters | rpptx semantic export still includes hidden-shape text, and the issue does not require semantic export | Covered historical |
+| A281-7 | Each word of an rpptx PDF extracts with its own box, with no `/ActualText` on spans whose glyphs map through ToUnicode, or one per span holding that span's own text, including bidi-reordered lines | Logical-line spans coalesce only when runs are drawn out of logical order. A line the bidi pass reordered still carries its whole logical text on its first span, so extraction reports the run as one word on the first word's box | Unmet historical |
+| A281-8 | The right column of the default Two Content layout starts at the same height and is black in render, CLI and PDF | None material for the issue | Covered historical |
+
+**Issue 437, F-X282, 3 rows**
+
+| A-ID | Required final outcome | Historical donor limitation or residual | Status |
+|---|---|---|---|
+| A282-1 | `run.text`, `try_replace_text`, `add_row`, `clone_row` and a cell paragraph setter cost at most 3 times more with a 419 KB styles part than with a 6 KB one, and the equal-model flush risk is proved or explicitly refused | `flush_to_package` no longer calls `CT_Styles::to_xml` when the model equals the part, so a model whose serialization fails while equal to its own part no longer fails the flush. The donor could not build such a model, so keep it as a residual risk to prove or refuse | Covered historical |
+| A282-2 | A setter on a cell paragraph or run costs at most 3 times more in row 40 than row 1, and at most 3 times more with 2000 body paragraphs than without, with the issue script boundary: the cell-place check is cold with three calls and the first included, and the body check is warm with one untimed call on each document | Cell paragraphs without a content control edit in place, but a cell with a content control keeps the old checked route. `cell.text`, `cell.vertical_alignment` and `cell.shading` still grow linearly with the body, outside the issue cases. The donor's last cold cell-place check reads x2.6 to x4.1 across runs on a fresh document and x1.2 to x1.4 with one untimed call, so the row stays open until the cold ratio is deterministically at most 3 | Unmet historical |
+| A282-3 | Filling a table cell by cell is flat per call, at most 2 times from 30 to 120 cells | In-place cell paragraph edits make the cost linear in cells. R3 did not time it | Covered historical |
+
+**Issue 445, F-X283, 4 rows**
+
+| A-ID | Required final outcome | Historical donor limitation or residual | Status |
+|---|---|---|---|
+| A283-1 | `Cell.text` costs under 1.0 ms per call at 2000 body paragraphs and at most 1.5 times its empty-body cost plus 0.05 ms, over the exact case 1 table of 20 rows by 5 columns and 100 cells set once sequentially, with bodies 0, 500 and 2000 and no invented warmup | Updated PR443 leaves this line FAIL at 3.46 ms at 0 and 12.75 ms at 2000 (x3.7). The remaining cost is the shared revision publication, so it stays unmet | Unmet historical |
+| A283-2 | `Cell.vertical_alignment` meets the same distinct PASS boundary over the same exact case 1 table, bodies and one sequential pass per cell | Updated PR443 records a PASS, but donor measurements are author historical outputs, not sprint evidence | Covered historical |
+| A283-3 | `Cell.shading` meets the same distinct PASS boundary over the same exact case 1 table, bodies and one sequential pass per cell | Updated PR443 records a PASS, but donor measurements are author historical outputs, not sprint evidence | Covered historical |
+| A283-4 | Python `Document.open` plus `try_replace_text` plus `save` costs at most 1.2 times the same-build CLI including subprocess start, over 4000 paragraphs of three runs each, a bold prefix, a normal middle and an italic end, water every fourth paragraph and 1000 replacements, with three paired trials and min-total tuple comparison | The issue records FAIL 0.83 s against 0.44 s (x1.9) and leaves case 2 upstream. The binding builds the owner inventory at open and again at publication. It remains unmet | Unmet historical |
+
+The separate `Paragraph.text`-in-cell observation is retained in the consumer and regression work list without an invented numeric criterion. The other `PyCell::edit` setters `width`, `set_border` and `set_margins` get correctness coverage, not unrequested timing promises.
+
+##### HLD impact inventory
+
+The design plan's `## HLD impact` is the implementation work list. Donor HLD updates are incomplete.
+
+| F-ID | Required HLD files and sections | Donor status |
+|---|---|---|
+| F-X276 | `docs/hld/08-rendering-spec.md`, Read-only fit and count consumers. `docs/hld/10-bindings-spec.md`, Python colour inputs and live font formats for `SlideCollection.index`, CLIs for fit exit codes and Presentation semantic text export for Markdown spacing | Adequate for its scope after the heading restatement |
+| F-X277 | `docs/hld/03-architecture.md` for physical story and note ownership. `docs/hld/04-opc-and-packaging.md` for note parts, separators and package markup. `docs/hld/10-bindings-spec.md`, Native Word facade stability, for markup APIs and literal replacement | Only HLD10 is updated. Add HLD03 and HLD04 assessment |
+| F-X278 | `docs/hld/08-rendering-spec.md`, Embedded face selection across exports and Native Office font consumption, and the tables, indent, borders, row-split, automatic-colour and Wingdings sections. `docs/hld/10-bindings-spec.md` if the font policy adds an opt-in | No HLD update. Add HLD08 and the HLD10 policy |
+| F-X279 | `docs/hld/03-architecture.md` for the comment graph and comparison identity. `docs/hld/04-opc-and-packaging.md` for comment parts and package revisions. `docs/hld/10-bindings-spec.md`, Native Word facade stability, for comments and revisions | Only HLD10 is updated. Add HLD03 and HLD04 assessment |
+| F-X280 | `docs/hld/04-opc-and-packaging.md` for duplicate ZIP refusal, XML 1.0 open refusal, bookmark ids and stored-package validation. `docs/hld/10-bindings-spec.md` for `rpptx::validate_presentation_file` and Python validation | READMEs only. Add HLD04 and HLD10 |
+| F-X281 | `docs/hld/05-drawingml-model.md` for chart title and series values. `docs/hld/07-inheritance-and-resolution.md` for the master-placeholder chain. `docs/hld/08-rendering-spec.md` for EMF, PNG, chart formats, hidden shapes, ActualText and placeholder inheritance. `docs/hld/10-bindings-spec.md` for export APIs and the additive chart table | READMEs only. Add HLD05, HLD07, HLD08 and HLD10 |
+| F-X282 | `docs/hld/03-architecture.md` for staged clones, styles sharing and package part identity. `docs/hld/10-bindings-spec.md`, Word checked XML owner authority, for the cell setter and `OpcPackage::get_part_shared`. Assess `docs/hld/12-testing-strategy.md` for the F-X268 performance gates | HLD03 and HLD10 are updated. Add the HLD12 assessment |
+| F-X283 | `docs/hld/03-architecture.md` for staged edits and package identity. `docs/hld/10-bindings-spec.md`, Word checked XML owner authority and live handle routes, for the cell setters and the Python owner inventory. Assess `docs/hld/12-testing-strategy.md` for the performance strategy | No HLD update. Add HLD03, HLD10 and the HLD12 assessment |
+
+##### Waves
+
+Wave 0 is an explicitly FUTURE exit gate with no new story. This registration is uncommitted metadata on the dirty tree observed at 2026-11-01T01:49:26Z, and it records no committed ancestry. Before any implementation wave starts, F-X272 must return an actual clean committed canonical base, and its provider contract for notes, bookmarks and the comment graph must be approved for dependent design only. For implementation, F-X277, F-X279 and F-X280 each require ACTUAL provider completion, including an actually approved and passed genuine local provider checkpoint where the workflow allows one. F-X276, F-X278, F-X281, F-X282 and F-X283 do not wait for that provider contract. F-X274's reviewed engine source is retained as the resource base for F-X278 and F-X281. F-X275 stays reviewed pending the final union. The future gate also requires the canonical worktree to be clean, the sprint head recorded, and the F272 tracker edits plus the single HLD14 registration committed.
+
+| Wave | Stories | Notes |
+|---|---|---|
+| 6 | F-X276 and F-X278 | The only fully conflict-free pair. No shared source or test file. F-X278 is the only hash mover |
+| 7 | F-X277 | The F-X272 notes contract is approved for design only. Implementation requires ACTUAL F-X272 provider completion, including an actually approved and passed genuine local provider checkpoint where the workflow allows one. Moves 5 hash entries |
+| 8 | F-X279 | The F-X272 comment-graph contract is approved for design only. Implementation requires ACTUAL F-X272 provider completion, including an actually approved and passed genuine local provider checkpoint where the workflow allows one. Declares hash delta or unchanged |
+| 9 | F-X280 | Implementation requires ACTUAL completed F-X277 and ACTUAL F-X272 bookmark provider completion, each including an actually approved and passed genuine local provider checkpoint where the workflow allows one. Hash unchanged |
+| 10 | F-X281 | No provider edge. Resource predecessors are F-X276, F-X278 and F-X280. Hash unchanged |
+| 11 | F-X282 | No provider edge. Clean Base and F272 measurement base. Hash unchanged. Serial after F-X277, F-X279, F-X280 and F-X281 |
+| 12 | F-X283 | No provider edge. Resource serial after F-X282 because it shares `crates/rdocx/src/document.rs`, `crates/rdocx-py/tests/test_core.py` and HLD03, HLD10 and HLD12. Hash unchanged |
+| 13 | F-X275 | Final release preparation. Strict SemVer, README and archive measurements once, hosted CI, wheels, native Word and PowerPoint, then Word 0.17.0 and shared/PowerPoint 0.15.0. Publication remains after close-sprint and separate exact-main approval |
+
+Parallelism is reflected through the supported run-state option, not an invented flag. The canonical command is `python3 scripts/sprint_workflow.py init S96 --resume --max-workers 2`. Two workers are enough because at most one conflict-free pair exists per wave. No worker pushes or merges. No worker writes AS_BUILT, SPRINT_TRACKER or the HLD14 registry. The hash baseline is exclusive per wave. README and archive measurements are recorded once by F-X275 or the integrator at the final union.
+
+##### Capacity and open question
+
+The existing S96 estimate is 14 to 20 developer-days. The seven new stories carry a provisional, unvalidated effort estimate of 43 to 63 developer-days: F-X276 3 to 5, F-X277 5 to 7, F-X278 6 to 8, F-X279 8 to 12, F-X280 7 to 10, F-X281 10 to 15 and F-X282 4 to 6. The combined S96 block is provisionally 57 to 83 developer-days before the shared final qualification. These developer-day totals are effort estimates, not elapsed calendar weeks and not a model-runtime forecast, and no ETA is approved. The explicit user direction to fold all arriving work into S96 makes 12 F-IDs an authorized cadence exception within S96. No gate is waived and no acceptance row is deleted. Original estimates and old observations are unchanged. On 2026-11-01 the later Issue445 intake adds F-X283, making 13 F-IDs under the same all-arrivals direction. The earlier 12-story, 43-to-63 and combined 57-to-83 figures remain dated historical estimates. F-X283 effort is unestimated pending design. These remain effort estimates, not elapsed calendar weeks and not a model-runtime forecast, and no ETA is approved.
+
+Q-S96-07 is answered. This answer opens no other product choice.
+
+| Q-ID | Status | Decision | Recommendation and why it remains material |
+|---|---|---|---|
+| Q-S96-07 | Answered, 2026-11-01 | Issue 433 A278-7 font policy across `rdocx convert`, `to_pdf`, `page_count` and `layout`. The user selected Alternative A: bundled default, explicit system-fallback opt-in in CLI and Python, and caller fonts highest | Answered by the user on 2026-11-01. The unanswered-choice blocker is removed. A278-7 remains unmet until contract and callable gaps are repaired and actual implementation and validation pass. Bundled omission is the default, so rendering baselines stay deterministic. Explicit system fallback is opt-in. Caller fonts keep the highest priority |
+
+##### Draft design obligations
+
+No design plan is approved or created by this registration. Each eventual `## Design` pass writes one existing `.claude/plans/F-X276-design.md` through `F-X283-design.md`, each with `## Spec reference` naming HLD sections rather than whole documents, `## Consumer map`, `## Behavior contracts and evidence`, `## Dependency readiness` that keeps provider edges and resource barriers separate, `## Acceptance criteria` with one numbered row per A-ID and the wrong implementation each rejects, `## Test matrix`, `## Test plan` using existing test carriers with no new test binary, `## Implementation checklist`, `## HLD impact` from the inventory above, `## Risk routing`, `## Hash harness`, and `## Open questions` recording answered Q-S96-07 where the font policy applies. Each plan also carries raw-XML verbatim preservation, `xsd:sequence` child order, and the named final rider debt. Public API additions are additive within the approved feature scope and enter the strict SemVer baseline. No new crate, module or source file is proposed. If a design needs a new source file, it must name the exact path and reason and request explicit repository permission. A new trait needs two existing implementers today, a new generic parameter needs two actual instantiations today, and a new feature flag needs a named current consumer. Two consumers of one trait implementation do not justify a trait. F-X275 remains reviewed and open pending the final union, and all accepted API additions enter its existing strict SemVer baseline and release notes. No donor source, donor CI or donor measurement is adopted as acceptance. F-X276 preparation V4 was accepted by the Codex preparation pass2 as a basis for later canonical design adoption, subject to normal contract approval and a clean-Base claim. That acceptance is not implementation, microscope or feature acceptance. No canonical design, approval or claim follows from this intake. F-X272 source peer2 increment was rejected and remains neither done nor accepted.
+
 #### Sprint S97, Fillable PDF forms
 
 
@@ -4053,8 +4290,14 @@ of the following unchanged paragraph. F-X275owns eventual Word-family release
 notes and credit after actual implementation and validation. F-X273is a composed
 layout consumer, not the comparison fix owner. No second tracker or plan is added.
 
-Q-S96-04is open contract closure for normal-note identity, standard tracked note
-representation and selected accept/reject package lifecycle. Existing positional
+Q-S96-04 is answered for representation: pending comparison-owned footnote
+lifecycle uses hidden, zero-width STANDARD Word bookmarks, and imported fully
+valid convention markers follow the same convention. Preserve original unused
+notes. Cleanup of newly owned notes follows the selected owning revision's
+accept or reject outcome, retaining notes still referenced by the retained
+result. Normal-note identity, schema placement, custody and cross-document
+collisions, and selected-resolution package cleanup remain open semantic
+contract details. Native Word retention remains unvalidated. Existing positional
 note pairing and story-count guards cannot simply be removed. Preserve separator
 owners, existing revisions, opaque data and source authority. First/last note part,
 relationship and content-type state must reproduce the selected input after
@@ -4086,3 +4329,9 @@ with zero revisions. Keep the secondary rewrite row as not reproduced, with its
 narrow positive structural controls and native/unreduced qualification still due.
 The root-authenticated report is issue430-public-repro-v1/REPORT.md under the
 existing TEMP evidence root. This is published-producer RED, not current acceptance.
+
+## Rolling independent delivery, 2026-11-01
+
+The user directed DeepSeek-only delivery and parallel implementation of ready approved stories, with Root handling independent work and final review. F-X276 and F-X278 have completed design review and no product dependencies. Their contracts are approved for rolling claims. Other drafts and their provider or resource barriers remain unchanged.
+
+Root applies a narrow coordination exception to the all-designs-first and clean-canonical claim gates: the unfinished F-X272 working changes remain byte-identical and excluded from the worker Base. Only reviewed planning and claim metadata is committed. Each new worker checkout is clean and its product source equals reviewed E2A, with approved plan and claim metadata added. No unfinished product source is committed to create this Base. This does not waive dependency completion, acceptance, independent implementation review, scoped validation, final native/schema/hash/binding/hosted gates or separate release approval.

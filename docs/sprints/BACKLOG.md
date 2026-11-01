@@ -40,8 +40,8 @@ regenerated, never hand-edited.
 | M22, Word depth | 12 | 12 | 0 | 0 |
 | M23, From-scratch business documents | 24 | 24 | 0 | 0 |
 | M24, Modern DOCX authoring completeness | 54 | 32 | 0 | 22 |
-| X, Cross-cutting | 289 | 275 | 4 | 6 |
-| **Total** | **620** | **557** | **4** | **55** |
+| X, Cross-cutting | 297 | 275 | 4 | 14 |
+| **Total** | **628** | **557** | **4** | **63** |
 <!-- AUTOGEN:backlog-summary END -->
 
 ## All F-IDs
@@ -844,9 +844,25 @@ HLD14 contract before adopting contributor changes.
 | F-X273 | Repair header body clearance and complete TOC navigation | S96 | L | done |
 | F-X274 | Honor section and field page-number formats | S96 | M | in-progress |
 | F-X275 | Prepare Word 0.17.0 and shared/PowerPoint 0.15.0 with strict SemVer gates | S96 | L | in-progress |
+| F-X276 | Complete rpptx fit, table rows, fit text, Markdown and slide indexing | S96 | M | pending |
+| F-X277 | Complete Word-like markup for equations, notes, links, cells, numbering, TOC and replace | S96 | L | pending |
+| F-X278 | Complete Word rendering fidelity and font policy | S96 | L | pending |
+| F-X279 | Complete comment ranges, comparison, revisions and insert_document | S96 | L | pending |
+| F-X280 | Complete validation and damaged-input refusal | S96 | L | pending |
+| F-X281 | Complete picture, chart, export and layout fidelity | S96 | XL | pending |
+| F-X282 | Bound edit cost across styles, body and cells | S96 | M | pending |
+| F-X283 | Bound whole-cell setters and Python open-replace-save cost | S96 | L | pending |
 
 <!-- AUTOGEN:backlog-MX END -->
 
 Issue430is admitted under the existing in-progress F-X272. Its footnote topology,
 ignored-story consistency and paragraph alignment rows require the pending amended
 contract and actual validation. The existing plan and S96plan hold that work.
+
+The new S96 intake adds F-X276 through F-X282, pending and unclaimed, mapping
+Issues 431 to 437 and PRs 438, 441, 440, 444, 439, 442 and 443 respectively.
+Issue434 is one story F-X279 with an F-X272 provider dependency, not a second
+F-X272 scope. Issue430 remains under F-X272 and Issue429 remains under F-X275.
+Issues 264, 281 and 377 stay open, and Issue381 stays with S97. Provider edges
+are F-X277 to F-X272, F-X279 to F-X272, and F-X280 to F-X277 and F-X272. Other
+new stories have no invented product edge. Q-S96-07 is answered: bundled default, explicit system-fallback opt-in, and caller fonts highest. The choice blocker is removed. A278-7 remains unmet. The later Issue445 intake adds F-X283, pending and unclaimed, mapping Issue445 and PR443 at head `7b3dcd0e4a3f89c4ecc7b88718c68a9a58159ad8`. It is a genuinely additional story, not an F282 repair reset, and keeps the existing 44 A-ID rows and F282's original three A-IDs and exhausted design peers. F-X283 has no provider edge. Shared facade, binding and HLD files make it a resource serial after F-X282. The earlier 12-story 43-to-63 and combined 57-to-83 figures remain historical, and F-X283 effort is unestimated pending design.
