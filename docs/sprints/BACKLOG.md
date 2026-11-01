@@ -40,8 +40,8 @@ regenerated, never hand-edited.
 | M22, Word depth | 12 | 12 | 0 | 0 |
 | M23, From-scratch business documents | 24 | 24 | 0 | 0 |
 | M24, Modern DOCX authoring completeness | 54 | 32 | 0 | 22 |
-| X, Cross-cutting | 297 | 275 | 5 | 13 |
-| **Total** | **628** | **557** | **5** | **62** |
+| X, Cross-cutting | 297 | 275 | 6 | 12 |
+| **Total** | **628** | **557** | **6** | **61** |
 <!-- AUTOGEN:backlog-summary END -->
 
 ## All F-IDs
@@ -846,7 +846,7 @@ HLD14 contract before adopting contributor changes.
 | F-X275 | Prepare Word 0.17.0 and shared/PowerPoint 0.15.0 with strict SemVer gates | S96 | L | in-progress |
 | F-X276 | Complete rpptx fit, table rows, fit text, Markdown and slide indexing | S96 | M | in-progress |
 | F-X277 | Complete Word-like markup for equations, notes, links, cells, numbering, TOC and replace | S96 | L | pending |
-| F-X278 | Complete Word rendering fidelity and font policy | S96 | L | pending |
+| F-X278 | Complete Word rendering fidelity and font policy | S96 | L | in-progress |
 | F-X279 | Complete comment ranges, comparison, revisions and insert_document | S96 | L | pending |
 | F-X280 | Complete validation and damaged-input refusal | S96 | L | pending |
 | F-X281 | Complete picture, chart, export and layout fidelity | S96 | XL | pending |

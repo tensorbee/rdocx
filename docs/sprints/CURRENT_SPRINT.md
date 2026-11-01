@@ -25,7 +25,7 @@
 | F-X275 | Prepare Word 0.17.0 and shared/PowerPoint 0.15.0 with strict SemVer gates | L | in-progress | codex |
 | F-X276 | Complete rpptx fit, table rows, fit text, Markdown and slide indexing | M | in-progress | deepseek |
 | F-X277 | Complete Word-like markup for equations, notes, links, cells, numbering, TOC and replace | L | pending | - |
-| F-X278 | Complete Word rendering fidelity and font policy | L | pending | - |
+| F-X278 | Complete Word rendering fidelity and font policy | L | in-progress | deepseek |
 | F-X279 | Complete comment ranges, comparison, revisions and insert_document | L | pending | - |
 | F-X280 | Complete validation and damaged-input refusal | L | pending | - |
 | F-X281 | Complete picture, chart, export and layout fidelity | XL | pending | - |
