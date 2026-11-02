@@ -26187,10 +26187,7 @@ impl Document {
             counts[0] += 1;
             work.set(counts);
         });
-        let parsed = match CT_Styles::from_xml(&bytes) {
-            Ok(parsed) => Arc::new(parsed),
-            Err(_) => return Ok(true),
-        };
+        let parsed = Arc::new(CT_Styles::from_xml(&bytes)?);
         #[cfg(test)]
         FX282_STYLES_WORK.with(|work| {
             let mut counts = work.get();
@@ -50331,6 +50328,30 @@ mod tests {
         );
         let reopened = Document::from_bytes(&bytes).unwrap();
         assert_eq!(reopened.default_font_name(), Some("Changed default"));
+    }
+
+    #[test]
+    fn issue437_malformed_styles_replacement_is_not_silently_rewritten() {
+        let mut seed = Document::new();
+        let bytes = seed.to_bytes().unwrap();
+        let mut document = Document::from_bytes(&bytes).unwrap();
+        let malformed = br#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="Bad"><w:pPr><w:spacing w:before="not-a-number"/></w:pPr></w:style></w:styles>"#.to_vec();
+        assert!(
+            CT_Styles::from_xml(&malformed).is_err(),
+            "fixture must actually fail the existing styles parser"
+        );
+        document
+            .package
+            .set_part("/word/styles.xml", malformed.clone());
+        let result = document.to_bytes();
+        assert!(
+            result.is_err(),
+            "a malformed styles replacement must be refused, not overwritten"
+        );
+        assert_eq!(
+            document.package.get_part("/word/styles.xml"),
+            Some(malformed.as_slice())
+        );
     }
 
     #[test]
