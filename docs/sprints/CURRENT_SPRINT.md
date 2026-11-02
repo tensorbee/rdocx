@@ -30,7 +30,7 @@
 | F-X280 | Complete validation and damaged-input refusal | L | pending | - |
 | F-X281 | Complete picture, chart, export and layout fidelity | XL | pending | - |
 | F-X282 | Bound edit cost across styles, body and cells | M | in-progress | codex |
-| F-X283 | Bound whole-cell setters and Python open-replace-save cost | L | pending | - |
+| F-X283 | Bound whole-cell setters and Python open-replace-save cost | L | in-progress | codex |
 
 ## Sequencing note
 
@@ -120,3 +120,7 @@ The user explicitly directed Codex to take over implementation and integration f
 ## Next parallel resource wave, 2026-11-02
 
 F-X282 is claimed for Codex on the clean integrated F-X276/F-X278 source. It edits facade styles/cell publication, package sharing, binding run routes and their existing test/HLD carriers. Concurrent F-X272 source work is restricted to its OOXML qualifier kernels and tests, with shared facade/HLD edits paused. Its preserved unfinished source is excluded from this Base and remains neither complete nor a provider. The stories have no formal dependency edge. Later source reconciliation must preserve both checked-publication contracts and every final gate. The older resource-successor ordering is historical coordination, not a new dependency barrier.
+
+## Codex delivery wave after F-X282 integration
+
+F-X282 is locally integrated reviewed at28a36b761eac87e446ac35d2556313aaa68c76c1, including its separately labelled malformed-styles delta. Its exact release timings and all final gates remain pending. F-X281 and F-X283 designs are approved. F-X283 is claimed for Codex in a clean isolated worker and owns facade, binding, unpublished support and HLD03/10/12 resources next. F-X272 runs only its OOXML constructor/admission kernels and tests alongside it, with facade/binding/HLD changes paused. F-X281 implementation follows these shared resources. These are resource constraints, not new provider edges. No provider completion or final acceptance is implied.
