@@ -23,9 +23,9 @@
 | F-X273 | Repair header body clearance and complete TOC navigation | L | done | - |
 | F-X274 | Honor section and field page-number formats | M | in-progress | codex |
 | F-X275 | Prepare Word 0.17.0 and shared/PowerPoint 0.15.0 with strict SemVer gates | L | in-progress | codex |
-| F-X276 | Complete rpptx fit, table rows, fit text, Markdown and slide indexing | M | in-progress | deepseek |
+| F-X276 | Complete rpptx fit, table rows, fit text, Markdown and slide indexing | M | in-progress | codex |
 | F-X277 | Complete Word-like markup for equations, notes, links, cells, numbering, TOC and replace | L | pending | - |
-| F-X278 | Complete Word rendering fidelity and font policy | L | in-progress | deepseek |
+| F-X278 | Complete Word rendering fidelity and font policy | L | in-progress | codex |
 | F-X279 | Complete comment ranges, comparison, revisions and insert_document | L | pending | - |
 | F-X280 | Complete validation and damaged-input refusal | L | pending | - |
 | F-X281 | Complete picture, chart, export and layout fidelity | XL | pending | - |
@@ -111,3 +111,7 @@ The user explicitly requires the failed CI to be fixed before publication. The o
 The user directed DeepSeek-only delivery and parallel implementation of ready approved stories, with Root handling independent work and final review. F-X276 and F-X278 have completed design review and no product dependencies. Their contracts are approved for rolling claims. Other drafts and their provider or resource barriers remain unchanged.
 
 Root applies a narrow coordination exception to the all-designs-first and clean-canonical claim gates: the unfinished F-X272 working changes remain byte-identical and excluded from the worker Base. Only reviewed planning and claim metadata is committed. Each new worker checkout is clean and its product source equals reviewed E2A, with approved plan and claim metadata added. No unfinished product source is committed to create this Base. This does not waive dependency completion, acceptance, independent implementation review, scoped validation, final native/schema/hash/binding/hosted gates or separate release approval.
+
+## Codex implementation takeover, 2026-11-02
+
+The user explicitly directed Codex to take over implementation and integration for faster delivery. This supersedes the earlier DeepSeek-only assignment. F-X276 and F-X278 keep their original Bases and preserved worker paths on successor codex branches. Existing independent model reviews and assistance logs remain attributed to their actual authors. Codex workers implement separate stories in parallel and independent final review remains required. This changes ownership, not acceptance or final release approval.
