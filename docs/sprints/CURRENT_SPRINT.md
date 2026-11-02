@@ -29,7 +29,7 @@
 | F-X279 | Complete comment ranges, comparison, revisions and insert_document | L | pending | - |
 | F-X280 | Complete validation and damaged-input refusal | L | pending | - |
 | F-X281 | Complete picture, chart, export and layout fidelity | XL | pending | - |
-| F-X282 | Bound edit cost across styles, body and cells | M | pending | - |
+| F-X282 | Bound edit cost across styles, body and cells | M | in-progress | codex |
 | F-X283 | Bound whole-cell setters and Python open-replace-save cost | L | pending | - |
 
 ## Sequencing note
@@ -115,3 +115,8 @@ Root applies a narrow coordination exception to the all-designs-first and clean-
 ## Codex implementation takeover, 2026-11-02
 
 The user explicitly directed Codex to take over implementation and integration for faster delivery. This supersedes the earlier DeepSeek-only assignment. F-X276 and F-X278 keep their original Bases and preserved worker paths on successor codex branches. Existing independent model reviews and assistance logs remain attributed to their actual authors. Codex workers implement separate stories in parallel and independent final review remains required. This changes ownership, not acceptance or final release approval.
+
+
+## Next parallel resource wave, 2026-11-02
+
+F-X282 is claimed for Codex on the clean integrated F-X276/F-X278 source. It edits facade styles/cell publication, package sharing, binding run routes and their existing test/HLD carriers. Concurrent F-X272 source work is restricted to its OOXML qualifier kernels and tests, with shared facade/HLD edits paused. Its preserved unfinished source is excluded from this Base and remains neither complete nor a provider. The stories have no formal dependency edge. Later source reconciliation must preserve both checked-publication contracts and every final gate. The older resource-successor ordering is historical coordination, not a new dependency barrier.
