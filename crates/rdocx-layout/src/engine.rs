@@ -38,7 +38,9 @@ use crate::block::{
     WordLegacyProducer, WordParagraphPaint,
 };
 use crate::convert;
-use crate::input::{EmbeddedFontSource, LayoutInput, MediaRegistry, RevisionStyle, RevisionView};
+use crate::input::{
+    EmbeddedFontSource, LayoutInput, MediaRegistry, PictureDrawOwners, RevisionStyle, RevisionView,
+};
 use crate::notes::NoteRegistry;
 use crate::paginator::{
     self, ColumnTrack, HeaderFooterContent, HeaderFooterSemantics, LineNumbering, PageBorderFrame,
@@ -3116,6 +3118,7 @@ pub struct Engine {
     last_bookmark_pages: HashMap<usize, crate::WordPageSection>,
     last_field_source_xml: HashMap<FieldSource, Vec<u8>>,
     last_text_box_owner_indices: HashMap<WordStory, usize>,
+    last_picture_draw_owners: PictureDrawOwners,
     #[cfg(test)]
     owned_context_builds: usize,
     #[cfg(test)]
@@ -3462,6 +3465,7 @@ struct HeaderFooterCacheEntry {
     key: HeaderFooterCacheKey,
     content: HeaderFooterVariantContent,
     diagnostics: Vec<Diagnostic>,
+    picture_draw_owners: PictureDrawOwners,
     font_trace: Vec<FontTraceEvent>,
     bytes: usize,
 }
@@ -4172,6 +4176,7 @@ impl Engine {
             last_bookmark_pages: HashMap::new(),
             last_field_source_xml: HashMap::new(),
             last_text_box_owner_indices: HashMap::new(),
+            last_picture_draw_owners: Vec::new(),
             #[cfg(test)]
             owned_context_builds: 0,
             #[cfg(test)]
@@ -4344,6 +4349,10 @@ impl Engine {
             std::mem::take(&mut self.last_field_placements),
             std::mem::take(&mut self.last_bookmark_pages),
         )
+    }
+
+    pub(crate) fn take_picture_draw_owners(&mut self) -> Vec<(String, Option<String>)> {
+        std::mem::take(&mut self.last_picture_draw_owners)
     }
 
     pub(crate) fn take_text_box_owner_indices(&mut self) -> HashMap<WordStory, usize> {
@@ -6334,6 +6343,7 @@ impl Engine {
         diagnostics.extend(self.font_manager.current_font_diagnostics().iter().cloned());
         diagnostics.extend(self.font_manager.word_substitution_diagnostics());
         result.diagnostics = diagnostics;
+        self.last_picture_draw_owners = media.picture_draw_owners_since(0);
         result.structure = Some(structure);
         let references = num_state.references_only();
         self.bookmark_numbering
@@ -6996,6 +7006,9 @@ fn paragraph_is_restart_record_source_safe(paragraph: &CT_P, styles: &CT_Styles)
         })
 }
 
+// Drawing content is excluded by paragraph_source_is_cache_safe, including
+// through table_is_cache_safe. Picture owners therefore execute fresh on these
+// paths. Only the header/footer VML cache captures and replays picture owners.
 fn paragraph_is_cache_safe(paragraph: &CT_P, styles: &CT_Styles) -> bool {
     paragraph_source_is_cache_safe(paragraph, styles, false, false)
 }
@@ -8577,6 +8590,21 @@ fn rebind_header_footer_sources(
         }
     }
     Ok(())
+}
+
+fn picture_draw_owner_bytes(owners: &Vec<(String, Option<String>)>) -> usize {
+    owners
+        .capacity()
+        .saturating_mul(std::mem::size_of::<(String, Option<String>)>())
+        .saturating_add(
+            owners
+                .iter()
+                .map(|(id, story)| {
+                    id.capacity()
+                        .saturating_add(story.as_ref().map_or(0, String::capacity))
+                })
+                .fold(0, usize::saturating_add),
+        )
 }
 
 fn header_footer_cache_entry_bytes(
@@ -12300,6 +12328,7 @@ fn layout_paragraph_with_source_and_table(
                                 )?,
                             }
                         } else {
+                            media.record_picture_draw_owner(&inline.embed_id);
                             InlineItem::Image {
                                 width,
                                 height,
@@ -13914,7 +13943,21 @@ fn render_word_chart(
         None => Err("relationship was not resolved from the document part".to_owned()),
     };
     match rendered {
-        Ok(group) => Ok(group),
+        Ok(group) => {
+            if let Some(Ok(chart)) = input.charts.get(relationship_id) {
+                for code in oxml_chart::unsupported_number_formats(&chart.chart)
+                    .map_err(|error| LayoutError::Layout(error.to_string()))?
+                {
+                    push_unique_diagnostic(
+                        diagnostics,
+                        format!(
+                            "Word chart relationship {relationship_id}: number format `{code}` is not supported and its labels use General"
+                        ),
+                    );
+                }
+            }
+            Ok(group)
+        }
         Err(detail) => {
             diagnostics.push(Diagnostic {
                 message: format!("Word chart relationship {relationship_id}: {detail}"),
@@ -14111,6 +14154,7 @@ fn collect_anchored_drawings(
                     }
                     None if anchor.embed_id.is_empty() => continue,
                     None => {
+                        media.record_picture_draw_owner(&anchor.embed_id);
                         let media_id = media
                             .id_for_relationship_with_diagnostic(&anchor.embed_id, diagnostics);
                         if let Some((opacity, rotation)) = anchor.picture_effects() {
@@ -14941,12 +14985,13 @@ fn layout_header_footer_variant(
                     (
                         entry.content.clone(),
                         entry.diagnostics.clone(),
+                        entry.picture_draw_owners.clone(),
                         entry.font_trace.clone(),
                     )
                 })
         })
         .flatten();
-    if let Some((mut content, cached_diagnostics, font_trace)) = hit {
+    if let Some((mut content, cached_diagnostics, picture_draw_owners, font_trace)) = hit {
         rebind_header_footer_sources(
             story_kind,
             relationship_id,
@@ -14956,12 +15001,14 @@ fn layout_header_footer_variant(
             sources,
         )?;
         diagnostics.extend(cached_diagnostics);
+        media.replay_picture_draw_owners(&picture_draw_owners);
         engine.font_manager.replay_font_trace_events(&font_trace)?;
         engine.header_footer_cache_hits += 1;
         return Ok(content);
     }
 
     let diagnostics_start = diagnostics.len();
+    let owners_start = media.picture_draw_owner_checkpoint();
     engine.font_manager.begin_paragraph_font_trace();
     let content_result = layout_header_footer_variant_uncached(
         story_kind,
@@ -14982,13 +15029,16 @@ fn layout_header_footer_variant(
     let mut content = content_result?;
     engine.header_footer_cache_builds += 1;
     let cached_diagnostics = diagnostics[diagnostics_start..].to_vec();
+    let picture_draw_owners = media.picture_draw_owners_since(owners_start);
     if let Some(font_trace) = font_trace {
         let bytes =
             header_footer_cache_entry_bytes(&key, &content, &cached_diagnostics, &font_trace);
+        let bytes = bytes.saturating_add(picture_draw_owner_bytes(&picture_draw_owners));
         engine.stage_header_footer_cache_entry(HeaderFooterCacheEntry {
             key,
             content: content.clone(),
             diagnostics: cached_diagnostics,
+            picture_draw_owners,
             font_trace,
             bytes,
         });
@@ -15320,6 +15370,7 @@ fn layout_watermark(
                 });
                 return Ok(None);
             };
+            media.record_related_picture_draw_owner(relationship_id, header_relationship_id);
             let data = image.data.clone();
             vec![PositionedElement::Image {
                 rect: Rect {
@@ -17118,6 +17169,127 @@ fn highlight_to_color(h: ST_HighlightColor) -> Option<Color> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fx281_picture_owners_follow_fresh_cache_and_transaction_custody() {
+        use rdocx_oxml::drawing::{CT_Anchor, CT_Drawing, CT_Inline};
+        fn picture(id: &str, anchor: bool) -> CT_P {
+            let mut paragraph = CT_P::new();
+            let drawing = if anchor {
+                CT_Drawing::anchor(CT_Anchor::background(id, 254_000, 254_000))
+            } else {
+                CT_Drawing::inline(CT_Inline::new(id, 254_000, 254_000))
+            };
+            paragraph.add_run("").content = vec![RunContent::Drawing(drawing)];
+            paragraph
+        }
+        let mut input = cacheable_header_footer_input("owner body");
+        let mut table = CT_Tbl::new();
+        let mut row = CT_Row::new();
+        let mut cell = CT_Tc::new();
+        cell.content = vec![CellContent::Paragraph(picture("rIdCell", false))];
+        row.cells.push(cell);
+        table.rows.push(row);
+        input.document.body.content.extend([
+            BodyContent::Paragraph(Box::new(picture("rIdBody", false))),
+            BodyContent::Paragraph(Box::new(picture("rIdAnchor", true))),
+            BodyContent::Table(Box::new(table)),
+        ]);
+        for id in ["rIdBody", "rIdAnchor", "rIdCell", "rIdUnused"] {
+            input.images.insert(
+                id.into(),
+                ImageData {
+                    data: vec![1, 2, 3, 4],
+                    content_type: "image/png".into(),
+                },
+            );
+        }
+        let mut expected = vec![
+            ("rIdBody".into(), None),
+            ("rIdAnchor".into(), None),
+            ("rIdCell".into(), None),
+            ("rIdWatermark".into(), Some("rId-default-header".into())),
+        ];
+        expected.sort();
+        let mut engine = Engine::new_deterministic().unwrap();
+        for _ in 0..2 {
+            let mut actual = crate::layout_document_with_reusable_engine(&mut engine, &input)
+                .unwrap()
+                .picture_draw_owners()
+                .to_vec();
+            actual.sort();
+            assert_eq!(actual, expected);
+        }
+        assert!(
+            engine.header_footer_cache_hits > 0,
+            "VML owner replay must run"
+        );
+        for entry in &engine.header_footer_cache {
+            let owned_bytes = header_footer_cache_entry_bytes(
+                &entry.key,
+                &entry.content,
+                &entry.diagnostics,
+                &entry.font_trace,
+            )
+            .saturating_add(picture_draw_owner_bytes(&entry.picture_draw_owners));
+            assert!(
+                entry.bytes >= owned_bytes,
+                "owner snapshots must be charged before admission"
+            );
+        }
+        // Reference projection retries the transaction with a fresh registry.
+        let mut reference = CT_P::new();
+        reference.add_run("").content = vec![RunContent::Field(Field::new("REF missing", "old"))];
+        input
+            .document
+            .body
+            .content
+            .push(BodyContent::Paragraph(Box::new(reference)));
+        let mut actual = crate::layout_document_with_reusable_engine(&mut engine, &input)
+            .unwrap()
+            .picture_draw_owners()
+            .to_vec();
+        actual.sort();
+        assert_eq!(actual, expected);
+        // A resolved related owner has its real story id, even with identical bytes.
+        input
+            .headers
+            .get_mut("rId-first-header")
+            .unwrap()
+            .paragraphs = vec![picture("rIdBody", false), picture("rIdAnchor", true)];
+        for id in ["rIdBody", "rIdAnchor"] {
+            input.images.insert(
+                format!("rId-first-header\0{id}"),
+                ImageData {
+                    data: vec![1, 2, 3, 4],
+                    content_type: "image/png".into(),
+                },
+            );
+            expected.push((id.into(), Some("rId-first-header".into())));
+        }
+        expected.sort();
+        let mut actual = crate::layout_document_with_reusable_engine(&mut engine, &input)
+            .unwrap()
+            .picture_draw_owners()
+            .to_vec();
+        actual.sort();
+        assert_eq!(actual, expected);
+        input.images.remove("rId-default-header\0rIdWatermark");
+        let missing = crate::layout_document_with_reusable_engine(&mut engine, &input).unwrap();
+        assert!(
+            !missing
+                .picture_draw_owners()
+                .iter()
+                .any(|(id, _)| id == "rIdWatermark")
+        );
+        let clean = make_input_with_text("no pictures after previous layouts");
+        assert!(
+            crate::layout_document_with_reusable_engine(&mut engine, &clean)
+                .unwrap()
+                .picture_draw_owners()
+                .is_empty()
+        );
+    }
+
     use super::*;
     use crate::input::ImageData;
     use oxml_layout::{MediaId, MultilingualGlyphRun, TextScript};
@@ -20214,12 +20386,29 @@ mod tests {
             .lines
             .iter_mut()
             .flat_map(|line| &mut line.items)
-            .find_map(|item| match item {
-                LineItem::Text(text) => Some(text),
-                _ => None,
-            })
+            .find(|item| matches!(item, LineItem::Text(_) | LineItem::MultilingualText(_)))
             .expect("template has text");
-        text.advances = vec![0.0; HEADER_FOOTER_CACHE_MAX_BYTES / 8 + 1];
+        match text {
+            LineItem::Text(text) => {
+                text.advances = vec![0.0; HEADER_FOOTER_CACHE_MAX_BYTES / 8 + 1];
+            }
+            LineItem::MultilingualText(span) => {
+                // Keep the checked rich span valid while growing the owned
+                // advance capacity that multilingual_cache_bytes charges.
+                let mut base = span.base().clone();
+                base.advances.reserve(HEADER_FOOTER_CACHE_MAX_BYTES / 8 + 1);
+                *span = span
+                    .clone()
+                    .with_base_and_advances(base, span.x_advances().to_vec())
+                    .expect("same rich span with additional advance capacity");
+                assert!(span.base().advances.capacity() * 8 > HEADER_FOOTER_CACHE_MAX_BYTES);
+                eprintln!(
+                    "HF_CACHE oversized rich template advance capacity {}",
+                    span.base().advances.capacity()
+                );
+            }
+            _ => unreachable!("selected a text template"),
+        }
         entry.bytes = header_footer_cache_entry_bytes(
             &entry.key,
             &entry.content,

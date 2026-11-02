@@ -384,6 +384,14 @@ deepest occupied layout or master match.
 Six independent chains. Getting them separately right is the difference between
 "renders" and "renders correctly".
 
+For transform, body-property and list-style inheritance, master placeholder
+selection first considers equivalent-type candidates without requiring an idx
+match. Within that family an actual layout idx match wins, then exact type, then
+the first Body for a Body, Subtitle or Object layout placeholder, then the first
+equivalent candidate in tree order. When there is no equivalent candidate, the
+existing idx match remains the fallback. Layout lookup and placeholder occupancy
+keep their separate idx-first rules.
+
 ### 1. Position and size
 
 Shape's own `a:xfrm`, then the matching layout placeholder, then the matching

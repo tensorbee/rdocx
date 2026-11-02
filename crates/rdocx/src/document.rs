@@ -25081,9 +25081,9 @@ impl Document {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let engine = engine.get_or_insert_with(rdocx_layout::engine::Engine::new);
-        let layout = Arc::new(rdocx_layout::layout_document_with_reusable_engine(
-            engine, &input,
-        )?);
+        let mut layout = rdocx_layout::layout_document_with_reusable_engine(engine, &input)?;
+        annotate_undrawable_images(&mut layout, &input);
+        let layout = Arc::new(layout);
         *cache = Some(Arc::clone(&layout));
         Ok(layout)
     }
@@ -25101,9 +25101,9 @@ impl Document {
         let input = self.build_layout_input()?;
         #[cfg(test)]
         record_layout_invocation();
-        let layout = Arc::new(rdocx_layout::layout_document_deterministic_with_provenance(
-            &input,
-        )?);
+        let mut layout = rdocx_layout::layout_document_deterministic_with_provenance(&input)?;
+        annotate_undrawable_images(&mut layout, &input);
+        let layout = Arc::new(layout);
         *cache = Some(Arc::clone(&layout));
         Ok(layout)
     }
@@ -25163,7 +25163,7 @@ impl Document {
         input.revision_style = options.revision_style;
         #[cfg(test)]
         record_layout_invocation();
-        let layout = if deterministic {
+        let mut layout = if deterministic {
             rdocx_layout::layout_document_deterministic_with_provenance(&input)?
         } else {
             let mut engine = self
@@ -25173,6 +25173,7 @@ impl Document {
             let engine = engine.get_or_insert_with(rdocx_layout::engine::Engine::new);
             rdocx_layout::layout_document_with_reusable_engine(engine, &input)?
         };
+        annotate_undrawable_images(&mut layout, &input);
         Ok(Arc::new(layout))
     }
 
@@ -46345,7 +46346,9 @@ impl Document {
         let input = self.build_layout_input_with_fonts(font_files, options)?;
         #[cfg(test)]
         record_layout_invocation();
-        Ok(rdocx_layout::layout_document_with_caller_fonts_and_provenance(&input)?)
+        let mut layout = rdocx_layout::layout_document_with_caller_fonts_and_provenance(&input)?;
+        annotate_undrawable_images(&mut layout, &input);
+        Ok(layout)
     }
 
     /// Return an uncached layout using caller fonts over bundled fallbacks.
@@ -46382,9 +46385,9 @@ impl Document {
             None => engine.insert(rdocx_layout::engine::Engine::new_deterministic()?),
         };
         engine.set_caller_font_aliases(&[]);
-        Ok(rdocx_layout::layout_document_with_reusable_engine(
-            engine, &input,
-        )?)
+        let mut layout = rdocx_layout::layout_document_with_reusable_engine(engine, &input)?;
+        annotate_undrawable_images(&mut layout, &input);
+        Ok(layout)
     }
 
     /// Return a reusable bundled-fallback layout with byte-free font aliases.
@@ -46423,9 +46426,9 @@ impl Document {
             None => engine.insert(rdocx_layout::engine::Engine::new_deterministic()?),
         };
         engine.set_caller_font_aliases(&font_aliases);
-        Ok(rdocx_layout::layout_document_with_reusable_engine(
-            engine, &input,
-        )?)
+        let mut layout = rdocx_layout::layout_document_with_reusable_engine(engine, &input)?;
+        annotate_undrawable_images(&mut layout, &input);
+        Ok(layout)
     }
 
     fn build_layout_input_with_fonts(
@@ -46523,7 +46526,9 @@ impl Document {
         let input = self.build_layout_input_with_fonts(font_files, options)?;
         #[cfg(test)]
         record_layout_invocation();
-        Ok(rdocx_layout::layout_document_with_provenance(&input)?)
+        let mut layout = rdocx_layout::layout_document_with_provenance(&input)?;
+        annotate_undrawable_images(&mut layout, &input);
+        Ok(layout)
     }
 
     /// Render caller fonts using the bundled fallback policy and selected revision view.
@@ -46598,27 +46603,67 @@ impl Document {
 
     /// Convert the document to a complete HTML document string.
     pub fn to_html(&self) -> String {
-        let input = self.build_html_input();
-        rdocx_html::to_html_document(&input, &rdocx_html::HtmlOptions::default())
+        self.to_html_with_diagnostics().0
     }
 
-    /// Convert the document to an HTML fragment (body content only, no `<html>` wrapper).
+    /// Convert to HTML and return chart projection diagnostics separately.
+    pub fn to_html_with_diagnostics(&self) -> (String, Vec<String>) {
+        let (input, charts, diagnostics) = self.build_html_input();
+        (
+            rdocx_html::to_html_document_with_charts(
+                &input,
+                &rdocx_html::HtmlOptions::default(),
+                &charts,
+            ),
+            diagnostics,
+        )
+    }
+
+    /// Convert to an HTML fragment without the document wrapper.
     pub fn to_html_fragment(&self) -> String {
-        let input = self.build_html_input();
-        rdocx_html::to_html_fragment(&input, &rdocx_html::HtmlOptions::default())
+        self.to_html_fragment_with_diagnostics().0
     }
 
-    /// Convert the document to Markdown.
+    /// Convert to an HTML fragment and return chart diagnostics separately.
+    pub fn to_html_fragment_with_diagnostics(&self) -> (String, Vec<String>) {
+        let (input, charts, diagnostics) = self.build_html_input();
+        (
+            rdocx_html::to_html_fragment_with_charts(
+                &input,
+                &rdocx_html::HtmlOptions::default(),
+                &charts,
+            ),
+            diagnostics,
+        )
+    }
+
+    /// Convert to Markdown.
     pub fn to_markdown(&self) -> String {
-        let input = self.build_html_input();
-        rdocx_html::to_markdown(&input)
+        self.to_markdown_with_diagnostics().0
+    }
+
+    /// Convert to Markdown and return chart diagnostics separately.
+    pub fn to_markdown_with_diagnostics(&self) -> (String, Vec<String>) {
+        let (input, charts, diagnostics) = self.build_html_input();
+        (
+            rdocx_html::to_markdown_with_charts(&input, &charts),
+            diagnostics,
+        )
     }
 
     /// Build an HtmlInput from the document's current state.
-    fn build_html_input(&self) -> rdocx_html::HtmlInput {
+    fn build_html_input(
+        &self,
+    ) -> (
+        rdocx_html::HtmlInput,
+        std::collections::HashMap<String, rdocx_html::ChartTable>,
+        Vec<String>,
+    ) {
         use oxml_opc::relationship::rel_types;
         use std::collections::HashMap;
 
+        let mut charts = HashMap::new();
+        let mut diagnostics = Vec::new();
         let mut images: HashMap<String, rdocx_html::ImageData> = HashMap::new();
         let mut hyperlink_urls: HashMap<String, String> = HashMap::new();
 
@@ -46644,6 +46689,43 @@ impl Document {
                             );
                         }
                     }
+                    t if t == rel_types::CHART && relationship_is_internal(rel) => {
+                        let part_name =
+                            OpcPackage::resolve_rel_target(&self.doc_part_name, &rel.target);
+                        let projection =
+                            (|| -> std::result::Result<rdocx_html::ChartTable, String> {
+                                let bytes = self
+                                    .package
+                                    .get_part(&part_name)
+                                    .ok_or_else(|| "chart part was not resolved".to_owned())?;
+                                let (_, data) = oxml_chart::read_chart_data(bytes)
+                                    .map_err(|error| error.to_string())?;
+                                let title = oxml_chart::chart_plain_title(bytes)
+                                    .map_err(|error| error.to_string())?;
+                                Ok(rdocx_html::ChartTable {
+                                    title,
+                                    categories: data.categories,
+                                    series: data.series,
+                                })
+                            })();
+                        match projection {
+                            Ok(chart) => {
+                                if chart.series.iter().any(|(_, values)| {
+                                    values.iter().any(|value| !value.is_finite())
+                                }) {
+                                    diagnostics.push(format!(
+                                        "chart relationship {}: non-finite series value omitted",
+                                        rel.id
+                                    ));
+                                }
+                                charts.insert(rel.id.clone(), chart);
+                            }
+                            Err(error) => diagnostics.push(format!(
+                                "chart relationship {}: chart table omitted: {error}",
+                                rel.id
+                            )),
+                        }
+                    }
                     t if t == rel_types::HYPERLINK
                         && rel.target_mode.as_ref().is_some_and(|m| m == "External") =>
                     {
@@ -46654,13 +46736,17 @@ impl Document {
             }
         }
 
-        rdocx_html::HtmlInput {
-            document: self.document.clone(),
-            styles: CT_Styles::clone(&self.styles),
-            numbering: self.numbering.clone(),
-            images,
-            hyperlink_urls,
-        }
+        (
+            rdocx_html::HtmlInput {
+                document: self.document.clone(),
+                styles: CT_Styles::clone(&self.styles),
+                numbering: self.numbering.clone(),
+                images,
+                hyperlink_urls,
+            },
+            charts,
+            diagnostics,
+        )
     }
 
     /// Render a single page of the document to PNG bytes.
@@ -49818,8 +49904,309 @@ fn has_consistent_sfnt_header(data: &[u8]) -> bool {
         && range_shift == expected_range_shift
 }
 
+fn annotate_undrawable_images(
+    layout: &mut rdocx_layout::WordLayoutResult,
+    input: &rdocx_layout::LayoutInput,
+) {
+    let mut messages = Vec::new();
+    for (id, story) in layout.picture_draw_owners() {
+        let key = story
+            .as_ref()
+            .map_or_else(|| id.clone(), |story| format!("{story}\0{id}"));
+        let Some(image) = input.images.get(&key) else {
+            continue;
+        };
+        let detail = match oxml_pdf::classify_image_draw(&image.data, &image.content_type) {
+            oxml_pdf::ImageDrawClass::UnsupportedFormat { kind } => {
+                format!("uses unsupported image format {kind}")
+            }
+            oxml_pdf::ImageDrawClass::CouldNotDecode => "could not be decoded".to_owned(),
+            oxml_pdf::ImageDrawClass::Drawn | oxml_pdf::ImageDrawClass::NotThisDecoder => continue,
+        };
+        let mut message = format!("picture relationship {id} {detail}");
+        if let Some(story) = story {
+            message.push_str(&format!(" in related story {story}"));
+        }
+        if !messages.contains(&message) {
+            messages.push(message);
+        }
+    }
+    for message in messages {
+        if !layout
+            .layout
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == message)
+        {
+            layout
+                .layout
+                .diagnostics
+                .push(oxml_layout::Diagnostic { message });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fx281_number_format_diagnostics_follow_successful_paint() {
+        for (code, refused) in [
+            ("General", false),
+            ("0", false),
+            ("0.00", false),
+            ("0.0%", false),
+            ("#,##0", false),
+            ("#,##0.0", false),
+            ("$#,##0", false),
+            ("\"EUR \"#,##0", false),
+            ("# ##0", false),
+            ("yyyy", true),
+            ("0.0E+00", true),
+            ("0;General", true),
+            ("", true),
+        ] {
+            let data = oxml_chart::ChartData {
+                categories: vec!["Q1".into()],
+                series: vec![("Zeta region".into(), vec![1820.0])],
+                number_format: Some(code.into()),
+                ..Default::default()
+            };
+            let mut document = Document::new();
+            document
+                .add_chart(
+                    oxml_chart::ChartKind::Bar,
+                    crate::Length::inches(5.0),
+                    crate::Length::inches(3.0),
+                    &data,
+                )
+                .unwrap();
+            let layout = document
+                .layout_with_fonts_and_bundled_fallback(&[])
+                .unwrap();
+            let diagnostics = layout.layout.diagnostics;
+            assert!(
+                !diagnostics
+                    .iter()
+                    .any(|d| d.message.contains("placeholder")),
+                "{code}: {diagnostics:?}"
+            );
+            assert_eq!(
+                diagnostics
+                    .iter()
+                    .filter(|d| d.message.contains("labels use General"))
+                    .count(),
+                usize::from(refused),
+                "{code}: {diagnostics:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fx281_chart_titles_diagnostics_and_source_bytes_follow_current_parts() {
+        let mut document = Document::new();
+        document.add_paragraph("Body retained");
+        document
+            .add_chart(
+                oxml_chart::ChartKind::Bar,
+                crate::Length::inches(5.0),
+                crate::Length::inches(3.0),
+                &oxml_chart::ChartData {
+                    categories: vec!["Q1".into(), "Q2".into()],
+                    series: vec![("Zeta region".into(), vec![1150.0, 1820.0])],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let rel = document
+            .package
+            .get_part_rels(&document.doc_part_name)
+            .unwrap()
+            .items
+            .iter()
+            .find(|rel| rel.rel_type == rel_types::CHART)
+            .unwrap()
+            .clone();
+        let part = OpcPackage::resolve_rel_target(&document.doc_part_name, &rel.target);
+        let original =
+            String::from_utf8(document.package.get_part(&part).unwrap().to_vec()).unwrap();
+        for title in [
+            "<c:title><c:tx><c:rich><a:p><a:r><a:t>Quarter</a:t></a:r></a:p></c:rich></c:tx></c:title>",
+            "<c:title><c:tx><c:strRef><c:f>Sheet1!$A$1</c:f><c:strCache><c:ptCount val=\"1\"/><c:pt idx=\"0\"><c:v>Quarter</c:v></c:pt></c:strCache></c:strRef></c:tx></c:title>",
+        ] {
+            let xml = original.replace("<c:chart>", &format!("<c:chart>{title}"));
+            document.package.set_part(&part, xml.as_bytes().to_vec());
+            for (output, diagnostics) in [
+                document.to_html_with_diagnostics(),
+                document.to_html_fragment_with_diagnostics(),
+                document.to_markdown_with_diagnostics(),
+            ] {
+                assert!(diagnostics.is_empty(), "{diagnostics:?}");
+                for token in ["Quarter", "Q1", "Zeta region", "1150"] {
+                    assert!(output.contains(token), "{output}");
+                }
+            }
+            assert_eq!(document.package.get_part(&part).unwrap(), xml.as_bytes());
+        }
+        // A sparse cache yields a non-finite projection cell, without inventing a value.
+        let sparse = original.replace("<c:pt idx=\"1\"><c:v>1820</c:v></c:pt>", "");
+        assert_ne!(sparse, original);
+        document.package.set_part(&part, sparse.as_bytes().to_vec());
+        let (output, diagnostics) = document.to_html_with_diagnostics();
+        assert!(output.contains("1150") && !output.contains("NaN"));
+        assert_eq!(
+            diagnostics,
+            [format!(
+                "chart relationship {}: non-finite series value omitted",
+                rel.id
+            )]
+        );
+        document.package.set_part(&part, b"<malformed".to_vec());
+        for (output, diagnostics) in [
+            document.to_html_with_diagnostics(),
+            document.to_html_fragment_with_diagnostics(),
+            document.to_markdown_with_diagnostics(),
+        ] {
+            assert!(
+                output.contains("Body retained")
+                    && !output.contains("chart-data")
+                    && !output.contains("Zeta region")
+            );
+            assert_eq!(diagnostics.len(), 1);
+            assert!(diagnostics[0].starts_with(&format!(
+                "chart relationship {}: chart table omitted:",
+                rel.id
+            )));
+            assert!(!output.contains("chart table omitted"));
+        }
+    }
+
+    #[test]
+    fn fx281_picture_diagnostics_cover_every_fresh_publisher_and_orphans() {
+        let mut document = Document::new();
+        document.add_picture(
+            b"\x89PNG\r\n\x1a\n",
+            "broken.png",
+            crate::Length::inches(1.0),
+            crate::Length::inches(1.0),
+        );
+        document
+            .package
+            .set_part("/word/media/orphan.emf", b"random".to_vec());
+        document
+            .package
+            .get_or_create_part_rels(&document.doc_part_name)
+            .add(rel_types::IMAGE, "media/orphan.emf");
+        let font = include_bytes!("../../oxml-layout/fonts/Carlito-Regular.ttf");
+        let fonts = [("Carlito", font.as_slice())];
+        let options = RenderOptions::default();
+        let check = |layout: &rdocx_layout::WordLayoutResult| {
+            let pictures = layout
+                .layout
+                .diagnostics
+                .iter()
+                .filter(|d| d.message.starts_with("picture relationship "))
+                .collect::<Vec<_>>();
+            assert_eq!(pictures.len(), 1, "{pictures:?}");
+            assert!(pictures[0].message.ends_with("could not be decoded"));
+            assert_eq!(layout.picture_draw_owners().len(), 1);
+        };
+        check(&document.cached_layout().unwrap());
+        check(&document.cached_deterministic_layout().unwrap());
+        let tracked = RenderOptions {
+            revision_view: rdocx_layout::RevisionView::Tracked,
+            ..options
+        };
+        check(&document.layout_for_options(tracked, true).unwrap());
+        check(&document.layout_for_options(tracked, false).unwrap());
+        check(
+            &document
+                .layout_with_fonts_and_options(&fonts, options)
+                .unwrap(),
+        );
+        check(
+            &document
+                .layout_with_fonts_and_bundled_fallback_and_options(&fonts, options)
+                .unwrap(),
+        );
+        check(
+            &document
+                .layout_with_fonts_aliases_and_bundled_fallback_and_options(
+                    &fonts,
+                    &[("Document Face", "Carlito")],
+                    options,
+                )
+                .unwrap(),
+        );
+        check(
+            &document
+                .layout_with_additional_fonts_and_options(&fonts, options)
+                .unwrap(),
+        );
+        // Invalidate after a real mutation and re-enter the reusable engine.
+        document.add_paragraph("after owner cache");
+        check(&document.cached_layout().unwrap());
+        let (_, diagnostics) = document.to_pdf_with_diagnostics(&[], options).unwrap();
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|d| d.message.starts_with("picture relationship "))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn fx281_picture_decode_diagnostic_on_owned_picture() {
+        fn send_sync<T: Send + Sync>() {}
+        send_sync::<rdocx_layout::input::MediaRegistry>();
+        let mut document = Document::new();
+        document.add_picture(
+            b"\x89PNG\r\n\x1a\n",
+            "broken.png",
+            crate::Length::inches(1.0),
+            crate::Length::inches(1.0),
+        );
+        let layout = document
+            .layout_with_fonts_and_bundled_fallback(&[])
+            .unwrap();
+        assert!(
+            layout
+                .layout
+                .diagnostics
+                .iter()
+                .any(|d| d.message.starts_with("picture relationship ")
+                    && d.message.ends_with(" could not be decoded")),
+            "{:?}",
+            layout.layout.diagnostics
+        );
+    }
+
+    #[test]
+    fn fx281_chart_semantic_exports_preserve_values() {
+        let mut document = Document::new();
+        document
+            .add_chart(
+                oxml_chart::ChartKind::Bar,
+                crate::Length::inches(5.0),
+                crate::Length::inches(3.0),
+                &oxml_chart::ChartData {
+                    categories: vec!["Q1".into(), "Q2".into()],
+                    series: vec![("Zeta region".into(), vec![1150.0, 1820.0])],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        for output in [
+            document.to_html(),
+            document.to_html_fragment(),
+            document.to_markdown(),
+        ] {
+            for expected in ["Q1", "Zeta region", "1150"] {
+                assert!(output.contains(expected), "missing {expected}: {output}");
+            }
+        }
+    }
+
     #[test]
     fn issue437_direct_cell_edit_publishes_once_and_roundtrips() {
         let mut document = Document::new();
@@ -68593,7 +68980,7 @@ mod tests {
             .get_or_create_part_rels("/word/document.xml")
             .add(rel_types::IMAGE, "media/misleading.png");
 
-        let html_input = document.build_html_input();
+        let (html_input, _, _) = document.build_html_input();
         let layout_input = document.build_layout_input().unwrap();
 
         assert_eq!(

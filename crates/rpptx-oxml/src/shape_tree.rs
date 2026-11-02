@@ -49,6 +49,21 @@ pub enum ShapeTreeChild {
 }
 
 impl ShapeTreeChild {
+    /// Reports the selected physical drawing owner's hidden paint flag.
+    /// Semantic text consumers retain the shape and its content.
+    pub fn hidden(&self) -> bool {
+        match self {
+            Self::Shape(value) => value.hidden(),
+            Self::Picture(value) => value.hidden(),
+            Self::GraphicFrame(value) => value.hidden(),
+            Self::GroupShape(value) => value.hidden(),
+            Self::Connector(value) => value.hidden(),
+            Self::AlternateContent(value) => {
+                value.chart_choice().is_some_and(CT_GraphicFrame::hidden)
+            }
+        }
+    }
+
     /// Returns the child's `p:cNvPr/@id`, when the child owns one.
     pub fn non_visual_id(&self) -> Option<u32> {
         match self {
@@ -1267,6 +1282,17 @@ struct ParsedGroup {
 }
 
 impl CT_Shape {
+    fn hidden(&self) -> bool {
+        let bindings = accessibility_parent_bindings(
+            &self.raw.raw_attributes,
+            &self.raw.non_visual_attributes,
+        );
+        crate::namespace::non_visual_drawing_hidden(
+            &self.raw.non_visual_drawing_properties,
+            &bindings,
+        )
+    }
+
     /// Creates an ordinary preset shape with a transform and minimal text body.
     pub fn new_preset(
         id: u32,
@@ -2402,6 +2428,15 @@ impl Default for CT_ShapeTree {
 }
 
 impl CT_GroupShape {
+    fn hidden(&self) -> bool {
+        let bindings = accessibility_parent_bindings(
+            &self.raw_attributes,
+            &self.non_visual_group_properties.raw_attributes,
+        );
+        self.accessibility_xml()
+            .is_some_and(|xml| crate::namespace::non_visual_drawing_hidden(xml, &bindings))
+    }
+
     /// Copies an ancestor group with a fresh identity, retaining exact geometry
     /// and producer metadata for a selected placeholder descendant.
     pub fn clone_with_id(&self, id: u32) -> Result<Self> {
@@ -5304,4 +5339,39 @@ fn fx216_notes_tree_refuses_references_to_uninstantiated_master_placeholders() {
             .any(|value| value.defines_shape && value.id == 42)
     );
     assert_eq!(master.to_xml().unwrap(), master_before);
+}
+#[cfg(test)]
+#[test]
+fn fx281_enum_hidden_dispatch_is_qualified_and_source_preserving() {
+    let frame = r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="12"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="0" y="0"/><a:ext cx="12700" cy="12700"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></p:graphicFrame>"#;
+    let shape =
+        r#"<p:sp><p:nvSpPr><p:cNvPr id="2"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr/></p:sp>"#;
+    let picture = r#"<p:pic><p:nvPicPr><p:cNvPr id="3"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill/><p:spPr/></p:pic>"#;
+    let connector = r#"<p:cxnSp><p:nvCxnSpPr><p:cNvPr id="4"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr><p:spPr/></p:cxnSp>"#;
+    let group = format!(
+        r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="5"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{shape}</p:grpSp>"#
+    );
+    let alternate = format!(
+        r#"<mc:AlternateContent><mc:Choice Requires="c">{frame}</mc:Choice><mc:Fallback>{shape}</mc:Fallback></mc:AlternateContent>"#
+    );
+    for (attribute, expected) in [
+        ("hidden='1'", true),
+        ("hidden='&#116;rue'", true),
+        ("hidden='false'", false),
+        ("xmlns:f='urn:foreign' f:hidden='1'", false),
+    ] {
+        let content = format!("{shape}{picture}{connector}{group}{frame}{alternate}")
+            .replace("<p:cNvPr ", &format!("<p:cNvPr {attribute} "));
+        let xml = format!(
+            r#"<p:spTree xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><p:nvGrpSpPr/><p:grpSpPr/>{content}</p:spTree>"#
+        );
+        let tree = CT_ShapeTree::from_xml(xml.as_bytes()).unwrap();
+        assert_eq!(tree.children.len(), 6);
+        let before = tree.to_xml().unwrap();
+        assert!(
+            tree.children.iter().all(|child| child.hidden() == expected),
+            "{attribute}"
+        );
+        assert_eq!(before, tree.to_xml().unwrap());
+    }
 }

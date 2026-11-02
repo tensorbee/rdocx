@@ -157,6 +157,15 @@ struct ParsedGraphic {
 }
 
 impl CT_GraphicFrame {
+    pub(crate) fn hidden(&self) -> bool {
+        let bindings = accessibility_parent_bindings(
+            &self.raw_attributes,
+            &self.non_visual_properties.attributes,
+        );
+        self.accessibility_xml()
+            .is_some_and(|xml| crate::namespace::non_visual_drawing_hidden(xml, &bindings))
+    }
+
     /// Creates a table-bearing graphic frame with canonical non-visual shells.
     pub fn new_table(
         id: u32,

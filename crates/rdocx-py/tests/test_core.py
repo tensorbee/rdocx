@@ -16148,3 +16148,136 @@ def test_fx283_cell_text_keeps_cross_cell_comment_parts_and_current_anchors(cont
     reopened = rdocx.Document.from_bytes(after)
     assert reopened.comments[0].anchor_text == document.comments[0].anchor_text
     assert reopened.tables[0].cell(0, 0).text == cell.text
+
+
+def _fx281_red_emf():
+    records = b"".join(struct.pack("<" + "I" * len(words), *words) for words in [
+        [39, 24, 1, 0, 255, 0], [37, 12, 1], [37, 12, 0x80000008],
+        [43, 24, 0, 0, 200, 100], [14, 20, 0, 16, 20]])
+    header = bytearray(88)
+    for offset, value in [(0, 1), (4, 88), (16, 199), (20, 99), (32, 5290), (36, 2645),
+                          (44, 0x10000), (48, 88 + len(records)), (52, 6),
+                          (72, 1024), (76, 768), (80, 270), (84, 203)]:
+        struct.pack_into("<I", header, offset, value)
+    header[40:44] = b" EMF"
+    struct.pack_into("<H", header, 56, 2)
+    return bytes(header) + records
+
+
+def _fx281_red_png(interlaced):
+    width, height = 64, 32
+    passes = [(0, 0, 1, 1)] if not interlaced else [
+        (0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4),
+        (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2)]
+    raw = b""
+    for x, y, dx, dy in passes:
+        columns = len(range(x, width, dx))
+        if columns:
+            raw += (b"\0" + b"\xff\0\0" * columns) * len(range(y, height, dy))
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, int(interlaced)))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+def _fx281_png_colours(data, *, rows=False):
+    assert data.startswith(b"\x89PNG\r\n\x1a\n")
+    offset, packed = 8, bytearray()
+    while offset < len(data):
+        length = struct.unpack_from(">I", data, offset)[0]
+        kind, payload = data[offset + 4:offset + 8], data[offset + 8:offset + 8 + length]
+        if kind == b"IHDR":
+            width, height, depth, colour, _, _, interlace = struct.unpack(">IIBBBBB", payload)
+            assert depth == 8 and interlace == 0 and colour in (2, 6)
+        elif kind == b"IDAT":
+            packed.extend(payload)
+        offset += length + 12
+    channels = 3 if colour == 2 else 4
+    stride = width * channels
+    raw = zlib.decompress(packed)
+    previous = bytearray(stride)
+    red = other = 0
+    decoded_rows = []
+    for y in range(height):
+        start = y * (stride + 1)
+        filter_kind = raw[start]
+        row = bytearray(raw[start + 1:start + 1 + stride])
+        for x in range(stride):
+            left = row[x - channels] if x >= channels else 0
+            above = previous[x]
+            upper_left = previous[x - channels] if x >= channels else 0
+            if filter_kind == 0: prediction = 0
+            elif filter_kind == 1: prediction = left
+            elif filter_kind == 2: prediction = above
+            elif filter_kind == 3: prediction = (left + above) // 2
+            else:
+                assert filter_kind == 4
+                estimate = left + above - upper_left
+                distances = [abs(estimate - value) for value in (left, above, upper_left)]
+                prediction = (left, above, upper_left)[distances.index(min(distances))]
+            row[x] = (row[x] + prediction) & 255
+        for x in range(0, stride, channels):
+            rgb = row[x:x + 3]
+            is_red = rgb[0] > 150 and rgb[1] < 80 and rgb[2] < 80
+            red += is_red
+            other += max(rgb) - min(rgb) > 80 and not is_red
+        decoded_rows.append(bytes(row))
+        previous = row
+    return (width, height, channels, decoded_rows) if rows else (red, other)
+
+
+def _fx281_replace_chart_title(package_bytes):
+    source, output = io.BytesIO(package_bytes), io.BytesIO()
+    with zipfile.ZipFile(source) as archive, zipfile.ZipFile(output, "w") as target:
+        for entry in archive.infolist():
+            payload = archive.read(entry.filename)
+            if re.fullmatch(r"(?:word|ppt)/charts/chart\d+\.xml", entry.filename):
+                payload = payload.replace(b"<c:chart>", b'<c:chart><c:title><c:tx><c:rich><a:p><a:r><a:t>Quarter</a:t></a:r></a:p></c:rich></c:tx></c:title>')
+            target.writestr(entry, payload)
+    return output.getvalue()
+
+
+def test_fx281_word_emf_page_pixels_adam7_and_decode_diagnostics():
+    import rdocx
+    document = rdocx.Document()
+    document.add_picture(_fx281_red_emf(), "red.emf", rdocx.Inches(2), rdocx.Inches(1))
+    png, diagnostics = document.render_page_to_png_with_diagnostics(0, dpi=30)
+    red, other = _fx281_png_colours(png)
+    print("FX281_PAGE word_emf", red, other)
+    assert red >= 1200 and other == 0
+    assert diagnostics == ()
+    counts = []
+    for interlaced in [False, True]:
+        document = rdocx.Document()
+        document.add_picture(_fx281_red_png(interlaced), "red.png", rdocx.Inches(2), rdocx.Inches(1))
+        png, diagnostics = document.render_page_to_png_with_diagnostics(0, dpi=30)
+        counts.append(_fx281_png_colours(png))
+        assert diagnostics == ()
+    print("FX281_PAGE word_plain_adam7", counts)
+    assert counts[0] == counts[1] and counts[0][0] >= 1200 and counts[0][1] == 0
+    broken = rdocx.Document()
+    broken.add_picture(_fx281_red_png(False), "broken.png", rdocx.Inches(1), rdocx.Inches(1))
+    imported = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(broken.to_bytes())) as source, zipfile.ZipFile(imported, "w") as target:
+        for entry in source.infolist():
+            payload = b"\x89PNG\r\n\x1a\n" if entry.filename.startswith("word/media/") else source.read(entry.filename)
+            target.writestr(entry, payload)
+    broken = rdocx.Document.from_bytes(imported.getvalue())
+    _, diagnostics = broken.render_page_to_png_with_diagnostics(0, dpi=30)
+    assert len([message for message in diagnostics if "could not be decoded" in message]) == 1
+
+
+def test_fx281_word_python_string_exports_project_current_chart_title():
+    import rdocx
+    document = rdocx.Document()
+    data = rdocx.CategoryChartData()
+    data.categories = ["Q1", "Q2"]
+    data.add_series("Zeta region", [1150, 1820])
+    document.add_chart(51, data, rdocx.Inches(4), rdocx.Inches(2))
+    document = rdocx.Document.from_bytes(_fx281_replace_chart_title(document.to_bytes()))
+    before = document.to_bytes()
+    for text in [document.to_html(), document.to_markdown()]:
+        assert isinstance(text, str)
+        for token in ["Quarter", "Q1", "Zeta region", "1150"]:
+            assert token in text
+    assert document.to_bytes() == before

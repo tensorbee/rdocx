@@ -28,6 +28,97 @@ use quick_xml::{Reader, Writer, XmlVersion};
 
 pub use oxml_drawing::color::RgbColor;
 
+/// Project the direct chart title from complete current part bytes without rewriting it.
+pub fn chart_plain_title(chart_xml: &[u8]) -> Result<Option<String>> {
+    CT_ChartSpace::from_xml(chart_xml)?;
+    use quick_xml::name::ResolveResult;
+    let mut reader = quick_xml::reader::NsReader::from_reader(chart_xml);
+    let mut path: Vec<(u8, Vec<u8>)> = Vec::new();
+    let mut rich = String::new();
+    let mut cached = String::new();
+    let mut has_rich = false;
+    let title_prefix = |path: &[(u8, Vec<u8>)]| {
+        path.len() >= 4
+            && path[..4]
+                .iter()
+                .map(|(ns, name)| (*ns, name.as_slice()))
+                .eq([
+                    (1, b"chartSpace".as_slice()),
+                    (1, b"chart"),
+                    (1, b"title"),
+                    (1, b"tx"),
+                ])
+    };
+    loop {
+        let (ns, event) = reader.read_resolved_event().map_err(OxmlError::from)?;
+        let ns = match ns {
+            ResolveResult::Bound(uri) if uri.as_ref() == C_NS.as_bytes() => 1,
+            ResolveResult::Bound(uri) if uri.as_ref() == A_NS.as_bytes() => 2,
+            _ => 0,
+        };
+        match event {
+            event @ (Event::Start(_) | Event::Empty(_)) => {
+                let empty = matches!(&event, Event::Empty(_));
+                let start = match event {
+                    Event::Start(start) | Event::Empty(start) => start,
+                    _ => unreachable!(),
+                };
+                path.push((ns, start.local_name().as_ref().to_vec()));
+                if path.len() == 5 && title_prefix(&path) && path[4] == (1, b"rich".to_vec()) {
+                    has_rich = true;
+                }
+                if empty {
+                    path.pop();
+                }
+            }
+            Event::End(_) => {
+                path.pop();
+            }
+            Event::Eof => break,
+            event => {
+                let rich_path = path.len() == 8
+                    && title_prefix(&path)
+                    && path[4] == (1, b"rich".to_vec())
+                    && path[5] == (2, b"p".to_vec())
+                    && path[6].0 == 2
+                    && matches!(path[6].1.as_slice(), b"r" | b"fld")
+                    && path[7] == (2, b"t".to_vec());
+                let cache_path = path.len() == 8
+                    && title_prefix(&path)
+                    && path[4..]
+                        .iter()
+                        .map(|(ns, name)| (*ns, name.as_slice()))
+                        .eq([
+                            (1, b"strRef".as_slice()),
+                            (1, b"strCache"),
+                            (1, b"pt"),
+                            (1, b"v"),
+                        ]);
+                let target = if rich_path {
+                    &mut rich
+                } else if cache_path {
+                    &mut cached
+                } else {
+                    continue;
+                };
+                match event {
+                    Event::Text(text) => target.push_str(&decode_plain(&text)),
+                    Event::CData(text) => target.push_str(&text.decode().map_err(|error| {
+                        ChartError::InvalidValue {
+                            element: "c:title".into(),
+                            value: error.to_string(),
+                        }
+                    })?),
+                    Event::GeneralRef(reference) => target.push_str(&resolve_entity(&reference)),
+                    _ => {}
+                }
+            }
+        }
+    }
+    let title = if has_rich { rich } else { cached };
+    Ok((!title.is_empty()).then_some(title))
+}
+
 /// The transitional ChartML namespace used by OOXML packages.
 pub const C_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
 /// The fixed ChartML prefix used by writers in this crate.
@@ -2245,10 +2336,75 @@ fn tick_label_origin(
 
 fn format_axis_value(format: Option<&NumberFormat>, value: f64) -> Result<String> {
     if let Some(format) = format {
-        format.format_value(value)
+        format_or_general(format, value)
     } else {
         NumberFormat::new("General".to_owned(), false)?.format_value(value)
     }
+}
+
+fn format_or_general(format: &NumberFormat, value: f64) -> Result<String> {
+    match format.format_value(value) {
+        Err(ChartError::InvalidValue { element, .. })
+            if element == "c:numFmt/@formatCode projection" && value.is_finite() =>
+        {
+            Ok(value.to_string())
+        }
+        result => result,
+    }
+}
+/// Refused numeric label codes, deduplicated in plot, point and axis source order.
+pub fn unsupported_number_formats(chart: &CT_Chart) -> Result<Vec<String>> {
+    let mut codes = Vec::new();
+    let mut note = |format: &NumberFormat| {
+        if format.format_code != "General"
+            && numeric_sections(&format.format_code).is_none()
+            && !codes.contains(&format.format_code)
+        {
+            codes.push(format.format_code.clone());
+        }
+    };
+    for plot in chart.plot_area.plots()? {
+        let mut sets = plot_data_labels(plot).into_iter().collect::<Vec<_>>();
+        for series in plot_series(plot) {
+            sets.extend(series.data_labels.as_ref());
+        }
+        for labels in &sets {
+            labels.number_format.iter().for_each(&mut note);
+        }
+        for series in plot_series(plot) {
+            if let Some(AxisData::Numeric(data)) = &series.categories {
+                note(&NumberFormat::new(data.format_code.clone(), false)?);
+            }
+        }
+        for labels in sets {
+            // Validate existing duplicate/index policy, then walk physical raw order.
+            point_label_overrides(labels)?;
+            let mut namespaces = chart_namespace_defaults();
+            for (name, uri) in &labels.namespace_declarations {
+                if name == "xmlns" {
+                    upsert_namespace_binding(&mut namespaces, Vec::new(), uri.clone());
+                } else if let Some(prefix) = name.strip_prefix("xmlns:") {
+                    upsert_namespace_binding(
+                        &mut namespaces,
+                        prefix.as_bytes().to_vec(),
+                        uri.clone(),
+                    );
+                }
+            }
+            for raw in labels.raw_children.at(0) {
+                if chart_root_local(raw, &namespaces)?.as_deref() == Some(b"dLbl") {
+                    parse_point_label_override(raw, &namespaces)?
+                        .number_format
+                        .iter()
+                        .for_each(&mut note);
+                }
+            }
+        }
+    }
+    for axis in chart.plot_area.axes()? {
+        axis.number_format.iter().for_each(&mut note);
+    }
+    Ok(codes)
 }
 
 fn shape_label(fonts: &mut FontManager, text: &str, origin: Point) -> Result<GlyphRun> {
@@ -2392,7 +2548,7 @@ fn series_categories(
                         element: "c:cat/c:pt/@idx".to_owned(),
                         value: index.to_string(),
                     })?;
-                    let text = format.format_value(*value)?;
+                    let text = format_or_general(format, *value)?;
                     Ok((index, text))
                 })
                 .collect()
@@ -2480,7 +2636,7 @@ fn render_data_labels(
                 };
                 if total > 0.0 {
                     let text = if let Some(format) = &labels.number_format {
-                        format.format_value(value / total)?
+                        format_or_general(format, value / total)?
                     } else {
                         NumberFormat::new("0%".to_owned(), false)?.format_value(value / total)?
                     };
@@ -6503,12 +6659,6 @@ fn validate_formula(formula: &str, element: &str) -> Result<()> {
 }
 
 fn validate_format_code(format_code: &str) -> Result<()> {
-    if format_code.is_empty() {
-        return Err(ChartError::InvalidValue {
-            element: "c:formatCode".to_owned(),
-            value: format_code.to_owned(),
-        });
-    }
     validate_xml_text(format_code, "c:formatCode")
 }
 
@@ -8875,49 +9025,320 @@ impl NumberFormat {
             return Ok(value.to_string());
         }
 
-        let (numeric_code, percentage) = self
-            .format_code
-            .strip_suffix('%')
-            .map(|code| (code, true))
-            .unwrap_or((&self.format_code, false));
-        let precision = if numeric_code == "0" {
-            Some(0)
-        } else if let Some(decimals) = numeric_code.strip_prefix("0.")
-            && !decimals.is_empty()
-            && decimals.bytes().all(|byte| byte == b'0')
-        {
-            Some(decimals.len())
-        } else {
-            None
-        };
-        let Some(precision) = precision else {
-            return Err(ChartError::InvalidValue {
-                element: "c:numFmt/@formatCode projection".to_owned(),
+        let sections =
+            numeric_sections(&self.format_code).ok_or_else(|| ChartError::InvalidValue {
+                element: "c:numFmt/@formatCode projection".into(),
                 value: self.format_code.clone(),
-            });
+            })?;
+        let index = if value < 0.0 && sections.len() >= 2 {
+            1
+        } else if value == 0.0 && sections.len() >= 3 {
+            2
+        } else {
+            0
         };
-        let projected = if percentage { value * 100.0 } else { value };
-        if !projected.is_finite() {
-            return Err(ChartError::InvalidValue {
-                element: "c:numFmt value".to_owned(),
-                value: projected.to_string(),
-            });
+        let mut text = sections[index].format(value.abs())?;
+        if value < 0.0 && sections.len() == 1 && !text.starts_with('-') {
+            text.insert(0, '-');
         }
-        let mut formatted = format!("{projected:.precision$}");
-        if percentage {
-            formatted.push('%');
-        }
-        Ok(formatted)
+        Ok(text)
     }
 
     fn validate(&self) -> Result<()> {
-        if self.format_code.is_empty() {
+        validate_xml_text(&self.format_code, "c:numFmt/@formatCode")
+    }
+}
+
+#[derive(Clone, PartialEq)]
+enum NumericToken {
+    Digit(bool),
+    Point,
+    Comma,
+    Percent,
+    Literal(String),
+}
+struct NumericSection {
+    tokens: Vec<NumericToken>,
+    group: usize,
+    scale: usize,
+}
+fn numeric_sections(code: &str) -> Option<Vec<NumericSection>> {
+    if code.is_empty() {
+        return None;
+    }
+    let mut parts = vec![String::new()];
+    let mut chars = code.chars().peekable();
+    let mut quoted = false;
+    while let Some(c) = chars.next() {
+        if c == '\\' || !quoted && matches!(c, '_' | '*') {
+            parts.last_mut()?.push(c);
+            parts.last_mut()?.push(chars.next()?);
+            continue;
+        }
+        if c == '"' {
+            if quoted && chars.peek() == Some(&'"') {
+                parts.last_mut()?.push_str("\"\"");
+                chars.next();
+                continue;
+            }
+            quoted = !quoted;
+        }
+        if c == ';' && !quoted {
+            parts.push(String::new());
+        } else {
+            parts.last_mut()?.push(c);
+        }
+    }
+    if quoted || parts.len() > 4 {
+        return None;
+    }
+    parts.truncate(3);
+    if parts.len() > 1 && parts.iter().any(|part| part == "General") {
+        return None;
+    }
+    let sections = parts
+        .iter()
+        .map(|part| numeric_section(part))
+        .collect::<Option<Vec<_>>>()?;
+    if !sections.iter().any(|section| {
+        section
+            .tokens
+            .iter()
+            .any(|t| matches!(t, NumericToken::Digit(_)))
+    }) {
+        return None;
+    }
+    Some(sections)
+}
+fn numeric_section(code: &str) -> Option<NumericSection> {
+    let mut chars = code.chars().peekable();
+    let mut tokens = Vec::new();
+    let mut point = false;
+    while let Some(c) = chars.next() {
+        let token = match c {
+            '"' => {
+                let mut literal = String::new();
+                loop {
+                    match chars.next()? {
+                        '"' if chars.peek() == Some(&'"') => {
+                            chars.next();
+                            literal.push('"');
+                        }
+                        '"' => break,
+                        c => literal.push(c),
+                    }
+                }
+                NumericToken::Literal(literal)
+            }
+            '\\' => NumericToken::Literal(chars.next()?.to_string()),
+            '_' => {
+                chars.next()?;
+                NumericToken::Literal(" ".into())
+            }
+            '*' => {
+                chars.next()?;
+                continue;
+            }
+            '[' => {
+                let mut bracket = String::new();
+                loop {
+                    let c = chars.next()?;
+                    if c == ']' {
+                        break;
+                    }
+                    bracket.push(c);
+                }
+                if let Some(currency) = bracket.strip_prefix('$') {
+                    let symbol = currency
+                        .rsplit_once('-')
+                        .filter(|(_, suffix)| {
+                            !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_hexdigit())
+                        })
+                        .map_or(currency, |(symbol, _)| symbol);
+                    NumericToken::Literal(symbol.into())
+                } else if [
+                    "red", "blue", "green", "yellow", "black", "white", "cyan", "magenta",
+                ]
+                .contains(&bracket.to_ascii_lowercase().as_str())
+                {
+                    continue;
+                } else {
+                    return None;
+                }
+            }
+            '0' | '#' | '?' => NumericToken::Digit(c == '0'),
+            '.' => {
+                if point {
+                    return None;
+                }
+                point = true;
+                NumericToken::Point
+            }
+            ',' => NumericToken::Comma,
+            '%' => NumericToken::Percent,
+            c if matches!(c.to_ascii_lowercase(), 'y' | 'm' | 'd' | 'h' | 's') => return None,
+            'A' | 'a'
+                if {
+                    let mut following = chars.clone();
+                    following.next() == Some('/') && matches!(following.next(), Some('P' | 'p'))
+                } =>
+            {
+                return None;
+            }
+            'E' | 'e' if matches!(chars.peek(), Some('+' | '-')) => return None,
+            '/' => {
+                if matches!(tokens.last(), Some(NumericToken::Digit(_)))
+                    && matches!(chars.peek(), Some('0' | '#' | '?'))
+                {
+                    return None;
+                }
+                NumericToken::Literal("/".into())
+            }
+            c => NumericToken::Literal(c.to_string()),
+        };
+        tokens.push(token);
+    }
+    let decimal = tokens
+        .iter()
+        .position(|t| *t == NumericToken::Point)
+        .unwrap_or(tokens.len());
+    let integer_digits = tokens[..decimal]
+        .iter()
+        .enumerate()
+        .filter_map(|(i, t)| matches!(t, NumericToken::Digit(_)).then_some(i))
+        .collect::<Vec<_>>();
+    let mut group = 0;
+    let mut scale = 0;
+    for (i, token) in tokens[..decimal].iter_mut().enumerate() {
+        if *token != NumericToken::Comma {
+            continue;
+        }
+        let left = integer_digits.iter().any(|at| *at < i);
+        let right = integer_digits.iter().filter(|at| **at > i).count();
+        if left && right > 0 {
+            group = right;
+            *token = NumericToken::Literal(String::new());
+        } else if left {
+            scale += 1;
+            *token = NumericToken::Literal(String::new());
+        } else {
+            *token = NumericToken::Literal(",".into());
+        }
+    }
+    // Fractional commas are ordinary literal commas, not scale/group directives.
+    for token in &mut tokens[decimal..] {
+        if *token == NumericToken::Comma {
+            *token = NumericToken::Literal(",".into());
+        }
+    }
+    Some(NumericSection {
+        tokens,
+        group,
+        scale,
+    })
+}
+impl NumericSection {
+    fn format(&self, value: f64) -> Result<String> {
+        let mut scaled = value;
+        for token in &self.tokens {
+            if *token == NumericToken::Percent {
+                scaled *= 100.0;
+            }
+        }
+        for _ in 0..self.scale {
+            scaled /= 1000.0;
+        }
+        if !scaled.is_finite() {
             return Err(ChartError::InvalidValue {
-                element: "c:numFmt/@formatCode".to_owned(),
-                value: self.format_code.clone(),
+                element: "c:numFmt value".into(),
+                value: scaled.to_string(),
             });
         }
-        validate_xml_text(&self.format_code, "c:numFmt/@formatCode")
+        let point = self
+            .tokens
+            .iter()
+            .position(|t| *t == NumericToken::Point)
+            .unwrap_or(self.tokens.len());
+        let precision = self.tokens[point..]
+            .iter()
+            .filter(|t| matches!(t, NumericToken::Digit(_)))
+            .count();
+        let rounded = format!("{scaled:.precision$}");
+        let (integer, fraction) = rounded.split_once('.').unwrap_or((&rounded, ""));
+        let integer_places = self.tokens[..point]
+            .iter()
+            .filter(|t| matches!(t, NumericToken::Digit(_)))
+            .count();
+        let required = self.tokens[..point]
+            .iter()
+            .filter(|t| **t == NumericToken::Digit(true))
+            .count();
+        let integer = if integer == "0" && required == 0 {
+            String::new()
+        } else {
+            format!("{integer:0>required$}")
+        };
+        let extra = integer.len().saturating_sub(integer_places);
+        let mut integer_at = 0;
+        let mut fraction_at = 0;
+        let mut places = integer_places;
+        let mut out = String::new();
+        let mut fractional_end = fraction.len();
+        for token in self.tokens[point..].iter().rev() {
+            if let NumericToken::Digit(required) = token {
+                if !required
+                    && fractional_end > 0
+                    && fraction.as_bytes()[fractional_end - 1] == b'0'
+                {
+                    fractional_end -= 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        for (at, token) in self.tokens.iter().enumerate() {
+            match token {
+                NumericToken::Digit(required) if at < point => {
+                    let take = if integer_at == 0 { extra + 1 } else { 1 };
+                    if integer.len().saturating_sub(integer_at) >= places {
+                        for _ in 0..take {
+                            if integer_at < integer.len() {
+                                out.push(integer.as_bytes()[integer_at] as char);
+                                integer_at += 1;
+                                let remaining = integer.len() - integer_at;
+                                if self.group > 0 && remaining > 0 && remaining % self.group == 0 {
+                                    out.push(',');
+                                }
+                            }
+                        }
+                    } else if *required {
+                        out.push('0');
+                    }
+                    places = places.saturating_sub(1);
+                }
+                NumericToken::Digit(required) => {
+                    if fraction_at < fractional_end || *required {
+                        out.push(
+                            fraction
+                                .as_bytes()
+                                .get(fraction_at)
+                                .copied()
+                                .unwrap_or(b'0') as char,
+                        );
+                    }
+                    fraction_at += 1;
+                }
+                NumericToken::Point => {
+                    if fractional_end > 0 {
+                        out.push('.');
+                    }
+                }
+                NumericToken::Literal(text) => out.push_str(text),
+                NumericToken::Percent => out.push('%'),
+                NumericToken::Comma => {}
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -10094,7 +10515,11 @@ fn parse_remaining_plot_child(
         }
         b"axId" if property_first => {
             if axis_ids.len() == 2 {
-                return Err(ChartError::DuplicateElement("c:axId".to_owned()));
+                if root != b"areaChart" {
+                    return Err(ChartError::DuplicateElement("c:axId".to_owned()));
+                }
+                raw_children.push(base + series.len() + 3, raw);
+                return Ok(());
             }
             axis_ids.push(parse_axis_id_scalar(&raw, "axId")?);
             *boundary = (*boundary).max(base + series.len() + 1 + axis_ids.len());
@@ -10331,7 +10756,8 @@ fn parse_bar_child(
         }
         b"axId" => {
             if axis_ids.len() == 2 {
-                return Err(ChartError::DuplicateElement("c:axId".to_owned()));
+                raw_children.push(series.len() + 7, raw);
+                return Ok(());
             }
             axis_ids.push(parse_axis_id_scalar(&raw, "axId")?);
             *boundary = (*boundary).max(series.len() + 5 + axis_ids.len());
@@ -10521,7 +10947,8 @@ fn parse_line_child(
         }
         b"axId" => {
             if axis_ids.len() == 2 {
-                return Err(ChartError::DuplicateElement("c:axId".to_owned()));
+                raw_children.push(series.len() + 6, raw);
+                return Ok(());
             }
             axis_ids.push(parse_axis_id_scalar(&raw, "axId")?);
             *boundary = (*boundary).max(series.len() + 4 + axis_ids.len());
@@ -14777,16 +15204,16 @@ mod tests {
             DispBlanksAs::Gap,
             &mut fonts,
         );
-        let error = match result {
-            Err(error) => error,
-            Ok(_) => panic!("unsupported category-axis format rendered"),
-        };
-        assert!(
-            error
-                .to_string()
-                .contains("c:numFmt/@formatCode projection")
-        );
-        assert!(error.to_string().contains("#,##0"));
+        let annotations = result.expect("supported grouping must draw the numeric category axis");
+        let text = annotations
+            .labels
+            .iter()
+            .filter_map(|element| match element {
+                PositionedElement::Text(run) => Some(run.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(text, ["1", "2"]);
     }
 
     #[test]
@@ -15484,9 +15911,7 @@ mod tests {
             ),
             format!(r#"<c:dLbls xmlns:c="{C_NS}"><c:showVal val="yes"/></c:dLbls>"#),
             format!(r#"<c:dLbls xmlns:c="{C_NS}"><c:dLblPos val="middle"/></c:dLbls>"#),
-            format!(
-                r#"<c:dLbls xmlns:c="{C_NS}"><c:numFmt formatCode="" sourceLinked="1"/></c:dLbls>"#
-            ),
+            format!(r#"<c:dLbls xmlns:c="{C_NS}"><c:numFmt sourceLinked="1"/></c:dLbls>"#),
             format!(
                 r#"<c:dLbls xmlns:c="{C_NS}"><c:numFmt formatCode="0" sourceLinked="maybe"/></c:dLbls>"#
             ),
@@ -15499,7 +15924,7 @@ mod tests {
 
         let invalid_code = NumberFormat::new("bad\u{0}code".to_owned(), false);
         assert!(invalid_code.is_err());
-        let unsupported = NumberFormat::new("#,##0".to_owned(), false).unwrap();
+        let unsupported = NumberFormat::new("yyyy-mm-dd".to_owned(), false).unwrap();
         assert!(unsupported.format_value(12.0).is_err());
         let general = NumberFormat::new("General".to_owned(), false).unwrap();
         for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
@@ -18554,5 +18979,234 @@ mod tests {
         for pair in layout.keys.windows(2) {
             assert!((pair[1].y - pair[0].y - 16.875).abs() <= 1.0);
         }
+    }
+    #[test]
+    fn fx281_number_format_approved_literals_and_grouping() {
+        for (code, expected) in [
+            ("#,##0", "1,820"),
+            ("$#,##0", "$1,820"),
+            ("\"EUR \"#,##0", "EUR 1,820"),
+            ("# ##0", "1 820"),
+        ] {
+            assert_eq!(
+                NumberFormat::new(code.to_owned(), false)
+                    .unwrap()
+                    .format_value(1820.0)
+                    .unwrap(),
+                expected
+            );
+        }
+    }
+    #[test]
+    fn fx281_extra_axis_ids_remain_raw_after_two_typed_ids() {
+        for extra in [
+            r#"<q:axId val="99999"/>"#,
+            r#"<q:axId val="-1884094432"/><q:axId val="99999"/>"#,
+        ] {
+            let series = plot_series(0);
+            let area = format!(
+                r#"<q:areaChart><q:grouping val="standard"/>{series}<q:axId val="-1884094432"/><q:axId val="-1884097184"/>{extra}</q:areaChart>"#
+            );
+            for plot in [bar_plot(extra), line_plot(extra), area] {
+                let chart = CT_ChartSpace::from_xml(chart_with_plot(&plot).as_bytes()).unwrap();
+                let written = String::from_utf8(chart.to_xml().unwrap()).unwrap();
+                assert!(written.contains(extra), "{written}");
+                assert_eq!(chart, CT_ChartSpace::from_xml(written.as_bytes()).unwrap());
+            }
+        }
+    }
+    #[test]
+    fn fx281_number_format_sections_tokens_refusals_and_painter_fallback() {
+        for (code, value, expected) in [
+            ("0 \"A/P\"", 1.0, "1 A/P"),
+            ("General", 1820.0, "1820"),
+            ("#,##0.0", 1820.0, "1,820.0"),
+            ("0.0%", 0.256, "25.6%"),
+            ("0.0#", -12.64, "-12.64"),
+            ("0.00", -12.645, "-12.64"),
+            ("0;[rEd](0);\"zero\"", 0.0, "zero"),
+            ("0;[Red](0);\"zero\"", -12.0, "(12)"),
+            ("0;-0", -2.0, "-2"),
+            ("0\\;0", 12.0, "1;2"),
+            ("\"a;b\"0", 1.0, "a;b1"),
+            ("\"A\"\"B\"0", 1.0, "A\"B1"),
+            ("[$USD-409]0", 1.0, "USD1"),
+            ("[$US-Dollar]0", 1.0, "US-Dollar1"),
+            ("0,,.0", 1_820_000.0, "1.8"),
+            ("#,##,##0", 1_234_567.0, "1,234,567"),
+            ("0.##", 1.2, "1.2"),
+            ("0.??", 1.0, "1"),
+            ("0_)*x", 1.0, "1 "),
+            ("0;", -1.0, ""),
+            ("#,##0;(#,##0);0;\"text\"", 1820.0, "1,820"),
+        ] {
+            assert_eq!(
+                NumberFormat::new(code.into(), false)
+                    .unwrap()
+                    .format_value(value)
+                    .unwrap(),
+                expected,
+                "code={code},value={value}"
+            );
+        }
+        assert!(
+            NumberFormat::new(String::new(), false)
+                .unwrap()
+                .format_value(1820.0)
+                .is_err()
+        );
+        for code in [
+            "0 A/P",
+            "yyyy-mm-dd",
+            "0.00E+00",
+            "# ?/?",
+            "[>1000]#,##0",
+            "@",
+            "0;0;0;@;0",
+            "0;General",
+            "[Color1]0",
+            "0..0",
+            "\"unterminated",
+        ] {
+            let format = NumberFormat::new(code.into(), false).unwrap();
+            assert!(format.format_value(1820.0).is_err(), "{code}");
+            assert_eq!(super::format_or_general(&format, 1820.0).unwrap(), "1820");
+            assert!(super::format_or_general(&format, f64::NAN).is_err());
+        }
+        let plot=bar_plot("").replace("<q:dLbls><q:showVal val=\"1\"/></q:dLbls>","<q:dLbls><q:numFmt formatCode=\"yyyy\" sourceLinked=\"0\"/><q:showVal val=\"1\"/></q:dLbls>");
+        let xml = chart_with_plot(&plot);
+        let chart = CT_ChartSpace::from_xml(xml.as_bytes()).unwrap();
+        let before = chart.to_xml().unwrap();
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        render_chart(&chart.chart, chart_bounds(), &mut fonts).unwrap();
+        assert_eq!(
+            super::unsupported_number_formats(&chart.chart).unwrap(),
+            ["yyyy"]
+        );
+        assert_eq!(before, chart.to_xml().unwrap());
+    }
+    #[test]
+    fn fx281_refused_format_diagnostics_keep_labels_categories_physical_points_axes_order() {
+        let labels = r#"<q:dLbls><q:dLbl><q:idx val="9"/><q:numFmt formatCode="hh" sourceLinked="0"/></q:dLbl><q:dLbl><q:idx val="1"/><q:numFmt formatCode="dd" sourceLinked="0"/></q:dLbl><q:numFmt formatCode="yyyy" sourceLinked="0"/><q:showVal val="1"/></q:dLbls>"#;
+        let mut plot = bar_plot("").replace("<q:dLbls><q:showVal val=\"1\"/></q:dLbls>", labels);
+        plot = plot.replace(
+            "</q:ser>",
+            r#"<q:dLbls><q:numFmt formatCode="mm" sourceLinked="0"/></q:dLbls></q:ser>"#,
+        );
+        let a = plot.find("<q:cat>").unwrap();
+        let b = plot[a..].find("</q:cat>").unwrap() + a + 8;
+        plot.replace_range(a..b,r#"<q:cat><q:numRef><q:f>Sheet1!$A$2:$A$3</q:f><q:numCache><q:formatCode>0E+00</q:formatCode><q:ptCount val="2"/><q:pt idx="0"><q:v>1</q:v></q:pt><q:pt idx="1"><q:v>2</q:v></q:pt></q:numCache></q:numRef></q:cat>"#);
+        let xml = chart_with_plot(&plot).replace(
+            r#"<q:crossAx val="-1884094432"/>"#,
+            r#"<q:numFmt formatCode="ss" sourceLinked="0"/><q:crossAx val="-1884094432"/>"#,
+        );
+        let chart = CT_ChartSpace::from_xml(xml.as_bytes()).unwrap();
+        assert_eq!(
+            super::unsupported_number_formats(&chart.chart).unwrap(),
+            ["yyyy", "mm", "0E+00", "hh", "dd", "ss"]
+        );
+    }
+    #[test]
+    fn fx281_title_reader_resolves_complete_part_paths_aliases_shadowing_and_empty_rich() {
+        let rich = r#"<q:rich><d:p><d:r><d:t>Qua&amp;</d:t></d:r><d:fld><d:t><![CDATA[R]]></d:t></d:fld></d:p></q:rich>"#;
+        let cache = r#"<q:strRef><q:strCache><q:pt idx="9"><q:v>Cache</q:v></q:pt><q:pt idx="1"><q:v>Next</q:v></q:pt></q:strCache></q:strRef>"#;
+        for (tx, expected) in [
+            (format!("{cache}{rich}"), Some("Qua&R")),
+            (cache.into(), Some("CacheNext")),
+            (format!("{cache}<q:rich/>"), None),
+            (
+                format!(
+                    "{cache}<q:rich><d:p><x:opaque><d:r><d:t>wrong</d:t></d:r></x:opaque></d:p></q:rich>"
+                ),
+                None,
+            ),
+            (
+                "<q:rich><d:p><d:r><d:t> </d:t></d:r></d:p></q:rich>".into(),
+                Some(" "),
+            ),
+            (
+                format!(
+                    "{cache}<q:rich xmlns:q=\"urn:foreign\"><d:p><d:r><d:t>wrong</d:t></d:r></d:p></q:rich>"
+                ),
+                Some("CacheNext"),
+            ),
+        ] {
+            let title = format!(
+                "<q:title><q:tx>{tx}</q:tx><q:extLst><d:t>wrong</d:t></q:extLst></q:title>"
+            );
+            let xml = chart_with_plot(&bar_plot(""))
+                .replace("<q:chart>", &format!("<q:chart xmlns:d=\"{A_NS}\">{title}"));
+            let source = xml.as_bytes().to_vec();
+            let chart = CT_ChartSpace::from_xml(&source).unwrap();
+            let before = chart.to_xml().unwrap();
+            assert_eq!(
+                super::chart_plain_title(&source).unwrap().as_deref(),
+                expected
+            );
+            assert_eq!(source, xml.as_bytes());
+            assert_eq!(before, chart.to_xml().unwrap());
+        }
+        assert_eq!(
+            super::chart_plain_title(chart_with_plot(&bar_plot("")).as_bytes()).unwrap(),
+            None
+        );
+        assert!(super::chart_plain_title(b"<q:chartSpace").is_err());
+    }
+    #[test]
+    fn fx281_empty_format_is_stored_but_projection_refuses_and_chart_uses_general() {
+        let plot=bar_plot("").replace("<q:dLbls><q:showVal val=\"1\"/></q:dLbls>","<q:dLbls><q:numFmt formatCode=\"\" sourceLinked=\"0\"/><q:showVal val=\"1\"/></q:dLbls>");
+        let xml = chart_with_plot(&plot);
+        let chart = CT_ChartSpace::from_xml(xml.as_bytes())
+            .expect("an explicitly empty stored formatCode must reach the fallback painter");
+        for plot in chart.chart.plot_area.plots().unwrap() {
+            plot.validate().unwrap();
+        }
+        assert!(
+            NumberFormat::new(String::new(), false)
+                .unwrap()
+                .format_value(1820.0)
+                .is_err()
+        );
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        render_chart(&chart.chart, chart_bounds(), &mut fonts).unwrap();
+        assert_eq!(
+            super::unsupported_number_formats(&chart.chart).unwrap(),
+            [""]
+        );
+        let saved = chart.to_xml().unwrap();
+        assert!(
+            std::str::from_utf8(&saved)
+                .unwrap()
+                .contains("formatCode=\"\"")
+        );
+        let reopened = CT_ChartSpace::from_xml(&saved).unwrap();
+        for plot in reopened.chart.plot_area.plots().unwrap() {
+            plot.validate().unwrap();
+        }
+        assert_eq!(
+            super::unsupported_number_formats(&reopened.chart).unwrap(),
+            [""]
+        );
+        assert_eq!(saved, reopened.to_xml().unwrap());
+        let mut plot = bar_plot("");
+        let a = plot.find("<q:cat>").unwrap();
+        let b = plot[a..].find("</q:cat>").unwrap() + a + 8;
+        plot.replace_range(a..b,r#"<q:cat><q:numRef><q:f>Sheet1!$A$2:$A$3</q:f><q:numCache><q:formatCode></q:formatCode><q:ptCount val="2"/><q:pt idx="0"><q:v>1</q:v></q:pt><q:pt idx="1"><q:v>2</q:v></q:pt></q:numCache></q:numRef></q:cat>"#);
+        let chart = CT_ChartSpace::from_xml(chart_with_plot(&plot).as_bytes()).unwrap();
+        for plot in chart.chart.plot_area.plots().unwrap() {
+            plot.validate().unwrap();
+        }
+        render_chart(&chart.chart, chart_bounds(), &mut fonts).unwrap();
+        assert_eq!(
+            super::unsupported_number_formats(&chart.chart).unwrap(),
+            [""]
+        );
+        let saved = chart.to_xml().unwrap();
+        let reopened = CT_ChartSpace::from_xml(&saved).unwrap();
+        assert_eq!(
+            super::unsupported_number_formats(&reopened.chart).unwrap(),
+            [""]
+        );
+        assert_eq!(saved, reopened.to_xml().unwrap());
     }
 }

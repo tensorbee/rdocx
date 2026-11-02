@@ -29344,25 +29344,30 @@ fn render_compatible_media(
     bytes: &[u8],
     content_type: &str,
 ) -> std::result::Result<bool, &'static str> {
-    let format = match ImageFormat::sniff(bytes) {
-        Some(ImageFormat::Png) if content_type.eq_ignore_ascii_case("image/png") => {
-            ImageFormat::Png
+    let format = ImageFormat::sniff(bytes);
+    if let Some(format @ (ImageFormat::Png | ImageFormat::Jpeg)) = format
+        && !render_media_within_decode_bounds(bytes, format)?
+    {
+        return Err("could not be decoded");
+    }
+    match oxml_pdf::classify_image_draw(bytes, content_type) {
+        oxml_pdf::ImageDrawClass::UnsupportedFormat { kind: "emf" } => {
+            return Err("uses unsupported image format emf");
         }
-        Some(ImageFormat::Jpeg)
-            if content_type.eq_ignore_ascii_case("image/jpeg")
-                || content_type.eq_ignore_ascii_case("image/jpg") =>
-        {
-            ImageFormat::Jpeg
+        oxml_pdf::ImageDrawClass::UnsupportedFormat { .. } => {
+            return Err("uses unsupported image format wmf");
         }
-        _ => return Ok(false),
-    };
-    if !render_media_within_decode_bounds(bytes, format)? {
-        return Ok(false);
+        oxml_pdf::ImageDrawClass::CouldNotDecode => return Err("could not be decoded"),
+        oxml_pdf::ImageDrawClass::NotThisDecoder => return Ok(false),
+        oxml_pdf::ImageDrawClass::Drawn => {}
+    }
+    if format == Some(ImageFormat::Emf) {
+        return Ok(true);
     }
     let Some(info) = probe(bytes).filter(|info| info.width_px > 0 && info.height_px > 0) else {
-        return Ok(false);
+        return Err("could not be decoded");
     };
-    if format == ImageFormat::Jpeg && (info.bit_depth != 8 || info.channels != 3) {
+    if format == Some(ImageFormat::Jpeg) && (info.bit_depth != 8 || info.channels != 3) {
         return Ok(false);
     }
     let width = f64::from(info.width_px);
@@ -29446,12 +29451,42 @@ fn render_media_within_decode_bounds(
     if format != ImageFormat::Png {
         return Ok(true);
     }
-    let Some(expected) = usize::try_from(info.width_px)
-        .ok()
-        .and_then(|width| width.checked_mul(info.channels as usize))
-        .and_then(|stride| stride.checked_add(1))
-        .and_then(|row| row.checked_mul(info.height_px as usize))
-    else {
+    let interlace = *bytes.get(28).ok_or("could not be decoded")?;
+    if interlace > 1 {
+        return Err("could not be decoded");
+    }
+    let expected = (|| {
+        let width = usize::try_from(info.width_px).ok()?;
+        let height = usize::try_from(info.height_px).ok()?;
+        let channels = usize::from(info.channels);
+        let passes: &[(usize, usize, usize, usize)] = match interlace {
+            0 => &[(0, 0, 1, 1)],
+            1 => &[
+                (0, 0, 8, 8),
+                (4, 0, 8, 8),
+                (0, 4, 4, 8),
+                (2, 0, 4, 4),
+                (0, 2, 2, 4),
+                (1, 0, 2, 2),
+                (0, 1, 1, 2),
+            ],
+            _ => return None,
+        };
+        passes.iter().try_fold(0usize, |total, &(x, y, dx, dy)| {
+            if width <= x || height <= y {
+                return Some(total);
+            }
+            let pass_width = (width - x).div_ceil(dx);
+            let pass_height = (height - y).div_ceil(dy);
+            total.checked_add(
+                pass_width
+                    .checked_mul(channels)?
+                    .checked_add(1)?
+                    .checked_mul(pass_height)?,
+            )
+        })
+    })();
+    let Some(expected) = expected else {
         return Err("has dimensions that overflow the decoded-image size");
     };
     if expected > MAX_RENDER_PREVIEW_DECODED_BYTES {

@@ -22,6 +22,7 @@ pub(crate) fn emit_body(
     images: &HashMap<String, ImageData>,
     hyperlink_urls: &HashMap<String, String>,
     options: &HtmlOptions,
+    charts: &HashMap<String, crate::ChartTable>,
 ) -> String {
     let mut out = String::new();
     let mut list_stack: Vec<ListState> = Vec::new();
@@ -66,6 +67,14 @@ pub(crate) fn emit_body(
                         close_list(&mut out, &mut list_stack);
                     }
                     emit_paragraph(&mut out, &p, styles, images, hyperlink_urls, options);
+                }
+                for id in crate::paragraph_chart_ids(&p) {
+                    if let Some(chart) = charts.get(&id) {
+                        while !list_stack.is_empty() {
+                            close_list(&mut out, &mut list_stack);
+                        }
+                        emit_chart_table(&mut out, chart);
+                    }
                 }
             }
             Block::Table(tbl) => {
@@ -633,4 +642,23 @@ pub(crate) fn base64_encode(data: &[u8]) -> String {
     }
 
     result
+}
+
+fn emit_chart_table(out: &mut String, chart: &crate::ChartTable) {
+    if let Some(title) = chart.title.as_ref().filter(|title| !title.is_empty()) {
+        out.push_str(&format!(
+            "<p class=\"chart-title\">{}</p>\n",
+            escape_html(title)
+        ));
+    }
+    out.push_str("<table class=\"chart-data\">\n");
+    for (index, row) in chart.rows().iter().enumerate() {
+        out.push_str("<tr>");
+        let tag = if index == 0 { "th" } else { "td" };
+        for cell in row {
+            out.push_str(&format!("<{tag}>{}</{tag}>", escape_html(cell)));
+        }
+        out.push_str("</tr>\n");
+    }
+    out.push_str("</table>\n");
 }

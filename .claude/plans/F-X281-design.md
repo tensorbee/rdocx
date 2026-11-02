@@ -10,7 +10,7 @@
 
 Root approves the closed design after .claude/reviews/F-X281-codex-design-final-1.md, zero defects and zero smells, following the exhausted three design peers. This supersedes historical draft/preparation/nonapproval wording below without rewriting its provenance. The approved source contract is the authenticated closure revision plus this status and risk-routing reconciliation. The public complete-byte title projection also matches the raw XML input risk row: its existing chart parser and scoped namespace/path rules apply before returning text, with malformed source, aliases/shadows, opaque lookalikes and unchanged-byte controls already specified. No new acceptance scope is introduced by correcting the older unmatched-row wording.
 
-No product question remains. F-X281 is approved but pending and unclaimed, with no provider dependency. Actual implementation still requires a clean Base and an exclusive resource wave. F-X282 owns facade/test/HLD resources until its handoff, and the F-X280/F-X283 resource order must be reconciled before claim. No delivery ledger or final gate passes are recorded by approval. All eight criteria, final checks and separate release approval remain due.
+No product question remains. Local implementation, the named scoped regressions and HLD05/07/08/10 are complete and independently reviewed. Actual implementation peer1 and Root final each report zero defects and zero smells. Implementation peers used1/3, with no confirmation peer or counter reset. Original claim Base is `4a220b6769fc2a5a2c90fc600f580478ea7e62f8` and continuation prefix is `514a076e592517ef128e555f52cef1085fa702de`. Preparation uses checkpoint `sprint-final-acceptance`. Status remains approved and delivery remains in-progress. All eight final acceptance rows, every named final rider and separate release approval remain due. Earlier resource-wave and unclaimed wording is historical.
 
 ## Preparation provenance
 
@@ -413,13 +413,44 @@ Versions stay Word 0.17.0 and shared PowerPoint 0.15.0. Publication is out of sc
 
 ## Implementation checklist
 
-- [ ] Acknowledge the operative Root closure repair and current clean Base before implementation. Do not reopen the exhausted design peer cap.
-- [ ] Export the image enum and classifier at the public oxml_pdf root and compile an external consumer of both paths.
-- [ ] Use complete chart bytes for the one chart_plain_title signature, exact title-path namespace controls, private HTML tuple plumbing and both direct/AlternateContent semantic routes.
-- [ ] Add only the public ShapeTreeChild hidden getter, keep variant helpers private or pub(crate), and include rpptx-oxml in final packaging and API evidence.
-- [ ] Use idx-free public PlaceholderKey::matches for equivalent-family selection without changing occupancy matching or mislabelling a missing type as Object.
+PhaseB carrier correction approved by Root: existing
+`crates/rdocx-layout/src/lib.rs` defines `WordLayoutResult` and all four
+provenance constructors. Its private picture-owner storage and approved getter
+join the already named engine emission sites. This is a source-reference
+correction, not another HLD impact file or public API.
+Existing `crates/rdocx-layout/src/input.rs` is also approved for the private
+transaction recorder/accessors, with Send+Sync-preserving Arc/Mutex storage.
+The current facade caller map includes the existing alias-aware bundled-fallback
+publisher as a seventh fresh path. It uses the same private annotation before
+publication and preserves its font aliases. HLD impact remains unchanged.
+
+- [x] Acknowledge the operative Root closure repair and current clean Base before implementation. Do not reopen the exhausted design peer cap.
+- [x] Export the image enum and classifier at the public oxml_pdf root and compile an external consumer of both paths.
+- [x] Use complete chart bytes for the one chart_plain_title signature, exact title-path namespace controls, private HTML tuple plumbing and both direct/AlternateContent semantic routes.
+- [x] Add only the public ShapeTreeChild hidden getter and keep variant helpers private or pub(crate).
+- [ ] Include rpptx-oxml in final packaging and strict public API evidence.
+- [x] Use idx-free public PlaceholderKey::matches for equivalent-family selection without changing occupancy matching or mislabelling a missing type as Object.
 
 The accepted proposal carried no separate implementation checklist. Its implementation obligations are the eight criteria in `## Approach` and `## Acceptance criteria`, the tests in `## Test plan`, and the HLD edits in `## HLD impact`. This heading adds no scope.
+
+## Local preparation evidence
+
+`/verify --scoped F-X281` consumes the authenticated PhaseA and PhaseB RED/GREEN
+receipts at `/private/tmp/rdocx-s96-root-f281-implementation`, with local checks
+passed and final sprint checks pending. Applicable observations include Word5,
+owner custody1, presentation4, HTML8, CLI2, corrected HF4 and same-build debug
+Python6, plus thirteen-crate scoped lint and its affected test-only follow-up.
+The actual independent reports are
+`.claude/reviews/F-X281-codex-implementation-pass-1.md` and
+`.claude/reviews/F-X281-codex-final-1.md`. Source/artifact applicability and
+historical setup failures remain in the existing progress and handoff packet.
+
+Final Office, pinned LibreOffice and Poppler bbox, schema, full installed
+Python3.9/3.12, typing/stubs and strict API, MSRV/WASM/docs, deterministic
+hash/pixel corpus, archives and nine-crate publish dry-run/size, hosted CI,
+final integrated union and reviewed-SHA release approval remain pending.
+Moving pdf/pages, pdf/resources or pdf/bytes stops qualification without a
+baseline update. Local debug source imports are not wheel or release proof.
 
 ## Open questions
 
@@ -507,3 +538,22 @@ Stop.
 Root claims the approved story for Codex in a separate clean-Base worker after reporting this resource split. PhaseA owns only existing files and corresponding test entrypoints under oxml-media, oxml-pdf, oxml-chart, rpptx-oxml and rpptx-layout. It does not edit Word facade/binding, rpptx facade/semantic export, HLD, manifests, baselines or shared tracking files. F-X272 retains its separate Word/OOXML lease and F-X283 retains its facade/binding/HLD lease until handback. These are nonoverlapping resource phases, not new provider edges.
 
 Before the later Word/export/HLD phase, Root reconciles the updated integrated prefix and grants the actual shared resources exclusively. All eight acceptance criteria, complete HLD impact and final riders remain required before verification or completion. No criterion is deferred beyond feature acceptance and no draft product decision is reopened by this scheduling choice. Historical statements that serialize the entire story behind F-X283 describe the earlier coarser resource plan.
+
+
+## PhaseA partial implementation checkpoint
+
+The existing media/PDF/chart/XML/layout phase is implemented with local evidence
+under /private/tmp/rdocx-s96-root-f281-implementation/phase-a. Public image root
+paths compile and execute in an external consumer. Complete-byte chart title,
+raw extra-axis preservation and deterministic numeric projection/fallback helpers
+are implemented. The one public enum hidden getter and private variant readers
+are implemented. The compound hidden item above remains unticked because final
+packaging/API qualification is pending. The compound title/export item remains
+unticked because private HTML tuple and semantic routes are a later leased phase.
+All eight criteria and every HLD impact remain required before feature verification.
+
+Root's early image/writer source collaboration is not a formal implementation
+peer or final review. Its path/current-position/ROP leads have actual intermediate
+RED and repaired GREEN observations. Its ActualText scan lead is static source
+reasoning, not an executed benchmark. No universal native GDI fidelity is claimed.
+Implementation peer count remains0/3. No commit, prepare or feature acceptance.

@@ -892,18 +892,24 @@ pub fn convert(
             }
         }
         "html" => {
-            let mut html = doc.to_html();
+            let (mut html, diagnostics) = doc.to_html_with_diagnostics();
             if let Some(stories) = readable_stories(file, &doc) {
                 push_html_stories(&mut html, &stories);
             }
             stage_and_publish(&[(output_path.clone(), html.into_bytes())], force)?;
+            for diagnostic in diagnostics {
+                eprintln!("{diagnostic}");
+            }
         }
         "md" | "markdown" => {
-            let mut md = doc.to_markdown();
+            let (mut md, diagnostics) = doc.to_markdown_with_diagnostics();
             if let Some(stories) = readable_stories(file, &doc) {
                 push_markdown_stories(&mut md, &stories);
             }
             stage_and_publish(&[(output_path.clone(), md.into_bytes())], force)?;
+            for diagnostic in diagnostics {
+                eprintln!("{diagnostic}");
+            }
         }
         "png" | "jpg" | "jpeg" | "tif" | "tiff" => {
             let (format, extension) = parse_image_format(to, image.quality, image.transparent)?;

@@ -4216,3 +4216,91 @@ fn fx254_missing_font_and_output_messages() {
     assert!(!String::from_utf8_lossy(&result.stderr).contains("--force"));
     assert_eq!(fs::read(&output).unwrap(), b"sentinel");
 }
+
+#[test]
+fn fx281_cli_chart_tables_and_separate_read_diagnostics() {
+    let workspace = TempWorkspace::new("fx281-chart-export");
+    let input = workspace.path.join("source.pptx");
+    let data = rpptx::ChartData {
+        categories: vec!["Q1".into(), "Q2".into()],
+        series: vec![("Zeta region".into(), vec![1150.0, 1820.0])],
+        ..Default::default()
+    };
+    let mut deck = Presentation::new().unwrap();
+    deck.add_slide(6).unwrap();
+    deck.add_chart(
+        0,
+        rpptx::ChartKind::Bar,
+        Emu(0),
+        Emu(0),
+        Emu(4572000),
+        Emu(2743200),
+        &data,
+    )
+    .unwrap();
+    deck.save(&input).unwrap();
+    let mut package = OpcPackage::open(&input).unwrap();
+    let rel = package
+        .get_part_rels("/ppt/slides/slide1.xml")
+        .unwrap()
+        .items
+        .iter()
+        .find(|rel| rel.rel_type == rel_types::CHART)
+        .unwrap()
+        .clone();
+    let part = OpcPackage::resolve_rel_target("/ppt/slides/slide1.xml", &rel.target);
+    let original = String::from_utf8(package.get_part(&part).unwrap().to_vec()).unwrap();
+    let title =
+        "<c:title><c:tx><c:rich><a:p><a:r><a:t>Quarter</a:t></a:r></a:p></c:rich></c:tx></c:title>";
+    let titled = original.replace("<c:chart>", &format!("<c:chart>{title}"));
+    assert_ne!(titled, original);
+    package.set_part(&part, titled.as_bytes().to_vec());
+    package.save(&input).unwrap();
+    for format in ["html", "md"] {
+        let output = workspace.path.join(format!("success.{format}"));
+        let result = cli(&[
+            "convert",
+            input.to_str().unwrap(),
+            "--to",
+            format,
+            "--output",
+            output.to_str().unwrap(),
+        ]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let text = fs::read_to_string(output).unwrap().replace("&#32;", " ");
+        for token in ["Quarter", "Q1", "Zeta region", "1150"] {
+            assert!(text.contains(token), "{text}");
+        }
+        assert!(!String::from_utf8_lossy(&result.stderr).contains("chart table omitted"));
+    }
+    package.set_part(&part, br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart/></c:chartSpace>"#.to_vec());
+    package.save(&input).unwrap();
+    for format in ["html", "md"] {
+        let output = workspace.path.join(format!("omitted.{format}"));
+        let result = cli(&[
+            "convert",
+            input.to_str().unwrap(),
+            "--to",
+            format,
+            "--output",
+            output.to_str().unwrap(),
+        ]);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let text = fs::read_to_string(output).unwrap();
+        assert!(!text.contains("Zeta region") && !text.contains("chart table omitted"));
+        assert_eq!(
+            String::from_utf8_lossy(&result.stderr)
+                .matches("chart table omitted:")
+                .count(),
+            1
+        );
+    }
+}

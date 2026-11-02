@@ -671,13 +671,11 @@ x and y advances, x and y offsets, logical clusters, direction, and extraction
 text. PDF paints those exact positions inside logical `ActualText`, raster
 applies the same per-glyph coordinates, and SVG emits searchable logical text.
 The PDF writer emits each rich run with one initial text matrix and relative
-glyph placement. Adjacent runs may share one extracted logical line only when
-their semantic owner, transformed baseline, and contiguous source or logical
-indices agree. The first run owns the complete `ActualText`, later runs use an
-empty replacement, and their paint operators stay in their original order.
-Ambiguous ownership, duplicate or gapped logical indices, and baseline changes
-end the line plan. Nested group transforms are cancelled only while expressing
-the same final glyph positions in page coordinates.
+glyph placement. Each valid rich run carries its own logical text in `ActualText` at that run's
+own text matrix, including a space span. Later words do not receive an empty
+replacement for an earlier word. Paint order, glyph positions and ToUnicode
+mapping remain unchanged. Inherited marked-content extraction text retains its
+existing ownership through nested groups.
 Legacy Latin remains on `GlyphRun` so existing output bytes do not move.
 A PowerPoint line taller than single spacing puts its baseline three quarters of
 the way down, or at the font's ascent share of the line when that is smaller. A
@@ -2750,6 +2748,62 @@ are laid out. Horizontal legends wrap within chart width. The renderer refuses
 unbounded or insufficient layouts rather than painting labels outside the
 chart. All backends consume the resulting group without separate legend logic.
 
+## Shared picture decoding
+
+PNG decoding supports all existing 8-bit channel forms with plain or Adam7
+interlace. Each pass has its own filter rows and scatters into the full raster
+before channel separation. Plain and interlaced flat-colour inputs retain the
+same rendered page pixels.
+
+EMF probe dimensions use positive inclusive pixel bounds. Invalid bounds fall
+back to positive frame differences converted by integer multiplication by 96
+and division by 2540, without adding one to frame dimensions. The raster player
+uses integer `(1024 / longest).clamp(1, 8)` scaling. Checked source and output
+RGBA products each refuse above 64 MiB before their raster allocation.
+
+The player covers window and viewport mapping, map modes and world transforms,
+save and negative restore, stock and created solid pens and brushes, 16-bit and
+32-bit polylines, polygons and Beziers, rectangles, rounded rectangles, ellipses,
+path brackets and STRETCHDIBITS with 1, 4, 8, 24 or 32-bit DIBs. DIB sampling
+retains source crop and signs, mapped affine destination and opaque RGB. Ternary
+ROP evaluates RGB Boolean dependencies. A source-free ROP does not require a
+fictitious DIB or source clip. A pattern-dependent ROP needs a solid brush. NOP
+preserves complete RGBA and does not mark an otherwise empty image as drawn.
+Unsupported palette-object dependencies, text, clipping, BITBLT, STRETCHBLT,
+ALPHABLEND, dashed or hatched objects, EMF+ and WMF do not set the drawn flag.
+No painted supported record means unsupported format. This is a raster subset,
+not vector output or exact GDI parity. Continuous mapping, affine stroke width,
+pixel-centre crop sampling and edge coverage are approximations.
+
+Word picture diagnostics use actual inline, anchor and resolved VML emission
+owners. `WordLayoutResult::picture_draw_owners` retains image relationship and
+optional related-story relationship ids. Media hashes and unused image-map
+entries do not supply owners. Scoped lookup never falls back to a main-story
+relationship. Fresh layout transactions replace capture state, and the VML
+header/footer cache replays its charged owner snapshot. Ordinary paragraph and
+table cache predicates exclude drawing content. All fresh facade publishers,
+including the alias-aware caller-font route, annotate before caching or returning
+the owned bundle. Unsupported and undecodable sentences retain relationship and
+story identity and appear once in diagnostics before encoding. Missing VML
+parts keep their existing unresolved sentence.
+
+## Chart numeric labels
+
+Numeric label pictures support zero and optional digits, decimal rounding,
+variable-width grouping, scaling commas, percent, quoted and escaped literals,
+currency brackets with stripped locale suffix, the eight named colour brackets,
+underscore and star. Up to four sections use positive, negative, zero and ignored
+text-section selection. Exact whole-code `General` remains supported. Date/time,
+scientific, fractional, conditional, text-only, empty and more-than-four-section
+codes refuse projection. Finite refused codes draw using Rust Display General
+values and one fallback diagnostic. Non-finite failures still propagate.
+
+`unsupported_number_formats` deduplicates first occurrences in physical plot
+order: label codes, numeric categories, point overrides, then axes. Painter
+fallback covers numeric categories, value labels and percent labels. Word and
+presentation add fallback diagnostics only after the chart group paints.
+Imported format spellings are not rewritten.
+
 ## Word chart pagination
 
 The Word layout input owns document-scoped parsed chart targets, the effective
@@ -2954,19 +3008,22 @@ appears on every slide.
 Upstream package assembly also constructs the source-neutral `ScopedMediaIds`
 maps consumed by `ResolveCtx::resolve_slide_with_media` and records package
 content types by resolved media ID. Only embedded picture relationships enter
-those maps. The target must be present, its declared content type must match its
-sniffed PNG or JPEG format. JPEG inputs must use the 8-bit, three-component
-layout supported by both the raster decoder and PDF pass-through path. Encoded
-bytes remain within 16 MiB and decoded scanline or pixel storage remains within
-64 MiB. Every dimension and byte multiplication is checked before allocation.
-The stricter raster backend must visibly decode the image at its native pixel
-bounds before it enters renderer input. Native bounds retain sparse visible
-pixels that a one-pixel probe could miss. This also covers the PDF backend,
-whose JPEG path is a less strict pass-through. A rejected relationship records
-its scope and stable failure reason separately from admitted media. The owning
-picture produces that one diagnostic and lowers as a visible bounds fallback.
-Missing, unsupported, malformed, invisible or content-type-mismatched media
-also stay unresolved. Linked media remains diagnosed and no renderer performs
+those maps. The target must be present. Shared `classify_image_draw` gives sniffed
+PNG and JPEG precedence over declared MIME types, admits a drawable bounded EMF,
+and separates an undecodable raster from unsupported EMF or WMF. Known other
+formats remain outside this decoder even when declared as a metafile. Empty or
+unrecognized bytes declared as an EMF or WMF use that unsupported-format outcome.
+
+PNG and JPEG preview admission retains the 16 MiB encoded and 64 MiB decoded
+limits with checked dimensions. Adam7 preview accounting sums the actual seven
+pass row sizes. A probed JPEG outside the 8-bit three-component layout and a
+decoded PNG that changes neither black nor white preview remain the named
+unresolved residuals. A recognized malformed raster records `could not be
+decoded`. An unsupported metafile names `emf` or `wmf`. A declared MIME mismatch
+does not discard a drawable sniffed PNG or JPEG. EMF bypasses this raster-preview
+policy and uses the shared player's independent bounds. Owning relationships
+retain their scope and failure reason for a visible bounds fallback.
+Linked media remains diagnosed and no renderer performs
 network access. Direct background picture fills use
 the scope of the slide, layout, or master that
 supplied `p:bg`. Theme-referenced picture fills are rejected
@@ -3143,7 +3200,7 @@ comparisons use the same actual geometry and font inputs with comparison
 criteria fixed before measuring output. A graph copy or nonblank image alone
 is not native appearance or pixel parity evidence.
 
-Qualified picture drawing properties with hidden=true or hidden=1 do not paint. Missing and false hidden flags retain ordinary picture rendering. The reader uses the actual qualified cNvPr owner and retains its raw bytes, including foreign attributes and children. LibreOffice may materialize master visibility as hidden layout pictures during save and reopen.
+Qualified shape, picture, connector, graphic-frame and group drawing properties with hidden=true or hidden=1 do not paint. A hidden group drops its descendants. Missing and false flags retain ordinary rendering. Selected AlternateContent chart choices use their own drawing owner. The same traversal applies to slides, layouts, masters, notes and handouts. Semantic export retains hidden-shape text and chart data. The reader uses the actual qualified cNvPr owner and retains its raw bytes, including foreign attributes and children. LibreOffice may materialize master visibility as hidden layout pictures during save and reopen.
 
 ## Word table topology and physical pictures
 

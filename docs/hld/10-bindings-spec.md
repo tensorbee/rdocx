@@ -4681,6 +4681,31 @@ It needs no family alias, new API or rewrite of the run's document semantics.
 API inputs, exact license authorization, immutable snapshots and own-renderer
 face selection retain their contracts.
 
+## Word chart text export
+
+Rust `Document::to_html_with_diagnostics`,
+`to_html_fragment_with_diagnostics` and `to_markdown_with_diagnostics` return
+`(String, Vec<String>)`. The existing string methods return the string half.
+Python keeps its string results. The CLI HTML and Markdown convert arms publish
+the string and print diagnostics to stderr.
+
+The ordinary Rust-only `rdocx_html::ChartTable` owns optional title, category
+strings and named numeric series. `rows` returns an empty-corner header and rows
+to the longest category or series length. Missing and non-finite values are
+blank. Finite Rust Display keeps 1150 as 1150. The three `with_charts` emitters
+borrow a relationship map without adding a field to `HtmlInput`. Existing
+emitters and EPUB use an empty map. Main-body paragraph drawing order places
+chart tables after their paragraph. Table-cell, furniture and text-box charts
+remain outside this finite traversal.
+
+The Word facade projects cached data and title from the same current chart-part
+bytes. A nonempty title is a paragraph before the escaped `chart-data` table,
+with HTML class `chart-title` or a plain Markdown line. A failed read omits the
+whole table with one relationship diagnostic. Non-finite cells diagnose once
+and leave other cells intact. No diagnostic is inserted into returned text,
+and read-only export does not rewrite package bytes or retire handles. These
+three tuples do not change the separate ODT, RTF, EPUB or text-report contracts.
+
 ## Presentation semantic text export
 
 Python `Presentation.to_html` and `to_markdown` return strings with keyword
@@ -4690,6 +4715,24 @@ Detached image mode refuses with directions to an export result or save method.
 with `text: str`, `assets: tuple[tuple[str, bytes], ...]` and
 `diagnostics: tuple[str, ...]`. Detached results own their data and remain
 independent of subsequent presentation edits.
+
+Chart projection resolves the current slide's internal chart relationship and
+content type, then reads cached data and the complete-byte title from that same
+part. It does not require a workbook or a direct shape-id chart owner. Direct
+graphic frames and selected AlternateContent chart choices use one semantic
+chart method. Rich title text takes precedence over cached string text, even
+when the rich join is empty. Hidden charts remain semantic content. Tables keep
+series names, categories and finite Display values such as 1150. Sparse or
+non-finite cells are blank and diagnose once. Read failure omits the entire table
+and records its relationship id, without adding the generic non-chart omission.
+Non-chart graphic frames keep their existing omission diagnostic. HTML cells
+and titles are escaped, and Markdown cells escape pipes and syntax.
+
+The same projection feeds both ordinary methods, both option methods, both save
+wrappers and CLI semantic conversion. Word and presentation Python string
+methods expose titles and table values without acquiring a tuple or ChartTable
+class. CLI diagnostics stay on stderr. Export does not rewrite chart title,
+cache, format or raw extra-axis bytes. WASM gains no semantic export surface.
 
 `save_html` and `save_markdown` accept a path and the same keyword options,
 with `inline_images=False`, and return a tuple of diagnostics after staged

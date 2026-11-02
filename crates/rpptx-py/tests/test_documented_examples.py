@@ -12556,3 +12556,217 @@ def test_issue431_slides_index_returns_the_live_position_python_pptx_returns():
         _ = held.slide_id
     with pytest.raises(IndexError):
         _ = presentation.slides[999]
+
+
+def _fx281_red_emf():
+    records = b"".join(struct.pack("<" + "I" * len(words), *words) for words in [
+        [39, 24, 1, 0, 255, 0], [37, 12, 1], [37, 12, 0x80000008],
+        [43, 24, 0, 0, 200, 100], [14, 20, 0, 16, 20]])
+    header = bytearray(88)
+    for offset, value in [(0, 1), (4, 88), (16, 199), (20, 99), (32, 5290), (36, 2645),
+                          (44, 0x10000), (48, 88 + len(records)), (52, 6),
+                          (72, 1024), (76, 768), (80, 270), (84, 203)]:
+        struct.pack_into("<I", header, offset, value)
+    header[40:44] = b" EMF"
+    struct.pack_into("<H", header, 56, 2)
+    return bytes(header) + records
+
+
+def _fx281_red_png(interlaced):
+    width, height = 64, 32
+    passes = [(0, 0, 1, 1)] if not interlaced else [
+        (0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4),
+        (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2)]
+    raw = b""
+    for x, y, dx, dy in passes:
+        columns = len(range(x, width, dx))
+        if columns:
+            raw += (b"\0" + b"\xff\0\0" * columns) * len(range(y, height, dy))
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, int(interlaced)))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+def _fx281_png_colours(data, *, rows=False):
+    assert data.startswith(b"\x89PNG\r\n\x1a\n")
+    offset, packed = 8, bytearray()
+    while offset < len(data):
+        length = struct.unpack_from(">I", data, offset)[0]
+        kind, payload = data[offset + 4:offset + 8], data[offset + 8:offset + 8 + length]
+        if kind == b"IHDR":
+            width, height, depth, colour, _, _, interlace = struct.unpack(">IIBBBBB", payload)
+            assert depth == 8 and interlace == 0 and colour in (2, 6)
+        elif kind == b"IDAT":
+            packed.extend(payload)
+        offset += length + 12
+    channels = 3 if colour == 2 else 4
+    stride = width * channels
+    raw = zlib.decompress(packed)
+    previous = bytearray(stride)
+    red = other = 0
+    decoded_rows = []
+    for y in range(height):
+        start = y * (stride + 1)
+        filter_kind = raw[start]
+        row = bytearray(raw[start + 1:start + 1 + stride])
+        for x in range(stride):
+            left = row[x - channels] if x >= channels else 0
+            above = previous[x]
+            upper_left = previous[x - channels] if x >= channels else 0
+            if filter_kind == 0: prediction = 0
+            elif filter_kind == 1: prediction = left
+            elif filter_kind == 2: prediction = above
+            elif filter_kind == 3: prediction = (left + above) // 2
+            else:
+                assert filter_kind == 4
+                estimate = left + above - upper_left
+                distances = [abs(estimate - value) for value in (left, above, upper_left)]
+                prediction = (left, above, upper_left)[distances.index(min(distances))]
+            row[x] = (row[x] + prediction) & 255
+        for x in range(0, stride, channels):
+            rgb = row[x:x + 3]
+            is_red = rgb[0] > 150 and rgb[1] < 80 and rgb[2] < 80
+            red += is_red
+            other += max(rgb) - min(rgb) > 80 and not is_red
+        decoded_rows.append(bytes(row))
+        previous = row
+    return (width, height, channels, decoded_rows) if rows else (red, other)
+
+
+def _fx281_replace_chart_title(package_bytes):
+    source, output = io.BytesIO(package_bytes), io.BytesIO()
+    with zipfile.ZipFile(source) as archive, zipfile.ZipFile(output, "w") as target:
+        for entry in archive.infolist():
+            payload = archive.read(entry.filename)
+            if re.fullmatch(r"(?:word|ppt)/charts/chart\d+\.xml", entry.filename):
+                payload = payload.replace(b"<c:chart>", b'<c:chart><c:title><c:tx><c:rich><a:p><a:r><a:t>Quarter</a:t></a:r></a:p></c:rich></c:tx></c:title>')
+            target.writestr(entry, payload)
+    return output.getvalue()
+
+
+def test_fx281_ppt_emf_page_pixels_width_only_adam7_and_decode_diagnostics():
+    import rpptx
+    for explicit_height in [False, True]:
+        deck = rpptx.Presentation()
+        slide = deck.slides.add_slide(deck.slide_layouts[6])
+        picture = slide.shapes.add_picture(io.BytesIO(_fx281_red_emf()), 0, 0, width=rpptx.Inches(3),
+                                           height=rpptx.Inches(1.5) if explicit_height else None)
+        assert picture.width == rpptx.Inches(3) and picture.height == rpptx.Inches(1.5)
+        png, diagnostics = deck.render_slide_to_png_with_diagnostics(0, dpi=30)
+        red, other = _fx281_png_colours(png)
+        print("FX281_PAGE ppt_emf", explicit_height, red, other)
+        assert red >= 2700 and other == 0
+        assert diagnostics == ()
+    counts = []
+    for interlaced in [False, True]:
+        deck = rpptx.Presentation()
+        slide = deck.slides.add_slide(deck.slide_layouts[6])
+        slide.shapes.add_picture(io.BytesIO(_fx281_red_png(interlaced)), 0, 0, width=rpptx.Inches(3), height=rpptx.Inches(1.5))
+        png, diagnostics = deck.render_slide_to_png_with_diagnostics(0, dpi=30)
+        counts.append(_fx281_png_colours(png))
+        assert diagnostics == ()
+    print("FX281_PAGE ppt_plain_adam7", counts)
+    assert counts[0] == counts[1] and counts[0][0] >= 2700 and counts[0][1] == 0
+    deck = rpptx.Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    slide.shapes.add_picture(io.BytesIO(b"\x89PNG\r\n\x1a\n"), 0, 0, width=rpptx.Inches(1), height=rpptx.Inches(1))
+    _, diagnostics = deck.render_slide_to_png_with_diagnostics(0, dpi=30)
+    assert len([message for message in diagnostics if "could not be decoded" in message]) == 1
+
+
+def test_fx281_ppt_python_string_and_save_exports_project_current_chart_title(tmp_path):
+    import rpptx
+    deck = rpptx.Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    data = rpptx.CategoryChartData()
+    data.categories = ["Q1", "Q2"]
+    data.add_series("Zeta region", [1150, 1820])
+    slide.shapes.add_chart(51, 0, 0, rpptx.Inches(4), rpptx.Inches(2), data)
+    deck = rpptx.Presentation.from_bytes(_fx281_replace_chart_title(deck.to_bytes()))
+    before = deck.to_bytes()
+    for text in [deck.to_html(), deck.to_markdown()]:
+        assert isinstance(text, str)
+        for token in ["Quarter", "Q1", "Zeta region", "1150"]:
+            assert token in text
+    for extension, method in [("html", deck.save_html), ("md", deck.save_markdown)]:
+        path = tmp_path / f"chart.{extension}"
+        method(path)
+        for token in ["Quarter", "Q1", "Zeta region", "1150"]:
+            assert token in path.read_text()
+    assert deck.to_bytes() == before
+
+
+def test_fx281_hidden_shapes_keep_semantics_and_match_single_visible_paint():
+    import xml.etree.ElementTree as ET
+    import rpptx
+    from rpptx.dml.color import RGBColor
+    deck = rpptx.Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    owners = []
+    for x, text in [(0, "Hidden semantic one"), (2, "Hidden semantic two"), (4, "Visible semantic")]:
+        shape = slide.shapes.add_shape(1, rpptx.Inches(x), rpptx.Inches(1), rpptx.Inches(1), rpptx.Inches(1))
+        shape.fill.solid()
+        shape.fill.fore_color.rgb = RGBColor(255, 0, 0)
+        shape.text = text
+        owners.append(shape.shape_id)
+    source = deck.to_bytes()
+    def project(remove):
+        output = io.BytesIO()
+        p = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
+        with zipfile.ZipFile(io.BytesIO(source)) as archive, zipfile.ZipFile(output, "w") as target:
+            for entry in archive.infolist():
+                data = archive.read(entry.filename)
+                if entry.filename == "ppt/slides/slide1.xml":
+                    root = ET.fromstring(data)
+                    tree = root.find(f"{p}cSld/{p}spTree")
+                    for child in list(tree):
+                        owner = child.find(f"{p}nvSpPr/{p}cNvPr")
+                        if owner is not None and int(owner.attrib["id"]) in owners[:2]:
+                            if remove: tree.remove(child)
+                            else: owner.set("hidden", "1")
+                    data = ET.tostring(root)
+                target.writestr(entry, data)
+        return rpptx.Presentation.from_bytes(output.getvalue())
+    hidden, control = project(False), project(True)
+    before = hidden.to_bytes()
+    assert "Hidden semantic one" in hidden.to_html() and "Hidden semantic two" in hidden.to_markdown()
+    for method, kwargs in [("render_slide_to_png", {"slide_index": 0}),
+                           ("render_all_notes", {}), ("render_all_handouts", {"slides_per_page": 2})]:
+        if method == "render_slide_to_png":
+            a = getattr(hidden, method)(0, dpi=30)
+            b = getattr(control, method)(0, dpi=30)
+            a, b = [a], [b]
+        else:
+            a = getattr(hidden, method)(dpi=30, **kwargs)
+            b = getattr(control, method)(dpi=30, **kwargs)
+        assert a == b
+        assert any(_fx281_png_colours(page)[0] > 0 for page in a)
+    assert hidden.to_pdf() == control.to_pdf()
+    assert hidden.to_notes_pdf() == control.to_notes_pdf()
+    assert hidden.to_handout_pdf(slides_per_page=2) == control.to_handout_pdf(slides_per_page=2)
+    assert hidden.to_bytes() == before
+
+
+def test_fx281_two_content_ink_tops_share_body_family_without_geometry_changes():
+    import rpptx
+    deck = rpptx.Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[3])
+    left, right = slide.placeholders[1], slide.placeholders[2]
+    left.text = right.text = "Same text"
+    explicit = [(shape.left, shape.top, shape.width, shape.height) for shape in [left, right]]
+    geometry = [shape.effective_geometry() for shape in [left, right]]
+    before = deck.to_bytes()
+    width, height, channels, rows = _fx281_png_colours(deck.render_slide_to_png(0, dpi=50), rows=True)
+    tops = []
+    for x, y, w, h in geometry:
+        x0, x1 = max(0, int(x * 50 / 914400)), min(width, int((x + w) * 50 / 914400) + 1)
+        y0, y1 = max(0, int(y * 50 / 914400)), min(height, int((y + h) * 50 / 914400) + 1)
+        tops.append(next(row for row in range(y0, y1)
+                         if any(max(rows[row][column * channels:column * channels + 3]) <= 40
+                                for column in range(x0, x1))))
+    print("FX281_TWO_CONTENT_TOPS", tops)
+    assert abs(tops[0] - tops[1]) <= 5
+    assert geometry == [shape.effective_geometry() for shape in [left, right]]
+    assert explicit == [(shape.left, shape.top, shape.width, shape.height) for shape in [left, right]]
+    assert deck.to_bytes() == before
