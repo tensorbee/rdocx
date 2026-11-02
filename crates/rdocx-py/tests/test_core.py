@@ -16107,3 +16107,44 @@ def test_issue437_control_owned_table_keeps_held_physical_paragraphs(target):
         assert sentinel.encode() in package.read("word/document.xml")
     reopened = rdocx.Document.from_bytes(saved)
     assert [paragraph.text for paragraph in reopened.tables[0].cell(0, 0).paragraphs] == expected
+
+
+@pytest.mark.parametrize("controlled", [False, True])
+def test_fx283_cell_text_keeps_cross_cell_comment_parts_and_current_anchors(controlled):
+    import rdocx
+    from rdocx import _rdocx
+
+    seed = rdocx.Document()
+    table = seed.add_table(1, 2)
+    table.cell(0, 0).text = "first"
+    table.cell(0, 1).text = "second"
+
+    def edit(xml):
+        start = '<w:commentRangeStart w:id="0"/>'
+        if controlled:
+            start = '<w:sdt><w:sdtPr/><w:sdtContent>' + start + '</w:sdtContent></w:sdt>'
+        first = xml.index("<w:r>", xml.index("<w:tc>"))
+        xml = xml[:first] + start + xml[first:]
+        end = xml.index("</w:p>", xml.index("second"))
+        return xml[:end] + '<w:commentRangeEnd w:id="0"/><w:r><w:commentReference w:id="0"/></w:r>' + xml[end:]
+
+    document = _fx264_with_comment_markers(seed, edit, [0])
+    cell = document.tables[0].cell(0, 0)
+    neighbor = document.tables[0].cell(0, 1)
+    before = document.to_bytes()
+    reads = getattr(_rdocx, "_word_piece_work", None)
+    alignments = getattr(_rdocx, "_word_piece_alignments", None)
+    if reads is not None:
+        reads()
+        alignments()
+    cell.text = "changed"
+    if reads is not None and not controlled:
+        assert reads() + alignments() <= 3
+    assert cell.text == "changed" and neighbor.text == "second"
+    assert document.comments[0].anchor_text == "changed\nsecond"
+    after = document.to_bytes()
+    with zipfile.ZipFile(io.BytesIO(before)) as old, zipfile.ZipFile(io.BytesIO(after)) as new:
+        assert old.read("word/comments.xml") == new.read("word/comments.xml")
+    reopened = rdocx.Document.from_bytes(after)
+    assert reopened.comments[0].anchor_text == document.comments[0].anchor_text
+    assert reopened.tables[0].cell(0, 0).text == cell.text

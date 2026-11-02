@@ -545,15 +545,16 @@ impl PyParagraph {
             .read_story_paragraph(&position.location, |p| p.run_path(position.run_index))
             .map_err(|error| crate::rdocx_to_pyerr(py, error))?
             .ok_or_else(|| PyIndexError::new_err("inserted link run was not found"))?;
+        let publication = crate::document::WordPublication::ParagraphAppend(
+            location
+                .native(&document.inner)
+                .map_err(|error| crate::rdocx_to_pyerr(py, error))?,
+        );
         let prepared = document.prepare_word_revision(
             py,
             &candidate,
             "Paragraph.add_internal_hyperlink",
-            crate::document::WordPublication::ParagraphAppend(
-                location
-                    .native(&document.inner)
-                    .map_err(|error| crate::rdocx_to_pyerr(py, error))?,
-            ),
+            publication,
         )?;
         let mut segments = self.path.segs.clone();
         segments.push(PathSeg::Run(position.run_index));
@@ -638,16 +639,13 @@ impl PyParagraph {
             } else {
                 "Paragraph.add_run"
             };
-            let prepared = document.prepare_word_revision(
-                py,
-                &candidate,
-                operation,
-                crate::document::WordPublication::ParagraphAppend(
-                    location
-                        .native(&document.inner)
-                        .map_err(|error| crate::rdocx_to_pyerr(py, error))?,
-                ),
-            )?;
+            let publication = crate::document::WordPublication::ParagraphAppend(
+                location
+                    .native(&document.inner)
+                    .map_err(|error| crate::rdocx_to_pyerr(py, error))?,
+            );
+            let prepared =
+                document.prepare_word_revision(py, &candidate, operation, publication)?;
             let mut segments = self.path.segs.clone();
             segments.push(PathSeg::Run(run_index));
             let path = document
@@ -876,15 +874,16 @@ impl PyParagraph {
         location
             .edit(&mut candidate, |p| p.add_equation(equation))
             .map_err(|e| crate::rdocx_to_pyerr(py, e))?;
+        let publication = crate::document::WordPublication::ParagraphAppend(
+            location
+                .native(&document.inner)
+                .map_err(|error| crate::rdocx_to_pyerr(py, error))?,
+        );
         let prepared = document.prepare_word_revision(
             py,
             &candidate,
             "Paragraph.add_equation",
-            crate::document::WordPublication::ParagraphAppend(
-                location
-                    .native(&document.inner)
-                    .map_err(|error| crate::rdocx_to_pyerr(py, error))?,
-            ),
+            publication,
         )?;
         document.commit_word_revision(prepared)?;
         document.install_inner(candidate);
@@ -970,19 +969,19 @@ impl PyParagraph {
         let location = self.validate(py)?;
         let text = text.unwrap_or_default();
         let mut document = self.document.borrow_mut(py);
+        let native = document
+            .paragraph_route(&location, None)
+            .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
+        if document.try_local_cell_paragraph_text(py, &native, text)? {
+            return Ok(());
+        }
         let mut candidate = document.inner.clone_for_staging();
         location
             .edit(&mut candidate, |paragraph| paragraph.set_text(text))
             .map_err(|error| crate::rdocx_to_pyerr(py, error))?;
-        let prepared = document.prepare_word_revision(
-            py,
-            &candidate,
-            "Paragraph.text",
-            location
-                .native(&document.inner)
-                .map(crate::document::WordPublication::ParagraphText)
-                .unwrap_or(crate::document::WordPublication::Conservative),
-        )?;
+        let publication = crate::document::WordPublication::ParagraphText(native);
+        let prepared =
+            document.prepare_word_revision(py, &candidate, "Paragraph.text", publication)?;
         document.commit_word_revision(prepared)?;
         document.install_inner(candidate);
         Ok(())

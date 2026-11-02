@@ -4756,6 +4756,42 @@ unsupported MC attribute retains its own raw value and resolved meaning,
 without freezing supported text and metadata edits on its owner. This does
 not establish a recursive schema validator or broaden ordinary import.
 
+Open retains exact eager fallible owner validation but returns with dormant
+checked authority. Dormant state has absent snapshot/removal scopes, empty
+owners/indexes and no pieces or pending pieces. Paragraph/table collections,
+section handles, pictures, stories, furniture variants, hyperlinks, revisions,
+comments and story items activate under an exclusive document borrow. Existing
+checked descendants use immutable authority. Numeric structural publication
+activates before index preparation. Unbound hyperlink removal activates after
+native record validation and before its physical-owner lookup.
+
+First activation always validates current native state afresh and prepares all
+storage before scope initialization. Initialization retains the current serial,
+origin and unique-current-epoch guard. A held epoch or outstanding preparation
+refuses activation without publishing authority. Positive dormant literal
+replacement validates its candidate, prepares the Python result, then commits
+one revision and native candidate without installing owner facts. Zero counts,
+count mismatch and refusal leave state unchanged. Direct URL/image publication
+and serialization retain their existing native errors and binding serial
+without keeping dormant facts. External stream failure does not reverse native
+normalization already performed by serialization.
+
+Whole-cell text and the five cell property setters use selected-table candidates
+when their physical owner is a qualified direct-body cell. Cell paragraph text
+resolves through paragraph_route and joins direct paragraph ordinals rather than
+raw story-item positions. First serialized tcPr relocates held paragraph and run
+routes for both absent and empty properties. Properties retain scopes. Text
+keeps the cell owner, advances its content and retires the existing CellText
+descendant scopes, including retained later paragraphs. Paragraph text retains
+its own existing policy: selected owner/properties and other cell paragraph
+scopes survive while selected content and descendants receive successors. Every fallible candidate,
+index, scope and piece preparation precedes revision commit. Exactly one aligned
+active piece is replaced after commit. Unsupported or disappearing-owner cases
+use the established checked fallback. Cached facts must contain only the root
+physical table for local publication. Nested neighboring cells use checked
+publication so equal row/cell ordinals cannot exchange held authority. Signed width truncation and wrap, border
+validation and atomic nonnegative margin validation remain field-specific.
+
 Current paragraph, table and cell capture uses derived exact-route indexes.
 Body and cell-paragraph aliases are prepared from the native batch location
 projections when the owner inventory is prepared, including before candidate

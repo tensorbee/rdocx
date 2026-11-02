@@ -155,6 +155,8 @@ fn _rdocx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(debug_assertions)]
     module.add_function(wrap_pyfunction!(document::word_piece_work, module)?)?;
     #[cfg(debug_assertions)]
+    module.add_function(wrap_pyfunction!(document::word_piece_alignments, module)?)?;
+    #[cfg(debug_assertions)]
     module.add_function(wrap_pyfunction!(document::staging_work, module)?)?;
     #[cfg(debug_assertions)]
     module.add_function(wrap_pyfunction!(document::reopen_work, module)?)?;

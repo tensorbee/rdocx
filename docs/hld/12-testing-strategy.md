@@ -4938,6 +4938,37 @@ claim of complete structural or behavioral equality.
 
 The same native Word 16.114 producer supplies the independent form reference for source-built Rust and Python packages. It requires an independent Word PDF, equal page count, exact text and checkbox semantics, per-page SSIM of at least 0.95 at 144 DPI, matched fonts, deterministic drawing, and documented margin alignment. Current artifact acceptance requires exact source and input applicability to the complete native comparison. A local Poppler bounding box does not substitute for it. Older typed-control evidence does not qualify this form surface. Full hash, rustdoc, WASM, publish dry-run, strict installed mypy, stubtest, and the full suite remain final-union gates.
 
+Whole-cell setter controls compare actual traversed body-piece alignments and
+selected-table owner work with unrelated body growth. Held first/later
+paragraphs and runs cover absent, empty and existing tcPr, property retention,
+text retirement, empty-cell births and neighboring cells. A clean edited cell
+beside an enclosing and nested row0/cell0 checks distinct held text, run/font
+and paragraph-property views through properties and both text publishers.
+Native/reopened bytes alone do not establish held physical-owner identity. Preparation and actual
+revision-commit refusal leave native bytes, authority and serial unchanged.
+Source-custody controls reject equal bytes in a different allocation and changed
+namespace metadata, then require fresh qualification after save/reopen. Width
+controls retain signed truncation and both i32 twip wrap boundaries. Border and
+margin refusals compare the complete package with a later successful edit.
+
+Dormant controls retain eager missing-link errors, zero/mismatch/positive ordered
+replacement, activation at serial zero and later serials, every first-handle
+factory, held-epoch refusal, direct unbound hyperlink operations, image
+replacement/resize and serializer stream failure. First activation compares
+current native and reopened facts. No dormant fact or piece survives any call.
+Debug work and these local semantics do not qualify wallclock acceptance.
+
+Issue445 release qualification uses the exact 20 by 5 table at body sizes 0,
+500 and 2000, acquiring and reusing its 100 handles before sequential text,
+vertical alignment and shading setter loops without warmup. Each 2000-body
+setter must cost below 1.0 ms and at most 1.5 times empty-body cost plus 0.05 ms.
+The independent 4000-paragraph three-run workload replaces 1000 water matches.
+Three paired trials select the lexicographic minimum Python total/open/replace/
+save tuple and minimum same-build CLI time including process start. Actual Linux
+x86_64 release Python total must be at most 1.2 times CLI. Installed runtime,
+typing, schema, native Office, hash and retained union riders remain separate
+final integrated obligations.
+
 ## Word checked XML qualification
 
 Word XML controls use a freshly source-qualified release wheel with complete

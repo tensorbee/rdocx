@@ -190,13 +190,19 @@ fn apply_local_cell_edit(
     cell: usize,
     candidate: rdocx_oxml::CT_Tbl,
     operation: &'static str,
-    retire: bool,
+    publication: Option<WordPublication>,
 ) -> PyResult<bool>
 ```
 
 `true` means committed, `false` means unqualified with no published mutation.
-Native or binding errors propagate without publication. `retire` is false for
-properties and true for text. The two ordinals are different values. The current table
+Native or binding errors propagate without publication. `publication` is None
+for properties, Some(CellText(actual table location, row, cell)) for Cell.text,
+and Some(ParagraphText(actual routed paragraph location)) for Paragraph.text.
+Use the existing private WordPublication enum, not an operation-name heuristic
+or a fourth public bridge. Before any publication, verify the supplied mode's
+selected owner matches the already qualified table/cell/direct paragraph.
+A mismatch or unsupported local mode takes checked fallback before mutation.
+The two ordinals are different values. The current table
 owner gives the body slot. The handle's current indexed table projection gives
 the facade table ordinal. `indexes.cell_paragraphs` is keyed by table ordinal
 (`:5639`), while native replacement and the piece slot use body slot. Missing
@@ -216,7 +222,13 @@ buckets, read projections, one replacement piece and an optional prepared
 revision. All fallible work and reservations occur here:
 
 1. Require an aligned cached body piece at `body_slot`, matching source context,
-   unchanged body-child count and a complete selected-table projection. The
+   unchanged body-child count and a complete selected-table projection. The cached
+   piece records its physical-table count once from prepared immutable facts,
+   including nested tables rather than only the facade table projection. Local
+   eligibility reads that cached count and requires exactly one physical table. A nested table anywhere in
+   this selected body table takes checked fallback, including a nested neighbor
+   of the otherwise clean selected cell. The local ordinal key does not prove
+   containing-table identity for that topology. The
    selected cell contains no nested table or content control anywhere in that
    cell. If qualification or mapping fails, use the old checked route.
 2. Build `word_block_owners` from the candidate only. `Err` propagates before
@@ -233,11 +245,14 @@ revision. All fallible work and reservations occur here:
    full reindex and local publication maintains these two new indexes.
 5. Join selected-cell paragraphs by direct ordinal, not raw story-item position.
    Property edits preserve owner/content/properties/grid states and relocate
-   their routes. Text edits preserve the selected cell owner but assign the
-   same successor content and descendant states as existing `CellText`
-   publication. In particular, never reuse property-only state assignment for
-   the changed paragraph or replaced runs. Retained later paragraphs follow the
-   existing CellText policy, rather than a new narrower retirement policy.
+   their routes. Cell.text preserves the selected cell owner and uses the exact
+   existing CellText successor/retirement policy for its content and descendants,
+   including retained later paragraphs. Paragraph.text uses the distinct existing
+   ParagraphText policy: preserve its paragraph owner/properties and unrelated
+   cell paragraph/run scopes, while changed content/replaced descendants receive
+   their existing successors. Never infer CellText retirement from a boolean
+   shared by both setters, and never reuse property-only states for changed
+   paragraph content. Match each supplied publication to its real selected owner.
 6. Prepare exact index deltas. Remove each affected old generation and route
    membership, install its relocated/replacement owner at a stable vector index
    where possible, and append newborn owners at reserved indices. Removed
@@ -257,8 +272,9 @@ revision. All fallible work and reservations occur here:
    paragraph into an empty cell. Body paragraph/table projections do not move.
    All matching and reservations are local to this table and the affected hash
    buckets. No full owners/indexes/pieces clone is permitted.
-8. For text, prepare the exact existing CellText retirement set plus snapshot
-   successor. The caller `retired` list excludes the document scope:
+8. For content, prepare the exact supplied CellText or ParagraphText retirement
+   set plus snapshot successor. None keeps property mode without a revision.
+   The caller `retired` list excludes the document scope:
    `prepare_scopes` adds that scope automatically. Property mode does not
    advance the counter. No scope is retired during preparation.
 9. Validate piece alignment and prepare the replacement Arc, without calling
@@ -610,9 +626,9 @@ and the issue's1.2threshold is unchanged.
 
 | Rule | Entry points and outputs | Provider and caller policy | Lifecycle stages compared |
 |---|---|---|---|
-| Local cell content | Python `Cell.text`, native `Cell::try_set_text` | `direct_body_table_cell_candidate` plus `apply_local_cell_edit` with `retire = true`, unchanged checked text semantics | Held/fresh reads, native model, saved XML, reopen |
-| Local properties | `Cell.vertical_alignment`, `shading`, `width`, `set_border`, `set_margins` | Same candidate route with `retire = false`, existing native conversions and validation | First property, repeated edit, held route, saved XML |
-| Cell paragraph publication | `Paragraph.text` setter | `paragraph_route` plus the local cell route for direct cell paragraphs, existing `edit_story_paragraph` otherwise | Held paragraph/run handles, fresh/native/reopened reads |
+| Local cell content | Python `Cell.text`, native `Cell::try_set_text` | `direct_body_table_cell_candidate` plus `apply_local_cell_edit` with Some(CellText), unchanged checked text semantics | Held/fresh reads, native model, saved XML, reopen |
+| Local properties | `Cell.vertical_alignment`, `shading`, `width`, `set_border`, `set_margins` | Same candidate route with None publication, existing native conversions and validation | First property, repeated edit, held route, saved XML |
+| Cell paragraph publication | `Paragraph.text` setter | `paragraph_route` plus the local cell route with Some(ParagraphText) for direct cell paragraphs, existing `edit_story_paragraph` otherwise | Held paragraph/run handles, fresh/native/reopened reads |
 | Dormant replacement | `Document.open`, `try_replace_text` with both expect modes, `replace_all`, `save`, `to_bytes` | Consuming checked batch, exact eager validation with transient results discarded, empty-scope serial commit and no retained dormant facts/pieces | Open, zero/nonzero/refused replace, save, first handle |
 | Active replacement | Same methods after a handle exists | Existing `prepare_word_revision` retirement and candidate installation | Held handles before and after, fresh handles, reopen |
 | CLI comparison | `rdocx replace` with one pattern/value pair | `try_replace_all_expected` and `try_replace_text` share `replace_batch` and staged commit semantics | Same input and successful counted output |
@@ -692,6 +708,18 @@ Final qualification uses an actual Linux x86_64 release wheel and matching CLI.
 
 | C16 | Fresh dormant document, replace_image, replace_image_for_story using an unbound Story, and relationship-wide picture resize, each success/refusal then first handle, normalization-sensitive fields and namespaces | Native operation/error/count and active lifetimes unchanged, no dormant facts/pieces retained, first activation uses current native/fresh/reopened owners and image targets/dimensions | Treating direct native reopens as prepare_word_revision publishers or reusing pre-publication validation facts |
 
+C17 extends A283-9 with Cell.text versus Paragraph.text versus property publication,
+held selected paragraph/run and later paragraph/run handles, and cell/table property
+handles, across absent/empty/present tcPr. Compare each exact existing checked
+publisher, current values and saved/reopened facts. A blanket CellText retirement
+for Paragraph.text must fail this discriminator. Public signatures stay unchanged.
+
+C18 extends A283-9 with a clean selected cell beside enclosing and nested
+row0/cell0 neighbors. Hold their paragraphs, runs, Font and paragraph-property
+views with distinct values through property, CellText and ParagraphText edits.
+The existing checked path must preserve physical identity and exact retirement.
+Native/reopened bytes alone must not pass exchanged held authority.
+
 ## Rejected alternatives
 
 - Whole-document cloning and full owner rebuilding retain the reported scaling defect.
@@ -745,19 +773,20 @@ No baseline movement is authorized.
 
 ## Implementation checklist
 
-- [ ] Add `direct_body_table_cell_candidate` and `commit_direct_body_table` with the stated signatures.
-- [ ] Add the private `apply_local_cell_edit` preparation and commit ordering.
-- [ ] Add private `cells_by_parent` and `runs_by_parent` indexes and maintain all full/local index publishers.
-- [ ] Establish exact-source namespace certificates and source-change rejection controls.
-- [ ] Implement the specified initializer amendment, exact ingress guards and consuming replacement publisher with their discriminating controls.
-- [ ] Route `Cell.text`, the property setters and `Paragraph.text` in a direct body cell through the local path.
-- [ ] Make `Paragraph.text` resolve its publication route through `paragraph_route`.
-- [ ] Retain exact eager fallible validation at open and positive dormant publication, discard transient results within each call, retain no dormant facts/pieces and implement each enumerated ingress.
-- [ ] Reproduce the historical missing-link witness against fresh native/Python artifacts, retaining current open errors and valid controls.
-- [ ] Implement all thirteen A-IDs with discriminating local evidence, unconditional first-activation rebuild, no retained dormant caches, all named direct publishers and serializer/error outcomes.
-- [ ] Update exactly the HLD impact list before implementation freeze.
-- [ ] Independent implementation microscope, scoped gate and structured handoff.
+- [x] Add `direct_body_table_cell_candidate` and `commit_direct_body_table` with the stated signatures.
+- [x] Add the private `apply_local_cell_edit` preparation and commit ordering.
+- [x] Add private `cells_by_parent` and `runs_by_parent` indexes and maintain all full/local index publishers.
+- [x] Establish exact-source namespace certificates and source-change rejection controls.
+- [x] Implement the specified initializer amendment, exact ingress guards and consuming replacement publisher with their discriminating controls.
+- [x] Route `Cell.text`, the property setters and `Paragraph.text` in a direct body cell through the local path.
+- [x] Make `Paragraph.text` resolve its publication route through `paragraph_route`.
+- [x] Retain exact eager fallible validation at open and positive dormant publication, discard transient results within each call, retain no dormant facts/pieces and implement each enumerated ingress.
+- [x] Reproduce the historical missing-link witness against fresh native/Python artifacts, retaining current open errors and valid controls.
+- [x] Implement all thirteen A-IDs with discriminating local evidence, unconditional first-activation rebuild, no retained dormant caches, all named direct publishers and serializer/error outcomes.
+- [x] Update exactly the HLD impact list before implementation freeze.
+- [x] Independent implementation microscope, scoped gate and structured handoff.
 - [ ] Final integrated and release artifact qualification.
+
 
 ## Contract closure self-review
 
@@ -856,3 +885,105 @@ invalidate. No implementation, actual performance result or final acceptance is
 claimed. All thirteen A-IDs and original workloads/gates remain. Three design
 peers remain used, with no fourth peer or reset. Status is draft, and fresh
 Root final2 follows actual adoption.
+
+## Root implementation contract clarification, paragraph retirement
+
+The implementation author identified a contradiction missed by the design peers
+and Root finals. A shared retire boolean could not preserve the distinct existing
+CellText and ParagraphText handle policies. Root authorizes the private helper's
+Option<WordPublication> parameter and exact selected-owner checks above. This
+repairs the mechanism for existing A283-9, without changing public signatures,
+the three bridge inventory, thresholds, provider edges or final gates. Design and
+implementation counters do not reset. Actual old/current handle observations and
+independent implementation review remain required.
+
+## Scoped instrumentation applicability
+
+Root authorizes a debug-only underscored _word_piece_alignments diagnostic in
+the existing binding module for the named F-X283 structural tests. It counts
+actual aligned_block comparisons and keeps _word_piece_work owner-read semantics
+unchanged. Release __all__, public interfaces and the three native facade bridges
+remain unchanged. Earlier Base and intermediate artifacts counted alignment in
+_word_piece_work. Their exact hashes and instrumentation revision remain in
+evidence, not relabeled as the final counter revision. Combined comparison/read
+counts are debug structural observations, never Linux release timing evidence.
+
+## Implementation peer1 D1 remediation
+
+Peer1 source-traced an unproven table-wide join between nested and enclosing
+cell paragraphs. Actual installed execution on frozen author artifact d9884b17
+fails all four new operation cases with exchanged held paragraph text while
+saved bytes remain correct. The actual Base artifact passes the same four
+cases. The repair keeps the existing checked publisher for any selected-table
+facts containing more than the single root table. It does not change the
+common relocation key, public API, original workloads, criteria or counters.
+This is author remediation, not an independent finding disposition. Peer2
+decides D1 closure. Implementation peers used1/3 remain used.
+
+C18 boundary controls also execute two same-depth controls, field-bearing
+physical paragraphs and textbox paragraphs under one physical table. Base,
+frozen author and repaired artifacts each pass all12 controls. No additional
+RED is claimed. Same-cell controlled and field-bearing physical paragraphs
+share a cell story but have distinct per-story projection ordinals in
+word_piece_owner_addresses. The local key includes that ordinal. Textbox
+owners select the existing nonzero text_boxes checked fallback. These controls
+do not broaden the local topology or change supported input behavior.
+
+The current cfg(test) commit-fault binding-object diagnostic is executed on the
+repaired source at Root's explicit request. It is not an installed-wheel
+injection and no new fault hook is exported. Installed ordinary refusal and
+later-success observations remain separate. Peer2 and Root assess evidence
+coverage without treating earlier or compiled-only diagnostics as current.
+
+
+## Peer2 D1 complete membership amendment
+
+The same physical-authority invariant remains D1. Native physical cell inventory
+counts controlled and empty cells even when binding direct coordinates omit them.
+Each immutable piece now caches complete direct-table membership: one physical
+root table, every native physical cell represented once in contiguous source order,
+qualified table/part identity, unique valid direct coordinates and every paragraph
+story belonging to that cell range. Local publication requires this certificate
+before revision preparation and requires it again for candidate facts. Ambiguous
+membership uses the existing checked publisher. All three constructors, rebuilds,
+splices and local piece replacement retain this immutable-fact custody. Setter
+qualification remains O(1). All13 A-IDs, numeric limits and counters remain unchanged.
+
+C19 extends A283-9 with controlled-row and controlled-cell neighbors before/after
+the selected direct cell, both text publishers and property controls. Assert
+physical story/XML routes, held/fresh views, the actual checked retirement policy
+and follow-up edits/save/reopen. Actual corrected Base16PASS and frozen8FAIL/8PASS
+precede production edits. An initial fixture incorrectly expected controlled held
+paragraphs to survive checked text publication. Its separate observations are
+retained as fixture history, not a project regression. Implementation peers2/3
+remain used. Current C9 diagnostic and final affected evidence follow separately.
+
+
+Peer2 remediation evidence: repaired installed49PASS, including C1916PASS,
+original affected21PASS and retained paragraph-ancestry12PASS. Actual native
+membership diagnostic1PASS and current C9 binding-object diagnostic1PASS have
+complete input and executable hashes. Installed fault injection stays unperformed.
+Scoped check, relevant all-feature Clippy, format and affected prose pass on the
+frozen source. Source/artifact evidence is under D1-membership. No release timing,
+provider, completion or clean-review claim. Peer3 and Root final remain required.
+
+
+## Local integration preparation
+
+Checkpoint: sprint-final-acceptance. The three actual implementation peers are
+consumed. Root final .claude/reviews/F-X283-codex-final-1.md records0 defects and
+0 smells on the frozen product source. /verify --scoped F-X283 binds applicable
+local evidence in prepare/VERIFY_SCOPED.json under the existing tmp evidence root.
+The structured handoff carries the reviewed source commit as Head and is committed
+separately afterward. No crates change follows that source commit. This mechanical
+metadata update changes no product, test or HLD intent. The canonical private
+Option<WordPublication> policy at a995352b is retained exactly. All13 acceptance
+rows and numeric workloads remain. Design peers3/3 and implementation peers3/3
+remain exhausted. No new peer phase or provider acceptance is inferred.
+
+Plan stays approved and final qualification stays unticked. Original exact Linux
+release case1/case2 timings, installed3.9/3.12 typing/stubs, native/schema, hash49,
+F26879/252/407/five-linear/count/memory/PowerPoint248, WASM, full integrated union,
+docs, archives/publication dry-run, hosted CI and reviewed-SHA publication approval
+remain due. Installed fault injection remains unperformed and separate from the
+actual current C9 binding-object diagnostic. No delivery completion is claimed.

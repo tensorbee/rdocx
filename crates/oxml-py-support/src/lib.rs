@@ -332,10 +332,7 @@ impl RevisionCounter {
         &mut self,
         scopes: &[RevisionScope],
     ) -> Result<Vec<RevisionState>, RevisionError> {
-        if self.initialized
-            || self.current != 0
-            || std::sync::Arc::strong_count(&self.document.0) != 1
-        {
+        if self.initialized || std::sync::Arc::strong_count(&self.document.0) != 1 {
             return Err(RevisionError::AlreadyInitialized);
         }
         let count = u64::try_from(scopes.len()).map_err(|_| RevisionError::Overflow)?;
@@ -1011,6 +1008,31 @@ mod tests {
         ));
         assert_eq!(early.current(), 0);
         assert!(early_document.first_cause().is_none());
+    }
+
+    #[test]
+    fn fx283_dormant_commits_preserve_serial_during_first_initialization() {
+        for commits in [0, 1, 3] {
+            let mut clock = RevisionCounter::new();
+            for _ in 0..commits {
+                let prepared = clock.prepare_scopes("dormant", &[], &[]).unwrap();
+                clock.commit_scopes(prepared).unwrap();
+            }
+            let serial = clock.current();
+            let held = clock.current_document_scope();
+            assert!(clock.initialize_scopes(&[]).is_err());
+            drop(held);
+            let pending = clock.prepare_scopes("pending", &[], &[]).unwrap();
+            assert!(clock.initialize_scopes(&[]).is_err());
+            drop(pending);
+            let states = clock
+                .initialize_scopes(&[RevisionScope::Owner, RevisionScope::Text])
+                .unwrap();
+            assert_eq!(clock.current(), serial);
+            assert_ne!(states[0].generation(), states[1].generation());
+            assert!(clock.capture_scopes(smallvec![], &states).is_ok());
+            assert!(clock.initialize_scopes(&[]).is_err());
+        }
     }
 
     #[test]

@@ -7237,6 +7237,53 @@ enum StylesSerializationProof {
     Unserializable,
 }
 
+/// Proof of the exact already-classified owner-free main-part allocation.
+#[derive(Clone)]
+struct LocalCellSource {
+    key: String,
+    main_part: String,
+    bytes: Arc<Vec<u8>>,
+    root: Vec<(String, String)>,
+    body: Vec<(String, String)>,
+}
+
+impl LocalCellSource {
+    fn classified(
+        package: &OpcPackage,
+        main_part: &str,
+        root: &[(String, String)],
+        body: &[(String, String)],
+        owner_free: bool,
+    ) -> Option<Self> {
+        if !owner_free {
+            return None;
+        }
+        let selected = package.get_part(main_part)?;
+        let (key, bytes) = package
+            .parts
+            .iter()
+            .find(|(_, bytes)| std::ptr::eq(bytes.as_slice(), selected))?;
+        Some(Self {
+            key: key.clone(),
+            main_part: main_part.to_owned(),
+            bytes: Arc::clone(bytes),
+            root: root.to_vec(),
+            body: body.to_vec(),
+        })
+    }
+
+    fn applies(&self, document: &Document) -> bool {
+        self.main_part == document.doc_part_name
+            && self.root == document.root_namespace_declarations
+            && self.body == document.body_namespace_declarations
+            && document
+                .package
+                .parts
+                .get(&self.key)
+                .is_some_and(|bytes| Arc::ptr_eq(bytes, &self.bytes))
+    }
+}
+
 /// A Word document (.docx file).
 ///
 /// This is the main entry point for reading, creating, and modifying
@@ -7253,6 +7300,7 @@ pub struct Document {
     /// The opened or saved package retains a shadowed serializer prefix, so a
     /// plain child edit must use the staged transaction instead of a local write.
     plain_local_edit_blocked: bool,
+    local_cell_source: Option<LocalCellSource>,
     /// Save failure a checked body edit must return before it changes the model.
     /// Cleared when the typed body or the saved main part changes.
     unsavable_body_edit_cache: OnceLock<Option<String>>,
@@ -15255,6 +15303,13 @@ pub(crate) fn set_story_source_xml(
         document.root_namespace_declarations = namespace_scopes.root_declarations;
         document.body_namespace_declarations = namespace_scopes.body_declarations;
         document.body_namespace_bindings = namespace_scopes.body_bindings;
+        document.local_cell_source = LocalCellSource::classified(
+            &document.package,
+            &document.doc_part_name,
+            &document.root_namespace_declarations,
+            &document.body_namespace_declarations,
+            !blocked,
+        );
     } else if document.comments_part_name.as_deref() == Some(part_name) {
         document.comments = Some(rdocx_oxml::comments::CT_Comments::from_xml(&xml)?);
         document.package.set_part(part_name, xml);
@@ -22557,6 +22612,10 @@ impl Document {
                     parsed: Arc::clone(&styles),
                     proof: StylesSerializationProof::Serializable,
                 });
+        let local_cell_source = package.get_part("/word/document.xml").and_then(|xml| {
+            let (blocked, _) = plain_local_edit_facts(&[], &[], xml, &OnceLock::new());
+            LocalCellSource::classified(&package, "/word/document.xml", &[], &[], !blocked)
+        });
         Document {
             package,
             document,
@@ -22564,6 +22623,7 @@ impl Document {
             body_namespace_declarations: Vec::new(),
             body_namespace_bindings: Vec::new(),
             plain_local_edit_blocked: false,
+            local_cell_source,
             unsavable_body_edit_cache: OnceLock::from(None),
             styles,
             styles_part_cache,
@@ -22715,6 +22775,7 @@ impl Document {
             body_namespace_declarations: self.body_namespace_declarations.clone(),
             body_namespace_bindings: self.body_namespace_bindings.clone(),
             plain_local_edit_blocked: self.plain_local_edit_blocked,
+            local_cell_source: self.local_cell_source.clone(),
             parsed: self.parsed.clone(),
             main_body_scans: Arc::clone(&self.main_body_scans),
             main_part_blocks: self.main_part_blocks.clone(),
@@ -24883,6 +24944,13 @@ impl Document {
         // this opening instead of parsing a fresh source a second time later.
         parsed_record.main_document = OnceLock::from(Some(document.clone()));
         let parsed = Some(Arc::new(parsed_record));
+        let local_cell_source = LocalCellSource::classified(
+            &package,
+            &doc_part_name,
+            &namespace_scopes.root_declarations,
+            &namespace_scopes.body_declarations,
+            !plain_local_edit_blocked,
+        );
         Ok(Document {
             package,
             document,
@@ -24890,6 +24958,7 @@ impl Document {
             body_namespace_declarations: namespace_scopes.body_declarations,
             body_namespace_bindings: namespace_scopes.body_bindings,
             plain_local_edit_blocked,
+            local_cell_source,
             unsavable_body_edit_cache,
             styles,
             styles_part_cache,
@@ -26683,6 +26752,28 @@ impl Document {
                 .or(kept_xml.as_deref())
                 .expect("compared existing document XML"),
         )?;
+        // The replay classification above belongs to the old source. A newly
+        // serialized owner can introduce its own namespace scope. Certify the
+        // exact output, reusing only facts qualified for those output bytes.
+        let local_cell_owner_free = if let Some(xml) = &doc_xml {
+            let owners = OnceLock::new();
+            if let Some(classified) = self
+                .main_part_blocks
+                .as_ref()
+                .and_then(|blocks| blocks.retained_nested_owners(xml))
+            {
+                let _ = owners.set(Some(classified));
+            }
+            let (blocked, _) = plain_local_edit_facts(
+                &namespace_scopes.root_declarations,
+                &namespace_scopes.body_declarations,
+                xml,
+                &owners,
+            );
+            !blocked
+        } else {
+            unsafe_prefix.is_none() && nested_namespace_owners.is_empty()
+        };
         if let Some(doc_xml) = doc_xml {
             self.package.set_part(&self.doc_part_name, doc_xml);
         }
@@ -26690,6 +26781,13 @@ impl Document {
         self.body_namespace_declarations = namespace_scopes.body_declarations;
         self.body_namespace_bindings = namespace_scopes.body_bindings;
         self.plain_local_edit_blocked = typed_document_is_unchanged && unsafe_prefix.is_some();
+        self.local_cell_source = LocalCellSource::classified(
+            &self.package,
+            &self.doc_part_name,
+            &self.root_namespace_declarations,
+            &self.body_namespace_declarations,
+            local_cell_owner_free,
+        );
         if !typed_document_is_unchanged {
             self.unsavable_body_edit_cache = OnceLock::new();
         }
@@ -35547,6 +35645,69 @@ impl Document {
     ) -> Result<Table<'_>> {
         self.preflight_checked_table(Some(index))?;
         Ok(self.insert_table(index, rows, cols))
+    }
+
+    /// Prepare one owner-free direct-body cell edit without changing this document.
+    #[doc(hidden)]
+    pub fn direct_body_table_cell_candidate(
+        &self,
+        body_slot: usize,
+        row: usize,
+        cell: usize,
+        edit: impl FnOnce(&mut crate::table::Cell<'_>) -> Result<()>,
+    ) -> Result<Option<CT_Tbl>> {
+        let source = self
+            .document
+            .body
+            .content
+            .get(body_slot)
+            .and_then(|item| match item {
+                BodyContent::Table(table) => Some(table),
+                _ => None,
+            })
+            .ok_or_else(|| Error::Other(format!("table index {body_slot} is out of range")))?;
+        if !self
+            .local_cell_source
+            .as_ref()
+            .is_some_and(|proof| proof.applies(self))
+        {
+            return Ok(None);
+        }
+        let Some(selected) = source.rows.get(row).and_then(|row| row.cells.get(cell)) else {
+            return Ok(None);
+        };
+        if selected.content.iter().any(|item| !matches!(item, rdocx_oxml::table::CellContent::Paragraph(paragraph) if paragraph.content_controls.is_empty())) {
+            return Ok(None);
+        }
+        let mut table = (**source).clone();
+        edit(&mut crate::table::Cell {
+            inner: &mut table.rows[row].cells[cell],
+        })?;
+        let mut body = CT_Body {
+            content: vec![BodyContent::Table(Box::new(table))],
+            sect_pr: None,
+        };
+        body.validate_resource_limits()?;
+        let BodyContent::Table(table) = body.content.pop().expect("singleton table") else {
+            unreachable!()
+        };
+        Ok(Some(*table))
+    }
+
+    /// Install the prepared table under the same exclusive source qualification.
+    #[doc(hidden)]
+    pub fn commit_direct_body_table(&mut self, body_slot: usize, table: CT_Tbl) {
+        assert!(
+            self.local_cell_source
+                .as_ref()
+                .is_some_and(|proof| proof.applies(self))
+        );
+        let BodyContent::Table(existing) = &mut self.document.body.content[body_slot] else {
+            panic!("qualified direct table changed kind")
+        };
+        **existing = table;
+        self.invalidate_layout();
+        self.unsavable_body_edit_cache = OnceLock::from(None);
     }
 
     /// Get the number of body content elements (paragraphs + tables).
@@ -45061,6 +45222,45 @@ impl Document {
         }
         self.commit_staged_mutation(candidate);
         Ok(Ok(counts))
+    }
+
+    /// Consume an already-private ordered replacement candidate, publishing only positive counts.
+    #[doc(hidden)]
+    #[allow(clippy::type_complexity)]
+    pub fn try_replace_all_expected_owned(
+        mut self,
+        pairs: &[(&str, &str, Option<usize>)],
+    ) -> Result<std::result::Result<Option<(Self, Vec<usize>)>, ReplacementCountMismatch>> {
+        if pairs.is_empty() {
+            return Ok(Ok(None));
+        }
+        let mut origin = self.take_staged_commit_origin();
+        let mut counts = Vec::with_capacity(pairs.len());
+        for (index, &(placeholder, replacement, expected)) in pairs.iter().enumerate() {
+            let found = self.replace_batch(&[(placeholder, replacement)])?;
+            if let Some(expected) = expected
+                && expected != found
+            {
+                return Ok(Err(ReplacementCountMismatch {
+                    index,
+                    placeholder: placeholder.to_owned(),
+                    expected,
+                    found,
+                }));
+            }
+            counts.push(found);
+        }
+        if counts.iter().all(|count| *count == 0) {
+            return Ok(Ok(None));
+        }
+        let candidate = Self::finish_staged_candidate(
+            &origin.package,
+            origin.signature_invalidated,
+            &mut origin.normal_engine,
+            &mut origin.bundled_engine,
+            self,
+        );
+        Ok(Ok(Some((candidate, counts))))
     }
 
     /// Render scalar and structural template tags from structured JSON data.
@@ -81705,4 +81905,236 @@ fn f283_navigation_failure_is_stamped_and_preserves_sequence_values() {
         )));
     assert!(rdocx_layout::engine::evaluate_sequence_fields(&input).is_err());
     assert!(rdocx_layout::layout_document_deterministic_with_provenance(&input).is_err());
+}
+
+#[cfg(test)]
+#[test]
+fn fx283_local_cell_source_certificate_rejects_changed_custody() {
+    let mut document = Document::new();
+    for _ in 0..30 {
+        document.add_paragraph("unrelated");
+    }
+    document.add_table(1, 1);
+    let make = |document: &Document| {
+        document.direct_body_table_cell_candidate(30, 0, 0, |cell| cell.try_set_text("after"))
+    };
+    assert!(make(&document).unwrap().is_some());
+    let mut staged = document.clone_for_staging();
+    assert!(make(&staged).unwrap().is_some());
+    let original = staged
+        .package
+        .get_part(&staged.doc_part_name)
+        .unwrap()
+        .to_vec();
+    staged
+        .package
+        .set_part(&staged.doc_part_name.clone(), original);
+    assert!(
+        make(&staged).unwrap().is_none(),
+        "equal bytes cannot replace source allocation identity"
+    );
+    staged = document.clone_for_staging();
+    staged
+        .body_namespace_declarations
+        .push(("xmlns:w".into(), "urn:shadow".into()));
+    assert!(make(&staged).unwrap().is_none());
+    let bytes = document.to_bytes().unwrap();
+    let reopened = Document::from_bytes(&bytes).unwrap();
+    assert!(make(&reopened).unwrap().is_some());
+    assert!(
+        make(&document).unwrap().is_some(),
+        "flush must classify the actual new source"
+    );
+    let before = document.to_bytes().unwrap();
+    assert!(
+        document
+            .direct_body_table_cell_candidate(30, 0, 0, |cell| {
+                cell.set_width(crate::Length::emu(635));
+                Err(Error::Other("injected preparation failure".into()))
+            })
+            .is_err()
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+}
+
+#[cfg(test)]
+#[test]
+fn fx283_local_cell_width_keeps_signed_truncation_and_wrap() {
+    for emu in [
+        634,
+        635,
+        636,
+        -634,
+        -635,
+        i64::from(i32::MAX) * 635 + 635,
+        i64::from(i32::MIN) * 635 - 635,
+    ] {
+        let mut local = Document::new();
+        local.add_table(1, 1);
+        let mut reference = local.clone_for_staging();
+        reference
+            .table_mut(0)
+            .unwrap()
+            .cell(0, 0)
+            .unwrap()
+            .set_width(crate::Length::emu(emu));
+        let candidate = local
+            .direct_body_table_cell_candidate(0, 0, 0, |cell| {
+                cell.set_width(crate::Length::emu(emu));
+                Ok(())
+            })
+            .unwrap()
+            .unwrap();
+        local.commit_direct_body_table(0, candidate);
+        let expected = reference
+            .table(0)
+            .unwrap()
+            .cell(0, 0)
+            .unwrap()
+            .width()
+            .unwrap()
+            .to_emu();
+        assert_eq!(
+            local
+                .table(0)
+                .unwrap()
+                .cell(0, 0)
+                .unwrap()
+                .width()
+                .unwrap()
+                .to_emu(),
+            expected
+        );
+        let reopened = Document::from_bytes(&local.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            reopened
+                .table(0)
+                .unwrap()
+                .cell(0, 0)
+                .unwrap()
+                .width()
+                .unwrap()
+                .to_emu(),
+            expected
+        );
+        assert_eq!(local.to_bytes().unwrap(), reference.to_bytes().unwrap());
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn fx283_owned_replacement_keeps_order_counts_and_refusal() {
+    let mut document = Document::new();
+    document.add_paragraph("water water");
+    let original = document.to_bytes().unwrap();
+    assert!(
+        document
+            .clone_for_staging()
+            .try_replace_all_expected_owned(&[])
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        document
+            .clone_for_staging()
+            .try_replace_all_expected_owned(&[("missing", "none", Some(0))])
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
+    let mismatch = document
+        .clone_for_staging()
+        .try_replace_all_expected_owned(&[("water", "wine", Some(3))])
+        .unwrap()
+        .err()
+        .unwrap();
+    assert_eq!(
+        (mismatch.index, mismatch.expected, mismatch.found),
+        (0, 3, 2)
+    );
+    let pairs = [
+        ("missing", "none", Some(0)),
+        ("water", "wine", Some(2)),
+        ("wine", "water", Some(2)),
+    ];
+    let mut reference = document.clone_for_staging();
+    let expected = reference.try_replace_all_expected(&pairs).unwrap().unwrap();
+    let (mut candidate, counts) = document
+        .clone_for_staging()
+        .try_replace_all_expected_owned(&pairs)
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(counts, expected);
+    assert_eq!(candidate.to_bytes().unwrap(), reference.to_bytes().unwrap());
+    assert_eq!(document.to_bytes().unwrap(), original);
+}
+
+#[cfg(test)]
+#[test]
+fn fx283_local_text_matches_checked_fallback_for_anchors_and_opaque_xml() {
+    let mut seed = Document::new();
+    let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tblGrid><w:gridCol w:w="1000"/></w:tblGrid><w:tr><w:tc><w:tcPr><x:keep xmlns:x="urn:opaque" x:v="untouched"/></w:tcPr><w:p><w:bookmarkStart w:id="9" w:name="mark"/><w:r><w:footnoteReference w:id="3"/></w:r><w:ins w:id="7" w:author="a"><w:r><w:t>tracked</w:t></w:r></w:ins><w:bookmarkEnd w:id="9"/></w:p><w:p><w:r><w:t>later</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:sectPr/></w:body></w:document>"#;
+    seed.package.set_part("/word/document.xml", xml.to_vec());
+    let mut local = Document::from_package(seed.package).unwrap();
+    let mut fallback = local.clone_for_staging();
+    fallback
+        .try_set_cell_text(0, 0, 0, "after\tline\nend")
+        .unwrap();
+    let table = local
+        .direct_body_table_cell_candidate(0, 0, 0, |cell| cell.try_set_text("after\tline\nend"))
+        .unwrap()
+        .unwrap();
+    local.commit_direct_body_table(0, table);
+    assert_eq!(local.to_bytes().unwrap(), fallback.to_bytes().unwrap());
+    assert_eq!(
+        local.table(0).unwrap().cell(0, 0).unwrap().text(),
+        "after\tline\nend\nlater"
+    );
+    let source = String::from_utf8(
+        local
+            .package
+            .get_part("/word/document.xml")
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(source.contains("<x:keep xmlns:x=\"urn:opaque\" x:v=\"untouched\"/>"));
+    assert!(source.find("<w:tcPr").unwrap() < source.find("<w:bookmarkStart").unwrap());
+}
+
+#[cfg(test)]
+#[test]
+fn fx283_flush_certificate_classifies_newly_serialized_namespace_owners() {
+    let mut document = Document::new();
+    document.add_table(1, 1);
+    assert!(
+        document
+            .direct_body_table_cell_candidate(0, 0, 0, |_| Ok(()))
+            .unwrap()
+            .is_some()
+    );
+    document
+        .document
+        .body
+        .content
+        .push(BodyContent::RawXml(Box::new(
+            br#"<w:p xmlns:a="urn:foreign"><w:r><w:t>new raw owner</w:t><a:opaque/></w:r></w:p>"#
+                .to_vec(),
+        )));
+    document.invalidate_layout();
+    document.flush_document_to_package().unwrap();
+    let actual = document.package.get_part(&document.doc_part_name).unwrap();
+    assert!(
+        !nested_modeled_namespace_owners(actual).unwrap().is_empty(),
+        "fixture must introduce an actually classified namespace owner"
+    );
+    assert!(
+        document
+            .direct_body_table_cell_candidate(0, 0, 0, |_| Ok(()))
+            .unwrap()
+            .is_none(),
+        "the pre-flush source had no nested owners, but the published source does"
+    );
 }
