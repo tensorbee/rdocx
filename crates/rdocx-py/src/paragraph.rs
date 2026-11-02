@@ -263,13 +263,7 @@ impl ParagraphLocation {
                 row,
                 cell,
                 paragraph,
-            } => {
-                // The mutable ordinal accessor excludes controlled paragraphs.
-                // Resolve through the same checked physical route as the reader.
-                let location =
-                    document.cell_paragraph_story_location(*table, *row, *cell, *paragraph)?;
-                document.edit_story_paragraph(&location, edit)
-            }
+            } => document.edit_cell_paragraph(*table, *row, *cell, *paragraph, edit),
             Self::Related(location) => {
                 document.edit_story_paragraph(&Self::refreshed(document, location)?, edit)
             }

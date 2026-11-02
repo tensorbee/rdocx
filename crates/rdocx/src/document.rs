@@ -7224,6 +7224,19 @@ impl DrawingMut<'_> {
     }
 }
 
+#[derive(Clone)]
+struct StylesPartCache {
+    bytes: Arc<Vec<u8>>,
+    parsed: Arc<CT_Styles>,
+    proof: StylesSerializationProof,
+}
+
+#[derive(Clone, Copy)]
+enum StylesSerializationProof {
+    Serializable,
+    Unserializable,
+}
+
 /// A Word document (.docx file).
 ///
 /// This is the main entry point for reading, creating, and modifying
@@ -7254,7 +7267,8 @@ pub struct Document {
     /// value. Reopen keeps it only when the reopened part bytes match. It is
     /// not a chain of older documents.
     main_part_blocks: Option<MainPartBlocks>,
-    pub(crate) styles: CT_Styles,
+    pub(crate) styles: Arc<CT_Styles>,
+    styles_part_cache: Option<StylesPartCache>,
     pub(crate) numbering: Option<CT_Numbering>,
     /// Boxed, because debug builds keep many copies of `Document` on deep
     /// stacks, and the fifteen-field model would otherwise grow every one.
@@ -7523,6 +7537,8 @@ fn bundle_relationship_precedes_story(rel_type: &str) -> bool {
 #[cfg(test)]
 thread_local! {
     static LAYOUT_INVOCATIONS: Cell<usize> = const { Cell::new(0) };
+    static FX282_STYLES_WORK: Cell<[usize; 2]> = const { Cell::new([0, 0]) };
+    static FX282_CELL_EDITS: Cell<[usize; 2]> = const { Cell::new([0, 0]) };
     static FAIL_NEXT_HEADER_FOOTER_SERIALIZATION: Cell<bool> = const { Cell::new(false) };
     static FAIL_NEXT_SCOPED_REOPEN: Cell<bool> = const { Cell::new(false) };
     static FAIL_NEXT_STAGED_REOPEN: Cell<bool> = const { Cell::new(false) };
@@ -7862,7 +7878,12 @@ fn uncounted_scan<T>(scan: impl FnOnce() -> T) -> T {
 #[cfg(debug_assertions)]
 fn without_reopen_work<T>(run: impl FnOnce() -> T) -> T {
     let paused = REOPEN_WORK_PAUSED.with(|cell| cell.replace(true));
+    // The debug ZIP oracle still runs. Its styles work is separate from the primary path.
+    #[cfg(test)]
+    let styles_work = FX282_STYLES_WORK.get();
     let result = run();
+    #[cfg(test)]
+    FX282_STYLES_WORK.set(styles_work);
     REOPEN_WORK_PAUSED.with(|cell| cell.set(paused));
     result
 }
@@ -20514,6 +20535,55 @@ fn take_table<'a>(table: &'a mut CT_Tbl, index: &mut usize) -> Option<&'a mut CT
     }
 }
 
+fn nth_table_in_body_ref<'a>(content: &'a [BodyContent], index: &mut usize) -> Option<&'a CT_Tbl> {
+    fn take<'a>(table: &'a CT_Tbl, index: &mut usize) -> Option<&'a CT_Tbl> {
+        if *index == 0 {
+            Some(table)
+        } else {
+            *index -= 1;
+            None
+        }
+    }
+    fn in_cell<'a>(cell: &'a CT_Tc, index: &mut usize) -> Option<&'a CT_Tbl> {
+        for child in &cell.content {
+            let found = match child {
+                CellContent::Table(table) => take(table, index),
+                CellContent::ContentControl(control) => in_control(control, index),
+                CellContent::Paragraph(_) => None,
+            };
+            if found.is_some() {
+                return found;
+            }
+        }
+        None
+    }
+    fn in_control<'a>(control: &'a CT_Sdt, index: &mut usize) -> Option<&'a CT_Tbl> {
+        for child in &control.content {
+            let found = match child {
+                SdtContent::Table(table) => take(table, index),
+                SdtContent::Cell(cell) => in_cell(cell, index),
+                SdtContent::ContentControl(control) => in_control(control, index),
+                _ => None,
+            };
+            if found.is_some() {
+                return found;
+            }
+        }
+        None
+    }
+    for child in content {
+        let found = match child {
+            BodyContent::Table(table) => take(table, index),
+            BodyContent::ContentControl(control) => in_control(control, index),
+            BodyContent::Paragraph(_) | BodyContent::RawXml(_) => None,
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
 fn nth_table_in_body<'a>(
     content: &'a mut [BodyContent],
     index: &mut usize,
@@ -22477,6 +22547,16 @@ impl Document {
         let identifiers = DocumentIdentifiers::scan(&package)
             .expect("a freshly constructed package has valid identifiers");
 
+        let styles = Arc::new(styles);
+        // The compatible package writer has already serialized this exact model.
+        let styles_part_cache =
+            package
+                .get_part_shared(DEFAULT_STYLES_PART)
+                .map(|bytes| StylesPartCache {
+                    bytes: Arc::clone(bytes),
+                    parsed: Arc::clone(&styles),
+                    proof: StylesSerializationProof::Serializable,
+                });
         Document {
             package,
             document,
@@ -22486,6 +22566,7 @@ impl Document {
             plain_local_edit_blocked: false,
             unsavable_body_edit_cache: OnceLock::from(None),
             styles,
+            styles_part_cache,
             numbering: None,
             core_properties,
             application_properties,
@@ -22643,7 +22724,8 @@ impl Document {
                 .cloned()
                 .map(OnceLock::from)
                 .unwrap_or_default(),
-            styles: self.styles.clone(),
+            styles: Arc::clone(&self.styles),
+            styles_part_cache: self.styles_part_cache.clone(),
             numbering: self.numbering.clone(),
             core_properties: self.core_properties.clone(),
             application_properties: self.application_properties.clone(),
@@ -24516,7 +24598,7 @@ impl Document {
     }
 
     fn from_opened_package(package: OpcPackage, read_from_bytes: bool) -> Result<Self> {
-        Self::from_package_reusing(package, read_from_bytes, None, None, None)
+        Self::from_package_reusing(package, read_from_bytes, None, None, None, None)
     }
 
     fn from_package_reusing(
@@ -24525,6 +24607,7 @@ impl Document {
         staged: Option<(&DocumentIdentifiers, &Parsed)>,
         blocks: Option<&MainPartBlocks>,
         writer_blocks: Option<&MainPartBlocks>,
+        styles_read: Option<&StylesPartCache>,
     ) -> Result<Self> {
         let (doc_part_name, _) = validated_word_package_class(&package)?;
 
@@ -24581,12 +24664,41 @@ impl Document {
 
         // Try to load styles, remembering where they came from.
         let styles_part_name = resolve_part(rel_types::STYLES);
-        let styles = match styles_part_name
+        let (styles, styles_part_cache) = match styles_part_name
             .as_deref()
-            .and_then(|p| package.get_part(p))
+            .and_then(|part| package.get_part_shared(part))
         {
-            Some(styles_xml) => CT_Styles::from_xml(styles_xml)?,
-            None => CT_Styles::new_default(),
+            Some(bytes) => {
+                if let Some(kept) = styles_read.filter(|kept| Arc::ptr_eq(bytes, &kept.bytes)) {
+                    (Arc::clone(&kept.parsed), Some(kept.clone()))
+                } else {
+                    #[cfg(test)]
+                    FX282_STYLES_WORK.with(|work| {
+                        let mut counts = work.get();
+                        counts[0] += 1;
+                        work.set(counts);
+                    });
+                    let parsed = Arc::new(CT_Styles::from_xml(bytes)?);
+                    #[cfg(test)]
+                    FX282_STYLES_WORK.with(|work| {
+                        let mut counts = work.get();
+                        counts[1] += 1;
+                        work.set(counts);
+                    });
+                    let proof = if parsed.to_xml().is_ok() {
+                        StylesSerializationProof::Serializable
+                    } else {
+                        StylesSerializationProof::Unserializable
+                    };
+                    let cache = StylesPartCache {
+                        bytes: Arc::clone(bytes),
+                        parsed: Arc::clone(&parsed),
+                        proof,
+                    };
+                    (parsed, Some(cache))
+                }
+            }
+            None => (Arc::new(CT_Styles::new_default()), None),
         };
 
         // Try to load numbering definitions
@@ -24780,6 +24892,7 @@ impl Document {
             plain_local_edit_blocked,
             unsavable_body_edit_cache,
             styles,
+            styles_part_cache,
             numbering,
             core_properties,
             application_properties,
@@ -25403,6 +25516,7 @@ impl Document {
                 Some((&provenance, opened)),
                 carried_blocks.as_ref(),
                 carried_scans.serialized.as_ref(),
+                self.styles_part_cache.as_ref(),
             )?,
             None => {
                 let mut output = std::io::Cursor::new(Vec::new());
@@ -26043,14 +26157,77 @@ impl Document {
         Ok(())
     }
 
+    fn styles_differ_from_part(&mut self, part: &str) -> Result<bool> {
+        let Some(bytes) = self.package.get_part_shared(part).cloned() else {
+            return Ok(true);
+        };
+        if let Some(cache) = self
+            .styles_part_cache
+            .as_ref()
+            .filter(|cache| Arc::ptr_eq(&bytes, &cache.bytes))
+        {
+            if Arc::ptr_eq(&self.styles, &cache.parsed) || self.styles == cache.parsed {
+                if matches!(cache.proof, StylesSerializationProof::Unserializable) {
+                    #[cfg(test)]
+                    FX282_STYLES_WORK.with(|work| {
+                        let mut counts = work.get();
+                        counts[1] += 1;
+                        work.set(counts);
+                    });
+                    self.styles.to_xml()?;
+                }
+                self.styles = Arc::clone(&cache.parsed);
+                return Ok(false);
+            }
+            return Ok(true);
+        }
+        #[cfg(test)]
+        FX282_STYLES_WORK.with(|work| {
+            let mut counts = work.get();
+            counts[0] += 1;
+            work.set(counts);
+        });
+        let parsed = match CT_Styles::from_xml(&bytes) {
+            Ok(parsed) => Arc::new(parsed),
+            Err(_) => return Ok(true),
+        };
+        #[cfg(test)]
+        FX282_STYLES_WORK.with(|work| {
+            let mut counts = work.get();
+            counts[1] += 1;
+            work.set(counts);
+        });
+        let proof = if parsed.to_xml().is_ok() {
+            StylesSerializationProof::Serializable
+        } else {
+            StylesSerializationProof::Unserializable
+        };
+        if self.styles != parsed {
+            return Ok(true);
+        }
+        if matches!(proof, StylesSerializationProof::Unserializable) {
+            #[cfg(test)]
+            FX282_STYLES_WORK.with(|work| {
+                let mut counts = work.get();
+                counts[1] += 1;
+                work.set(counts);
+            });
+            self.styles.to_xml()?;
+        }
+        self.styles = Arc::clone(&parsed);
+        self.styles_part_cache = Some(StylesPartCache {
+            bytes,
+            parsed,
+            proof,
+        });
+        Ok(false)
+    }
+
     /// Write the in-memory document/styles back into the OPC package parts.
     pub(crate) fn flush_to_package(&mut self) -> Result<()> {
         self.flush_document_to_package()?;
 
-        // Serialize the styles part. A document opened without one still gets
-        // rdocx's defaults written out, so make sure it is reachable: an
-        // unreferenced, untyped part would simply be ignored by Word.
-        let styles_xml = self.styles.to_xml()?;
+        // Unchanged proved styles share their model and source bytes through staging.
         let styles_part_name = self.styles_part_name.clone();
         let styles_part = self
             .reserve_document_part_bundle(
@@ -26063,19 +26240,29 @@ impl Document {
                 Error::Other(format!("styles relationship allocation failed: {error}"))
             })?;
         self.styles_part_name = Some(styles_part.clone());
-        let styles_changed = self
-            .package
-            .get_part(&styles_part)
-            .and_then(|xml| CT_Styles::from_xml(xml).ok())
-            .as_ref()
-            != Some(&self.styles);
-        if styles_changed {
+        if self.styles_differ_from_part(&styles_part)? {
+            #[cfg(test)]
+            FX282_STYLES_WORK.with(|work| {
+                let mut counts = work.get();
+                counts[1] += 1;
+                work.set(counts);
+            });
+            let styles_xml = self.styles.to_xml()?;
             let styles_xml = if let Some(source) = self.package.get_part(&styles_part) {
                 retain_styles_root_attributes(source, styles_xml)?
             } else {
                 styles_xml
             };
             self.package.set_part(&styles_part, styles_xml);
+            let bytes = self
+                .package
+                .get_part_shared(&styles_part)
+                .expect("just installed styles bytes");
+            self.styles_part_cache = Some(StylesPartCache {
+                bytes: Arc::clone(bytes),
+                parsed: Arc::clone(&self.styles),
+                proof: StylesSerializationProof::Serializable,
+            });
         }
 
         // Serialize numbering definitions if we have any
@@ -32749,6 +32936,140 @@ impl Document {
         Ok(read(ParagraphRef { inner: &paragraph }))
     }
 
+    /// Edit a direct cell paragraph without a whole-document transaction when local admission is sufficient.
+    /// Controlled paragraphs and candidates needing package reconciliation keep the checked story route.
+    #[doc(hidden)]
+    pub fn edit_cell_paragraph<T>(
+        &mut self,
+        table: usize,
+        row: usize,
+        cell: usize,
+        paragraph: usize,
+        edit: impl FnOnce(&mut Paragraph<'_>) -> Result<T>,
+    ) -> Result<T> {
+        let mut table_index = table;
+        let selected = nth_table_in_body_ref(&self.document.body.content, &mut table_index)
+            .and_then(|table| table.rows.get(row))
+            .and_then(|row| row.cells.get(cell))
+            .ok_or_else(|| Error::Other("cell index is out of range".to_owned()))?;
+        let readers = selected.paragraphs();
+        let direct_count = selected
+            .content
+            .iter()
+            .filter(|child| matches!(child, CellContent::Paragraph(_)))
+            .count();
+        if readers.len() != direct_count || paragraph >= direct_count {
+            let location = self.cell_paragraph_story_location(table, row, cell, paragraph)?;
+            #[cfg(test)]
+            FX282_CELL_EDITS.with(|work| {
+                let mut counts = work.get();
+                counts[1] += 1;
+                work.set(counts);
+            });
+            return self.edit_story_paragraph(&location, edit);
+        }
+        let original = readers[paragraph].clone();
+        let mut candidate = original.clone();
+        let result = edit(&mut Paragraph {
+            inner: &mut candidate,
+        })?;
+        let mut fragment = ContentFragment::paragraph(candidate.clone())?;
+        reject_section_owning_content_fragment(&fragment)?;
+        let qualified = (|| -> Option<bool> {
+            if self.plain_local_edit_blocked
+                || oxml_core::xml::validate_strict_xml_1_0(&fragment.xml).is_err()
+            {
+                return Some(false);
+            }
+            let inherited = fragment
+                .namespace_scope
+                .iter()
+                .map(|(prefix, namespace)| {
+                    (
+                        if prefix.is_empty() {
+                            "xmlns".to_owned()
+                        } else {
+                            format!("xmlns:{prefix}")
+                        },
+                        namespace.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            if !xml_relationship_ids_in_order_with_bindings(&fragment.xml, &inherited)
+                .ok()?
+                .is_empty()
+            {
+                return Some(false);
+            }
+            let before = ContentFragment::paragraph(original.clone()).ok()?;
+            let count = |xml: &[u8]| -> Option<BTreeMap<(i32, usize), usize>> {
+                let mut counts = BTreeMap::new();
+                for marker in crate::comments::comment_source_markers(xml).ok()? {
+                    let entry = counts.entry((marker.id, marker.family)).or_insert(0usize);
+                    *entry = entry.checked_add(1)?;
+                }
+                Some(counts)
+            };
+            let before = count(&before.xml)?;
+            let after = count(&fragment.xml)?;
+            Some(
+                before
+                    .iter()
+                    .all(|(marker, before)| after.get(marker).copied().unwrap_or(0) >= *before),
+            )
+        })()
+        .unwrap_or(false);
+        if !qualified {
+            let location = self.cell_paragraph_story_location(table, row, cell, paragraph)?;
+            fragment.source_part_name = Some(location.story.part_name.clone());
+            fragment.source_story_kind = Some(location.story.kind);
+            fragment.source_owner_index = Some(location.story.owner_index);
+            #[cfg(test)]
+            FX282_CELL_EDITS.with(|work| {
+                let mut counts = work.get();
+                counts[1] += 1;
+                work.set(counts);
+            });
+            self.replace_story_content(&location, fragment)?;
+            return Ok(result);
+        }
+        let mut table_index = table;
+        let selected = nth_table_in_body(&mut self.document.body.content, &mut table_index)
+            .and_then(|table| table.rows.get_mut(row))
+            .and_then(|row| row.cells.get_mut(cell))
+            .ok_or_else(|| Error::Other("cell index is out of range".to_owned()))?;
+        if selected
+            .content
+            .iter()
+            .filter(|child| matches!(child, CellContent::Paragraph(_)))
+            .count()
+            != direct_count
+        {
+            return Err(Error::Other(
+                "cell paragraph changed during local edit".to_owned(),
+            ));
+        }
+        let selected = selected
+            .paragraphs_mut()
+            .into_iter()
+            .nth(paragraph)
+            .ok_or_else(|| Error::Other("cell paragraph index is out of range".to_owned()))?;
+        if *selected != original {
+            return Err(Error::Other(
+                "cell paragraph changed during local edit".to_owned(),
+            ));
+        }
+        *selected = candidate;
+        self.invalidate_layout();
+        #[cfg(test)]
+        FX282_CELL_EDITS.with(|work| {
+            let mut counts = work.get();
+            counts[0] += 1;
+            work.set(counts);
+        });
+        Ok(result)
+    }
+
     /// Edit one source-qualified rich paragraph and publish it atomically.
     #[doc(hidden)]
     pub fn edit_story_paragraph<T>(
@@ -38205,8 +38526,7 @@ impl Document {
         }
         let mut candidate = self.clone_for_staging();
         candidate.reserve_styles_bundle()?;
-        let defaults = candidate
-            .styles
+        let defaults = Arc::make_mut(&mut candidate.styles)
             .doc_defaults
             .get_or_insert_with(Default::default);
         let properties = defaults.rpr.get_or_insert_with(Default::default);
@@ -38265,8 +38585,7 @@ impl Document {
         }
         let mut candidate = self.clone_for_staging();
         candidate.reserve_styles_bundle()?;
-        let defaults = candidate
-            .styles
+        let defaults = Arc::make_mut(&mut candidate.styles)
             .doc_defaults
             .get_or_insert_with(Default::default);
         let properties = defaults.rpr.get_or_insert_with(Default::default);
@@ -38295,8 +38614,7 @@ impl Document {
         }
         let mut candidate = self.clone_for_staging();
         candidate.reserve_styles_bundle()?;
-        candidate
-            .styles
+        Arc::make_mut(&mut candidate.styles)
             .doc_defaults
             .get_or_insert_with(Default::default)
             .ppr = properties;
@@ -39515,7 +39833,7 @@ impl Document {
             )));
         }
 
-        let properties = candidate.styles.styles[style_index]
+        let properties = Arc::make_mut(&mut candidate.styles).styles[style_index]
             .ppr
             .get_or_insert_with(CT_PPr::default);
         properties.num_id = Some(num_id);
@@ -39632,7 +39950,7 @@ impl Document {
 
         candidate.reserve_styles_bundle()?;
         candidate.reserve_numbering_bundle()?;
-        let properties = candidate.styles.styles[style_index]
+        let properties = Arc::make_mut(&mut candidate.styles).styles[style_index]
             .ppr
             .as_mut()
             .expect("the exact style link was validated above");
@@ -39709,9 +40027,9 @@ impl Document {
         }
         let linked_style = authored.linked_style.clone();
         let style_id = authored.style_id.clone();
-        candidate.styles.styles.push(authored);
+        Arc::make_mut(&mut candidate.styles).styles.push(authored);
         update_reciprocal_style_link(
-            &mut candidate.styles,
+            Arc::make_mut(&mut candidate.styles),
             &style_id,
             None,
             linked_style.as_deref(),
@@ -39765,9 +40083,9 @@ impl Document {
         }
         let style_id = authored.style_id.clone();
         let new_link = authored.linked_style.clone();
-        candidate.styles.styles[index] = authored;
+        Arc::make_mut(&mut candidate.styles).styles[index] = authored;
         update_reciprocal_style_link(
-            &mut candidate.styles,
+            Arc::make_mut(&mut candidate.styles),
             &style_id,
             old_link.as_deref(),
             new_link.as_deref(),
@@ -39799,7 +40117,11 @@ impl Document {
                 style_type.to_str()
             )));
         }
-        for (position, style) in candidate.styles.styles.iter_mut().enumerate() {
+        for (position, style) in Arc::make_mut(&mut candidate.styles)
+            .styles
+            .iter_mut()
+            .enumerate()
+        {
             if style.style_type == style_type {
                 style.is_default = position == index;
             }
@@ -39857,8 +40179,7 @@ impl Document {
 
         let mut candidate = self.clone_for_staging();
         candidate.reserve_styles_bundle()?;
-        candidate
-            .styles
+        Arc::make_mut(&mut candidate.styles)
             .styles
             .retain(|style| style.style_id != style_id);
         style::validate_style_graph_change(&self.styles, &candidate.styles)?;
@@ -39890,7 +40211,7 @@ impl Document {
                         .is_some_and(|(name, common)| name.eq_ignore_ascii_case(common))
             });
             if !defined {
-                candidate.styles.styles.push(common);
+                Arc::make_mut(&mut candidate.styles).styles.push(common);
                 added += 1;
             }
         }
@@ -40050,7 +40371,7 @@ impl Document {
                     ));
                 }
             } else {
-                candidate.styles.styles.push(definition);
+                Arc::make_mut(&mut candidate.styles).styles.push(definition);
             }
         }
         style::validate_style_graph(&candidate.styles)?;
@@ -43647,7 +43968,7 @@ impl Document {
         let source = self.styles.clone();
         for style in &other.styles.styles {
             if self.styles.get_by_id(&style.style_id).is_none() {
-                self.styles.styles.push(style.clone());
+                Arc::make_mut(&mut self.styles).styles.push(style.clone());
             }
         }
         style::validate_style_graph_change(&source, &self.styles).map(|_| ())
@@ -43802,8 +44123,7 @@ impl Document {
             let Some(mapped_num_id) = num_remap.get(&source_num_id).copied() else {
                 continue;
             };
-            let Some(destination_style) = self
-                .styles
+            let Some(destination_style) = std::sync::Arc::make_mut(&mut self.styles)
                 .styles
                 .iter_mut()
                 .find(|style| style.style_id == source_style.style_id)
@@ -46139,7 +46459,7 @@ impl Document {
 
         rdocx_html::HtmlInput {
             document: self.document.clone(),
-            styles: self.styles.clone(),
+            styles: CT_Styles::clone(&self.styles),
             numbering: self.numbering.clone(),
             images,
             hyperlink_urls,
@@ -46753,7 +47073,7 @@ impl Document {
 
         // Rendering may consume a sole effects-only default without changing
         // either authored style part or merging the effects style catalogue.
-        let mut layout_styles = self.styles.clone();
+        let mut layout_styles = CT_Styles::clone(&self.styles);
         if layout_styles.get_default(StyleType::Table).is_none() {
             let effects = self.package.get_part_rels(&self.doc_part_name).and_then(|rels| {
                 let mut candidates = rels.items.iter().filter(|rel| {
@@ -49303,6 +49623,716 @@ fn has_consistent_sfnt_header(data: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn issue437_direct_cell_edit_publishes_once_and_roundtrips() {
+        let mut document = Document::new();
+        document.add_table(2, 2);
+        document.add_paragraph("untouched body");
+        let original = document.document.body.content.clone();
+        let styles = Arc::clone(&document.styles);
+        FX282_CELL_EDITS.set([0, 0]);
+        let calls = std::cell::Cell::new(0);
+        let result = document
+            .edit_cell_paragraph(0, 1, 1, 0, |paragraph| {
+                calls.set(calls.get() + 1);
+                paragraph.set_style("Normal");
+                paragraph.add_run("changed");
+                Ok((paragraph.runs().count() - 1, true))
+            })
+            .unwrap();
+        assert_eq!(result, (0, true));
+        assert_eq!(calls.get(), 1);
+        assert_eq!(FX282_CELL_EDITS.get(), [1, 0]);
+        assert!(Arc::ptr_eq(&styles, &document.styles));
+        assert_eq!(document.document.body.content[1..], original[1..]);
+        let BodyContent::Table(before) = &original[0] else {
+            panic!("table")
+        };
+        let BodyContent::Table(after) = &document.document.body.content[0] else {
+            panic!("table")
+        };
+        assert_eq!(before.rows[0], after.rows[0]);
+        assert_eq!(before.rows[1].cells[0], after.rows[1].cells[0]);
+        assert_eq!(after.rows[1].cells[1].paragraphs()[0].text(), "changed");
+        let bytes = document.to_bytes().unwrap();
+        let saved = Document::from_bytes(&bytes).unwrap();
+        let BodyContent::Table(table) = &saved.document.body.content[0] else {
+            panic!("table")
+        };
+        assert_eq!(table.rows[1].cells[1].paragraphs()[0].text(), "changed");
+    }
+
+    #[test]
+    fn issue437_failed_cell_edit_preserves_live_model_and_layout() {
+        let mut document = Document::new();
+        document.add_table(1, 1);
+        let body = document.document.body.content.clone();
+        let styles = Arc::clone(&document.styles);
+        let cached = document.layout().unwrap();
+        let calls = std::cell::Cell::new(0);
+        FX282_CELL_EDITS.set([0, 0]);
+        let result: Result<()> = document.edit_cell_paragraph(0, 0, 0, 0, |paragraph| {
+            calls.set(calls.get() + 1);
+            paragraph.add_run("must not escape");
+            Err(Error::Other("edit failed".to_owned()))
+        });
+        assert!(result.is_err());
+        assert_eq!(calls.get(), 1);
+        assert_eq!(FX282_CELL_EDITS.get(), [0, 0]);
+        assert_eq!(document.document.body.content, body);
+        assert!(Arc::ptr_eq(&styles, &document.styles));
+        assert!(Arc::ptr_eq(&cached, &document.layout().unwrap()));
+        let result: Result<()> = document.edit_cell_paragraph(0, 0, 0, 10, |_| {
+            calls.set(calls.get() + 1);
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert_eq!(calls.get(), 1);
+        assert!(Arc::ptr_eq(&cached, &document.layout().unwrap()));
+    }
+
+    #[test]
+    fn issue437_cell_checked_fallback_does_not_repeat_callback() {
+        let mut document = Document::new();
+        document.add_table(1, 1);
+        document.plain_local_edit_blocked = true;
+        let calls = std::cell::Cell::new(0);
+        FX282_CELL_EDITS.set([0, 0]);
+        document
+            .edit_cell_paragraph(0, 0, 0, 0, |paragraph| {
+                calls.set(calls.get() + 1);
+                paragraph.add_run("checked");
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(FX282_CELL_EDITS.get(), [0, 1]);
+        let BodyContent::Table(table) = &document.document.body.content[0] else {
+            panic!("table")
+        };
+        assert_eq!(table.rows[0].cells[0].paragraphs()[0].text(), "checked");
+    }
+
+    #[test]
+    fn issue437_styles_copy_on_write_and_same_bytes_replacement() {
+        let mut document = Document::new();
+        let bytes = document.to_bytes().unwrap();
+        let document = Document::from_bytes(&bytes).unwrap();
+        let mut changed = document.clone_for_staging();
+        assert!(Arc::ptr_eq(&document.styles, &changed.styles));
+        changed
+            .set_default_font_name_value(Some("Changed default"))
+            .unwrap();
+        assert!(!Arc::ptr_eq(&document.styles, &changed.styles));
+        assert_ne!(document.styles, changed.styles);
+        let mut replaced = document.clone_for_staging();
+        let bytes = replaced
+            .package
+            .get_part("/word/styles.xml")
+            .unwrap()
+            .to_vec();
+        replaced.package.set_part("/word/styles.xml", bytes);
+        FX282_STYLES_WORK.set([0, 0]);
+        replaced.flush_to_package().unwrap();
+        assert_eq!(FX282_STYLES_WORK.get(), [1, 1]);
+        assert_eq!(document.styles, replaced.styles);
+        FX282_STYLES_WORK.set([0, 0]);
+        replaced.flush_to_package().unwrap();
+        assert_eq!(FX282_STYLES_WORK.get(), [0, 0]);
+    }
+
+    #[test]
+    fn issue437_controlled_and_nested_cell_routes_keep_physical_selection() {
+        let source = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>before</w:t></w:r></w:p><w:sdt><w:sdtContent><w:p><w:r><w:t>controlled</w:t></w:r></w:p></w:sdtContent></w:sdt><w:p><w:r><w:t>after</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+        let mut document = Document::new();
+        document.document = CT_Document::from_xml(source).unwrap();
+        let bytes = document.to_bytes().unwrap();
+        let mut document = Document::from_bytes(&bytes).unwrap();
+        FX282_CELL_EDITS.set([0, 0]);
+        document
+            .edit_cell_paragraph(0, 0, 0, 2, |paragraph| paragraph.set_text("selected after"))
+            .unwrap();
+        assert_eq!(FX282_CELL_EDITS.get(), [0, 1]);
+        let BodyContent::Table(table) = &document.document.body.content[0] else {
+            panic!("table")
+        };
+        let texts = table.rows[0].cells[0]
+            .paragraphs()
+            .into_iter()
+            .map(CT_P::text)
+            .collect::<Vec<_>>();
+        assert_eq!(texts, ["before", "controlled", "selected after"]);
+
+        let mut document = Document::new();
+        document.add_table(1, 1);
+        let nested = Document::detached_table(1, 1);
+        let BodyContent::Table(table) = &mut document.document.body.content[0] else {
+            panic!("table")
+        };
+        table.rows[0].cells[0]
+            .content
+            .push(CellContent::Table(nested));
+        let mut after = CT_P::new();
+        after.add_run("after nested");
+        table.rows[0].cells[0]
+            .content
+            .push(CellContent::Paragraph(after));
+        FX282_CELL_EDITS.set([0, 0]);
+        document
+            .edit_cell_paragraph(0, 0, 0, 1, |paragraph| paragraph.set_text("outer selected"))
+            .unwrap();
+        assert_eq!(FX282_CELL_EDITS.get(), [1, 0]);
+        let BodyContent::Table(table) = &document.document.body.content[0] else {
+            panic!("table")
+        };
+        assert_eq!(
+            table.rows[0].cells[0].paragraphs()[1].text(),
+            "outer selected"
+        );
+        let CellContent::Table(nested) = &table.rows[0].cells[0].content[1] else {
+            panic!("nested")
+        };
+        assert_eq!(nested.rows[0].cells[0].paragraphs()[0].text(), "");
+    }
+
+    #[test]
+    fn issue437_cell_candidate_refusal_preserves_layout_and_comment_removal_policy() {
+        let mut document = Document::new();
+        document.add_table(1, 1);
+        let cached = document.layout().unwrap();
+        let before = document.document.clone();
+        let calls = std::cell::Cell::new(0);
+        assert!(
+            document
+                .edit_cell_paragraph(0, 0, 0, 0, |paragraph| {
+                    calls.set(calls.get() + 1);
+                    paragraph.set_style("bad\0style");
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert_eq!(calls.get(), 1);
+        assert_eq!(document.document, before);
+        assert!(Arc::ptr_eq(&cached, &document.layout().unwrap()));
+
+        let BodyContent::Table(table) = &mut document.document.body.content[0] else {
+            panic!("table")
+        };
+        table.rows[0].cells[0].paragraphs_mut()[0].extra_xml.push((
+            0,
+            br#"<w:commentRangeStart w:id="42"/><w:commentRangeEnd w:id="42"/>"#.to_vec(),
+        ));
+        let bytes = document.to_bytes().unwrap();
+        let mut local = Document::from_bytes(&bytes).unwrap();
+        let mut checked = Document::from_bytes(&bytes).unwrap();
+        let location = checked.cell_paragraph_story_location(0, 0, 0, 0).unwrap();
+        let expected = checked.edit_story_paragraph(&location, |paragraph| {
+            paragraph.inner.extra_xml.clear();
+            paragraph.inner.comment_ranges.clear();
+            Ok(())
+        });
+        FX282_CELL_EDITS.set([0, 0]);
+        let actual = local.edit_cell_paragraph(0, 0, 0, 0, |paragraph| {
+            paragraph.inner.extra_xml.clear();
+            paragraph.inner.comment_ranges.clear();
+            Ok(())
+        });
+        assert_eq!(FX282_CELL_EDITS.get(), [0, 1]);
+        assert_eq!(
+            actual.as_ref().err().map(ToString::to_string),
+            expected.as_ref().err().map(ToString::to_string)
+        );
+        assert_eq!(local.document, checked.document);
+        assert_eq!(local.to_bytes().unwrap(), checked.to_bytes().unwrap());
+    }
+
+    #[test]
+    fn issue437_qualified_foreign_extension_keeps_opaque_source_scope() {
+        let mut document = Document::new();
+        document.add_table(1, 1);
+        let bytes = document.to_bytes().unwrap();
+        let mut local = Document::from_bytes(&bytes).unwrap();
+        let mut checked = Document::from_bytes(&bytes).unwrap();
+        let raw = br#"<q:extension xmlns:q="urn:retained" value="kept"/>"#;
+        let location = checked.cell_paragraph_story_location(0, 0, 0, 0).unwrap();
+        checked
+            .edit_story_paragraph(&location, |paragraph| {
+                paragraph.inner.extra_xml.push((0, raw.to_vec()));
+                Ok(())
+            })
+            .unwrap();
+        FX282_CELL_EDITS.set([0, 0]);
+        local
+            .edit_cell_paragraph(0, 0, 0, 0, |paragraph| {
+                paragraph.inner.extra_xml.push((0, raw.to_vec()));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(FX282_CELL_EDITS.get(), [1, 0]);
+        assert_eq!(local.document, checked.document);
+        let local_saved =
+            OpcPackage::from_reader(std::io::Cursor::new(local.to_bytes().unwrap())).unwrap();
+        let checked_saved =
+            OpcPackage::from_reader(std::io::Cursor::new(checked.to_bytes().unwrap())).unwrap();
+        let local_xml = local_saved.get_part("/word/document.xml").unwrap();
+        let checked_xml = checked_saved.get_part("/word/document.xml").unwrap();
+        assert!(local_xml.windows(raw.len()).any(|bytes| bytes == raw));
+        assert!(checked_xml.windows(raw.len()).any(|bytes| bytes == raw));
+        assert!(String::from_utf8_lossy(local_xml).contains("<w:p><q:extension"));
+        assert!(String::from_utf8_lossy(checked_xml).contains("<w:p xmlns:mc="));
+        // The checked publisher closes inherited namespaces onto the paragraph.
+        // Direct publication retains its original inherited scope instead.
+        assert_ne!(local_xml, checked_xml);
+    }
+
+    #[test]
+    fn issue437_retained_lexical_candidates_preserve_checked_acceptance() {
+        for (name, raw, qualified) in [
+            ("ordinary", r#"<w:foo data="ok"/>"#, true),
+            ("literal_lt", r#"<w:foo data="a<b"/>"#, false),
+            ("numeric_name", r#"<w:9foo/>"#, false),
+            ("unbound_name", r#"<z:foo/>"#, false),
+            (
+                "duplicate_expanded_attr",
+                r#"<w:foo xmlns:x="urn:x" xmlns:y="urn:x" x:a="1" y:a="2"/>"#,
+                false,
+            ),
+        ] {
+            let mut seed = Document::new();
+            let mut package =
+                OpcPackage::from_reader(std::io::Cursor::new(seed.to_bytes().unwrap())).unwrap();
+            let xml = format!(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr/><w:p>{raw}<w:r><w:t>synthetic</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:sectPr/></w:body></w:document>"#
+            );
+            package.set_part("/word/document.xml", xml.into_bytes());
+            let mut input = std::io::Cursor::new(Vec::new());
+            package.write_to(&mut input).unwrap();
+            let mut checked = Document::from_bytes(input.get_ref()).unwrap();
+            let mut local = Document::from_bytes(input.get_ref()).unwrap();
+            let location = checked.cell_paragraph_story_location(0, 0, 0, 0).unwrap();
+            let checked_calls = std::cell::Cell::new(0);
+            let local_calls = std::cell::Cell::new(0);
+            let edit = |paragraph: &mut Paragraph<'_>, calls: &std::cell::Cell<usize>| {
+                calls.set(calls.get() + 1);
+                paragraph.set_style("Normal");
+                let candidate = ContentFragment::paragraph(paragraph.inner.clone()).unwrap();
+                assert_eq!(
+                    oxml_core::xml::validate_strict_xml_1_0(&candidate.xml).is_ok(),
+                    qualified,
+                    "actual typed candidate: {name}"
+                );
+                assert!(
+                    candidate
+                        .xml
+                        .windows(raw.len())
+                        .any(|bytes| bytes == raw.as_bytes()),
+                    "retained candidate: {name}"
+                );
+                Ok(())
+            };
+            checked
+                .edit_story_paragraph(&location, |paragraph| edit(paragraph, &checked_calls))
+                .unwrap();
+            FX282_CELL_EDITS.set([0, 0]);
+            local
+                .edit_cell_paragraph(0, 0, 0, 0, |paragraph| edit(paragraph, &local_calls))
+                .unwrap();
+            assert_eq!(checked_calls.get(), 1, "{name}");
+            assert_eq!(local_calls.get(), 1, "{name}");
+            assert_eq!(
+                FX282_CELL_EDITS.get(),
+                if qualified { [1, 0] } else { [0, 1] },
+                "{name}"
+            );
+            if !qualified {
+                assert_eq!(local.document, checked.document, "{name}");
+            }
+            let local_bytes = local.to_bytes().unwrap();
+            let checked_bytes = checked.to_bytes().unwrap();
+            let saved = OpcPackage::from_reader(std::io::Cursor::new(&local_bytes)).unwrap();
+            let xml = saved.get_part("/word/document.xml").unwrap();
+            assert!(
+                xml.windows(raw.len()).any(|bytes| bytes == raw.as_bytes()),
+                "saved raw: {name}"
+            );
+            let reopened = Document::from_bytes(&local_bytes).unwrap();
+            let BodyContent::Table(table) = &reopened.document.body.content[0] else {
+                panic!("table")
+            };
+            assert_eq!(table.rows[0].cells[0].paragraphs()[0].text(), "synthetic");
+            assert_eq!(
+                table.rows[0].cells[0].paragraphs()[0]
+                    .properties
+                    .as_ref()
+                    .unwrap()
+                    .style_id
+                    .as_deref(),
+                Some("Normal")
+            );
+            if !qualified {
+                assert_eq!(
+                    local_bytes, checked_bytes,
+                    "strict-error checked publication bytes: {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn issue437_control_owned_table_paragraphs_keep_checked_source_preflight() {
+        let sentinel = r#"<q:sentinel xmlns:q="urn:kept" value="raw"/>"#;
+        let xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>outer before</w:t></w:r></w:p><w:sdt><w:sdtPr><w:tag w:val="nested table"/></w:sdtPr><w:sdtContent><w:tbl><w:tblPr>{sentinel}</w:tblPr><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>controlled table</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:sdtContent></w:sdt><w:p><w:r><w:t>outer after</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#
+        );
+        let mut seed = Document::new();
+        seed.document = CT_Document::from_xml(xml.as_bytes()).unwrap();
+        let bytes = seed.to_bytes().unwrap();
+        for target in 0..3 {
+            let mut document = Document::from_bytes(&bytes).unwrap();
+            let BodyContent::Table(table) = &document.document.body.content[0] else {
+                panic!("table")
+            };
+            let cell = &table.rows[0].cells[0];
+            assert_eq!(
+                cell.paragraphs()
+                    .iter()
+                    .map(|paragraph| paragraph.text())
+                    .collect::<Vec<_>>(),
+                ["outer before", "controlled table", "outer after"]
+            );
+            assert_eq!(
+                cell.content
+                    .iter()
+                    .filter(|child| matches!(child, CellContent::Paragraph(_)))
+                    .count(),
+                2
+            );
+            assert!(matches!(cell.content[1], CellContent::ContentControl(_)));
+            let before = document.document.clone();
+            let source = document
+                .package
+                .get_part("/word/document.xml")
+                .unwrap()
+                .to_vec();
+            let checked_error = document
+                .cell_paragraph_story_location(0, 0, 0, target)
+                .unwrap_err()
+                .to_string();
+            assert_eq!(
+                checked_error,
+                "cell paragraph modeled/source correspondence is unsupported"
+            );
+            let calls = std::cell::Cell::new(0);
+            FX282_CELL_EDITS.set([0, 0]);
+            let actual = document.edit_cell_paragraph(0, 0, 0, target, |paragraph| {
+                calls.set(calls.get() + 1);
+                paragraph.set_text("must not reach an unqualified owner")
+            });
+            assert_eq!(actual.unwrap_err().to_string(), checked_error);
+            assert_eq!(calls.get(), 0, "checked owner preflight precedes callback");
+            assert_eq!(
+                FX282_CELL_EDITS.get(),
+                [0, 0],
+                "neither direct publication nor checked edit reached"
+            );
+            assert_eq!(document.document, before);
+            assert_eq!(
+                document.package.get_part("/word/document.xml"),
+                Some(source.as_slice())
+            );
+            assert!(
+                source
+                    .windows(sentinel.len())
+                    .any(|bytes| bytes == sentinel.as_bytes())
+            );
+            let saved_bytes = document.to_bytes().unwrap();
+            assert_eq!(saved_bytes, bytes);
+            let reopened = Document::from_bytes(&saved_bytes).unwrap();
+            let BodyContent::Table(table) = &reopened.document.body.content[0] else {
+                panic!("table")
+            };
+            assert_eq!(
+                table.rows[0].cells[0]
+                    .paragraphs()
+                    .into_iter()
+                    .map(CT_P::text)
+                    .collect::<Vec<_>>(),
+                ["outer before", "controlled table", "outer after"]
+            );
+        }
+    }
+
+    #[test]
+    fn issue437_unqualified_cell_candidate_matches_checked_legacy_policy() {
+        for raw in [
+            b"<w:hyperlink r:id=\"rIdMissing\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"/>".as_slice(),
+            b"<q:extension xmlns:q=\"urn:retained\">\x01</q:extension>",
+        ] {
+            let mut document = Document::new();
+            document.add_table(1, 1);
+            let bytes = document.to_bytes().unwrap();
+            let mut local = Document::from_bytes(&bytes).unwrap();
+            let mut checked = Document::from_bytes(&bytes).unwrap();
+            let location = checked.cell_paragraph_story_location(0, 0, 0, 0).unwrap();
+            let expected = checked.edit_story_paragraph(&location, |paragraph| {
+                paragraph.inner.extra_xml.push((0, raw.to_vec()));
+                Ok(())
+            });
+            let calls = std::cell::Cell::new(0);
+            let actual = local.edit_cell_paragraph(0, 0, 0, 0, |paragraph| {
+                calls.set(calls.get() + 1);
+                paragraph.inner.extra_xml.push((0, raw.to_vec()));
+                Ok(())
+            });
+            assert_eq!(calls.get(), 1);
+            assert_eq!(actual.as_ref().err().map(ToString::to_string), expected.as_ref().err().map(ToString::to_string));
+            assert_eq!(local.document, checked.document);
+            let actual_bytes = local.to_bytes().unwrap();
+            let expected_bytes = checked.to_bytes().unwrap();
+            let actual_package = OpcPackage::from_reader(std::io::Cursor::new(&actual_bytes)).unwrap();
+            let expected_package = OpcPackage::from_reader(std::io::Cursor::new(&expected_bytes)).unwrap();
+            for part in ["/word/document.xml", "/word/styles.xml", "/docProps/core.xml", "/[Content_Types].xml"] {
+                assert_eq!(actual_package.get_part(part).map(String::from_utf8_lossy), expected_package.get_part(part).map(String::from_utf8_lossy), "{part}, raw={:?}", String::from_utf8_lossy(raw));
+            }
+            assert_eq!(actual_bytes.len(), expected_bytes.len());
+        }
+    }
+
+    #[test]
+    fn issue437_failed_styles_proof_retries_writer_without_publishing() {
+        let mut document = Document::new();
+        let bytes = document.to_bytes().unwrap();
+        let mut document = Document::from_bytes(&bytes).unwrap();
+        let original = document
+            .package
+            .get_part("/word/styles.xml")
+            .unwrap()
+            .to_vec();
+        let mut invalid = CT_Styles::clone(&document.styles);
+        let mut edge =
+            rdocx_oxml::borders::CT_BorderEdge::new(rdocx_oxml::shared::ST_Border::Single);
+        edge.source_xml = Some(b"<w:top/>".to_vec());
+        invalid.styles[0]
+            .ppr
+            .get_or_insert_with(Default::default)
+            .borders = Some(Box::new(rdocx_oxml::borders::CT_PBdr {
+            top: Some(edge),
+            ..Default::default()
+        }));
+        assert!(
+            invalid.to_xml().is_err(),
+            "synthetic model must actually fail writer"
+        );
+        let invalid = Arc::new(invalid);
+        document.styles = Arc::clone(&invalid);
+        let cache = document.styles_part_cache.as_mut().unwrap();
+        cache.parsed = Arc::clone(&invalid);
+        cache.proof = StylesSerializationProof::Unserializable;
+        FX282_STYLES_WORK.set([0, 0]);
+        assert!(document.flush_to_package().is_err());
+        assert_eq!(FX282_STYLES_WORK.get(), [0, 1]);
+        assert_eq!(
+            document.package.get_part("/word/styles.xml"),
+            Some(original.as_slice())
+        );
+        assert!(Arc::ptr_eq(
+            &invalid,
+            &document.styles_part_cache.as_ref().unwrap().parsed
+        ));
+    }
+
+    #[test]
+    fn issue437_unrelated_retained_control_owners_keep_checked_fallback() {
+        let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        let rows = format!(
+            r#"<w:sdt xmlns:w="{word}" xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml"><w:sdtPr><w:tag w:val="rows"/><w15:repeatingSection/></w:sdtPr><w:sdtContent><w:sdt><w:sdtPr><w15:repeatingSectionItem/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>row</w:t></w:r></w:p></w:sdtContent></w:sdt></w:sdtContent></w:sdt>"#
+        );
+        let twin = r#"<w:sdt xmlns:x="urn:x"><w:sdtPr><x:meta/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>twin</w:t></w:r></w:p></w:sdtContent></w:sdt>"#;
+        for (name, owners, fallback) in [
+            ("ordinary", String::new(), false),
+            (
+                "alias",
+                format!(
+                    r#"<q:sdt xmlns:q="{word}"><q:sdtPr><q:tag q:val="t"/></q:sdtPr><q:sdtContent><q:p><q:r><q:t>in q</q:t></q:r></q:p></q:sdtContent></q:sdt>"#
+                ),
+                true,
+            ),
+            ("twins", format!("{twin}{twin}"), true),
+            ("two_repeating", format!("{rows}{rows}"), true),
+        ] {
+            let mut seed = Document::new();
+            let bytes = seed.to_bytes().unwrap();
+            let mut package = OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+            let xml = format!(
+                r#"<w:document xmlns:w="{word}"><w:body><w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc><w:tcPr/><w:p><w:r><w:t>synthetic</w:t></w:r></w:p></w:tc></w:tr></w:tbl>{owners}<w:sectPr/></w:body></w:document>"#
+            );
+            package.set_part("/word/document.xml", xml.into_bytes());
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            package.write_to(&mut bytes).unwrap();
+            let mut document = Document::from_bytes(bytes.get_ref()).unwrap();
+            FX282_CELL_EDITS.set([0, 0]);
+            document
+                .edit_cell_paragraph(0, 0, 0, 0, |paragraph| {
+                    paragraph.set_style("Normal");
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(
+                FX282_CELL_EDITS.get(),
+                if fallback { [0, 1] } else { [1, 0] },
+                "{name}"
+            );
+            assert!(
+                document.to_bytes().is_ok(),
+                "{name} retained owners must save"
+            );
+        }
+    }
+
+    #[test]
+    fn issue437_styles_open_proof_and_unchanged_flush() {
+        let mut seed = Document::new();
+        seed.add_paragraph("replace this token");
+        seed.add_table(1, 1);
+        let bytes = seed.to_bytes().unwrap();
+        FX282_STYLES_WORK.set([0, 0]);
+        let mut document = Document::from_bytes(&bytes).unwrap();
+        assert_eq!(FX282_STYLES_WORK.get(), [1, 1], "actual open proves once");
+        let styles = Arc::clone(&document.styles);
+        let part = Arc::clone(
+            document
+                .package
+                .get_part_shared("/word/styles.xml")
+                .unwrap(),
+        );
+        let assert_unchanged = |document: &Document| {
+            assert!(Arc::ptr_eq(&styles, &document.styles));
+            assert!(Arc::ptr_eq(
+                &part,
+                document
+                    .package
+                    .get_part_shared("/word/styles.xml")
+                    .unwrap()
+            ));
+            assert_eq!(FX282_STYLES_WORK.get(), [0, 0]);
+        };
+        FX282_STYLES_WORK.set([0, 0]);
+        assert_eq!(document.try_replace_text("token", "value").unwrap(), 1);
+        assert_unchanged(&document);
+        assert_eq!(document.add_empty_table_row(0).unwrap(), 1);
+        assert_unchanged(&document);
+        let saved = document.to_bytes().unwrap();
+        assert_unchanged(&document);
+        let saved = OpcPackage::from_reader(std::io::Cursor::new(saved)).unwrap();
+        assert_eq!(saved.get_part("/word/styles.xml"), Some(part.as_slice()));
+        assert_eq!(document.paragraph(0).unwrap().text(), "replace this value");
+        assert_eq!(document.table(0).unwrap().row_count(), 2);
+    }
+
+    #[test]
+    fn issue437_changed_style_reaches_saved_part_and_retains_root_attributes() {
+        let mut seed = Document::new();
+        let mut package =
+            OpcPackage::from_reader(std::io::Cursor::new(seed.to_bytes().unwrap())).unwrap();
+        let first = r#"<q:first xmlns:q="urn:producer" value='A &amp; B'/>"#;
+        let second = r#"<q:second xmlns:q="urn:producer" value="exact"/>"#;
+        let inherited = r#"<q:inherited value="materialized"/>"#;
+        let source = format!(
+            r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:q="urn:producer" q:producer="original"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Before" w:hAnsi="Before"/></w:rPr></w:rPrDefault></w:docDefaults>{first}{second}{inherited}<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style></w:styles>"#
+        );
+        package.set_part("/word/styles.xml", source.as_bytes().to_vec());
+        let mut input = std::io::Cursor::new(Vec::new());
+        package.write_to(&mut input).unwrap();
+        let mut document = Document::from_bytes(input.get_ref()).unwrap();
+        let materialized = std::str::from_utf8(&document.styles.extra_xml[2])
+            .unwrap()
+            .to_owned();
+        assert_ne!(materialized, inherited);
+        assert!(materialized.contains(r#"xmlns:q="urn:producer""#));
+        assert!(materialized.contains(r#"value="materialized""#));
+        assert!(oxml_core::xml::validate_strict_xml_1_0(materialized.as_bytes()).is_ok());
+        let original = Arc::clone(&document.styles);
+        let original_part = Arc::clone(
+            document
+                .package
+                .get_part_shared("/word/styles.xml")
+                .unwrap(),
+        );
+        document
+            .set_default_font_name_value(Some("Changed default"))
+            .unwrap();
+        assert!(!Arc::ptr_eq(&original, &document.styles));
+        assert_eq!(
+            original
+                .doc_defaults
+                .as_ref()
+                .unwrap()
+                .rpr
+                .as_ref()
+                .unwrap()
+                .font_ascii
+                .as_deref(),
+            Some("Before")
+        );
+        FX282_STYLES_WORK.set([0, 0]);
+        document.flush_to_package().unwrap();
+        assert_eq!(
+            FX282_STYLES_WORK.get(),
+            [0, 1],
+            "changed model serializes once"
+        );
+        assert!(!Arc::ptr_eq(
+            &original_part,
+            document
+                .package
+                .get_part_shared("/word/styles.xml")
+                .unwrap()
+        ));
+        let bytes = document.to_bytes().unwrap();
+        let saved = OpcPackage::from_reader(std::io::Cursor::new(&bytes)).unwrap();
+        let xml = std::str::from_utf8(saved.get_part("/word/styles.xml").unwrap()).unwrap();
+        assert_ne!(xml, source);
+        assert!(xml.contains(r#"xmlns:q="urn:producer""#));
+        assert!(xml.contains(r#"q:producer="original""#));
+        assert_eq!(
+            xml.matches(first).count(),
+            1,
+            "first opaque child stays exact"
+        );
+        assert_eq!(
+            xml.matches(second).count(),
+            1,
+            "second opaque child stays exact"
+        );
+        let defaults = xml.find("<w:docDefaults").unwrap();
+        let first_at = xml.find(first).unwrap();
+        let second_at = xml.find(second).unwrap();
+        let inherited_at = xml.find(&materialized).unwrap();
+        let style = xml.find("<w:style ").unwrap();
+        assert_eq!(xml.matches(&materialized).count(), 1);
+        assert!(
+            defaults < first_at
+                && first_at < second_at
+                && second_at < inherited_at
+                && inherited_at < style
+        );
+        let parsed = CT_Styles::from_xml(xml.as_bytes()).unwrap();
+        assert_eq!(
+            parsed
+                .doc_defaults
+                .as_ref()
+                .unwrap()
+                .rpr
+                .as_ref()
+                .unwrap()
+                .font_ascii
+                .as_deref(),
+            Some("Changed default")
+        );
+        let reopened = Document::from_bytes(&bytes).unwrap();
+        assert_eq!(reopened.default_font_name(), Some("Changed default"));
+    }
+
     #[test]
     fn owners_only_story_list_then_item_lookup_matches_the_full_reader() {
         for count in [0usize, 1, 3] {
@@ -65633,7 +66663,7 @@ mod tests {
             .layout_with_options(normal)
             .expect("prime receiver engine");
 
-        receiver.styles = CT_Styles::new();
+        receiver.styles = Arc::new(CT_Styles::new());
         receiver.invalidate_layout();
         assert!(!receiver.transfer_reusable_layout_from(&mut source));
         assert!(
@@ -72701,8 +73731,7 @@ mod tests {
     #[test]
     fn numbering_graph_rejects_each_one_sided_style_link() {
         let mut document = Document::new();
-        let normal = document
-            .styles
+        let normal = std::sync::Arc::make_mut(&mut document.styles)
             .styles
             .iter_mut()
             .find(|style| style.style_id == "Normal")
@@ -72712,8 +73741,7 @@ mod tests {
             ..CT_PPr::default()
         });
         assert!(document.validate_numbering_graph().is_err());
-        document
-            .styles
+        std::sync::Arc::make_mut(&mut document.styles)
             .styles
             .iter_mut()
             .find(|style| style.style_id == "Normal")
@@ -73113,8 +74141,7 @@ mod tests {
         let instance_id = document
             .add_numbering_instance(definition_id, &[NumberingLevelOverride::new(0).start(4)])
             .unwrap();
-        document
-            .styles
+        std::sync::Arc::make_mut(&mut document.styles)
             .styles
             .iter_mut()
             .find(|style| style.style_id == "Normal")
@@ -73180,8 +74207,7 @@ mod tests {
             .add_numbering_definition(&[ListLevel::decimal()])
             .unwrap();
         let instance_id = source.add_numbering_instance(definition_id, &[]).unwrap();
-        source
-            .styles
+        std::sync::Arc::make_mut(&mut source.styles)
             .styles
             .iter_mut()
             .find(|style| style.style_id == "Normal")
@@ -73667,8 +74693,7 @@ mod tests {
             keep_next: Some(true),
             ..Default::default()
         });
-        let default_style = doc
-            .styles
+        let default_style = std::sync::Arc::make_mut(&mut doc.styles)
             .styles
             .iter_mut()
             .find(|style| style.style_id == "Normal")
@@ -73843,7 +74868,7 @@ mod tests {
             .unwrap();
         doc.add_style(StyleBuilder::paragraph("Derived", "Derived"))
             .unwrap();
-        for style in &mut doc.styles.styles {
+        for style in &mut Arc::make_mut(&mut doc.styles).styles {
             match style.style_id.as_str() {
                 "BaseInd" => {
                     style.ppr = Some(CT_PPr {
@@ -79883,7 +80908,7 @@ mod odttf_tests {
     #[test]
     fn fx200_absent_default_getters_and_clears_do_not_materialize_defaults() {
         let mut document = Document::new();
-        document.styles.doc_defaults = None;
+        Arc::make_mut(&mut document.styles).doc_defaults = None;
         let before = document.to_bytes().unwrap();
         assert!(document.default_font_name().is_none() && document.default_font_size().is_none());
         document.set_default_font_name_value(None).unwrap();

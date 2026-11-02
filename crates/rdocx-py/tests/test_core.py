@@ -16039,3 +16039,71 @@ def test_issue433_render_pages_selects_the_caller_layout_in_both_directions():
                 dpi=12.0, fonts=caller, system_fonts=system, pages=selected
             ) == ([pages[index] for index in selected], diagnostics)
             assert diagnostics == (), "caller supplies the actual requested family"
+
+
+@pytest.mark.parametrize("opened", [False, True])
+def test_issue437_cell_edits_keep_handles_values_and_avoid_staging(opened):
+    import rdocx
+    from rdocx import _rdocx
+    document = rdocx.Document()
+    document.add_table(rows=2, cols=2)
+    document.add_paragraph("unrelated")
+    if opened:
+        document = rdocx.Document.from_bytes(document.to_bytes())
+    paragraph = document.tables[0].cell(1, 1).paragraphs[0]
+    staging = getattr(_rdocx, "_staging_work", None)
+    if staging:
+        staging()
+    paragraph.style = "Normal"
+    paragraph.alignment = rdocx.enum.text.WD_ALIGN_PARAGRAPH.CENTER
+    if staging:
+        assert list(staging()) == [0] * 6
+    run = paragraph.add_run("selected cell")
+    if staging:
+        # Debug route equivalence checks can serialize the selected body
+        # children during append authority preparation. Keep that diagnostic
+        # outside the direct setter work assertion.
+        staging()
+    run.font.size = rdocx.Pt(14)
+    if staging:
+        assert list(staging()) == [0] * 6
+    assert paragraph.text == "selected cell"
+    assert run.text == "selected cell"
+    fresh = document.tables[0].cell(1, 1).paragraphs[0]
+    assert fresh.text == paragraph.text
+    assert fresh.runs[0].font.size == rdocx.Pt(14)
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    saved = reopened.tables[0].cell(1, 1).paragraphs[0]
+    assert saved.text == "selected cell"
+    assert saved.runs[0].font.size == rdocx.Pt(14)
+    assert reopened.paragraphs[-1].text == "unrelated"
+
+
+@pytest.mark.parametrize("target", [0, 1, 2])
+def test_issue437_control_owned_table_keeps_held_physical_paragraphs(target):
+    import rdocx
+    sentinel = '<q:sentinel xmlns:q="urn:kept" value="raw"/>'
+    content = ('<w:tbl><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid><w:tr><w:tc>'
+               '<w:p><w:r><w:t>outer before</w:t></w:r></w:p><w:sdt><w:sdtPr>'
+               '<w:tag w:val="nested table"/></w:sdtPr><w:sdtContent><w:tbl>'
+               '<w:tblPr>' + sentinel + '</w:tblPr><w:tblGrid><w:gridCol w:w="2000"/>'
+               '</w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>controlled table</w:t></w:r>'
+               '</w:p></w:tc></w:tr></w:tbl></w:sdtContent></w:sdt><w:p><w:r>'
+               '<w:t>outer after</w:t></w:r></w:p></w:tc></w:tr></w:tbl>')
+    document = _replace_document_body(rdocx.Document(), content)
+    held = list(document.tables[0].cell(0, 0).paragraphs)
+    runs = [paragraph.runs[0] for paragraph in held]
+    assert [paragraph.text for paragraph in held] == ["outer before", "controlled table", "outer after"]
+    before = document.to_bytes()
+    with pytest.raises(rdocx.RdocxError, match="cell paragraph modeled/source correspondence is unsupported"):
+        runs[target].text = f"selected {target}"
+    expected = ["outer before", "controlled table", "outer after"]
+    assert [paragraph.text for paragraph in held] == expected
+    assert [run.text for run in runs] == expected
+    assert [paragraph.text for paragraph in document.tables[0].cell(0, 0).paragraphs] == expected
+    saved = document.to_bytes()
+    assert saved == before
+    with zipfile.ZipFile(io.BytesIO(saved)) as package:
+        assert sentinel.encode() in package.read("word/document.xml")
+    reopened = rdocx.Document.from_bytes(saved)
+    assert [paragraph.text for paragraph in reopened.tables[0].cell(0, 0).paragraphs] == expected

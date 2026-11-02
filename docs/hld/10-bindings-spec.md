@@ -1,5 +1,20 @@
 # 10, Bindings spec
 
+## Cell edit and shared part surfaces
+
+`OpcPackage::get_part_shared(&self, part_name: &str) -> Option<&Arc<Vec<u8>>>`
+uses the same case-equivalent lookup as `get_part` and exposes the existing
+shared allocation without copying bytes. The doc-hidden
+`Document::edit_cell_paragraph<T>` takes physical table, row, cell and paragraph
+indices and a `FnOnce(&mut Paragraph) -> Result<T>`. Its real consumers return
+unit for setters and a run-index/path pair for run insertion. It executes the
+callback at most once, including checked fallback. Invalid locations execute
+it zero times. Python cell paragraph mutations call this bridge. Run binding
+uses prepared paragraph route facts rather than materializing a second native
+paragraph projection. Existing Python signatures and handle authority remain
+unchanged.
+
+
 
 ## Additive native timeline projection
 

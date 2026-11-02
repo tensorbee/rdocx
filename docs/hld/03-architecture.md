@@ -1,5 +1,27 @@
 # 03, Architecture
 
+## Shared styles and cell edits
+
+The Word facade holds `CT_Styles` in an `Arc`. A private cache binds the exact
+shared OPC part allocation to its parsed model and serialization proof. Opening
+proves a newly parsed model once. Staged in-memory reopen reuses proof only for
+the same source allocation. Unchanged proved models preserve original part
+bytes. A replaced source is parsed again, and malformed styles refuse before
+replacement. Changed styles use copy-on-write and publish cache state only
+after serialization and root-attribute retention succeed. A failed proof is
+retained as a failed proof and the writer error is retried when needed.
+
+Direct physical cell paragraph edits resolve the immutable reader location and
+require its paragraph count to equal the direct paragraph count. They edit a
+clone once, admit its fragment, and publish only a strictly qualified candidate
+with no relationship references and no removed comment markers. Unsupported
+source ownership, mixed controlled content and unqualified XML retain checked
+story replacement using the already edited candidate. Local publication
+invalidates layout after assignment. Caller callback errors leave the model
+and existing layout caches untouched. Font fallback policy remains bundled by
+default, with explicit system opt-in and caller fonts taking priority.
+
+
 
 ## Neutral linear opacity ownership
 

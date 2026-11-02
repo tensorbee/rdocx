@@ -407,32 +407,55 @@ The malformed styles replacement is a separate planned refusal. On the current w
 
 ## Implementation checklist
 
-- [ ] Add `OpcPackage::get_part_shared` in `crates/oxml-opc/src/package.rs`, using the existing deterministic part key.
-- [ ] Change `Document.styles` to `Arc<CT_Styles>` and add `styles_part_cache`.
-- [ ] Add the open-time parse and one `CT_Styles::to_xml` proof.
-- [ ] Thread `styles_read` through `from_package_reusing` at the `reopen_staged` call on `document.rs:25480`. The zip arm at `25492` proves again because its bytes `Arc` is new.
-- [ ] Carry the styles cache in `clone_for_staging`.
-- [ ] Replace the unconditional styles serialize-and-parse in `flush_to_package` with `styles_differ_from_part`.
-- [ ] Use `Arc::make_mut` on every candidate style mutation and `CT_Styles::clone` where a deep clone is required.
-- [ ] Add `Document::edit_cell_paragraph<T>` with the immutable reader-count and direct-count gate. Keep the proposed signature and both current return types. No signature revision is needed.
-- [ ] Add the private `nth_table_in_body_ref` helper. It mirrors `nth_table_in_body` and does not invalidate layout.
-- [ ] Clone the selected `CT_P` into `original` and `candidate` when the source reaches the edit. Run the closure once on `candidate`. An `Err` returns before any mutable access. A preflight refusal runs it zero times.
-- [ ] Build the candidate with `ContentFragment::paragraph`, refuse section ownership with `reject_section_owning_content_fragment`, and probe it with `validate_strict_xml_1_0` as a sufficient direct-path qualification, not a refusal gate.
-- [ ] Qualify direct publication by a successful strict probe, an empty candidate relationship-id set, non-decreasing comment marker counts and the cached `plain_local_edit_blocked` false fact. Otherwise publish the already-built fragment through `replace_story_content` with source facts from the resolved location. Never rerun the closure. A newly introduced U+0000 is refused by the checked publication.
-- [ ] Reacquire the same table, cell and direct ordinal without invalidating first, verify `*paragraph.inner == original`, assign `candidate`, then call `invalidate_layout`.
-- [ ] Keep the checked route for any cell with a content-control paragraph, including control-owned nested table paragraphs, and for out-of-range ordinals.
-- [ ] Change `PyRun::bind_current` to use `document.paragraph_route`.
-- [ ] Do not change `CT_Body::tables`. Do not add a lazy-iterator test.
-- [ ] Add the local native tests in the existing `crates/rdocx/src/document.rs` and `crates/rdocx-oxml/src/document.rs` test modules.
-- [ ] Add the Python tests to the existing `crates/rdocx-py/tests/test_core.py`.
-- [ ] Add the malformed replacement, failed cell update, failed-closure cache, candidate admission, legacy-retained fallback, unrelated-owner replay, checked-fallback and at-most-once closure tests.
-- [ ] Update HLD03, HLD10 and HLD12 exactly as listed.
-- [ ] Run the scoped checks, then the final union once.
-- [ ] On the implementation Base, record the malformed-replacement before and after. If retain-success still rewrites, land that refusal in its own labelled behavior commit with the expected result from Hash harness.
-- [ ] Do not edit README, crate READMEs, `scripts/readme_doctests.py`, `scripts/hash_baseline.json`, AS_BUILT, SPRINT_TRACKER or delivery totals.
-- [ ] Do not add a new test binary, module, crate, trait or feature flag. The only new generic is `edit_cell_paragraph<T>`, justified above.
-- [ ] Do not warm the cell-place case, change `n`, replace the case-3 loop or change any threshold.
-- [ ] Revalidate the frozen line citations that this adoption did not re-read, on the implementation Base, before claim.
+### Local implementation and scoped evidence
+
+These are the operative preparation items. Earlier planned-test names and unexecuted statements describe preparation intent. Actual carriers and applicable receipts are recorded below. Plan status remains approved and feature status remains in-progress.
+
+
+- [x] Add `OpcPackage::get_part_shared` in `crates/oxml-opc/src/package.rs`, using the existing deterministic part key.
+- [x] Change `Document.styles` to `Arc<CT_Styles>` and add `styles_part_cache`.
+- [x] Add the open-time parse and one `CT_Styles::to_xml` proof.
+- [x] Thread `styles_read` through `from_package_reusing` at the `reopen_staged` call on `document.rs:25480`. The zip arm at `25492` proves again because its bytes `Arc` is new.
+- [x] Carry the styles cache in `clone_for_staging`.
+- [x] Replace the unconditional styles serialize-and-parse in `flush_to_package` with `styles_differ_from_part`.
+- [x] Use `Arc::make_mut` on every candidate style mutation and `CT_Styles::clone` where a deep clone is required.
+- [x] Add `Document::edit_cell_paragraph<T>` with the immutable reader-count and direct-count gate. Keep the proposed signature and both current return types. No signature revision is needed.
+- [x] Add the private `nth_table_in_body_ref` helper. It mirrors `nth_table_in_body` and does not invalidate layout.
+- [x] Clone the selected `CT_P` into `original` and `candidate` when the source reaches the edit. Run the closure once on `candidate`. An `Err` returns before any mutable access. A preflight refusal runs it zero times.
+- [x] Build the candidate with `ContentFragment::paragraph`, refuse section ownership with `reject_section_owning_content_fragment`, and probe it with `validate_strict_xml_1_0` as a sufficient direct-path qualification, not a refusal gate.
+- [x] Qualify direct publication by a successful strict probe, an empty candidate relationship-id set, non-decreasing comment marker counts and the cached `plain_local_edit_blocked` false fact. Otherwise publish the already-built fragment through `replace_story_content` with source facts from the resolved location. Never rerun the closure. A newly introduced U+0000 is refused by the checked publication.
+- [x] Reacquire the same table, cell and direct ordinal without invalidating first, verify `*paragraph.inner == original`, assign `candidate`, then call `invalidate_layout`.
+- [x] Keep the checked route for any cell with a content-control paragraph, including control-owned nested table paragraphs, and for out-of-range ordinals.
+- [x] Change `PyRun::bind_current` to use `document.paragraph_route`.
+- [x] Do not change `CT_Body::tables`. Do not add a lazy-iterator test.
+- [x] Add the local native tests in the existing `crates/rdocx/src/document.rs` and `crates/oxml-opc/src/package.rs` test modules. No `rdocx-oxml` test addition is required because `CT_Body::tables` remains unchanged. This carrier reconciliation does not remove a behavioral assertion.
+- [x] Add the Python tests to the existing `crates/rdocx-py/tests/test_core.py`.
+- [x] Add the malformed replacement, failed cell update, failed-closure cache, candidate admission, legacy-retained fallback, unrelated-owner replay, checked-fallback and at-most-once closure tests.
+- [x] Update HLD03, HLD10 and HLD12 exactly as listed.
+- [x] Bind actual local checks as `/verify --scoped F-X282`, local checks pass. Consume the authenticated native, OPC, Python, affected lint/check and format observations. Final union remains pending.
+- [x] Record actual implementation-Base malformed replacement before and after, and isolate its refusal/test patch for a separate labelled intentional behavior commit during prepare. Expected behavior is refusal with retained malformed bytes instead of silent replacement. Final hash measurement remains deferred.
+- [x] Do not edit README, crate READMEs, `scripts/readme_doctests.py`, `scripts/hash_baseline.json`, AS_BUILT, SPRINT_TRACKER or delivery totals.
+- [x] Do not add a new test binary, module, crate, trait or feature flag. The only new generic is `edit_cell_paragraph<T>`, justified above.
+- [x] Do not warm the cell-place case, change `n`, replace the case-3 loop or change any threshold.
+- [x] Revalidate operative source contracts on the actual implementation Base and through independent reviews. Frozen numeric line pins remain historical. No exhaustive retrospective citation audit or new before-claim execution is claimed.
+
+### Actual local verification and reviews
+
+- [x] Actual old-source styles work RED, fixed-source GREEN and malformed replacement behavior proof, with failed setup/fixture attempts preserved separately.
+- [x] All 15 final native `issue437` cases pass in `final1-test-native3.log`, including actual-open one-parse/one-proof, unchanged model and part allocations across real replacement/row/save, changed saved style and producer metadata, exact opaque children and child order.
+- [x] Existing OPC shared-accessor regression passes. Earlier 42 focused Python cases and three added current/old-policy public cases are separate applicable observations. Debug Python 3.14 semantic evidence does not qualify timing.
+- [x] Affected all-target/all-feature warnings-denied clippy, format and prose pass. Existing unaffected binding checks and artifact evidence remain applicable through `TEST_REPAIR_APPLICABILITY.json`.
+- [x] Implementation peer1 findings closed by actual peer2. Peer3 is clean and Root final2 is clean. All three implementation peers are used. The historical final1 missed test gap and subsequent author repair remain on record.
+
+### Final integrated acceptance, pending
+
+- [ ] Exact A282-1 release Linux Python 3.12 ratios for original 6466/419136-byte styles inputs, five operations and ten calls including the first, no warmup, bound 3.0.
+- [ ] Exact A282-2 original 40 by 6 cell first/last cold n=3 ratios without discarded cell calls, plus original 2000-paragraph body one-warmup then n=3 ratios, bound 3.0.
+- [ ] Exact A282-3 original single-loop 30/120-cell fill per-call ratio, bound 2.0.
+- [ ] Final integrated saved bytes and hash49, F-X268 79 flat-cost gates, 252-call catalogue and original 407 gate. No baseline change or blanket output-preservation claim.
+- [ ] Full workspace, native Office and external oracle, installed runtime and typing, WASM, wheels, archives, packaging, hosted CI and all approved risk riders at the final union.
+- [ ] Reconcile actual future C1 checked typed-publication admission with this bridge during integration. C1 remains excluded from this Base and is not a provider edge.
+- [ ] Final acceptance, delivery completion and separate reviewed-SHA release approval. No publication is authorized by preparation.
 
 ## Open questions
 

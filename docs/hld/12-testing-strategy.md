@@ -1,5 +1,36 @@
 # 12, Testing strategy
 
+## Styles and cell edit performance contract
+
+The styles regression records actual parse and serialization work after an
+open-time proof. Unchanged staged edits must do neither operation. Replaced
+part allocations require fresh parsing even for equal bytes. Copy-on-write
+checks preserve the original clone. Malformed replacement tests prove refusal
+and exact retention of the replacement bytes. Cell checks cover direct
+publication, checked fallback, callback-at-most-once behavior, invalid indices,
+failed edit atomicity and saved values. Retained lexical acceptance controls
+prove that duplicate expanded attributes, a literal less-than attribute, an
+invalid qualified name and an unbound prefix survive typed serialization as
+strict-unqualified candidates. The actual checked publisher and bridge must
+both accept them with one callback and identical saved bytes. An ordinary
+strict-qualified control proves direct selection. Control-owned nested tables
+contribute reader paragraphs while direct nested tables do not. The former
+must retain actual checked-source preflight refusal before the callback when
+modeled/source correspondence is unsupported, preserving physical reader
+values, held handles, source bytes and saved bytes.
+
+The release Python 3.12 Linux performance gate retains the reported cold
+sampling boundaries. Styles comparisons use 6,466 and 419,136-byte inputs,
+five operations and ten calls including the first, with ratio at most three.
+The 40 by 6 table compares first and last cells with three cold samples and
+ratio at most three. The 2,000-paragraph body variant uses exactly one warmup
+per side before three samples with the same bound. Filling 30 and 120 cells
+uses one loop and a per-call ratio at most two. Native counters and debug
+Python diagnostics cannot substitute for these release timing gates. The
+existing byte preservation, F-X268, issue 79, 252 and 407, native and external
+oracle riders remain independent final integrated checks.
+
+
 
 Materialized timeline geometry controls start with actual CT_Slide presets/custom paths, then inspect positioned corners and raster extents at the native1980ms scale/rotation/motion phase. Asymmetric nonorigin cubic controls and text rectangles distinguish independent axes and parent transforms. Factor1, signed/zero factors, overflow refusal, picture custom clipping, ordinary/fallback geometry and a single text/content owner protect the existing consumer boundaries. Numeric state or changed bounds alone cannot discharge painted-geometry correctness.
 

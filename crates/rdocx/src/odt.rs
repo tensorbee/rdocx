@@ -4580,7 +4580,7 @@ mod tests {
             .unwrap();
         doc.add_style(crate::StyleBuilder::paragraph("Derived", "Derived"))
             .unwrap();
-        for style in &mut doc.styles.styles {
+        for style in &mut std::sync::Arc::make_mut(&mut doc.styles).styles {
             match style.style_id.as_str() {
                 "BaseInd" => {
                     style.ppr = Some(rdocx_oxml::properties::CT_PPr {
@@ -7029,8 +7029,7 @@ mod tests {
             br#"<w:background xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" w:color="123456"/>"#
                 .to_vec(),
         );
-        let defaults = document
-            .styles
+        let defaults = std::sync::Arc::make_mut(&mut document.styles)
             .doc_defaults
             .as_mut()
             .and_then(|defaults| defaults.rpr.as_mut())

@@ -539,6 +539,12 @@ impl OpcPackage {
         self.parts.get(key).map(|data| data.as_slice())
     }
 
+    /// Get shared raw part bytes by the same case-equivalent URI lookup as [`Self::get_part`].
+    pub fn get_part_shared(&self, part_name: &str) -> Option<&Arc<Vec<u8>>> {
+        let key = deterministic_part_key(&self.parts, part_name)?;
+        self.parts.get(key)
+    }
+
     /// Return whether a case-equivalent normalized part name exists.
     pub fn contains_part(&self, part_name: &str) -> bool {
         deterministic_part_key(&self.parts, part_name).is_some()
@@ -1428,6 +1434,21 @@ fn part_name_to_rels_path(part_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_part_lookup_reuses_case_equivalent_allocation() {
+        let mut package = OpcPackage::new();
+        package.set_part("/word/styles.xml", b"styles".to_vec());
+        let first = package.get_part_shared("/word/styles.xml").unwrap();
+        let equivalent = package.get_part_shared("/WORD/STYLES.XML").unwrap();
+        assert!(Arc::ptr_eq(first, equivalent));
+        let cloned = package.clone();
+        assert!(Arc::ptr_eq(
+            first,
+            cloned.get_part_shared("/word/styles.xml").unwrap()
+        ));
+        assert!(package.get_part_shared("/missing.xml").is_none());
+    }
 
     fn package_zip(entries: &[(&str, &[u8])]) -> std::io::Cursor<Vec<u8>> {
         package_zip_with_comment(entries, &[])
