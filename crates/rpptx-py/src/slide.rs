@@ -1528,6 +1528,19 @@ impl PySlideCollection {
         ))
     }
 
+    /// Returns the live zero-based position of one slide of this presentation.
+    fn index(&self, py: Python<'_>, slide: &Bound<'_, PyAny>) -> PyResult<usize> {
+        let slide = slide
+            .extract::<PyRef<'_, PySlide>>()
+            .map_err(|_| PyValueError::new_err("slide is not in this collection"))?;
+        if !slide.presentation.is(&self.presentation) {
+            return Err(PyValueError::new_err("slide is not in this collection"));
+        }
+        slide
+            .validate(py)
+            .map_err(|_| PyValueError::new_err("slide is not in this collection"))
+    }
+
     /// Removes one slide of this presentation with its notes and owned media.
     fn remove(&self, py: Python<'_>, slide: &Bound<'_, PyAny>) -> PyResult<()> {
         self.len(py)?;

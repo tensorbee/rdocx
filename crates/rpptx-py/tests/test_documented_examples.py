@@ -3579,7 +3579,7 @@ def test_validate_returns_the_issues_the_cli_prints_as_frozen_snapshots(tmp_path
     (issue,) = broken_deck.validate()
     assert (issue.kind, issue.message) == (
         "duplicate_shape_id",
-        f"DuplicateShapeId {{ slide: 0, id: {first} }}",
+        f"slide 1: duplicate shape ID {first}, shared by more than one shape",
     )
     assert broken_deck.validate() == (issue,)
     with pytest.raises(AttributeError):
@@ -12510,3 +12510,49 @@ def test_issue389_empty_body_removal_has_no_ghost_owner_or_resurrection():
     assert len(fresh.text_frame.paragraphs) == 1
     with pytest.raises(rpptx.StaleElementError):
         _ = held_body.text
+
+
+def test_issue431_slides_index_returns_the_live_position_python_pptx_returns():
+    import rpptx
+
+    presentation = rpptx.Presentation()
+    for title in ("One", "Two", "Three"):
+        presentation.slides.add_slide(presentation.slide_layouts[5]).shapes.title.text = title
+    slide = presentation.slides[2]
+    assert presentation.slides.index(slide) == 2
+    assert presentation.slides.index(presentation.slides[2]) == 2
+    presentation.slides.move(2, 0)
+    assert presentation.slides.index(slide) == 0
+    assert presentation.slides.index(presentation.slides[0]) == 0
+
+    other = rpptx.Presentation()
+    foreign = other.slides.add_slide(other.slide_layouts[5])
+    for bad in (foreign, "slide", 0, None):
+        with pytest.raises(ValueError, match="slide is not in this collection"):
+            presentation.slides.index(bad)
+
+    twin = rpptx.Presentation.from_bytes(presentation.to_bytes())
+    with pytest.raises(ValueError, match="slide is not in this collection"):
+        presentation.slides.index(twin.slides[0])
+
+    reopened = rpptx.Presentation.from_bytes(presentation.to_bytes())
+    with pytest.raises(ValueError, match="slide is not in this collection"):
+        presentation.slides.index(reopened.slides[1])
+
+    empty = rpptx.Presentation()
+    with pytest.raises(ValueError, match="slide is not in this collection"):
+        empty.slides.index(presentation.slides[1])
+
+    held = presentation.slides[1]
+    presentation.slides.remove(held)
+    with pytest.raises(ValueError, match="slide is not in this collection"):
+        presentation.slides.index(held)
+
+    # Other accessors keep their existing errors. The removed handle is
+    # causally stale through slide_id, and an invalid numeric collection lookup
+    # stays IndexError. The defensive absent-owner IndexError branch is
+    # unchanged and is not presented as a reachable public case.
+    with pytest.raises(rpptx.StaleElementError, match="stale"):
+        _ = held.slide_id
+    with pytest.raises(IndexError):
+        _ = presentation.slides[999]

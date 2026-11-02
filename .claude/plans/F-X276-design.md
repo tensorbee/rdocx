@@ -14,7 +14,7 @@ Root adopts this final-reviewed V4 preparation as the canonical draft on 2026-11
 
 ## Operative rolling approval, 2026-11-01
 
-Root approves this contract for the user's explicit rolling parallel start after the recorded final design reviews and canonical fidelity checks. Earlier preparation and batch-blocking wording is historical. The immutable product source Base is reviewed commit `e2a31e58a9b0af20f0ec374e3561c2e599abb0cd`, excluding the preserved unfinished F-X272 working changes. No product dependency exists. Implementation must recheck exact source locations on its worker Base and preserve every acceptance criterion, signature, HLD impact and pending final rider. Q-S96-07 is answered as bundled fonts by default, system fallback opt-in and caller fonts highest. This is contract approval, not implementation acceptance or a provider checkpoint. Three design peers remain used. Implementation has a separate cap of three independent passes.
+Root approves this contract for the user's explicit rolling parallel start after the recorded final design reviews and canonical fidelity checks. Earlier preparation and batch-blocking wording is historical. The immutable product source Base is reviewed commit `e2a31e58a9b0af20f0ec374e3561c2e599abb0cd`, excluding the preserved unfinished F-X272 working changes. No product dependency exists. Implementation must recheck exact source locations on its worker Base and preserve every acceptance criterion, signature, HLD impact and pending final rider. Q-S96-07 is answered as bundled fonts by default, system fallback opt-in and caller fonts highest. This is contract approval, not implementation acceptance or a provider checkpoint. Three design peers remain used. Implementation has a separate cap of three independent passes. The current A2 and A5 contracts include the factual clarifications in `.claude/reviews/F-X276-peer2-contract-adjudication-codex-final-1.md`. Pair selection and existing accessor error behavior are unchanged. The active worker must acknowledge this contract revision before continuing affected work. At that historical checkpoint implementation peer2 was used, with one pass available. All three implementation peers have since completed. Codex final pass2 is clean after separate remediation, while final sprint acceptance remains pending.
 
 
 ## Problem
@@ -74,11 +74,11 @@ Private returns change, with no new struct. `autofit_inventory` returns `Result<
 
 `append_autofit_context` already visits every physical leaf. When `read_only` is false, a repeated id still returns `autofit {part}: duplicate shape ID {id}` for a picture, a connector, or a text shape. When `read_only` is true, a repeated id pushes one tuple and does not return `Err`. The leaf is still skipped when `cells` is empty, so a picture still creates no owner. `fit_report` appends each diagnostic to `FitReport.diagnostics` once per leaf, after the font facts, not once per consuming context. If an owner has the same part and child path, it appends that diagnostic to `update.diagnostics` once, after the font-diagnostic assignment at `:4033`. Each frame cloned from that owner then carries the sentence once. The context loop does not push it again. A picture appears only in `FitReport.diagnostics`. The first leaf is not labeled a duplicate.
 
-`materialize_notes_measurement_bounds` returns `Result<Vec<(Vec<usize>, String)>>`. The path is the same child path `owned_items` uses. After `append_autofit_context`, the inventory finds the notes owner with that part and path, sets `unsupported` to the reason, and pushes `Diagnostic { message: reason }` onto `update.diagnostics` once.
+`materialize_notes_measurement_bounds` returns `Result<Vec<(Vec<usize>, String)>>`. The path is the same child path `owned_items` uses. After `append_autofit_context`, the inventory finds the notes owner with that part and path and sets `unsupported` to the reason. For a non-empty owner only, it pushes `Diagnostic { message: reason }` onto `update.diagnostics` once. An empty notes placeholder follows the general empty-owner rule below and receives no unsupported cause.
 
 Unsupported cause publication. This is one rule for both publishers. Immediately before the contextful push at `:4060` and immediately before the contextless push at `:4121`, if the owner is non-empty and `unsupported` is `Some(cause)`, set status to `unsupported` and, when `update.diagnostics` does not already contain that cause, push one `Diagnostic { message: cause }`. Do not push it again. Do not append that cause to `FitReport.diagnostics`. An empty owner keeps today's status `empty`, overflow false, and does not gain this cause. Notes reasons already stored on `update.diagnostics` stay one copy. Duplicate-leaf diagnostics stay on their own channel and are not rewritten by this rule.
 
-Page-growth exception. It applies only to a measured table cell whose stored measurement has `width_fits == true` and `fits == false`. Overflow is then false only when the grown transformed rectangle lies on the page. When `width_fits == false`, overflow stays true. The exception does not run for a non-table text frame, an empty frame, or an unsupported frame. `needed_scale`, `needed_reduction`, and both trials stay the stored-row hypothetical. A permitted trial must not be null.
+Page-growth exception. It applies only to a measured table cell whose stored measurement has `width_fits == true` and `fits == false`. Overflow is then false only when the grown transformed rectangle lies on the page. When `width_fits == false`, overflow stays true. The exception does not run for a non-table text frame, an empty frame, or an unsupported frame. `needed_scale`, `needed_reduction`, and both trials stay the stored-row hypothetical. Candidate-pair selection is unchanged. If no pair fits every context in both measurements, both needed values and both trials are `None`. If a pair is admitted, both trials are present and `width_fits` is true. Do not synthesize a non-fitting trial.
 
 ## Consumer map
 
@@ -107,7 +107,7 @@ Unreduced, and not dropped: Issue 431 leaves PowerPoint-saved layout, master, an
 | Exit and JSON | Exit 0 only when every frame has a status other than `unsupported` and `overflow` false. Exit 1 when any `overflow` is true or any status is `unsupported`. Exit 2 stays a checked error. JSON `reason` is `cannot-assess` for status `unsupported`, even when `overflow` is false. Otherwise it stays `unfit-at-floor` when `overflow` is true and `needed_scale` is absent, and null otherwise | Empty overflow false at `lib.rs:4046-4057`. Non-empty unsupported overflow true at `:4065` and `:4127` | A1. Unexecuted |
 | `Display` | Sentences below. Spoken slide, master, and shape numbers are 1-based. Fields stay zero-based. Python `message` is the same sentence | HLD 10 requires that equality. The frozen snapshot pins `DuplicateShapeId { slide: 0, id: {first} }` | A1. Unexecuted |
 | Markdown | Always-escape set and conditions below. A space is literal only when both neighbors in the assembled paragraph are non-whitespace. Otherwise `&#32;`. Tab and CR stay `&#9;` and `&#13;`. Alt newlines stay `&#10;` (`html.rs:657-664`) | Current escaper at `html.rs:1147-1160`. Notes prefix at `:254-259`. Break insert at `:512-518` | A4. Unexecuted |
-| `index` | Live zero-based position. Identity is the same `Py<PyPresentation>` plus the live path from `current_path` (`presentation.rs:3424-3438`). Every miss uses `slide is not in this collection`. A non-slide, including `slide`, is `ValueError`, so `extract` is not the only gate. `PySlide::validate` still raises `IndexError` for an absent owner (`slide.rs:438-450`). `index` converts that absence, and a stale generation, to `ValueError` | python-pptx 1.0.2 `Slides.index` at `src/pptx/slide.py:285-293`. Equality is element identity in `src/pptx/shared.py:24-33`. Annotated tag `799d6b153eb69cf237191cf0ccd8568591dd9599`, commit `278b47b1dedd5b46ee84c286e77cdfb0bf4594be` | A5. Unexecuted |
+| `index` | Live zero-based position. Identity is the same `Py<PyPresentation>` plus the live path from `current_path` (`presentation.rs:3424-3438`). Every miss uses `slide is not in this collection`. A non-slide, including `slide`, is `ValueError`, so `extract` is not the only gate. `PySlide::validate` keeps its defensive absent-owner `IndexError` branch (`slide.rs:438-450`). Valid public handles whose owner is removed instead fail scope validation with `StaleElementError` before that branch. `index` converts its rejected inputs, including a stale generation, to `ValueError` | python-pptx 1.0.2 `Slides.index` at `src/pptx/slide.py:285-293`. Equality is element identity in `src/pptx/shared.py:24-33`. Annotated tag `799d6b153eb69cf237191cf0ccd8568591dd9599`, commit `278b47b1dedd5b46ee84c286e77cdfb0bf4594be` | A5. Unexecuted |
 
 Always escape these characters and no others:
 
@@ -146,7 +146,7 @@ U+0020 SPACE is not in that set. Conditional escapes:
 - `MissingThemeRel`: `slide master {master+1} has no theme relationship`
 - `InvalidXmlChild`: `{part} {path}: {message}`
 
-Markdown position. State crosses runs of one paragraph. `TextRun::Break` inserts `  \n` and resets the line column and the digit count. Heading text after `# ` is not a list start. A list body after `- ` or `1. ` escapes a nested marker. Notes are written as `> ` plus `semantic_md_preserved` of each line (`html.rs:254-259`). A marker at the start of that line is escaped. The generated `> ` is not part of the escaped text. A plain paragraph starts at column 0. HTML stays on `semantic_escape`. WASM has no semantic export.
+Markdown position. Track the digits-only line prefix incrementally rather than rescanning it for each period or closing parenthesis. Each input character participates in at most one ordered-prefix digit check. A deterministic work counter in the existing long-line regression distinguishes a long digit prefix followed by repeated punctuation, without a wall-clock threshold. State crosses runs of one paragraph. `TextRun::Break` inserts `  \n` and resets the line column and the digit count. Heading text after `# ` is not a list start. A list body after `- ` or `1. ` escapes a nested marker. Notes are written as `> ` plus `semantic_md_preserved` of each line (`html.rs:254-259`). A marker at the start of that line is escaped. The generated `> ` is not part of the escaped text. A plain paragraph starts at column 0. HTML stays on `semantic_escape`. WASM has no semantic export.
 
 Notes reasons, exact:
 
@@ -165,7 +165,7 @@ Package bytes, revisions, raw XML, and schema order stay unchanged for `fit_repo
 
 ## Dependency readiness
 
-There is no product dependency, and no F-X272 provider is invented. F-X272 does not supply a fit, index, or Markdown rule. Q-S96-07 remains unanswered globally and is not an F-X276 product choice, and this story has no blocking product question of its own.
+There is no product dependency, and no F-X272 provider is invented. F-X272 does not supply a fit, index, or Markdown rule. Q-S96-07 is answered as bundled default with an explicit system opt-in and caller priority. It is not an F-X276 product choice, and this story has no blocking product question of its own.
 
 Historical evidence only: peer pass 2 described an F-X272 handoff as frozen and named Word field regions of HLD 10 at working-tree regions 2915 and 4880. That sentence is not current writer state, and Codex final 1's live-author observation is historical qualification, not a reexecuted current test. The source preparation author has stopped, and the separate metadata intake adopter has returned its lease. The preparation turn re-hashed the files in the pin table and did not re-count the tree. Those pins, CI facts and dates remain historical.
 
@@ -201,7 +201,7 @@ A1 observations:
 
 A2 geometry, identity group unless noted. The page test runs only for the guarded height failure.
 
-- Width failure: no-wrap text in a table cell whose stored and grown rectangle lies inside 720 by 540. Stored `width_fits` is false. Expected `overflow` true. A published trial has `width_fits` false. The page-growth exception must not clear it.
+- Width failure: no-wrap text in a table cell whose stored and grown rectangle lies inside 720 by 540. Stored `width_fits` is false. Expected `overflow` true. For the W-times80 fixture with no admitted pair, `needed_scale`, `needed_reduction`, `quantized_trial` and `persisted_trial` are `None`. Published trials for an admitted pair remain the stored-row hypothetical and have `width_fits` true. The page-growth exception must not clear a stored width failure. Do not infer that every stored width failure has no fitting pair.
 - Width discriminator: origin `(500, 100)`, width 80, rotation 0, no flip, `width_fits` true, grown bottom at most `540.01`. Right edge is 580. Expected `overflow` false. Comparing `max_x` with page height 540 reports true and fails this fixture. Keep the off-page control at `(680, 100)`, width 80, right edge 760, expected `overflow` true, and the on-page control at x 100, right edge 180, expected `overflow` false.
 - Rotated `max_x`: bounds `(660, 100, 40, 100)`, rotation 90, no flip, `width_fits` true. `Transform::rotate_about(90, 20, 50)` then translation by `(660, 100)` maps local `(x, y)` to `(730 - y, 130 + x)`. `max_x` is 730. Expected `overflow` true while grown bottom stays at most `540.01`.
 - Rotated `min_x`: bounds `(0, 200, 20, 80)`, rotation 90, no flip, `width_fits` true, one row whose stored height is 80. The same rotation maps local `(x, y)` to `(50 - y, 230 + x)`. Grown `H` must satisfy `80 < H <= 340`. Expected `overflow` true. If a font build misses the range, change the text until `H` is inside it.
@@ -225,7 +225,7 @@ A5 observations:
 - Two wrappers fetched as `slides[2]` both return 2.
 - After `move(2, 0)`, the held wrapper returns 0, and a fresh `slides[0]` fetched after the move returns 0. Both resolve through the same presentation and the same live slide path.
 - A twin, a reopened deck, a foreign slide, an empty collection asked for a foreign slide, the string `slide`, and a removed or stale handle raise `ValueError` with `slide is not in this collection`.
-- Other methods still raise `IndexError` for an absent owner.
+- Other accessors keep their existing errors. A removed handle used through `slide_id` raises `StaleElementError`, and an invalid numeric collection index raises `IndexError`. The defensive absent-owner `IndexError` branch is unchanged, but no public absence path is promised or fabricated.
 
 Wrong implementations rejected:
 
@@ -298,7 +298,7 @@ Do not rewrite "Tables" unless the shared helper forces one sentence. Do not cop
 
 `docs/hld/10-bindings-spec.md`:
 
-- `SlideCollection`. `index` returns the live zero-based position and raises `ValueError` with `slide is not in this collection` for another presentation, a structural twin, a reopened deck, a non-slide, a removed or stale handle, and a foreign slide against an empty collection. Two wrappers and a fresh lookup after `move` agree.
+- `SlideCollection`. `index` returns the live zero-based position and raises `ValueError` with `slide is not in this collection` for another presentation, a structural twin, a reopened deck, a non-slide, a removed or stale handle, and a foreign slide against an empty collection. Two wrappers and a fresh lookup after `move` agree. Other accessor errors stay unchanged, including causal `StaleElementError` for a removed handle and `IndexError` for a numeric index outside the collection. The defensive absent-owner branch is not presented as a reachable public case.
 - "`Presentation.validate()`". The printed line is the `Display` sentence, and Python `message` equals it.
 - "PowerPoint fit", current text at lines 4087-4089. Keep "No fitting permitted trial reports null needed scale and unfit-at-floor." Replace "Unsupported mandatory owners refuse. Fit does not save, exiting0 without overflow,1 for overflow and2 for checked error." Exit 0 when every frame is assessed and none overflow. Exit 1 when any frame overflows or has status `unsupported`. Exit 2 for a checked error. A non-empty unsupported frame carries its cause once. JSON `reason` is `cannot-assess` when status is `unsupported`. The page-growth exception is the same width-qualified rule as HLD 08. Fit does not save.
 - "Presentation semantic text export", section starting at line 4656. Keep the existing method sentences. Add this paragraph: Markdown keeps one space between two non-whitespace characters as a space. U+0020 is not always escaped. A leading, trailing, or repeated space, and a space beside whitespace, is written `&#32;`. Tab and CR stay `&#9;` and `&#13;`. The always-escaped characters are U+005C, U+0060, U+002A, U+005F, U+005B, U+005D, U+003C, U+003E, U+0023, U+007C, U+007E, and U+0026. U+002D and U+002B are escaped only where they would start a list marker. U+003D is escaped only where the line would be a setext underline. U+002E and U+0029 are escaped only when they end an ordered-list number on that same line. The decision uses the assembled paragraph, including image alt text and a notes line after the generated `> ` prefix. An inserted hard break resets the line column and the digit count.
@@ -324,32 +324,40 @@ Expected unchanged. Saved OPC bytes, PDF, and PNG stay the same. The integrated 
 
 ## Implementation checklist
 
-- [ ] Add `Display` and `authoring_table_height` without a new file.
-- [ ] Return the duplicate tuple from `autofit_inventory` and append it once per leaf in `fit_report`.
-- [ ] Return the notes reason vec and copy it once onto `unsupported` and `update.diagnostics`.
-- [ ] Publish a non-empty unsupported cause once at both `:4060` and `:4121`.
-- [ ] Apply the page-growth exception only when `width_fits` is true and `fits` is false.
-- [ ] Change the CLI line, exit rule, and JSON `reason`.
-- [ ] Add `SlideCollection.index` and the stub.
-- [ ] Add the A1 through A5 fixtures to the existing carriers.
-- [ ] Update only the HLD sentences listed above.
-- [ ] Leave README measurements, release scripts, `AS_BUILT.md`, and `SPRINT_TRACKER.md` untouched.
+- [x] Add `Display` and `authoring_table_height` without a new file.
+- [x] Return the duplicate tuple from `autofit_inventory` and append it once per leaf in `fit_report`.
+- [x] Return the notes reason vec and copy it once onto `unsupported` and `update.diagnostics`.
+- [x] Publish a non-empty unsupported cause once at both `:4060` and `:4121`.
+- [x] Apply the page-growth exception only when `width_fits` is true and `fits` is false.
+- [x] Change the CLI line, exit rule, and JSON `reason`.
+- [x] Add `SlideCollection.index` and the stub.
+- [x] Add the A1 through A5 fixtures to the existing carriers.
+- [x] Update only the HLD sentences listed above.
+- [x] Leave README measurements, release scripts, `AS_BUILT.md`, and `SPRINT_TRACKER.md` untouched.
+
+## Final sprint acceptance checklist
+
+- [ ] Final integrated workspace and CLI union.
+- [ ] Hash49 and pixels7, with expected unchanged F-X276 output.
+- [ ] Named native, PDF, PNG and LibreOffice riders.
+- [ ] Installed Python3.9 and3.12, typing, stubs and archive qualification.
+- [ ] Hosted CI and full public Markdown export benchmark.
 
 ## Open questions
 
 | ID | Affected F-IDs and A-IDs | Decision | Status |
 |---|---|---|---|
-| Q-FX276-1 | A5 | `index` maps a removed or stale handle to `ValueError`. Other methods keep `IndexError` | Answered. python-pptx 1.0.2 and `slide.rs:438-450` |
+| Q-FX276-1 | A5 | `index` maps a removed or stale handle to `ValueError`. Other accessors keep existing errors, including causal `StaleElementError` for removed handles and numeric-index `IndexError`. The defensive absent-owner branch remains unchanged, not a claimed public runtime case | Answered. python-pptx 1.0.2 and `slide.rs:438-450` |
 | Q-FX276-2 | A1 | `PlaceholderKey::matches` stays index-first. Type fallback runs only when no key matches | Answered. `placeholder.rs:289-296` |
 | Q-FX276-3 | A4 | The spacing rule applies to alt text and the non-decimal label | Answered. `html.rs:473-478` and `:657-664` |
 | Q-FX276-4 | A1 | The donor `Display` sentences are the public text | Answered. `pulls/pr-438.diff:499-550` |
 | Q-FX276-5 | A1 | The absent-idx several-candidate sentence is `notes placeholder has no idx, and {count} notes-master placeholders have its type` | Answered. `placeholder.rs:292-295` |
 
-No blocking row remains. Q-S96-07 remains unanswered globally and is not an F-X276 product choice.
+No blocking row remains. Q-S96-07 is answered globally: bundled default, explicit system fallback and caller fonts highest. It adds no F-X276 product choice.
 
 ## Compatibility for 0.17.0 / 0.15.0
 
-Listed behavior changes are the width-qualified grown-table overflow rule, fit exit 1 for status `unsupported`, one published cause on every non-empty unsupported frame, the `Display` sentences, Markdown spacing, and `index` raising `ValueError` where `PySlide::validate` still raises `IndexError`. Width failure and unsupported overflow stay true. Listed additions are `SlideCollection.index`, `Display`, and `authoring_table_height`. No existing argument, default, or `kind` string changes.
+Listed behavior changes are the width-qualified grown-table overflow rule, fit exit 1 for status `unsupported`, one published cause on every non-empty unsupported frame, the `Display` sentences, Markdown spacing, and `index` raising `ValueError` for its rejected inputs while other accessors keep their existing errors. The defensive absent-owner `IndexError` branch is unchanged and a removed accessor remains causally stale. Width failure and unsupported overflow stay true. Listed additions are `SlideCollection.index`, `Display`, and `authoring_table_height`. No existing argument, default, or `kind` string changes.
 
 F-X275's approved plan at `.claude/plans/F-X275-design.md:172` lists issues 423, 424, 425, 426, 427, 428, 429, and 430. It does not name F-X276. F-X276 does not revise that plan, and it does not edit `CHANGELOG.md` or the release scripts. There is no required order between the two stories. When `/release-notes` is later run for a reviewed sprint that contains this story, the family notes name Issue 431, `SlideCollection.index`, the `Display` sentences, the fit exit rule, and the Markdown spacing rule. A draft built only from the F-X275 inventory is regenerated at that point. Publication stays a separate exact-main approval.
 

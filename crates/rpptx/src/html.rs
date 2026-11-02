@@ -205,7 +205,13 @@ impl<'a> SemanticExporter<'a> {
                     if let Some(properties) = &paragraph.properties {
                         inherited.apply_paragraph(properties);
                     }
-                    content.push_str(&self.inline(index, paragraph, inherited.marks, &path)?);
+                    content.push_str(&self.inline(
+                        index,
+                        paragraph,
+                        inherited.marks,
+                        &path,
+                        false,
+                    )?);
                 }
                 if !content.is_empty() {
                     heading = Some(content);
@@ -253,9 +259,10 @@ impl<'a> SemanticExporter<'a> {
                 } else {
                     self.result.text.push_str("## Notes\n\n");
                     for line in notes.split('\n') {
-                        self.result
-                            .text
-                            .push_str(&format!("> {}\n", semantic_md_preserved(line)));
+                        self.result.text.push_str(&format!(
+                            "> {}\n",
+                            semantic_md_preserved(line, true, MdNewline::HardBreak)
+                        ));
                     }
                     self.result.text.push('\n');
                 }
@@ -369,7 +376,7 @@ impl<'a> SemanticExporter<'a> {
         if let Some(properties) = &paragraph.properties {
             effective.apply_paragraph(properties);
         }
-        let text = self.inline(index, paragraph, effective.marks, path)?;
+        let text = self.inline(index, paragraph, effective.marks, path, true)?;
         let bullet = effective.bullet.as_ref();
         let ordered = matches!(bullet, Some(TextBulletChoice::AutoNumber(_)));
         let listed = matches!(
@@ -475,7 +482,7 @@ impl<'a> SemanticExporter<'a> {
                     path,
                     "Markdown canonical decimal list marker, source ordered label retained as text",
                 );
-                format!("{} {text}", semantic_md_text(&label))
+                format!("{} {text}", semantic_md_text(&label, false))
             } else {
                 text
             };
@@ -496,8 +503,29 @@ impl<'a> SemanticExporter<'a> {
         paragraph: &oxml_drawing::text::CT_TextParagraph,
         base: SemanticMarks,
         path: &str,
+        content_start: bool,
     ) -> Result<String> {
         use oxml_drawing::text::TextRun;
+        let markdown = self.format == SemanticFormat::Markdown;
+        let mut raw = Vec::new();
+        if markdown {
+            for run in &paragraph.runs {
+                match run {
+                    TextRun::Run(run) => raw.extend(run.text.value.chars()),
+                    TextRun::Field(field) => raw.extend(
+                        field
+                            .text
+                            .as_ref()
+                            .map_or("", |text| text.value.as_str())
+                            .chars(),
+                    ),
+                    TextRun::Break(_) => raw.push('\n'),
+                }
+            }
+        }
+        let escaped =
+            markdown.then(|| semantic_md_chars(&raw, content_start, true, MdNewline::HardBreak));
+        let mut offset = 0usize;
         let mut out = String::new();
         for run in &paragraph.runs {
             let (text, properties) = match run {
@@ -510,11 +538,12 @@ impl<'a> SemanticExporter<'a> {
                     )
                 }
                 TextRun::Break(_) => {
-                    out.push_str(if self.format == SemanticFormat::Html {
-                        "<br />"
+                    if markdown {
+                        out.push_str(&escaped.as_ref().unwrap()[offset]);
+                        offset += 1;
                     } else {
-                        "  \n"
-                    });
+                        out.push_str("<br />");
+                    }
                     continue;
                 }
             };
@@ -528,10 +557,13 @@ impl<'a> SemanticExporter<'a> {
                 .map(|id| self.link(index, id, path))
                 .transpose()?
                 .flatten();
-            let mut value = if self.format == SemanticFormat::Html {
-                semantic_escape(text).replace(['\u{000b}', '\n'], "<br />")
+            let mut value = if markdown {
+                let length = text.chars().count();
+                let value = escaped.as_ref().unwrap()[offset..offset + length].concat();
+                offset += length;
+                value
             } else {
-                semantic_md_preserved(text).replace(['\u{000b}', '\n'], "  \n")
+                semantic_escape(text).replace(['\u{000b}', '\n'], "<br />")
             };
             for tag in marks.tags().into_iter().rev() {
                 value = format!("<{tag}>{value}</{tag}>");
@@ -656,7 +688,7 @@ impl<'a> SemanticExporter<'a> {
         } else {
             self.result.text.push_str(&format!(
                 "![{}](<{destination}> \"{}\")\n\n",
-                semantic_md_preserved(&alt).replace('\n', "&#10;"),
+                semantic_md_preserved(&alt, false, MdNewline::Literal).replace('\n', "&#10;"),
                 semantic_escape(&title)
                     .replace('\n', "&#10;")
                     .replace('\r', "&#13;")
@@ -754,7 +786,7 @@ impl<'a> SemanticExporter<'a> {
                         if let Some(properties) = &paragraph.properties {
                             effective.apply_paragraph(properties);
                         }
-                        text = self.inline(index, paragraph, effective.marks, path)?;
+                        text = self.inline(index, paragraph, effective.marks, path, true)?;
                     }
                 }
                 if self.format == SemanticFormat::Html {
@@ -1144,21 +1176,123 @@ fn semantic_escape(text: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
 }
-fn semantic_md_text(text: &str) -> String {
-    let mut out = String::new();
-    for character in text.chars() {
-        if "\\`*_{}[]<>()#!|+-=~&.".contains(character) {
-            out.push('\\');
+/// How an assembled Markdown paragraph writes a line feed.
+#[derive(Clone, Copy, PartialEq)]
+enum MdNewline {
+    HardBreak,
+    Literal,
+}
+fn md_line_is_setext(raw: &[char], start: usize, end: usize, marker: char) -> bool {
+    let mut end = end;
+    while end > start && raw[end - 1] == ' ' {
+        end -= 1;
+    }
+    end > start && raw[start..end].iter().all(|&character| character == marker)
+}
+/// The index just past the line holding `from`, excluding its line feed.
+fn md_line_end(raw: &[char], from: usize) -> usize {
+    let mut end = from;
+    while end < raw.len() && raw[end] != '\n' && raw[end] != '\u{000b}' {
+        end += 1;
+    }
+    end
+}
+#[cfg(test)]
+thread_local! {
+    static MD_ORDERED_PREFIX_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Escapes one assembled Markdown paragraph. `content_start` is false when the
+/// text follows generated syntax on its first line, as heading text after `# `.
+fn semantic_md_chars(
+    raw: &[char],
+    content_start: bool,
+    preserve_spaces: bool,
+    newline: MdNewline,
+) -> Vec<String> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut line_start = 0usize;
+    let mut digits_only = true;
+    for (index, &character) in raw.iter().enumerate() {
+        if character == '\n' || character == '\u{000b}' {
+            out.push(match newline {
+                MdNewline::HardBreak => "  \n".to_owned(),
+                MdNewline::Literal => "\n".to_owned(),
+            });
+            if newline == MdNewline::HardBreak {
+                line_start = index + 1;
+                digits_only = true;
+            } else {
+                digits_only = false;
+            }
+            continue;
         }
-        out.push(character);
+        if character == '\r' {
+            digits_only = false;
+            out.push("&#13;".to_owned());
+            continue;
+        }
+        if character == '\t' {
+            digits_only = false;
+            out.push("&#9;".to_owned());
+            continue;
+        }
+        if character == ' ' {
+            digits_only = false;
+            if !preserve_spaces {
+                out.push(" ".to_owned());
+                continue;
+            }
+            let left = index.checked_sub(1).map(|previous| raw[previous]);
+            let right = raw.get(index + 1).copied();
+            let literal = left.is_some_and(|neighbour| !neighbour.is_whitespace())
+                && right.is_some_and(|neighbour| !neighbour.is_whitespace());
+            out.push(if literal {
+                " ".to_owned()
+            } else {
+                "&#32;".to_owned()
+            });
+            continue;
+        }
+        let line_content_start = line_start == 0 && content_start || line_start > 0;
+        let at_line_content = index == line_start && line_content_start;
+        let escape = if "\\`*_[]<>#|~&".contains(character) {
+            true
+        } else if character == '-' {
+            at_line_content
+                && (raw.get(index + 1).is_none_or(|next| next.is_whitespace())
+                    || md_line_is_setext(raw, line_start, md_line_end(raw, index), '-'))
+        } else if character == '+' {
+            at_line_content && raw.get(index + 1).is_none_or(|next| next.is_whitespace())
+        } else if character == '=' {
+            at_line_content && md_line_is_setext(raw, line_start, md_line_end(raw, index), '=')
+        } else if character == '.' || character == ')' {
+            line_content_start && index > line_start && digits_only
+        } else {
+            false
+        };
+        // Once the line has a non-digit, later punctuation cannot end an
+        // ordered-list number. Inspect each prefix character at most once.
+        if digits_only {
+            #[cfg(test)]
+            MD_ORDERED_PREFIX_VISITS.set(MD_ORDERED_PREFIX_VISITS.get() + 1);
+            digits_only = character.is_ascii_digit();
+        }
+        if escape {
+            out.push(format!("\\{character}"));
+        } else {
+            out.push(character.to_string());
+        }
     }
     out
 }
-fn semantic_md_preserved(text: &str) -> String {
-    semantic_md_text(text)
-        .replace(' ', "&#32;")
-        .replace('\t', "&#9;")
-        .replace('\r', "&#13;")
+fn semantic_md_text(text: &str, content_start: bool) -> String {
+    let raw = text.chars().collect::<Vec<_>>();
+    semantic_md_chars(&raw, content_start, false, MdNewline::HardBreak).concat()
+}
+fn semantic_md_preserved(text: &str, content_start: bool, newline: MdNewline) -> String {
+    let raw = text.chars().collect::<Vec<_>>();
+    semantic_md_chars(&raw, content_start, true, newline).concat()
 }
 fn semantic_base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -3428,6 +3562,50 @@ mod tests {
             shape.text(),
             Some("Chrome oracle".to_owned()),
             "{CHROME_ORACLE}"
+        );
+    }
+
+    #[test]
+    fn markdown_long_plain_line_keeps_its_characters_and_syntax_boundaries() {
+        // A long ordinary line must not turn ordinary characters into
+        // line-end scans. The same assembled paragraph still escapes only
+        // where Markdown syntax starts.
+        for marker in ['.', ')'] {
+            let digits = "1".repeat(2048);
+            let text = format!("{digits}{}", marker.to_string().repeat(2048));
+            MD_ORDERED_PREFIX_VISITS.set(0);
+            assert_eq!(
+                semantic_md_text(&text, true),
+                format!("{digits}\\{marker}{}", marker.to_string().repeat(2047))
+            );
+            assert!(
+                MD_ORDERED_PREFIX_VISITS.get() <= text.chars().count(),
+                "ordered-list prefix work must be linear, got {} visits for {} characters",
+                MD_ORDERED_PREFIX_VISITS.get(),
+                text.chars().count()
+            );
+        }
+        assert_eq!(semantic_md_text("12.\n34)", true), "12\\.  \n34\\)");
+        assert_eq!(
+            semantic_md_preserved("12.\n34)", true, MdNewline::Literal),
+            "12\\.\n34)"
+        );
+        assert_eq!(semantic_md_text("12\r34.", true), "12&#13;34.");
+        assert_eq!(semantic_md_text("12\t34.", true), "12&#9;34.");
+        assert_eq!(semantic_md_text("12 34.", true), "12 34.");
+        assert_eq!(semantic_md_text("12.", false), "12.");
+        let plain = "a".repeat(16_384);
+        assert_eq!(semantic_md_text(&plain, true), plain);
+        let mut assembled = String::from("see ");
+        assembled.push_str(&"b".repeat(16_384));
+        assembled.push_str(" - table");
+        assert_eq!(
+            semantic_md_preserved(&assembled, true, MdNewline::HardBreak),
+            assembled
+        );
+        assert_eq!(
+            semantic_md_text(&format!("{}\n- not a list", "c".repeat(16_384)), true),
+            format!("{}  \n\\- not a list", "c".repeat(16_384))
         );
     }
 

@@ -666,7 +666,7 @@ pub fn validate(file: &Path) -> Result<bool> {
     let presentation = Presentation::open(file)?;
     let issues = presentation.validate();
     for issue in &issues {
-        eprintln!("{issue:?}");
+        eprintln!("{issue}");
     }
     if issues.is_empty() {
         // A reader that closes standard output early, as `| head` does, does
@@ -1811,33 +1811,12 @@ pub fn fit(file: &Path, as_json: bool, font_dir: Option<&Path>) -> Result<bool> 
         .collect::<Vec<_>>();
     let presentation = Presentation::open(file)?;
     let report = presentation.fit_report(&refs)?;
-    let unsupported = report
+    // A frame the provider cannot assess is reported with its reason and
+    // counts as an overflow, so exit 0 still means every frame was assessed.
+    let overflow = report
         .frames
         .iter()
-        .filter(|f| f.update.status == "unsupported")
-        .collect::<Vec<_>>();
-    if !unsupported.is_empty() {
-        return Err(format!(
-            "fit cannot assess mandatory owners: {}",
-            unsupported
-                .iter()
-                .map(|f| format!(
-                    "{} {:?}: {}",
-                    f.update.location.owner_part,
-                    f.update.location.child_path,
-                    f.update
-                        .diagnostics
-                        .iter()
-                        .map(|d| d.message.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ))
-                .collect::<Vec<_>>()
-                .join(" | ")
-        )
-        .into());
-    }
-    let overflow = report.frames.iter().any(|f| f.overflow);
+        .any(|frame| frame.overflow || frame.update.status == "unsupported");
     let frames=report.frames.iter().map(|f| {
         let u=&f.update;
         json!({
@@ -1845,7 +1824,7 @@ pub fn fit(file: &Path, as_json: bool, font_dir: Option<&Path>) -> Result<bool> 
             "owner_kind":u.owner_kind,"slide":u.slide_index.map(|i|i+1),"shape_id":u.shape_id,"name":u.name,"context":f.context,
             "mode":match u.mode {AutofitMode::None=>"none",AutofitMode::Normal=>"normal",AutofitMode::Shape=>"shape"},
             "status":u.status,"overflow":f.overflow,"needed_scale":f.needed_scale,"needed_reduction":f.needed_reduction,
-            "reason":if f.overflow && f.needed_scale.is_none(){Some("unfit-at-floor")}else{None},
+            "reason":if u.status=="unsupported"{Some("cannot-assess")}else if f.overflow && f.needed_scale.is_none(){Some("unfit-at-floor")}else{None},
             "measured_font_scale":f.measured_font_scale,"current_line_spacing_reduction":f.current_line_spacing_reduction,
             "stored_font_scale":u.font_scale,"stored_line_spacing_reduction":u.line_spacing_reduction,"point_size":u.point_size,
             "old_bounds_emu":u.old_bounds,"new_bounds_emu":u.new_bounds,"changed":u.changed,
@@ -1865,16 +1844,8 @@ pub fn fit(file: &Path, as_json: bool, font_dir: Option<&Path>) -> Result<bool> 
         )?;
     } else {
         let mut stdout = io::stdout().lock();
-        for frame in &frames {
-            writeln!(
-                stdout,
-                "{} {:?}: status={}, overflow={}, needed_scale={}",
-                frame["owner_part"],
-                frame["child_path"],
-                frame["status"],
-                frame["overflow"],
-                frame["needed_scale"]
-            )?;
+        for frame in &report.frames {
+            writeln!(stdout, "{}", fit_text_line(frame))?;
         }
         for diagnostic in diagnostics {
             writeln!(stdout, "Diagnostic: {diagnostic}")?;
@@ -1882,6 +1853,48 @@ pub fn fit(file: &Path, as_json: bool, font_dir: Option<&Path>) -> Result<bool> 
     }
     io::stdout().flush()?;
     Ok(overflow)
+}
+
+/// One frame of the plain-text fit report: owner part, plain child path, shape
+/// name, table cell and, for a shared frame, the slide it is measured on.
+fn fit_text_line(frame: &rpptx::FitFrameReport) -> String {
+    let update = &frame.update;
+    let location = &update.location;
+    let mut line = format!(
+        "{} {}",
+        location.owner_part,
+        location
+            .child_path
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join("/")
+    );
+    if let Some(name) = &update.name {
+        line.push_str(&format!(" {name:?}"));
+    }
+    if let Some((row, column)) = location.cell {
+        line.push_str(&format!(" cell {row},{column}"));
+    }
+    if frame.context != location.owner_part {
+        line.push_str(&format!(" in {}", frame.context));
+    }
+    let needed_scale = frame
+        .needed_scale
+        .map_or_else(|| "none".to_owned(), |scale| scale.to_string());
+    line.push_str(&format!(
+        ": status={}, overflow={}, needed_scale={needed_scale}",
+        update.status, frame.overflow
+    ));
+    if update.status == "unsupported" {
+        let reasons = update
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>();
+        line.push_str(&format!(", cannot assess: {}", reasons.join("; ")));
+    }
+    line
 }
 
 /// Inputs for one explicitly licensed embedded font face.

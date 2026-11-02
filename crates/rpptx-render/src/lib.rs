@@ -608,6 +608,19 @@ pub fn authoring_table_cell(
     Ok((cell_shape, text))
 }
 
+/// The height of `table` as rendering draws it, each row grown to fit its cells' text.
+/// `directions` holds one entry per cell in row order, as rendering takes them.
+pub fn authoring_table_height(
+    table: &ResolvedTable,
+    fonts: &mut FontManager,
+    page_number: usize,
+    directions: &[Vec<oxml_layout::TextDirection>],
+) -> Result<f64, RenderInputError> {
+    Ok(grown_row_heights(table, fonts, page_number, directions)?
+        .iter()
+        .sum())
+}
+
 /// Runs independent Q native-informed and S persisted-render trials for one
 /// candidate. Every invocation re-shapes its own source clone. Q's rounding
 /// never changes the original nominal values or ordinary fractional rendering.
@@ -1118,13 +1131,14 @@ fn painted_row_text_extent(
     Ok(text_body.insets.top + content_extent + text_body.insets.bottom)
 }
 
-fn lower_table(
+/// The height of each table row once it has grown to fit its cells' text, as PowerPoint grows a row
+/// whose stored `a:tr/@h` is too short. A cell spanning rows grows its last row.
+fn grown_row_heights(
     table: &ResolvedTable,
     font_manager: &mut FontManager,
     page_number: usize,
     text_directions: &[Vec<oxml_layout::TextDirection>],
-    diagnostics: &mut Vec<String>,
-) -> Result<Vec<PositionedElement>, RenderInputError> {
+) -> Result<Vec<f64>, RenderInputError> {
     let mut physical_column_widths = table.column_widths.clone();
     if table.right_to_left {
         physical_column_widths.reverse();
@@ -1164,6 +1178,22 @@ fn lower_table(
             }
         }
     }
+    Ok(required_heights)
+}
+
+fn lower_table(
+    table: &ResolvedTable,
+    font_manager: &mut FontManager,
+    page_number: usize,
+    text_directions: &[Vec<oxml_layout::TextDirection>],
+    diagnostics: &mut Vec<String>,
+) -> Result<Vec<PositionedElement>, RenderInputError> {
+    let mut physical_column_widths = table.column_widths.clone();
+    if table.right_to_left {
+        physical_column_widths.reverse();
+    }
+    let column_offsets = cumulative_offsets(&physical_column_widths);
+    let required_heights = grown_row_heights(table, font_manager, page_number, text_directions)?;
     let row_offsets = cumulative_offsets(&required_heights);
     let mut fills = Vec::new();
     if let Some(background) = &table.background {
@@ -2703,6 +2733,118 @@ mod tests {
             vertical_fills[1].y + vertical_fills[1].height
                 > vertical_fills[0].y + vertical_fills[0].height
         );
+    }
+
+    #[test]
+    fn grown_row_heights_grow_the_last_span_row_and_short_neighbors_add_nothing() {
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        let mut spanned_text = table_text("one two three four five six");
+        spanned_text.wrap = true;
+        let spanned = ResolvedTable {
+            column_widths: vec![16.0],
+            rows: vec![
+                ResolvedTableRow {
+                    height: 6.0,
+                    cells: vec![ResolvedTableCell {
+                        text: Some(spanned_text),
+                        row_span: 2,
+                        ..ResolvedTableCell::default()
+                    }],
+                },
+                ResolvedTableRow {
+                    height: 6.0,
+                    cells: vec![ResolvedTableCell {
+                        vertical_merge: true,
+                        ..ResolvedTableCell::default()
+                    }],
+                },
+                ResolvedTableRow {
+                    height: 6.0,
+                    cells: vec![ResolvedTableCell::default()],
+                },
+            ],
+            ..ResolvedTable::default()
+        };
+        let directions = vec![Vec::new(); 3];
+        let heights = grown_row_heights(&spanned, &mut fonts, 1, &directions).unwrap();
+        // Independent expected value: stack the spanning cell's text against its
+        // stored two-row extent through the text layout directly, not through
+        // grown_row_heights. The contract adds `needed - stored span height` to
+        // the last span row, so that row becomes `needed - 6`. A wrong rule that
+        // adds `needed` itself would leave it at `needed + 6`.
+        let cell = &spanned.rows[0].cells[0];
+        let mut body = cell.text.clone().expect("spanning text");
+        body.insets = cell.margins;
+        let content = Rect {
+            x: body.insets.left,
+            y: body.insets.top,
+            width: (16.0 - body.insets.left - body.insets.right).max(0.0),
+            height: (12.0 - body.insets.top - body.insets.bottom).max(0.0),
+        };
+        let (content, _) = text::oriented_content_box(content, body.vertical);
+        let stacked =
+            text::stack_text_for_page_with_directions(&mut fonts, content, &body, 1, &[]).unwrap();
+        let needed = body.insets.top + stacked.height + body.insets.bottom;
+        assert!(
+            needed > 12.0 + 0.01,
+            "fixture must grow the span, needed={needed}"
+        );
+        assert_eq!(heights[0], 6.0, "first row keeps its stored height");
+        assert!(
+            (heights[1] - (needed - 6.0)).abs() < 1.0e-9,
+            "last span row grows by needed - stored span height: got {}, expected {}",
+            heights[1],
+            needed - 6.0
+        );
+        assert_eq!(heights[2], 6.0, "short neighbor adds nothing");
+
+        let short = ResolvedTable {
+            column_widths: vec![40.0],
+            rows: vec![ResolvedTableRow {
+                height: 40.0,
+                cells: vec![ResolvedTableCell {
+                    text: Some(table_text("hi")),
+                    ..ResolvedTableCell::default()
+                }],
+            }],
+            ..ResolvedTable::default()
+        };
+        let heights = grown_row_heights(&short, &mut fonts, 1, &[Vec::new()]).unwrap();
+        assert_eq!(heights, vec![40.0]);
+    }
+
+    #[test]
+    fn painted_table_fills_use_the_grown_row_offsets() {
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        let table = ResolvedTable {
+            column_widths: vec![20.0],
+            rows: vec![
+                ResolvedTableRow {
+                    height: 6.0,
+                    cells: vec![ResolvedTableCell {
+                        fill: Some(Paint::Solid(Color::from_hex("FF0000"))),
+                        text: Some(table_text("one two three four five six")),
+                        ..ResolvedTableCell::default()
+                    }],
+                },
+                ResolvedTableRow {
+                    height: 6.0,
+                    cells: vec![ResolvedTableCell {
+                        fill: Some(Paint::Solid(Color::from_hex("00FF00"))),
+                        ..ResolvedTableCell::default()
+                    }],
+                },
+            ],
+            ..ResolvedTable::default()
+        };
+        let directions = vec![Vec::new(); 2];
+        let heights = grown_row_heights(&table, &mut fonts, 1, &directions).unwrap();
+        assert!(heights[0] > 6.0);
+        let fills = filled_rects(&layout_table(table));
+        assert_eq!(fills.len(), 2);
+        assert!((fills[0].height - heights[0]).abs() < 1.0e-6);
+        assert!((fills[1].y - heights[0]).abs() < 1.0e-6);
+        assert!((fills[1].height - heights[1]).abs() < 1.0e-6);
     }
 
     #[test]

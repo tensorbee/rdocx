@@ -95,7 +95,7 @@ fn fx218_export_source_and_resources_are_unchanged() {
     assert!(
         markdown
             .text
-            .contains("Semantic&#32;body&#32;\\<literal\\>&#32;\\&&#32;exact"),
+            .contains("Semantic body \\<literal\\> \\& exact"),
         "{}",
         markdown.text
     );
@@ -171,7 +171,13 @@ fn fx218_inline_escaping_and_qualified_image_links() {
         html.text
     );
     let markdown = deck.to_markdown().unwrap();
-    assert!(markdown.text.contains("<strong>&#32;inherited&#32;</strong><em>1\\.&#32;literal&#32;\\*&#32;\\<&#32;\\&&#32;</em>"),"{}",markdown.text);
+    assert!(
+        markdown
+            .text
+            .contains("<strong>&#32;inherited </strong><em>1. literal \\* \\< \\&&#32;</em>"),
+        "{}",
+        markdown.text
+    );
     assert_eq!(
         deck.to_bytes().unwrap(),
         Presentation::from_bytes(&deck.to_bytes().unwrap())
@@ -340,7 +346,7 @@ fn fx218_corpus_markdown_preserves_every_semantic_construct() {
     };
     let result = deck.to_markdown_with_options(&options).unwrap();
     let expected = format!(
-        "<a id=\"slide-1\"></a>\n\n# Slide 1\n\nSemantic&#32;body&#32;\\<literal\\>&#32;\\&&#32;exact\n\n| <strong>Head</strong> | <strong>Value</strong> |\n| --- | --- |\n| Cell | 1\\|2 |\n\n![](<{}> \"\")\n\n## Notes\n\n> Speaker&#32;note\n\n",
+        "<a id=\"slide-1\"></a>\n\n# Slide 1\n\nSemantic body \\<literal\\> \\& exact\n\n| <strong>Head</strong> | <strong>Value</strong> |\n| --- | --- |\n| Cell | 1\\|2 |\n\n![](<{}> \"\")\n\n## Notes\n\n> Speaker note\n\n",
         result.assets[0].0
     );
     assert_eq!(result.text, expected);
@@ -378,11 +384,7 @@ fn fx218_corpus_markdown_preserves_every_semantic_construct() {
         .unwrap();
     let mut expected = "# Title\n\n- Content\n".to_owned();
     for level in 1..9 {
-        expected.push_str(&format!(
-            "{}- Level&#32;{}\n",
-            "  ".repeat(level),
-            level + 1
-        ));
+        expected.push_str(&format!("{}- Level {}\n", "  ".repeat(level), level + 1));
     }
     expected.push('\n');
     assert_eq!(slide, expected);
@@ -485,13 +487,208 @@ fn fx218_ordered_labels_and_explicit_no_bullet() {
     assert!(html.text.contains("<p>item 2</p>"));
     let markdown = deck.to_markdown().unwrap();
     assert!(
-        markdown
-            .text
-            .contains("4. IV\\) item&#32;0\n5. V\\) item&#32;1"),
+        markdown.text.contains("4. IV) item 0\n5. V) item 1"),
         "{}",
         markdown.text
     );
-    assert!(markdown.text.contains("\n\nitem&#32;2\n\n"));
+    assert!(markdown.text.contains("\n\nitem 2\n\n"));
+}
+
+#[test]
+fn issue431_smartart_frame_is_contextless_and_names_its_cause_once() {
+    use rpptx::Presentation;
+    let mut package = smartart_fixture_package();
+    make_smartart_renderable(&mut package);
+    let presentation = Presentation::from_bytes(&package_bytes(package)).unwrap();
+    let before = presentation.to_bytes().unwrap();
+    let report = presentation.fit_report(&[]).unwrap();
+    let frame = report
+        .frames
+        .iter()
+        .find(|frame| frame.context == "uninstantiated")
+        .unwrap();
+    assert_eq!(frame.update.status, "unsupported");
+    assert!(frame.overflow);
+    assert_eq!(
+        frame
+            .update
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>(),
+        ["opaque or unresolved text owner"]
+    );
+    assert!(
+        !report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "opaque or unresolved text owner")
+    );
+    assert_eq!(presentation.to_bytes().unwrap(), before);
+}
+
+#[test]
+fn issue431_table_cell_shape_autofit_names_its_cause_once() {
+    use rpptx::{Emu, Presentation};
+    let mut deck = Presentation::new().unwrap();
+    deck.add_slide(6).unwrap();
+    let mut slide = deck.slide_mut(0).unwrap();
+    let mut shape = slide
+        .add_table(
+            2,
+            2,
+            Emu(914_400),
+            Emu(1_828_800),
+            Emu(7_315_200),
+            Emu(914_400),
+        )
+        .unwrap();
+    shape
+        .table_mut()
+        .unwrap()
+        .cell_mut(0, 0)
+        .unwrap()
+        .set_text("cell");
+    let bytes = deck.to_bytes().unwrap();
+    let mut package = OpcPackage::from_reader(Cursor::new(bytes)).unwrap();
+    let slide_part = "/ppt/slides/slide1.xml";
+    let xml = std::str::from_utf8(package.get_part(slide_part).unwrap()).unwrap();
+    let edited = xml.replacen("<a:bodyPr/>", "<a:bodyPr><a:spAutoFit/></a:bodyPr>", 1);
+    assert_ne!(edited, xml);
+    package.set_part(slide_part, edited.into_bytes());
+    let mut bytes = Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    let presentation = Presentation::from_bytes(bytes.get_ref()).unwrap();
+    let report = presentation.fit_report(&[]).unwrap();
+    let frame = report
+        .frames
+        .iter()
+        .find(|frame| frame.update.location.cell == Some((0, 0)))
+        .unwrap();
+    assert_ne!(frame.context, "uninstantiated");
+    assert_eq!(frame.update.status, "unsupported");
+    assert_eq!(
+        frame
+            .update
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>(),
+        ["table-cell shape autofit has no independently owned extent"]
+    );
+    assert!(
+        !report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message
+                == "table-cell shape autofit has no independently owned extent")
+    );
+}
+
+#[test]
+fn issue431_markdown_writes_plain_spaces_and_escapes_only_markdown_syntax() {
+    use rpptx::{Emu, Presentation};
+    let mut deck = Presentation::new().unwrap();
+    deck.add_slide(6).unwrap();
+    deck.slide_mut(0)
+        .unwrap()
+        .add_textbox(Emu(0), Emu(0), Emu(4_000_000), Emu(4_000_000))
+        .unwrap()
+        .set_text(
+            "North grew 12% (EUR 1.2m) - see table.\n- not a list\n12. not a list\n\
+             2024) not a list\n# not a heading\ntwo  spaces\n edges ",
+        )
+        .unwrap();
+    deck.set_notes_text(0, "Thank the team.").unwrap();
+    let options = rpptx::PresentationTextExportOptions {
+        include_notes: true,
+        skip_hidden: false,
+        inline_images: false,
+    };
+    let markdown = deck.to_markdown_with_options(&options).unwrap().text;
+    for line in [
+        "North grew 12% (EUR 1.2m) - see table.",
+        "\\- not a list",
+        "12\\. not a list",
+        "2024\\) not a list",
+        "\\# not a heading",
+        "two&#32;&#32;spaces",
+        "&#32;edges&#32;",
+        "> Thank the team.",
+    ] {
+        assert!(
+            markdown.lines().any(|candidate| candidate == line),
+            "{line:?} in {markdown}"
+        );
+    }
+}
+
+#[test]
+fn issue431_markdown_position_state_crosses_runs_and_breaks() {
+    use rpptx::{Emu, Presentation};
+    let markdown_for = |runs: &[&str]| {
+        let mut deck = Presentation::new().unwrap();
+        deck.add_slide(6).unwrap();
+        {
+            let mut slide = deck.slide_mut(0).unwrap();
+            let mut shape = slide
+                .add_textbox(Emu(0), Emu(0), Emu(4_000_000), Emu(4_000_000))
+                .unwrap();
+            let mut frame = shape.text_frame().unwrap();
+            let mut paragraph = frame.paragraph_mut(0).unwrap();
+            for run in runs {
+                paragraph.add_run(run);
+            }
+        }
+        deck.to_markdown().unwrap().text
+    };
+    assert!(markdown_for(&["Q3", " revenue"]).contains("Q3 revenue"));
+    assert!(markdown_for(&["Hello ", "world"]).contains("Hello world"));
+    assert!(markdown_for(&["a", "  b"]).contains("a&#32;&#32;b"));
+    assert!(markdown_for(&["see ", "- table"]).contains("see - table"));
+    assert!(markdown_for(&["- ", "table"]).contains("\\- table"));
+    assert!(markdown_for(&["1", ". item"]).contains("1\\. item"));
+    assert!(markdown_for(&["see ", "1", ". item"]).contains("see 1. item"));
+    assert!(markdown_for(&["`", "code", "`"]).contains("\\`code\\`"));
+    assert!(markdown_for(&["-5"]).contains("-5"));
+    assert!(!markdown_for(&["-5"]).contains("\\-5"));
+    assert!(markdown_for(&["+5"]).contains("+5"));
+    assert!(!markdown_for(&["+5"]).contains("\\+5"));
+    assert!(markdown_for(&["= x"]).contains("= x"));
+    assert!(!markdown_for(&["= x"]).contains("\\= x"));
+
+    let mut deck = Presentation::new().unwrap();
+    deck.add_slide(6).unwrap();
+    deck.slide_mut(0)
+        .unwrap()
+        .add_textbox(Emu(0), Emu(0), Emu(4_000_000), Emu(4_000_000))
+        .unwrap()
+        .set_text("Hello\u{b}- next")
+        .unwrap();
+    let markdown = deck.to_markdown().unwrap().text;
+    assert!(markdown.contains("Hello  \n\\- next"), "{markdown}");
+
+    let mut deck = Presentation::new().unwrap();
+    deck.add_slide(6).unwrap();
+    deck.slide_mut(0)
+        .unwrap()
+        .add_textbox(Emu(0), Emu(0), Emu(4_000_000), Emu(4_000_000))
+        .unwrap()
+        .set_text("1\u{b}. item")
+        .unwrap();
+    let markdown = deck.to_markdown().unwrap().text;
+    assert!(markdown.contains("1  \n. item"), "{markdown}");
+
+    let mut deck = Presentation::new().unwrap();
+    deck.add_slide(6).unwrap();
+    deck.set_notes_text(0, "- next").unwrap();
+    let options = rpptx::PresentationTextExportOptions {
+        include_notes: true,
+        skip_hidden: false,
+        inline_images: false,
+    };
+    let markdown = deck.to_markdown_with_options(&options).unwrap().text;
+    assert!(markdown.contains("> \\- next"), "{markdown}");
 }
 
 #[test]
@@ -889,9 +1086,7 @@ fn fx218_qualified_picture_aliases_alt_and_byte_deduplication() {
     assert_eq!(html.text.matches("<img ").count(), 2);
     assert!(html.text.contains("alt=\"alt [x] &lt; &amp;\nnext\""));
     assert!(
-        markdown
-            .text
-            .contains("alt&#32;\\[x\\]&#32;\\<&#32;\\&&#10;next"),
+        markdown.text.contains("alt \\[x\\] \\< \\&&#10;next"),
         "{}",
         markdown.text
     );

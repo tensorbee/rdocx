@@ -3092,8 +3092,21 @@ read-only FitReport. They retain owner contexts, admitted table cells, empty
 frames, measured/stored scale, hypothetical needed total scale/reduction,
 quantized and persisted trial containment and provider diagnostics. Trials
 report points, stored bounds EMU and integer solver scale/reduction values in
-hundred-thousandths. Unsupported mandatory owners refuse rather than vanish,
-and no permitted fitting trial retains a null needed scale. Caller fonts use
+hundred-thousandths. Unsupported mandatory owners are named with their cause and do not vanish or
+abort the deck. The cause is published once on every non-empty unsupported
+frame, whether that frame has a measurement context or is contextless. The CLI
+exits 1. A table cell whose stored measurement fits the width and not the
+height overflows only when the grown table's transformed rectangle leaves the
+page. A cell whose stored measurement does not fit the width stays overflow.
+The test uses the shared row growth and `shape_transform`, including rotation
+and flip. `needed_scale` stays the stored-row hypothetical. A repeated shape id
+is measured and named once for every later physical leaf. `refresh_autofit` and
+`fit_text_at` still refuse. A notes placeholder whose idx matches no
+notes-master placeholder is measured from the single notes-master placeholder
+of its type, on the read-only fit path only. Zero or several type candidates
+after a successful collection are reported, not guessed. A master-key collision
+that collection already rejects stays a checked error. No permitted fitting
+trial retains a null needed scale. Caller fonts use
 the same strict preparation and deterministic bundled fallback as rendering.
 The report does not mutate autofit or save the presentation.
 

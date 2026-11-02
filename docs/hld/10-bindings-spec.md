@@ -899,6 +899,14 @@ staged `duplicate_slide`, advances the revision once, and returns the new slide
 captured at that revision. As in the facade, a slide that owns a modern
 comments part is refused, even when removing its last comment left that part
 empty, and the refusal leaves the package and the revision unchanged.
+`SlideCollection.index(slide)` returns the live zero-based position and raises
+`ValueError` with `slide is not in this collection` for another presentation, a
+structural twin, a reopened deck, a non-slide, a removed or stale handle, and a
+foreign slide against an empty collection. Two wrappers and a fresh lookup
+after `move` agree. Other accessors keep their existing errors. A removed handle
+used through an accessor such as `slide_id` is causally `StaleElementError`, and
+a numeric collection index outside the collection remains `IndexError`. The
+defensive absent-owner branch is not presented as a reachable public case.
 
 `Shape` geometry, `name`, and `rotation` are writable without a revision bump.
 Assigning one coordinate or the rotation of a placeholder first copies the
@@ -1223,8 +1231,9 @@ for a nonzero `expect`, without creating a body or retiring an owner.
 `Presentation.validate()` runs the native `validate` with the GIL released and
 returns a tuple of frozen `ValidationIssue` snapshots in native order. Each
 carries a `kind` that names the native variant in snake_case, such as
-`duplicate_shape_id`, and a `message` equal to the line `rpptx validate`
-prints for that issue. A clean presentation returns an empty tuple.
+`duplicate_shape_id`, and a `message` equal to the `Display` sentence that
+`rpptx validate` prints for that issue. A clean presentation returns an empty
+tuple.
 
 The presentation binding exposes `to_pdf`, `render_slide_to_png`,
 `render_all_slides`, `to_notes_pdf`, and `render_all_notes` through the native
@@ -4074,8 +4083,13 @@ identity/name, contexts, empty/status facts, current measured/stored values,
 needed total scale/reduction, quantized/persisted trials and diagnostics.
 Trial dimensions/heights are points, stored bounds EMU and integer scales or
 reductions hundred-thousandths. No fitting permitted trial reports null needed
-scale and unfit-at-floor. Unsupported mandatory owners refuse. Fit does not
-save, exiting0 without overflow,1 for overflow and2 for checked error.
+scale and unfit-at-floor. Exit 0 when every frame is assessed and none overflow.
+Exit 1 when any frame overflows or has status `unsupported`. Exit 2 for a
+checked error. A non-empty unsupported frame carries its cause once. Empty
+frames keep status `empty`, overflow false and no unsupported cause, including
+an unresolved notes placeholder. JSON `reason` is `cannot-assess` when status is
+`unsupported`. The page-growth
+exception is the same width-qualified rule as HLD 08. Fit does not save.
 
 `inspect` reports the file, slide and layout counts, slide size, core metadata,
 and each slide's identity, hidden state, and shape count. Its JSON form uses the
@@ -4667,6 +4681,18 @@ rendering. Semantic flags refuse on PDF and image formats. The existing
 `--force` policy applies to the whole document/asset set and never permits
 replacing the input. Diagnostics are separate from exported text. WASM gains
 no semantic export entry point.
+
+Markdown keeps one space between two non-whitespace characters as a space.
+U+0020 is not always escaped. A leading, trailing, or repeated space, and a
+space beside whitespace, is written `&#32;`. Tab and CR stay `&#9;` and `&#13;`.
+The always-escaped characters are U+005C, U+0060, U+002A, U+005F, U+005B,
+U+005D, U+003C, U+003E, U+0023, U+007C, U+007E, and U+0026. U+002D and U+002B
+are escaped only where they would start a list marker. U+003D is escaped only
+where the line would be a setext underline. U+002E and U+0029 are escaped only
+when they end an ordered-list number on that same line. The decision uses the
+assembled paragraph, including image alt text and a notes line after the
+generated `> ` prefix. An inserted hard break resets the line column and the
+digit count.
 
 ## Word checked XML owner authority
 

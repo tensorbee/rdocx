@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
@@ -428,7 +429,7 @@ fn validate_reports_duplicate_paragraph_properties_while_text_remains_readable()
     let validated = cli(&["validate", deck.to_str().unwrap()]);
     assert!(!validated.status.success());
     let diagnostic = String::from_utf8(validated.stderr).unwrap();
-    assert!(diagnostic.contains("InvalidXmlChild"), "{diagnostic}");
+    assert!(!diagnostic.contains("InvalidXmlChild"), "{diagnostic}");
     assert!(diagnostic.contains(&slide_part), "{diagnostic}");
     assert!(
         diagnostic.contains("finite XML child order or multiplicity is invalid"),
@@ -2991,6 +2992,284 @@ fn fit_reports_every_supported_overflow_and_needed_scale() {
         }
         assert_eq!(fs::read(&input).unwrap(), before);
     }
+}
+
+#[test]
+fn issue431_fit_text_output_names_each_frame_once() {
+    let temp = TempWorkspace::new("issue431-fit-text");
+    let input = temp.path.join("deck.pptx");
+    let mut presentation = Presentation::new().unwrap();
+    for _ in 0..3 {
+        presentation.add_slide(5).unwrap();
+    }
+    {
+        let mut slide = presentation.slide_mut(2).unwrap();
+        let mut shape = slide
+            .add_table(
+                2,
+                2,
+                Emu(914_400),
+                Emu(1_828_800),
+                Emu(7_315_200),
+                Emu(914_400),
+            )
+            .unwrap();
+        let mut table = shape.table_mut().unwrap();
+        for (row, column) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+            table
+                .cell_mut(row, column)
+                .unwrap()
+                .set_text(&format!("r{row}c{column}"));
+        }
+    }
+    presentation.save(&input).unwrap();
+    let result = cli(&["fit", input.to_str().unwrap()]);
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8(result.stdout).unwrap();
+    let lines = stdout
+        .lines()
+        .filter(|line| !line.starts_with("Diagnostic: "))
+        .collect::<Vec<_>>();
+    let native = presentation.fit_report(&[]).unwrap();
+    assert_eq!(lines.len(), native.frames.len());
+    let unique = lines.iter().collect::<HashSet<_>>();
+    assert_eq!(unique.len(), lines.len(), "{stdout}");
+    for (row, column) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+        let cell = format!(
+            "/ppt/slides/slide3.xml 1 \"Table 3\" cell {row},{column}: status=unchanged, \
+             overflow=false, needed_scale=100000"
+        );
+        assert!(lines.contains(&cell.as_str()), "{cell} in {stdout}");
+    }
+    assert!(!stdout.contains("Array ["), "{stdout}");
+    assert!(!stdout.contains("Number("), "{stdout}");
+}
+
+#[test]
+fn issue431_fit_reports_an_unsupported_frame_with_cannot_assess() {
+    let temp = TempWorkspace::new("issue431-fit-unsupported");
+    let input = temp.path.join("deck.pptx");
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    presentation.set_notes_text(0, "A note").unwrap();
+    let mut package =
+        OpcPackage::from_reader(Cursor::new(presentation.to_bytes().unwrap())).unwrap();
+    let notes_part = package
+        .parts
+        .keys()
+        .find(|part| {
+            package.content_types.content_type_for(part) == Some(content_types::NOTES_SLIDE)
+        })
+        .unwrap()
+        .clone();
+    let xml = String::from_utf8(package.get_part(&notes_part).unwrap().to_vec()).unwrap();
+    let shape = r#"<p:sp><p:nvSpPr><p:cNvPr id="9" name="Diagram 9"/><p:cNvSpPr/><p:nvPr><p:ph type="dgm" idx="10"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>1</a:t></a:r></a:p></p:txBody></p:sp>"#;
+    let xml = xml.replace("</p:spTree>", &format!("{shape}</p:spTree>"));
+    package.set_part(&notes_part, xml.into_bytes());
+    let mut bytes = Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    fs::write(&input, bytes.into_inner()).unwrap();
+
+    let text = cli(&["fit", input.to_str().unwrap()]);
+    assert_eq!(
+        text.status.code(),
+        Some(1),
+        "{}{}",
+        String::from_utf8_lossy(&text.stdout),
+        String::from_utf8_lossy(&text.stderr)
+    );
+    let stdout = String::from_utf8(text.stdout).unwrap();
+    let line = stdout
+        .lines()
+        .find(|line| line.contains("status=unsupported"))
+        .unwrap();
+    assert!(line.contains("cannot assess:"), "{line}");
+    assert!(
+        line.contains("notes placeholder idx 10 matches no notes-master placeholder"),
+        "{line}"
+    );
+
+    let json = cli(&["fit", input.to_str().unwrap(), "--json"]);
+    assert_eq!(json.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    let frame = value["frames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|frame| frame["status"] == "unsupported")
+        .unwrap();
+    assert_eq!(frame["reason"], "cannot-assess");
+    assert_eq!(frame["overflow"], true);
+}
+
+#[test]
+fn issue431_fit_prints_a_picture_duplicate_diagnostic_once() {
+    let temp = TempWorkspace::new("issue431-fit-picture-diagnostic");
+    let input = temp.path.join("deck.pptx");
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .add_textbox(Emu(914400), Emu(914400), Emu(914400), Emu(457200))
+        .unwrap()
+        .set_text("text")
+        .unwrap();
+    presentation
+        .add_picture(
+            0,
+            &fx218_cli_png(),
+            "pixel.png",
+            Emu(914400),
+            Emu(1_828_800),
+            None,
+            None,
+        )
+        .unwrap();
+    let mut package =
+        OpcPackage::from_reader(Cursor::new(presentation.to_bytes().unwrap())).unwrap();
+    let slide_part = "/ppt/slides/slide1.xml";
+    let xml = String::from_utf8(package.get_part(slide_part).unwrap().to_vec()).unwrap();
+    let text_start = xml.find("<p:sp>").unwrap();
+    let text_end = text_start + xml[text_start..].find("</p:sp>").unwrap() + "</p:sp>".len();
+    let text_id_start = xml[text_start..text_end].find("id=\"").unwrap() + text_start + 4;
+    let text_id_end = text_id_start + xml[text_id_start..].find('"').unwrap();
+    let text_id = &xml[text_id_start..text_id_end];
+    let picture_start = xml.find("<p:pic>").unwrap();
+    let picture_end =
+        picture_start + xml[picture_start..].find("</p:pic>").unwrap() + "</p:pic>".len();
+    let picture_block = &xml[picture_start..picture_end];
+    let id_start = picture_block.find("id=\"").unwrap() + 4;
+    let id_end = id_start + picture_block[id_start..].find('"').unwrap();
+    let old_id = &picture_block[id_start..id_end];
+    let duplicate =
+        picture_block.replacen(&format!("id=\"{old_id}\""), &format!("id=\"{text_id}\""), 1);
+    let xml = format!(
+        "{}{}{}",
+        &xml[..picture_start],
+        duplicate,
+        &xml[picture_end..]
+    );
+    package.set_part(slide_part, xml.into_bytes());
+    let mut bytes = Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    fs::write(&input, bytes.into_inner()).unwrap();
+
+    let result = cli(&["fit", input.to_str().unwrap()]);
+    assert_eq!(
+        result.status.code(),
+        Some(0),
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8(result.stdout).unwrap();
+    let diagnostics = stdout
+        .lines()
+        .filter(|line| line.contains("is shared with an earlier shape"))
+        .collect::<Vec<_>>();
+    assert_eq!(diagnostics.len(), 1, "{stdout}");
+    assert_eq!(
+        diagnostics[0],
+        format!(
+            "Diagnostic: /ppt/slides/slide1.xml 1: shape ID {text_id} is shared with an earlier shape"
+        ),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn issue431_fit_prints_the_contextless_smartart_cause_once() {
+    let temp = TempWorkspace::new("issue431-fit-smartart");
+    let input = temp.path.join("deck.pptx");
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    let mut package =
+        OpcPackage::from_reader(Cursor::new(presentation.to_bytes().unwrap())).unwrap();
+    let slide_part = "/ppt/slides/slide1.xml";
+    let xml = String::from_utf8(package.get_part(slide_part).unwrap().to_vec()).unwrap();
+    let frame = r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="42" name="SmartArt"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="0" y="0"/><a:ext cx="5080000" cy="2540000"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:dm="smart-data" r:lo="smart-layout" r:qs="smart-style" r:cs="smart-colors"/></a:graphicData></a:graphic></p:graphicFrame>"#;
+    let xml = xml.replace("</p:spTree>", &format!("{frame}</p:spTree>"));
+    package.set_part(slide_part, xml.into_bytes());
+    let mut bytes = Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    fs::write(&input, bytes.into_inner()).unwrap();
+
+    let result = cli(&["fit", input.to_str().unwrap()]);
+    assert_eq!(
+        result.status.code(),
+        Some(1),
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stdout = String::from_utf8(result.stdout).unwrap();
+    let line = stdout
+        .lines()
+        .find(|line| line.contains("uninstantiated"))
+        .unwrap();
+    assert!(line.contains("status=unsupported, overflow=true"), "{line}");
+    assert!(
+        line.contains("cannot assess: opaque or unresolved text owner"),
+        "{line}"
+    );
+    assert_eq!(
+        stdout.matches("opaque or unresolved text owner").count(),
+        1,
+        "{stdout}"
+    );
+}
+
+#[test]
+fn issue431_fit_exits_two_for_matching_notes_master_keys() {
+    let temp = TempWorkspace::new("issue431-fit-notes-collision");
+    let input = temp.path.join("deck.pptx");
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    presentation.set_notes_text(0, "note").unwrap();
+    let mut package =
+        OpcPackage::from_reader(Cursor::new(presentation.to_bytes().unwrap())).unwrap();
+    let master_part = package
+        .parts
+        .keys()
+        .find(|part| {
+            package.content_types.content_type_for(part) == Some(content_types::NOTES_MASTER)
+        })
+        .unwrap()
+        .clone();
+    let xml = String::from_utf8(package.get_part(&master_part).unwrap().to_vec()).unwrap();
+    let placeholder = xml.find("<p:ph ").unwrap();
+    let start = xml[..placeholder].rfind("<p:sp>").unwrap();
+    let end = start + xml[start..].find("</p:sp>").unwrap() + "</p:sp>".len();
+    let block = &xml[start..end];
+    let id_start = block.find("id=\"").unwrap() + 4;
+    let id_end = id_start + block[id_start..].find('"').unwrap();
+    let id: u32 = block[id_start..id_end].parse().unwrap();
+    let duplicate = block.replacen(&format!("id=\"{id}\""), &format!("id=\"{}\"", id + 100), 1);
+    let xml = format!("{}{}{}", &xml[..end], duplicate, &xml[end..]);
+    package.set_part(&master_part, xml.into_bytes());
+    let mut bytes = Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    fs::write(&input, bytes.into_inner()).unwrap();
+
+    let result = cli(&["fit", input.to_str().unwrap()]);
+    assert_eq!(
+        result.status.code(),
+        Some(2),
+        "{}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("ambiguous placeholder"),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
 }
 
 #[test]
