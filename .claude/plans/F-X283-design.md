@@ -754,6 +754,7 @@ the shared full gate once over the integrated union. All remain pending.
 - `docs/hld/03-architecture.md`
 - `docs/hld/10-bindings-spec.md`
 - `docs/hld/12-testing-strategy.md`
+- `docs/hld/15-build-and-toolchain.md`
 
 ## Risk routing
 
@@ -987,3 +988,48 @@ F26879/252/407/five-linear/count/memory/PowerPoint248, WASM, full integrated uni
 docs, archives/publication dry-run, hosted CI and reviewed-SHA publication approval
 remain due. Installed fault injection remains unperformed and separate from the
 actual current C9 binding-object diagnostic. No delivery completion is claimed.
+
+
+## Approved final benchmark execution route
+
+The exact A283-1 through A283-4 workloads and thresholds remain unchanged.
+The reviewed local implementation is integrated at
+514a076e592517ef128e555f52cef1085fa702de. Resume the existing F-ID and worker
+branch for the missing callable final Linux gate, preserving original claim
+Base 101c34c4a6d5fa62d9ba0e0ff745fd44c9aeaf13 and all prior evidence.
+This adds no product dependency or public API and resets no review counter.
+
+Add scripts/benchmark_f283.py from the reviewed TEMP runner, SHA-256
+9d944b03b199e16e58e4d8b404f319c06b5722e9bf7933b9f382fe0ce6d07acc.
+Root asked under AGENTS.md's new-file rule and the user instructed continuation.
+The runner preserves the pinned original workloads, validates input geometry,
+and requires separately authenticated final source, release artifacts, build
+configuration and interpreter identities. Its 19 synthetic checks pass.
+These are tool checks, not product timings.
+
+Use the already registered .github/workflows/ci.yml for a manual benchmark-only
+route. Keep existing default, push, PR, schedule and owner-only behavior.
+Benchmark mode selects only a native ubuntu-24.04 x86_64 CPython3.12 job with
+read-only permissions. Normal CI and SemVer signing remain separate.
+Existing scripts/sprint_workflow.py excludes only actual started, source-qualified
+benchmark attempts from normal CI authority. Skipped jobs and claimed inputs
+cannot exclude ordinary evidence. A later benchmark run cannot invalidate an
+applicable normal proof. Add the four focused cases to the existing controller
+test entrypoint. The concrete four-path TEMP patch is
+58ac548859df3e16ca4d3e8c37df96b2bb84a1abfe584e132e0a91e690fe2b1e.
+Root reviewed it with zero actionable findings and independently passed eight
+controller tests and 15 selector controls. Revalidate its exact inputs on adoption.
+
+Update HLD15's CI and proof-authority intent before source freeze. Earlier
+HLD03, HLD10 and HLD12 product updates remain intact and have no new lease in
+this resumed phase. Source-qualified dispatch, authentic producer transfer,
+payload-size admission, exact Linux timings and the full union remain pending.
+No new workflow is added because its registration would require default-branch
+integration before this pre-close gate. No source push or dispatch is authorized
+by this plan revision alone. Use the workflow's reviewed source-availability
+checkpoint when its prerequisites actually pass.
+
+This extension triggers risk-routing's performance-budget, new-file,
+release-scripting, shared-consumer and evidence-adoption rows. Keep their final
+integrated checks and separate release approval. Local scope is the runner,
+route selectors and deciding controller regressions. No final gate is waived.
