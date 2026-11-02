@@ -4573,6 +4573,44 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn issue433_odt_paragraph_projection_replaces_the_first_line_pair() {
+        let mut doc = Document::new();
+        doc.add_style(crate::StyleBuilder::paragraph("BaseInd", "Base Ind"))
+            .unwrap();
+        doc.add_style(crate::StyleBuilder::paragraph("Derived", "Derived"))
+            .unwrap();
+        for style in &mut doc.styles.styles {
+            match style.style_id.as_str() {
+                "BaseInd" => {
+                    style.ppr = Some(rdocx_oxml::properties::CT_PPr {
+                        ind_left: Some(rdocx_oxml::Twips(720)),
+                        ind_hanging: Some(rdocx_oxml::Twips(720)),
+                        ..rdocx_oxml::properties::CT_PPr::default()
+                    });
+                }
+                "Derived" => {
+                    style.based_on = Some("BaseInd".to_owned());
+                    style.ppr = Some(rdocx_oxml::properties::CT_PPr {
+                        ind_left: Some(rdocx_oxml::Twips(0)),
+                        ind_first_line: Some(rdocx_oxml::Twips(0)),
+                        ..rdocx_oxml::properties::CT_PPr::default()
+                    });
+                }
+                _ => {}
+            }
+        }
+        let derived = rdocx_oxml::text::CT_P::from_xml_fragment(br#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:pPr><w:pStyle w:val="Derived"/></w:pPr><w:r><w:rPr><w:i/></w:rPr><w:t>derived</w:t></w:r></w:p>"#).unwrap();
+        let writer = OdtWriter::new(&doc);
+        let properties = writer.effective_paragraph_properties(&derived);
+        assert_eq!(properties.ind_first_line, Some(rdocx_oxml::Twips(0)));
+        assert_eq!(properties.ind_hanging, None);
+        // The run projection stays on `CT_RPr::merge_from`; only `w:ind`
+        // changes here, so the italic run property is untouched.
+        let run = derived.runs.first().unwrap();
+        assert_eq!(run.properties.as_ref().and_then(|p| p.italic), Some(true));
+    }
+
     const PNG: &[u8] = &[
         0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
         0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,

@@ -3129,9 +3129,11 @@ Python copies bytes and path inputs before releasing the GIL. Metadata,
 strict file loading and native layout or rendering run detached. Missing and
 non-directory paths raise their existing I/O exceptions with the path. Other
 strict loader refusals retain the public layout/domain error and exact failing
-path. Invalid inputs do not produce output or mutate source. Normal Word
-caller rendering keeps normal fallback, while deterministic entrypoints keep
-bundled fallback. Existing caller-only native layout methods remain isolated.
+path. Invalid inputs do not produce output or mutate source. Caller fonts on the
+bundled omission tier resolve missing families from the bundled inventory. A
+nonempty caller request under the explicit system opt-in keeps the normal
+engine. Deterministic entrypoints keep bundled fallback. Existing caller-only
+native layout methods remain isolated.
 
 Configured `render_pages` constructs one owned layout. Omitted page selection
 uses that bundle's actual page count. Explicit selections retain order and
@@ -3186,32 +3188,37 @@ must include those fields. Checked PDF output refuses failed selected-font
 preparation before allocating partial output, and native Result consumers
 propagate the existing error. Valid output and legacy vector signatures remain.
 
-Native renderers obtain the complete positioned output through
-`Document::layout` and `Document::layout_with_options`. Accepted calls return a
-shared `Arc<WordLayoutResult>` from the normal-font cache, including pages,
-font bytes, revision view, and the result-local Word source map. After a
-mutation, the retained normal engine may reuse bounded context-independent
-paragraph and shaping work while rebuilding the completed result. Tracked calls
-stay uncached and use a distinct revision-view paragraph identity.
-`Document::layout_with_fonts` and
-`Document::layout_with_fonts_and_options` return owned uncached bundles whose
-font mapping contains the exact caller-provided bytes selected for shaping.
-They construct a caller-only engine and cannot observe the normal process font
-snapshot. `Document::layout_with_fonts_and_bundled_fallback` and its
-option-taking counterpart return the same owned result shape while retaining a
-private reusable deterministic-base engine. Caller faces override bundled
-faces, missing families resolve from the bundled inventory, and system fonts
-remain unavailable. Differing caller labels act as aliases automatically on
-the existing strict and bundled-fallback paths.
-`Document::layout_with_fonts_aliases_and_bundled_fallback` and
-`Document::layout_with_fonts_aliases_and_bundled_fallback_and_options` add
-explicit byte-free aliases to the owned bundled-fallback result paths.
-`Document::transfer_reusable_bundled_fallback_layout_from_with_aliases` moves
-private work only when the exact caller-font bytes, bounded aliases, and other
-retained inputs match. Rejection preserves both engines. Deterministic calls
-remain isolated on the bundled-font-only path. The built-in PDF, raster, and
-page accessors consume their existing paths. These additions are pre-1.0 native
-Rust APIs and do not add Python, WASM, or CLI methods.
+Native renderers obtain omission output through `Document::layout` and
+`Document::layout_with_options`. `layout_page` and `layout_page_with_options`
+keep their route through `layout_with_options` and clone one page out of the
+returned `Arc`. Accepted omission calls return a shared `Arc<WordLayoutResult>`
+from the bundled cache, including pages, font bytes, revision view, and the
+result-local Word source map. `Arc::clone` preserves that sharing. Accepted calls
+with `use_system_fonts` true return the shared normal-font cache instead. Tracked
+calls stay uncached and use the engine selected by that field. Nonempty
+caller-font results that the private helper wraps use `Arc::new` and are not that
+shared cache. `Document::layout_with_fonts` and
+`Document::layout_with_fonts_and_options` stay caller-only and uncached. The
+bundled-fallback methods, including both alias methods, stay caller plus
+bundled. `layout_with_additional_fonts_and_options` stays caller plus the normal
+engine and ignores `use_system_fonts`. Deterministic calls remain on the bundled
+path and ignore the field. These are pre-1.0 native Rust APIs. Python receives
+`system_fonts`, default false, on the implicit publishers and calls the public
+route table for a nonempty font list. WASM does not receive the field. `toPdf`
+follows `Document::to_pdf` into the deterministic cache.
+
+### Font policy keywords
+
+`RenderOptions::use_system_fonts` is the native Rust selector and defaults to
+false through the derived `Default`. Python exposes the keyword-only
+`system_fonts: bool = False` on `to_pdf`, `to_pdf_with_diagnostics`,
+`page_count`, `layout`, `layout_page`, and every render helper and diagnostic
+twin. The CLI exposes `--system-fonts` on `convert`, `render`, and `layout`.
+`inspect` stays on the deterministic bundled path and accepts no font-policy
+flag. Omission, an empty sequence, an empty directory, and a directory with no
+font file select bundled fonts. Caller fonts keep highest priority over embedded
+and the selected tier. An explicit system request refuses on a build without the
+`system-fonts` feature with the documented error before the normal engine runs.
 
 Native Word callers measure a checked paragraph or table with
 `Document::measure_content(&ContentLocation, Length, RenderOptions)`. Width must
@@ -3904,13 +3911,14 @@ original package. Images, headers, footers, numbering, settings, themes, font
 tables, notes, properties, content types, relationships, and opaque parts stay
 in the package rather than being reconstructed by the binding.
 
-The constructor, `fromBytes`, `addParagraph`, `addHeading`,
-`addBoldParagraph`, `addTable`, `getText`, `paragraphCount`, `toDocxBytes`,
-`toPdf`, `toHtml`, `toHtmlFragment`, `toMarkdown`, and `replacePlaceholder`
-names remain stable. `toPdf` delegates to the normal `Document::to_pdf` facade
-and returns its bytes directly. `Document::open`, `save`, and a second
-deterministic PDF alias stay absent because browser callers supply and receive
-bytes and the WASM profile already excludes host font discovery.
+The constructor and the listed method names remain stable. `toPdf` calls
+`Document::to_pdf` at `rdocx-wasm/src/lib.rs:85` and returns those bytes
+directly. Under this alternative that call is the bundled deterministic cache.
+It does not load host fonts. `rdocx-wasm` disables `rdocx` defaults at
+`Cargo.toml:27`, while bundled font data stays unconditional. The wasm32 graph
+therefore excludes host font discovery. No wasm font-policy option is added. A
+future request for host fonts must fail with the native system-font error. No
+binding route change.
 
 The `system-fonts` feature is default-on in `rdocx-layout` and `rdocx`, which
 preserves native behavior. `rdocx-wasm` disables `rdocx` defaults, while the
@@ -4219,7 +4227,8 @@ collected. Otherwise validation retains those errors, adds one indeterminate
 paragraph-visibility Warning with the actual detail, and omits the empty-count
 advisory. It does not substitute plain text or all-false flags. Title, author
 and heading advisories retain their existing behavior. `layout --json` uses
-bundled deterministic fonts and reports every direct body item. Its point-space
+bundled deterministic fonts unless `--system-fonts` selects the system tier, and
+reports every direct body item. Its point-space
 fragments carry one-based physical and displayed page numbers, and preserved
 unlaid items retain an empty fragment list. `diff` compares accepted-view
 paragraph text story by story: the body paragraphs, the body's table cells
@@ -4237,7 +4246,8 @@ compared, `--json` emits a schema-1 record with each unreadable side in
 error or incomplete comparison. `replace --expect N` checks the
 run-aware replacement count before staged publication. A mismatch creates no
 output and leaves an existing destination untouched. Both the selected page
-and all-page `render` paths use bundled deterministic fonts. The compiled
+and all-page `render` paths use bundled deterministic fonts unless
+`--system-fonts` selects the system tier. The compiled
 surface also includes nested comment thread commands with optional RFC 3339
 comment dates, all-story revision inspection, all-story filtered revision
 resolution, comparison with explicit granularity, ignore options and per-story

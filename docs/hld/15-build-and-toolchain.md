@@ -64,17 +64,23 @@ that layout directly to
 `oxml_pdf::render_to_pdf_checked`, which gives the golden-PNG gate
 deterministic PDF input and refuses failed selected-font preparation before
 output. The legacy vector operation retains its signature and returns no
-partial bytes on preparation failure. Existing constructors and rendering
-methods still load system fonts for library users.
+partial bytes on preparation failure.
 
-The hash harness, golden-PNG gate and SSIM harness use the deterministic path.
-The normal rendering API still discovers system fonts, but now captures the
-bundled plus system face table once per process. Installing, removing, or
-replacing system fonts requires a process restart. File-backed font bytes use a
-separate bounded process cache keyed by canonical file identity, so faces at
-different TTC indices share one byte buffer. Both process caches are compiled
-only with `system-fonts`, and poisoned file-cache locks recover by rebuilding
-the requested entry.
+Deterministic constructors and the hash harness, golden PNG gate, and SSIM
+harness use the bundled path. Existing omission constructors and rendering
+methods also use bundled fonts. `RenderOptions.use_system_fonts` true is the
+explicit system request. That request loads system fonts when the feature is on
+and returns the documented error when the feature is off. Deterministic methods
+ignore the field. Installing or removing system fonts cannot change a bundled
+omission result.
+
+The normal rendering API captures the bundled plus system face table once per
+process. Installing, removing, or replacing system fonts requires a process
+restart for the system opt-in. File-backed font bytes use a separate bounded
+process cache keyed by canonical file identity, so faces at different TTC
+indices share one byte buffer. Both process caches are compiled only with
+`system-fonts`, and poisoned file-cache locks recover by rebuilding the
+requested entry.
 
 Font sources enabled by Cargo dependency feature unification, including
 `fontdb/memmap` shared files, use `Database::with_face_data` to retain owned

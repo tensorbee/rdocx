@@ -69,6 +69,26 @@ fn assert_success(output: &Output, command: &str) {
     );
 }
 
+/// Asserts success and that stderr carries only font-substitution facts.
+fn assert_success_with_font_diagnostics(output: &Output, command: &str) -> String {
+    assert!(
+        output.status.success(),
+        "{command} failed with {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    for line in stderr.lines() {
+        assert!(
+            line.starts_with("Font '")
+                && line.contains("' substituted: selected '")
+                && line.ends_with(" tier"),
+            "{command} wrote an unexpected diagnostic: {line}"
+        );
+    }
+    stderr
+}
+
 /// Asserts that `args` refuses to replace an existing `output` and leaves it
 /// byte-identical, and that the same command with `--force` replaces it.
 fn assert_existing_output_needs_force(args: &[&str], output: &Path) {
@@ -2792,7 +2812,12 @@ fn render_uses_the_bundled_font_deterministic_path() {
         "--page",
         "0",
     ]);
-    assert_success(&selected_output, "render selected page");
+    let selected_stderr =
+        assert_success_with_font_diagnostics(&selected_output, "render selected page");
+    assert_eq!(
+        selected_stderr,
+        "Font 'Helvetica Neue' substituted: selected 'Carlito' from the bundled tier\n"
+    );
     let selected_png = first_dir.join("visible_page1.png");
     let selected_bytes = fs::read(&selected_png).unwrap();
     assert_eq!(
@@ -2815,7 +2840,11 @@ fn render_uses_the_bundled_font_deterministic_path() {
         "--dpi",
         "24",
     ]);
-    assert_success(&all_output, "render all pages");
+    let all_stderr = assert_success_with_font_diagnostics(&all_output, "render all pages");
+    assert_eq!(
+        all_stderr,
+        "Font 'Helvetica Neue' substituted: selected 'Carlito' from the bundled tier\n"
+    );
     let all_png = second_dir.join("visible_page1.png");
     let all_bytes = fs::read(&all_png).unwrap();
     assert_eq!(
@@ -2850,6 +2879,7 @@ fn issue_253_cli_revision_view_selects_tracked_output() {
         .to_pdf_with_options(RenderOptions {
             revision_view: RevisionView::Tracked,
             revision_style: RevisionStyle::Plain,
+            use_system_fonts: false,
         })
         .unwrap();
     assert_ne!(accepted_pdf, tracked_pdf);
@@ -2902,6 +2932,7 @@ fn issue_253_cli_revision_view_selects_tracked_output() {
             RenderOptions {
                 revision_view: RevisionView::Tracked,
                 revision_style: RevisionStyle::Plain,
+                use_system_fonts: false,
             },
         )
         .unwrap()
@@ -2941,6 +2972,7 @@ fn cli_revision_style_colours_the_tracked_view_only() {
     let legal = RenderOptions {
         revision_view: RevisionView::Tracked,
         revision_style: RevisionStyle::Legal,
+        use_system_fonts: false,
     };
     let legal_pdf = opened.to_pdf_with_options(legal).unwrap();
     assert_ne!(
@@ -3146,7 +3178,10 @@ fn image_export_ranges_share_declared_index_conventions() {
         "--pages",
         "2",
     ]);
-    assert_success(&converted, "convert selected JPEG");
+    assert_eq!(
+        assert_success_with_font_diagnostics(&converted, "convert selected JPEG"),
+        "Font 'Calibri' substituted: selected 'Carlito' from the bundled tier\n"
+    );
     let jpeg = input.with_extension("jpg");
     let expected = Document::open(&input)
         .unwrap()
@@ -3174,7 +3209,10 @@ fn image_export_ranges_share_declared_index_conventions() {
         "--output",
         path_text(&temp.path.join("all.png")),
     ]);
-    assert_success(&default_all, "convert all deterministic PNG pages");
+    assert_eq!(
+        assert_success_with_font_diagnostics(&default_all, "convert all deterministic PNG pages"),
+        "Font 'Calibri' substituted: selected 'Carlito' from the bundled tier\n"
+    );
     for one_based in 1..=3 {
         assert!(
             temp.path.join(format!("all_{one_based:03}.png")).exists(),
@@ -3194,7 +3232,10 @@ fn image_export_ranges_share_declared_index_conventions() {
         "--pages",
         "1,3",
     ]);
-    assert_success(&rendered, "render selected TIFF");
+    assert_eq!(
+        assert_success_with_font_diagnostics(&rendered, "render selected TIFF"),
+        "Font 'Calibri' substituted: selected 'Carlito' from the bundled tier\n"
+    );
     assert!(
         fs::read(temp.path.join("tiff-out/pages.tiff"))
             .unwrap()
@@ -7918,5 +7959,460 @@ fn issue423_cli_duplicate_numbering_overlay_preserves_source_and_refusals() {
         assert_eq!(reopened.paragraphs()[0].text(), expected, "{name}");
         assert!(package_part_text(&output, "/word/document.xml").contains(&numbering));
         assert_eq!(fs::read(&input).unwrap(), before);
+    }
+}
+
+#[cfg(not(feature = "system-fonts"))]
+#[test]
+fn cli_explicit_system_fonts_refuse_without_the_feature_and_publish_nothing() {
+    let workspace = TempWorkspace::new("system-fonts-off");
+    let input = workspace.path.join("input.docx");
+    let mut document = fixture_document(&[]);
+    document.add_paragraph("explicit system refusal");
+    document.save(&input).unwrap();
+    let original = fs::read(&input).unwrap();
+
+    let fonts = workspace.path.join("fonts");
+    fs::create_dir(&fonts).unwrap();
+    fs::write(
+        fonts.join("Carlito.ttf"),
+        include_bytes!("../../oxml-layout/fonts/Carlito-Regular.ttf"),
+    )
+    .unwrap();
+
+    let caller_image = workspace.path.join("caller-only.png");
+    assert_success_with_font_diagnostics(
+        &cli(&[
+            "convert",
+            path_text(&input),
+            "--to",
+            "png",
+            "--font-dir",
+            path_text(&fonts),
+            "--dpi",
+            "24",
+            "--output",
+            path_text(&caller_image),
+        ]),
+        "feature-off caller image",
+    );
+    let font_files = oxml_layout::FontFile::from_dir(&fonts).unwrap();
+    let refs = font_files
+        .iter()
+        .map(|font| (font.family.as_str(), font.data.as_slice()))
+        .collect::<Vec<_>>();
+    let caller_layout = Document::open(&input)
+        .unwrap()
+        .layout_with_fonts_and_bundled_fallback_and_options(&refs, RenderOptions::default())
+        .unwrap();
+    assert_eq!(
+        fs::read(&caller_image).unwrap(),
+        oxml_pdf::render_page_to_png(&caller_layout.layout, 0, 24.0).unwrap()
+    );
+    let refusal = "system fonts are not available in this build";
+
+    for format in ["pdf", "png"] {
+        let converted = workspace.path.join(format!("converted.{format}"));
+        for caller in [false, true] {
+            let mut args = vec![
+                "convert",
+                path_text(&input),
+                "--to",
+                format,
+                "--system-fonts",
+                "--output",
+                path_text(&converted),
+            ];
+            if caller {
+                args.extend(["--font-dir", path_text(&fonts)]);
+            }
+            let result = cli(&args);
+            assert_eq!(result.status.code(), Some(1), "convert caller={caller}");
+            assert!(
+                String::from_utf8_lossy(&result.stderr).contains(refusal),
+                "convert caller={caller}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(
+                !converted.exists(),
+                "convert caller={caller} published output"
+            );
+            assert_eq!(fs::read(&input).unwrap(), original);
+        }
+    }
+    let rendered = workspace.path.join("rendered");
+    for caller in [false, true] {
+        let mut args = vec![
+            "render",
+            path_text(&input),
+            "--system-fonts",
+            "--output-dir",
+            path_text(&rendered),
+            "--dpi",
+            "24",
+        ];
+        if caller {
+            args.extend(["--font-dir", path_text(&fonts)]);
+        }
+        let result = cli(&args);
+        assert_eq!(result.status.code(), Some(1), "render caller={caller}");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(refusal),
+            "render caller={caller}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            !rendered.join("input_page1.png").exists(),
+            "render caller={caller} published output"
+        );
+    }
+
+    for caller in [false, true] {
+        let mut args = vec!["layout", path_text(&input), "--system-fonts", "--json"];
+        if caller {
+            args.extend(["--font-dir", path_text(&fonts)]);
+        }
+        let result = cli(&args);
+        assert_eq!(result.status.code(), Some(1), "layout caller={caller}");
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains(refusal),
+            "layout caller={caller}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            result.stdout.is_empty(),
+            "layout caller={caller} printed a layout"
+        );
+    }
+
+    // `inspect` gains no font-policy flag, so clap refuses it as an option.
+    let inspect = cli(&["inspect", path_text(&input), "--system-fonts"]);
+    assert_eq!(
+        inspect.status.code(),
+        Some(2),
+        "inspect must reject --system-fonts"
+    );
+    assert!(String::from_utf8_lossy(&inspect.stderr).contains("system-fonts"));
+
+    // An empty caller directory without the flag is omission, not a caller set.
+    // This must be a genuinely empty directory, not the populated `fonts` path
+    // used by the explicit-system refusal loops above.
+    let empty_fonts = workspace.path.join("empty-fonts");
+    fs::create_dir(&empty_fonts).unwrap();
+    let omitted = cli(&[
+        "layout",
+        path_text(&input),
+        "--font-dir",
+        path_text(&empty_fonts),
+        "--json",
+    ]);
+    assert_success(&omitted, "empty-directory omission layout");
+    let plain = cli(&["layout", path_text(&input), "--json"]);
+    assert_success(&plain, "plain layout");
+    assert_eq!(omitted.stdout, plain.stdout);
+}
+
+#[cfg(feature = "system-fonts")]
+#[test]
+fn cli_font_policy_routes_bundled_omission_and_the_system_opt_in_per_command() {
+    let workspace = TempWorkspace::new("system-fonts-on");
+    let input = workspace.path.join("input.docx");
+    let mut document = fixture_document(&[]);
+    document.add_paragraph("font policy routes");
+    document
+        .add_paragraph("")
+        .add_run("iiiiWWWW caller matrix")
+        .font("FX195CallerOnly");
+    document.save(&input).unwrap();
+    let opened = Document::open(&input).unwrap();
+
+    let empty_fonts = workspace.path.join("empty-fonts");
+    fs::create_dir(&empty_fonts).unwrap();
+
+    // Omission is bundled. No flag and an empty directory share the
+    // deterministic result for all three commands.
+    let deterministic_pdf = opened
+        .to_pdf_deterministic_with_options(RenderOptions::default())
+        .unwrap();
+    let plain_pdf = workspace.path.join("plain.pdf");
+    let plain_stderr = assert_success_with_font_diagnostics(
+        &cli(&[
+            "convert",
+            path_text(&input),
+            "--to",
+            "pdf",
+            "--output",
+            path_text(&plain_pdf),
+        ]),
+        "plain convert",
+    );
+    assert_eq!(fs::read(&plain_pdf).unwrap(), deterministic_pdf);
+    assert!(
+        plain_stderr
+            .contains("Font 'Calibri' substituted: selected 'Carlito' from the bundled tier")
+    );
+    assert!(plain_stderr.contains("Font 'FX195CallerOnly' substituted: selected '"));
+    let empty_pdf = workspace.path.join("empty.pdf");
+    let empty_stderr = assert_success_with_font_diagnostics(
+        &cli(&[
+            "convert",
+            path_text(&input),
+            "--to",
+            "pdf",
+            "--font-dir",
+            path_text(&empty_fonts),
+            "--output",
+            path_text(&empty_pdf),
+        ]),
+        "empty-directory convert",
+    );
+    assert_eq!(fs::read(&empty_pdf).unwrap(), deterministic_pdf);
+    assert_eq!(empty_stderr, plain_stderr);
+
+    let deterministic_png = opened
+        .render_page_to_png_deterministic_with_options(0, 24.0, RenderOptions::default())
+        .unwrap()
+        .unwrap();
+    let plain_render = workspace.path.join("plain-render");
+    let render_stderr = assert_success_with_font_diagnostics(
+        &cli(&[
+            "render",
+            path_text(&input),
+            "--output-dir",
+            path_text(&plain_render),
+            "--dpi",
+            "24",
+        ]),
+        "plain render",
+    );
+    assert_eq!(render_stderr, plain_stderr);
+    assert_eq!(
+        fs::read(plain_render.join("input_page1.png")).unwrap(),
+        deterministic_png
+    );
+
+    let plain_layout = cli(&["layout", path_text(&input), "--json"]);
+    assert_success(&plain_layout, "plain layout");
+    let empty_layout = cli(&[
+        "layout",
+        path_text(&input),
+        "--font-dir",
+        path_text(&empty_fonts),
+        "--json",
+    ]);
+    assert_success(&empty_layout, "empty-directory layout");
+    assert_eq!(plain_layout.stdout, empty_layout.stdout);
+
+    // The explicit opt-in selects the system tier on the same three routes.
+    let system = RenderOptions {
+        use_system_fonts: true,
+        ..RenderOptions::default()
+    };
+    let system_pdf_path = workspace.path.join("system.pdf");
+    let system_stderr = assert_success_with_font_diagnostics(
+        &cli(&[
+            "convert",
+            path_text(&input),
+            "--to",
+            "pdf",
+            "--system-fonts",
+            "--output",
+            path_text(&system_pdf_path),
+        ]),
+        "system convert",
+    );
+    assert!(system_stderr.contains("Font 'FX195CallerOnly' substituted: selected '"));
+    assert_eq!(
+        fs::read(&system_pdf_path).unwrap(),
+        opened.to_pdf_with_options(system).unwrap()
+    );
+
+    let system_png = opened
+        .render_page_to_png_with_options(0, 24.0, system)
+        .unwrap()
+        .unwrap();
+    let system_render = workspace.path.join("system-render");
+    let system_render_stderr = assert_success_with_font_diagnostics(
+        &cli(&[
+            "render",
+            path_text(&input),
+            "--system-fonts",
+            "--output-dir",
+            path_text(&system_render),
+            "--dpi",
+            "24",
+        ]),
+        "system render",
+    );
+    assert_eq!(system_render_stderr, system_stderr);
+    assert_eq!(
+        fs::read(system_render.join("input_page1.png")).unwrap(),
+        system_png
+    );
+
+    let system_layout = cli(&["layout", path_text(&input), "--system-fonts", "--json"]);
+    assert_success(&system_layout, "system layout");
+    let system_layout: Value = serde_json::from_slice(&system_layout.stdout).unwrap();
+    assert_eq!(
+        system_layout["page_count"],
+        opened
+            .layout_with_options(system)
+            .unwrap()
+            .layout
+            .pages
+            .len()
+    );
+
+    // A nonempty caller directory keeps caller priority on the bundled route.
+    let caller_fonts = workspace.path.join("caller-fonts");
+    fs::create_dir(&caller_fonts).unwrap();
+    let caller_bytes = fx195_caller_only_monospace();
+    fs::write(caller_fonts.join("FilenameAlias.ttf"), &caller_bytes).unwrap();
+    let caller_pdf = workspace.path.join("caller.pdf");
+    let caller_stderr = assert_success_with_font_diagnostics(
+        &cli(&[
+            "convert",
+            path_text(&input),
+            "--to",
+            "pdf",
+            "--font-dir",
+            path_text(&caller_fonts),
+            "--output",
+            path_text(&caller_pdf),
+        ]),
+        "caller convert",
+    );
+    assert!(
+        !caller_stderr.contains("FX195CallerOnly"),
+        "caller face must satisfy the request without a substitution fact: {caller_stderr}"
+    );
+    let caller_files = oxml_layout::FontFile::from_dir(&caller_fonts).unwrap();
+    let caller_refs = caller_files
+        .iter()
+        .map(|font| (font.family.as_str(), font.data.as_slice()))
+        .collect::<Vec<_>>();
+    let caller_layout = opened
+        .layout_with_fonts_and_bundled_fallback_and_options(&caller_refs, RenderOptions::default())
+        .unwrap();
+    assert_eq!(
+        fs::read(&caller_pdf).unwrap(),
+        oxml_pdf::render_to_pdf_checked(&caller_layout.layout).unwrap()
+    );
+
+    // A nonempty caller list with the explicit system opt-in follows the
+    // system column on all three commands and keeps caller priority.
+    let caller_system_pdf = workspace.path.join("caller-system.pdf");
+    let caller_system_stderr = assert_success_with_font_diagnostics(
+        &cli(&[
+            "convert",
+            path_text(&input),
+            "--to",
+            "pdf",
+            "--font-dir",
+            path_text(&caller_fonts),
+            "--system-fonts",
+            "--output",
+            path_text(&caller_system_pdf),
+        ]),
+        "caller system convert",
+    );
+    assert!(
+        !caller_system_stderr.contains("FX195CallerOnly"),
+        "caller face must satisfy the request without a substitution fact: {caller_system_stderr}"
+    );
+    let caller_system_layout = opened
+        .layout_with_additional_fonts_and_options(&caller_refs, system)
+        .unwrap();
+    assert_eq!(
+        fs::read(&caller_system_pdf).unwrap(),
+        oxml_pdf::render_to_pdf_checked(&caller_system_layout.layout).unwrap()
+    );
+
+    let caller_system_render = workspace.path.join("caller-system-render");
+    let caller_system_render_stderr = assert_success_with_font_diagnostics(
+        &cli(&[
+            "render",
+            path_text(&input),
+            "--font-dir",
+            path_text(&caller_fonts),
+            "--system-fonts",
+            "--output-dir",
+            path_text(&caller_system_render),
+            "--dpi",
+            "24",
+        ]),
+        "caller system render",
+    );
+    assert_eq!(caller_system_render_stderr, caller_system_stderr);
+    assert_eq!(
+        fs::read(caller_system_render.join("input_page1.png")).unwrap(),
+        opened
+            .render_page_to_png_with_fonts_and_options(0, 24.0, &caller_refs, system)
+            .unwrap()
+            .unwrap()
+    );
+
+    let caller_system_layout_json = cli(&[
+        "layout",
+        path_text(&input),
+        "--font-dir",
+        path_text(&caller_fonts),
+        "--system-fonts",
+        "--json",
+    ]);
+    assert_success(&caller_system_layout_json, "caller system layout");
+    let caller_system_layout_json: Value =
+        serde_json::from_slice(&caller_system_layout_json.stdout).unwrap();
+    assert_eq!(
+        caller_system_layout_json["page_count"],
+        caller_system_layout.layout.pages.len()
+    );
+
+    for (name, caller, system_fonts) in [
+        ("bundled-image", false, false),
+        ("caller-image", true, false),
+        ("system-image", false, true),
+        ("caller-system-image", true, true),
+    ] {
+        let output = workspace.path.join(format!("{name}.png"));
+        let mut args = vec![
+            "convert",
+            path_text(&input),
+            "--to",
+            "png",
+            "--dpi",
+            "24",
+            "--output",
+            path_text(&output),
+        ];
+        if caller {
+            args.extend(["--font-dir", path_text(&caller_fonts)]);
+        }
+        if system_fonts {
+            args.push("--system-fonts");
+        }
+        assert_success_with_font_diagnostics(&cli(&args), name);
+        let options = RenderOptions {
+            use_system_fonts: system_fonts,
+            ..RenderOptions::default()
+        };
+        let expected = if caller {
+            let layout = if system_fonts {
+                opened
+                    .layout_with_additional_fonts_and_options(&caller_refs, options)
+                    .unwrap()
+            } else {
+                opened
+                    .layout_with_fonts_and_bundled_fallback_and_options(&caller_refs, options)
+                    .unwrap()
+            };
+            oxml_pdf::render_page_to_png(&layout.layout, 0, 24.0).unwrap()
+        } else {
+            opened
+                .render_page_to_png_with_options(0, 24.0, options)
+                .unwrap()
+                .unwrap()
+        };
+        assert_eq!(fs::read(output).unwrap(), expected, "{name}");
     }
 }

@@ -26,7 +26,8 @@ pub struct SvgRenderResult {
     pub diagnostics: Vec<SvgDiagnostic>,
 }
 
-pub(crate) fn render_page(layout: &LayoutResult, page_index: usize) -> Option<SvgRenderResult> {
+/// Lower one laid-out page to a self-contained SVG document.
+pub fn render_page(layout: &LayoutResult, page_index: usize) -> Option<SvgRenderResult> {
     let page = layout.pages.get(page_index)?;
     let mut state = SvgState::new(
         layout,

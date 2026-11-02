@@ -766,6 +766,7 @@ fn layout_table_inner(
                     cell_path,
                     style_cell.paragraph_properties.as_ref(),
                     style_cell.run_properties.as_ref(),
+                    cell_shading,
                     doc_grid,
                 )?
             };
@@ -1521,6 +1522,8 @@ fn autofit_column_widths(
                             cell_path,
                             style_cell.paragraph_properties.as_ref(),
                             style_cell.run_properties.as_ref(),
+                            // Text colour does not change a measured width.
+                            None,
                             doc_grid,
                         )?;
                         Ok(if rotated {
@@ -1718,6 +1721,7 @@ fn layout_cell_content(
     cell_path: &[usize],
     table_style_ppr: Option<&rdocx_oxml::properties::CT_PPr>,
     table_style_rpr: Option<&rdocx_oxml::properties::CT_RPr>,
+    cell_shading: Option<Color>,
     doc_grid: Option<&CT_DocGrid>,
 ) -> Result<(Vec<CellBlock>, Vec<CellBlockSemantics>)> {
     use crate::engine;
@@ -1744,6 +1748,7 @@ fn layout_cell_content(
                         source,
                         table_style_ppr,
                         table_style_rpr,
+                        cell_shading,
                         doc_grid,
                     )?;
                 if let Some(registry) = sources {
@@ -1800,6 +1805,7 @@ fn layout_cell_content(
                 &source_path,
                 table_style_ppr,
                 table_style_rpr,
+                cell_shading,
                 doc_grid,
                 &mut blocks,
                 &mut semantics,
@@ -1853,6 +1859,7 @@ fn layout_control_cell_content(
     path: &[usize],
     table_style_ppr: Option<&rdocx_oxml::properties::CT_PPr>,
     table_style_rpr: Option<&rdocx_oxml::properties::CT_RPr>,
+    cell_shading: Option<Color>,
     doc_grid: Option<&CT_DocGrid>,
     blocks: &mut Vec<CellBlock>,
     semantics: &mut Vec<CellBlockSemantics>,
@@ -1878,6 +1885,7 @@ fn layout_control_cell_content(
                         source,
                         table_style_ppr,
                         table_style_rpr,
+                        cell_shading,
                         doc_grid,
                     )?;
                 if let Some(registry) = sources {
@@ -1934,6 +1942,7 @@ fn layout_control_cell_content(
                 &source_path,
                 table_style_ppr,
                 table_style_rpr,
+                cell_shading,
                 doc_grid,
                 blocks,
                 semantics,
@@ -2161,13 +2170,10 @@ fn resolve_table_style_cell(
                 .get_or_insert_with(rdocx_oxml::properties::CT_RPr::default)
                 .merge_from(properties);
         }
-        if let Some(borders) = style
-            .table_properties
-            .as_ref()
-            .and_then(|properties| properties.borders.as_ref())
-        {
-            overlay_borders(&mut resolved.borders, borders);
-        }
+        // The style's `w:tblBorders` are table borders, not cell borders. They
+        // reach the table through `resolve_base_table_properties`, under the
+        // table's own, and its outer edges apply to the table's outer edges
+        // only (ECMA-376 Part 1, 17.4.39).
         if let Some(shading) = style
             .table_properties
             .as_ref()
@@ -2918,8 +2924,12 @@ mod tests {
             header_borders.top.as_ref().unwrap().color.as_deref(),
             Some("0000AA")
         );
+        // The style's `w:tblBorders` stays on the table, where paint uses it
+        // as the fallback for a cell edge the cell itself did not set.
+        assert!(header_borders.left.is_none());
+        let table_borders = block.borders.as_ref().expect("style table borders");
         assert_eq!(
-            header_borders.left.as_ref().unwrap().color.as_deref(),
+            table_borders.left.as_ref().unwrap().color.as_deref(),
             Some("AA0000")
         );
     }

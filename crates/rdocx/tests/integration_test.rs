@@ -1886,7 +1886,7 @@ mod theme_and_embedded_font_tests {
     use quick_xml::events::BytesStart;
     use rdocx::{
         CT_OfficeStyleSheet, EmbeddedFont, EmbeddedFontKind, FontDefinition, FontEmbeddingLicense,
-        ThemeFontLanguage,
+        RenderOptions, ThemeFontLanguage,
     };
 
     const FONT_KEY: &str = "{00112233-4455-6677-8899-AABBCCDDEEFF}";
@@ -1984,6 +1984,85 @@ mod theme_and_embedded_font_tests {
         document.set_font(corpus_font()).unwrap();
         document.embed_font("Corpus Sans", embedded_font()).unwrap();
         document
+    }
+
+    #[test]
+    fn issue433_caller_face_beats_same_family_embedded_and_bundled_faces() {
+        let family = "Liberation Sans";
+        let sans = include_bytes!("../../oxml-layout/fonts/LiberationSans-Regular.ttf");
+        let mono = include_bytes!("../../oxml-layout/fonts/LiberationMono-Regular.ttf");
+        let mut caller = mono.to_vec();
+        for (old, new) in [
+            (b"Liberation Mono".to_vec(), family.as_bytes().to_vec()),
+            (
+                "Liberation Mono"
+                    .encode_utf16()
+                    .flat_map(u16::to_be_bytes)
+                    .collect(),
+                family.encode_utf16().flat_map(u16::to_be_bytes).collect(),
+            ),
+        ] {
+            assert_eq!(old.len(), new.len());
+            for offset in 0..=caller.len() - old.len() {
+                if caller[offset..].starts_with(&old) {
+                    caller[offset..offset + old.len()].copy_from_slice(&new);
+                }
+            }
+        }
+        let mut document = Document::new();
+        document
+            .add_paragraph("")
+            .add_run(&"iiiiiiiiiiiiiiiiiiii ".repeat(160))
+            .font(family);
+        let bundled = document.to_pdf().unwrap();
+        let caller_fonts = [(family, caller.as_slice())];
+        let caller_reference = document
+            .to_pdf_with_diagnostics(&caller_fonts, RenderOptions::default())
+            .unwrap();
+        assert_ne!(
+            bundled, caller_reference.0,
+            "mono metrics must differ from bundled Sans"
+        );
+        assert!(caller_reference.1.is_empty());
+        document
+            .embed_font(
+                family,
+                EmbeddedFont::new(
+                    EmbeddedFontKind::Regular,
+                    sans.to_vec(),
+                    FONT_KEY,
+                    license(true, "Liberation fonts SIL OFL 1.1"),
+                ),
+            )
+            .unwrap();
+        assert_ne!(
+            document.to_pdf().unwrap(),
+            caller_reference.0,
+            "embedded Sans differs from caller Mono"
+        );
+        for system in [false, true] {
+            if system && !cfg!(feature = "system-fonts") {
+                continue;
+            }
+            let options = RenderOptions {
+                use_system_fonts: system,
+                ..RenderOptions::default()
+            };
+            assert_eq!(
+                document
+                    .to_pdf_with_diagnostics(&caller_fonts, options)
+                    .unwrap(),
+                caller_reference,
+                "caller must beat same-family embedded face, system={system}"
+            );
+        }
+        let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            reopened
+                .to_pdf_with_diagnostics(&caller_fonts, RenderOptions::default())
+                .unwrap(),
+            caller_reference
+        );
     }
 
     #[test]
@@ -9071,10 +9150,21 @@ fn independent_nested_tables_measure_to_one_final_height() {
         .fold(0.0_f64, f64::max);
     let final_height_twips = (final_height * 20.0).ceil() as i32;
     assert!(measurements[0].height_points < final_height);
-    assert!(
+    // Each nested-table measurement reports exactly one bundled substitution
+    // fact for the document-default Calibri face, with no arbitrary extras.
+    assert_eq!(
         measurements
             .iter()
-            .all(|result| result.diagnostics.is_empty())
+            .map(|result| result
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.message.as_str())
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>(),
+        [
+            vec!["Font 'Calibri' substituted: selected 'Carlito' from the bundled tier"],
+            vec!["Font 'Calibri' substituted: selected 'Carlito' from the bundled tier"],
+        ]
     );
 
     for index in 0..2 {
@@ -13013,6 +13103,7 @@ fn save_pdf_to_file() {
         rdocx::RenderOptions {
             revision_view: rdocx::RevisionView::Tracked,
             revision_style: rdocx::RevisionStyle::Plain,
+            use_system_fonts: false,
         },
     );
     if result.is_ok() {
@@ -36612,4 +36703,60 @@ fn issue424_note_authoring_marker_source_survives_save_reopen_and_imported_absen
         });
     }
     assert_eq!(bodyless_numbers, 1, "only the actual endnote mark remains");
+}
+
+#[test]
+fn issue433_generated_toc_entries_draw_plain_and_not_underlined() {
+    let mut document = Document::new();
+    document.add_paragraph("Introduction").style("Heading1");
+    document.add_paragraph("Methods").style("Heading1");
+    document.add_paragraph("Body text.");
+    document.insert_toc(0, 1).unwrap();
+
+    let layout = document.layout_deterministic().unwrap();
+    let mut runs = Vec::new();
+    let mut hyperlink_lines = 0;
+    let mut all_lines = 0;
+    oxml_layout::walk(
+        &layout.layout.pages[0].elements,
+        &mut |element, _| match element {
+            oxml_layout::PositionedElement::Text(run) => {
+                runs.push((run.text.clone(), run.color));
+            }
+            oxml_layout::PositionedElement::Line { color, .. } => {
+                all_lines += 1;
+                if *color == oxml_layout::Color::from_hex("0563C1") {
+                    hyperlink_lines += 1;
+                }
+            }
+            _ => {}
+        },
+    );
+    let all_text = runs
+        .iter()
+        .map(|(text, _)| text.as_str())
+        .collect::<String>();
+    assert!(all_text.contains("Table of Contents"), "{all_text}");
+    assert!(all_text.contains("Introduction"), "{all_text}");
+    assert!(all_text.contains("Methods"), "{all_text}");
+    let first_color = |needle: &str| {
+        runs.iter()
+            .find(|(text, _)| text == needle)
+            .map(|(_, color)| *color)
+    };
+    assert_eq!(
+        first_color("Introduction"),
+        Some(oxml_layout::Color::BLACK),
+        "generated TOC entry must draw plain: {runs:?}"
+    );
+    assert_eq!(
+        first_color("Methods"),
+        Some(oxml_layout::Color::BLACK),
+        "generated TOC entry must draw plain: {runs:?}"
+    );
+    assert_eq!(all_lines, 0, "generated TOC has no underline of any colour");
+    assert_eq!(
+        hyperlink_lines, 0,
+        "generated TOC entries must not carry the Hyperlink underline"
+    );
 }

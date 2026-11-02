@@ -77,6 +77,31 @@ pub struct RenderOptions {
     pub revision_view: rdocx_layout::RevisionView,
     /// How the tracked view marks revisions.
     pub revision_style: rdocx_layout::RevisionStyle,
+    /// Select system font discovery for the implicit layout publishers.
+    ///
+    /// Derived `Default` is `false`, so omission uses the bundled cache.
+    /// `true` is the explicit system opt-in, and a build without the
+    /// `system-fonts` feature refuses it. Deterministic helpers ignore it.
+    pub use_system_fonts: bool,
+}
+
+/// The refusal for an explicit system-font request on a feature-off build.
+const SYSTEM_FONTS_UNAVAILABLE: &str =
+    "system fonts are not available in this build (the system-fonts feature is disabled)";
+
+/// Which font tier an implicit layout publisher uses for omission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FontPolicy {
+    BundledOnly,
+    SystemWithBundledFallback,
+}
+
+fn font_policy(options: RenderOptions) -> FontPolicy {
+    if options.use_system_fonts {
+        FontPolicy::SystemWithBundledFallback
+    } else {
+        FontPolicy::BundledOnly
+    }
 }
 
 /// Which of Word's independent note streams a policy governs.
@@ -24901,6 +24926,36 @@ impl Document {
         Ok(layout)
     }
 
+    /// One private owner for the omission and caller-font tier selection.
+    ///
+    /// Empty caller fonts are omission: the policy cache `Arc` is returned
+    /// unchanged. A tracked view stays uncached. Nonempty caller fonts keep
+    /// caller priority and return `Arc::new` of the owned public method.
+    fn layout_with_font_policy(
+        &self,
+        policy: FontPolicy,
+        font_files: &[(&str, &[u8])],
+        options: RenderOptions,
+    ) -> Result<Arc<rdocx_layout::WordLayoutResult>> {
+        if matches!(policy, FontPolicy::SystemWithBundledFallback)
+            && !cfg!(feature = "system-fonts")
+        {
+            return Err(Error::Other(SYSTEM_FONTS_UNAVAILABLE.to_owned()));
+        }
+        if font_files.is_empty() {
+            return self.layout_for_options(options, matches!(policy, FontPolicy::BundledOnly));
+        }
+        let owned = match policy {
+            FontPolicy::BundledOnly => {
+                self.layout_with_fonts_and_bundled_fallback_and_options(font_files, options)?
+            }
+            FontPolicy::SystemWithBundledFallback => {
+                self.layout_with_additional_fonts_and_options(font_files, options)?
+            }
+        };
+        Ok(Arc::new(owned))
+    }
+
     fn layout_for_options(
         &self,
         options: RenderOptions,
@@ -45633,23 +45688,27 @@ impl Document {
         true
     }
 
-    /// Return the cached normal-font layout with its Word source map.
+    /// Return the cached bundled-font layout with its Word source map.
     ///
+    /// This is the default omission tier. Set [`RenderOptions::use_system_fonts`]
+    /// through [`Self::layout_with_options`] to request the system opt-in.
     /// Repeated calls share the same accepted-view result until the document
     /// is mutated.
     pub fn layout(&self) -> Result<Arc<rdocx_layout::WordLayoutResult>> {
         self.layout_with_options(RenderOptions::default())
     }
 
-    /// Return a normal-font layout with the selected revision view.
+    /// Return a layout with the selected revision view and font tier.
     ///
-    /// Accepted-view calls share the normal layout cache. Tracked-view calls
-    /// remain uncached because they do not replace the accepted-view cache.
+    /// Accepted-view calls share the bundled cache unless
+    /// [`RenderOptions::use_system_fonts`] is true, which selects the normal
+    /// cache. Tracked-view calls remain uncached because they do not replace
+    /// the accepted-view cache.
     pub fn layout_with_options(
         &self,
         options: RenderOptions,
     ) -> Result<Arc<rdocx_layout::WordLayoutResult>> {
-        self.layout_for_options(options, false)
+        self.layout_with_font_policy(font_policy(options), &[], options)
     }
 
     /// Return the bundled-font-only layout with its Word source map.
@@ -46247,13 +46306,14 @@ impl Document {
         Ok(oxml_pdf::render_all_pages(&layout.layout, dpi))
     }
 
-    /// Encode one normal-fallback bundle and return its owned diagnostics.
+    /// Encode one bundle with bundled fonts by default, or explicit system fonts,
+    /// and return its owned diagnostics. Caller fonts keep highest priority.
     pub fn to_pdf_with_diagnostics(
         &self,
         font_files: &[(&str, &[u8])],
         options: RenderOptions,
     ) -> Result<(Vec<u8>, Vec<oxml_layout::Diagnostic>)> {
-        let layout = self.layout_with_additional_fonts_and_options(font_files, options)?;
+        let layout = self.layout_with_font_policy(font_policy(options), font_files, options)?;
         let bytes = oxml_pdf::render_to_pdf_checked(&layout.layout)?;
         Ok((bytes, layout.layout.diagnostics.clone()))
     }
@@ -46266,7 +46326,7 @@ impl Document {
         font_files: &[(&str, &[u8])],
         options: RenderOptions,
     ) -> Result<(Option<Vec<u8>>, Vec<oxml_layout::Diagnostic>)> {
-        let layout = self.layout_with_additional_fonts_and_options(font_files, options)?;
+        let layout = self.layout_with_font_policy(font_policy(options), font_files, options)?;
         let bytes = oxml_pdf::render_page_to_png(&layout.layout, page_index, dpi);
         Ok((bytes, layout.layout.diagnostics.clone()))
     }
@@ -46278,7 +46338,7 @@ impl Document {
         font_files: &[(&str, &[u8])],
         options: RenderOptions,
     ) -> Result<(Vec<Vec<u8>>, Vec<oxml_layout::Diagnostic>)> {
-        let layout = self.layout_with_additional_fonts_and_options(font_files, options)?;
+        let layout = self.layout_with_font_policy(font_policy(options), font_files, options)?;
         let bytes = oxml_pdf::render_all_pages(&layout.layout, dpi);
         Ok((bytes, layout.layout.diagnostics.clone()))
     }
@@ -46291,7 +46351,7 @@ impl Document {
         font_files: &[(&str, &[u8])],
         options: RenderOptions,
     ) -> Result<(oxml_pdf::RasterOutput, Vec<oxml_layout::Diagnostic>)> {
-        let layout = self.layout_with_additional_fonts_and_options(font_files, options)?;
+        let layout = self.layout_with_font_policy(font_policy(options), font_files, options)?;
         let all_pages;
         let selected = match page_indices {
             Some(selected) => selected,
@@ -46358,8 +46418,10 @@ impl Document {
         Ok(oxml_pdf::render_all_pages(&layout.layout, dpi))
     }
 
-    /// Return a cloned positioned page from the cached normal-font layout.
+    /// Return a cloned positioned page from the cached bundled-font layout.
     ///
+    /// This is the default omission tier. Set [`RenderOptions::use_system_fonts`]
+    /// through [`Self::layout_page_with_options`] to request the system opt-in.
     /// `page_index` is zero-based. An index beyond the document returns `None`.
     pub fn layout_page(&self, page_index: usize) -> Result<Option<oxml_layout::PageFrame>> {
         self.layout_page_with_options(page_index, RenderOptions::default())
@@ -63949,6 +64011,7 @@ mod tests {
             RenderOptions {
                 revision_view: rdocx_layout::RevisionView::Tracked,
                 revision_style: rdocx_layout::RevisionStyle::Plain,
+                use_system_fonts: false,
             },
         ] {
             reset_layout_invocations();
@@ -64238,6 +64301,7 @@ mod tests {
         let options = RenderOptions {
             revision_view: rdocx_layout::RevisionView::Tracked,
             revision_style: rdocx_layout::RevisionStyle::Plain,
+            use_system_fonts: false,
         };
 
         reset_layout_invocations();
@@ -64345,7 +64409,7 @@ mod tests {
     }
 
     #[test]
-    fn font_modes_use_isolated_layout_caches() {
+    fn font_modes_share_bundled_omission_and_isolate_caller_fonts() {
         let mut doc = Document::new();
         doc.add_paragraph("Font mode isolation");
 
@@ -64358,18 +64422,145 @@ mod tests {
         assert!(!doc.to_pdf().unwrap().is_empty());
         assert_eq!(layout_invocations(), 1);
 
+        // The implicit bundled omission publishers and the explicit
+        // deterministic helpers share one cache. A second layout pass here
+        // would mean the implicit call had moved to the normal engine.
+        let implicit = doc.layout().unwrap();
+        let deterministic = doc.layout_deterministic().unwrap();
+        assert!(Arc::ptr_eq(&implicit, &deterministic));
         doc.render_page_to_png_deterministic(0, 1.0).unwrap();
         doc.render_page_to_png_deterministic(0, 1.0).unwrap();
-        assert_eq!(layout_invocations(), 2);
+        assert_eq!(layout_invocations(), 1);
 
         doc.render_page_to_png(0, 1.0).unwrap();
         doc.render_page_to_png_deterministic(0, 1.0).unwrap();
-        assert_eq!(layout_invocations(), 2);
+        assert_eq!(layout_invocations(), 1);
 
+        // Caller-font bundles are owned and never stored in either cache.
         let (family, font_data) = oxml_layout::bundled_fonts::bundled_font_data()[0];
         doc.to_pdf_with_fonts(&[(family, font_data)]).unwrap();
         doc.to_pdf_with_fonts(&[(family, font_data)]).unwrap();
-        assert_eq!(layout_invocations(), 4);
+        assert_eq!(layout_invocations(), 3);
+    }
+
+    #[test]
+    fn issue433_render_options_default_selects_the_bundled_tier() {
+        assert!(!RenderOptions::default().use_system_fonts);
+
+        let mut doc = Document::new();
+        doc.add_paragraph("Bundled omission");
+        reset_layout_invocations();
+
+        let implicit = doc.layout().unwrap();
+        let explicit = doc
+            .layout_with_options(RenderOptions {
+                use_system_fonts: false,
+                ..RenderOptions::default()
+            })
+            .unwrap();
+        assert!(Arc::ptr_eq(&implicit, &explicit));
+        assert_eq!(layout_invocations(), 1);
+
+        // The diagnostic twins for an empty caller slice are omission too, so
+        // they read the same bundled cache rather than the additional-font
+        // engine.
+        let deterministic = doc.to_pdf_deterministic().unwrap();
+        let (diagnostic_bytes, _) = doc
+            .to_pdf_with_diagnostics(&[], RenderOptions::default())
+            .unwrap();
+        assert_eq!(diagnostic_bytes, deterministic);
+        assert_eq!(layout_invocations(), 1);
+
+        // A nonempty caller slice under the bundled policy shares the
+        // bundled-fallback sibling, not the normal additional-font engine.
+        let (family, bytes) = caller_only_font();
+        let mut caller_doc = Document::new();
+        caller_doc
+            .add_paragraph("")
+            .add_run("bundled caller")
+            .font(family);
+        let caller_fonts = [(family, bytes.as_slice())];
+        let (caller_diagnostic_bytes, _) = caller_doc
+            .to_pdf_with_diagnostics(&caller_fonts, RenderOptions::default())
+            .unwrap();
+        assert_eq!(
+            caller_diagnostic_bytes,
+            caller_doc
+                .to_pdf_with_fonts_deterministic_and_options(
+                    &caller_fonts,
+                    RenderOptions::default()
+                )
+                .unwrap()
+        );
+    }
+
+    #[cfg(not(feature = "system-fonts"))]
+    #[test]
+    fn issue433_explicit_system_request_refuses_without_the_feature() {
+        let mut doc = Document::new();
+        doc.add_paragraph("Explicit system refusal");
+        let options = RenderOptions {
+            use_system_fonts: true,
+            ..RenderOptions::default()
+        };
+        let expected =
+            "system fonts are not available in this build (the system-fonts feature is disabled)";
+
+        match doc.layout_with_options(options) {
+            Err(Error::Other(message)) => assert_eq!(message, expected),
+            other => panic!("empty omission did not refuse: {other:?}"),
+        }
+        let (family, bytes) = caller_only_font();
+        match doc.to_pdf_with_diagnostics(&[(family, &bytes)], options) {
+            Err(Error::Other(message)) => assert_eq!(message, expected),
+            other => panic!("nonempty caller set did not refuse: {other:?}"),
+        }
+        // An explicit system request must not fall through to the normal
+        // engine, which would silently succeed with bundled faces.
+        assert!(
+            doc.normal_layout_engine
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+        );
+    }
+
+    #[cfg(feature = "system-fonts")]
+    #[test]
+    fn issue433_explicit_system_request_uses_the_normal_cache() {
+        let mut doc = Document::new();
+        doc.add_paragraph("Explicit system cache");
+        let options = RenderOptions {
+            use_system_fonts: true,
+            ..RenderOptions::default()
+        };
+
+        let first = doc.layout_with_options(options).unwrap();
+        let second = doc.layout_with_options(options).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &doc.layout().unwrap()));
+
+        let (diagnostic_bytes, _) = doc.to_pdf_with_diagnostics(&[], options).unwrap();
+        assert_eq!(diagnostic_bytes, doc.to_pdf_with_options(options).unwrap());
+
+        // The nonempty system diagnostic twin shares the normal-engine
+        // sibling instead of the bundled fallback.
+        let (family, bytes) = caller_only_font();
+        let mut caller_doc = Document::new();
+        caller_doc
+            .add_paragraph("")
+            .add_run("system caller")
+            .font(family);
+        let caller_fonts = [(family, bytes.as_slice())];
+        let (caller_diagnostic_bytes, _) = caller_doc
+            .to_pdf_with_diagnostics(&caller_fonts, options)
+            .unwrap();
+        assert_eq!(
+            caller_diagnostic_bytes,
+            caller_doc
+                .to_pdf_with_fonts_and_options(&caller_fonts, options)
+                .unwrap()
+        );
     }
 
     #[test]
@@ -65105,6 +65296,7 @@ mod tests {
         let tracked = RenderOptions {
             revision_view: rdocx_layout::RevisionView::Tracked,
             revision_style: rdocx_layout::RevisionStyle::Plain,
+            use_system_fonts: false,
         };
 
         reset_layout_invocations();
@@ -65119,12 +65311,33 @@ mod tests {
             .expect("second tracked layout should succeed");
         assert!(!Arc::ptr_eq(&tracked_first, &tracked_second));
         assert_eq!(layout_invocations(), 3);
+        // Bundled tracked calls are fresh deterministic layouts and do not
+        // touch the normal engine or either accepted-result cache. The earlier
+        // accepted bundled call already primed the deterministic cache, so the
+        // tracked calls must leave that accepted Arc intact.
         assert!(
             doc.normal_layout_engine
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_some()
+                .is_none()
         );
+        assert!(
+            doc.layout_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+        );
+        {
+            let cache = doc
+                .deterministic_layout_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let cached = cache
+                .as_ref()
+                .expect("accepted bundled layout primes the deterministic cache");
+            assert!(Arc::ptr_eq(&accepted_first, cached));
+            assert!(!Arc::ptr_eq(&tracked_first, cached));
+        }
 
         let accepted_second = doc.layout().expect("accepted cache should succeed");
         assert!(Arc::ptr_eq(&accepted_first, &accepted_second));
@@ -65137,6 +65350,29 @@ mod tests {
             accepted_first.revision_view,
             rdocx_layout::RevisionView::Accepted
         );
+
+        #[cfg(feature = "system-fonts")]
+        {
+            let normal = RenderOptions {
+                use_system_fonts: true,
+                ..RenderOptions::default()
+            };
+            let system_first = doc
+                .layout_with_options(normal)
+                .expect("accepted system layout should succeed");
+            let system_second = doc
+                .layout_with_options(normal)
+                .expect("accepted system cache should succeed");
+            assert!(Arc::ptr_eq(&system_first, &system_second));
+            assert!(!Arc::ptr_eq(&system_first, &accepted_first));
+            assert_eq!(layout_invocations(), 4);
+            assert!(
+                doc.normal_layout_engine
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_some()
+            );
+        }
     }
 
     #[test]
@@ -65146,6 +65382,7 @@ mod tests {
         let tracked = RenderOptions {
             revision_view: rdocx_layout::RevisionView::Tracked,
             revision_style: rdocx_layout::RevisionStyle::Plain,
+            use_system_fonts: false,
         };
 
         let first = doc
@@ -65155,11 +65392,12 @@ mod tests {
             .layout_with_options(tracked)
             .expect("second tracked layout");
         assert!(!Arc::ptr_eq(&first, &second));
+        // Bundled tracked calls stay on the fresh deterministic path.
         assert!(
             doc.normal_layout_engine
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_some()
+                .is_none()
         );
         assert!(
             doc.layout_cache
@@ -65167,6 +65405,40 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_none()
         );
+        assert!(
+            doc.deterministic_layout_cache
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+        );
+
+        #[cfg(feature = "system-fonts")]
+        {
+            let normal = RenderOptions {
+                revision_view: rdocx_layout::RevisionView::Tracked,
+                revision_style: rdocx_layout::RevisionStyle::Plain,
+                use_system_fonts: true,
+            };
+            let first = doc
+                .layout_with_options(normal)
+                .expect("first tracked system layout");
+            let second = doc
+                .layout_with_options(normal)
+                .expect("second tracked system layout");
+            assert!(!Arc::ptr_eq(&first, &second));
+            assert!(
+                doc.normal_layout_engine
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_some()
+            );
+            assert!(
+                doc.layout_cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_none()
+            );
+        }
     }
 
     #[test]
@@ -65190,11 +65462,27 @@ mod tests {
             .is_err()
         );
 
+        // Bundled omission does not take the poisoned normal lock.
         let first = document
             .layout()
-            .expect("layout recovers from poisoned engine lock");
+            .expect("bundled layout ignores the poisoned normal engine lock");
         let second = document.layout().expect("recovered layout remains cached");
         assert!(Arc::ptr_eq(&first, &second));
+
+        #[cfg(feature = "system-fonts")]
+        {
+            let normal = RenderOptions {
+                use_system_fonts: true,
+                ..RenderOptions::default()
+            };
+            let first = document
+                .layout_with_options(normal)
+                .expect("system layout recovers from the poisoned engine lock");
+            let second = document
+                .layout_with_options(normal)
+                .expect("recovered system layout remains cached");
+            assert!(Arc::ptr_eq(&first, &second));
+        }
     }
 
     #[test]
@@ -65275,15 +65563,24 @@ mod tests {
         assert!(source.is_some_and(|span| caller.source_node(span.node).is_some()));
     }
 
+    #[cfg(feature = "system-fonts")]
     #[test]
     fn compatible_document_transfer_reuses_normal_layout_work() {
         let mut source = Document::new();
         source.add_paragraph("unchanged paragraph");
         source.add_paragraph("old second paragraph");
-        let source_result = source.layout().expect("prime source engine");
+        let normal = RenderOptions {
+            use_system_fonts: true,
+            ..RenderOptions::default()
+        };
+        let source_result = source
+            .layout_with_options(normal)
+            .expect("prime source engine");
 
         let mut receiver = source.clone_for_staging();
-        let receiver_result = receiver.layout().expect("prime receiver engine");
+        let receiver_result = receiver
+            .layout_with_options(normal)
+            .expect("prime receiver engine");
         assert!(receiver.transfer_reusable_layout_from(&mut source));
         assert!(
             source
@@ -65301,27 +65598,40 @@ mod tests {
         );
         assert!(Arc::ptr_eq(
             &source_result,
-            &source.layout().expect("source result cache remains")
+            &source
+                .layout_with_options(normal)
+                .expect("source result cache remains")
         ));
         assert!(Arc::ptr_eq(
             &receiver_result,
-            &receiver.layout().expect("receiver result cache remains")
+            &receiver
+                .layout_with_options(normal)
+                .expect("receiver result cache remains")
         ));
 
         receiver
             .paragraph_mut(1)
             .expect("second paragraph")
             .add_run(" changed");
-        assert!(receiver.layout().is_ok());
+        assert!(receiver.layout_with_options(normal).is_ok());
     }
 
+    #[cfg(feature = "system-fonts")]
     #[test]
     fn incompatible_or_failed_transfer_preserves_both_engines() {
         let mut source = Document::new();
         source.add_paragraph("source paragraph");
         let mut receiver = source.clone_for_staging();
-        source.layout().expect("prime source engine");
-        receiver.layout().expect("prime receiver engine");
+        let normal = RenderOptions {
+            use_system_fonts: true,
+            ..RenderOptions::default()
+        };
+        source
+            .layout_with_options(normal)
+            .expect("prime source engine");
+        receiver
+            .layout_with_options(normal)
+            .expect("prime receiver engine");
 
         receiver.styles = CT_Styles::new();
         receiver.invalidate_layout();
@@ -73527,6 +73837,50 @@ mod tests {
     }
 
     #[test]
+    fn issue433_effective_paragraph_properties_replace_the_first_line_pair() {
+        let mut doc = Document::new();
+        doc.add_style(StyleBuilder::paragraph("BaseInd", "Base Ind"))
+            .unwrap();
+        doc.add_style(StyleBuilder::paragraph("Derived", "Derived"))
+            .unwrap();
+        for style in &mut doc.styles.styles {
+            match style.style_id.as_str() {
+                "BaseInd" => {
+                    style.ppr = Some(CT_PPr {
+                        ind_left: Some(Twips(720)),
+                        ind_hanging: Some(Twips(720)),
+                        ..CT_PPr::default()
+                    });
+                }
+                "Derived" => {
+                    style.based_on = Some("BaseInd".to_owned());
+                    style.ppr = Some(CT_PPr {
+                        ind_left: Some(Twips(0)),
+                        ind_first_line: Some(Twips(0)),
+                        ..CT_PPr::default()
+                    });
+                }
+                _ => {}
+            }
+        }
+        doc.add_paragraph("base").style("BaseInd");
+        doc.add_paragraph("derived").style("Derived");
+        doc.add_paragraph("direct")
+            .style("BaseInd")
+            .first_line_indent(Length::twips(0));
+
+        let base = doc.effective_paragraph_properties(&doc.paragraph(0).unwrap());
+        assert_eq!(base.ind_hanging, Some(Twips(720)));
+        assert_eq!(base.ind_first_line, None);
+        let derived = doc.effective_paragraph_properties(&doc.paragraph(1).unwrap());
+        assert_eq!(derived.ind_first_line, Some(Twips(0)));
+        assert_eq!(derived.ind_hanging, None);
+        let direct = doc.effective_paragraph_properties(&doc.paragraph(2).unwrap());
+        assert_eq!(direct.ind_first_line, Some(Twips(0)));
+        assert_eq!(direct.ind_hanging, None);
+    }
+
+    #[test]
     fn picture_round_trips() {
         // 1x1 red PNG
         let png: &[u8] = &[
@@ -76502,29 +76856,64 @@ mod watermark_tests {
         document.add_paragraph("unchanged cacheable body paragraph");
 
         LAYOUT_INVOCATIONS.set(0);
-        let accepted_before = document.layout().expect("populate normal layout cache");
-        document
-            .to_pdf_deterministic()
-            .expect("populate deterministic layout cache");
-        assert_eq!(LAYOUT_INVOCATIONS.get(), 2);
-        assert_eq!(layout_state(&document), (true, true, true));
+        let bundled_before = document.layout().expect("populate bundled omission cache");
+        assert_eq!(LAYOUT_INVOCATIONS.get(), 1);
+        assert_eq!(
+            layout_state(&document),
+            (false, false, true),
+            "bundled omission fills only the deterministic cache"
+        );
+
+        #[cfg(feature = "system-fonts")]
+        let normal_before = {
+            let normal = RenderOptions {
+                use_system_fonts: true,
+                ..RenderOptions::default()
+            };
+            let layout = document
+                .layout_with_options(normal)
+                .expect("populate normal layout cache");
+            assert_eq!(LAYOUT_INVOCATIONS.get(), 2);
+            assert_eq!(layout_state(&document), (true, true, true));
+            layout
+        };
 
         mutate(&mut document);
 
+        #[cfg(feature = "system-fonts")]
         assert_eq!(
             layout_state(&document),
             (false, true, false),
             "completed results are invalidated while reusable work survives"
         );
+        #[cfg(not(feature = "system-fonts"))]
+        assert_eq!(
+            layout_state(&document),
+            (false, false, false),
+            "completed bundled results are invalidated"
+        );
 
-        let accepted_after = document
+        let bundled_after = document
             .layout()
             .expect("relayout after watermark mutation");
-        document
-            .to_pdf_deterministic()
-            .expect("deterministic relayout after watermark mutation");
-        assert!(!Arc::ptr_eq(&accepted_before, &accepted_after));
-        assert_eq!(LAYOUT_INVOCATIONS.get(), 4);
+        assert!(!Arc::ptr_eq(&bundled_before, &bundled_after));
+        #[cfg(feature = "system-fonts")]
+        assert_eq!(LAYOUT_INVOCATIONS.get(), 3);
+        #[cfg(not(feature = "system-fonts"))]
+        assert_eq!(LAYOUT_INVOCATIONS.get(), 2);
+
+        #[cfg(feature = "system-fonts")]
+        {
+            let normal = RenderOptions {
+                use_system_fonts: true,
+                ..RenderOptions::default()
+            };
+            let normal_after = document
+                .layout_with_options(normal)
+                .expect("normal relayout after watermark mutation");
+            assert!(!Arc::ptr_eq(&normal_before, &normal_after));
+            assert_eq!(LAYOUT_INVOCATIONS.get(), 4);
+        }
     }
 
     #[test]

@@ -129,6 +129,9 @@ enum Command {
         /// Directory of caller fonts used before bundled fallback
         #[arg(long)]
         font_dir: Option<PathBuf>,
+        /// Discover system fonts instead of the bundled omission tier
+        #[arg(long)]
+        system_fonts: bool,
         /// Output point-space body fragments as schema-1 JSON
         #[arg(long)]
         json: bool,
@@ -155,6 +158,9 @@ enum Command {
         /// Directory containing caller font files (.ttf/.otf/.ttc)
         #[arg(long)]
         font_dir: Option<PathBuf>,
+        /// Discover system fonts instead of the bundled omission tier
+        #[arg(long)]
+        system_fonts: bool,
         /// Revision view for PDF and image output
         #[arg(long, value_parser = commands::parse_revision_view)]
         revision_view: Option<rdocx::RevisionView>,
@@ -240,6 +246,9 @@ enum Command {
         /// Directory of caller fonts used before bundled fallback
         #[arg(long)]
         font_dir: Option<PathBuf>,
+        /// Discover system fonts instead of the bundled omission tier
+        #[arg(long)]
+        system_fonts: bool,
         /// Output directory (defaults to current directory)
         #[arg(long, short = 'o')]
         output_dir: Option<PathBuf>,
@@ -810,7 +819,8 @@ fn run_cli() {
             file,
             json,
             font_dir,
-        } => commands::layout(&file, json, font_dir.as_deref()),
+            system_fonts,
+        } => commands::layout(&file, json, font_dir.as_deref(), system_fonts),
         Command::Convert {
             file,
             to,
@@ -819,6 +829,7 @@ fn run_cli() {
             force,
             dpi,
             font_dir,
+            system_fonts,
             revision_view,
             revision_style,
             pages,
@@ -834,11 +845,13 @@ fn run_cli() {
                 || quality.is_some()
                 || pages.is_some()
                 || transparent
-                || font_dir.is_some(),
+                || font_dir.is_some()
+                || system_fonts,
             output.as_deref(),
             force,
             dpi.unwrap_or(150),
             font_dir.as_deref(),
+            system_fonts,
             revision_view.unwrap_or(rdocx::RevisionView::Accepted),
             revision_style.unwrap_or(rdocx::RevisionStyle::Plain),
             commands::ImageOptions {
@@ -878,6 +891,7 @@ fn run_cli() {
         Command::Render {
             file,
             font_dir,
+            system_fonts,
             output_dir,
             force,
             dpi,
@@ -895,6 +909,7 @@ fn run_cli() {
             dpi,
             commands::RenderOptions {
                 font_dir: font_dir.as_deref(),
+                system_fonts,
                 page,
                 pages: pages.as_deref(),
                 format: &format,

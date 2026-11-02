@@ -874,6 +874,200 @@ def test_issue_253_selected_view_controls_page_count():
     assert tracked == original.render_all_pages(24.0, revision_view="tracked")
 
 
+def test_issue433_python_font_policy_keeps_one_tier_per_folder(tmp_path):
+    from pathlib import Path
+
+    import rdocx
+
+    fonts = Path(__file__).resolve().parents[2] / "oxml-layout" / "fonts"
+    caller_family = "Issue433Caller1"
+    mono = (fonts / "LiberationMono-Regular.ttf").read_bytes()
+    # Rename the caller face's internal family to the requested name so the
+    # caller tier genuinely satisfies the request instead of substituting.
+    assert len("Liberation Mono") == len(caller_family)
+    mono = mono.replace(b"Liberation Mono", caller_family.encode())
+    mono = mono.replace(
+        "Liberation Mono".encode("utf-16-be"), caller_family.encode("utf-16-be")
+    )
+    empty_dir = tmp_path / "empty-fonts"
+    empty_dir.mkdir()
+
+    document = rdocx.Document()
+    document.add_paragraph("iiiiWWWW issue 433 caller priority " * 20)
+    document.paragraphs[0].runs[0].font.name = caller_family
+
+    # No caller, an empty sequence, and an empty directory are all omission.
+    bundled_pdf = document.to_pdf()
+    # Pin the complete fact from an intentionally absent request, including tier.
+    bundled_facts = document.to_pdf_with_diagnostics()[1]
+    assert bundled_facts == (
+        "Font 'Issue433Caller1' substituted: selected 'Carlito' from the bundled tier",
+    )
+    assert document.render_pages_with_diagnostics(dpi=24.0)[1] == bundled_facts
+    assert document.render_all_pages_with_diagnostics(24.0)[1] == bundled_facts
+    assert document.render_page_to_png_with_diagnostics(0, 24.0)[1] == bundled_facts
+    bundled_count = document.page_count()
+    assert document.render_page_to_svg(0) is not None
+    assert document.render_page_to_svg(bundled_count - 1) is not None
+    assert document.render_page_to_svg(bundled_count) is None
+    assert document.to_pdf(fonts=[]) == bundled_pdf
+    assert document.to_pdf(font_dir=empty_dir) == bundled_pdf
+    assert document.page_count(fonts=[]) == document.page_count()
+    assert document.page_count(font_dir=empty_dir) == document.page_count()
+    assert document.layout(fonts=[]) == document.layout()
+    assert document.layout_page(0, fonts=[]) == document.layout_page(0)
+
+    # Diagnostic twins agree with their siblings on omission.
+    assert document.to_pdf_with_diagnostics()[0] == bundled_pdf
+    assert document.to_pdf_with_diagnostics(fonts=[])[0] == bundled_pdf
+    assert (
+        document.render_page_to_png(0, 24.0)
+        == document.render_page_to_png_with_diagnostics(0, 24.0)[0]
+    )
+    assert (
+        document.render_all_pages(24.0)
+        == document.render_all_pages_with_diagnostics(24.0)[0]
+    )
+    assert (
+        document.render_pages(dpi=24.0)
+        == document.render_pages_with_diagnostics(dpi=24.0)[0]
+    )
+
+    # One caller face keeps caller priority and is not omission.
+    caller = [(caller_family, mono)]
+    caller_pdf = document.to_pdf(fonts=caller)
+    assert caller_pdf != bundled_pdf
+    assert document.to_pdf(fonts=caller, system_fonts=False) == caller_pdf
+    assert document.page_count(fonts=caller) == document.page_count(
+        fonts=caller, system_fonts=False
+    )
+    assert document.layout(fonts=caller) == document.layout(
+        fonts=caller, system_fonts=False
+    )
+    assert document.layout_page(0, fonts=caller) == document.layout_page(
+        0, fonts=caller, system_fonts=False
+    )
+    assert document.to_pdf_with_diagnostics(fonts=caller) == (caller_pdf, ())
+    assert document.render_pages_with_diagnostics(dpi=24.0, fonts=caller)[1] == ()
+    assert (
+        document.render_page_to_png(0, 24.0, fonts=caller)
+        == document.render_page_to_png_with_diagnostics(0, 24.0, fonts=caller)[0]
+    )
+    assert (
+        document.render_all_pages(24.0, fonts=caller)
+        == document.render_all_pages_with_diagnostics(24.0, fonts=caller)[0]
+    )
+    assert (
+        document.render_pages(dpi=24.0, fonts=caller)
+        == document.render_pages_with_diagnostics(dpi=24.0, fonts=caller)[0]
+    )
+
+    # The SVG sibling follows the same bundled nonempty route.
+    caller_pages = document.page_count(fonts=caller)
+    svg_caller_bundled = document.render_page_to_svg(0, fonts=caller)
+    assert svg_caller_bundled is not None
+    assert (
+        svg_caller_bundled.svg
+        == document.render_page_to_svg(0, fonts=caller, system_fonts=False).svg
+    )
+    assert document.render_page_to_svg(caller_pages - 1, fonts=caller) is not None
+    assert document.render_page_to_svg(caller_pages, fonts=caller) is None
+    assert not any(
+        caller_family in diagnostic.message
+        for diagnostic in svg_caller_bundled.diagnostics
+    )
+
+    # A nonempty caller list with the explicit system opt-in follows the
+    # system column and keeps caller priority.
+    caller_system_pages = document.page_count(fonts=caller, system_fonts=True)
+    assert caller_system_pages == len(
+        document.render_all_pages(24.0, fonts=caller, system_fonts=True)
+    )
+    assert (
+        document.layout_page(caller_system_pages - 1, fonts=caller, system_fonts=True)
+        is not None
+    )
+    assert (
+        document.layout_page(caller_system_pages, fonts=caller, system_fonts=True)
+        is None
+    )
+    assert document.to_pdf(fonts=caller, system_fonts=True) == (
+        document.to_pdf_with_diagnostics(fonts=caller, system_fonts=True)[0]
+    )
+    assert (
+        document.render_page_to_png(0, 24.0, fonts=caller, system_fonts=True)
+        == document.render_page_to_png_with_diagnostics(
+            0, 24.0, fonts=caller, system_fonts=True
+        )[0]
+    )
+    assert (
+        document.render_pages(dpi=24.0, fonts=caller, system_fonts=True)
+        == document.render_pages_with_diagnostics(
+            dpi=24.0, fonts=caller, system_fonts=True
+        )[0]
+    )
+    assert (
+        document.render_all_pages(24.0, fonts=caller, system_fonts=True)
+        == document.render_all_pages_with_diagnostics(
+            24.0, fonts=caller, system_fonts=True
+        )[0]
+    )
+    svg_caller_system = document.render_page_to_svg(
+        0, fonts=caller, system_fonts=True
+    )
+    assert svg_caller_system is not None
+    assert (
+        svg_caller_system.svg
+        == document.render_page_to_svg(0, fonts=caller, system_fonts=True).svg
+    )
+    assert (
+        document.render_page_to_svg(
+            caller_system_pages - 1, fonts=caller, system_fonts=True
+        )
+        is not None
+    )
+    assert (
+        document.render_page_to_svg(
+            caller_system_pages, fonts=caller, system_fonts=True
+        )
+        is None
+    )
+    assert not any(
+        caller_family in diagnostic.message
+        for diagnostic in svg_caller_system.diagnostics
+    )
+
+    # The explicit system opt-in shares one normal-engine route and page count.
+    system_pages = document.page_count(system_fonts=True)
+    system_rasters, system_facts = document.render_pages_with_diagnostics(
+        dpi=24.0, system_fonts=True
+    )
+    assert len(system_rasters) == system_pages
+    assert document.render_pages(dpi=24.0, system_fonts=True) == system_rasters
+    assert system_facts == document.to_pdf_with_diagnostics(system_fonts=True)[1]
+    assert any(fact.startswith("Font 'Issue433Caller1' substituted: selected '") for fact in system_facts)
+    assert system_pages == len(document.render_all_pages(24.0, system_fonts=True))
+    assert document.layout_page(system_pages - 1, system_fonts=True) is not None
+    assert document.layout_page(system_pages, system_fonts=True) is None
+    assert document.to_pdf(system_fonts=True) == document.to_pdf_with_diagnostics(
+        system_fonts=True
+    )[0]
+    assert (
+        document.render_page_to_png(0, 24.0, system_fonts=True)
+        == document.render_page_to_png_with_diagnostics(
+            0, 24.0, system_fonts=True
+        )[0]
+    )
+    svg_system = document.render_page_to_svg(0, system_fonts=True)
+    assert svg_system is not None
+    assert (
+        svg_system.svg
+        == document.render_page_to_svg(0, system_fonts=True).svg
+    )
+    assert document.render_page_to_svg(system_pages - 1, system_fonts=True) is not None
+    assert document.render_page_to_svg(system_pages, system_fonts=True) is None
+
+
 def test_issue_253_pdf_text_view(tmp_path):
     import rdocx
 
@@ -15805,3 +15999,43 @@ def test_issue423_duplicate_numbering_render_cache_and_reopen_share_explicit_ove
     assert _issue423_svg_text(reopened) == expected
     assert reopened.paragraphs[0].text == expected
     assert re.findall(rb'<w:pgNumType\b[^>]*/>', _document_xml(reopened)) == owner_xml
+
+
+def test_issue433_render_pages_selects_the_caller_layout_in_both_directions():
+    from pathlib import Path
+    import rdocx
+
+    fonts = Path(__file__).resolve().parents[2] / "oxml-layout" / "fonts"
+    for requested, source in [
+        ("Liberation Sans", "Liberation Mono"),
+        ("Liberation Mono", "Liberation Sans"),
+    ]:
+        data = (fonts / (source.replace(" ", "") + "-Regular.ttf")).read_bytes()
+        data = data.replace(source.encode(), requested.encode()).replace(
+            source.encode("utf-16-be"), requested.encode("utf-16-be")
+        )
+        document = rdocx.Document()
+        document.add_paragraph("iiiiiiiiiiiiiiiiiiii iiiiiiiiiiiiiiiiiiii " * 180)
+        document.paragraphs[0].runs[0].font.name = requested
+        caller = [(requested, data)]
+        bundled_count = document.page_count()
+        caller_count = document.page_count(fonts=caller)
+        assert (caller_count > bundled_count) == (source == "Liberation Mono")
+        assert caller_count != bundled_count
+        for system in [False, True]:
+            count = document.page_count(fonts=caller, system_fonts=system)
+            pages, diagnostics = document.render_pages_with_diagnostics(
+                dpi=12.0, fonts=caller, system_fonts=system
+            )
+            assert len(pages) == count
+            assert document.render_pages(
+                dpi=12.0, fonts=caller, system_fonts=system
+            ) == pages
+            selected = [count - 1, 0] if count > 1 else [0]
+            assert document.render_pages(
+                dpi=12.0, fonts=caller, system_fonts=system, pages=selected
+            ) == [pages[index] for index in selected]
+            assert document.render_pages_with_diagnostics(
+                dpi=12.0, fonts=caller, system_fonts=system, pages=selected
+            ) == ([pages[index] for index in selected], diagnostics)
+            assert diagnostics == (), "caller supplies the actual requested family"

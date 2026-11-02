@@ -840,6 +840,7 @@ pub struct FontContributionScope {
     depth: usize,
     owns_trace: bool,
     diagnostic_start: usize,
+    word_diagnostic_start: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -909,6 +910,10 @@ pub struct FontManager {
     // At most one current-output message per Aptos request spelling.
     // Scope capture rolls provisional messages back with their contributions.
     layout_font_diagnostics: Vec<Diagnostic>,
+    // Word-only substitution facts: a requested family absent from the
+    // selected tier and a physical fallback face chosen instead. Kept apart
+    // from `layout_font_diagnostics`, which PowerPoint already reads.
+    word_substitution_diagnostics: Vec<Diagnostic>,
 }
 
 /// Families with broad non-Latin coverage, tried before scanning everything.
@@ -1026,6 +1031,7 @@ impl FontManager {
             paragraph_font_trace: None,
             layout_fonts: Vec::new(),
             layout_font_diagnostics: Vec::new(),
+            word_substitution_diagnostics: Vec::new(),
         }
     }
 
@@ -1336,6 +1342,7 @@ impl FontManager {
         self.paragraph_font_trace = None;
         self.layout_fonts = Vec::new();
         self.layout_font_diagnostics = Vec::new();
+        self.word_substitution_diagnostics.clear();
     }
 
     /// Begin recording exact events for one bounded cache candidate.
@@ -1436,6 +1443,7 @@ impl FontManager {
             depth,
             owns_trace,
             diagnostic_start: self.layout_font_diagnostics.len(),
+            word_diagnostic_start: self.word_substitution_diagnostics.len(),
         })
     }
 
@@ -1459,6 +1467,8 @@ impl FontManager {
         if trace.overflowed {
             self.layout_font_diagnostics
                 .truncate(scope.diagnostic_start);
+            self.word_substitution_diagnostics
+                .truncate(scope.word_diagnostic_start);
             if scope.owns_trace {
                 self.paragraph_font_trace = None;
             } else {
@@ -1502,6 +1512,8 @@ impl FontManager {
         result.extend(staged.iter().cloned());
         self.layout_font_diagnostics
             .truncate(scope.diagnostic_start);
+        self.word_substitution_diagnostics
+            .truncate(scope.word_diagnostic_start);
         if scope.owns_trace {
             self.paragraph_font_trace = None;
         } else {
@@ -1852,6 +1864,74 @@ impl FontManager {
         &self.layout_font_diagnostics
     }
 
+    /// Word-only substitution facts for the current layout.
+    ///
+    /// Each fact names the requested family, the selected physical family and
+    /// the tier that supplied it. They are kept out of
+    /// [`Self::current_font_diagnostics`] because PowerPoint reads that list.
+    #[doc(hidden)]
+    pub fn word_substitution_diagnostics(&self) -> Vec<Diagnostic> {
+        self.word_substitution_diagnostics.clone()
+    }
+
+    fn note_substitution(&mut self, requested: Option<&str>, selected: FontId) {
+        let Some(requested) = requested else {
+            return;
+        };
+        let Some(index) = self.index_of(selected) else {
+            return;
+        };
+        let Some(db_id) = self.fonts.get(index).map(|font| font.db_id) else {
+            return;
+        };
+        let (physical, tier) = {
+            let Some(face) = self.db.face(db_id) else {
+                return;
+            };
+            let Some((physical, _)) = face.families.first() else {
+                return;
+            };
+            let physical = physical.clone();
+            if physical.eq_ignore_ascii_case(requested) {
+                return;
+            }
+            let tier = if self
+                .caller_families
+                .values()
+                .any(|ids| ids.contains(&db_id))
+                || self.caller_aliases.values().any(|ids| ids.contains(&db_id))
+            {
+                "caller"
+            } else if self
+                .embedded_aliases
+                .values()
+                .any(|ids| ids.contains(&db_id))
+            {
+                "embedded"
+            } else {
+                match &face.source {
+                    fontdb::Source::Binary(_) => "bundled",
+                    // Host font discovery only exists with the feature on, so
+                    // every remaining source is a system face there.
+                    #[cfg(feature = "system-fonts")]
+                    _ => "system",
+                }
+            };
+            (physical, tier)
+        };
+        let message =
+            format!("Font '{requested}' substituted: selected '{physical}' from the {tier} tier");
+        if self
+            .word_substitution_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == message)
+        {
+            return;
+        }
+        self.word_substitution_diagnostics
+            .push(Diagnostic { message });
+    }
+
     // Selection aliases name requests, not the physical family of a face.
     // Authenticate the selected collection face from its original source bytes.
     fn physical_requested_family_matches(&self, index: usize, requested: &str) -> bool {
@@ -1874,6 +1954,7 @@ impl FontManager {
     }
 
     fn record_font_approximation(&mut self, id: FontId, requested: Option<&str>) {
+        self.note_substitution(requested, id);
         let Some(requested) = requested else {
             return;
         };
@@ -1916,6 +1997,46 @@ impl FontManager {
         original: &str,
         ppt_bullet_compatibility: bool,
     ) -> Result<(String, FontId)> {
+        self.resolve_symbol_text_impl(
+            family,
+            bold,
+            italic,
+            original,
+            ppt_bullet_compatibility,
+            false,
+        )
+    }
+
+    /// Word's symbol resolution. The Wingdings 2 table is Word-only because
+    /// PowerPoint has its own F0B7 path and no Issue 433 acceptance.
+    #[doc(hidden)]
+    pub fn resolve_word_symbol_text(
+        &mut self,
+        family: Option<&str>,
+        bold: bool,
+        italic: bool,
+        original: &str,
+        ppt_bullet_compatibility: bool,
+    ) -> Result<(String, FontId)> {
+        self.resolve_symbol_text_impl(
+            family,
+            bold,
+            italic,
+            original,
+            ppt_bullet_compatibility,
+            true,
+        )
+    }
+
+    fn resolve_symbol_text_impl(
+        &mut self,
+        family: Option<&str>,
+        bold: bool,
+        italic: bool,
+        original: &str,
+        ppt_bullet_compatibility: bool,
+        word: bool,
+    ) -> Result<(String, FontId)> {
         let primary = self.resolve_font(family, bold, italic)?;
         if self.has_original_symbol_coverage(primary, family, original) {
             return Ok((original.to_owned(), primary));
@@ -1941,6 +2062,28 @@ impl FontManager {
                         0xb7 if ppt_bullet_compatibility && character == '\u{f0b7}' => {
                             Some('\u{2022}')
                         }
+                        _ => None,
+                    }
+                } else if word
+                    && family.is_some_and(|name| name.eq_ignore_ascii_case("Wingdings 2"))
+                {
+                    // Wingdings 2 bullets and check boxes. The Unicode 7.0
+                    // mapping of each code, or the nearest shape the bundled
+                    // fonts draw where they lack that mapping's character.
+                    match code {
+                        0x4f => Some('\u{2717}'),
+                        0x50 => Some('\u{2713}'),
+                        0x52 => Some('\u{2611}'),
+                        0x54 => Some('\u{2612}'),
+                        0x96 | 0x98 => Some('\u{25cf}'),
+                        0x97 => Some('\u{2022}'),
+                        0x99..=0x9c => Some('\u{25cb}'),
+                        0x9f | 0xa0 => Some('\u{25aa}'),
+                        0xa1 | 0xa2 => Some('\u{25a0}'),
+                        0xa3 => Some('\u{25a1}'),
+                        0xad => Some('\u{25c6}'),
+                        0xae => Some('\u{2b25}'),
+                        0xb7 => Some('\u{2b27}'),
                         _ => None,
                     }
                 } else if family.is_some_and(|name| name.eq_ignore_ascii_case("Symbol"))
@@ -1980,11 +2123,35 @@ impl FontManager {
         original: &str,
         displayed: &str,
     ) -> Vec<String> {
+        self.unknown_symbol_diagnostics_impl(selected, requested, original, displayed, false)
+    }
+
+    /// Word's unknown-symbol facts. Includes the bounded Wingdings 2 family.
+    #[doc(hidden)]
+    pub fn unknown_word_symbol_diagnostics(
+        &self,
+        selected: FontId,
+        requested: Option<&str>,
+        original: &str,
+        displayed: &str,
+    ) -> Vec<String> {
+        self.unknown_symbol_diagnostics_impl(selected, requested, original, displayed, true)
+    }
+
+    fn unknown_symbol_diagnostics_impl(
+        &self,
+        selected: FontId,
+        requested: Option<&str>,
+        original: &str,
+        displayed: &str,
+        word: bool,
+    ) -> Vec<String> {
         if self.index_of(selected).is_none() {
             return Vec::new();
         }
         let family = match requested {
             Some(name) if name.eq_ignore_ascii_case("Wingdings") => "Wingdings",
+            Some(name) if word && name.eq_ignore_ascii_case("Wingdings 2") => "Wingdings 2",
             Some(name) if name.eq_ignore_ascii_case("Symbol") => "Symbol",
             _ => return Vec::new(),
         };
@@ -6392,31 +6559,60 @@ for feature in ['smcp=0','smcp=1']:
             .unwrap();
         let accepted = fonts.current_font_diagnostics().to_vec();
         assert_eq!(accepted.len(), 1);
+        let accepted_word = fonts.word_substitution_diagnostics();
+        assert_eq!(accepted_word.len(), 1);
         let outer = fonts.begin_font_contribution_scope().unwrap();
         fonts
             .record_font_contribution(id, Some("Aptos Display"), "provisional")
             .unwrap();
+        fonts
+            .record_font_contribution(id, Some("RF278OuterMissing"), "outer")
+            .unwrap();
+        let outer_word = fonts.word_substitution_diagnostics();
+        assert_eq!(outer_word.len(), 3);
         let inner = fonts.begin_font_contribution_scope().unwrap();
         fonts
             .record_font_contribution(id, Some("Aptos"), "nested")
             .unwrap();
+        fonts
+            .record_font_contribution(id, Some("RF278InnerMissing"), "nested")
+            .unwrap();
+        assert_eq!(fonts.word_substitution_diagnostics().len(), 4);
         let nested = fonts
             .finish_font_contribution_scope(inner)
             .unwrap()
             .unwrap();
         assert_eq!(fonts.current_font_diagnostics().len(), 2);
+        assert_eq!(fonts.word_substitution_diagnostics(), outer_word);
         let staged = fonts
             .finish_font_contribution_scope(outer)
             .unwrap()
             .unwrap();
         assert_eq!(fonts.current_font_diagnostics(), accepted);
+        assert_eq!(fonts.word_substitution_diagnostics(), accepted_word);
         fonts.replay_font_trace_events(&staged).unwrap();
+        assert_eq!(fonts.word_substitution_diagnostics(), outer_word);
         assert_eq!(fonts.current_font_diagnostics().len(), 2);
         fonts.replay_font_trace_events(&nested).unwrap();
         assert_eq!(fonts.current_font_diagnostics().len(), 2);
+        let final_word = fonts.word_substitution_diagnostics();
+        assert_eq!(final_word.len(), 4);
+        assert!(final_word.iter().any(|fact| {
+            fact.message
+                .starts_with("Font 'RF278InnerMissing' substituted:")
+        }));
+        fonts.replay_font_trace_events(&staged).unwrap();
+        fonts.replay_font_trace_events(&nested).unwrap();
+        assert_eq!(fonts.word_substitution_diagnostics(), final_word);
+        assert_eq!(
+            fonts.current_font_diagnostics().len(),
+            2,
+            "Word-only families never enter the PowerPoint channel"
+        );
         let final_facts = fonts.current_font_diagnostics().to_vec();
         fonts.begin_layout();
         assert!(fonts.current_font_diagnostics().is_empty());
+        assert!(fonts.word_substitution_diagnostics().is_empty());
         fonts
             .record_font_contribution(id, Some("Aptos"), "")
             .unwrap();
@@ -6426,6 +6622,18 @@ for feature in ['smcp=0','smcp=1']:
         assert!(fonts.current_font_diagnostics().is_empty());
         fonts.replay_font_trace_events(&staged).unwrap();
         assert_eq!(fonts.current_font_diagnostics(), &final_facts[1..]);
+        let replayed_word = fonts.word_substitution_diagnostics();
+        assert_eq!(replayed_word.len(), 3);
+        assert!(
+            replayed_word
+                .iter()
+                .any(|fact| fact.message.starts_with("Font 'Calibri' substituted:"))
+        );
+        assert!(
+            !replayed_word
+                .iter()
+                .any(|fact| fact.message.contains("RF278InnerMissing"))
+        );
     }
 
     #[test]
@@ -6437,7 +6645,18 @@ for feature in ['smcp=0','smcp=1']:
             .record_font_contribution(id, Some("Aptos"), "accepted")
             .unwrap();
         let accepted = fonts.current_font_diagnostics().to_vec();
+        let accepted_word = fonts.word_substitution_diagnostics();
+        assert_eq!(accepted_word.len(), 1);
         let scope = fonts.begin_font_contribution_scope().unwrap();
+        fonts
+            .record_font_contribution(id, Some("RF278OuterMissing"), "outer")
+            .unwrap();
+        let outer_word = fonts.word_substitution_diagnostics();
+        assert_eq!(outer_word.len(), 2);
+        let inner = fonts.begin_font_contribution_scope().unwrap();
+        fonts
+            .record_font_contribution(id, Some("RF278InnerMissing"), "inner")
+            .unwrap();
         for _ in 0..=PARAGRAPH_FONT_TRACE_MAX_ENTRIES {
             fonts
                 .record_font_contribution(id, Some("Aptos Display"), "staged")
@@ -6445,11 +6664,20 @@ for feature in ['smcp=0','smcp=1']:
         }
         assert!(
             fonts
+                .finish_font_contribution_scope(inner)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(fonts.word_substitution_diagnostics(), outer_word);
+        assert_eq!(fonts.current_font_diagnostics(), accepted);
+        assert!(
+            fonts
                 .finish_font_contribution_scope(scope)
                 .unwrap()
                 .is_none()
         );
         assert_eq!(fonts.current_font_diagnostics(), accepted);
+        assert_eq!(fonts.word_substitution_diagnostics(), accepted_word);
         fonts.begin_paragraph_font_trace();
         for _ in 0..=PARAGRAPH_FONT_TRACE_MAX_ENTRIES {
             fonts
@@ -6462,6 +6690,12 @@ for feature in ['smcp=0','smcp=1']:
         assert!(fonts.finish_paragraph_font_events().is_none());
         assert_eq!(fonts.current_font_diagnostics().len(), 2);
         let before = fonts.current_font_diagnostics().to_vec();
+        let before_word = fonts.word_substitution_diagnostics();
+        assert_eq!(
+            before_word.len(),
+            3,
+            "a trace overflow outside a provisional scope keeps committed facts"
+        );
         assert!(
             fonts
                 .replay_font_trace_events(&[FontTraceEvent::Contribution(FontContribution {
@@ -6471,6 +6705,7 @@ for feature in ['smcp=0','smcp=1']:
                 .is_err()
         );
         assert_eq!(fonts.current_font_diagnostics(), before);
+        assert_eq!(fonts.word_substitution_diagnostics(), before_word);
     }
 
     #[test]
@@ -6588,6 +6823,115 @@ for feature in ['smcp=0','smcp=1']:
             ("v".into(), id)
         );
     }
+    #[test]
+    fn issue433_word_substitutions_keep_every_distinct_request_and_reset() {
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        fonts.begin_layout();
+        for index in 0..70 {
+            let request = format!("Issue433Missing{index}");
+            let (_, id) = fonts
+                .resolve_word_symbol_text(Some(&request), false, false, "text", false)
+                .unwrap();
+            fonts
+                .record_font_contribution(id, Some(&request), "text")
+                .unwrap();
+        }
+        let facts = fonts.word_substitution_diagnostics();
+        assert_eq!(
+            facts.len(),
+            70,
+            "every distinct substitution must be reported"
+        );
+        for index in 0..70 {
+            assert!(facts.iter().any(|fact| fact.message.starts_with(&format!(
+                "Font 'Issue433Missing{index}' substituted: selected '"
+            )) && fact.message.ends_with("from the bundled tier")));
+        }
+        let (_, id) = fonts
+            .resolve_word_symbol_text(Some("Issue433Missing0"), false, false, "text", false)
+            .unwrap();
+        fonts
+            .record_font_contribution(id, Some("Issue433Missing0"), "text")
+            .unwrap();
+        assert_eq!(
+            fonts.word_substitution_diagnostics(),
+            facts,
+            "repeated requests are deduplicated"
+        );
+        assert!(
+            fonts.current_font_diagnostics().is_empty(),
+            "PowerPoint facts stay separate"
+        );
+        fonts.begin_layout();
+        assert!(fonts.word_substitution_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn issue433_wingdings_2_maps_only_on_the_word_symbol_path() {
+        let mut fonts = FontManager::new_deterministic().unwrap();
+        for (code, target) in [
+            (0xa1, '\u{25a0}'),
+            (0xa2, '\u{25a0}'),
+            (0xa3, '\u{25a1}'),
+            (0x9f, '\u{25aa}'),
+            (0x99, '\u{25cb}'),
+            (0x96, '\u{25cf}'),
+            (0x97, '\u{2022}'),
+            (0xb7, '\u{2b27}'),
+        ] {
+            for code in [code, code + 0xf000] {
+                let original = char::from_u32(code).unwrap().to_string();
+                let (display, id) = fonts
+                    .resolve_word_symbol_text(Some("Wingdings 2"), false, false, &original, false)
+                    .unwrap();
+                assert_eq!(display, target.to_string(), "U+{code:04X}");
+                let shaped = fonts.shape_text(id, &display, 12.0).unwrap();
+                assert!(!shaped.glyph_ids.is_empty());
+                assert!(shaped.glyph_ids.iter().all(|glyph| *glyph != 0));
+            }
+        }
+        // The shared PowerPoint path keeps Wingdings 2 private-use codes.
+        assert_eq!(
+            fonts
+                .resolve_symbol_text(Some("Wingdings 2"), false, false, "\u{f0a1}", false)
+                .unwrap()
+                .0,
+            "\u{f0a1}"
+        );
+        let word = fonts
+            .resolve_word_symbol_text(Some("Wingdings 2"), false, false, "\u{f0a1}", false)
+            .unwrap();
+        assert_eq!(word.0, "\u{25a0}");
+        // An unmapped code keeps its scalar and reports the family and code.
+        let unmapped = fonts
+            .resolve_word_symbol_text(Some("Wingdings 2"), false, false, "\u{f0a7}", false)
+            .unwrap();
+        assert_eq!(unmapped.0, "\u{f0a7}");
+        assert_eq!(
+            fonts.unknown_word_symbol_diagnostics(
+                unmapped.1,
+                Some("Wingdings 2"),
+                "\u{f0a7}",
+                &unmapped.0,
+            ),
+            ["Unknown Wingdings 2 symbol U+F0A7: original code retained"]
+        );
+        assert!(
+            fonts
+                .unknown_symbol_diagnostics(
+                    unmapped.1,
+                    Some("Wingdings 2"),
+                    "\u{f0a7}",
+                    &unmapped.0,
+                )
+                .is_empty(),
+            "the shared PowerPoint path must not report Wingdings 2"
+        );
+        // The bundled faces are not a physical Wingdings 2, so original-code
+        // coverage cannot suppress the bounded semantic map.
+        assert!(!fonts.has_original_symbol_coverage(unmapped.1, Some("Wingdings 2"), "\u{f0a7}"));
+    }
+
     #[test]
     fn fx210_caller_labels_cannot_authenticate_aptos_or_original_symbol_faces() {
         let source = bundled_font_data()

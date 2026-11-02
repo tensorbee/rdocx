@@ -15606,6 +15606,7 @@ fn both_revision_views_render_and_accepted_matches_resolved_document() {
             RenderOptions {
                 revision_view: RevisionView::Accepted,
                 revision_style: rdocx_layout::RevisionStyle::Plain,
+                use_system_fonts: false,
             },
         )
         .unwrap()
@@ -15617,6 +15618,7 @@ fn both_revision_views_render_and_accepted_matches_resolved_document() {
             RenderOptions {
                 revision_view: RevisionView::Tracked,
                 revision_style: rdocx_layout::RevisionStyle::Plain,
+                use_system_fonts: false,
             },
         )
         .unwrap()
@@ -15753,6 +15755,7 @@ fn caller_font_layout_options_select_the_tracked_revision_projection() {
             RenderOptions {
                 revision_view: RevisionView::Tracked,
                 revision_style: rdocx_layout::RevisionStyle::Plain,
+                use_system_fonts: false,
             },
         )
         .expect("tracked caller-font layout should succeed");
@@ -30391,6 +30394,7 @@ fn comparison_preserves_word_source_paths_in_every_revision_view() {
             .layout_with_options(RenderOptions {
                 revision_view: view,
                 revision_style: rdocx::RevisionStyle::Plain,
+                use_system_fonts: false,
             })
             .expect("layout revision source view");
         let mut header_sources = 0usize;
@@ -31244,6 +31248,11 @@ fn dense_form_matches_reviewed_one_page_geometry() {
     assert_eq!(table_lines.len(), 25, "table geometry: {table_lines:?}");
     // The preceding line now advances by its Word Windows-font pitch.
     let word_line_shift = 2.20703125;
+    // A style's `w:tblBorders` stay on the table. Inside bands therefore use
+    // its `w:insideH` (sz 4) rather than its outer `w:bottom` (sz 8), which
+    // used to be promoted onto every cell.
+    let inside_band_shift = 0.5;
+    let merged_bottom_shift = 0.25;
     // The first cell's `nil` top removes the table's outer edge above it, as
     // Word 16.111 draws the form.
     assert!(!has_line(
@@ -31266,27 +31275,27 @@ fn dense_form_matches_reviewed_one_page_geometry() {
     ));
     assert!(has_line(
         72.0,
-        109.5 + word_line_shift,
+        109.5 + word_line_shift - merged_bottom_shift,
         306.0,
-        109.5 + word_line_shift
+        109.5 + word_line_shift - merged_bottom_shift
     ));
     assert!(has_line(
         306.0,
-        92.375 + word_line_shift,
+        92.375 + word_line_shift - inside_band_shift,
         416.0,
-        92.375 + word_line_shift
+        92.375 + word_line_shift - inside_band_shift
     ));
     assert!(has_line(
         416.0,
-        105.125 + word_line_shift,
+        105.125 + word_line_shift - inside_band_shift,
         526.0,
-        105.125 + word_line_shift
+        105.125 + word_line_shift - inside_band_shift
     ));
     assert!(has_line(
         306.0,
-        128.5 + word_line_shift,
+        128.5 + word_line_shift - inside_band_shift,
         540.0,
-        128.5 + word_line_shift
+        128.5 + word_line_shift - inside_band_shift
     ));
 
     let pdf = document.to_pdf_deterministic().expect("dense form PDF");
@@ -31320,16 +31329,17 @@ fn dense_form_matches_reviewed_one_page_geometry() {
         .chunks_exact(4)
         .filter(|pixel| *pixel == [255, 215, 215, 255])
         .count();
-    // F-X183 reviewed zero side padding changes cell and nested content geometry.
-    assert_eq!(checksum, 12_522_878_329_634_332_671);
-    assert_eq!(non_white_pixels, 32_421);
+    // Table-style borders stay on the table rather than every cell. The
+    // thinner inside band changes nested geometry and exposed stamp pixels.
+    assert_eq!(checksum, 5_302_818_789_495_566_545);
+    assert_eq!(non_white_pixels, 32_119);
     assert_eq!(
         behind_pixels, 0,
         "page-behind stamp is covered by cell shading"
     );
-    // The 58 pixel wide stamp moved 1 point down with the border band above
-    // its row, which leaves 28 whole pixel rows at 96 dpi rather than 29.
-    assert_eq!(foreground_pixels, 1_624);
+    // The thinner inside border band leaves one more whole 58 pixel row of
+    // the stamp visible at 96 dpi, so 29 rows rather than 28.
+    assert_eq!(foreground_pixels, 1_682);
 }
 
 #[test]
@@ -44836,6 +44846,7 @@ mod f266c_character_grid_and_vertical_text_regressions {
                 .layout_deterministic_with_options(rdocx::RenderOptions {
                     revision_view: rdocx_layout::RevisionView::Tracked,
                     revision_style: rdocx_layout::RevisionStyle::Plain,
+                    use_system_fonts: false,
                 })
                 .expect("deterministic tracked layout");
             let mut bars = 0usize;
@@ -404543,6 +404554,7 @@ fn fx232_legal_revision_paint_preserves_stored_formatting() {
     let options = |revision_style| RenderOptions {
         revision_view: RevisionView::Tracked,
         revision_style,
+        use_system_fonts: false,
     };
 
     // The layout gives each change its colour, the insertion and the move
@@ -404665,6 +404677,7 @@ fn fx232_render_style_participates_in_every_cache_identity() {
         let options = RenderOptions {
             revision_view: RevisionView::Tracked,
             revision_style: style,
+            use_system_fonts: false,
         };
         // Bundled fallback uses a retained engine, unlike fresh deterministic layout.
         let warm = document
@@ -404696,6 +404709,7 @@ fn fx232_render_style_participates_in_every_cache_identity() {
     let invalid = RenderOptions {
         revision_view: RevisionView::Accepted,
         revision_style: RevisionStyle::Legal,
+        use_system_fonts: false,
     };
     assert!(document.layout_deterministic_with_options(invalid).is_err());
     assert!(
@@ -404713,6 +404727,7 @@ fn fx232_render_style_participates_in_every_cache_identity() {
         let options = RenderOptions {
             revision_view: RevisionView::Tracked,
             revision_style: style,
+            use_system_fonts: false,
         };
         let warm = document
             .layout_with_fonts_and_bundled_fallback_and_options(&caller_fonts, options)

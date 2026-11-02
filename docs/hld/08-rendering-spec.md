@@ -887,6 +887,34 @@ run fragment. The PDF backend's recursive leaf walk applies the complete nested
 group transform to each annotation rectangle. Unsupported actions never create
 an annotation, but their visible text remains in the line.
 
+## Word first-line indent
+
+`w:firstLine` and `w:hanging` are one property. `CT_PPr::merge_from` and
+`merge_direct_ppr` assign both fields from a source layer when either is
+present, so the absent sibling becomes `None`. The rule applies to numbering
+level properties, direct paragraph properties, the `tbRl` vertical-text arm, and
+the public, EPUB, and ODT paragraph projections. A more specific layer that sets
+one half replaces the pair, matching ECMA-376 Part 1 17.3.1.12. A single `w:ind`
+that carries both attributes keeps its stored values, and the line breaker keeps
+hanging precedence for that same-element case. ODT run properties stay on
+`CT_RPr::merge_from` and do not move when only `w:ind` changes. Twip unit
+rounding is unchanged.
+
+## Word automatic text colour
+
+Run colour follows the resolved inheritance cascade. An effective `auto`
+colour, or no colour after inheritance, takes a contrast colour from the fill
+behind it. A run without its own colour retains an inherited explicit or theme
+colour.
+Black fills and dark navy fills produce white text, a light grey fill produces
+black text, and an unshaded cell or paragraph produces black text. The fill is
+the cell's resolved shading, including a paragraph shading inside that cell, and
+a nested cell resolves its own shading rather than inheriting the outer cell.
+Content-control paragraphs inside a shaded cell follow that cell. A body
+paragraph follows its own paragraph shading. The split is the luminance floor of
+the weighted channels at 156 out of 255. Explicit colours and theme colours keep
+their resolved values. Native Word threshold calibration remains pending.
+
 ## Tables
 
 PresentationML table paint keeps each stored `a:tr/@h` value. The painted row grows when wrapped text, a span, cell margins, or unwrapped vertical text needs more room than the current span. The extra height is added to the last row of that span while later cells are measured. Fills, borders, the table background, and text then use those grown offsets together. A short cell stays at the stored height. Wrapped vertical text does not grow when its longest oriented line already fits the current content height.
@@ -1134,12 +1162,24 @@ that preserve widow and orphan minima. Each cell advances independently at a
 safe boundary, and a continuation fragment retains the same logical row and
 cell ownership. A page break repeats preceding header rows, records another
 body-layout fragment, and extends vertical borders and fill without adding a
-horizontal border at the artificial break. `w:cantSplit` instead moves the
-whole row when it fits the next page. An unsplittable row taller than a fresh
-page paints once with visible overflow rather than retrying indefinitely.
+horizontal border at the artificial break. Whole-row barriers are `w:cantSplit`,
+header rows, merges, nested tables, clipped and exact-height rows, rotated and anchored
+content, keep-next, and page-break-before. An unsplittable row taller than a
+fresh page paints once with visible overflow rather than retrying indefinitely.
 Merged, rotated, anchored, nested-table and exact-height rows keep their
 whole-row placement, including exact-height clipping, until those cases have
 a safe fragment model.
+
+### Row splitting and vertical alignment
+
+A flowed ordinary row breaks across pages at the same complete paragraph and
+line boundaries whether or not it carries `w:vAlign`. Vertical alignment
+positions the cell content inside the space the row occupies. It does not make
+the row unsplittable and does not change the lines each page carries.
+`w:vAlign` is not a whole-row barrier. The barriers are `w:cantSplit`, header
+rows, merges, nested tables, clipped and exact-height rows, rotation, anchored
+content, keep-next, and page-break-before. The continuation fragment keeps the same logical row and
+cell ownership.
 
 A conditional table-style region's `w:trPr` resolves base first, exactly like
 its cell layers. The style's base row properties apply first, then every region
@@ -1168,9 +1208,21 @@ every `w:cnfStyle` on the row, the cell and the cell's paragraphs. Direct table
 and cell properties remain the final overlay. An explicit
 cell `nil` border suppresses the corresponding edge, including an outer edge.
 A cell `none` border behaves as an unset cell edge and inherits the corresponding
-table or table-style border. Painting and row border bands share this resolution.
+table border. Painting and row border bands share this resolution.
 The model retains `nil` and `none` as distinct source tokens because an
 unrelated table or document edit must not normalize producer XML.
+
+### Table border precedence
+
+A table style's `w:tblBorders` are table borders, not cell borders. They resolve
+into the table's base border set under the table's own direct `w:tblBorders`,
+and their outer edges apply to the table's outer edges only (ECMA-376 Part 1,
+17.4.39). A cell edge uses its direct `w:tcBorders` value first, then the table
+border set. A direct table border therefore replaces the style grid for that
+edge, so an all-`none` direct table border paints zero edges instead of
+inheriting the style's single grid. A direct `none` on the inside edges removes
+those bands while the outer edges keep their own values. Painting and row border
+bands share this resolution.
 
 A table without an explicit style uses the authored default table style.
 Its modeled base width, alignment, indent, borders, shading, look, and cell
@@ -1437,41 +1489,32 @@ clip correspondence and staged authoring atomicity. Unchecked constructors
 do not guarantee arbitrary malformed graphs are safe.
 
 
-`Document` keeps normal-font and deterministic `WordLayoutResult` values in
-separate `Mutex<Option<Arc<_>>>` caches. `layout`, option-taking accepted
-layout, `render_page_to_png`, `render_all_pages`, `to_pdf`, and `layout_page`
-share the normal result. The normal path also retains one synchronized
-`rdocx-layout::Engine` after mutation invalidates that completed result. The
-deterministic renderers use their own bundle. Tracked layouts remain uncached
-and use the normal engine with a distinct revision-view paragraph identity.
-Caller-only native font layouts construct an isolated engine, remain
-uncached, and cannot observe bundled or system fonts. Caller-font access
-returns an owned bundle. Normal Word additional-font layout and output use
-`layout_with_additional_fonts_and_options` in a fresh normal-font engine.
-Caller fonts override embedded and fallback faces. A family the caller does
-not supply resolves as `to_pdf` resolves it, from system fonts when the
-`system-fonts` feature is enabled and then from bundled fonts. PDF, PNG, SVG
-and selected raster pages consume that exact owned bundle. The separate
-bundled-fallback caller-font mode retains one reusable deterministic-base
-engine. Caller faces have highest priority, missing families
-resolve from bundled faces, and system fonts remain unavailable. Its owned
-result shares immutable pages and font bytes without caching the completed
-bundle. Every PDF and raster path borrows its `LayoutResult` field from the same
-bundle that owns the exact font data and Word source map. Cloning a completed
-result shares each immutable page frame and font byte buffer.
+`Document` keeps a bundled-omission cache and a system-opt-in cache. `layout`,
+`layout_with_options`, `render_page_to_png`, `render_page_to_svg`,
+`render_pages`, `render_all_pages`, `to_pdf`, `save_pdf`, and `layout_page`
+share the bundled cache when `RenderOptions.use_system_fonts` is false. False is
+derived `Default`. `layout_page` and `layout_page_with_options` keep their route
+through `layout_with_options`. The same methods share the normal cache when the
+field is true. Their diagnostic twins use that same choice for an empty caller
+font slice and return the cached `Arc`. `Arc::clone` preserves sharing. A
+nonempty caller list is caller, then embedded, then the selected tier, and it is
+wrapped with `Arc::new` only when the private helper calls an owned method. That
+`Arc` is not the omission cache. Deterministic methods ignore the field and keep
+the bundled cache. `layout_with_fonts` stays caller-only.
+`layout_with_fonts_and_bundled_fallback` and both alias methods stay caller plus
+bundled. `layout_with_additional_fonts_and_options` stays caller plus the normal
+engine and ignores the field.
 
-Without selected caller fonts, Python `Document.layout()` reads the
-bundled-font-only snapshot. Nonempty caller inputs use the normal additional
-font bundle. Empty sequences and valid empty directories retain each
-entrypoint's omission path after all supplied paths are validated. It returns immutable main-body fragments with their zero-based body
-index, one-based physical and displayed page numbers, and point-space bounds.
-`Document.layout_page()` uses the same font-selection rule. Omitted caller
-inputs, empty sequences and valid directories with no selected font retain
-the bundled deterministic cache after path validation. Nonempty selected fonts
-use a fresh normal additional-font bundle. It returns immutable page number
-and size metadata for one zero-based page index. Neither method
-exposes positioned renderer elements or permits mutation through a layout
-result.
+Without selected caller fonts, Python `Document.layout()` and
+`Document.layout_page()` read the bundled snapshot when `system_fonts` is false.
+`system_fonts` true reads the normal snapshot, and a build without
+`system-fonts` returns the documented error. Empty sequences and valid empty
+directories are omission. Nonempty caller fonts keep caller priority and use the
+public route table for that same tier. They do not call the private helper and
+they do not call the normal font methods when the tier is bundled. `page_count`,
+`to_pdf`, `to_pdf_with_diagnostics`, and every render helper, including
+`render_all_pages` and its diagnostic twin, use that same keyword and the same
+public route.
 
 PowerPoint slide raster export also stays on the facade-owned deterministic
 path. `Presentation::slide_png_deterministic` renders one zero-based slide and
@@ -1522,6 +1565,16 @@ not globally rewritten. Source XML and stored codes remain unchanged.
 Monochrome Unicode substitutes preserve the measured semantic symbol, not
 original Wingdings outlines, dimensions or advances. U2610 checkbox coverage
 is separate from the WingdingsA7 section-square mapping.
+
+### Word-only Wingdings 2 mapping
+
+Qualified numbering bullets and explicit `w:sym` runs in `Wingdings 2` map both
+the low byte `0xA1` and `U+F0A1` to the black square `U+25A0`. The mapping is
+bounded to Word's symbol methods and does not rewrite ordinary private-use
+text. An unmapped `Wingdings 2` code such as `U+F0A7`
+keeps its stored code and reports one diagnostic, `Unknown Wingdings 2 symbol
+U+F0A7: original code retained`. The Wingdings, Symbol, and PowerPoint control
+mappings above stay unchanged. Source XML and stored codes remain unchanged.
 
 Normal `FontManager` construction clones one process-lifetime snapshot of the
 bundled and system face table. Installing, removing, or replacing a system font
@@ -2406,6 +2459,19 @@ seekable RIFF buffer. The writer patches header sizes in place, retains only one
 bounded 16-byte index record per frame, and appends `idx1` after `movi`. Every
 codec write is capped before growth. Neither format invokes a subprocess or a
 system codec.
+
+## Word TOC entry ink
+
+A generated TOC entry carries the Hyperlink character style on its run, and Word
+paints that entry in the TOC paragraph style's ink rather than the Hyperlink
+character style. The layout engine recognizes a paragraph style whose identifier
+has an ASCII case-insensitive `toc` prefix whose remaining trimmed text parses
+as a numeric level from 1 to 9, or whose trimmed name equals `toc N` for
+N from 1 to 9 under ASCII case folding, and omits a Hyperlink
+character style from that entry's run resolution. Both a Word-written TOC and an
+rdocx-built TOC therefore paint `#000000` without underline. The same Hyperlink
+run in an ordinary body paragraph keeps its colour and underline. Source XML and
+stored field instructions are unchanged.
 
 ## Numbering-aware heading placement
 

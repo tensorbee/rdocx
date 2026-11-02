@@ -1634,10 +1634,10 @@ impl CT_PPr {
         if other.ind_end.is_some() {
             self.ind_end = other.ind_end;
         }
-        if other.ind_first_line.is_some() {
+        // `w:firstLine` and `w:hanging` are one property, the first-line
+        // indent, so a level that sets either replaces both.
+        if other.ind_first_line.is_some() || other.ind_hanging.is_some() {
             self.ind_first_line = other.ind_first_line;
-        }
-        if other.ind_hanging.is_some() {
             self.ind_hanging = other.ind_hanging;
         }
         if other.keep_next.is_some() {
@@ -3071,5 +3071,69 @@ mod tests {
         let mut repeated = Writer::new(Vec::new());
         reopened.to_xml(&mut repeated).unwrap();
         assert_eq!(repeated.into_inner(), saved);
+    }
+
+    #[test]
+    fn issue433_first_line_and_hanging_merge_as_one_property() {
+        // A derived level that sets either attribute replaces both, so the
+        // absent sibling clears instead of leaking from the base.
+        let hanging = parse_ppr(r#"<w:ind w:left="720" w:hanging="720"/>"#);
+        let mut first_line = CT_PPr::default();
+        first_line.merge_from(&hanging);
+        assert_eq!(first_line.ind_hanging, Some(Twips(720)));
+        assert_eq!(first_line.ind_first_line, None);
+
+        let derived = CT_PPr {
+            ind_left: Some(Twips(0)),
+            ind_first_line: Some(Twips(0)),
+            ..CT_PPr::default()
+        };
+        first_line.merge_from(&derived);
+        assert_eq!(first_line.ind_first_line, Some(Twips(0)));
+        assert_eq!(first_line.ind_hanging, None);
+
+        let hanging_only = CT_PPr {
+            ind_left: Some(Twips(0)),
+            ind_hanging: Some(Twips(0)),
+            ..CT_PPr::default()
+        };
+        let mut inherited_first_line = parse_ppr(r#"<w:ind w:left="0" w:firstLine="360"/>"#);
+        inherited_first_line.merge_from(&hanging_only);
+        assert_eq!(inherited_first_line.ind_first_line, None);
+        assert_eq!(inherited_first_line.ind_hanging, Some(Twips(0)));
+
+        // A merge that sets neither leaves the inherited pair untouched.
+        let untouched = parse_ppr(r#"<w:ind w:left="360"/>"#);
+        inherited_first_line.merge_from(&untouched);
+        assert_eq!(inherited_first_line.ind_hanging, Some(Twips(0)));
+        assert_eq!(inherited_first_line.ind_first_line, None);
+    }
+
+    #[test]
+    fn issue433_both_first_line_attributes_survive_and_unknown_xml_is_preserved() {
+        let mut ppr = parse_ppr(
+            r#"<w:ind w:left="0" w:firstLine="240" w:hanging="360"/><w:unknownChild w:val="keep"/>"#,
+        );
+        assert_eq!(ppr.ind_first_line, Some(Twips(240)));
+        assert_eq!(ppr.ind_hanging, Some(Twips(360)));
+        // A later layer that sets only one half of the pair replaces both.
+        let derived = CT_PPr {
+            ind_hanging: Some(Twips(360)),
+            ..CT_PPr::default()
+        };
+        ppr.merge_from(&derived);
+        assert_eq!(ppr.ind_first_line, None);
+        assert_eq!(ppr.ind_hanging, Some(Twips(360)));
+        let mut writer = Writer::new(Vec::new());
+        ppr.to_xml(&mut writer).unwrap();
+        let saved = writer.into_inner();
+        let text = std::str::from_utf8(&saved).unwrap();
+        assert!(text.contains(r#"w:hanging="360""#), "{text}");
+        assert!(!text.contains(r#"w:firstLine"#), "{text}");
+        // The unmodelled child beside `w:ind` is replayed byte for byte.
+        assert!(text.contains(r#"<w:unknownChild w:val="keep"/>"#), "{text}");
+        let reopened = crate::numbering::parse_scoped_ppr(&saved, &["w".to_owned()]).unwrap();
+        assert_eq!(reopened.ind_first_line, None);
+        assert_eq!(reopened.ind_hanging, Some(Twips(360)));
     }
 }

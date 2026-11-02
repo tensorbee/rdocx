@@ -4218,6 +4218,19 @@ mod tests {
     use super::*;
     use crate::{Length, ListLevel, ListNumberFormat, StyleBuilder};
 
+    #[test]
+    fn issue433_epub_paragraph_projection_replaces_the_first_line_pair() {
+        let styles = rdocx_oxml::styles::CT_Styles::from_xml(br#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="BaseInd"><w:name w:val="Base Ind"/><w:pPr><w:ind w:left="720" w:hanging="720"/></w:pPr></w:style><w:style w:type="paragraph" w:styleId="Derived"><w:name w:val="Derived"/><w:basedOn w:val="BaseInd"/><w:pPr><w:ind w:left="0" w:firstLine="0"/></w:pPr></w:style></w:styles>"#).unwrap();
+        let paragraph = rdocx_oxml::text::CT_P::from_xml_fragment(br#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:pPr><w:pStyle w:val="Derived"/></w:pPr></w:p>"#).unwrap();
+        let properties = effective_epub_list_properties(&paragraph, &styles);
+        assert_eq!(properties.ind_first_line, Some(Twips(0)));
+        assert_eq!(properties.ind_hanging, None);
+        let inherited = rdocx_oxml::text::CT_P::from_xml_fragment(br#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:pPr><w:pStyle w:val="BaseInd"/></w:pPr></w:p>"#).unwrap();
+        let inherited = effective_epub_list_properties(&inherited, &styles);
+        assert_eq!(inherited.ind_hanging, Some(Twips(720)));
+        assert_eq!(inherited.ind_first_line, None);
+    }
+
     const PNG_1X1: &[u8] = &[
         137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
         0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 13, 73, 68, 65, 84, 8, 29, 99, 96, 96, 96, 248, 15, 0,

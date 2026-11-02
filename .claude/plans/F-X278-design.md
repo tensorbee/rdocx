@@ -541,21 +541,21 @@ The donor delta names 14 keys. Those donor values are not acceptance. Re-record 
 
 ## Implementation checklist
 
-- [ ] Revalidate every cited line on the implementation Base before claim. The Evidence pins spot check does not close this item. F-X278 does not wait on paused F-X272 source work.
+- [x] Revalidate the cited callable and consumer contracts against the implementation Base. Current whole-story peers and Root final record that revalidation. Frozen numeric lines remain historical pins, not current line claims.
 - [x] Q-S96-07 is answered by the user as Alternative A.
-- [ ] Implement A278-1 through A278-6 in existing files.
-- [ ] Implement the private policy helper with an `Arc` return, derived `Default` false, and the three doc-hidden methods.
-- [ ] Point every Rust diagnostic method at the helper for empty and nonempty slices.
-- [ ] Point every Python nonempty sibling at the public route table, not at the private helper and not at an ignore-list normal method when the tier is bundled.
-- [ ] Branch CLI `convert` at `:833` and `:857`, `render` at `:2248`, and `layout` at `:438`. Leave `inspect` on `layout_deterministic`.
-- [ ] Give Python `layout_page` and every implicit render helper the same keyword and the same public route as `layout`.
-- [ ] Widen `svg::render_page` to `pub` and re-export it. Do not add a second SVG engine.
-- [ ] Add local RED and GREEN tests in existing modules, including public, EPUB, ODT, diagnostic twins, and `capture_element`.
-- [ ] Replace the named HLD paragraphs with the selected Alternative A text.
-- [ ] Run the scoped gate and microscope after claim.
+- [x] Implement A278-1 through A278-6 in existing files.
+- [x] Implement the private policy helper with an `Arc` return, derived `Default` false, and the three doc-hidden methods.
+- [x] Point every Rust diagnostic method at the helper for empty and nonempty slices.
+- [x] Point every Python nonempty sibling at the public route table, not at the private helper and not at an ignore-list normal method when the tier is bundled.
+- [x] Branch CLI `convert` at `:833` and `:857`, `render` at `:2248`, and `layout` at `:438`. Leave `inspect` on `layout_deterministic`.
+- [x] Give Python `layout_page` and every implicit render helper the same keyword and the same public route as `layout`.
+- [x] Widen `svg::render_page` to `pub` and re-export it. Do not add a second SVG engine.
+- [x] Add local RED and GREEN tests in existing modules, including public, EPUB, ODT, diagnostic twins, and `capture_element`.
+- [x] Replace the named HLD paragraphs with the selected Alternative A text.
+- [x] Run the scoped gate and microscope after claim.
 - [ ] Record the reviewed 14-key hash delta in deterministic font mode.
 - [ ] Run the final union once, including F-X273 and F-X274 affected rows.
-- [ ] Leave README measurements to F-X275.
+- [x] Leave README measurements to F-X275.
 
 ## Open questions
 
@@ -589,9 +589,9 @@ Shared 0.15.0 public additions, on the first unpublished shared line: the three 
 
 `inspect` gains no flag. Passing `--system-fonts` to `inspect` is an unsupported-flag refusal. `to_pdfa_deterministic` gains no keyword. Ignore-list Rust methods keep today's engines. No publication and no README measurement belong to this story. F-X275 owns the family measurements. This plan does not edit `CHANGELOG.md` or the release scripts.
 
-## Approval prerequisites
+## Historical approval prerequisites at adoption
 
-This file stays `draft`. Adoption does not satisfy these prerequisites.
+At adoption this file stayed `draft` until the prerequisites below were resolved. The operative rolling approval above supersedes this historical readiness description.
 
 1. Semantic closure, any remaining material product question, and the global batch approval are still required. Root final 3 accepted the preparation for adoption and revalidation. It did not approve this canonical design.
 2. Three design peers are used and zero remain. Root final follows each phase. A future implementation has a separate cap of three. This adoption is not a counter reset and is not implementation review.
@@ -623,3 +623,10 @@ Scoped current-worktree reads on 2026-11-01, not a full citation audit:
 - `layout_deterministic` is still at `crates/rdocx/src/document.rs:45824`.
 
 No accepted preparation clause was invalidated by those reads. Every other line citation remains a frozen 919-packet pin. Implementation-Base revalidation before claim stays required. This adoption did not audit the later 923-file packet and does not treat either packet as a clean Base.
+
+
+## Local preparation checkpoint, 2026-11-02
+
+All three implementation peers and Codex final2 have completed. Final2 reports0defects0smells0nits after RF278-01 remediation. Implementation checklist records actual local completion. Current callable/consumer revalidation is the recorded source audit after implementation and does not invent a historical preclaim read. The resumed preparation consumes that applicable evidence. No product criterion, public signature, HLD impact or budget changed in this metadata reconciliation.
+
+Plan stays approved and delivery in-progress. The two final checklist items above and all named final union/native/installed/packaging/hosted riders remain pending. Expected14-key changes require actual deterministic integrated observation and an individually reviewed account, not donor values. README measurements remain with F-X275. Publication requires its separate final approval.
