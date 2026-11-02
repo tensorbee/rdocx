@@ -1,0 +1,13 @@
+# F-X282 canonical design, Root targeted final 2
+
+ACCEPTED TARGETED REPAIR of C282-1 and C282-2. Zero outstanding defects, zero smells and zero nits in this affected contract. This is Root final review after the existing three design peers, not a fourth peer, implementation review, design approval or claim.
+
+The stopped author returned exit 0 with the final handoff. Plan SHA-256 is `a2465f2f6d042668711791f44bbdc9660b0b5e8e51d3c5f1483db9265ae62f98`. The 105-file lease baseline changed only the permitted F-X282 plan. Canonical HEAD stays `5820539cd277b417ae060e15010eb73bd1d00b01`. Frozen before/after and handoff are in `/private/tmp/rdocx-cross-review/f282-design-closure-final-frozen`.
+
+C282-1 is closed at design level by immutable eligibility, owned original and candidate paragraphs, all fallible preparation before live access, and assignment before cache invalidation. The direct publication reacquires the same owner without `table_mut`. See `.claude/plans/F-X282-design.md:131` through line 143. The existing mutable cell accessor has no document cache side effect at `crates/rdocx/src/table.rs:2007`, unlike `Document::table_mut`. Planned failure and success controls explicitly compare the layout Arc, style and refusal memo. No new runtime result is claimed.
+
+C282-2 is closed at design level by candidate serialization, section ownership and strict XML 1.0 admission before assignment, and checked publication of relationship-bearing or comment-marker-decreasing candidates with the already-built fragment. See `.claude/plans/F-X282-design.md:136` through line 142. `serialize_content_fragment` closes inherited namespace bindings at `crates/rdocx/src/document.rs:14152`, and the checked editor sets the same source facts at line 32874. The fallback preserves exactly-once closure execution. Existing comment reconciliation permits unchanged or increased counts at `crates/rdocx/src/comments.rs:3530`. The candidate tests retain the invalid NUL and ordinary-style controls, both existing return types and failure atomicity.
+
+The three original ratio contracts, cold sample boundaries, F-X268 79/252/407, saved bytes, hash 49 and all named installed binding, packaging, native and CI riders remain due. The accepted revision leaves the plan draft, F-X282 pending and unclaimed, and requires actual implementation-Base revalidation and later batch approval. Source implementation is not authorized by this report. Root's earlier probe remains Root-authored counterfactual evidence, not a DeepSeek discovery or performance qualification.
+
+No source edits, builds, tests, native actions, Git mutations or publication were performed in this review. Return control to orchestration.

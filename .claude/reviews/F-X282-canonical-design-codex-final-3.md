@@ -1,0 +1,21 @@
+# F-X282 canonical design, Root compatibility final 3
+
+REPAIR REQUIRED BEFORE APPROVAL. One defect, zero smells and zero nits. This is an additional Root compatibility check of the repaired candidate admission, not a fourth design peer or an implementation review. The earlier final2 accepted the two targeted repairs without testing this legacy acceptance discriminator. That omission is Root's review miss too. Preserve the historical report unchanged.
+
+Plan SHA-256 `a2465f2f6d042668711791f44bbdc9660b0b5e8e51d3c5f1483db9265ae62f98`. Root used existing compiled libraries, not a fresh current-source build or unimplemented bridge. Native library SHA-256 `5e254d7051a256a327a80dc9ac53c3e85e4a6f496b236fd74201482d7a05724c`. Five generated fixtures and exact source, library and input pins are under `/private/tmp/rdocx-f282-lexical-equivalence-probe`. `manifest-v3.json` records native compile0/run0 and actual five-input strict replay0, with semantic results kept separately.
+
+## C282-3, strict admission becomes an unapproved public refusal
+
+`.claude/plans/F-X282-design.md:138` returns on every `validate_strict_xml_1_0` error before reaching the checked fallback at line140. It describes that function as the lexical gate for the character class. The actual validator also checks namespace binding, qualified names, attribute value syntax and expanded-attribute uniqueness at `crates/oxml-core/src/xml.rs:55` and line172. Those are broader than the OPC character-only writer at `crates/oxml-opc/src/package.rs:759`.
+
+Root's controlled native probe constructs five ordinary direct cell paragraphs with a retained unknown element, opens them and changes only their paragraph style to Normal through `edit_story_paragraph`. All five open and checked edits return Ok. A fresh location after publication yields the retained paragraph XML. The ordinary unknown element passes strict validation. The four other outputs refuse respectively with DuplicateExpandedAttribute, a literal-less-than attribute error, InvalidName for w:9foo, and an unbound-prefix error. See `/private/tmp/rdocx-f282-lexical-equivalence-probe/run-v3.log:1` through line5 and `strict-run-v3.log:1` through line5. `serialize_content_fragment` at `crates/rdocx/src/document.rs:14152` does not itself impose all those strict lexical rules. The existing checked editor serializes the candidate and uses its actual checked publisher at line32874.
+
+The plan therefore turns existing accepted preserved source into a newly refused edit, contrary to its explicit unchanged refusal contract. This is not permission to newly admit malformed XML or to weaken the checked publisher. Keep strict validation as a sufficient direct-path qualification, and route candidates that cannot be qualified through the existing checked publication with the already-edited fragment, without rerunning FnOnce. That route decides the actual legacy acceptance or refusal. A newly introduced NUL candidate must still reach the same existing XML1.0 refusal class and leave live model and caches unchanged. The ordinary compatible case must keep its direct path.
+
+Add retained-source legacy controls that distinguish fallback from the new blanket rejection. Preserve all three ratio workloads, exact cold timing, prior cache barrier, relationship/comment checks, both existing return types, saved bytes and all final riders. No new public refusal policy, narrowed closure API, whole-document workaround on the qualified direct route, source implementation or peer reset is authorized.
+
+## Probe provenance and next phase
+
+The first Root probe failed compilation due to Python/Rust quoting. The initial strict helper execution had zero inputs because Root launched it before the native probe completed. A subsequent assertion detected the missing files. Version2 native edits passed but its old location was stale after publication, so it produced no fragments. Version3 reacquired current locations and actually validated five emitted files sequentially. Those setup mistakes belong to Root and supply no product or DeepSeek failures. Existing-library behavior remains counterfactual evidence, with actual implementation-Base revalidation required.
+
+This review changed no product, plan, HLD, tracker or Git state. End review and return to orchestration for a separate DeepSeek design repair phase.
