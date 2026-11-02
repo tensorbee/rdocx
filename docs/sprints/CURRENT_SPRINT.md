@@ -28,7 +28,7 @@
 | F-X278 | Complete Word rendering fidelity and font policy | L | in-progress | codex |
 | F-X279 | Complete comment ranges, comparison, revisions and insert_document | L | pending | - |
 | F-X280 | Complete validation and damaged-input refusal | L | pending | - |
-| F-X281 | Complete picture, chart, export and layout fidelity | XL | pending | - |
+| F-X281 | Complete picture, chart, export and layout fidelity | XL | in-progress | codex |
 | F-X282 | Bound edit cost across styles, body and cells | M | in-progress | codex |
 | F-X283 | Bound whole-cell setters and Python open-replace-save cost | L | in-progress | codex |
 

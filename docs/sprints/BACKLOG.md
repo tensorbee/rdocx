@@ -40,8 +40,8 @@ regenerated, never hand-edited.
 | M22, Word depth | 12 | 12 | 0 | 0 |
 | M23, From-scratch business documents | 24 | 24 | 0 | 0 |
 | M24, Modern DOCX authoring completeness | 54 | 32 | 0 | 22 |
-| X, Cross-cutting | 297 | 275 | 8 | 10 |
-| **Total** | **628** | **557** | **8** | **59** |
+| X, Cross-cutting | 297 | 275 | 9 | 9 |
+| **Total** | **628** | **557** | **9** | **58** |
 <!-- AUTOGEN:backlog-summary END -->
 
 ## All F-IDs
@@ -849,7 +849,7 @@ HLD14 contract before adopting contributor changes.
 | F-X278 | Complete Word rendering fidelity and font policy | S96 | L | in-progress |
 | F-X279 | Complete comment ranges, comparison, revisions and insert_document | S96 | L | pending |
 | F-X280 | Complete validation and damaged-input refusal | S96 | L | pending |
-| F-X281 | Complete picture, chart, export and layout fidelity | S96 | XL | pending |
+| F-X281 | Complete picture, chart, export and layout fidelity | S96 | XL | in-progress |
 | F-X282 | Bound edit cost across styles, body and cells | S96 | M | in-progress |
 | F-X283 | Bound whole-cell setters and Python open-replace-save cost | S96 | L | in-progress |
 
