@@ -8849,7 +8849,7 @@ Provider edge F-X272: design may use the approved comment-graph and comparison c
 
 **Sprint**: S96
 **Size**: L
-**Depends on**: F-X277, F-X272, F-X280a and F-X280b. Original provider gates and both child completion gates retained
+**Depends on**: F-X277, F-X272, F-X280a, F-X280b and F-X280c. Original providers and all child completion gates retained
 **Test gate**: regression
 **Spec reference**: `04-opc-and-packaging.md`, duplicate ZIP refusal, XML 1.0 open refusal, bookmark ids and stored-package validation, and `10-bindings-spec.md`, `rpptx::validate_presentation_file` and Python validation.
 
@@ -8875,7 +8875,17 @@ Own original Issue435 A280-7 only. One private sized_transform guards textbox, s
 **Test gate**: regression
 **Spec reference**: 04-opc-and-packaging.md, package/validation contracts, and 10-bindings-spec.md, validation APIs.
 
-Own original A280-1 through A280-6, full validation/open/bookmark criteria and residuals. F-X280a owns A280-7. Retain original provider/resource barriers, complete prior peer lineage and all final gates. Root pending Display-policy reconciliation remains proposed, not approved. The parent F-X280 rolls up both children and all seven original criteria, with no second implementation or added effort estimate.
+Own original A280-1/2/3/5/6, Word validation, both-family shared OPC duplicate/open refusal and bookmark criteria/residuals. F-X280a owns A280-7 and F-X280c owns A280-4. C does not complete shared open policy, and final duplicate/open composition remains due. Retain original provider/resource barriers, complete prior peer lineage and all final gates. Root pending Display-policy reconciliation remains proposed, not approved. The parent F-X280 rolls up all three children and all seven original criteria, with no second implementation or added effort estimate.
+
+### F-X280c, Validate stored PresentationML packages through the public file route
+
+**Sprint**: S96
+**Size**: M
+**Depends on**: none
+**Test gate**: regression
+**Spec reference**: 04-opc-and-packaging.md, original XML/package validation, 06-presentationml-model.md, root/shape/table structure, and 10-bindings-spec.md, validation consumers.
+
+Own original Issue435 A280-4 completely: all six stored faults, valid controls, public validate_presentation_file, CLI/help and unchanged Python parsed-model Display messages. Existing OPC APIs and error variants suffice. Validate original indexed unique source identities, including raw metadata unavailable through package.parts, without serialized zip_entries as evidence. Do not add duplicate/open policy or a central-directory scanner. B retains original A280-1/2/3/5/6, all Word providers and both-family duplicate/forbidden-open obligations, including final composition through this file/CLI route. A remains original A7. Parent retains all completion/final gates. Existing files only, three used design peers, Root affected audit and exact hunk/metadata/path readiness pending. No new aggregate effort estimate or scope.
 
 ### F-X281, Complete picture, chart, export and layout fidelity
 

@@ -3,12 +3,12 @@
 **Status**: draft
 **Sprint**: S96
 **Size**: L
-**Depends on**: F-X277, F-X272, F-X280a, F-X280b
+**Depends on**: F-X277, F-X272, F-X280a, F-X280b, F-X280c
 **Test gate**: regression
 
 ## Problem
 
-Original Issue435/PR439 has seven criteria. A280-7 is independent of the unfinished Word providers and becomes F-X280a. A280-1 through A280-6 remain F-X280b with the original F277/F272 barriers. This umbrella has no second product implementation and completes only after both children and original final gates.
+Original Issue435/PR439 has seven criteria. A280-7 is independent of the unfinished Word providers and becomes F-X280a. A280-4 becomes independent F-X280c. A280-1/2/3/5/6 remain F-X280b with the original F277/F272 barriers. This umbrella has no second product implementation and completes only after all three children and original final gates.
 
 ## Spec reference
 
@@ -18,19 +18,20 @@ Original Issue435/PR439 has seven criteria. A280-7 is independent of the unfinis
 
 ## Approach
 
-Partition without narrowing or duplicating original issue scope. F-X280a owns negative authored shape dimensions across native/Python entrypoints, zero and table/connector controls. F-X280b owns original A280-1 through A280-6, all validation, damaged-package/open refusal and bookmark tolerance contracts, residuals and provider barriers. Pending Root Display-policy reconciliation remains with that remainder. Consume both actual handoffs and final integrated evidence once. Do not create fake parent production work or rerun child local tests for paperwork.
+Partition without narrowing or duplicating original issue scope. F-X280a owns negative authored shape dimensions across native/Python entrypoints, zero and table/connector controls. F-X280b owns original A280-1/2/3/5/6, Word validation, damaged-package/open refusal and bookmark tolerance contracts, residuals and original provider barriers. F-X280c owns complete A280-4 stored PowerPoint validation, Rust file API, CLI/help and unchanged Python parsed/Display contract. Root must audit the applicable pending Display/source-frontier reconciliation before approving C. Childc does not complete B's RPPTX duplicate/open-forbidden obligations. Consume all three actual handoffs and final integrated evidence once. Do not create fake parent production work or rerun child local tests for paperwork.
 
 ## Consumer map
 
 | Contract | Owner | Parent obligation |
 |---|---|---|
 | A280-7 shape additions | F-X280a | Complete child native/Python and applicable final qualification |
-| A280-1 through A280-6, all validation/open/bookmark contracts | F-X280b | Genuine F277/F272 provider completion, child evidence and final qualification |
-| Whole Issue435 | Integrator through this umbrella | All seven original rows retained, both children completed, no double scope/effort credit |
+| A280-1/2/3/5/6, Word validation/shared open/bookmark contracts | F-X280b | Genuine F277/F272 provider completion, child evidence and final qualification |
+| A280-4 stored PowerPoint validation, Rust/CLI and parsed Python distinction | F-X280c | Complete independent child plus B final-union duplicate/open-source interaction |
+| Whole Issue435 | Integrator through this umbrella | All seven original rows retained, all three children completed, no double scope/effort credit |
 
 ## Acceptance criteria
 
-A280-1 through A280-6 retain exact inputs, outcomes and riders in F280b. A280-7 retains exact inputs, outcomes and riders in F280a. Parent completion requires both accepted integrations, true provider barriers, original named residuals, final union and normal metadata gates. Childa readiness alone does not unblock the remainder or declare F272/F277 complete. Existing F281/F282 resource ordering against the parent is unchanged by this split.
+A280-1/2/3/5/6 retain exact inputs, outcomes and riders in F280b. A280-4 retains its complete original faults, valid controls and consumers in F280c. A280-7 retains exact inputs, outcomes and riders in F280a. Parent completion requires all three accepted integrations, true provider barriers, original named residuals, final union and normal metadata gates. Childa readiness alone does not unblock the remainder or declare F272/F277 complete. Existing F281/F282 resource ordering against the parent is unchanged by this split.
 
 ## Test matrix
 
@@ -42,11 +43,11 @@ Consume child regression and final integrated full/risk union evidence. Preserve
 
 ## HLD impact
 
-None for completion itself. Childa owns only shape-authoring HLD10 paragraphs. Childb retains HLD04/HLD10 validation/package sections. HLD14 split registration is integrator metadata work. Parent checks the completed union, not a duplicate mechanism description.
+None for completion itself. Childa owns only shape-authoring HLD10 paragraphs. Childb retains HLD04/HLD10 Word/shared open-policy sections. Childc owns the PowerPoint stored-validation sections of HLD04/HLD10, preserving childa shape paragraphs. HLD14 split registration is integrator metadata work. Parent checks the completed union, not a duplicate mechanism description.
 
 ## Risk routing
 
-Completion/evidence adoption and contributed-issue mapping require affected metadata checks. Applicable product riders are the union from both children, run once over the final integrated source. No gates are waived.
+Completion/evidence adoption and contributed-issue mapping require affected metadata checks. Applicable product riders are the union from all three children, run once over the final integrated source. No gates are waived.
 
 ## Hash harness
 
@@ -60,9 +61,10 @@ All three original design peers remain used and exhausted. F280b preserves full 
 
 - [ ] Root audits and approves exact partition and childa readiness/coordination exception.
 - [ ] Childa completes its bounded independent contract.
+- [ ] Childc completes its bounded independent A4 contract with original-source and Display controls.
 - [ ] Childb closes actual provider/design barriers and implements its unchanged scope.
-- [ ] Both handoffs integrate, final union and original riders pass, then normal child and umbrella completion records reconcile once.
+- [ ] All three handoffs integrate, final union and original riders pass, then normal child and umbrella completion records reconcile once.
 
 ## Open questions
 
-No new product policy. Split/design approval, resource/metadata window and actual final evidence remain pending. F280b Display reconciliation is separately proposed by Root and not adopted by this packet.
+No new product policy. Second split/design approval, original-source/encoding/metadata ordering audit, hunk/resource window, exact metadata/path exception and actual evidence remain pending. Prior Root Display reconciliation is applied to the C draft for affected audit, not marked approved. B/parent remain draft and keep all original provider/final gates.
