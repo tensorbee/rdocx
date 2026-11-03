@@ -40,8 +40,8 @@ regenerated, never hand-edited.
 | M22, Word depth | 12 | 12 | 0 | 0 |
 | M23, From-scratch business documents | 24 | 24 | 0 | 0 |
 | M24, Modern DOCX authoring completeness | 54 | 32 | 0 | 22 |
-| X, Cross-cutting | 303 | 275 | 13 | 11 |
-| **Total** | **634** | **557** | **13** | **60** |
+| X, Cross-cutting | 305 | 275 | 14 | 12 |
+| **Total** | **636** | **557** | **14** | **61** |
 <!-- AUTOGEN:backlog-summary END -->
 
 ## All F-IDs
@@ -850,7 +850,9 @@ HLD14 contract before adopting contributor changes.
 | F-X277b | Complete Word-like notes, links and numbering | S96 | L | pending |
 | F-X277c | Complete cells, authored TOC and chart-excluding replacement agreement | S96 | M | in-progress |
 | F-X278 | Complete Word rendering fidelity and font policy | S96 | L | in-progress |
-| F-X279 | Complete comment ranges, comparison, revisions and insert_document | S96 | L | pending |
+| F-X279 | Complete Issue434 through children, completion umbrella | S96 | L | pending |
+| F-X279a | Expose owned revision text and one kind vocabulary | S96 | M | in-progress |
+| F-X279b | Complete comments, comparison and insert_document | S96 | L | pending |
 | F-X280 | Complete Issue435 through child stories, completion umbrella | S96 | L | pending |
 | F-X280a | Refuse negative authored shape sizes before publication | S96 | S | in-progress |
 | F-X280b | Complete validation and damaged-input refusal | S96 | L | pending |

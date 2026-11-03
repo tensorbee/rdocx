@@ -8837,13 +8837,15 @@ A278-7 remains unmet. Q-S96-07 is answered, so the font-policy choice no longer 
 
 **Sprint**: S96
 **Size**: L
-**Depends on**: F-X272, approved contract for design, actual provider completion for implementation
+**Depends on**: F-X272, F-X279a, F-X279b, approved contract for design, actual provider completion for implementation
 **Test gate**: regression
 **Spec reference**: `03-architecture.md`, comment graph and comparison identity, `04-opc-and-packaging.md`, comment parts and package revisions, and `10-bindings-spec.md`, Native Word facade stability.
 
 Complete Issue 434 and PR 444 final outcomes for comments, comparison, revisions and insert_document. Historical PR head `fac363eb9701918ad0d9d6672e386921506b7c02`, captured 2026-10-31T17:23:44Z. After `reply_to`, the reply id has its own range start and end covering its parent's text and a reference after its parent's, and `reply_to` and `rdocx comment reply` take initials. `w:comments` root declares `mc` and lists `w14` in `mc:Ignorable`, each comment's first paragraph uses CommentText and opens with CommentReference plus `w:annotationRef`, both styles are defined when missing, and `commentsIds.xml` is optional. Two paragraphs with the same text and formatting compare equal whatever their run boundaries, with zero revisions at every granularity, and a real word edit gives one deletion and one insertion at word granularity across fields, tabs, drawings, markers and hyperlinks. Each revision record in Python and `--json` carries its text, and each kind has one snake_case spelling across both surfaces. After `insert_document`, B's paragraphs resolve to B's font and size through a renamed style, a style carrying B's defaults, or direct formatting, with the three cases agreeing. With the default policy, each inserted document's lists keep their own numbering, 1, 2, 1, 2, 1, 2, MAY reuse an equal abstract definition and MUST keep instances distinct, including the Rust default.
 
 Provider edge F-X272: design may use the approved comment-graph and comparison contract, while implementation requires actual provider completion, including an actually approved and passed genuine local provider checkpoint where the workflow allows one. Issue430 footnote lifecycle and following-paragraph alignment rows are preserved. HLD03 and HLD04 are assessed. The story declares its hash delta or unchanged. Rust `insert_document` defaults and list behavior must be resolved rather than left at donor behavior.
+
+Operative split: parent has no product source lease and waits all children plus F272. A279-4 wholly A, A1/2/3/5/6 wholly B. Native comment new-candidate gate unchanged, no provider credit or review-cap reset.
 
 ### F-X280, Complete validation and damaged-input refusal
 
@@ -8936,3 +8938,23 @@ Provider edges are none. Clean Base is mandatory. Shared facade, binding and HLD
 **Spec reference**: 03-architecture.md table/TOC/search and 10-bindings-spec.md Native Word facade stability.
 
 Operative second split: C owns original A277-4,5,7,8 completely. B retains only A277-2,3,6 and F272. This ownership overrides inherited B ranges and checklist rows. C retains authored TOC scope and foreign single-paragraph residual, plus WHOLE actual text/report/replacement agreement including text boxes. The stale inferred CLI mismatch is not evidence or a waiver. Parent waits all three children and F272, F280 barriers unchanged. All three design peers remain exhausted. C is draft until Root affected final audit. Worker HLD impact is narrow HLD03/HLD10, notes HLD04 remains B. No new source/provider completion or baseline allocation follows.
+
+### F-X279a, Expose owned revision text and one kind vocabulary
+
+**Sprint**: S96
+**Size**: M
+**Depends on**: none
+**Test gate**: regression
+**Spec reference**: HLD03 owned revision projections, HLD10 Revision/StoryRevision/Python/CLI snapshots.
+
+Own complete original A279-4 including exact text rules, all eight kinds, constructor omission defaults and native/Python/CLI consumers. Existing tree/source context only, no unchecked helper/quota. Draft until Root affected final. Existing design peers exhausted, implementation cap unchanged.
+
+### F-X279b, Complete comments, comparison and insert_document
+
+**Sprint**: S96
+**Size**: L
+**Depends on**: F-X272
+**Test gate**: regression
+**Spec reference**: Original F279 HLD03/04/10 comment/comparison/import contracts.
+
+Own complete original A279-1,2,3,5,6, P1/P2 composition and mandatory new-candidate native comment gate. A279-4 belongs wholly A. Preserve original final union, provider and review-cap obligations. Draft until Root affected final.

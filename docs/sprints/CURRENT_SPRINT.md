@@ -29,7 +29,9 @@
 | F-X277b | Complete Word-like notes, links and numbering | L | pending | - |
 | F-X277c | Complete cells, authored TOC and chart-excluding replacement agreement | M | in-progress | codex |
 | F-X278 | Complete Word rendering fidelity and font policy | L | in-progress | codex |
-| F-X279 | Complete comment ranges, comparison, revisions and insert_document | L | pending | - |
+| F-X279 | Complete Issue434 through children, completion umbrella | L | pending | - |
+| F-X279a | Expose owned revision text and one kind vocabulary | M | in-progress | codex |
+| F-X279b | Complete comments, comparison and insert_document | L | pending | - |
 | F-X280 | Complete Issue435 through child stories, completion umbrella | L | pending | - |
 | F-X280a | Refuse negative authored shape sizes before publication | S | in-progress | opencode |
 | F-X280b | Complete validation and damaged-input refusal | L | pending | - |
@@ -153,3 +155,5 @@ Root final1 approves and claims independent F-X280a on the actual OpenCode host 
 F-X280 second delivery split, proposed: F-X280c owns original A280-4 as one independent stored PowerPoint validator story, including native file API, CLI/help and preserved parsed Python/Display policy. B retains original A280-1/2/3/5/6 and every F272/F277 barrier, A remains A280-7, parent waits for all three children and original final gates. C consumes existing OPC open/error APIs without repairing duplicate/open-forbidden policy. Its source scan covers indexed unique identities, and B final composition must close physical duplicate refusal. Three original design peers remain used, no cap reset or approval. Root must audit exact source/encoding/metadata failure ordering and approve semantic hunk leases plus proposed metadata-only claim exception at bd48016f2ef48ed77c63505b2db21ba9e8100382 and /private/tmp/rdocx-s96-f280c-opencode. Preserve prepared shape, math/C and canonical C1 carry. No model/project launch, whole-product check, claim or provider completion follows.
 
 Root affected final approves and claims F-X280c with opencode in /private/tmp/rdocx-s96-f280c-opencode. The prior proposed/draft paragraph is historical. This exact metadata-only coordination exception preserves all unfinished source and unrelated carry. Parent/remainder provider barriers, exhausted design peers, scoped implementation review and every final rider remain. No product run, provider completion or publication is claimed.
+
+Root affected final approves and claims F-X279a with codex in /private/tmp/rdocx-s96-f279a-codex. The prior proposed/draft paragraph is historical. This exact metadata-only coordination exception preserves all unfinished source and unrelated carry. Parent/remainder provider barriers, exhausted design peers, scoped implementation review and every final rider remain. No product run, provider completion or publication is claimed.
