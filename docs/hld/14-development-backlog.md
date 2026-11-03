@@ -8791,13 +8791,35 @@ Rider debt stays explicit: actual rpptx CLI and Python calls, render and PDF for
 
 **Sprint**: S96
 **Size**: L
-**Depends on**: F-X272, approved contract for design, actual provider completion for implementation
+**Depends on**: F-X272, F-X277a, F-X277b. Parent rollup, no product source lease
 **Test gate**: regression
 **Spec reference**: `03-architecture.md`, physical story and note ownership, `04-opc-and-packaging.md`, note parts and package markup, and `10-bindings-spec.md`, Native Word facade stability.
 
 Complete Issue 432 and PR 441 final outcomes for Word-like written markup. Historical PR head `aca195c4412f65cfc497a955b34a3e52efd3e2e7`, captured 2026-10-31T21:11:35Z. The earlier R3 head `54e5351efd443faac6e1e21ffd351a0b68fc0985` is historical only. Every `m:rad` written by `add_equation` holds `m:deg` after `m:radPr`, empty for a square root. A note number run has `w:rPr` before the note reference, the notes part holds separator and continuation-separator notes, and a space separates the number from the text. Links written by `Paragraph.add_hyperlink`, `add_heading_hyperlink`, Markdown with a template and HTML carry `w:rStyle Hyperlink`, with the built-in style added when missing, or at least colour and underline, including the low-level Rust publishers. An empty cell's lone empty paragraph is not carried into the merged cell, and second-empty and first-empty give one paragraph while both-with-text keeps both. Cells made by `insert_column` and `add_row` get the source cell's `w:pPr` and run properties of its paragraph mark, including `w:jc center` and `w:b`. A numbering definition id returned by `add_numbering_definition` stays valid for the life of the document. `rebuild_toc()` fills a TOC that `insert_toc()` wrote before the document had headings, in both orders. Replacement and text agree on what is searched, charts are left alone, count 1, the CLI accepts `--expect 1`, and cache and workbook agree.
 
 Provider edge F-X272: design may use the approved notes contract, while implementation requires actual provider completion, including an actually approved and passed genuine local provider checkpoint where the workflow allows one. Do not manufacture completion or use an oracle-only pending gate. Residual R-A277-7 foreign single-paragraph TOC is separate and needs its own row and provider if retained. HLD03 and HLD04 are assessed. The note leading-space behavior change is verified. Hash baseline moves 5 entries.
+
+Split ownership: F-X277 is the completion umbrella. A277-1 belongs wholly to F-X277a. A277-2 through A277-8 belong wholly to F-X277b, retaining F-X272. Both children and the parent retain the original exhausted design-peer history. Root affected final audit does not create a fourth peer. F-X280's parent and F-X272 barriers remain unchanged. The parent estimate is historical aggregate effort and is not added to child implementation effort.
+
+### F-X277a, Emit authored radical degrees and preserve imported absence
+
+**Sprint**: S96
+**Size**: S
+**Depends on**: none
+**Test gate**: regression
+**Spec reference**: `03-architecture.md`, OfficeMath ownership and raw-boundary publication, and `10-bindings-spec.md`, native equation conversion and Python `Paragraph.add_equation`.
+
+Own exactly Issue432 A277-1. New square roots contain an empty `m:deg` immediately after `m:radPr`, with `degHide`1. Nth roots retain their degree. Imported missing degree stays missing, imported missing radical properties retains the existing `degHide`0 normalization, and opaque imported children retain their exact bytes and existing slots. Exercise direct grammar, native LaTeX/MathML, native paragraph publication and actual Python publication through save/reopen. Official SDK3.0.1 Radical metadata pins `radPr`0..1, `deg`1..1, `e`1..1 in sequence. Imported preservation does not assert validity of an imported missing-degree radical. No new public API. Childa does not consume or complete F-X272. Final SDK, raw-preservation, installed binding, normal CI, packaging and deterministic-font hash riders remain with the integrated owner. Native radical drawing remains the original pending residual.
+
+### F-X277b, Complete Word-like notes, links, cells, numbering, TOC and replace
+
+**Sprint**: S96
+**Size**: L
+**Depends on**: F-X272, approved notes contract for design, actual provider completion for implementation
+**Test gate**: regression
+**Spec reference**: `03-architecture.md`, physical story and note ownership, `04-opc-and-packaging.md`, note parts and package markup, and `10-bindings-spec.md`, Native Word facade stability.
+
+Own exactly the original Issue432 A277-2 through A277-8. Preserve all note order, specials and leading space, hyperlink publisher/style, cell merge/inheritance, numbering identity through publication/sign/reopen, TOC construction-order, and chart-excluding replacement criteria. Preserve R-A277-7 foreign one-paragraph TOC and R-A277-8 text-box observations as explicit residuals. The existing F272 notes contract and actual dependency checkpoint remain mandatory. No radical implementation belongs here. The complete inherited remainder plan keeps accepted findings, original source/donor provenance and all three exhausted design peers without reset.
 
 ### F-X278, Complete Word rendering fidelity and font policy
 

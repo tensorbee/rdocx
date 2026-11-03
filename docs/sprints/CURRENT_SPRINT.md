@@ -24,7 +24,9 @@
 | F-X274 | Honor section and field page-number formats | M | in-progress | codex |
 | F-X275 | Prepare Word 0.17.0 and shared/PowerPoint 0.15.0 with strict SemVer gates | L | in-progress | codex |
 | F-X276 | Complete rpptx fit, table rows, fit text, Markdown and slide indexing | M | in-progress | codex |
-| F-X277 | Complete Word-like markup for equations, notes, links, cells, numbering, TOC and replace | L | pending | - |
+| F-X277 | Complete Issue432 through child stories, completion umbrella | L | pending | - |
+| F-X277a | Emit authored radical degrees and preserve imported absence | S | in-progress | opencode |
+| F-X277b | Complete Word-like notes, links, cells, numbering, TOC and replace | L | pending | - |
 | F-X278 | Complete Word rendering fidelity and font policy | L | in-progress | codex |
 | F-X279 | Complete comment ranges, comparison, revisions and insert_document | L | pending | - |
 | F-X280 | Complete validation and damaged-input refusal | L | pending | - |
@@ -124,3 +126,12 @@ F-X282 is claimed for Codex on the clean integrated F-X276/F-X278 source. It edi
 ## Codex delivery wave after F-X282 integration
 
 F-X282 is locally integrated reviewed at28a36b761eac87e446ac35d2556313aaa68c76c1, including its separately labelled malformed-styles delta. Its exact release timings and all final gates remain pending. F-X281 and F-X283 designs are approved. F-X283 is claimed for Codex in a clean isolated worker and owns facade, binding, unpublished support and HLD03/10/12 resources next. F-X272 runs only its OOXML constructor/admission kernels and tests alongside it, with facade/binding/HLD changes paused. F-X281 implementation follows these shared resources. These are resource constraints, not new provider edges. No provider completion or final acceptance is implied.
+
+
+### Proposed F-X277 independent radical child and metadata-only claim route
+
+F-X277 is partitioned into F-X277a for A277-1 and F-X277b for A277-2 through A277-8. The remainder retains F-X272. The umbrella waits for both children and F-X272. F-X280 retains its parent and F-X272 barriers. All eight original Issue432 criteria and residuals remain, with original design-peer use preserved. There are13original top-level S96 contracts and two added child delivery rows, not two added issue scopes or an increased aggregate effort estimate. Root final1 approves F-X277a independently. The umbrella and remainder remain draft and pending. Registration alone is not a claim.
+
+Root approved coordination exception: permit the F-X277a claim while the canonical F-X272 carry remains untouched, after a reviewed metadata-only planning/claim commit. The product Base must equal ed588356bc50982516fff571eeba21bde8d76868 exactly, and the child worktree must be clean. Exclude every unfinished product/HLD carry, including the57uncommitted Python field-validation test lines around test_core.py:8258. Only named reviewed planning/tracker/claim metadata may enter that commit. Reconfirm source and worker branch/tree identity before launch. Root explicitly approves this narrow continuation of the existing coordination exception and the temporary worker path /private/tmp/rdocx-s96-f277a-opencode. It does not permit staging dirty source or bypassing design, review, scoped/final verification or publication approval. See .claude/reviews/F-X277-split-design-codex-final-1.md.
+
+Root reserved exclusive child lease: grammar math.rs, the existing Rust integration_test.rs and the new Python radical test added to the existing test_core.py, plus OfficeMath sections only in HLD03/HLD10. The Python worker starts from clean product Base, never a copied dirty canonical carrier. Root preserves its unrelated Python carry, pauses writes to those shared test carriers and semantic HLD sections while the child is active, and reconciles only the reviewed child hunks at integration. F272 continues disjoint OOXML constructor/admission work. Child source edits should be limited to the constructor correction and existing test/HLD carriers. Hash baseline remains integrator-exclusive. Owner is '-' until an actual claim using the implementing OpenCode host identity, not an impersonated model name.
