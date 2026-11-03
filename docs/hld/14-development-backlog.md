@@ -8849,13 +8849,33 @@ Provider edge F-X272: design may use the approved comment-graph and comparison c
 
 **Sprint**: S96
 **Size**: L
-**Depends on**: F-X277 and F-X272, approved contracts for design, actual provider completion for implementation
+**Depends on**: F-X277, F-X272, F-X280a and F-X280b. Original provider gates and both child completion gates retained
 **Test gate**: regression
 **Spec reference**: `04-opc-and-packaging.md`, duplicate ZIP refusal, XML 1.0 open refusal, bookmark ids and stored-package validation, and `10-bindings-spec.md`, `rpptx::validate_presentation_file` and Python validation.
 
 Complete Issue 435 and PR 439 final outcomes for validation and damaged inputs. Historical PR head `7c4b5cf879014247ee370653537f9fa9745721d3` from the 18:26:06Z capture. The reviewed re-authenticated captured head `1e8e5a98c7177117ebca917e343264bc74176493`, updated 2026-10-31T18:29:26Z, supersedes it for source coverage. CI belongs only to the exact captured head and is not acceptance. `rdocx validate` exits non-zero on schema faults for order, unknown element, enum, required attribute, negative extent and `m:rad` without `m:deg`, naming the part, while the base document validates. Each dangling reference exits non-zero naming the part and dangling id for picture blip, header reference, footnote reference and `w:t` inside `w:del`, and `validate` fails every file `rdocx.Document()` refuses. Both validators exit non-zero on a malformed `docProps/app.xml` and a ZIP storing a part twice, naming the part, and on open both libraries refuse a duplicate entry name or warn and say which copy they read. `rpptx validate` exits non-zero on unknown element, missing required `name`, misordered `presentation.xml` children, missing content type and short table row, naming the part, while the base deck validates. `validate` reports a part holding U+0001 as not well-formed, and opening fails naming the part for both libraries and both `word/document.xml` and `ppt/slides/slide1.xml`, while well-formed opaque content remains verbatim and is never rewritten to `_x0001_`. Two bookmarks sharing a `w:id` open and render in the same part and across body and header, `validate` may report the duplicate, and a save may renumber the pair without weakening Issue430 ownership or collision rules. `add_textbox` and `add_shape` raise at the call for a negative width or height, and nothing is written, while zero extent stays allowed.
 
 Provider edges F-X277 for note run order and F-X272 for bookmark and footnote identity and Issue430 ownership: design may use the approved contracts, while implementation requires actual provider completion, including an actually approved and passed genuine local provider checkpoint where the workflow allows one. HLD04 and HLD10 are added. Hash unchanged.
+
+### F-X280a, Refuse negative authored shape sizes before publication
+
+**Sprint**: S96
+**Size**: S
+**Depends on**: none
+**Test gate**: regression
+**Spec reference**: 10-bindings-spec.md, ShapeCollection authoring/owner atomicity, and 01-glossary.md, EMU.
+
+Own original Issue435 A280-7 only. One private sized_transform guards textbox, styled preset and actual crate-private unstyled preset additions before append. Negative width or height refuses with existing native InvalidShapeMutation and Python RpptxError. Zero shape dimensions and negative positions remain accepted, table positivity and connector geometry unchanged. Compare package bytes, source identities and Python held handles after failure, save/reopen accepted controls. Existing carriers only, no new public API/module/source file. Inherits all three used design peers and original final integrated riders. Root approval and exact metadata/path exception pending.
+
+### F-X280b, Complete validation and damaged-input refusal
+
+**Sprint**: S96
+**Size**: L
+**Depends on**: F-X277 and F-X272, original approved-contract and actual-completion barriers unchanged
+**Test gate**: regression
+**Spec reference**: 04-opc-and-packaging.md, package/validation contracts, and 10-bindings-spec.md, validation APIs.
+
+Own original A280-1 through A280-6, full validation/open/bookmark criteria and residuals. F-X280a owns A280-7. Retain original provider/resource barriers, complete prior peer lineage and all final gates. Root pending Display-policy reconciliation remains proposed, not approved. The parent F-X280 rolls up both children and all seven original criteria, with no second implementation or added effort estimate.
 
 ### F-X281, Complete picture, chart, export and layout fidelity
 

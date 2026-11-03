@@ -29,7 +29,9 @@
 | F-X277b | Complete Word-like notes, links, cells, numbering, TOC and replace | L | pending | - |
 | F-X278 | Complete Word rendering fidelity and font policy | L | in-progress | codex |
 | F-X279 | Complete comment ranges, comparison, revisions and insert_document | L | pending | - |
-| F-X280 | Complete validation and damaged-input refusal | L | pending | - |
+| F-X280 | Complete Issue435 through child stories, completion umbrella | L | pending | - |
+| F-X280a | Refuse negative authored shape sizes before publication | S | in-progress | opencode |
+| F-X280b | Complete validation and damaged-input refusal | L | pending | - |
 | F-X281 | Complete picture, chart, export and layout fidelity | XL | in-progress | codex |
 | F-X282 | Bound edit cost across styles, body and cells | M | in-progress | codex |
 | F-X283 | Bound whole-cell setters and Python open-replace-save cost | L | in-progress | codex |
@@ -139,3 +141,8 @@ Root reserved exclusive child lease: grammar math.rs, the existing Rust integrat
 ## F-X277a owner recovery, 2026-11-03
 
 The user stopped all GLM assignments because its server went down. No project source task was launched and the OpenCode child worktree is clean. Root reassigns this unchanged child to the actual Codex host under the existing metadata-only coordination exception. The replacement worktree is /private/tmp/rdocx-s96-f277a-codex on work/f-x277a-codex. Its product source remains exactly ed588, with reviewed claim/recovery metadata only. Preserve the original never-started branch for provenance, then remove its clean worktree without force after authenticating the replacement. No model retry is authorized. A separate Codex reviewer performs independent microscope before preparation, followed by Root adjudication. Existing review caps, dependencies and final riders remain.
+
+
+F-X280 delivery split, proposed: F-X280a owns original A280-7 with no F272/F277 provider edge, F-X280b retains A280-1 through A280-6 and the original providers, and F-X280 remains the completion umbrella. All three original design peers remain used. No duplicate scope or fresh review cap. Childa approval and a narrow metadata-only coordination/path exception at reviewed HEAD e6fec886557f819fc28f5ff1e0196edd458b1371 are pending Root's affected final. The proposed path is /private/tmp/rdocx-s96-f280a-opencode. Canonical F272 carry and F277a worktree/owner are preserved. No whole-product check, approval, claim or gate result follows from registration. Original final union and F281/F282 resource ordering remain unchanged.
+
+Root final1 approves and claims independent F-X280a on the actual OpenCode host after the user restored GLM availability and its sentinel file tools passed. This is separate from the recovered Codex math story, which remains with Codex. The exact temporary path is /private/tmp/rdocx-s96-f280a-opencode. The metadata-only coordination exception preserves all unfinished canonical source, clean worker product tree ed588 and the original caps/provider barriers. Reserved production/test/HLD sections are in the approved child. No project work, independent implementation review, final acceptance or publication is implied by this claim.
