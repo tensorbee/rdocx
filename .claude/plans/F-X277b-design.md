@@ -1,4 +1,4 @@
-# F-X277b, Complete Word-like notes, links, cells, numbering, TOC and replace
+# F-X277b, Complete Word-like notes, links and numbering
 
 **Status**: draft
 **Sprint**: S96
@@ -8,6 +8,8 @@
 
 
 ## Split scope and inherited review lineage
+
+Operative second split: only A277-2, A277-3 and A277-6 remain in this child. A277-4, A277-5, A277-7 and the WHOLE A277-8 obligation, including actual text/report/replacement and text-box agreement, belong exclusively to F-X277c. This rule overrides every inherited scope range, acceptance row, checklist, risk rider and historical residual below. Retained C-owned text is historical context, never duplicate delivery. In particular the old inferred CLI text-box count mismatch and proposed waiver are superseded pending actual current observations. R-A277-7 foreign one-paragraph TOC remains recorded by C. F272 remains a genuine dependency of B. All three design peers remain exhausted. B and parent remain draft. Root affected final audit is required.
 
 This is the remainder child of F-X277. Its operative scope is exactly A277-2 through A277-8. A277-1, including authored/imported radical behavior and its Python consumer, is delegated completely to F-X277a. Historical preparation and review references below continue to name the original F-X277 records. They are not a new review cycle. All three parent design peers are exhausted and remain exhausted for this remainder. Root affected final audit is required, with no fourth peer. The status stays draft. F-X272 remains the notes provider for design approval and actual implementation readiness. No provider completion is invented by the split.
 

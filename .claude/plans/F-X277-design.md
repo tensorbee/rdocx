@@ -3,10 +3,12 @@
 **Status**: draft
 **Sprint**: S96
 **Size**: L
-**Depends on**: F-X272, F-X277a, F-X277b
+**Depends on**: F-X272, F-X277a, F-X277b, F-X277c
 **Test gate**: regression
 
 ## Problem
+
+Operative ownership: A277-1 is F-X277a. A277-2,3,6 are F-X277b with F272. A277-4,5,7,8 are F-X277c, including the complete actual text/report/replacement agreement requirement. This partition overrides every older two-child range below. Parent closes only after all three children and F272 satisfy actual gates. F280 barriers and exhausted parent design-peer history remain unchanged. This metadata proposal is draft and does not approve or complete a child.
 
 Issue432 and PR441 contain eight independent acceptance rows. The prior umbrella implementation was blocked by F-X272's unfinished notes contract. A277-1's authored/imported radical behavior does not consume that provider and is extracted as F-X277a. A277-2 through A277-8 remain F-X277b, retaining F-X272. This parent is the completion rollup, not a second implementation of either child.
 

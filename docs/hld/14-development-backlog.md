@@ -8791,7 +8791,7 @@ Rider debt stays explicit: actual rpptx CLI and Python calls, render and PDF for
 
 **Sprint**: S96
 **Size**: L
-**Depends on**: F-X272, F-X277a, F-X277b. Parent rollup, no product source lease
+**Depends on**: F-X272, F-X277a, F-X277b, F-X277c. Parent rollup, no product source lease
 **Test gate**: regression
 **Spec reference**: `03-architecture.md`, physical story and note ownership, `04-opc-and-packaging.md`, note parts and package markup, and `10-bindings-spec.md`, Native Word facade stability.
 
@@ -8916,3 +8916,13 @@ Case 1 retains the exact 20 by 5 table, 100 cells set once sequentially, bodies 
 The separate `Paragraph.text`-in-cell observation stays in the consumer and regression work list without an invented numeric criterion. The other `PyCell::edit` setters `width`, `set_border` and `set_margins` get correctness coverage, not unrequested timing promises. Held live handles, first-handle activation, mandatory open checks, atomic failure, tracked/comments/notes and saved bytes remain design obligations. The updated PR443 explicitly leaves `Cell.text` failing and case 2 upstream. This is a genuinely additional story, not an F282 repair-cycle reset. The existing 44 A-ID rows and F282's original three A-IDs and exhausted design peers remain intact.
 
 Provider edges are none. Clean Base is mandatory. Shared facade, binding and HLD files make F-X283 a resource serial after F-X282, not a formal provider edge. HLD03, HLD10 and HLD12 are assessed. Hash unchanged.
+
+### F-X277c, Complete cells, authored TOC and chart-excluding replacement agreement
+
+**Sprint**: S96
+**Size**: M
+**Depends on**: none
+**Test gate**: regression
+**Spec reference**: 03-architecture.md table/TOC/search and 10-bindings-spec.md Native Word facade stability.
+
+Operative second split: C owns original A277-4,5,7,8 completely. B retains only A277-2,3,6 and F272. This ownership overrides inherited B ranges and checklist rows. C retains authored TOC scope and foreign single-paragraph residual, plus WHOLE actual text/report/replacement agreement including text boxes. The stale inferred CLI mismatch is not evidence or a waiver. Parent waits all three children and F272, F280 barriers unchanged. All three design peers remain exhausted. C is draft until Root affected final audit. Worker HLD impact is narrow HLD03/HLD10, notes HLD04 remains B. No new source/provider completion or baseline allocation follows.
