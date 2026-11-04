@@ -103,9 +103,9 @@ Canonical F272 source/build lease remains with its current owner. Proposed excep
 ## Implementation checklist
 
 - [x] Root approves partition and bounded design, actual provider independence, metadata/path exception and resource windows.
-- [ ] Fresh mutable issue/PR check, reviewed metadata Base, clean worker product verification and /start-feature F-X280a --claimed.
-- [ ] Actual semantic RED, private helper and three call-site implementation, focused GREEN and Python evidence or exact pending installation rider.
-- [ ] Update only declared HLD section, scoped gate and independent zero-finding microscope with actual source pins.
+- [x] Fresh mutable issue/PR check, reviewed metadata Base, clean worker product verification and /start-feature F-X280a --claimed.
+- [x] Actual semantic RED, private helper and three call-site implementation, focused GREEN and Python evidence or exact pending installation rider.
+- [x] Update only declared HLD section, scoped gate and independent zero-finding microscope with actual source pins.
 - [ ] Prepare and validate structured handoff only after Root's acceptance, preserve branch through integration/verification.
 - [ ] Integrator consumes final applicable riders and completes child without claiming parent validation/provider completion.
 

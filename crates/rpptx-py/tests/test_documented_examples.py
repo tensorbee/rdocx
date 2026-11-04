@@ -12770,3 +12770,78 @@ def test_fx281_two_content_ink_tops_share_body_family_without_geometry_changes()
     assert geometry == [shape.effective_geometry() for shape in [left, right]]
     assert explicit == [(shape.left, shape.top, shape.width, shape.height) for shape in [left, right]]
     assert deck.to_bytes() == before
+
+
+def test_issue435_add_textbox_and_add_shape_refuse_a_negative_size(tmp_path):
+    """Expected on old source: every negative-size call is accepted and
+    changes the package. The contract is a call-time RpptxError naming the
+    negative dimensions, an unchanged package and counts after every failed
+    call, and previously held collection, picture, group, group-member and
+    text handles that keep authority and stay usable afterwards.
+    """
+    import rpptx
+
+    deck = rpptx.Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[6])
+    collection = slide.shapes
+    held_shape = collection.add_textbox(100, 200, 300000, 400000)
+    held_text = held_shape.text_frame.paragraphs[0]
+    # A relationship-backed companion member.
+    image = tmp_path / "seed.png"
+    image.write_bytes(_tiny_png())
+    held_picture = collection.add_picture(str(image), 500, 600)
+    # A populated group with an existing member and its own text handle.
+    group = collection.add_group_shape()
+    held_group_shapes = group.shapes
+    held_member = held_group_shapes.add_textbox(30, 40, 500000, 600000)
+    held_member_text = held_member.text_frame.paragraphs[0]
+    before = deck.to_bytes()
+    assert len(collection) == 3
+    assert len(held_group_shapes) == 1
+
+    with pytest.raises(rpptx.RpptxError, match=r"must not be negative, got -100 by 200 EMU"):
+        collection.add_textbox(-100, 200, -100, 200)
+    assert deck.to_bytes() == before
+    assert len(collection) == 3
+    assert len(held_group_shapes) == 1
+
+    with pytest.raises(rpptx.RpptxError, match=r"must not be negative, got 100 by -200 EMU"):
+        collection.add_shape("rect", 100, 200, 100, -200)
+    assert deck.to_bytes() == before
+    assert len(collection) == 3
+    assert len(held_group_shapes) == 1
+
+    with pytest.raises(rpptx.RpptxError, match=r"must not be negative, got -1 by 0 EMU"):
+        held_group_shapes.add_textbox(0, 0, -1, 0)
+    assert deck.to_bytes() == before
+    assert len(held_group_shapes) == 1
+
+    with pytest.raises(rpptx.RpptxError, match=r"must not be negative, got 1 by -2 EMU"):
+        held_group_shapes.add_shape("rect", 0, 0, 1, -2)
+    assert deck.to_bytes() == before
+    assert len(collection) == 3
+    assert len(held_group_shapes) == 1
+
+    # Held handles keep authority and stay usable after the refusals.
+    held_member_text.add_run(" kept")
+    assert held_member_text.text == " kept"
+    assert held_member.text == " kept"
+    assert held_member.width == 500000
+    assert held_picture.width is not None
+    assert held_shape.text == ""
+    assert held_group_shapes.add_shape("rect", 0, 0, 10, 20).shape_type is not None
+    assert len(held_group_shapes) == 2
+    assert collection.add_textbox(0, 0, 100, 100).text == ""
+    assert len(collection) == 4
+    assert deck.to_bytes() != before
+
+    reopened = rpptx.Presentation.from_bytes(deck.to_bytes())
+    reopened_shapes = reopened.slides[0].shapes
+    assert len(reopened_shapes) == 4
+    assert reopened_shapes[1].shape_type is not None
+    reopened_group = reopened_shapes[2].shapes
+    assert len(reopened_group) == 2
+    assert reopened_group[0].text == " kept"
+    assert reopened_group[0].width == 500000
+    assert reopened_group[1].width == 10
+    assert reopened.slides[0].shapes.add_textbox(0, 0, 1, 1) is not None

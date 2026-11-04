@@ -37377,3 +37377,523 @@ fn native_scaled_preset_paints_all_expected_corners_at_parallel_phase() {
         );
     }
 }
+
+#[test]
+fn issue435_new_shapes_refuse_a_negative_size() {
+    let mut presentation = Presentation::new().expect("open bundled template");
+    presentation.add_slide(6).expect("add blank slide");
+    let before = presentation.to_bytes().unwrap();
+    let original_count = presentation.slide(0).unwrap().shapes().len();
+
+    // SlideMut root route, textbox with a negative width.
+    let error = match presentation.slide_mut(0).unwrap().add_textbox(
+        Emu(-100),
+        Emu(200),
+        Emu(-100),
+        Emu(200),
+    ) {
+        Ok(_) => panic!("negative textbox width was accepted"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            &error,
+            Error::InvalidShapeMutation { operation: "add textbox", message }
+                if message == "shape width and height must not be negative, got -100 by 200 EMU"
+        ),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(presentation.to_bytes().unwrap(), before);
+    assert_eq!(
+        presentation.slide(0).unwrap().shapes().len(),
+        original_count
+    );
+
+    // SlideMut root route, preset shape with a negative height.
+    let error = match presentation.slide_mut(0).unwrap().add_shape(
+        "rect",
+        Emu(100),
+        Emu(200),
+        Emu(100),
+        Emu(-200),
+    ) {
+        Ok(_) => panic!("negative shape height was accepted"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            &error,
+            Error::InvalidShapeMutation { operation: "add shape", message }
+                if message == "shape width and height must not be negative, got 100 by -200 EMU"
+        ),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(presentation.to_bytes().unwrap(), before);
+    assert_eq!(
+        presentation.slide(0).unwrap().shapes().len(),
+        original_count
+    );
+
+    // SlideMut root route, both dimensions negative.
+    let error = match presentation.slide_mut(0).unwrap().add_shape(
+        "rect",
+        Emu(0),
+        Emu(0),
+        Emu(-100),
+        Emu(-200),
+    ) {
+        Ok(_) => panic!("negative shape extents were accepted"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            &error,
+            Error::InvalidShapeMutation { operation: "add shape", message }
+                if message == "shape width and height must not be negative, got -100 by -200 EMU"
+        ),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(presentation.to_bytes().unwrap(), before);
+
+    // ShapesMut root route through the local append path.
+    let error =
+        match presentation
+            .shapes_mut(0, &[])
+            .unwrap()
+            .add_textbox(Emu(0), Emu(0), Emu(-1), Emu(0))
+        {
+            Ok(_) => panic!("negative textbox width was accepted on ShapesMut"),
+            Err(error) => error,
+        };
+    assert!(
+        matches!(
+            &error,
+            Error::InvalidShapeMutation { operation: "add textbox", message }
+                if message == "shape width and height must not be negative, got -1 by 0 EMU"
+        ),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(presentation.to_bytes().unwrap(), before);
+
+    let error = match presentation.shapes_mut(0, &[]).unwrap().add_shape(
+        "rect",
+        Emu(0),
+        Emu(0),
+        Emu(1),
+        Emu(-2),
+    ) {
+        Ok(_) => panic!("negative shape height was accepted on ShapesMut"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            &error,
+            Error::InvalidShapeMutation { operation: "add shape", message }
+                if message == "shape width and height must not be negative, got 1 by -2 EMU"
+        ),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(presentation.to_bytes().unwrap(), before);
+
+    // Root route forced onto the candidate transaction path by an existing
+    // connector: the refusal must leave the held presentation untouched.
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .add_connector(ConnectorType::Straight, Emu(0), Emu(0), Emu(10), Emu(10))
+        .unwrap();
+    let connected = presentation.to_bytes().unwrap();
+    let error =
+        match presentation
+            .shapes_mut(0, &[])
+            .unwrap()
+            .add_textbox(Emu(0), Emu(0), Emu(-5), Emu(5))
+        {
+            Ok(_) => panic!("negative textbox width was accepted on the candidate path"),
+            Err(error) => error,
+        };
+    assert!(
+        matches!(
+            &error,
+            Error::InvalidShapeMutation { operation: "add textbox", message }
+                if message == "shape width and height must not be negative, got -5 by 5 EMU"
+        ),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(presentation.to_bytes().unwrap(), connected);
+
+    // Populated group route through the candidate transaction path.
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .add_group_shape()
+        .unwrap();
+    let group_index = presentation.slide(0).unwrap().shapes().len() - 1;
+    let grouped = presentation.to_bytes().unwrap();
+    let error = match presentation
+        .shapes_mut(0, &[group_index])
+        .unwrap()
+        .add_shape("rect", Emu(0), Emu(0), Emu(-7), Emu(5))
+    {
+        Ok(_) => panic!("negative shape width was accepted in a group"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            &error,
+            Error::InvalidShapeMutation { operation: "add shape", message }
+                if message == "shape width and height must not be negative, got -7 by 5 EMU"
+        ),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(presentation.to_bytes().unwrap(), grouped);
+    let xml = String::from_utf8(presentation.slide_xml(0).unwrap()).unwrap();
+    let reopened_group = CT_Slide::from_xml(xml.as_bytes()).unwrap();
+    let ShapeTreeChild::GroupShape(group) = reopened_group
+        .common_slide_data
+        .shape_tree
+        .children
+        .last()
+        .unwrap()
+    else {
+        panic!("expected the appended group to stay last");
+    };
+    assert!(group.children.is_empty(), "the refusal appended a member");
+}
+
+#[test]
+fn issue435_new_shapes_accept_zero_extents_and_negative_positions() {
+    let mut presentation = Presentation::new().expect("open bundled template");
+    presentation.add_slide(6).expect("add blank slide");
+    let original_count = presentation.slide(0).unwrap().shapes().len();
+
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .add_textbox(Emu(-500), Emu(-1000), Emu(0), Emu(0))
+        .expect("zero textbox extents with negative positions");
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .add_shape("rect", Emu(-1), Emu(-2), Emu(0), Emu(500))
+        .expect("zero shape width with negative positions");
+    presentation
+        .shapes_mut(0, &[])
+        .unwrap()
+        .add_textbox(Emu(0), Emu(0), Emu(400), Emu(0))
+        .expect("zero shape height through ShapesMut");
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .add_shape("rect", Emu(100), Emu(100), Emu(200), Emu(300))
+        .expect("positive control");
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .add_connector(ConnectorType::Straight, Emu(50), Emu(60), Emu(50), Emu(60))
+        .expect("equal connector endpoints");
+
+    let bytes = presentation.to_bytes().unwrap();
+    let reopened = Presentation::from_bytes(&bytes).expect("reopen");
+    assert!(reopened.validate().is_empty());
+    let xml = String::from_utf8(reopened.slide_xml(0).unwrap()).unwrap();
+    let slide = CT_Slide::from_xml(xml.as_bytes()).unwrap();
+    let children = &slide.common_slide_data.shape_tree.children[original_count..];
+    assert_eq!(children.len(), 5);
+    let transform = |index: usize| {
+        let ShapeTreeChild::Shape(shape) = &children[index] else {
+            panic!("expected an ordinary shape at {index}");
+        };
+        shape.shape_properties.transform.as_ref().unwrap()
+    };
+    let textbox = transform(0);
+    assert_eq!(textbox.offset.unwrap().x, Emu(-500));
+    assert_eq!(textbox.offset.unwrap().y, Emu(-1000));
+    assert_eq!(textbox.extent.unwrap().cx, Emu(0));
+    assert_eq!(textbox.extent.unwrap().cy, Emu(0));
+    let shape = transform(1);
+    assert_eq!(shape.offset.unwrap().x, Emu(-1));
+    assert_eq!(shape.offset.unwrap().y, Emu(-2));
+    assert_eq!(shape.extent.unwrap().cx, Emu(0));
+    assert_eq!(shape.extent.unwrap().cy, Emu(500));
+    let shapes_mut_textbox = transform(2);
+    assert_eq!(shapes_mut_textbox.offset.unwrap().x, Emu(0));
+    assert_eq!(shapes_mut_textbox.offset.unwrap().y, Emu(0));
+    assert_eq!(shapes_mut_textbox.extent.unwrap().cx, Emu(400));
+    assert_eq!(shapes_mut_textbox.extent.unwrap().cy, Emu(0));
+    let positive = transform(3);
+    assert_eq!(positive.extent.unwrap().cx, Emu(200));
+    assert_eq!(positive.extent.unwrap().cy, Emu(300));
+    let ShapeTreeChild::Connector(connector) = &children[4] else {
+        panic!("expected the equal-endpoint connector");
+    };
+    let connector_transform = connector.shape_properties.transform.as_ref().unwrap();
+    assert_eq!(connector_transform.extent.unwrap().cx, Emu(0));
+    assert_eq!(connector_transform.extent.unwrap().cy, Emu(0));
+    assert!(!connector_transform.flip_horizontal);
+    assert!(!connector_transform.flip_vertical);
+}
+
+#[test]
+fn issue435_table_positivity_and_connector_endpoints_stay_unchanged() {
+    let mut presentation = Presentation::new().expect("open bundled template");
+    presentation.add_slide(6).expect("add blank slide");
+    let before = presentation.to_bytes().unwrap();
+    let original_count = presentation.slide(0).unwrap().shapes().len();
+
+    let error = match presentation.slide_mut(0).unwrap().add_table(
+        2,
+        2,
+        Emu(0),
+        Emu(0),
+        Emu(-300),
+        Emu(200),
+    ) {
+        Ok(_) => panic!("negative table width was accepted"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, Error::InvalidTableMutation { .. }));
+    let error =
+        match presentation
+            .slide_mut(0)
+            .unwrap()
+            .add_table(2, 2, Emu(0), Emu(0), Emu(300), Emu(0))
+        {
+            Ok(_) => panic!("zero table height was accepted"),
+            Err(error) => error,
+        };
+    assert!(matches!(error, Error::InvalidTableMutation { .. }));
+    assert_eq!(presentation.to_bytes().unwrap(), before);
+    assert_eq!(
+        presentation.slide(0).unwrap().shapes().len(),
+        original_count
+    );
+
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .add_table(2, 3, Emu(0), Emu(0), Emu(300), Emu(200))
+        .expect("positive table control");
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .add_connector(ConnectorType::Elbow, Emu(700), Emu(800), Emu(100), Emu(200))
+        .expect("reversed connector endpoints");
+
+    let xml = String::from_utf8(presentation.slide_xml(0).unwrap()).unwrap();
+    let slide = CT_Slide::from_xml(xml.as_bytes()).unwrap();
+    let children = &slide.common_slide_data.shape_tree.children[original_count..];
+    assert_eq!(children.len(), 2);
+    let ShapeTreeChild::Connector(connector) = &children[1] else {
+        panic!("expected the reversed connector");
+    };
+    let transform = connector.shape_properties.transform.as_ref().unwrap();
+    assert_eq!(transform.offset.unwrap().x, Emu(100));
+    assert_eq!(transform.offset.unwrap().y, Emu(200));
+    assert_eq!(transform.extent.unwrap().cx, Emu(600));
+    assert_eq!(transform.extent.unwrap().cy, Emu(600));
+    assert!(transform.flip_horizontal);
+    assert!(transform.flip_vertical);
+}
+
+#[test]
+fn issue435_refusals_preserve_populated_group_companions() {
+    let mut presentation = Presentation::new().expect("open bundled template");
+    presentation.add_slide(6).expect("add blank slide");
+
+    // An existing ordinary shape and a relationship-backed member.
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .add_textbox(Emu(10), Emu(20), Emu(300), Emu(400))
+        .unwrap();
+    presentation
+        .add_picture(
+            0,
+            &valid_one_pixel_png(),
+            "seed.png",
+            Emu(100),
+            Emu(200),
+            None,
+            None,
+        )
+        .unwrap();
+    // A populated group with an existing member.
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .add_group_shape()
+        .unwrap();
+    let group_index = presentation.slide(0).unwrap().shapes().len() - 1;
+    presentation
+        .shapes_mut(0, &[group_index])
+        .unwrap()
+        .add_textbox(Emu(30), Emu(40), Emu(500), Emu(600))
+        .unwrap();
+    // An opaque package part seeded through the public OPC layer.
+    let mut package = open_opc(&presentation.to_bytes().unwrap(), "seeded companions");
+    package
+        .content_types
+        .add_default("bin", "application/octet-stream");
+    package.set_part("/ppt/opaque.bin", b"OPAQUE-SEED".to_vec());
+    let mut presentation =
+        Presentation::from_bytes(&package_bytes(package)).expect("reopen the seeded deck");
+
+    let seeded = presentation.to_bytes().unwrap();
+    let original_count = presentation.slide(0).unwrap().shapes().len();
+    assert_eq!(original_count, 3);
+    let ids = |xml: &str| {
+        CT_Slide::from_xml(xml.as_bytes())
+            .unwrap()
+            .common_slide_data
+            .shape_tree
+            .children
+            .iter()
+            .map(|child| child.non_visual_id().expect("seeded shape id"))
+            .collect::<Vec<_>>()
+    };
+    let seeded_ids = ids(&String::from_utf8(presentation.slide_xml(0).unwrap()).unwrap());
+    assert_eq!(seeded_ids.len(), 3);
+
+    // Populated group route through the candidate transaction path: a
+    // negative width, a negative height and both negative. Each failed call
+    // must leave the complete package, the shape ids and the counts
+    // unchanged, including the existing member, the picture relationship and
+    // the opaque part.
+    for (width, height, tail) in [
+        (-1000i64, 2000i64, "got -1000 by 2000 EMU"),
+        (1000, -2000, "got 1000 by -2000 EMU"),
+        (-1000, -2000, "got -1000 by -2000 EMU"),
+    ] {
+        let error = match presentation
+            .shapes_mut(0, &[group_index])
+            .unwrap()
+            .add_shape("rect", Emu(10), Emu(20), Emu(width), Emu(height))
+        {
+            Ok(_) => panic!("negative shape extents {tail} were accepted in a populated group"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(
+                &error,
+                Error::InvalidShapeMutation { operation: "add shape", message }
+                    if message == &format!("shape width and height must not be negative, {tail}")
+            ),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(
+            presentation.to_bytes().unwrap(),
+            seeded,
+            "package changed after the populated-group refusal {tail}"
+        );
+        assert_eq!(
+            presentation.slide(0).unwrap().shapes().len(),
+            original_count
+        );
+        assert_eq!(
+            ids(&String::from_utf8(presentation.slide_xml(0).unwrap()).unwrap()),
+            seeded_ids,
+            "ids changed after the populated-group refusal {tail}"
+        );
+    }
+
+    let error = match presentation
+        .shapes_mut(0, &[group_index])
+        .unwrap()
+        .add_textbox(Emu(0), Emu(0), Emu(-5), Emu(5))
+    {
+        Ok(_) => panic!("negative textbox width was accepted in a populated group"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            &error,
+            Error::InvalidShapeMutation { operation: "add textbox", message }
+                if message == "shape width and height must not be negative, got -5 by 5 EMU"
+        ),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(presentation.to_bytes().unwrap(), seeded);
+    assert_eq!(
+        ids(&String::from_utf8(presentation.slide_xml(0).unwrap()).unwrap()),
+        seeded_ids
+    );
+
+    // Root-level refusal beside the relationship-backed member and the
+    // opaque part, through the local append path.
+    let error =
+        match presentation
+            .slide_mut(0)
+            .unwrap()
+            .add_shape("rect", Emu(0), Emu(0), Emu(-3), Emu(4))
+        {
+            Ok(_) => panic!("negative shape width was accepted beside seeded companions"),
+            Err(error) => error,
+        };
+    assert!(
+        matches!(
+            &error,
+            Error::InvalidShapeMutation { operation: "add shape", message }
+                if message == "shape width and height must not be negative, got -3 by 4 EMU"
+        ),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(presentation.to_bytes().unwrap(), seeded);
+    assert_eq!(
+        presentation.slide(0).unwrap().shapes().len(),
+        original_count
+    );
+    assert_eq!(
+        ids(&String::from_utf8(presentation.slide_xml(0).unwrap()).unwrap()),
+        seeded_ids
+    );
+
+    // Subsequent successful use of the same owners after the refusals.
+    presentation
+        .shapes_mut(0, &[group_index])
+        .unwrap()
+        .add_textbox(Emu(50), Emu(60), Emu(700), Emu(800))
+        .expect("a valid member is still accepted after the refusals");
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .add_textbox(Emu(-70), Emu(-80), Emu(90), Emu(90))
+        .expect("negative positions stay supported after the refusals");
+
+    let bytes = presentation.to_bytes().unwrap();
+    let reopened = Presentation::from_bytes(&bytes).expect("reopen after refusals");
+    assert!(reopened.validate().is_empty());
+    let package = open_opc(&bytes, "after refusals");
+    assert_eq!(
+        package.get_part("/ppt/opaque.bin"),
+        Some(b"OPAQUE-SEED".as_slice()),
+        "the opaque part did not survive the refusals"
+    );
+    let xml = String::from_utf8(reopened.slide_xml(0).unwrap()).unwrap();
+    let slide = CT_Slide::from_xml(xml.as_bytes()).unwrap();
+    let children = &slide.common_slide_data.shape_tree.children;
+    assert_eq!(children.len(), original_count + 1);
+    assert_eq!(
+        &children
+            .iter()
+            .map(|child| child.non_visual_id().expect("surviving id"))
+            .collect::<Vec<_>>()[..seeded_ids.len()],
+        &seeded_ids,
+        "seeded identities changed"
+    );
+    let ShapeTreeChild::GroupShape(group) = &children[2] else {
+        panic!("expected the seeded group to stay at index 2");
+    };
+    assert_eq!(group.children.len(), 2, "the group member count is wrong");
+    let ShapeTreeChild::Shape(member) = &group.children[0] else {
+        panic!("expected the seeded group member to stay first");
+    };
+    let transform = member.shape_properties.transform.as_ref().unwrap();
+    assert_eq!(transform.offset.unwrap().x, Emu(30));
+    assert_eq!(transform.offset.unwrap().y, Emu(40));
+    assert_eq!(transform.extent.unwrap().cx, Emu(500));
+    assert_eq!(transform.extent.unwrap().cy, Emu(600));
+    let ShapeTreeChild::Picture(_) = &children[1] else {
+        panic!("expected the seeded picture to stay at index 1");
+    };
+}

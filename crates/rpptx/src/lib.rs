@@ -22487,7 +22487,7 @@ fn textbox_member(id: u32, left: Emu, top: Emu, width: Emu, height: Emu) -> Resu
     CT_Shape::new_textbox(
         id,
         &format!("TextBox {id}"),
-        positioned_transform(left, top, width, height),
+        sized_transform("add textbox", left, top, width, height)?,
     )
     .map(ShapeTreeChild::Shape)
     .map_err(|error| invalid_shape_construction("add textbox", error))
@@ -22505,7 +22505,7 @@ fn preset_member(
         id,
         &format!("Shape {id}"),
         preset,
-        positioned_transform(left, top, width, height),
+        sized_transform("add shape", left, top, width, height)?,
     )
     .map_err(|error| invalid_shape_construction("add shape", error))?;
     shape
@@ -22526,7 +22526,7 @@ fn unstyled_preset_member(
         id,
         &format!("Shape {id}"),
         preset,
-        positioned_transform(left, top, width, height),
+        sized_transform("add shape", left, top, width, height)?,
     )
     .map(ShapeTreeChild::Shape)
     .map_err(|error| invalid_shape_construction("add shape", error))
@@ -22864,6 +22864,27 @@ impl ConnectorType {
             Self::Curve => "curvedConnector3",
         }
     }
+}
+
+/// Builds a positioned transform for authored shape dimensions, refusing a
+/// negative width or height at the call.
+fn sized_transform(
+    operation: &'static str,
+    left: Emu,
+    top: Emu,
+    width: Emu,
+    height: Emu,
+) -> Result<CT_Transform2D> {
+    if width.0 < 0 || height.0 < 0 {
+        return Err(Error::InvalidShapeMutation {
+            operation,
+            message: format!(
+                "shape width and height must not be negative, got {} by {} EMU",
+                width.0, height.0
+            ),
+        });
+    }
+    Ok(positioned_transform(left, top, width, height))
 }
 
 fn positioned_transform(left: Emu, top: Emu, width: Emu, height: Emu) -> CT_Transform2D {
@@ -43787,4 +43808,66 @@ fn issue389_local_edits_do_not_scale_with_unrelated_package() {
             .unwrap();
         assert_eq!(fx260_slide_scans(), 1, "xml slides={slides}");
     }
+}
+
+#[test]
+fn issue435_unstyled_shape_route_refuses_a_negative_size() {
+    let mut presentation = Presentation::new().unwrap();
+    presentation.add_slide(6).unwrap();
+    let before = presentation.to_bytes().unwrap();
+
+    let error = match presentation.slide_mut(0).unwrap().add_unstyled_shape(
+        "rect",
+        Emu(1),
+        Emu(2),
+        Emu(-3),
+        Emu(4),
+    ) {
+        Ok(_) => panic!("negative unstyled width was accepted"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            &error,
+            Error::InvalidShapeMutation { operation: "add shape", message }
+                if message == "shape width and height must not be negative, got -3 by 4 EMU"
+        ),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(presentation.to_bytes().unwrap(), before);
+
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .add_unstyled_shape("rect", Emu(-1), Emu(-2), Emu(0), Emu(0))
+        .unwrap();
+    presentation
+        .slide_mut(0)
+        .unwrap()
+        .add_unstyled_shape("rect", Emu(10), Emu(20), Emu(300), Emu(400))
+        .unwrap();
+    let children = &presentation.slides[0]
+        .slide
+        .common_slide_data
+        .shape_tree
+        .children;
+    assert_eq!(children.len(), 2);
+    for (index, child) in children.iter().enumerate() {
+        let ShapeTreeChild::Shape(shape) = child else {
+            panic!("expected an unstyled preset shape at {index}");
+        };
+        assert!(shape.style().is_none(), "unstyled route introduced a style");
+    }
+    let transform = |index: usize| {
+        let ShapeTreeChild::Shape(shape) = &children[index] else {
+            panic!("expected an unstyled preset shape at {index}");
+        };
+        shape.shape_properties.transform.as_ref().unwrap()
+    };
+    assert_eq!(transform(0).offset.unwrap().x, Emu(-1));
+    assert_eq!(transform(0).offset.unwrap().y, Emu(-2));
+    assert_eq!(transform(0).extent.unwrap().cx, Emu(0));
+    assert_eq!(transform(0).extent.unwrap().cy, Emu(0));
+    assert_eq!(transform(1).extent.unwrap().cx, Emu(300));
+    assert_eq!(transform(1).extent.unwrap().cy, Emu(400));
 }

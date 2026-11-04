@@ -1020,7 +1020,14 @@ and rounding. `align` is an `ST_RectAlignment` token string, and lengths are
 EMU.
 
 `ShapeCollection.add_shape` accepts a DrawingML preset name or an `MSO_SHAPE`
-member. `add_connector` follows the python-pptx signature, `add_group_shape`
+member. `add_textbox` and `add_shape` refuse a negative width or height at
+the call, before any shape, relationship or part is created, raising
+`RpptxError` with a message ending `shape width and height must not be
+negative, got {width} by {height} EMU` carrying the raw signed values. A zero
+width or height is accepted, and negative `left` and `top` are positions
+rather than dimensions and stay supported. Tables keep requiring positive
+extents, and connectors stay endpoint-based. `add_connector` follows the
+python-pptx signature, `add_group_shape`
 appends an empty group, and `add_picture` accepts a path, bytes, or a binary
 file-like object, which is rewound first when it can seek. `remove` deletes one
 shape of a slide with the relationships and parts only it used and advances the
@@ -1040,7 +1047,8 @@ allocation of the returned Python shape. Existing physical owners retain their
 authority, including the group, its collection and its existing members. The
 returned member is captured against the prepared successor before publication.
 The same group collection can make the next addition without being re-fetched.
-An error leaves native state and owner generations unchanged.
+Textbox and preset additions through a group's `shapes` refuse a negative
+width or height the same way at the call. An error leaves native state and owner generations unchanged.
 A group added inside a group has the zero `a:xfrm` python-pptx writes, so its
 `left`, `top`, `width`, and `height` read zero until its first member arrives,
 while a group added to a slide's own shapes reads `None`. `add_group_shape` has
