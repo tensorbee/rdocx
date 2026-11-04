@@ -6112,6 +6112,44 @@ def test_fx203_installed_properties_and_tracking_are_live_and_typed():
     assert document.settings.track_revisions is None
 
 
+def test_issue432_authored_radicals_emit_degree_through_python():
+    import io
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    import rdocx
+
+    math_ns = "http://schemas.openxmlformats.org/officeDocument/2006/math"
+    cases = (
+        ("latex", r"\sqrt{x}", "", "1"),
+        ("latex", r"\sqrt[3]{x}", "3", "0"),
+        ("mathml", '<math xmlns="http://www.w3.org/1998/Math/MathML"><msqrt><mi>x</mi></msqrt></math>', "", "1"),
+        ("mathml", '<math xmlns="http://www.w3.org/1998/Math/MathML"><mroot><mi>x</mi><mn>3</mn></mroot></math>', "3", "0"),
+    )
+    for format_name, source, degree, hidden in cases:
+        for display in (False, True):
+            document = rdocx.Document()
+            paragraph = document.add_paragraph("before")
+            paragraph.add_equation(source, format=format_name, display=display)
+            paragraph.add_run("after")
+            saved = document.to_bytes()
+            with zipfile.ZipFile(io.BytesIO(saved)) as package:
+                root = ET.fromstring(package.read("word/document.xml"))
+            radicals = root.findall(f".//{{{math_ns}}}rad")
+            assert len(radicals) == 1
+            radical = radicals[0]
+            assert [child.tag for child in radical] == [
+                f"{{{math_ns}}}radPr", f"{{{math_ns}}}deg", f"{{{math_ns}}}e"
+            ]
+            assert "".join(radical[1].itertext()) == degree
+            hide = radical[0].find(f"{{{math_ns}}}degHide")
+            assert hide is not None and hide.get(f"{{{math_ns}}}val") == hidden
+            reopened = rdocx.Document(io.BytesIO(saved))
+            assert len(reopened.paragraphs[0].equations()) == 1
+            assert "before" in reopened.paragraphs[0].text
+            assert "after" in reopened.paragraphs[0].text
+
+
 def test_fx203_installed_equation_snapshot_keeps_conversion_boundary():
     import rdocx
 

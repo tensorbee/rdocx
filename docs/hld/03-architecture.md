@@ -836,6 +836,11 @@ Expanded names decide typed meaning, fixed `m:` names are written, unsafe
 prefix collisions fail closed, and unsupported descendants retain their owner
 and schema slot. The settings owner projects the single document-wide
 `m:mathPr` subtree through the same source-preserving replacement path.
+Authored square roots carry an empty `m:deg` after `m:radPr`, with
+`m:degHide` set to1. Indexed roots retain their degree. Imported absence of
+`m:deg` remains absent. An import without `m:radPr` retains the existing
+normalization that adds `m:degHide`0. Preserving an imported missing degree
+does not assert schema validity of that source.
 
 `rdocx-layout` consumes that typed OfficeMath tree at the paragraph's retained
 raw boundaries. Its private recursive math module measures the supported

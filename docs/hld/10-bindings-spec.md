@@ -1946,7 +1946,11 @@ argument, so document-wide and display-paragraph properties stay with their
 owners rather than being silently projected. Format attributes and expression
 properties that cannot survive the conversion are diagnosed. The surface is
 native Rust, with Python's existing `Paragraph.add_equation(source, format=...)`
-route reusing it. The finite Issue365 matrix admits named Greek variants,
+route reusing it. Native and Python authoring write an empty `m:deg` after
+`m:radPr` for square roots, in both inline and display equations. Indexed
+roots retain their degree. Imported missing degrees remain absent, and the
+existing missing-`radPr` normalization remains unchanged. These markup rules
+add no signature or format option. The finite Issue365 matrix admits named Greek variants,
 relations, operators, arrows and degree, upright sin/log/ln/exp/operatorname,
 plain mathrm and literal text. Function runs use normal=true, plain mathematics
 uses style=Plain and normal text uses both. Literal text retains boundary and

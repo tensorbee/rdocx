@@ -4602,6 +4602,71 @@ fn paragraph_items_keep_runs_equations_controls_and_raw_xml_in_source_order() {
 }
 
 #[test]
+fn issue432_public_equation_radicals_keep_authored_degree() {
+    let cases = [
+        ("latex", r"\sqrt{x}", "", "1"),
+        ("latex", r"\sqrt[3]{x}", "3", "0"),
+        (
+            "mathml",
+            r#"<math xmlns="http://www.w3.org/1998/Math/MathML"><msqrt><mi>x</mi></msqrt></math>"#,
+            "",
+            "1",
+        ),
+        (
+            "mathml",
+            r#"<math xmlns="http://www.w3.org/1998/Math/MathML"><mroot><mi>x</mi><mn>3</mn></mroot></math>"#,
+            "3",
+            "0",
+        ),
+    ];
+    let mut missing_degree = Vec::new();
+    for (format, source, degree, hidden) in cases {
+        for display in [false, true] {
+            let converted = match format {
+                "latex" => rdocx::equation_from_latex(source),
+                _ => rdocx::equation_from_mathml(source),
+            }
+            .unwrap();
+            let equation = if display {
+                rdocx::OfficeMath::display(vec![rdocx::CT_OMath::new(converted.value.expressions)])
+            } else {
+                rdocx::OfficeMath::inline(converted.value.expressions)
+            };
+            let mut document = Document::new();
+            let mut paragraph = document.add_paragraph("before");
+            paragraph.add_equation(equation).unwrap();
+            paragraph.add_run("after");
+            let bytes = document.to_bytes().unwrap();
+            let reopened = Document::from_bytes(&bytes).unwrap();
+            let paragraph = reopened.paragraph(0).unwrap();
+            assert_eq!(paragraph.equations().count(), 1);
+            assert!(paragraph.text().contains("before"));
+            assert!(paragraph.text().contains("after"));
+            let xml = reopened.part_xml("word/document.xml").unwrap();
+            assert_eq!(xml.matches("<m:rad>").count(), 1);
+            if let Some(degree_start) = xml.find("<m:deg>") {
+                assert!(xml.find("<m:radPr>").unwrap() < degree_start);
+                let degree_end = xml.find("</m:deg>").unwrap();
+                assert!(degree_end < xml.find("<m:e>").unwrap());
+                let degree_xml = &xml[degree_start + "<m:deg>".len()..degree_end];
+                if degree.is_empty() {
+                    assert!(degree_xml.is_empty());
+                } else {
+                    assert!(degree_xml.contains("<m:t>3</m:t>"));
+                }
+            } else {
+                missing_degree.push(format!("{format} {source}, display={display}"));
+            }
+            assert!(xml.contains(&format!("<m:degHide m:val=\"{hidden}\"/>")));
+        }
+    }
+    assert!(
+        missing_degree.is_empty(),
+        "missing authored degree: {missing_degree:?}"
+    );
+}
+
+#[test]
 fn public_equation_authoring_saves_reopens_and_remains_mutable() {
     let mut document = Document::new();
     let mut paragraph = document.add_paragraph("before");

@@ -152,14 +152,14 @@ The worker uses /start-feature F-X277a --claimed, /implement-feature F-X277a and
 ## Implementation checklist
 
 - [x] Root approves the split contract and exact metadata-only claim Base, with source and workflow pins checked.
-- [ ] Worker acknowledges its source/test/HLD lease and canonical plan revision.
+- [x] Worker acknowledges its source/test/HLD lease and canonical plan revision. Root implements as Codex after the recorded owner recovery.
 - [x] Reauthenticate mutable issue/PR identity before claim, retaining exact existing pins. Fresh10:45UTC snapshot is unchanged.
-- [ ] Prepare the complete bounded old-source regression batch and preserve real outcomes.
-- [ ] Correct authored degree presence without changing import parsing, converters or public API.
-- [ ] Complete native public and Python discriminator coverage in existing carriers.
-- [ ] Update precisely HLD03/HLD10 sections before source freeze.
-- [ ] Obtain scoped checks and identified self-review, stop for actual independent Root microscope, repair any findings within the original maximum of three implementation passes, and obtain a clean independent result before preparation.
-- [ ] Prepare a validated handoff with all final union riders explicitly pending.
+- [x] Prepare the complete bounded old-source regression batch and preserve real outcomes. Actual source/binary/log receipts are retained.
+- [x] Correct authored degree presence without changing import parsing, converters or public API.
+- [x] Complete native public and Python discriminator coverage in existing carriers. Native runtime passed. Python test source is added and parses, with actual installed execution retained as final debt.
+- [x] Update precisely HLD03/HLD10 sections before source freeze.
+- [x] Obtain scoped checks and actual independent microscope. Codex independent pass1 reports zero defects and smells, with Root adjudication accepting the evidence and unchanged final debt.
+- [x] Prepare a validated sprint-final-acceptance handoff with all final union riders explicitly pending. Delivery completion remains unrecorded.
 
 ## Open questions
 

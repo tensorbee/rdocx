@@ -1028,7 +1028,7 @@ impl MathRadical {
             degree: MathArgument::default(),
             base,
             hide_degree: true,
-            degree_present: false,
+            degree_present: true,
             preservation: Preservation::default(),
         }
     }
@@ -3641,6 +3641,58 @@ mod tests {
         let supported = CT_OMath::from_xml(supported.as_bytes()).unwrap();
         assert!(!supported.expressions[0].has_unsupported_content());
         assert!(!supported.expressions[1].has_unsupported_content());
+    }
+
+    #[test]
+    fn issue432_authored_radicals_emit_deg_and_imports_keep_absence() {
+        let equation = CT_OMath::new(vec![
+            MathExpression::Radical(MathRadical::new(MathArgument::default())),
+            MathExpression::Radical(MathRadical::new(MathArgument::text("x"))),
+            MathExpression::Radical(MathRadical::with_degree(
+                MathArgument::text("3"),
+                MathArgument::text("y"),
+            )),
+        ]);
+        let output = equation.to_xml().unwrap();
+        let xml = std::str::from_utf8(&output).unwrap();
+        assert_eq!(xml.matches("<m:rad>").count(), 3);
+        assert_eq!(xml.matches("<m:deg>").count(), 3);
+        assert_eq!(xml.matches("<m:deg></m:deg>").count(), 2);
+        for radical in xml.split("<m:rad>").skip(1) {
+            let radical = radical.split("</m:rad>").next().unwrap();
+            assert!(radical.find("<m:radPr>").unwrap() < radical.find("<m:deg>").unwrap());
+            assert!(radical.find("<m:deg>").unwrap() < radical.find("<m:e>").unwrap());
+        }
+        assert_eq!(xml.matches("<m:degHide m:val=\"1\"/>").count(), 2);
+        assert!(xml.contains("<m:t>3</m:t>"));
+        let reopened = CT_OMath::from_xml(&output).unwrap();
+        assert_eq!(reopened.expressions.len(), 3);
+        assert_eq!(reopened.to_xml().unwrap(), output);
+    }
+
+    #[test]
+    fn issue432_imported_radicals_keep_absence_normalization_and_raw_slots() {
+        let opaque = r#"<x:kept x:tag="a&amp;b"><x:child/></x:kept>"#;
+        let source = format!(
+            r#"<q:oMath xmlns:q="{M_NS}" xmlns:x="urn:producer"><q:rad><q:e/></q:rad><q:rad><q:radPr><q:degHide q:val="1"/></q:radPr>{opaque}<q:e><q:r><q:t>x</q:t></q:r></q:e></q:rad><q:rad><q:deg/><q:e/></q:rad></q:oMath>"#
+        );
+        let parsed = CT_OMath::from_xml(source.as_bytes()).unwrap();
+        let output = parsed.to_xml().unwrap();
+        let xml = std::str::from_utf8(&output).unwrap();
+        let radicals = xml.split("<m:rad>").skip(1).collect::<Vec<_>>();
+        assert_eq!(radicals.len(), 3);
+        assert!(!radicals[0].contains("<m:deg>"));
+        assert!(radicals[0].contains("<m:degHide m:val=\"0\"/>"));
+        assert!(!radicals[1].contains("<m:deg>"));
+        assert!(radicals[1].contains("<m:degHide m:val=\"1\"/>"));
+        assert!(radicals[1].contains(opaque));
+        assert!(radicals[1].find("</m:radPr>").unwrap() < radicals[1].find(opaque).unwrap());
+        assert!(radicals[1].find(opaque).unwrap() < radicals[1].find("<m:e>").unwrap());
+        assert!(radicals[2].contains("<m:deg></m:deg>"));
+        let reopened = CT_OMath::from_xml(&output).unwrap();
+        let second = reopened.to_xml().unwrap();
+        assert!(std::str::from_utf8(&second).unwrap().contains(opaque));
+        assert_eq!(second, output);
     }
 
     #[test]
