@@ -16,6 +16,13 @@ replaces text, and produces deterministic fixed output.
 - Scriptable output covers slide order, notes, comments, recursive group
   content, relationship-backed media, and deterministic rendering diagnostics.
 
+`rpptx validate FILE` validates the stored package through its original XML
+bytes: XML 1.0 lexical and character faults, one complete root per XML part
+including package metadata, the `p:presentation` root child sequence, unknown
+direct shape-tree children, required unqualified `cNvPr` id and name on
+physical owners, table row against grid column equality, role content-type
+overrides, and the parsed-model issues. It is not a full schema validator.
+
 
 ## Package signatures
 

@@ -24,6 +24,19 @@ presentation, notes, handout, PDF, and animation outputs.
 - Resolve master, layout, placeholder, theme, chart, SmartArt, media, notes,
   comments, and timing state while preserving unmodelled package content.
 
+## Stored-package validation
+
+`rpptx::validate_presentation_file` validates the stored `.pptx` file through
+its original XML bytes, read-only. It checks XML 1.0 lexical and character
+faults, one complete root per XML part including `[Content_Types].xml` and
+relationship parts, the `p:presentation` direct child sequence, unknown
+direct shape-tree children, required unqualified `cNvPr` id and name
+attributes on physical shape owners, physical table row against grid column
+equality, and PowerPoint role content-type overrides resolved through their
+owning relationships, then appends the existing parsed-model issues. This is
+a bounded subset, not a full schema validator, and the input file is never
+written.
+
 ## Measured footprint and speed
 
 The archive row uses `cargo package --locked --allow-dirty --no-verify` with all 22 local package patches. Compilation and publication verification are separate gates.

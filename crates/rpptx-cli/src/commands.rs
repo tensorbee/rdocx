@@ -663,8 +663,7 @@ pub fn replace(
 }
 
 pub fn validate(file: &Path) -> Result<bool> {
-    let presentation = Presentation::open(file)?;
-    let issues = presentation.validate();
+    let issues = rpptx::validate_presentation_file(file)?;
     for issue in &issues {
         eprintln!("{issue}");
     }

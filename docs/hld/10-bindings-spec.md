@@ -1257,7 +1257,19 @@ returns a tuple of frozen `ValidationIssue` snapshots in native order. Each
 carries a `kind` that names the native variant in snake_case, such as
 `duplicate_shape_id`, and a `message` equal to the `Display` sentence that
 `rpptx validate` prints for that issue. A clean presentation returns an empty
-tuple.
+tuple. This binding stays parsed-model only: there is no Python
+stored-package API, and the parsed route keeps building and rescanning the
+model rather than reading original package bytes.
+
+The native side adds `rpptx::validate_presentation_file`, a read-only stored
+route over the original XML bytes, and the `rpptx validate` command routes to
+it. It reports the bounded stored subset described in
+`04-opc-and-packaging.md` and then appends the existing parsed-model issues,
+so an issue a consumer reaches through either route prints the same Display
+sentence. The issue variants, their snake_case kinds and the Display
+sentences are unchanged, and no new Python surface is added for the stored
+route. The command help and README name the exact checked subset and state
+that it is not a full schema validator.
 
 The presentation binding exposes `to_pdf`, `render_slide_to_png`,
 `render_all_slides`, `to_notes_pdf`, and `render_all_notes` through the native

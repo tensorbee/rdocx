@@ -1315,7 +1315,41 @@ relationship ids, missing content-type overrides, relationship targets that
 resolve to no part, and orphan media. `rpptx` adds its own presentation-specific
 checks, listed in `06-presentationml-model.md`.
 
+The PowerPoint facade adds `validate_presentation_file`, a read-only stored
+route that validates the original XML bytes a read admits, never a
+reserialized model, and never writes its input. For every indexed unique OPC
+identity it checks XML 1.0 lexical and character faults, exactly one complete
+document root, and non-whitespace text outside the root, over the original
+bytes of ordinary parts and, through a read-only archive over the retained
+file bytes, of `[Content_Types].xml` and relationship parts. Metadata is selected
+by the loader's existing normalized OPC identities, including dot and parent
+segments, rather than a raw suffix or a newly imposed path policy. The lexical
+reader and presentation field-identity inventory track namespace lifetimes with
+heap-backed frame marks, retaining vendor declaration rules, raw URI matching
+and the existing per-element declaration cap without a numeric nesting overflow.
+Root-count and structural readers use the already checked source and their
+explicit scoped state. A private lossless decode step preserves existing opaque UTF-8 with BOM and UTF-16
+LE/BE XML support and rejects malformed encodings instead of replacing
+characters. Qualified structural checks cover the SDK 3.0.1
+`p:presentation` direct-child sequence including `p:kinsoku`, unknown direct
+children of `p:spTree` and nested `p:grpSp`, required unqualified `cNvPr` id
+and name attributes on actual physical shape owners, physical table row
+against that table's own grid column equality, and role content-type
+overrides for internal slide, layout, master, notes slide, notes master and
+handout master relationships resolved through their actual owning part.
+Compatibility wrappers are honored as a finite observation: qualified
+immediate PresentationML members of both `mc:Choice` and `mc:Fallback` at a
+real tree-member position inherit the same checks, extension lists,
+`p:contentPart` and foreign namespaces declared `mc:Ignorable` stay opaque
+islands, and no branch is selected. This is a bounded subset, not a full
+schema validator, and it is not the duplicate or open-refusal behavior that
+remains with the B story. Existing parsed-model issues are appended after the
+stored ones and deduplicated through the existing issue equality, a model
+open failure returns the stored issues when any exist, and a model failure
+without stored issues propagates.
+
 Presentation HTML conversion publishes only a serialized, reopened, validated
+
 candidate. Projection failure returns `Error::Html` or an existing package
 error before any partial presentation escapes. Default master, layout, and
 theme parts remain byte-identical while new slide children follow the existing

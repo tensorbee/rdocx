@@ -536,14 +536,99 @@ fn validate_rejects_corruption_and_accepts_the_pinned_corpus() {
             "missing pinned corpus deck {}",
             deck.display()
         );
+        let before = fs::read(&deck).unwrap();
         let output = cli(&["validate", deck.to_str().unwrap()]);
+        if entry == "LIBRE_OFFICE-100610-0.pptx" {
+            // The one classified raw mismatch: the stored route reports the
+            // exact finite diagnostic against the original bytes while the
+            // old parsed-model route still loads and validates the deck
+            // clean. The input file is not changed.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !output.status.success(),
+                "classified corpus deck must fail the stored route: {stderr}"
+            );
+            assert!(stderr.contains("/ppt/slides/slide8.xml"), "{stderr}");
+            assert!(
+                stderr.contains("table row has 10 cells but its grid has 12 columns"),
+                "{stderr}"
+            );
+            assert!(stderr.contains("tr[4]"), "{stderr}");
+            let opened = Presentation::open(&deck).unwrap();
+            assert!(opened.validate().is_empty(), "{:?}", opened.validate());
+            assert_eq!(fs::read(&deck).unwrap(), before, "input must not change");
+            continue;
+        }
         assert!(
             output.status.success(),
             "validate failed for {}: {}",
             deck.display(),
             String::from_utf8_lossy(&output.stderr)
         );
+        assert_eq!(
+            fs::read(&deck).unwrap(),
+            before,
+            "input must not change: {}",
+            deck.display()
+        );
     }
+}
+
+#[test]
+fn issue435_stored_scan_handles_deep_opaque_input_without_native_recursion() {
+    // Deep valid opaque content inside a real role part's extension island,
+    // and the same inside an unused custom part, must scan iteratively. The
+    // case runs in the CLI child process so an unexpected native abort of an
+    // old candidate cannot take down the test orchestrator.
+    // Cross the former u16 namespace-depth boundary in both the lexical
+    // scanner and legacy field-identity inventory, without adding a quota.
+    let deep = "<x>".repeat(100_000) + &"</x>".repeat(100_000);
+    let temp = TempWorkspace::new("issue435-deep");
+
+    let mut deck_package = {
+        let bytes = issue435_probe_deck().to_bytes().unwrap();
+        OpcPackage::from_reader(Cursor::new(&bytes)).unwrap()
+    };
+    let slide = issue435_slide_part(&deck_package);
+    let xml = String::from_utf8(deck_package.get_part(&slide).unwrap().to_vec()).unwrap();
+    let tree_end = xml.find("</p:spTree>").expect("spTree close");
+    let edited = format!(
+        "{}<p:extLst>{}</p:extLst>{}",
+        &xml[..tree_end],
+        deep,
+        &xml[tree_end..]
+    );
+    deck_package.set_part(&slide, edited.into_bytes());
+    let role_path = temp.path.join("deep-role-island.pptx");
+    deck_package
+        .save(&role_path)
+        .expect("write deep role fixture");
+
+    let validated = cli(&["validate", role_path.to_str().unwrap()]);
+    assert!(
+        validated.status.success(),
+        "deep opaque island in a real role must validate clean: {}",
+        String::from_utf8_lossy(&validated.stderr)
+    );
+
+    let mut custom_package = {
+        let bytes = issue435_probe_deck().to_bytes().unwrap();
+        OpcPackage::from_reader(Cursor::new(&bytes)).unwrap()
+    };
+    custom_package.set_part("/customXml/deep.xml", deep.into_bytes());
+    custom_package
+        .content_types
+        .add_override("/customXml/deep.xml", "application/xml");
+    let custom_path = temp.path.join("deep-custom.pptx");
+    custom_package
+        .save(&custom_path)
+        .expect("write deep custom fixture");
+    let validated = cli(&["validate", custom_path.to_str().unwrap()]);
+    assert!(
+        validated.status.success(),
+        "deep unused custom XML must validate clean: {}",
+        String::from_utf8_lossy(&validated.stderr)
+    );
 }
 
 #[test]
@@ -4303,4 +4388,257 @@ fn fx281_cli_chart_tables_and_separate_read_diagnostics() {
             1
         );
     }
+}
+
+// F-X280c, original Issue435 A280-4: the CLI validate route moves to the
+// stored-package validator. These tests compile against the Base CLI and
+// fail there while it still validates only the parsed model, then pass once
+// the stored route lands.
+
+fn issue435_probe_deck() -> Presentation {
+    let mut deck = Presentation::new().unwrap();
+    deck.add_slide(6).unwrap();
+    deck.slide_mut(0)
+        .unwrap()
+        .add_textbox(Emu(0), Emu(0), Emu(3_000_000), Emu(500_000))
+        .unwrap()
+        .set_text("Issue435 stored validation probe")
+        .unwrap();
+    let mut slide = deck.slide_mut(0).unwrap();
+    let mut shape = slide
+        .add_table(2, 2, Emu(0), Emu(1_000_000), Emu(3_000_000), Emu(900_000))
+        .unwrap();
+    let mut table = shape.table_mut().unwrap();
+    for (row, column, text) in [
+        (0, 0, "Head"),
+        (0, 1, "Value"),
+        (1, 0, "Cell"),
+        (1, 1, "1|2"),
+    ] {
+        table.cell_mut(row, column).unwrap().set_text(text);
+    }
+    deck
+}
+
+fn issue435_fault_deck(
+    temp: &TempWorkspace,
+    name: &str,
+    mutate: impl FnOnce(&mut OpcPackage),
+) -> PathBuf {
+    let bytes = issue435_probe_deck().to_bytes().unwrap();
+    let mut package = OpcPackage::from_reader(Cursor::new(&bytes)).unwrap();
+    mutate(&mut package);
+    let path = temp.path.join(format!("{name}.pptx"));
+    package.save(&path).expect("write fault fixture");
+    path
+}
+
+fn issue435_slide_part(package: &OpcPackage) -> String {
+    package
+        .content_types
+        .overrides
+        .iter()
+        .find_map(|(part, content_type)| {
+            (content_type.as_str() == content_types::SLIDE).then_some(part.clone())
+        })
+        .expect("slide part")
+}
+
+#[test]
+fn issue435_cli_stored_validation_reports_the_six_original_faults() {
+    let temp = TempWorkspace::new("issue435-cli-stored");
+
+    let clean = temp.path.join("clean.pptx");
+    issue435_probe_deck().save(&clean).unwrap();
+    let before = fs::read(&clean).unwrap();
+    let passed = cli(&["validate", clean.to_str().unwrap()]);
+    assert!(passed.status.success(), "clean deck must validate");
+    assert!(
+        String::from_utf8_lossy(&passed.stdout).contains("Validation passed"),
+        "{}",
+        String::from_utf8_lossy(&passed.stdout)
+    );
+    assert_eq!(
+        fs::read(&clean).unwrap(),
+        before,
+        "validate must not rewrite input"
+    );
+
+    type Issue435Fault = (&'static str, &'static str, fn(&mut OpcPackage));
+    let faults: [Issue435Fault; 7] = [
+        (
+            "bogus-in-sptree",
+            "/ppt/slides/slide1.xml",
+            |package: &mut OpcPackage| {
+                let slide = issue435_slide_part(package);
+                let xml = String::from_utf8(package.get_part(&slide).unwrap().to_vec()).unwrap();
+                let tree = xml.find("<p:spTree ").expect("spTree start tag");
+                let after_grp = tree
+                    + xml[tree..].find("<p:grpSpPr/>").expect("grpSpPr")
+                    + "<p:grpSpPr/>".len();
+                package.set_part(
+                    &slide,
+                    format!("{}<p:bogus/>{}", &xml[..after_grp], &xml[after_grp..]).into_bytes(),
+                );
+            },
+        ),
+        (
+            "cnvpr-missing-name",
+            "/ppt/slides/slide1.xml",
+            |package: &mut OpcPackage| {
+                let slide = issue435_slide_part(package);
+                let xml = String::from_utf8(package.get_part(&slide).unwrap().to_vec()).unwrap();
+                let owner = xml.find("<p:nvSpPr>").expect("nvSpPr");
+                let cnvpr = owner + xml[owner..].find("<p:cNvPr ").expect("nvSpPr cNvPr");
+                let tag_end = cnvpr + xml[cnvpr..].find('>').expect("cNvPr close");
+                let tag = &xml[cnvpr..=tag_end];
+                let name_at = tag.find(" name=\"").expect("name attribute");
+                let value_end = tag[name_at + 7..].find('"').unwrap() + name_at + 7;
+                let edited = format!(
+                    "{}{}",
+                    &xml[..cnvpr + name_at],
+                    &xml[cnvpr + value_end + 1..]
+                );
+                package.set_part(&slide, edited.into_bytes());
+            },
+        ),
+        (
+            "notesmaster-after-sldidlst",
+            "/ppt/presentation.xml",
+            |package: &mut OpcPackage| {
+                let xml =
+                    String::from_utf8(package.get_part("/ppt/presentation.xml").unwrap().to_vec())
+                        .unwrap();
+                let after_slides =
+                    xml.find("</p:sldIdLst>").expect("sldIdLst close") + "</p:sldIdLst>".len();
+                let edited = format!(
+                    "{}<p:notesMasterIdLst><p:notesMasterId id=\"2147483649\" r:id=\"rId8\"/></p:notesMasterIdLst>{}",
+                    &xml[..after_slides],
+                    &xml[after_slides..]
+                );
+                package.set_part("/ppt/presentation.xml", edited.into_bytes());
+            },
+        ),
+        (
+            "sldsz-before-sldidlst",
+            "/ppt/presentation.xml",
+            |package: &mut OpcPackage| {
+                let xml =
+                    String::from_utf8(package.get_part("/ppt/presentation.xml").unwrap().to_vec())
+                        .unwrap();
+                let start = xml.find("<p:sldSz ").expect("sldSz");
+                let end = xml[start..].find("/>").unwrap() + start + 2;
+                let size = xml[start..end].to_string();
+                let without = format!("{}{}", &xml[..start], &xml[end..]);
+                let before_slides = without.find("<p:sldIdLst>").expect("sldIdLst");
+                let edited = format!(
+                    "{}{}{}",
+                    &without[..before_slides],
+                    size,
+                    &without[before_slides..]
+                );
+                package.set_part("/ppt/presentation.xml", edited.into_bytes());
+            },
+        ),
+        (
+            "override-removed-xml-default",
+            "/ppt/slides/slide1.xml",
+            |package: &mut OpcPackage| {
+                package
+                    .content_types
+                    .overrides
+                    .remove(&issue435_slide_part(package));
+            },
+        ),
+        (
+            "short-table-row",
+            "/ppt/slides/slide1.xml",
+            |package: &mut OpcPackage| {
+                let slide = issue435_slide_part(package);
+                let xml = String::from_utf8(package.get_part(&slide).unwrap().to_vec()).unwrap();
+                let table = xml.find("<a:tbl ").expect("table");
+                let row = table + xml[table..].find("<a:tr ").expect("row");
+                let row_end = row + xml[row..].find("</a:tr>").expect("row close");
+                let last_tc = xml[row..row_end].rfind("<a:tc>").expect("cell");
+                package.set_part(
+                    &slide,
+                    format!("{}{}", &xml[..row + last_tc], &xml[row_end..]).into_bytes(),
+                );
+            },
+        ),
+        (
+            "sldmaster-after-sldidlst",
+            "/ppt/presentation.xml",
+            |package: &mut OpcPackage| {
+                let xml =
+                    String::from_utf8(package.get_part("/ppt/presentation.xml").unwrap().to_vec())
+                        .unwrap();
+                let start = xml.find("<p:sldMasterIdLst>").expect("sldMasterIdLst");
+                let end =
+                    xml.find("</p:sldMasterIdLst>").expect("close") + "</p:sldMasterIdLst>".len();
+                let list = xml[start..end].to_string();
+                let without = format!("{}{}", &xml[..start], &xml[end..]);
+                let after_slides =
+                    without.find("</p:sldIdLst>").expect("sldIdLst close") + "</p:sldIdLst>".len();
+                let edited = format!(
+                    "{}{}{}",
+                    &without[..after_slides],
+                    list,
+                    &without[after_slides..]
+                );
+                package.set_part("/ppt/presentation.xml", edited.into_bytes());
+            },
+        ),
+    ];
+    for (name, part, mutate) in faults {
+        let path = issue435_fault_deck(&temp, name, mutate);
+        let before = fs::read(&path).unwrap();
+        let validated = cli(&["validate", path.to_str().unwrap()]);
+        let stderr = String::from_utf8_lossy(&validated.stderr);
+        assert!(
+            !validated.status.success(),
+            "{name} must fail stored validation, got success"
+        );
+        assert!(stderr.contains("Validation failed"), "{name}: {stderr}");
+        assert!(stderr.contains(part), "{name} must name {part}: {stderr}");
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            before,
+            "{name} input bytes must not change"
+        );
+    }
+}
+
+#[test]
+fn issue435_cli_stored_validation_keeps_the_already_caught_control() {
+    let temp = TempWorkspace::new("issue435-cli-control");
+    let bytes = issue435_probe_deck().to_bytes().unwrap();
+    let mut package = OpcPackage::from_reader(Cursor::new(&bytes)).unwrap();
+    package
+        .content_types
+        .overrides
+        .remove(&issue435_slide_part(&package));
+    package.content_types.defaults.remove("xml");
+    let path = temp.path.join("override-removed-no-fallback.pptx");
+    package.save(&path).expect("write control fixture");
+
+    let validated = cli(&["validate", path.to_str().unwrap()]);
+    let stderr = String::from_utf8_lossy(&validated.stderr);
+    assert!(!validated.status.success(), "no-fallback control must fail");
+    assert!(stderr.contains("/ppt/slides/slide1.xml"), "{stderr}");
+}
+
+#[test]
+fn issue435_cli_help_names_the_checked_subset_and_disclaims_full_validation() {
+    let help = cli(&["validate", "--help"]);
+    assert!(help.status.success());
+    let text = String::from_utf8_lossy(&help.stdout);
+    assert!(text.contains("stored presentation package"), "{text}");
+    assert!(text.contains("not a full schema validator"), "{text}");
+
+    // File and package errors keep the existing propagation and exit.
+    let missing = cli(&["validate", "/nonexistent/issue435.pptx"]);
+    assert!(!missing.status.success());
+    let stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(stderr.starts_with("Error:"), "{stderr}");
 }

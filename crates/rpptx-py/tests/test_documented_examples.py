@@ -3585,6 +3585,26 @@ def test_validate_returns_the_issues_the_cli_prints_as_frozen_snapshots(tmp_path
     with pytest.raises(AttributeError):
         issue.kind = "other"
 
+    # The CLI prints exactly the same Display sentence for the same input,
+    # whether it reaches the issue through the parsed model or the stored
+    # package route. The Python API stays parsed-model only.
+    import subprocess
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    log = tmp_path / "cli-validate.log"
+    with open(log, "w") as sink:
+        completed = subprocess.run(
+            ["cargo", "run", "--quiet", "-p", "rpptx-cli", "--", "validate", str(broken)],
+            cwd=root, stdout=sink, stderr=sink,
+        )
+    assert completed.returncode == 1
+    lines = [
+        line for line in log.read_text().splitlines()
+        if line.startswith("slide 1:")
+    ]
+    assert lines == [issue.message]
+
 
 def test_try_replace_text_scoped_to_a_slide_or_a_text_frame(tmp_path):
     import rpptx

@@ -6,6 +6,14 @@
 **Depends on**: none
 **Test gate**: regression
 
+## Operative Root takeover repair, 2026-11-03
+
+GLM stopped after repair1and author self-review3. Root final2 found persistent normalized metadata recovery, newly lost group traversal and a deeper namespace-reader panic in the composed file API. Actual frozenCLIfalse-cleans and validcontrols are retained in /private/tmp/rdocx-s96-f280c-root-review. The100001level legacy opening panic is independently confirmed through part_field_identities and exists in Base, so it is not attributed as GLM-introduced. Root takes sole source/build ownership in the existing explicit worker path, with branchwork/f-x280c-codex. The old opencode ref and exact frozen source are archived by ROOT_TAKEOVER_RECEIPT.json, no reset or discarded work. The editable environment path stays unchanged for provenance. All three author review passes remain used, with no reset or fourth author pass.
+
+Repair the actual nested group state so it preserves both its own nonvisual owner and direct tree-member checks, including MC/table/nestedgroup descendants. Use the existing OPC root-relative resolver to select original metadata under the loader's current path normalization, retaining existing case and relationship policy. No new URI rule or quota.
+
+The deep-input repair covers the selected shared strict lexical helper and the legacy field-identity scan used by opening. Use concrete private heap-backed namespace scope state with Start/Empty/End lifetime rather than a u16depth counter. Preserve lexical error classes, binding/attribute/name/reference checks, existing field-id selection and UTF8/UTF16frontiers. A reusable vendor declaration resolver visits only level0then1then0 per element, preserving raw URI matching, reserved bindings and its existing256declarations-per-element cap. Logical frames and ordered raw declaration undo include empty undeclarations. Plain root/structural readers use their existing explicit scope state. The legacy field cache retains the no-prefix versus explicit-empty-prefix distinction and does not acquire extra MC or unrelated-attribute validation. No new public API, module/file, trait, generic, global depth quota or XML rewrite. Existing HLD04/10impact describes raw-source read-only checks and inherited-reader behavior. Source-pinned strict namespace/deep controls and original legacy field-ID controls accompany the existing issue435regressions. This closes the already required raw/opaque input and panic frontier, not a new publication or performance claim.
+
 ## Problem
 
 Original Issue435 A280-4 requires validation of the stored deck, including unknown shape-tree children, missing required nonvisual name, presentation order, missing slide content-type override and short table rows. Current CLI opens a parsed Presentation and runs its live-model validate, which cannot prove these original bytes were valid. This complete child owns A280-4, its promised Rust file API, CLI/help and preserved Python parsed-model distinction. A280-7 stays with F280a. Original A280-1/2/3/5/6 and all Word/note/bookmark/open-policy barriers stay with F280b. No issue criterion is waived or promoted into a native/schema success claim.
@@ -151,12 +159,18 @@ Separate worktrees are required. F280a and this child both edit rpptx lib.rs, na
 
 ## Implementation checklist
 
-- [ ] Root approves exact A4 independence, original XML frontier/metadata ordering and bounded encoding controls.
-- [ ] Register exact partition and preserve B/parent barriers, three used peers and all final riders.
-- [ ] Approve metadata/path exception and hunk leases, fresh intake, actual whole-product check/clean worker and normal claim/start.
-- [ ] Actual RED, smallest existing-file implementation, complete focused GREEN, installed Python result or named pending rider.
-- [ ] Declared HLD updates, independent zero-finding microscope, scoped gate and validated structured handoff.
+- [x] Root approves exact A4 independence, original XML frontier/metadata ordering and bounded encoding controls.
+- [x] Register exact partition and preserve B/parent barriers, three used peers and all final riders.
+- [x] Approve metadata/path exception and hunk leases, fresh intake, actual whole-product check/clean worker and normal claim/start.
+- [x] Actual RED, smallest existing-file implementation, complete focused GREEN, installed Python result or named pending rider.
+- [x] Declared HLD updates, independent zero-finding microscope and scoped gate. Structured handoff validation is the separate preparation coordination step.
 - [ ] Integrator reconciles shape/validation hunks and final union before child/parent acceptance.
+
+## Local preparation disposition
+
+Local original A4implementation, HLD04/10updates, source-qualified scoped gates, independent Root source aspects and Rootfinal4are complete. ActualCodexowner, branchwork/f-x280c-codex and retainedexplicitworkerpath are recorded in ROOT_TAKEOVER_RECEIPT.json. All three GLMauthor passes remain used. Root's later review/fix sequence did not reset them. Earlier proposed-host/approval-pending/local-not-implemented statements describe historical preparation. Plan remains approved and feature in-progress for checkpoint sprint-final-acceptance. Two labeled source commits and the review metadata commit are recorded. Structured handoff validation is rechecked against the updated source Head after punctuation-only review metadata correction, without totals or provider completion.
+
+Actual current observations are8core,1field inventory,14native issue435,1strengthenedCLIdeep,3affectedCLI plus the corrected50corpus custodycase1,8legacyfx208with1nativeignored, changed-crate Clippy/fmt/prose/adapters/whitespace0, freshdebugPython3.12build/install and focusedvalidate1plusdeepopen/validate0. Earlier failures and original per-command source identities stay retained. All original final union/native/schema/installed3.9and3.12/typing/hash/WASM/archive/hosted/Bcomposition and separate release approval remain pending.
 
 ## Open questions and readiness
 

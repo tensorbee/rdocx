@@ -37897,3 +37897,1211 @@ fn issue435_refusals_preserve_populated_group_companions() {
         panic!("expected the seeded picture to stay at index 1");
     };
 }
+
+// F-X280c, original Issue435 A280-4: stored PresentationML package
+// validation through the public file route. These fixtures and the parsed
+// route assertions use only the existing API, so they run at the claim Base
+// and keep running unchanged after the stored route lands. The direct
+// validate_presentation_file assertions are added beside them once the
+// implementation exists, because a missing API at compile time is not a
+// semantic RED.
+
+fn issue435_temp_directory(label: &str) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let ordinal = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "rpptx-issue435-{label}-{}-{ordinal}",
+        std::process::id()
+    ))
+}
+
+fn issue435_probe_deck() -> Presentation {
+    let mut deck = Presentation::new().unwrap();
+    deck.add_slide(6).unwrap();
+    deck.slide_mut(0)
+        .unwrap()
+        .add_textbox(Emu(0), Emu(0), Emu(3_000_000), Emu(500_000))
+        .unwrap()
+        .set_text("Issue435 stored validation probe")
+        .unwrap();
+    let mut slide = deck.slide_mut(0).unwrap();
+    let mut shape = slide
+        .add_table(2, 2, Emu(0), Emu(1_000_000), Emu(3_000_000), Emu(900_000))
+        .unwrap();
+    let mut table = shape.table_mut().unwrap();
+    for (row, column, text) in [
+        (0, 0, "Head"),
+        (0, 1, "Value"),
+        (1, 0, "Cell"),
+        (1, 1, "1|2"),
+    ] {
+        table.cell_mut(row, column).unwrap().set_text(text);
+    }
+    deck
+}
+
+fn issue435_slide_part(package: &OpcPackage) -> String {
+    package
+        .content_types
+        .overrides
+        .iter()
+        .find_map(|(part, content_type)| {
+            (content_type.as_str() == content_types::SLIDE).then_some(part.clone())
+        })
+        .expect("slide part")
+}
+
+fn issue435_edit_slide_xml(package: &mut OpcPackage, edit: impl FnOnce(&str) -> String) {
+    let slide_part = issue435_slide_part(package);
+    let xml = String::from_utf8(package.get_part(&slide_part).unwrap().to_vec()).unwrap();
+    package.set_part(&slide_part, edit(&xml).into_bytes());
+}
+
+fn issue435_edit_presentation_xml(package: &mut OpcPackage, edit: impl FnOnce(&str) -> String) {
+    let xml =
+        String::from_utf8(package.get_part("/ppt/presentation.xml").unwrap().to_vec()).unwrap();
+    package.set_part("/ppt/presentation.xml", edit(&xml).into_bytes());
+}
+
+fn issue435_fault_deck(label: &str, name: &str, mutate: impl FnOnce(&mut OpcPackage)) -> PathBuf {
+    let deck = issue435_probe_deck();
+    let bytes = deck.to_bytes().unwrap();
+    let mut package = OpcPackage::from_reader(Cursor::new(&bytes)).unwrap();
+    mutate(&mut package);
+    let dir = issue435_temp_directory(label);
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.pptx"));
+    package.save(&path).unwrap();
+    path
+}
+
+/// Writes a package file through a raw ZIP, copying every entry of a saved
+/// probe deck verbatim and adding extra parts. This is the only way a part
+/// with a character XML 1.0 cannot carry reaches disk, because the OPC
+/// writer refuses such new bytes.
+fn issue435_raw_zip_fixture(
+    label: &str,
+    name: &str,
+    content_type_addition: &str,
+    extra_parts: &[(&str, Vec<u8>)],
+) -> PathBuf {
+    let source = issue435_probe_deck().to_bytes().unwrap();
+    let mut reader = zip::ZipArchive::new(Cursor::new(&source)).unwrap();
+    let dir = issue435_temp_directory(label);
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.pptx"));
+    let file = fs::File::create(&path).unwrap();
+    let mut writer = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    for index in 0..reader.len() {
+        let mut entry = reader.by_index(index).unwrap();
+        let entry_name = entry.name().unwrap().to_string();
+        let mut data = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut data).unwrap();
+        if entry_name == "[Content_Types].xml" {
+            let xml = String::from_utf8(data).unwrap();
+            let xml = xml.replace("</Types>", &format!("{content_type_addition}</Types>"));
+            writer.start_file(entry_name, options).unwrap();
+            std::io::Write::write_all(&mut writer, xml.as_bytes()).unwrap();
+            continue;
+        }
+        writer.start_file(entry_name, options).unwrap();
+        std::io::Write::write_all(&mut writer, &data).unwrap();
+    }
+    for (part, data) in extra_parts {
+        writer.start_file(*part, options).unwrap();
+        std::io::Write::write_all(&mut writer, data).unwrap();
+    }
+    writer.finish().unwrap();
+    path
+}
+
+fn issue435_clean_deck(label: &str) -> PathBuf {
+    let dir = issue435_temp_directory(label);
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("clean.pptx");
+    issue435_probe_deck().save(&path).unwrap();
+    path
+}
+
+fn issue435_saved_xml(path: &Path, part: &str) -> String {
+    let package = OpcPackage::open(path).unwrap();
+    String::from_utf8(package.get_part(part).unwrap().to_vec()).unwrap()
+}
+
+fn issue435_bogus_in_sptree(label: &str) -> PathBuf {
+    let path = issue435_fault_deck(label, "bogus-in-sptree", |package| {
+        issue435_edit_slide_xml(package, |xml| {
+            let tree = xml.find("<p:spTree ").expect("spTree start tag");
+            let after_grp =
+                tree + xml[tree..].find("<p:grpSpPr/>").expect("grpSpPr") + "<p:grpSpPr/>".len();
+            format!("{}<p:bogus/>{}", &xml[..after_grp], &xml[after_grp..])
+        });
+    });
+    let xml = issue435_saved_xml(&path, "/ppt/slides/slide1.xml");
+    let tree = xml.find("<p:spTree ").unwrap();
+    let bogus = tree + xml[tree..].find("<p:bogus/>").unwrap();
+    let grp = tree + xml[tree..].find("<p:grpSpPr/>").unwrap();
+    assert!(bogus > grp, "bogus direct child inside spTree");
+    path
+}
+
+fn issue435_cnvpr_missing_name(label: &str) -> PathBuf {
+    let path = issue435_fault_deck(label, "cnvpr-missing-name", |package| {
+        issue435_edit_slide_xml(package, |xml| {
+            let owner = xml.find("<p:nvSpPr>").expect("nvSpPr");
+            let cnvpr = owner + xml[owner..].find("<p:cNvPr ").expect("nvSpPr cNvPr");
+            let tag_end = cnvpr + xml[cnvpr..].find('>').expect("cNvPr close");
+            let tag = &xml[cnvpr..=tag_end];
+            let name_at = tag.find(" name=\"").expect("name attribute");
+            let value_end = tag[name_at + 7..].find('"').unwrap() + name_at + 7;
+            format!(
+                "{}{}",
+                &xml[..cnvpr + name_at],
+                &xml[cnvpr + value_end + 1..]
+            )
+        });
+    });
+    let xml = issue435_saved_xml(&path, "/ppt/slides/slide1.xml");
+    let nvsp = xml.find("<p:nvSpPr>").unwrap();
+    let cnvpr = nvsp + xml[nvsp..].find("<p:cNvPr ").unwrap();
+    let cnvpr_tag_end = cnvpr + xml[cnvpr..].find('>').unwrap();
+    assert!(
+        !xml[cnvpr..=cnvpr_tag_end].contains(" name=\""),
+        "shape cNvPr lost its name attribute"
+    );
+    path
+}
+
+fn issue435_notes_master_id_lst_after_sld_id_lst(label: &str) -> PathBuf {
+    let path = issue435_fault_deck(label, "notesmaster-after-sldidlst", |package| {
+        issue435_edit_presentation_xml(package, |xml| {
+            let after_slides =
+                xml.find("</p:sldIdLst>").expect("sldIdLst close") + "</p:sldIdLst>".len();
+            format!(
+                "{}<p:notesMasterIdLst><p:notesMasterId id=\"2147483649\" r:id=\"rId8\"/></p:notesMasterIdLst>{}",
+                &xml[..after_slides],
+                &xml[after_slides..]
+            )
+        });
+    });
+    let xml = issue435_saved_xml(&path, "/ppt/presentation.xml");
+    let sldid_end = xml.find("</p:sldIdLst>").unwrap();
+    let notes = xml.find("<p:notesMasterIdLst>").unwrap();
+    assert!(notes > sldid_end, "notesMasterIdLst after sldIdLst");
+    path
+}
+
+fn issue435_sld_master_id_lst_after_sld_id_lst(label: &str) -> PathBuf {
+    let path = issue435_fault_deck(label, "sldmaster-after-sldidlst", |package| {
+        issue435_edit_presentation_xml(package, |xml| {
+            let start = xml.find("<p:sldMasterIdLst>").expect("sldMasterIdLst");
+            let end = xml.find("</p:sldMasterIdLst>").expect("close") + "</p:sldMasterIdLst>".len();
+            let list = xml[start..end].to_string();
+            let without = format!("{}{}", &xml[..start], &xml[end..]);
+            let after_slides =
+                without.find("</p:sldIdLst>").expect("sldIdLst close") + "</p:sldIdLst>".len();
+            format!(
+                "{}{}{}",
+                &without[..after_slides],
+                list,
+                &without[after_slides..]
+            )
+        });
+    });
+    let xml = issue435_saved_xml(&path, "/ppt/presentation.xml");
+    let sldid_end = xml.find("</p:sldIdLst>").unwrap();
+    let master = xml.find("<p:sldMasterIdLst>").unwrap();
+    assert!(master > sldid_end, "sldMasterIdLst after sldIdLst");
+    path
+}
+
+fn issue435_sld_sz_before_sld_id_lst(label: &str) -> PathBuf {
+    let path = issue435_fault_deck(label, "sldsz-before-sldidlst", |package| {
+        issue435_edit_presentation_xml(package, |xml| {
+            let start = xml.find("<p:sldSz ").expect("sldSz");
+            let end = xml[start..].find("/>").unwrap() + start + 2;
+            let size = xml[start..end].to_string();
+            let without = format!("{}{}", &xml[..start], &xml[end..]);
+            let before_slides = without.find("<p:sldIdLst>").expect("sldIdLst");
+            format!(
+                "{}{}{}",
+                &without[..before_slides],
+                size,
+                &without[before_slides..]
+            )
+        });
+    });
+    let xml = issue435_saved_xml(&path, "/ppt/presentation.xml");
+    assert!(
+        xml.find("<p:sldSz ").unwrap() < xml.find("<p:sldIdLst>").unwrap(),
+        "sldSz before sldIdLst"
+    );
+    path
+}
+
+fn issue435_slide_override_removed_with_xml_default(label: &str) -> PathBuf {
+    let path = issue435_fault_deck(label, "override-removed-xml-default", |package| {
+        package
+            .content_types
+            .overrides
+            .remove(&issue435_slide_part(package));
+    });
+    let package = OpcPackage::open(&path).unwrap();
+    assert!(
+        !package
+            .content_types
+            .overrides
+            .contains_key("/ppt/slides/slide1.xml"),
+        "slide override removed"
+    );
+    assert_eq!(
+        package
+            .content_types
+            .defaults
+            .get("xml")
+            .map(String::as_str),
+        Some("application/xml"),
+        "xml default remains"
+    );
+    path
+}
+
+fn issue435_slide_override_removed_without_fallback(label: &str) -> PathBuf {
+    let path = issue435_fault_deck(label, "override-removed-no-fallback", |package| {
+        package
+            .content_types
+            .overrides
+            .remove(&issue435_slide_part(package));
+        package.content_types.defaults.remove("xml");
+    });
+    let package = OpcPackage::open(&path).unwrap();
+    assert!(
+        !package
+            .content_types
+            .overrides
+            .contains_key("/ppt/slides/slide1.xml"),
+        "slide override removed"
+    );
+    assert_eq!(
+        package
+            .content_types
+            .defaults
+            .get("xml")
+            .map(String::as_str),
+        None,
+        "no xml default remains"
+    );
+    path
+}
+
+fn issue435_short_table_row(label: &str) -> PathBuf {
+    let path = issue435_fault_deck(label, "short-table-row", |package| {
+        issue435_edit_slide_xml(package, |xml| {
+            let table = xml.find("<a:tbl ").expect("table");
+            let row = table + xml[table..].find("<a:tr ").expect("row");
+            let row_end = row + xml[row..].find("</a:tr>").expect("row close");
+            let last_tc = xml[row..row_end].rfind("<a:tc>").expect("cell");
+            format!("{}{}", &xml[..row + last_tc], &xml[row_end..])
+        });
+    });
+    let xml = issue435_saved_xml(&path, "/ppt/slides/slide1.xml");
+    let row = xml.find("<a:tr ").unwrap();
+    let row_end = row + xml[row..].find("</a:tr>").unwrap();
+    assert_eq!(
+        xml[row..row_end].matches("<a:tc>").count(),
+        1,
+        "first row shorter than its two-column grid"
+    );
+    path
+}
+
+#[test]
+fn issue435_parsed_validation_keeps_its_original_route_outcomes() {
+    let clean = issue435_clean_deck("parsed-clean");
+    let opened = Presentation::open(&clean).unwrap();
+    assert!(opened.validate().is_empty(), "{:?}", opened.validate());
+
+    // Already-caught control preserved from Base: removing the slide Override
+    // with no Default fallback is reported by the parsed route itself.
+    let no_fallback = issue435_slide_override_removed_without_fallback("parsed-no-fallback");
+    let issues = Presentation::open(&no_fallback).unwrap().validate();
+    assert!(
+        issues.iter().any(|issue| matches!(issue,
+        rpptx::ValidationIssue::MissingContentTypeOverride { part }
+            if part == "/ppt/slides/slide1.xml")),
+        "{issues:?}"
+    );
+
+    // The original six faults and the extra root-order fault are invisible to
+    // the parsed route: the model is parsed, re-serialized and scanned without
+    // original byte order or stored-package context. Observed at Base
+    // 72b1f8cb and asserted here so a future parsed-route change is explicit.
+    let faults = [
+        ("parsed-bogus", issue435_bogus_in_sptree("parsed-bogus")),
+        (
+            "parsed-missing-name",
+            issue435_cnvpr_missing_name("parsed-missing-name"),
+        ),
+        (
+            "parsed-notes-master-after-slides",
+            issue435_notes_master_id_lst_after_sld_id_lst("parsed-notes-master-after-slides"),
+        ),
+        (
+            "parsed-sld-master-after-slides",
+            issue435_sld_master_id_lst_after_sld_id_lst("parsed-sld-master-after-slides"),
+        ),
+        (
+            "parsed-size-before-slides",
+            issue435_sld_sz_before_sld_id_lst("parsed-size-before-slides"),
+        ),
+        (
+            "parsed-override-xml-default",
+            issue435_slide_override_removed_with_xml_default("parsed-override-xml-default"),
+        ),
+        (
+            "parsed-short-row",
+            issue435_short_table_row("parsed-short-row"),
+        ),
+    ];
+    for (label, path) in faults {
+        let opened = Presentation::open(&path)
+            .unwrap_or_else(|error| panic!("{label} must open through the parsed route: {error}"));
+        assert!(
+            opened.validate().is_empty(),
+            "{label}: parsed route unexpectedly reported {:?}",
+            opened.validate()
+        );
+    }
+}
+
+// Direct stored-route assertions. These require the new API, so they are
+// written with the implementation, after the Base RED was recorded through
+// the existing parsed and CLI producers.
+
+fn issue435_stored_issues(path: &Path, part: &str, message: &str) -> Vec<String> {
+    rpptx::validate_presentation_file(path)
+        .unwrap_or_else(|error| panic!("stored route failed for {}: {error}", path.display()))
+        .into_iter()
+        .filter(|issue| match issue {
+            rpptx::ValidationIssue::InvalidXmlChild {
+                part: issue_part, ..
+            } => issue_part == part && issue.to_string().contains(message),
+            other => other.to_string().contains(message),
+        })
+        .map(|issue| issue.to_string())
+        .collect()
+}
+
+#[test]
+fn issue435_stored_file_route_reports_the_six_original_faults() {
+    let clean = issue435_clean_deck("stored-clean");
+    assert!(
+        rpptx::validate_presentation_file(&clean)
+            .unwrap()
+            .is_empty(),
+        "{:?}",
+        rpptx::validate_presentation_file(&clean).unwrap()
+    );
+    let before = fs::read(&clean).unwrap();
+
+    let bogus = issue435_bogus_in_sptree("stored-bogus");
+    let found = issue435_stored_issues(
+        &bogus,
+        "/ppt/slides/slide1.xml",
+        "unknown or misplaced direct XML child",
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("bogus[3]"), "{found:?}");
+
+    let missing_name = issue435_cnvpr_missing_name("stored-missing-name");
+    let found = issue435_stored_issues(
+        &missing_name,
+        "/ppt/slides/slide1.xml",
+        "required cNvPr name attribute is absent",
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+
+    let notes_master = issue435_notes_master_id_lst_after_sld_id_lst("stored-notes-master");
+    let found = issue435_stored_issues(
+        &notes_master,
+        "/ppt/presentation.xml",
+        "finite XML child order or multiplicity is invalid",
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+    // The path ordinal proves the notesMasterIdLst was the third root child,
+    // i.e. after sldIdLst, in the original bytes.
+    assert!(found[0].contains("notesMasterIdLst[3]"), "{found:?}");
+
+    let sld_master = issue435_sld_master_id_lst_after_sld_id_lst("stored-sld-master");
+    let found = issue435_stored_issues(
+        &sld_master,
+        "/ppt/presentation.xml",
+        "finite XML child order or multiplicity is invalid",
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+
+    let size_before = issue435_sld_sz_before_sld_id_lst("stored-size-before");
+    let found = issue435_stored_issues(
+        &size_before,
+        "/ppt/presentation.xml",
+        "finite XML child order or multiplicity is invalid",
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("sldIdLst[3]"), "{found:?}");
+
+    let override_default = issue435_slide_override_removed_with_xml_default("stored-override");
+    let found = issue435_stored_issues(
+        &override_default,
+        "/ppt/slides/slide1.xml",
+        "has no content type override",
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+
+    let short_row = issue435_short_table_row("stored-short-row");
+    let found = issue435_stored_issues(
+        &short_row,
+        "/ppt/slides/slide1.xml",
+        "table row has 1 cells but its grid has 2 columns",
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+
+    // The already-caught control is also reported through the file route.
+    let no_fallback = issue435_slide_override_removed_without_fallback("stored-no-fallback");
+    let found = issue435_stored_issues(
+        &no_fallback,
+        "/ppt/slides/slide1.xml",
+        "has no content type override",
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+
+    assert_eq!(
+        fs::read(&clean).unwrap(),
+        before,
+        "input bytes must not change"
+    );
+}
+
+#[test]
+fn issue435_stored_root_accepts_sdk_kinsoku() {
+    let valid = issue435_fault_deck("stored-kinsoku", "kinsoku-valid", |package| {
+        issue435_edit_presentation_xml(package, |xml| {
+            let at = xml.find("<p:defaultTextStyle").expect("defaultTextStyle");
+            format!(
+                "{}<p:kinsoku lang=\"ja-JP\" invalStChars=\"!\" invalEndChars=\"(\"/>{}",
+                &xml[..at],
+                &xml[at..]
+            )
+        });
+    });
+    let xml = issue435_saved_xml(&valid, "/ppt/presentation.xml");
+    assert!(
+        xml.contains("<p:kinsoku "),
+        "actual kinsoku bytes must be present"
+    );
+    let issues = rpptx::validate_presentation_file(&valid).unwrap();
+    assert!(
+        !issues
+            .iter()
+            .any(|issue| issue.to_string().contains("kinsoku")),
+        "{issues:?}"
+    );
+    assert!(
+        !issues.iter().any(|issue| matches!(issue,
+            rpptx::ValidationIssue::InvalidXmlChild { part, .. }
+                if part == "/ppt/presentation.xml")),
+        "{issues:?}"
+    );
+    let before = fs::read(&valid).unwrap();
+
+    // The writer's kiosk typo is not an SDK standard child: the same slot
+    // holding p:kiosk is reported, proving the pinned particle inventory.
+    let kiosk = issue435_fault_deck("stored-kinsoku", "kiosk-unknown", |package| {
+        issue435_edit_presentation_xml(package, |xml| {
+            let at = xml.find("<p:defaultTextStyle").expect("defaultTextStyle");
+            format!("{}<p:kiosk/>{}", &xml[..at], &xml[at..])
+        });
+    });
+    let found = issue435_stored_issues(
+        &kiosk,
+        "/ppt/presentation.xml",
+        "unknown or misplaced direct XML child",
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("kiosk"), "{found:?}");
+
+    // A kinsoku before notesSz is out of sequence.
+    let bad_order = issue435_fault_deck("stored-kinsoku", "kinsoku-before-notessz", |package| {
+        issue435_edit_presentation_xml(package, |xml| {
+            let at = xml.find("<p:notesSz ").expect("notesSz");
+            format!(
+                "{}<p:kinsoku lang=\"ja-JP\" invalStChars=\"!\" invalEndChars=\"(\"/>{}",
+                &xml[..at],
+                &xml[at..]
+            )
+        });
+    });
+    let found = issue435_stored_issues(
+        &bad_order,
+        "/ppt/presentation.xml",
+        "finite XML child order or multiplicity is invalid",
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("notesSz"), "{found:?}");
+
+    assert_eq!(
+        fs::read(&valid).unwrap(),
+        before,
+        "input bytes must not change"
+    );
+}
+
+#[test]
+fn issue435_stored_validation_checks_choice_members() {
+    let chart_uri = "http://schemas.openxmlformats.org/drawingml/2006/chart";
+    let missing_name_chart_choice = format!(
+        "<mc:AlternateContent><mc:Choice Requires=\"p\">\
+<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"9\"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>\
+<p:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1\" cy=\"1\"/></p:xfrm>\
+<a:graphic><a:graphicData uri=\"{chart_uri}\" r:id=\"rId8\"/></a:graphic></p:graphicFrame></mc:Choice>\
+<mc:Fallback><p:sp><p:nvSpPr><p:cNvPr id=\"10\" name=\"Named fallback\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>\
+<p:spPr/></p:sp></mc:Fallback></mc:AlternateContent>"
+    );
+    let nested_valid = "<mc:AlternateContent><mc:Choice Requires=\"p\"><mc:AlternateContent>\
+<mc:Choice Requires=\"p\"><p:sp><p:nvSpPr><p:cNvPr id=\"11\" name=\"Nested named\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>\
+<p:spPr/></p:sp></mc:Choice><mc:Fallback/></mc:AlternateContent></mc:Choice>\
+<mc:Fallback/></mc:AlternateContent>";
+    let bogus_and_foreign = "<mc:AlternateContent>\
+<mc:Choice Requires=\"p\"><p:bogus/></mc:Choice>\
+<mc:Fallback><p:bogus/></mc:Fallback></mc:AlternateContent>\
+<mc:AlternateContent><mc:Choice Requires=\"x\"><x:foreign xmlns:x=\"urn:issue435\"/></mc:Choice>\
+<mc:Fallback><x:foreign xmlns:x=\"urn:issue435\"/></mc:Fallback></mc:AlternateContent>";
+    let deck = issue435_fault_deck("stored-choice", "choice-members", |package| {
+        issue435_edit_slide_xml(package, |xml| {
+            let tree = xml.find("<p:spTree ").expect("spTree start tag");
+            let after_grp =
+                tree + xml[tree..].find("<p:grpSpPr/>").expect("grpSpPr") + "<p:grpSpPr/>".len();
+            format!(
+                "{}{missing_name_chart_choice}{nested_valid}{bogus_and_foreign}{}",
+                &xml[..after_grp],
+                &xml[after_grp..]
+            )
+        });
+    });
+    let issues = rpptx::validate_presentation_file(&deck).unwrap();
+    let missing: Vec<_> = issues
+        .iter()
+        .filter(|issue| {
+            issue
+                .to_string()
+                .contains("required cNvPr name attribute is absent")
+        })
+        .collect();
+    assert_eq!(missing.len(), 1, "{issues:?}");
+    assert!(
+        missing[0].to_string().contains("graphicFrame"),
+        "{issues:?}"
+    );
+    let unknown: Vec<_> = issues
+        .iter()
+        .filter(|issue| {
+            issue
+                .to_string()
+                .contains("unknown or misplaced direct XML child")
+        })
+        .collect();
+    assert_eq!(unknown.len(), 2, "{issues:?}");
+    assert!(
+        unknown
+            .iter()
+            .all(|issue| issue.to_string().contains("}bogus[1]")),
+        "{issues:?}"
+    );
+    // The named fallback and nested members and both foreign branches stay clean.
+    assert!(
+        !issues
+            .iter()
+            .any(|issue| issue.to_string().contains("urn:issue435")),
+        "{issues:?}"
+    );
+    assert_eq!(issues.len(), 3, "{issues:?}");
+}
+
+#[test]
+fn issue435_stored_file_route_reports_faults_the_parsed_projection_hides() {
+    let malformed = issue435_fault_deck("stored-metadata", "malformed-unused-xml", |package| {
+        package.set_part("/customXml/item1.xml", b"<a><b></a>".to_vec());
+        package
+            .content_types
+            .add_override("/customXml/item1.xml", "application/xml");
+    });
+    let issues = rpptx::validate_presentation_file(&malformed).unwrap();
+    assert!(
+        issues.iter().any(|issue| matches!(issue,
+            rpptx::ValidationIssue::InvalidXmlChild { part, .. } if part == "/customXml/item1.xml")),
+        "{issues:?}"
+    );
+    // The parsed route projection does not report the stored fault.
+    let opened = Presentation::open(&malformed).unwrap();
+    assert!(opened.validate().is_empty(), "{:?}", opened.validate());
+
+    let forbidden = issue435_raw_zip_fixture(
+        "stored-metadata",
+        "forbidden-character",
+        "<Override PartName=\"/customXml/char1.xml\" ContentType=\"application/xml\"/>",
+        &[("/customXml/char1.xml", {
+            let mut xml = b"<a>".to_vec();
+            xml.push(0x01);
+            xml.extend_from_slice(b"</a>");
+            xml
+        })],
+    );
+    let issues = rpptx::validate_presentation_file(&forbidden).unwrap();
+    assert!(
+        issues.iter().any(|issue| matches!(issue,
+            rpptx::ValidationIssue::InvalidXmlChild { part, message, .. }
+                if part == "/customXml/char1.xml" && message.contains("ForbiddenLiteralCharacter")),
+        ),
+        "{issues:?}"
+    );
+}
+
+#[test]
+fn issue435_stored_file_route_failure_precedence() {
+    // A stored issue plus a model-open failure returns the stored issues.
+    let both = issue435_fault_deck("stored-precedence", "stored-and-model", |package| {
+        package.set_part("/customXml/item1.xml", b"<a><b></a>".to_vec());
+        package
+            .content_types
+            .add_override("/customXml/item1.xml", "application/xml");
+        let xml =
+            String::from_utf8(package.get_part("/ppt/presentation.xml").unwrap().to_vec()).unwrap();
+        let start = xml.find("<p:notesSz ").expect("notesSz");
+        let end = xml[start..].find("/>").unwrap() + start + 2;
+        package.set_part(
+            "/ppt/presentation.xml",
+            format!("{}{}", &xml[..start], &xml[end..]).into_bytes(),
+        );
+    });
+    let issues = rpptx::validate_presentation_file(&both).unwrap();
+    assert!(
+        issues.iter().any(|issue| matches!(issue,
+            rpptx::ValidationIssue::InvalidXmlChild { part, .. } if part == "/customXml/item1.xml")),
+        "{issues:?}"
+    );
+    assert_eq!(issues.len(), 1, "{issues:?}");
+
+    // A model failure without any stored issue propagates the model error.
+    let model_only = issue435_fault_deck("stored-precedence", "model-only", |package| {
+        let xml =
+            String::from_utf8(package.get_part("/ppt/presentation.xml").unwrap().to_vec()).unwrap();
+        let start = xml.find("<p:notesSz ").expect("notesSz");
+        let end = xml[start..].find("/>").unwrap() + start + 2;
+        package.set_part(
+            "/ppt/presentation.xml",
+            format!("{}{}", &xml[..start], &xml[end..]).into_bytes(),
+        );
+    });
+    assert!(rpptx::validate_presentation_file(&model_only).is_err());
+}
+
+#[test]
+fn issue435_stored_file_route_preserves_opaque_and_encoded_payload() {
+    let utf16_body: Vec<u8> = "<?xml version=\"1.0\" encoding=\"UTF-16\"?><a x=\"1\"/>"
+        .encode_utf16()
+        .flat_map(|unit| unit.to_le_bytes())
+        .collect();
+    let utf16_be_body: Vec<u8> = "<?xml version=\"1.0\" encoding=\"UTF-16\"?><a x=\"1\"/>"
+        .encode_utf16()
+        .flat_map(|unit| unit.to_be_bytes())
+        .collect();
+    let aliased = concat!(
+        "<sld xmlns=\"http://schemas.openxmlformats.org/presentationml/2006/main\" ",
+        "xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" ",
+        "xmlns:x=\"urn:issue435\" mc:Ignorable=\"x\" ",
+        "xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\">",
+        "<cSld><spTree>",
+        "<nvGrpSpPr><cNvPr id=\"1\" name=\"\"/><cNvGrpSpPr/><nvPr/></nvGrpSpPr>",
+        "<grpSpPr/>",
+        "<x:island/>",
+        "<extLst><ext uri=\"{ISSUE435}\"><cNvPr id=\"99\"/><tbl><tr><tc/></tr></tbl></ext></extLst>",
+        "<sp><nvSpPr><cNvPr id=\"2\" name=\"Aliased shape\"/><cNvSpPr/><nvPr/></nvSpPr><spPr/></sp>",
+        "</spTree></cSld>",
+        "<clrMapOvr><a:masterClrMapping/></clrMapOvr>",
+        "</sld>"
+    );
+    let deck = issue435_fault_deck("stored-opaque", "opaque-and-encoded", |package| {
+        let mut utf16_le = vec![0xFF, 0xFE];
+        utf16_le.extend_from_slice(&utf16_body);
+        let mut utf16_be = vec![0xFE, 0xFF];
+        utf16_be.extend_from_slice(&utf16_be_body);
+        package.set_part("/customXml/utf16le.xml", utf16_le);
+        package.set_part("/customXml/utf16be.xml", utf16_be);
+        let mut bom = vec![0xEF, 0xBB, 0xBF];
+        bom.extend_from_slice(b"<a x=\"1\"/>");
+        package.set_part("/customXml/bom.xml", bom);
+        package.set_part(
+            "/media/binary.bin",
+            vec![0x00, 0x01, 0xFF, 0xFF, 0x89, b'P', b'N', b'G'],
+        );
+        package
+            .content_types
+            .add_override("/customXml/utf16le.xml", "application/xml");
+        package
+            .content_types
+            .add_override("/customXml/utf16be.xml", "application/xml");
+        package
+            .content_types
+            .add_override("/customXml/bom.xml", "application/xml");
+        package
+            .content_types
+            .add_override("/media/binary.bin", "application/octet-stream");
+        package.set_part("/ppt/slides/aliased.xml", aliased.as_bytes().to_vec());
+        package.content_types.add_override(
+            "/ppt/slides/aliased.xml",
+            "application/vnd.openxmlformats-officedocument.presentationml.slide+xml",
+        );
+    });
+    let issues = rpptx::validate_presentation_file(&deck).unwrap();
+    assert!(issues.is_empty(), "{issues:?}");
+    let before = fs::read(&deck).unwrap();
+    let reopened = rpptx::validate_presentation_file(&deck).unwrap();
+    assert!(reopened.is_empty(), "{reopened:?}");
+    assert_eq!(
+        fs::read(&deck).unwrap(),
+        before,
+        "input bytes must not change"
+    );
+}
+
+#[test]
+fn issue435_stored_tree_root_cnvpr_requires_id_and_name() {
+    // The spTree root's own nvGrpSpPr cNvPr is a required nonvisual-owner
+    // path, distinct from the member shapes inside the tree.
+    let missing = issue435_fault_deck("stored-tree-root", "tree-root-missing-name", |package| {
+        issue435_edit_slide_xml(package, |xml| {
+            let nv = xml.find("<p:nvGrpSpPr>").expect("nvGrpSpPr");
+            let cnvpr = nv + xml[nv..].find("<p:cNvPr ").expect("nvGrpSpPr cNvPr");
+            let tag_end = cnvpr + xml[cnvpr..].find('>').expect("cNvPr close");
+            let tag = &xml[cnvpr..=tag_end];
+            let name_at = tag.find(" name=\"").expect("name attribute");
+            let value_end = tag[name_at + 7..].find('"').unwrap() + name_at + 7;
+            format!(
+                "{}{}",
+                &xml[..cnvpr + name_at],
+                &xml[cnvpr + value_end + 1..]
+            )
+        });
+    });
+    let xml = issue435_saved_xml(&missing, "/ppt/slides/slide1.xml");
+    let nvsp = xml.find("<p:nvGrpSpPr>").unwrap();
+    let cnvpr = nvsp + xml[nvsp..].find("<p:cNvPr ").unwrap();
+    let cnvpr_tag_end = cnvpr + xml[cnvpr..].find('>').unwrap();
+    assert!(
+        !xml[cnvpr..=cnvpr_tag_end].contains(" name=\""),
+        "tree-root cNvPr lost its name attribute"
+    );
+    let found = issue435_stored_issues(
+        &missing,
+        "/ppt/slides/slide1.xml",
+        "required cNvPr name attribute is absent",
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("nvGrpSpPr"), "{found:?}");
+}
+
+#[test]
+fn issue435_stored_table_rows_count_direct_physical_cells() {
+    // The approved rule counts direct qualified a:tc children against that
+    // table's own direct a:gridCol count and requires equality, with no
+    // gridSpan weighting in either direction.
+    let long = issue435_fault_deck("stored-count", "row-long", |package| {
+        issue435_edit_slide_xml(package, |xml| {
+            let row_end = xml.find("</a:tr>").expect("first row close");
+            let extra = "<a:tc><a:txBody><a:bodyPr/><a:p><a:r><a:t>Extra</a:t></a:r></a:p>\
+</a:txBody><a:tcPr/></a:tc>";
+            format!("{}{}{}", &xml[..row_end], extra, &xml[row_end..])
+        });
+    });
+    let found = issue435_stored_issues(
+        &long,
+        "/ppt/slides/slide1.xml",
+        "table row has 3 cells but its grid has 2 columns",
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+
+    // A missing physical cell cannot be concealed by a gridSpan value.
+    let concealed = issue435_fault_deck("stored-count", "row-span-concealed", |package| {
+        issue435_edit_slide_xml(package, |xml| {
+            let row_end = xml.find("</a:tr>").expect("first row close");
+            let last_tc = xml[..row_end].rfind("<a:tc>").expect("last cell");
+            let xml = format!("{}{}", &xml[..last_tc], &xml[row_end..]);
+            xml.replacen("<a:tc>", "<a:tc gridSpan=\"999\">", 1)
+        });
+    });
+    let xml = issue435_saved_xml(&concealed, "/ppt/slides/slide1.xml");
+    let first_row_end = xml.find("</a:tr>").unwrap();
+    let cells = xml[..first_row_end].matches("<a:tc>").count()
+        + xml[..first_row_end].matches("<a:tc ").count();
+    assert_eq!(cells, 1, "one physical cell");
+    assert!(
+        xml.contains("gridSpan=\"999\""),
+        "span value present but not counted"
+    );
+    let found = issue435_stored_issues(
+        &concealed,
+        "/ppt/slides/slide1.xml",
+        "table row has 1 cells but its grid has 2 columns",
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+
+    // An equal row stays clean, and a merged row authored with its physical
+    // continuation cell keeps a full physical count.
+    let continuation = issue435_fault_deck("stored-count", "row-continuation", |package| {
+        issue435_edit_slide_xml(package, |xml| {
+            xml.replacen("<a:tc>", "<a:tc vMerge=\"1\">", 1)
+        });
+    });
+    let xml = issue435_saved_xml(&continuation, "/ppt/slides/slide1.xml");
+    let row_end = xml.find("</a:tr>").unwrap();
+    assert!(xml.contains("vMerge=\"1\""), "continuation cell present");
+    let cells = xml[..row_end].matches("<a:tc>").count() + xml[..row_end].matches("<a:tc ").count();
+    assert_eq!(cells, 2, "physical count intact");
+    let issues = rpptx::validate_presentation_file(&continuation).unwrap();
+    assert!(
+        !issues
+            .iter()
+            .any(|issue| issue.to_string().contains("grid columns")),
+        "{issues:?}"
+    );
+
+    // The existing short fault is still reported with the plain count.
+    let short = issue435_short_table_row("stored-count");
+    let found = issue435_stored_issues(
+        &short,
+        "/ppt/slides/slide1.xml",
+        "table row has 1 cells but its grid has 2 columns",
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+}
+
+#[test]
+fn issue435_stored_structural_checks_require_actual_role_ownership() {
+    // An unused MIME-XML part rooted p:presentation is not a presentation
+    // owner: no structural membership issue may come from it.
+    let unowned = issue435_fault_deck("stored-unowned", "unowned-presentation", |package| {
+        package.set_part(
+            "/customXml/lookalike.xml",
+            format!("<p:presentation xmlns:p=\"{P_NS}\"><p:opaque/></p:presentation>").into_bytes(),
+        );
+        package
+            .content_types
+            .add_override("/customXml/lookalike.xml", "application/xml");
+    });
+    let issues = rpptx::validate_presentation_file(&unowned).unwrap();
+    assert!(
+        !issues
+            .iter()
+            .any(|issue| issue.to_string().contains("/customXml/lookalike.xml")),
+        "{issues:?}"
+    );
+    let before = fs::read(&unowned).unwrap();
+
+    // The same for an unused p:sld lookalike with a PML-looking subtree.
+    let unowned_slide = issue435_fault_deck("stored-unowned", "unowned-slide", |package| {
+        package.set_part(
+            "/customXml/slidelike.xml",
+            format!(
+                "<p:sld xmlns:p=\"{P_NS}\"><p:cSld><p:spTree><p:nvGrpSpPr/>\
+<p:grpSpPr/><p:bogus/></p:spTree></p:cSld></p:sld>"
+            )
+            .into_bytes(),
+        );
+        package
+            .content_types
+            .add_override("/customXml/slidelike.xml", "application/xml");
+    });
+    let issues = rpptx::validate_presentation_file(&unowned_slide).unwrap();
+    assert!(
+        !issues
+            .iter()
+            .any(|issue| issue.to_string().contains("/customXml/slidelike.xml")),
+        "{issues:?}"
+    );
+
+    // Paired control: the same opaque child in the actual presentation part
+    // is a membership fault, and lexical checks still ran on the lookalikes.
+    let owned = issue435_fault_deck("stored-unowned", "owned-presentation", |package| {
+        issue435_edit_presentation_xml(package, |xml| {
+            let at = xml.find("<p:defaultTextStyle").expect("defaultTextStyle");
+            format!("{}<p:opaque/>{}", &xml[..at], &xml[at..])
+        });
+    });
+    let found = issue435_stored_issues(
+        &owned,
+        "/ppt/presentation.xml",
+        "unknown or misplaced direct XML child",
+    );
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].contains("opaque[5]"), "{found:?}");
+
+    let malformed_lookalike =
+        issue435_fault_deck("stored-unowned", "unowned-malformed", |package| {
+            package.set_part("/customXml/broken.xml", b"<a><b></a>".to_vec());
+            package
+                .content_types
+                .add_override("/customXml/broken.xml", "application/xml");
+        });
+    let issues = rpptx::validate_presentation_file(&malformed_lookalike).unwrap();
+    assert!(
+        issues.iter().any(|issue| matches!(issue,
+            rpptx::ValidationIssue::InvalidXmlChild { part, .. }
+                if part == "/customXml/broken.xml")),
+        "{issues:?}"
+    );
+
+    assert_eq!(
+        fs::read(&unowned).unwrap(),
+        before,
+        "input bytes must not change"
+    );
+}
+
+#[test]
+fn issue435_stored_root_rejects_outside_root_character_events() {
+    let cases: [(&str, Vec<u8>, &str); 5] = [
+        (
+            "cdata-before-root",
+            b"<![CDATA[poison]]><a/>".to_vec(),
+            "outside the document root",
+        ),
+        (
+            "reference-after-root",
+            b"<a/>&amp;".to_vec(),
+            "outside the document root",
+        ),
+        (
+            "character-reference-after-root",
+            b"<a/>&#65;".to_vec(),
+            "outside the document root",
+        ),
+        (
+            "declaration-after-root",
+            b"<a/><?xml version=\"1.0\"?>".to_vec(),
+            "outside the document prolog",
+        ),
+        (
+            "doctype-after-root",
+            b"<a/><!DOCTYPE a>".to_vec(),
+            "outside the document prolog",
+        ),
+    ];
+    for (name, part, message) in cases {
+        let deck = issue435_fault_deck("stored-root-events", name, |package| {
+            package.set_part("/customXml/events.xml", part.clone());
+            package
+                .content_types
+                .add_override("/customXml/events.xml", "application/xml");
+        });
+        let found = issue435_stored_issues(&deck, "/customXml/events.xml", message);
+        assert_eq!(found.len(), 1, "{name}: {found:?}");
+    }
+
+    // Valid positions stay clean: in-root CDATA and references, and outside
+    // -root literal whitespace, comments and processing instructions.
+    let clean = issue435_fault_deck("stored-root-events", "valid-positions", |package| {
+        let xml = br#"<?xml version="1.0"?><!-- prolog --><?proc instruction?>
+<a><![CDATA[in root]]>&amp;</a>"#
+            .to_vec();
+        package.set_part("/customXml/valid.xml", xml);
+        package
+            .content_types
+            .add_override("/customXml/valid.xml", "application/xml");
+    });
+    let issues = rpptx::validate_presentation_file(&clean).unwrap();
+    assert!(
+        !issues
+            .iter()
+            .any(|issue| issue.to_string().contains("/customXml/valid.xml")),
+        "{issues:?}"
+    );
+}
+
+#[test]
+fn issue435_stored_metadata_identity_follows_the_loader() {
+    // A binary part whose name merely ends in the metadata filename is not
+    // original metadata and must stay under its MIME frontier. The writer
+    // refuses such bytes for a suffix-named XML entry, so the fixture is a
+    // raw archive.
+    let decoy = issue435_raw_zip_fixture(
+        "stored-metadata-id",
+        "binary-suffix-decoy",
+        "<Override PartName=\"/customXml/payload[Content_Types].xml\" ContentType=\"application/octet-stream\"/>",
+        &[(
+            "/customXml/payload[Content_Types].xml",
+            vec![0x00, 0x01, 0xFF, 0xFE, b'P', b'K'],
+        )],
+    );
+    let issues = rpptx::validate_presentation_file(&decoy).unwrap();
+    assert!(
+        !issues
+            .iter()
+            .any(|issue| issue.to_string().contains("payload[Content_Types].xml")),
+        "{issues:?}"
+    );
+
+    // A nested ordinary XML part with the same suffix is scanned exactly
+    // once, as ordinary XML under its MIME type.
+    let nested = issue435_fault_deck("stored-metadata-id", "xml-suffix-decoy", |package| {
+        package.set_part("/customXml/data[Content_Types].xml", b"<a><b></a>".to_vec());
+        package
+            .content_types
+            .add_override("/customXml/data[Content_Types].xml", "application/xml");
+    });
+    let issues = rpptx::validate_presentation_file(&nested).unwrap();
+    let hits = issues
+        .iter()
+        .filter(|issue| issue.to_string().contains("data[Content_Types].xml"))
+        .count();
+    assert_eq!(hits, 1, "{issues:?}");
+
+    // Genuine original metadata keeps being checked, including a case
+    // variant the loader itself admits, here holding a forbidden character
+    // inside a comment.
+    let real = issue435_raw_zip_fixture(
+        "stored-metadata-id",
+        "real-metadata-character",
+        "<!-- forbidden \u{1} comment -->",
+        &[],
+    );
+    let issues = rpptx::validate_presentation_file(&real).unwrap();
+    assert!(
+        issues.iter().any(|issue| matches!(issue,
+            rpptx::ValidationIssue::InvalidXmlChild { part, message, .. }
+                if part.eq_ignore_ascii_case("/[Content_Types].xml")
+                    && message.contains("ForbiddenLiteralCharacter")),),
+        "{issues:?}"
+    );
+}
+
+#[test]
+fn issue435_stored_groups_keep_nonvisual_membership_and_table_checks() {
+    for (case, expected) in [
+        ("valid", None),
+        ("missing-name", Some("required cNvPr name")),
+        ("missing-owner", Some("required cNvPr is absent")),
+        (
+            "unknown-member",
+            Some("unknown or misplaced direct XML child"),
+        ),
+        (
+            "short-row",
+            Some("table row has 1 cells but its grid has 2 columns"),
+        ),
+        ("mc-missing-name", Some("required cNvPr name")),
+        ("opaque-extension", None),
+    ] {
+        let path = issue435_fault_deck("root-group-scan", case, |package| {
+            issue435_edit_slide_xml(package, |xml| {
+                let start = xml.find("<p:grpSpPr/>").unwrap() + "<p:grpSpPr/>".len();
+                let end = xml.rfind("</p:spTree>").unwrap();
+                let mut children = xml[start..end].to_owned();
+                if matches!(case, "missing-name" | "mc-missing-name") {
+                    let owner = children.find("<p:cNvPr ").unwrap();
+                    let tail = owner + children[owner..].find('>').unwrap();
+                    let name = owner + children[owner..tail].find(" name=\"").unwrap();
+                    let value_end = name + 7 + children[name + 7..].find('"').unwrap();
+                    children.replace_range(name..=value_end, "");
+                }
+                if case == "short-row" {
+                    let row = children.find("<a:tr ").unwrap();
+                    let row_end = row + children[row..].find("</a:tr>").unwrap();
+                    let cell = row + children[row..row_end].rfind("<a:tc>").unwrap();
+                    children.replace_range(cell..row_end, "");
+                }
+                if case == "unknown-member" {
+                    children.push_str("<p:bogus/>");
+                }
+                if case == "opaque-extension" {
+                    children.push_str("<p:extLst><p:ext uri=\"urn:opaque\"><p:sp><p:nvSpPr><p:cNvPr id=\"900\"/></p:nvSpPr></p:sp></p:ext></p:extLst>");
+                }
+                let owner = if case == "missing-owner" {
+                    ""
+                } else {
+                    "<p:nvGrpSpPr><p:cNvPr id=\"800\" name=\"group\"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>"
+                };
+                let group = format!("<p:grpSp>{owner}<p:grpSpPr/>{children}</p:grpSp>");
+                let group = if case == "mc-missing-name" {
+                    format!(
+                        "<mc:AlternateContent xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\"><mc:Choice Requires=\"p\">{group}</mc:Choice><mc:Fallback/></mc:AlternateContent>"
+                    )
+                } else {
+                    group
+                };
+                format!("{}{group}{}", &xml[..start], &xml[end..])
+            });
+        });
+        let before = fs::read(&path).unwrap();
+        let issues = rpptx::validate_presentation_file(&path).unwrap();
+        if let Some(expected) = expected {
+            assert!(
+                issues
+                    .iter()
+                    .any(|issue| issue.to_string().contains(expected)),
+                "{case}: {issues:?}"
+            );
+        } else {
+            assert!(issues.is_empty(), "{case}: {issues:?}");
+        }
+        assert_eq!(fs::read(path).unwrap(), before);
+    }
+}
+
+#[test]
+fn issue435_stored_metadata_uses_loader_normalization_for_all_metadata() {
+    let source = issue435_probe_deck().to_bytes().unwrap();
+    for (original, renamed) in [
+        ("[Content_Types].xml", "./[Content_Types].xml"),
+        ("[Content_Types].xml", "x/../[Content_Types].xml"),
+        ("[Content_Types].xml", "//[Content_Types].xml"),
+        ("_rels/.rels", "_rels/.rels/."),
+    ] {
+        for malformed in [false, true] {
+            let dir = issue435_temp_directory("root-normalized-metadata");
+            fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("candidate.pptx");
+            let mut reader = zip::ZipArchive::new(Cursor::new(&source)).unwrap();
+            let mut writer = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            for index in 0..reader.len() {
+                let mut entry = reader.by_index(index).unwrap();
+                let name = entry.name().unwrap().to_string();
+                let mut bytes = Vec::new();
+                std::io::Read::read_to_end(&mut entry, &mut bytes).unwrap();
+                if name == original && malformed {
+                    bytes.extend_from_slice(b"<extra/>");
+                }
+                writer
+                    .start_file(if name == original { renamed } else { &name }, options)
+                    .unwrap();
+                std::io::Write::write_all(&mut writer, &bytes).unwrap();
+            }
+            writer.finish().unwrap();
+            let before = fs::read(&path).unwrap();
+            let issues = rpptx::validate_presentation_file(&path).unwrap();
+            if malformed {
+                assert!(
+                    issues
+                        .iter()
+                        .any(|issue| issue.to_string().contains("more than one document root")),
+                    "{renamed}: {issues:?}"
+                );
+            } else {
+                assert!(issues.is_empty(), "{renamed}: {issues:?}");
+            }
+            assert_eq!(fs::read(path).unwrap(), before);
+        }
+    }
+}
