@@ -2428,6 +2428,21 @@ that `stories` does not report folds into the story around it. A revision
 outside every owner, such as one in a footnote separator, is an error rather
 than a silent omission.
 
+Each owned snapshot also stores visible revision text from that same XML tree.
+Insertion, deletion and move records select their own content. Property changes
+select the current run, paragraph or table, excluding prior properties and
+content removed from the accepted view. Section changes and the private comment
+package record have empty text. Qualified text, tabs and breaks follow admitted
+owner paths, with opaque subtrees excluded. Stored field results contribute
+without evaluating instructions. Table owners append a tab after each visible
+cell paragraph and a newline after each retained outer row. This read projection
+does not change resolution admission or the preserved source bytes.
+Source and field context are prepared once per part. Persistent scalar field
+checkpoints avoid replaying preceding paragraphs for each snapshot. Each text
+projection visits its selected owner subtree. Property text requires the actual
+qualified properties-to-owner chain, so a preserved misplaced property record
+cannot borrow neighboring control text.
+
 Revision mutation uses explicit all, exact-author, inclusive RFC 3339 instant,
 and id selectors. One id operation resolves every modeled element carrying the
 id, while undated revisions do not match date ranges. Invalid bounds or a

@@ -1044,18 +1044,20 @@ pub struct PyRevision {
     pub timestamp: Option<String>,
     pub kind: String,
     pub story: Option<PyStory>,
+    pub text: String,
 }
 
 #[pymethods]
 impl PyRevision {
     #[new]
-    #[pyo3(signature = (*, id, author, timestamp, kind, story=None))]
+    #[pyo3(signature = (*, id, author, timestamp, kind, story=None, text=String::new()), text_signature = "(*, id, author, timestamp, kind, story=None, text='')")]
     fn new(
         id: i32,
         author: String,
         timestamp: Option<String>,
         kind: String,
         story: Option<PyRef<'_, PyStory>>,
+        text: String,
     ) -> Self {
         Self {
             id,
@@ -1063,6 +1065,7 @@ impl PyRevision {
             timestamp,
             kind,
             story: story.map(|story| story.clone()),
+            text,
         }
     }
 }
@@ -16904,6 +16907,7 @@ impl PyDocument {
                         timestamp: revision.timestamp().map(str::to_owned),
                         kind: revision_kind_name(revision.kind()).to_owned(),
                         story: Some(self.owned_story_snapshot(revision.story())?),
+                        text: revision.text().to_owned(),
                     })
                 })
                 .collect::<PyResult<Vec<_>>>()?,

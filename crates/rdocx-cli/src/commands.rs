@@ -1777,6 +1777,7 @@ pub fn revision_list(file: &Path, json_output: bool) -> Result<()> {
                 "author": revision.author(),
                 "timestamp": revision.timestamp(),
                 "kind": revision_kind_label(revision.kind()),
+                "text": revision.text(),
                 "story": story_json(revision.story()),
             })
         })
@@ -2154,12 +2155,12 @@ fn revision_kind_label(kind: RevisionKind) -> &'static str {
     match kind {
         RevisionKind::Insertion => "insertion",
         RevisionKind::Deletion => "deletion",
-        RevisionKind::MoveFrom => "move-from",
-        RevisionKind::MoveTo => "move-to",
-        RevisionKind::RunPropertyChange => "run-property-change",
-        RevisionKind::ParagraphPropertyChange => "paragraph-property-change",
-        RevisionKind::TablePropertyChange => "table-property-change",
-        RevisionKind::SectionPropertyChange => "section-property-change",
+        RevisionKind::MoveFrom => "move_from",
+        RevisionKind::MoveTo => "move_to",
+        RevisionKind::RunPropertyChange => "run_property_change",
+        RevisionKind::ParagraphPropertyChange => "paragraph_property_change",
+        RevisionKind::TablePropertyChange => "table_property_change",
+        RevisionKind::SectionPropertyChange => "section_property_change",
     }
 }
 
@@ -3867,6 +3868,29 @@ pub fn verify_signatures(file: &Path, as_json: bool) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn issue434_all_revision_kind_labels_match_python_vocabulary() {
+        use rdocx::RevisionKind;
+        for (kind, expected) in [
+            (RevisionKind::Insertion, "insertion"),
+            (RevisionKind::Deletion, "deletion"),
+            (RevisionKind::MoveFrom, "move_from"),
+            (RevisionKind::MoveTo, "move_to"),
+            (RevisionKind::RunPropertyChange, "run_property_change"),
+            (
+                RevisionKind::ParagraphPropertyChange,
+                "paragraph_property_change",
+            ),
+            (RevisionKind::TablePropertyChange, "table_property_change"),
+            (
+                RevisionKind::SectionPropertyChange,
+                "section_property_change",
+            ),
+        ] {
+            assert_eq!(super::revision_kind_label(kind), expected);
+        }
+    }
     use super::*;
 
     /// The Myers matches of `diff` are a longest common subsequence: equal,

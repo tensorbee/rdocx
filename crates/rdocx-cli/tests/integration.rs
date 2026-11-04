@@ -8632,3 +8632,104 @@ fn issue432_cli_text_and_expected_replacement_agree_without_chart_mutation() {
         );
     }
 }
+
+fn issue434_revision_text_fixture(path: &Path) {
+    write_document(path, &["thirty", "sixty", "Late fees apply."]);
+    rewrite_run(path, "thirty", |run| {
+        format!(
+            r#"<w:del w:id="101" w:author="Fixture" w:date="2026-11-03T00:00:00Z">{}</w:del>"#,
+            run.replace("<w:t", "<w:delText")
+                .replace("</w:t>", "</w:delText>")
+        )
+    });
+    rewrite_run(path, "sixty", |run| {
+        format!(
+            r#"<w:ins w:id="102" w:author="Fixture" w:date="2026-11-03T00:00:00Z">{run}</w:ins>"#
+        )
+    });
+    rewrite_run(path, "Late fees apply.", |run| {
+        assert!(run.starts_with("<w:r>"));
+        run.replacen("<w:r>",r#"<w:r><w:rPr><w:b/><w:rPrChange w:id="103" w:author="Fixture" w:date="2026-11-03T00:00:00Z"><w:rPr><w:i/></w:rPr></w:rPrChange></w:rPr>"#,1)
+    });
+    assert_eq!(
+        Document::open(path)
+            .unwrap()
+            .story_revisions()
+            .unwrap()
+            .len(),
+        3
+    );
+}
+
+#[test]
+fn issue434_revision_list_exposes_owned_text_without_rewriting_source() {
+    let workspace = TempWorkspace::new("issue434-text");
+    let input = workspace.path.join("revisions.docx");
+    issue434_revision_text_fixture(&input);
+    let before = fs::read(&input).unwrap();
+    let mut native = Document::open(&input).unwrap();
+    let held = native.story_revisions().unwrap();
+    assert_eq!(
+        held.iter()
+            .map(|revision| revision.text())
+            .collect::<Vec<_>>(),
+        ["thirty", "sixty", "Late fees apply."]
+    );
+    let saved = workspace.path.join("snapshot-saved.docx");
+    native.save(&saved).unwrap();
+    assert_eq!(
+        Document::open(&saved).unwrap().story_revisions().unwrap(),
+        held
+    );
+    assert_eq!(native.accept_all().unwrap(), 3);
+    assert!(native.story_revisions().unwrap().is_empty());
+    assert_eq!(
+        held.iter()
+            .map(|revision| revision.text())
+            .collect::<Vec<_>>(),
+        ["thirty", "sixty", "Late fees apply."]
+    );
+    let output = cli(&["revision", "list", path_text(&input), "--json"]);
+    assert_success(&output, "revision text JSON");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let records = value["revisions"].as_array().unwrap();
+    assert_eq!(records.len(), 3);
+    assert_eq!(
+        records
+            .iter()
+            .map(|r| r["text"].as_str())
+            .collect::<Vec<_>>(),
+        vec![Some("thirty"), Some("sixty"), Some("Late fees apply.")]
+    );
+    assert_eq!(fs::read(&input).unwrap(), before);
+}
+
+#[test]
+fn issue434_revision_kinds_match_python_without_changing_story_labels_or_tsv_columns() {
+    let workspace = TempWorkspace::new("issue434-kinds");
+    let input = workspace.path.join("revisions.docx");
+    issue434_revision_text_fixture(&input);
+    let before = fs::read(&input).unwrap();
+    let output = cli(&["revision", "list", path_text(&input), "--json"]);
+    assert_success(&output, "revision kind JSON");
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let records = value["revisions"].as_array().unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .map(|r| r["kind"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["deletion", "insertion", "run_property_change"]
+    );
+    let output = cli(&["revision", "list", path_text(&input)]);
+    assert_success(&output, "human revision list");
+    let text = String::from_utf8(output.stdout).unwrap();
+    let rows = text
+        .lines()
+        .map(|line| line.split('\t').collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|row| row.len() == 7 && row[4] == "body"));
+    assert_eq!(rows[2][3], "run_property_change");
+    assert_eq!(fs::read(&input).unwrap(), before);
+}

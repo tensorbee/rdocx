@@ -127,13 +127,26 @@ Expected output bytes unchanged for read-only projection and snapshot constructi
 
 ## Implementation checklist
 
-- [ ] Root affected final, precise source-context/visible-owner reconciliation, current issue/PR pins, approved metadata adoption and normal clean Base claim.
-- [ ] Existing-carrier old semantic RED, separate additive-API compile coverage, exact source/artifact/exit receipts.
-- [ ] Both native producers, same-tree projection, exact current owner/all-kind/empty/nested/scalar controls.
-- [ ] Python constructor/getter/export/stub and actual native snapshot consumer, CLI JSON/human vocabulary.
-- [ ] Read/save/reopen byte-preservation and held/fresh snapshot controls, no provider/canonical carry contamination.
-- [ ] HLD03/HLD10 narrow projection sections, scoped gate and independent microscope under original cap.
-- [ ] Truthful handoff final debt. No publication/commit outside invoked workflow.
+- [x] Root affected final, precise source-context/visible-owner reconciliation, current issue/PR pins, approved metadata adoption and normal clean Base claim.
+- [x] Existing-carrier old semantic RED, separate additive-API compile coverage, exact source/artifact/exit receipts.
+- [x] Both native producers, same-tree projection, exact current owner/all-kind/empty/nested/scalar controls.
+- [x] Python constructor/getter/export/stub and actual native snapshot consumer, CLI JSON/human vocabulary.
+- [x] Read/save/reopen byte-preservation and held/fresh snapshot controls, no provider/canonical carry contamination.
+- [x] HLD03/HLD10 narrow projection sections, scoped gate and independent microscope under original cap.
+- [x] Truthful handoff final debt. No publication/commit outside invoked workflow.
+
+## Final integrated acceptance still pending
+
+- [ ] Reconcile this clean-Base alias/raw-wrapper projection with actually completed C1 and rerun affected controls before final freeze.
+- [ ] Install and authenticate final Python3.9/3.12 artifacts, run actual runtime/signature/typing/stub checks.
+- [ ] Run the integrated full/hash and applicable SDK/native/WASM union.
+- [ ] Complete archive/dry-run and hosted CI gates on the actual integrated source.
+
+The local checklist records implementation and source-only Python regressions,
+not installed runtime qualification. Independent implementation pass1 found D1
+and D2. Root repaired them and actual independent pass2 reports zero defects and
+smells at source diff89a3fa69. The original design pass cap is unchanged. Plan
+stays approved and delivery stays in-progress through preparation.
 
 ## Open questions and approval boundary
 

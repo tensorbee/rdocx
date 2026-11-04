@@ -744,8 +744,9 @@ direct-body constructors and call shape remain unchanged.
 `Document.revisions` lists the revisions of every story that the accept and
 reject methods resolve, each with a snake_case `kind` and the `Story` that
 holds it, so its length equals the count they return. A `Revision` built
-directly keeps its four-field constructor and has no story unless one is
-passed. `try_replace_text` and `replace_all_regex` return their
+directly keeps its four required keyword fields and has no story unless one is
+passed. Its optional `text: str` defaults to the empty string. Snapshots own
+immutable text, and equality includes text. `None` is not a text value. `try_replace_text` and `replace_all_regex` return their
 replacement counts. `update_fields` takes the native evaluation context as
 keyword arguments, reads the wall-clock fields of `now` as given, and returns
 the number of updated fields. Comments are
@@ -2765,6 +2766,13 @@ the list has one entry per resolved revision. A compared comment package
 change uses one private package revision, reported under the main story,
 because its added or removed comment may have no surviving comment owner.
 The list length equals the count from `accept_all` and `reject_all`.
+`StoryRevision::text()` returns owned stored visible text through a borrowed
+string view. Content revisions select their payload and property revisions
+select the current owner. Section and private package revisions have empty
+text. Reading does not evaluate fields or modify XML. Python snapshots and CLI
+JSON use this native text. CLI revision kinds use the same eight snake_case
+labels as Python. Human revision output retains its seven tab-separated columns
+without adding text. Story labels retain their existing spelling.
 `rdocx-cli revision list` and Python `Document.revisions` expose this all-story
 listing. WASM load and save paths preserve the revision XML without a revision
 inspection method.

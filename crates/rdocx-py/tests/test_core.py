@@ -16393,3 +16393,60 @@ def test_issue432_literal_and_regex_preserve_chart_parts():
         assert count == 1
         with zipfile.ZipFile(io.BytesIO(candidate.to_bytes())) as archive:
             assert {name: archive.read(name) for name in companions} == companions
+
+
+@pytest.mark.parametrize("text", ["", "owned text"])
+def test_issue434_revision_constructor_text_defaults_and_frozen_equality(text):
+    import rdocx
+
+    metadata = dict(id=7, author="Ada", timestamp=None, kind="insertion")
+    import inspect
+    assert inspect.signature(rdocx.Revision).parameters["text"].default == ""
+    omitted = rdocx.Revision(**metadata)
+    explicit = rdocx.Revision(**metadata, text=text)
+    assert omitted.text == ""
+    assert omitted.story is None
+    assert explicit.text == text
+    assert (explicit == omitted) is (text == "")
+    assert explicit == rdocx.Revision(**metadata, text=text)
+    with pytest.raises((AttributeError, TypeError)):
+        explicit.text = "mutated"
+    with pytest.raises(TypeError):
+        rdocx.Revision(**metadata, text=None)
+    story = rdocx.Story(kind="body", part_name="/word/document.xml", owner_index=0)
+    assert rdocx.Revision(**metadata, story=story, text=text).story == story
+
+
+def test_issue434_revision_text_owned_snapshots_save_reopen_and_accept():
+    import rdocx
+
+    seed = rdocx.Document()
+    for text in ("thirty", "sixty", "Late fees apply."):
+        seed.add_paragraph(text)
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(seed.to_bytes())) as source, zipfile.ZipFile(output, "w") as target:
+        for info in source.infolist():
+            raw = source.read(info.filename)
+            if info.filename == "word/document.xml":
+                xml = raw.decode()
+                for text, kind, rid in (("thirty", "del", 101), ("sixty", "ins", 102)):
+                    run = f"<w:r><w:t>{text}</w:t></w:r>"
+                    assert run in xml
+                    payload = run.replace("w:t", "w:delText") if kind == "del" else run
+                    xml = xml.replace(run, f'<w:{kind} w:id="{rid}" w:author="Ada">{payload}</w:{kind}>')
+                run = "<w:r><w:t>Late fees apply.</w:t></w:r>"
+                assert run in xml
+                xml = xml.replace(run, '<w:r><w:rPr><w:b/><w:rPrChange w:id="103" w:author="Ada"><w:rPr><w:i/></w:rPr></w:rPrChange></w:rPr><w:t>Late fees apply.</w:t></w:r>')
+                raw = xml.encode()
+            target.writestr(info, raw)
+    document = rdocx.Document.from_bytes(output.getvalue())
+    before = document.to_bytes()
+    held = document.revisions
+    expected = [("deletion", "thirty"), ("insertion", "sixty"), ("run_property_change", "Late fees apply.")]
+    assert [(revision.kind, revision.text) for revision in held] == expected
+    assert document.to_bytes() == before
+    reopened = rdocx.Document.from_bytes(document.to_bytes())
+    assert reopened.revisions == held
+    assert document.accept_all() == 3
+    assert document.revisions == ()
+    assert [(revision.kind, revision.text) for revision in held] == expected

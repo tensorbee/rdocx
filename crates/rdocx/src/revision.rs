@@ -104,6 +104,7 @@ pub struct StoryRevision {
     author: String,
     timestamp: Option<String>,
     kind: RevisionKind,
+    text: String,
 }
 
 fn comment_comparison_record(
@@ -160,11 +161,19 @@ pub(crate) fn comment_comparison_revision(
             author: metadata.author,
             timestamp: metadata.timestamp,
             kind: metadata.kind,
+            text: String::new(),
         }),
     )
 }
 
 impl StoryRevision {
+    /// Stored visible text of this revision, or its current property owner.
+    ///
+    /// This owned snapshot does not evaluate fields or change with later edits.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
     /// Return the story that holds this revision.
     ///
     /// Table cells fold into the story that holds the table. The identity is
@@ -228,6 +237,41 @@ struct XmlElement {
     revision: Option<RevisionMetadata>,
     namespace_declarations: NamespaceDeclarations,
     field_marker: Option<String>,
+    snapshot_field_marker: Option<String>,
+    snapshot_scalar: String,
+}
+
+/// Read-projection facts share the existing tree, never a second parsed model.
+struct SnapshotFacts {
+    nodes: Vec<SnapshotNode>,
+    fields: Vec<SnapshotField>,
+    #[cfg(test)]
+    preparation_visits: usize,
+    #[cfg(test)]
+    owner_visits: std::cell::Cell<usize>,
+}
+
+#[derive(Clone, Copy)]
+struct SnapshotNode {
+    story: usize,
+    domain: usize,
+    domain_end: usize,
+    canonical_w: bool,
+    control_parent: Option<usize>,
+    admitted: bool,
+    wrappers: bool,
+    hidden: bool,
+    row_removed: bool,
+    seed: Option<usize>,
+}
+
+#[derive(Clone, Copy)]
+struct SnapshotField {
+    previous: Option<usize>,
+    domain: usize,
+    end: usize,
+    instructions: usize,
+    result: bool,
 }
 
 struct XmlTree<'a> {
@@ -758,10 +802,12 @@ pub(crate) fn story_part_revisions(
     owners: &[(Range<usize>, StoryId)],
 ) -> Result<Vec<StoryRevision>> {
     let tree = XmlTree::parse(source)?;
+    let facts = tree.snapshot_facts();
     tree.elements
         .iter()
-        .filter_map(|element| Some((element.start, element.revision.as_ref()?)))
-        .map(|(start, metadata)| {
+        .enumerate()
+        .filter_map(|(index, element)| Some((index, element.start, element.revision.as_ref()?)))
+        .map(|(index, start, metadata)| {
             let (_, story) = owners
                 .iter()
                 .filter(|(span, _)| span.contains(&start))
@@ -777,6 +823,7 @@ pub(crate) fn story_part_revisions(
                 author: metadata.author.clone(),
                 timestamp: metadata.timestamp.clone(),
                 kind: metadata.kind,
+                text: tree.snapshot_text(index, &facts)?,
             })
         })
         .collect()
@@ -1122,7 +1169,437 @@ pub(crate) fn validate_carried_paragraph_fields(paragraphs: &[&CT_P]) -> Result<
     Ok(())
 }
 
+enum SnapshotFieldTransition {
+    Keep,
+    Pop(Option<usize>),
+    Push(SnapshotField),
+}
+
+fn snapshot_field_transition_from(
+    current: Option<SnapshotField>,
+    head: Option<usize>,
+    node: SnapshotNode,
+    marker: &str,
+) -> SnapshotFieldTransition {
+    match marker {
+        "begin" => SnapshotFieldTransition::Push(SnapshotField {
+            previous: head,
+            domain: node.domain,
+            end: node.domain_end,
+            instructions: current.map_or(0, |field| field.instructions) + 1,
+            result: false,
+        }),
+        "separate" => match current {
+            Some(field) if field.domain == node.domain && !field.result => {
+                SnapshotFieldTransition::Push(SnapshotField {
+                    result: true,
+                    instructions: field.instructions - 1,
+                    ..field
+                })
+            }
+            _ => SnapshotFieldTransition::Keep,
+        },
+        "end" => match current {
+            Some(field) if field.domain == node.domain => {
+                SnapshotFieldTransition::Pop(field.previous)
+            }
+            _ => SnapshotFieldTransition::Keep,
+        },
+        _ => SnapshotFieldTransition::Keep,
+    }
+}
+
 impl<'a> XmlTree<'a> {
+    /// Build source context once for the whole snapshot batch. Persistent
+    /// scalar field heads share prefixes without copying stacks or source text.
+    fn snapshot_facts(&self) -> SnapshotFacts {
+        let (stories, ends) = self.paragraph_source_domains();
+        let mut facts = SnapshotFacts {
+            nodes: Vec::with_capacity(self.elements.len()),
+            fields: Vec::new(),
+            #[cfg(test)]
+            preparation_visits: 0,
+            #[cfg(test)]
+            owner_visits: std::cell::Cell::new(0),
+        };
+        for (index, element) in self.elements.iter().enumerate() {
+            #[cfg(test)]
+            {
+                facts.preparation_visits += 1;
+            }
+            let parent = element.parent.map(|parent| facts.nodes[parent]);
+            let story = stories[index].unwrap_or(index);
+            let mut node = SnapshotNode {
+                story,
+                domain: parent.map_or(story, |parent| parent.domain),
+                domain_end: parent.map_or(element.end, |parent| parent.domain_end),
+                canonical_w: parent.is_some_and(|parent| parent.canonical_w),
+                control_parent: element.parent.and_then(|parent| {
+                    if matches!(self.elements[parent].local.as_str(), "sdt" | "sdtContent") {
+                        facts.nodes[parent].control_parent
+                    } else {
+                        Some(parent)
+                    }
+                }),
+                admitted: false,
+                wrappers: true,
+                hidden: parent.is_some_and(|parent| parent.hidden),
+                row_removed: element.word
+                    && element.local == "tr"
+                    && self.snapshot_row_removed(index),
+                seed: None,
+            };
+            for (prefix, uri) in &element.namespace_declarations {
+                if prefix == "w" {
+                    node.canonical_w = uri == WORD_NS;
+                }
+            }
+            if element.word && element.local == "p" {
+                node.domain = story;
+                node.domain_end = ends.get(&story).copied().unwrap_or(element.end);
+            } else if element.word
+                && matches!(
+                    element.local.as_str(),
+                    "fldSimple" | "hyperlink" | "sdtContent"
+                )
+            {
+                node.domain = index;
+                node.domain_end = element.end;
+            }
+            node.hidden |= node.row_removed
+                || element.revision.as_ref().is_some_and(|metadata| {
+                    matches!(
+                        metadata.kind,
+                        RevisionKind::Deletion | RevisionKind::MoveFrom
+                    )
+                });
+            // Story roots may independently model textbox contents. An outer
+            // owner's traversal still cannot cross the opaque drawing path.
+            if element.word
+                && element.modeled
+                && matches!(
+                    element.local.as_str(),
+                    "body" | "hdr" | "ftr" | "comment" | "footnote" | "endnote" | "txbxContent"
+                )
+            {
+                node.admitted = true;
+            } else if let Some(parent) = element.parent
+                && facts.nodes[parent].admitted
+                && let Some(wrappers) = self.snapshot_child(parent, index, &facts, node.canonical_w)
+            {
+                node.admitted = true;
+                node.wrappers = wrappers;
+            }
+            facts.nodes.push(node);
+        }
+        let mut heads = HashMap::<usize, Option<usize>>::new();
+        let mut undo = Vec::<(usize, Option<usize>)>::new();
+        let mut branches = Vec::<(usize, usize)>::new();
+        for (index, element) in self.elements.iter().enumerate() {
+            #[cfg(test)]
+            {
+                facts.preparation_visits += 1;
+            }
+            while branches
+                .last()
+                .is_some_and(|(end, _)| *end <= element.start)
+            {
+                let (_, checkpoint) = branches.pop().expect("branch exists");
+                while undo.len() > checkpoint {
+                    let (story, previous) = undo.pop().expect("undo exists");
+                    heads.insert(story, previous);
+                }
+            }
+            let node = facts.nodes[index];
+            if !node.admitted {
+                continue;
+            }
+            let mut head = heads.get(&node.story).copied().flatten();
+            while let Some(active) = head {
+                if facts.fields[active].end > element.start {
+                    break;
+                }
+                head = facts.fields[active].previous;
+            }
+            let previous = heads.get(&node.story).copied().flatten();
+            if head != previous {
+                if !branches.is_empty() {
+                    undo.push((node.story, previous));
+                }
+                heads.insert(node.story, head);
+            }
+            facts.nodes[index].seed = head;
+            if element.revision.as_ref().is_some_and(|metadata| {
+                matches!(
+                    metadata.kind,
+                    RevisionKind::Deletion | RevisionKind::MoveFrom
+                )
+            }) {
+                branches.push((element.end, undo.len()));
+            }
+            if let Some(marker) = element.snapshot_field_marker.as_deref() {
+                let next = snapshot_field_transition_from(
+                    head.map(|index| facts.fields[index]),
+                    head,
+                    node,
+                    marker,
+                );
+                let next = match next {
+                    SnapshotFieldTransition::Keep => head,
+                    SnapshotFieldTransition::Pop(previous) => previous,
+                    SnapshotFieldTransition::Push(field) => {
+                        let index = facts.fields.len();
+                        facts.fields.push(field);
+                        Some(index)
+                    }
+                };
+                if next != head {
+                    if !branches.is_empty() {
+                        undo.push((node.story, head));
+                    }
+                    heads.insert(node.story, next);
+                }
+            }
+        }
+        facts
+    }
+
+    /// The same concrete child grammar drives context and owner projection.
+    fn snapshot_child(
+        &self,
+        parent: usize,
+        child: usize,
+        facts: &SnapshotFacts,
+        canonical_w: bool,
+    ) -> Option<bool> {
+        let element = &self.elements[parent];
+        let next = &self.elements[child];
+        if !next.word {
+            return None;
+        }
+        let local = next.local.as_str();
+        let wrappers = facts.nodes[parent].wrappers;
+        let role = if element.local == "sdtContent" {
+            facts.nodes[parent]
+                .control_parent
+                .map(|index| self.elements[index].local.as_str())
+                .unwrap_or("")
+        } else {
+            element.local.as_str()
+        };
+        if element.local == "sdtContent"
+            && matches!(
+                role,
+                "p" | "hyperlink"
+                    | "ins"
+                    | "del"
+                    | "moveFrom"
+                    | "moveTo"
+                    | "smartTag"
+                    | "customXml"
+                    | "fldSimple"
+            )
+        {
+            return matches!(local, "r" | "sdt" | "ins" | "del" | "moveFrom" | "moveTo")
+                .then_some(false);
+        }
+        let admitted = match role {
+            "tbl" => matches!(local, "tr" | "sdt"),
+            "tr" => matches!(local, "tc" | "sdt"),
+            "body" | "hdr" | "ftr" | "comment" | "footnote" | "endnote" | "txbxContent" | "tc" => {
+                matches!(local, "p" | "tbl" | "sdt")
+            }
+            "sdt" => local == "sdtContent",
+            "p" | "smartTag" | "customXml" | "fldSimple" => {
+                matches!(
+                    local,
+                    "r" | "hyperlink" | "sdt" | "ins" | "del" | "moveFrom" | "moveTo"
+                ) || wrappers
+                    && canonical_w
+                    && !next.empty
+                    && matches!(local, "smartTag" | "customXml" | "fldSimple")
+            }
+            "hyperlink" | "ins" | "del" | "moveFrom" | "moveTo" => matches!(
+                local,
+                "r" | "hyperlink" | "sdt" | "ins" | "del" | "moveFrom" | "moveTo"
+            ),
+            "r" => matches!(local, "t" | "delText" | "tab" | "br" | "cr" | "fldChar"),
+            _ => false,
+        };
+        admitted.then_some(if matches!(local, "p" | "tc" | "tbl") {
+            true
+        } else {
+            wrappers
+                && !matches!(
+                    local,
+                    "sdt" | "sdtContent" | "hyperlink" | "ins" | "del" | "moveFrom" | "moveTo"
+                )
+        })
+    }
+
+    fn snapshot_text(&self, revision: usize, facts: &SnapshotFacts) -> Result<String> {
+        let kind = self.elements[revision]
+            .revision
+            .as_ref()
+            .expect("revision index")
+            .kind;
+        let current = matches!(
+            kind,
+            RevisionKind::RunPropertyChange
+                | RevisionKind::ParagraphPropertyChange
+                | RevisionKind::TablePropertyChange
+        );
+        if kind == RevisionKind::SectionPropertyChange {
+            return Ok(String::new());
+        }
+        let owner = if current {
+            let expected = match kind {
+                RevisionKind::RunPropertyChange => ("rPr", "r"),
+                RevisionKind::ParagraphPropertyChange => ("pPr", "p"),
+                RevisionKind::TablePropertyChange => ("tblPr", "tbl"),
+                _ => unreachable!("property kind"),
+            };
+            let Some(properties) = self.elements[revision].parent else {
+                return Ok(String::new());
+            };
+            let Some(owner) = self.elements[properties].parent else {
+                return Ok(String::new());
+            };
+            if !self.elements[properties].word
+                || self.elements[properties].local != expected.0
+                || !self.elements[owner].word
+                || self.elements[owner].local != expected.1
+            {
+                return Ok(String::new());
+            }
+            owner
+        } else {
+            revision
+        };
+        if !facts.nodes[owner].admitted || current && facts.nodes[owner].hidden {
+            return Ok(String::new());
+        }
+        let table = self.elements[owner].local == "tbl";
+        let mut output = String::new();
+        let mut pending = vec![(owner, false, 0usize)];
+        let mut heads = HashMap::<usize, Option<usize>>::new();
+        let mut local_fields = Vec::<SnapshotField>::new();
+        let base = facts.fields.len();
+        while let Some((index, exiting, table_depth)) = pending.pop() {
+            #[cfg(test)]
+            {
+                facts.owner_visits.set(facts.owner_visits.get() + 1);
+            }
+            let element = &self.elements[index];
+            let node = facts.nodes[index];
+            if exiting {
+                if table && element.local == "p" {
+                    output.push('\t');
+                } else if table && element.local == "tr" && table_depth == 1 {
+                    output.push('\n');
+                }
+                continue;
+            }
+            if current
+                && (node.row_removed
+                    || index != owner
+                        && element.revision.as_ref().is_some_and(|metadata| {
+                            matches!(
+                                metadata.kind,
+                                RevisionKind::Deletion | RevisionKind::MoveFrom
+                            )
+                        }))
+            {
+                continue;
+            }
+            let head = heads.entry(node.story).or_insert(node.seed);
+            while let Some(active) = *head {
+                let field = if active < base {
+                    facts.fields[active]
+                } else {
+                    local_fields[active - base]
+                };
+                if field.end > element.start {
+                    break;
+                }
+                *head = field.previous;
+            }
+            if let Some(marker) = element.snapshot_field_marker.as_deref() {
+                let current = head.map(|active| {
+                    if active < base {
+                        facts.fields[active]
+                    } else {
+                        local_fields[active - base]
+                    }
+                });
+                let transition = snapshot_field_transition_from(current, *head, node, marker);
+                match transition {
+                    SnapshotFieldTransition::Keep => {}
+                    SnapshotFieldTransition::Pop(previous) => *head = previous,
+                    SnapshotFieldTransition::Push(field) => {
+                        *head = Some(base + local_fields.len());
+                        local_fields.push(field);
+                    }
+                }
+                continue;
+            }
+            if matches!(
+                element.local.as_str(),
+                "t" | "delText" | "tab" | "br" | "cr"
+            ) {
+                let visible = head.is_none_or(|active| {
+                    (if active < base {
+                        facts.fields[active]
+                    } else {
+                        local_fields[active - base]
+                    })
+                    .instructions
+                        == 0
+                });
+                if visible {
+                    match element.local.as_str() {
+                        "tab" => output.push('\t'),
+                        "br" | "cr" => output.push('\n'),
+                        _ => output.push_str(&element.snapshot_scalar),
+                    }
+                }
+                continue;
+            }
+            let depth = table_depth + usize::from(element.local == "tbl");
+            pending.push((index, true, depth));
+            for child in element.children.iter().rev().copied() {
+                if self
+                    .snapshot_child(index, child, facts, facts.nodes[child].canonical_w)
+                    .is_some()
+                {
+                    pending.push((child, false, depth));
+                }
+            }
+        }
+        Ok(output)
+    }
+
+    fn snapshot_row_removed(&self, row: usize) -> bool {
+        self.elements[row]
+            .children
+            .iter()
+            .copied()
+            .filter(|child| self.elements[*child].word && self.elements[*child].local == "trPr")
+            .any(|properties| {
+                self.elements[properties].children.iter().any(|child| {
+                    self.elements[*child]
+                        .revision
+                        .as_ref()
+                        .is_some_and(|metadata| {
+                            matches!(
+                                metadata.kind,
+                                RevisionKind::Deletion | RevisionKind::MoveFrom
+                            )
+                        })
+                })
+            })
+    }
+
     /// Exactly the shells left outside run revisions by paragraph publication.
     /// Every other child, including an SDT or opaque drawing, stays atomic.
     fn paragraph_publication_frames(&self, body: usize) -> Vec<bool> {
@@ -1527,6 +2004,35 @@ impl<'a> XmlTree<'a> {
                     scopes.pop();
                     elements[index].close_start = before;
                     elements[index].end = after;
+                }
+                Event::Text(ref text) => {
+                    if let Some(index) = stack.last().copied()
+                        && elements[index].word
+                        && matches!(elements[index].local.as_str(), "t" | "delText")
+                    {
+                        elements[index]
+                            .snapshot_scalar
+                            .push_str(&oxml_core::xml_text::decode_plain(text));
+                    }
+                }
+                Event::GeneralRef(ref entity) => {
+                    if let Some(index) = stack.last().copied()
+                        && elements[index].word
+                        && matches!(elements[index].local.as_str(), "t" | "delText")
+                    {
+                        elements[index]
+                            .snapshot_scalar
+                            .push_str(&oxml_core::xml_text::resolve_entity(entity));
+                    }
+                }
+                Event::CData(ref data) => {
+                    if let Some(index) = stack.last().copied()
+                        && elements[index].word
+                        && matches!(elements[index].local.as_str(), "t" | "delText")
+                        && let Ok(text) = data.decode()
+                    {
+                        elements[index].snapshot_scalar.push_str(&text);
+                    }
                 }
                 Event::Eof => break,
                 _ => {}
@@ -2548,12 +3054,10 @@ fn push_element(
     if modeled && is_revision_local(&local) && revision.is_none() {
         modeled = false;
     }
-    let mut field_marker = None;
+    let mut snapshot_field_marker = None;
     if word
         && local == "fldChar"
-        && parent.is_some_and(|parent| {
-            elements[parent].modeled && elements[parent].word && elements[parent].local == "r"
-        })
+        && parent.is_some_and(|parent| elements[parent].word && elements[parent].local == "r")
     {
         for attribute in start.attributes() {
             let attribute = attribute.map_err(|error| Error::Other(error.to_string()))?;
@@ -2562,16 +3066,21 @@ fn push_element(
             if let Some((prefix, "fldCharType")) = key.split_once(':')
                 && scope.get(prefix).is_some_and(|uri| uri == WORD_NS)
             {
-                if field_marker.is_some() {
-                    field_marker = Some(String::new());
+                if snapshot_field_marker.is_some() {
+                    snapshot_field_marker = Some(String::new());
                     break;
                 }
-                field_marker = Some(
-                    attribute
-                        .decoded_and_normalized_value(XmlVersion::Implicit1_0, start.decoder())
-                        .map_err(xml_error)?
-                        .into_owned(),
-                );
+                snapshot_field_marker = match attribute
+                    .decoded_and_normalized_value(XmlVersion::Implicit1_0, start.decoder())
+                {
+                    Ok(value) => Some(value.into_owned()),
+                    Err(error) if parent.is_some_and(|parent| elements[parent].modeled) => {
+                        return Err(xml_error(error));
+                    }
+                    // Read-only observations do not add resolver errors for an
+                    // otherwise opaque run. Its existing admission stays intact.
+                    Err(_) => None,
+                };
             }
         }
     }
@@ -2590,7 +3099,11 @@ fn push_element(
         children: Vec::new(),
         revision,
         namespace_declarations,
-        field_marker,
+        field_marker: parent
+            .filter(|parent| elements[*parent].modeled)
+            .and(snapshot_field_marker.clone()),
+        snapshot_field_marker,
+        snapshot_scalar: String::new(),
     });
     if let Some(parent) = parent {
         elements[parent].children.push(index);
@@ -3456,5 +3969,307 @@ fn carried_simple_fields_preserve_schema_and_selected_source_custody() {
             content.to_owned()
         ))
         .is_err()
+    );
+}
+
+#[cfg(test)]
+fn issue434_snapshot_texts(body: &str) -> Vec<(RevisionKind, String)> {
+    let source = format!(
+        r#"<w:document xmlns:w="{WORD_NS}" xmlns:a="{WORD_NS}" xmlns:x="urn:foreign"><w:body>{body}</w:body></w:document>"#
+    );
+    let tree = XmlTree::parse(source.as_bytes()).unwrap();
+    let facts = tree.snapshot_facts();
+    tree.elements
+        .iter()
+        .enumerate()
+        .filter_map(|(index, element)| {
+            element
+                .revision
+                .as_ref()
+                .map(|metadata| (metadata.kind, tree.snapshot_text(index, &facts).unwrap()))
+        })
+        .collect()
+}
+
+#[test]
+fn issue434_snapshot_scalars_current_properties_and_opaque_paths() {
+    let revisions = issue434_snapshot_texts(
+        r#"<w:p><w:pPr><w:pPrChange w:id="1" w:author="A"><w:pPr><w:r><w:t>old poison</w:t></w:r></w:pPr></w:pPrChange></w:pPr><w:r><w:rPr><w:rPrChange w:id="2" w:author="A"><w:rPr/></w:rPrChange></w:rPr><w:t> A &amp; B&#x43; <![CDATA[<raw>]]>&unknown;</w:t><w:tab/><w:br/><w:cr/><w:drawing><w:txbxContent><w:p><w:r><w:t>drawing poison</w:t></w:r></w:p></w:txbxContent></w:drawing><x:t>foreign poison</x:t><w:sym w:char="0041"/></w:r><w:del w:id="3" w:author="A"><w:r><w:delText>removed</w:delText></w:r></w:del><w:ins w:id="4" w:author="A"><a:r><a:t>new</a:t></a:r></w:ins></w:p>"#,
+    );
+    let scalar = " A & BC <raw>&unknown;\t\n\n";
+    assert_eq!(
+        revisions,
+        vec![
+            (
+                RevisionKind::ParagraphPropertyChange,
+                format!("{scalar}new")
+            ),
+            (RevisionKind::RunPropertyChange, scalar.into()),
+            (RevisionKind::Deletion, "removed".into()),
+            (RevisionKind::Insertion, "new".into()),
+        ]
+    );
+}
+
+#[test]
+fn issue434_snapshot_move_mark_section_and_empty_kinds() {
+    let revisions = issue434_snapshot_texts(
+        r#"<w:p><w:pPr><w:rPr><w:del w:id="1" w:author="A"/></w:rPr><w:pPrChange w:id="2" w:author="A"><w:pPr/></w:pPrChange><w:sectPr><w:sectPrChange w:id="3" w:author="A"><w:sectPr/></w:sectPrChange></w:sectPr></w:pPr><w:r><w:t>retained</w:t></w:r><w:moveFrom w:id="4" w:author="A"><w:r><w:t>from</w:t></w:r></w:moveFrom><w:moveTo w:id="5" w:author="A"><w:r><w:t>to</w:t></w:r></w:moveTo><w:ins w:id="6" w:author="A"/></w:p>"#,
+    );
+    assert_eq!(
+        revisions,
+        vec![
+            (RevisionKind::Deletion, String::new()),
+            (RevisionKind::ParagraphPropertyChange, "retainedto".into()),
+            (RevisionKind::SectionPropertyChange, String::new()),
+            (RevisionKind::MoveFrom, "from".into()),
+            (RevisionKind::MoveTo, "to".into()),
+            (RevisionKind::Insertion, String::new()),
+        ]
+    );
+}
+
+#[test]
+fn issue434_snapshot_table_separators_nested_controls_and_removed_rows() {
+    let revisions = issue434_snapshot_texts(
+        r#"<w:tbl><w:tblPr><w:tblPrChange w:id="1" w:author="A"><w:tblPr/></w:tblPrChange></w:tblPr><w:tr><w:tc><w:p><w:r><w:t>A</w:t></w:r></w:p><w:sdt><w:sdtContent><w:p><w:r><w:t>B</w:t></w:r></w:p></w:sdtContent></w:sdt><w:tbl><w:tr><w:tc><w:p><w:r><w:t>C</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:tc><w:tc><w:p><w:r><w:t>D</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:trPr><w:del w:id="2" w:author="A"/></w:trPr><w:tc><w:p><w:r><w:t>removed row</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:trPr><w:moveFrom w:id="3" w:author="A"/></w:trPr><w:tc><w:p><w:r><w:t>moved row</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+    );
+    assert_eq!(
+        revisions[0],
+        (RevisionKind::TablePropertyChange, "A\tB\tC\tD\t\n".into())
+    );
+    assert_eq!(revisions[1].1, "");
+    assert_eq!(revisions[2].1, "");
+}
+
+#[test]
+fn issue434_snapshot_stored_field_caches_and_wrapper_frontiers() {
+    let revisions = issue434_snapshot_texts(
+        r#"<w:p><w:pPr><w:pPrChange w:id="1" w:author="A"><w:pPr/></w:pPrChange></w:pPr><w:smartTag><w:r><w:t>smart</w:t></w:r><w:customXml><w:r><w:t>custom</w:t></w:r></w:customXml></w:smartTag><w:fldSimple w:instr="instruction poison"><w:r><w:t>simple</w:t></w:r></w:fldSimple><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>outer poison</w:instrText><w:t>instruction text poison</w:t></w:r><w:r><w:fldChar w:fldCharType="separate"/><w:t>outer</w:t><w:fldChar w:fldCharType="begin"/><w:instrText>inner poison</w:instrText><w:fldChar w:fldCharType="separate"/><w:t>inner</w:t><w:fldChar w:fldCharType="end"/><w:fldChar w:fldCharType="end"/></w:r><w:r><w:fldChar w:fldCharType="begin"/><w:t>no cache poison</w:t><w:fldChar w:fldCharType="end"/></w:r><w:hyperlink><w:smartTag><w:r><w:t>opaque nested wrapper</w:t></w:r></w:smartTag><w:r><w:t>link</w:t></w:r></w:hyperlink><w:sdt><w:sdtContent><w:r><w:t>control</w:t></w:r><w:customXml><w:r><w:t>opaque control wrapper</w:t></w:r></w:customXml></w:sdtContent></w:sdt><x:customXml><w:r><w:t>foreign</w:t></w:r></x:customXml><x:opaque><w:r><w:t>opaque</w:t></w:r></x:opaque></w:p>"#,
+    );
+    assert_eq!(revisions[0].1, "smartcustomsimpleouterinnerlinkcontrol");
+}
+
+#[test]
+fn issue434_snapshot_raw_wrapper_requires_base_canonical_writer_binding() {
+    let source = format!(
+        r#"<a:document xmlns:a="{WORD_NS}"><a:body><a:p><a:pPr><a:pPrChange a:id="1" a:author="A"><a:pPr/></a:pPrChange></a:pPr><a:r><a:t>direct</a:t></a:r><a:smartTag><a:r><a:t>excluded</a:t></a:r></a:smartTag><a:customXml xmlns:w="{WORD_NS}"><a:r><a:t>included</a:t></a:r></a:customXml></a:p></a:body></a:document>"#
+    );
+    let tree = XmlTree::parse(source.as_bytes()).unwrap();
+    let facts = tree.snapshot_facts();
+    let index = tree
+        .elements
+        .iter()
+        .position(|element| element.revision.is_some())
+        .unwrap();
+    assert_eq!(tree.snapshot_text(index, &facts).unwrap(), "directincluded");
+}
+
+#[test]
+fn issue434_snapshot_field_context_precedes_selected_owner() {
+    let revisions = issue434_snapshot_texts(
+        r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>CODE</w:instrText></w:r></w:p><w:p><w:r><w:rPr><w:rPrChange w:id="1" w:author="A"><w:rPr/></w:rPrChange></w:rPr><w:t>instruction poison</w:t></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr><w:rPrChange w:id="2" w:author="A"><w:rPr/></w:rPrChange></w:rPr><w:t>cache</w:t></w:r><w:ins w:id="3" w:author="A"><w:r><w:t>inserted cache</w:t></w:r></w:ins><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#,
+    );
+    assert_eq!(
+        revisions
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>(),
+        ["", "cache", "inserted cache"]
+    );
+}
+
+#[test]
+fn issue434_snapshot_nested_field_result_cannot_escape_outer_instruction() {
+    let revisions = issue434_snapshot_texts(
+        r#"<w:p><w:pPr><w:pPrChange w:id="1" w:author="A"><w:pPr/></w:pPrChange></w:pPr><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:sdt><w:sdtContent><w:r><w:fldChar w:fldCharType="end"/><w:t>bad domain poison</w:t></w:r></w:sdtContent></w:sdt><w:r><w:fldChar w:fldCharType="begin"/><w:fldChar w:fldCharType="separate"/><w:t>inner instruction poison</w:t><w:fldChar w:fldCharType="end"/><w:fldChar w:fldCharType="separate"/><w:t>outer cache</w:t><w:fldChar w:fldCharType="end"/></w:r></w:p>"#,
+    );
+    assert_eq!(revisions[0].1, "outer cache");
+}
+
+#[test]
+fn issue434_snapshot_property_owner_in_removed_ancestor_is_empty() {
+    let revisions = issue434_snapshot_texts(
+        r#"<w:p><w:del w:id="1" w:author="A"><w:r><w:rPr><w:rPrChange w:id="2" w:author="A"><w:rPr/></w:rPrChange></w:rPr><w:delText>removed</w:delText></w:r></w:del></w:p><w:tbl><w:tr><w:trPr><w:del w:id="3" w:author="A"/></w:trPr><w:tc><w:p><w:pPr><w:pPrChange w:id="4" w:author="A"><w:pPr/></w:pPrChange></w:pPr><w:r><w:t>removed row</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
+    );
+    assert_eq!(
+        revisions
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>(),
+        ["removed", "", "", ""]
+    );
+}
+
+#[test]
+fn issue434_snapshot_story_roots_share_owned_projection_and_order() {
+    use crate::StoryKind;
+    let body = r#"<w:p><w:del w:id="1" w:author="A"><w:r><w:delText>old</w:delText></w:r></w:del><w:ins w:id="2" w:author="A"><w:r><w:t>new</w:t></w:r></w:ins></w:p>"#;
+    for (kind, opening, closing) in [
+        (
+            StoryKind::Body,
+            "<w:document><w:body>",
+            "</w:body></w:document>",
+        ),
+        (StoryKind::Header, "<w:hdr>", "</w:hdr>"),
+        (StoryKind::Footer, "<w:ftr>", "</w:ftr>"),
+        (
+            StoryKind::Footnote,
+            "<w:footnotes><w:footnote w:id=\"1\">",
+            "</w:footnote></w:footnotes>",
+        ),
+        (
+            StoryKind::Endnote,
+            "<w:endnotes><w:endnote w:id=\"1\">",
+            "</w:endnote></w:endnotes>",
+        ),
+        (
+            StoryKind::Comment,
+            "<w:comments><w:comment w:id=\"1\">",
+            "</w:comment></w:comments>",
+        ),
+        (StoryKind::TextBox, "<w:txbxContent>", "</w:txbxContent>"),
+    ] {
+        let raw = format!("{opening}{body}{closing}").replacen(
+            '>',
+            &format!(" xmlns:w=\"{WORD_NS}\">"),
+            1,
+        );
+        let story = StoryId::new(kind, "/word/test.xml", 0);
+        let snapshots = story_part_revisions(
+            "/word/test.xml",
+            raw.as_bytes(),
+            &[(0..raw.len(), story.clone())],
+        )
+        .unwrap();
+        assert_eq!(
+            snapshots
+                .iter()
+                .map(|revision| revision.text())
+                .collect::<Vec<_>>(),
+            ["old", "new"],
+            "{kind:?}: {raw}"
+        );
+        assert!(snapshots.iter().all(|revision| revision.story() == &story));
+    }
+}
+
+#[test]
+fn issue434_snapshot_private_package_revision_has_empty_text() {
+    use base64::Engine;
+    let mut document = Document::new();
+    let record = br#"{"id":7,"author":"A","timestamp":"2026-11-03T00:00:00Z"}"#;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(record);
+    document.package.set_part(
+        crate::comparison::COMMENT_COMPARISON_PART,
+        format!(
+            "{}{}{}",
+            crate::comparison::COMMENT_COMPARISON_OPEN,
+            encoded,
+            crate::comparison::COMMENT_COMPARISON_CLOSE
+        )
+        .into_bytes(),
+    );
+    let revision = comment_comparison_revision(&document, StoryId::body())
+        .unwrap()
+        .unwrap();
+    assert_eq!(revision.id(), 7);
+    assert_eq!(revision.text(), "");
+}
+
+#[test]
+fn issue434_snapshot_controls_keep_destination_grammar() {
+    let revisions = issue434_snapshot_texts(
+        r#"<w:tbl><w:tblPr><w:tblPrChange w:id="1" w:author="A"><w:tblPr/></w:tblPrChange></w:tblPr><w:sdt><w:sdtContent><w:p><w:r><w:t>wrong table-control child</w:t></w:r></w:p><w:tr><w:sdt><w:sdtContent><w:tc><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:sdtContent></w:sdt></w:tr></w:sdtContent></w:sdt></w:tbl><w:p><w:pPr><w:pPrChange w:id="2" w:author="A"><w:pPr/></w:pPrChange></w:pPr><w:sdt><w:sdtContent><w:p><w:r><w:t>wrong inline child</w:t></w:r></w:p><w:r><w:t>inline</w:t></w:r></w:sdtContent></w:sdt></w:p>"#,
+    );
+    assert_eq!(revisions[0].1, "cell\t\n");
+    assert_eq!(revisions[1].1, "inline");
+}
+
+#[test]
+fn issue434_snapshot_nested_revision_local_payload_is_not_ancestor_hidden() {
+    let revisions = issue434_snapshot_texts(
+        r#"<w:p><w:del w:id="1" w:author="A"><w:r><w:delText>outer</w:delText></w:r><w:del w:id="2" w:author="A"><w:r><w:delText>inner</w:delText></w:r></w:del></w:del></w:p>"#,
+    );
+    assert_eq!(
+        revisions
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>(),
+        ["outerinner", "inner"]
+    );
+}
+
+#[test]
+fn issue434_misplaced_properties_and_paragraph_mark_have_no_run_owner() {
+    let texts = issue434_snapshot_texts(
+        r#"<w:p><w:pPr><w:rPr><w:rPrChange w:id="4" w:author="A"><w:rPr/></w:rPrChange></w:rPr></w:pPr><w:sdt><w:sdtContent><w:rPrChange w:id="1" w:author="A"><w:rPr/></w:rPrChange><w:pPrChange w:id="2" w:author="A"><w:pPr/></w:pPrChange><w:tblPrChange w:id="3" w:author="A"><w:tblPr/></w:tblPrChange><w:r><w:t>unrelated control text</w:t></w:r></w:sdtContent></w:sdt></w:p>"#,
+    );
+    assert_eq!(texts.len(), 4);
+    assert!(texts.iter().all(|(_, text)| text.is_empty()));
+}
+
+#[test]
+fn issue434_disjoint_revision_projection_prepares_context_once() {
+    for n in [1000, 2000] {
+        let body = (0..n)
+            .map(|id| {
+                format!(
+                    r#"<w:p><w:ins w:id="{id}" w:author="A"><w:r><w:t>x</w:t></w:r></w:ins></w:p>"#
+                )
+            })
+            .collect::<String>();
+        let source =
+            format!(r#"<w:document xmlns:w="{WORD_NS}"><w:body>{body}</w:body></w:document>"#);
+        let tree = XmlTree::parse(source.as_bytes()).unwrap();
+        let facts = tree.snapshot_facts();
+        let texts = tree
+            .elements
+            .iter()
+            .enumerate()
+            .filter_map(|(index, element)| {
+                element
+                    .revision
+                    .as_ref()
+                    .map(|_| tree.snapshot_text(index, &facts).unwrap())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(texts.len(), n);
+        assert!(texts.iter().all(|text| text == "x"));
+        assert_eq!(facts.preparation_visits, 2 * tree.elements.len());
+        assert_eq!(
+            facts.owner_visits.get(),
+            5 * n,
+            "owner walks never replay earlier paragraphs"
+        );
+        assert!(facts.fields.is_empty());
+        let story = StoryId::body();
+        let snapshots = story_part_revisions(
+            "/word/document.xml",
+            source.as_bytes(),
+            &[(0..source.len(), story)],
+        )
+        .unwrap();
+        assert_eq!(
+            snapshots
+                .iter()
+                .map(StoryRevision::text)
+                .collect::<Vec<_>>(),
+            texts
+        );
+    }
+}
+
+#[test]
+fn issue434_field_checkpoint_deletion_forks_preserve_current_and_local_modes() {
+    let texts = issue434_snapshot_texts(
+        r#"<w:p><w:del w:id="1" w:author="A"><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:ins w:id="2" w:author="A"><w:r><w:t>inner instruction poison</w:t></w:r></w:ins></w:del><w:ins w:id="3" w:author="A"><w:r><w:t>outside visible</w:t></w:r></w:ins><w:ins w:id="4" w:author="A"><w:del w:id="5" w:author="A"><w:r><w:fldChar w:fldCharType="begin"/></w:r></w:del><w:r><w:t>outer local instruction poison</w:t></w:r></w:ins><w:ins w:id="6" w:author="A"><w:r><w:t>later visible</w:t></w:r></w:ins></w:p>"#,
+    );
+    assert_eq!(
+        texts
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>(),
+        ["", "", "outside visible", "", "", "later visible"]
     );
 }
