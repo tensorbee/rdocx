@@ -30076,7 +30076,16 @@ fn render_scoped_resources(
             master: master.media_ids,
             media_content_types: deck_media
                 .iter()
-                .map(|(media_id, media)| (*media_id, media.content_type.clone()))
+                .map(|(media_id, media)| {
+                    // These relationship IDs have already passed render_compatible_media.
+                    // Preserve the package declaration while reporting the effective raster type.
+                    let content_type = match ImageFormat::sniff(&media.bytes) {
+                        Some(ImageFormat::Png) => "image/png",
+                        Some(ImageFormat::Jpeg) => "image/jpeg",
+                        _ => &media.content_type,
+                    };
+                    (*media_id, content_type.to_owned())
+                })
                 .collect(),
         },
         ScopedMediaFailures {

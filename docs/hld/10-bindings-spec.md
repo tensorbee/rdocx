@@ -181,8 +181,11 @@ The established layout entrypoints retain their call shapes.
 The shared native `ChartData` input includes optional category-axis and
 value-axis titles plus a typed `Vec<RgbColor>` palette. `oxml-chart`, `rdocx`,
 and `rpptx` re-export the same `RgbColor`. `ChartData::default()` supplies empty
-optional styling fields for callers using update syntax. The added fields are
-an intentional pre-1.0 struct-literal break. Python roots expose concrete
+optional styling fields for callers using update syntax. Checked chart authoring
+and data replacement reject an explicitly empty number-format code before
+publication. Imported stored empty codes remain retained and use the documented
+General draw fallback while their numeric projection refuses. The added fields
+are an intentional pre-1.0 struct-literal break. Python roots expose concrete
 `CategoryChartData`, `XyChartData` and seven-kind `XL_CHART_TYPE` values. Word
 `add_chart(chart_type, chart_data, width, height, after=None)` returns a prepared
 owned Paragraph and accepts only a checked same-document direct body owner.

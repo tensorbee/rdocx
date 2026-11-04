@@ -3006,8 +3006,10 @@ is why `embed_id` cannot survive the port, and it deduplicates a logo that
 appears on every slide.
 
 Upstream package assembly also constructs the source-neutral `ScopedMediaIds`
-maps consumed by `ResolveCtx::resolve_slide_with_media` and records package
-content types by resolved media ID. Only embedded picture relationships enter
+maps consumed by `ResolveCtx::resolve_slide_with_media` and records effective
+render content types by resolved media ID. For admitted PNG/JPEG bytes these
+transient types follow the sniff, including cached-chart previews. Stored package
+and MediaData content types retain their original declarations. Only embedded picture relationships enter
 those maps. The target must be present. Shared `classify_image_draw` gives sniffed
 PNG and JPEG precedence over declared MIME types, admits a drawable bounded EMF,
 and separates an undecodable raster from unsupported EMF or WMF. Known other

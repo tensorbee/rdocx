@@ -12,6 +12,46 @@ Root approves the closed design after .claude/reviews/F-X281-codex-design-final-
 
 No product question remains. Local implementation, the named scoped regressions and HLD05/07/08/10 are complete and independently reviewed. Actual implementation peer1 and Root final each report zero defects and zero smells. Implementation peers used1/3, with no confirmation peer or counter reset. Original claim Base is `4a220b6769fc2a5a2c90fc600f580478ea7e62f8` and continuation prefix is `514a076e592517ef128e555f52cef1085fa702de`. Preparation uses checkpoint `sprint-final-acceptance`. Status remains approved and delivery remains in-progress. All eight final acceptance rows, every named final rider and separate release approval remain due. Earlier resource-wave and unclaimed wording is historical.
 
+## Operative chart regression continuation, 2026-11-03
+
+Root resumes this already integrated feature in an isolated codex worker at
+continuation Base6bea9093818d6b691bf88b2980e9cc17927be015. Original claim/review
+history is unchanged. The earlier worker tip3e9ff3a1 is preserved under the
+explicit recovery archive ref, no reset or dirty C1 source is used. The existing
+implementation peer count remains1/3. Final sprint acceptance still remains due.
+
+An actual source-pinned chart cohort has two failures. Diagnostic assertions
+identify explicit empty ChartData.number_format and cached drawable PNG with a
+JPEG declaration. Shared checked chart authoring and replacement must reject an
+explicit empty code before publication, preserving the existing atomic-refusal
+contract. Do not reject imported stored empty codes: their XML stays retained,
+public projection refuses them and the existing painter uses General with one
+diagnostic. Nonempty unsupported codes keep that documented draw fallback.
+
+The old cached-chart expectation for drawable PNG/JPEG with mismatched MIME is
+stale against the approved sniff precedence. Change those two cases to positive
+actual image-byte assertions. Preserve malformed/corrupt/oversize and existing
+odd-channel preview residual negatives. The actual metafile-declared PNG/JPEG
+control also exposes a second MIME veto in cached-chart layout. Derive the
+transient native ScopedMediaIds raster content type from already admitted bytes.
+Keep stored package/MediaData declarations unchanged, and keep the direct
+low-level unsupported-WMF map control. This applies the existing sniff contract
+without changing decoder acceptance or quotas.
+Keep named original chart cases and add a shared add/replace empty negative,
+None/General/nonempty-refused positive and existing imported-empty controls.
+HLD05/07/08 intent is already present. HLD10 gains the authoring-versus-imported
+clarification. Actual peer2 found one current-intent documentation defect. Root
+adopts HLD09 impact to reconcile sniff-based PNG/JPEG cached previews and the
+existing16MiBencoded/64MiBdecoded bounds. The existing PNG/JPEG-only cached owner
+contract remains, including a placeholder for genuine EMF previews. This is
+existing-contract reconciliation after peer2, not a new decoder or acceptance
+waiver. Implementation peers used2/3, with final peer3 and Root final due. No new signature, quota, decoder or release scope is introduced.
+Root final and actual independent review remain required before preparation.
+
+## Continuation preparation disposition
+
+Actual peer2D1is repaired, actual peer3 and Rootfinal2 each report0defects and0smells. Implementation peers3of3 are used, including retained originalpeer1, with no reset or confirmation round. The eight-path source freeze2 and actual local outcomes are retained under /private/tmp/rdocx-s96-f281-chart-recovery. Shared7, native chart12with1manualignored, corrected cached-layout1 and changed-crate Clippy/fmt/prose/whitespace pass. Earlier continuation wording that review remains due is historical. This prepares checkpoint sprint-final-acceptance only. Plan remains approved and delivery in-progress. All original final acceptance rows and riders remain pending, with canonical C1 integration still required.
+
 ## Preparation provenance
 
 Author revision after Root preparation final 1. Not approved. No canonical plan file is written. This revision is not a model ranking and is not self-approved.
@@ -340,9 +380,11 @@ The test gate is differential. Local RED and GREEN in the carriers above are the
 - `docs/hld/07-inheritance-and-resolution.md`
 - `docs/hld/08-rendering-spec.md`
 - `docs/hld/10-bindings-spec.md`
+- `docs/hld/09-charts-spec.md`
 
 ### Planned changes
 
+- `docs/hld/09-charts-spec.md`, cached-preview paragraph: sniffed admitted PNG/JPEG wins over package declaration, transient effective content type does not mutate stored MIME, bounds remain16MiBencoded/64MiBdecoded and the existing PNG/JPEG-only owner policy and residuals remain.
 - `docs/hld/05-drawingml-model.md`, after "Preservation" (line 496): imported `c:title` text is read from the complete chart-part bytes with qualified direct title paths and inherited namespace scopes, `CT_Title.text` stays unset, and export series values are cached numbers. A saved chart with a third `c:axId` on bar, line, or area is preserved raw and is not described as schema-conformant.
 - `docs/hld/08-rendering-spec.md`, after "Word chart pagination" (line 2687): EMF raster subset and exclusions, Adam7, number-format fallback including the exact `General` exemption, hidden `p:cNvPr` on slide, layout, master, notes, and handouts, per-span ActualText, and the master candidate rule below. HLD08 does not replace the HLD07 chain sentence.
 - `docs/hld/10-bindings-spec.md`, at "Presentation semantic text export" (line 4656) and the Word HTML and markdown methods around line 4390: chart title and table on the eight routes, `ChartTable` Rust-only, the three `Document` diagnostic tuples, `HtmlInput` fields unchanged, Python string methods unchanged, no WASM semantic export. Line 4390's ODT, RTF, EPUB, and text-report tuples stay outside this story.

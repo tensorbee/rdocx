@@ -1309,6 +1309,9 @@ fn validate_chart_data(kind: ChartKind, data: &ChartData) -> Result<()> {
         }
     }
     if let Some(format) = &data.number_format {
+        if format.is_empty() {
+            return Err(invalid_authoring_value("number format must not be empty"));
+        }
         NumericData::new("Sheet1!$A$2".to_owned(), format.clone(), vec![0.0])?;
     }
     Ok(())
@@ -19152,6 +19155,37 @@ mod tests {
         );
         assert!(super::chart_plain_title(b"<q:chartSpace").is_err());
     }
+    #[test]
+    fn fx281_checked_chart_data_refuses_empty_without_rejecting_stored_fallbacks() {
+        let mut data = ChartData {
+            categories: vec!["North".to_owned()],
+            series: vec![("Revenue".to_owned(), vec![1820.0])],
+            ..ChartData::default()
+        };
+        let (original, workbook) = authored_chart_parts(ChartKind::Bar, &data, "rId1").unwrap();
+        data.number_format = Some(String::new());
+        assert!(authored_chart_parts(ChartKind::Bar, &data, "rId1").is_err());
+        assert!(replace_chart_data(&original, &workbook, &data).is_err());
+        assert_eq!(read_chart_data(&original).unwrap().1.number_format, None);
+        for format in [None, Some("General"), Some("yyyy-mm-dd")] {
+            data.number_format = format.map(str::to_owned);
+            let (xml, _) = authored_chart_parts(ChartKind::Bar, &data, "rId1").unwrap();
+            let chart = CT_ChartSpace::from_xml(&xml).unwrap();
+            let mut fonts = FontManager::new_deterministic().unwrap();
+            render_chart(&chart.chart, chart_bounds(), &mut fonts).unwrap();
+            let expected = if format == Some("yyyy-mm-dd") {
+                vec!["yyyy-mm-dd"]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(
+                super::unsupported_number_formats(&chart.chart).unwrap(),
+                expected
+            );
+            assert!(replace_chart_data(&original, &workbook, &data).is_ok());
+        }
+    }
+
     #[test]
     fn fx281_empty_format_is_stored_but_projection_refuses_and_chart_uses_general() {
         let plot=bar_plot("").replace("<q:dLbls><q:showVal val=\"1\"/></q:dLbls>","<q:dLbls><q:numFmt formatCode=\"\" sourceLinked=\"0\"/><q:showVal val=\"1\"/></q:dLbls>");

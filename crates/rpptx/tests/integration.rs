@@ -14402,14 +14402,15 @@ fn add_chart_rejects_invalid_data_without_mutation() {
             ..ChartData::default()
         },
     ];
-    for data in invalid {
+    for (case, data) in invalid.into_iter().enumerate() {
         let mut presentation = Presentation::new().unwrap();
         presentation.add_slide(0).unwrap();
         let before = presentation.to_bytes().unwrap();
         assert!(
             presentation
                 .add_chart(0, ChartKind::Bar, Emu(1), Emu(2), Emu(3), Emu(4), &data,)
-                .is_err()
+                .is_err(),
+            "invalid authoring case {case}: {data:?}"
         );
         assert_eq!(presentation.to_bytes().unwrap(), before);
     }
@@ -14581,6 +14582,8 @@ fn supported_and_fallback_charts_render_deterministically() {
         presentation_with_three_dimensional_chart_fallback(Some((&corrupt_png, "image/png")));
     let mismatched =
         presentation_with_three_dimensional_chart_fallback(Some((&preview, "image/jpeg")));
+    let metafile_declared_png =
+        presentation_with_three_dimensional_chart_fallback(Some((&preview, "image/x-emf")));
     let jpeg = valid_template_jpeg();
     let jpeg_fallback =
         presentation_with_three_dimensional_chart_fallback(Some((&jpeg, "image/jpeg")));
@@ -14595,6 +14598,8 @@ fn supported_and_fallback_charts_render_deterministically() {
         presentation_with_three_dimensional_chart_fallback(Some((&corrupt_jpeg, "image/jpeg")));
     let mismatched_jpeg =
         presentation_with_three_dimensional_chart_fallback(Some((&jpeg, "image/png")));
+    let metafile_declared_jpeg =
+        presentation_with_three_dimensional_chart_fallback(Some((&jpeg, "image/x-wmf")));
     let inflation_bomb = png_inflation_bomb();
     assert!(oxml_media::probe(&inflation_bomb).is_some());
     let inflation_bomb_fallback =
@@ -14621,9 +14626,11 @@ fn supported_and_fallback_charts_render_deterministically() {
         &malformed,
         &corrupt,
         &mismatched,
+        &metafile_declared_png,
         &jpeg_fallback,
         &corrupt_jpeg_fallback,
         &mismatched_jpeg,
+        &metafile_declared_jpeg,
         &inflation_bomb_fallback,
         &oversized_fallback,
         &sparse_fallback,
@@ -14639,23 +14646,27 @@ fn supported_and_fallback_charts_render_deterministically() {
         );
     }
 
-    let rendered_fallback = render_presentation_package(&fallback);
-    let mut cached_images = Vec::new();
-    walk(&rendered_fallback.pages[0].elements, &mut |element, _| {
-        if let PositionedElement::Image { data, .. } = element {
-            cached_images.push(data.clone());
-        }
-    });
-    assert_eq!(cached_images, vec![preview]);
+    for bytes in [&fallback, &mismatched, &metafile_declared_png] {
+        let rendered_fallback = render_presentation_package(bytes);
+        let mut cached_images = Vec::new();
+        walk(&rendered_fallback.pages[0].elements, &mut |element, _| {
+            if let PositionedElement::Image { data, .. } = element {
+                cached_images.push(data.clone());
+            }
+        });
+        assert_eq!(cached_images, vec![preview.clone()]);
+    }
 
-    let rendered_jpeg = render_presentation_package(&jpeg_fallback);
-    let mut cached_jpegs = Vec::new();
-    walk(&rendered_jpeg.pages[0].elements, &mut |element, _| {
-        if let PositionedElement::Image { data, .. } = element {
-            cached_jpegs.push(data.clone());
-        }
-    });
-    assert_eq!(cached_jpegs, vec![jpeg]);
+    for bytes in [&jpeg_fallback, &mismatched_jpeg, &metafile_declared_jpeg] {
+        let rendered_jpeg = render_presentation_package(bytes);
+        let mut cached_jpegs = Vec::new();
+        walk(&rendered_jpeg.pages[0].elements, &mut |element, _| {
+            if let PositionedElement::Image { data, .. } = element {
+                cached_jpegs.push(data.clone());
+            }
+        });
+        assert_eq!(cached_jpegs, vec![jpeg.clone()]);
+    }
 
     let rendered_sparse = render_presentation_package(&sparse_fallback);
     let mut cached_sparse_images = Vec::new();
@@ -14666,17 +14677,15 @@ fn supported_and_fallback_charts_render_deterministically() {
     });
     assert_eq!(cached_sparse_images, vec![sparse]);
 
-    for bytes in [
-        &missing,
-        &malformed,
-        &corrupt,
-        &mismatched,
-        &corrupt_jpeg_fallback,
-        &mismatched_jpeg,
-        &inflation_bomb_fallback,
-        &oversized_fallback,
-        &grayscale_jpeg_fallback,
-        &cmyk_jpeg_fallback,
+    for (case, bytes) in [
+        ("missing", &missing),
+        ("malformed", &malformed),
+        ("corrupt", &corrupt),
+        ("corrupt JPEG", &corrupt_jpeg_fallback),
+        ("inflation bound", &inflation_bomb_fallback),
+        ("oversized", &oversized_fallback),
+        ("grayscale JPEG", &grayscale_jpeg_fallback),
+        ("CMYK JPEG", &cmyk_jpeg_fallback),
     ] {
         let rendered = render_presentation_package(bytes);
         let mut labels = Vec::new();
@@ -14685,7 +14694,10 @@ fn supported_and_fallback_charts_render_deterministically() {
                 labels.push(run.text.clone());
             }
         });
-        assert!(labels.iter().any(|label| label == "Unsupported chart"));
+        assert!(
+            labels.iter().any(|label| label == "Unsupported chart"),
+            "{case}: {labels:?}"
+        );
     }
 }
 

@@ -732,16 +732,19 @@ lower it without a chart-specific backend path.
 
 For a chart that was **preserved rather than authored**, the resolver draws the
 immediate typed cached-picture fallback when the native projection is
-unsupported, the embedded image resolves in the same source scope, its bytes
-match the declared PNG or JPEG content type, encoded bytes and decoded scanline
-or pixel storage stay within 16 MiB caps, JPEG uses the 8-bit three-component
-layout shared by the raster and PDF backends, the stricter raster boundary
-visibly decodes it at native pixel bounds, and the resolver accepts that
-renderer content type. The corpus renderer and integration gates call the same
+unsupported, the embedded image resolves in the same source scope, and its bytes
+are an admitted PNG or JPEG. Byte sniffing takes precedence over the declared
+content type, including a metafile declaration. Encoded bytes stay within16MiB,
+and decoded scanline or pixel storage stays within64MiB. JPEG uses the 8-bit
+three-component layout shared by the raster and PDF backends. The stricter
+raster boundary visibly decodes the preview at native pixel bounds, and the
+resolver accepts its transient render-effective PNG or JPEG content type.
+Other preview formats, including drawable EMF, retain the labelled placeholder.
+Stored package declarations and media bytes remain unchanged. The corpus renderer and integration gates call the same
 crate-local package rendering function.
 Otherwise it emits a labelled placeholder rectangle. Both routes record the
 stable chart diagnostic. Missing previews, unsupported preview formats,
-malformed or invisible preview bytes, content-type mismatches, and missing,
+malformed or invisible preview bytes, and missing,
 external, missing-target or malformed chart relationships keep their more
 specific source context. The preserved chart and alternate-content bytes remain
 the sole serialisation source.
