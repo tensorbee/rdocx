@@ -30,6 +30,15 @@ on:
         description: Root-admitted external execution configuration SHA-256
         type: string
         required: true
+      f283_benchmark:
+        description: Require optional F283 Linux benchmarks alongside normal CI
+        type: boolean
+        default: false
+      f283_approval_bundle:
+        description: Separate Root-approved F283 transfer JSON, pinned by config_sha
+        type: string
+        required: false
+        default: ''
   schedule:
     # A dependency can become vulnerable without any change to this repo, so the
     # supply-chain job also runs on a schedule rather than only on pushes.
@@ -1155,12 +1164,158 @@ jobs:
             ${{ runner.temp }}/semver-sign/subject/bundle.json
           if-no-files-found: error
 
+  f283-linux-release-benchmarks:
+    name: F283 Linux release benchmarks (optional)
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.f283_benchmark == true && github.repository == 'tensorbee/rdocx' &&
+      github.actor == 'mantissaman' && github.triggering_actor == 'mantissaman' &&
+      github.sha == inputs.source_sha && github.ref == inputs.source_ref &&
+      startsWith(github.ref, 'refs/heads/') && github.workflow_sha == inputs.workflow_sha
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12.13'
+          architecture: x64
+          check-latest: false
+      - name: Admit the separately approved second-phase inputs
+        id: f283-inputs
+        env:
+          APPROVAL_JSON: ${{ inputs.f283_approval_bundle }}
+          APPROVAL_SHA: ${{ inputs.config_sha }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          OWNER_COMPATIBILITY: ${{ inputs.owner_compatibility }}
+          RUNNER_LABEL: ${{ inputs.runner_label }}
+        run: |
+          python -I -B - <<'PY'
+          import hashlib, json, os, platform, re
+          from pathlib import Path
+          assert os.environ['OWNER_COMPATIBILITY'] == 'false', 'Conflicting dispatch modes'
+          assert os.environ['RUNNER_LABEL'] == 'ubuntu-24.04', 'Wrong admitted runner label'
+          assert platform.system() == 'Linux' and platform.machine() == 'x86_64'
+          print('::notice::Optional F283 benchmarks run alongside normal CI and are required by CI gate when requested.')
+          raw = os.environ['APPROVAL_JSON'].encode('utf-8')
+          assert re.fullmatch('[0-9a-f]{64}', os.environ['APPROVAL_SHA'])
+          assert hashlib.sha256(raw).hexdigest() == os.environ['APPROVAL_SHA']
+          bundle = json.loads(raw)
+          assert bundle['schema'] == 'f283-root-transfer-v1'
+          for key in ['producer_run_id', 'wheel_artifact_id', 'cli_artifact_id']:
+              assert str(bundle[key]).isdigit() and int(bundle[key]) > 0
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              for key in ['producer_run_id', 'wheel_artifact_id', 'cli_artifact_id']:
+                  output.write(key + '=' + str(bundle[key]) + '\n')
+          proof_raw = bundle['proof_json'].encode('utf-8')
+          assert hashlib.sha256(proof_raw).hexdigest() == bundle['proof_sha256']
+          proof = json.loads(proof_raw)
+          assert proof['schema'] == 'f283-root-approved-final-input-v1'
+          assert proof['source_commit'] == os.environ['SOURCE_SHA']
+          assert proof['source_root'] == os.environ['GITHUB_WORKSPACE']
+          assert proof['build_mode_source_attestation_accepted'] is True
+          assert hashlib.sha256(Path('scripts/benchmark_f283.py').read_bytes()).hexdigest() == proof['runner_sha256']
+          root = Path('/tmp/f283-gate')
+          root.mkdir(exist_ok=False)
+          target = root / 'input'
+          target.mkdir()
+          fixed = [('source_inputs_json', 'source-inputs.json', proof['source_manifest']),
+                   ('wheel_build_receipt_json', 'wheel-build.json', proof['build_receipts']['wheel']),
+                   ('cli_build_receipt_json', 'cli-build.json', proof['build_receipts']['cli'])]
+          for key, name, expected in fixed:
+              path = target / name
+              payload = bundle[key].encode('utf-8')
+              assert expected['path'] == str(path)
+              assert hashlib.sha256(payload).hexdigest() == expected['sha256']
+              path.write_bytes(payload)
+          wheel_path = Path(proof['wheel']['path'])
+          assert wheel_path.parent == target and wheel_path.suffix == '.whl'
+          assert proof['cli']['path'] == str(target / 'rdocx')
+          (target / 'approved-input.json').write_bytes(proof_raw)
+          (target / 'transfer.json').write_bytes(raw)
+          PY
+      - name: Download existing authenticated release wheel
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ steps.f283-inputs.outputs.producer_run_id }}
+          artifact-ids: ${{ steps.f283-inputs.outputs.wheel_artifact_id }}
+          path: /tmp/f283-gate/wheel-download
+      - name: Download existing authenticated release CLI archive
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ steps.f283-inputs.outputs.producer_run_id }}
+          artifact-ids: ${{ steps.f283-inputs.outputs.cli_artifact_id }}
+          path: /tmp/f283-gate/cli-download
+      - name: Check reused artifact bytes and stage the native CLI
+        run: |
+          python -I -B - <<'PY'
+          import hashlib, json, shutil, tarfile
+          from pathlib import Path
+          root = Path('/tmp/f283-gate')
+          bundle = json.loads((root / 'input/transfer.json').read_text())
+          proof = json.loads(bundle['proof_json'])
+          wheels = list((root / 'wheel-download').rglob('*.whl'))
+          assert len(wheels) == 1
+          assert hashlib.sha256(wheels[0].read_bytes()).hexdigest() == proof['wheel']['sha256']
+          shutil.copyfile(wheels[0], proof['wheel']['path'])
+          archives = list((root / 'cli-download').rglob('rdocx-x86_64-unknown-linux-gnu.tar.gz'))
+          assert len(archives) == 1
+          assert hashlib.sha256(archives[0].read_bytes()).hexdigest() == bundle['cli_archive_sha256']
+          with tarfile.open(archives[0], 'r:gz') as archive:
+              members = [member for member in archive.getmembers() if member.name == 'rdocx']
+              assert len(members) == 1 and members[0].isfile()
+              cli = archive.extractfile(members[0]).read()
+          assert hashlib.sha256(cli).hexdigest() == proof['cli']['sha256']
+          path = Path(proof['cli']['path'])
+          path.write_bytes(cli)
+          path.chmod(0o755)
+          PY
+      - name: Install only the authenticated existing wheel
+        run: |
+          python -m venv /tmp/f283-gate/venv
+          /tmp/f283-gate/venv/bin/python -I -B - <<'PY'
+          import json, subprocess, sys
+          from pathlib import Path
+          proof = json.loads(Path('/tmp/f283-gate/input/approved-input.json').read_text())
+          subprocess.run([sys.executable, '-m', 'pip', '--isolated', '--disable-pip-version-check',
+                          'install', '--no-index', '--no-deps', proof['wheel']['path']], check=True)
+          PY
+      - name: Run only the exact two final F283 workloads
+        run: |
+          /tmp/f283-gate/venv/bin/python -I -B - <<'PY'
+          import json, subprocess, sys
+          from pathlib import Path
+          bundle = json.loads(Path('/tmp/f283-gate/input/transfer.json').read_text())
+          subprocess.run([sys.executable, '-I', '-B', 'scripts/benchmark_f283.py',
+                          '--proof', '/tmp/f283-gate/input/approved-input.json',
+                          '--proof-sha256', bundle['proof_sha256'],
+                          '--output', '/tmp/f283-gate/results'], check=True)
+          PY
+      - name: Retain actual samples, child outcomes and approved inputs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: f283-linux-gates-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            /tmp/f283-gate/results
+            /tmp/f283-gate/input/*.json
+          if-no-files-found: warn
+
+
   ci-gate:
     name: CI gate
     if: always()
     needs:
       - changes
       - owner-compatibility
+      - f283-linux-release-benchmarks
       - semver-linux
       - semver-macos
       - semver-windows
@@ -1195,6 +1350,8 @@ jobs:
           SEMVER_SIGN: ${{ needs['semver-sign'].result }}
           OWNER_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.owner_compatibility == true }}
           OWNER_RESULT: ${{ needs['owner-compatibility'].result }}
+          F283_REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.f283_benchmark == true }}
+          F283_RESULT: ${{ needs['f283-linux-release-benchmarks'].result }}
           NO_DEFAULT_FEATURES_RESULT: ${{ needs['no-default-features'].result }}
           RELEASE_REGRESSIONS_RESULT: ${{ needs['release-regressions'].result }}
           CLIPPY_RESULT: ${{ needs['clippy'].result }}
@@ -1235,6 +1392,12 @@ jobs:
                 ;;
             esac
           }
+
+          if [ "$OWNER_MODE" = "true" ] && [ "$F283_REQUESTED" = "true" ]; then
+            echo "Owner-only mode cannot request F283 benchmarks" >&2
+            exit 1
+          fi
+          check_result "$F283_REQUESTED" "$F283_RESULT" f283-linux-release-benchmarks
 
           for result in "$SEMVER_LINUX" "$SEMVER_MACOS" "$SEMVER_WINDOWS" "$SEMVER_SIGN"; do
             if [ "$SEMVER_REQUIRED" = "true" ]; then test "$result" = "success"; else test "$result" = "skipped"; fi

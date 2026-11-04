@@ -903,6 +903,50 @@ the filtered product jobs skip, yet the same stable aggregate gate reports.
 The scheduled path skips change detection and requires supply-chain success.
 Unfiltered jobs retain their ordinary triggers.
 
+**Optional final Linux performance gates.** The registered CI workflow can add
+one F283 benchmark job to an ordinary manual final CI invocation. Its native
+Ubuntu24.04 x86_64 host uses CPython3.12.13 and read-only repository content and
+Actions permissions. Existing push, PR, schedule, normal manual and owner-only
+job selectors remain unchanged. There is no benchmark-only CI path or normal
+SemVer authority exclusion.
+
+The unconditional `CI gate` depends on the benchmark job. A requested benchmark
+must succeed, and an unrequested one must be skipped. Failure, cancellation,
+unexpected skip and missing result fail the required aggregate. Owner-only mode
+cannot request the benchmark, with refusal both at artifact admission and in
+the aggregate. Successful benchmark results do not bypass the existing normal,
+owner, selected-job, native or signer checks.
+
+The benchmark reuses an existing same-source release wheel and CLI from a
+separately authenticated producer run. A Root-approved transfer pins source,
+artifact, interpreter, build receipt and configuration identities. Release mode
+is not inferred from artifact names or a future producer assertion. Missing
+proof or transfer admission remains pending. The job builds, signs, publishes
+and tags nothing.
+
+An offline `--prepare-dispatch` mode of the local benchmark runner packages an
+already Root-approved transfer into a GitHub workflow dispatch request file. It
+authenticates the transfer bytes against a supplied lowercase SHA-256,
+validates the existing CI transfer contract without approving anything, and
+requires a nonempty `refs/heads/` source ref and a lowercase 40-character
+workflow SHA. The complete request carries the branch ref and exactly the eight
+existing CI inputs, with `owner_compatibility=false` and `f283_benchmark=true`
+as JSON booleans, the proof's source commit, the transfer digest and the
+original transfer text preserved exactly. The request is serialized as ASCII
+JSON of at most 65535 bytes including formatting and the final newline before
+any output is created. Overwrites are refused, failed validation leaves no
+output, and the only printed matter is the output path, byte count and digest.
+The mode never performs a network operation, imports the product, contacts a
+service or starts a benchmark, and a prepared file still awaits separate
+authorized dispatch.
+
+The two Issue445 workloads retain their original builders, setter order, held
+handles, sampling and thresholds. Independent untimed package inspection checks
+the replacement input's paragraph, run, text and style geometry before timing.
+The runner retains timed blocks, paired trials, correctness outputs and child
+exits. An authenticated complete result qualifies only its exact final Linux
+release performance gates, without replacing normal CI or release approval.
+
 Repository ruleset `21823007` is active for repository `tensorbee/rdocx`,
 targets branches, and includes `~DEFAULT_BRANCH`. Its only rule requires exact
 status context `CI gate` with

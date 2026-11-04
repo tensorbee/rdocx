@@ -1450,6 +1450,8 @@ class SprintWorkflowTests(unittest.TestCase):
                 "SEMVER_SIGN": "skipped",
                 "OWNER_MODE": "false",
                 "OWNER_RESULT": "skipped",
+                "F283_REQUESTED": "false",
+                "F283_RESULT": "skipped",
                 "EVENT_NAME": event_name,
                 "CHANGES_RESULT": changes_result,
             }
@@ -1680,6 +1682,307 @@ class SprintWorkflowTests(unittest.TestCase):
         self.assertIn("name: CI gate", self.yaml_direct_lines(ci_gate, 4))
         self.assertIn("if: always()", self.yaml_direct_lines(ci_gate, 4))
 
+    def test_f283_optional_aggregate_requires_requested_success_or_unrequested_skip(self):
+        ci = (workflow.REPO / '.github/workflows/ci.yml').read_text()
+        script = self.yaml_run_script(self.yaml_step(self.yaml_block(ci, '  ci-gate:'), 'Validate filtered jobs'))
+        for requested in (False, True):
+            for result in ('success', 'failure', 'cancelled', 'skipped', '', None):
+                with self.subTest(requested=requested, result=result):
+                    env = self.ci_gate_environment(selected={}, results={}, event_name='workflow_dispatch')
+                    env['F283_REQUESTED'] = str(requested).lower()
+                    if result is None:
+                        env.pop('F283_RESULT')
+                    else:
+                        env['F283_RESULT'] = result
+                    child = subprocess.run(['bash', '-eu', '-o', 'pipefail', '-c', script], env=env, capture_output=True)
+                    expected = requested and result == 'success' or not requested and result == 'skipped'
+                    self.assertEqual(child.returncode == 0, expected)
+
+    def test_f283_success_keeps_normal_native_signer_and_owner_checks(self):
+        ci = (workflow.REPO / '.github/workflows/ci.yml').read_text()
+        script = self.yaml_run_script(self.yaml_step(self.yaml_block(ci, '  ci-gate:'), 'Validate filtered jobs'))
+        def run(env):
+            return subprocess.run(['bash', '-eu', '-o', 'pipefail', '-c', script], env=env, capture_output=True).returncode
+        env = self.ci_gate_environment(selected={}, results={}, event_name='workflow_dispatch')
+        env.update(F283_REQUESTED='true', F283_RESULT='success', SEMVER_REQUIRED='true')
+        for key in ('SEMVER_LINUX', 'SEMVER_MACOS', 'SEMVER_WINDOWS', 'SEMVER_SIGN'):
+            env[key] = 'success'
+        self.assertEqual(run(env), 0)
+        for key in ('SEMVER_LINUX', 'SEMVER_MACOS', 'SEMVER_WINDOWS', 'SEMVER_SIGN', 'CHANGES_RESULT'):
+            with self.subTest(normal_check=key):
+                self.assertNotEqual(run(dict(env, **{key: 'failure'})), 0)
+        self.assertNotEqual(run(dict(env, TEST_SELECTED='true', TEST_RESULT='failure')), 0)
+        owner = self.ci_gate_environment(selected={}, results={}, changes_result='skipped', event_name='workflow_dispatch')
+        owner.update(OWNER_MODE='true', OWNER_RESULT='success')
+        for key in ('NO_DEFAULT_FEATURES', 'RELEASE_REGRESSIONS', 'CLIPPY', 'FMT', 'DOC', 'PACKAGE_OXML_LAYOUT'):
+            owner[key + '_RESULT'] = 'skipped'
+        self.assertEqual(run(owner), 0)
+        self.assertNotEqual(run(dict(owner, OWNER_RESULT='failure')), 0)
+        for result in ('success', 'failure', 'cancelled', 'skipped', ''):
+            with self.subTest(conflicting_modes_result=result):
+                self.assertNotEqual(run(dict(owner, F283_REQUESTED='true', F283_RESULT=result)), 0)
+
+    def test_f283_optional_job_is_an_unconditional_gate_dependency(self):
+        ci = (workflow.REPO / '.github/workflows/ci.yml').read_text()
+        gate = self.yaml_block(ci, '  ci-gate:')
+        self.assertIn('if: always()', self.yaml_direct_lines(gate, 4))
+        self.assertIn('      - f283-linux-release-benchmarks', gate.split('    runs-on:', 1)[0])
+        step = self.yaml_step(gate, 'Validate filtered jobs')
+        self.assertIn("F283_REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.f283_benchmark == true }}", step)
+        self.assertIn("F283_RESULT: ${{ needs['f283-linux-release-benchmarks'].result }}", step)
+        job = self.yaml_block(ci, '  f283-linux-release-benchmarks:')
+        self.assertIn('name: F283 Linux release benchmarks (optional)', job)
+        assertion = re.search(r"^\s*assert os.environ\['OWNER_COMPATIBILITY'\] == 'false'.*$", job, re.MULTILINE)
+        self.assertIsNotNone(assertion)
+        class ConflictingEnvironment:
+            environ = {'OWNER_COMPATIBILITY': 'true'}
+        with self.assertRaises(AssertionError):
+            exec(assertion.group(0).strip(), {'os': ConflictingEnvironment})
+
+    def f283_prepare_dispatch_transfer(self, mutate=None, padding=0):
+        inputs_text = json.dumps({'crates/rdocx/src/lib.rs': '0' * 64})
+        wheel_text = json.dumps({'kind': 'wheel', 'argv': ['cargo', 'build', '--release', '--locked']})
+        cli_text = json.dumps({'kind': 'cli', 'argv': ['cargo', 'build', '--release', '--locked']})
+        proof = {'schema': 'f283-root-approved-final-input-v1', 'source_commit': 'b' * 40,
+                 'build_mode_source_attestation_accepted': True,
+                 'source_manifest': {'sha256': hashlib.sha256(inputs_text.encode()).hexdigest()},
+                 'build_receipts': {'wheel': {'sha256': hashlib.sha256(wheel_text.encode()).hexdigest()},
+                                    'cli': {'sha256': hashlib.sha256(cli_text.encode()).hexdigest()}}}
+        proof_text = json.dumps(proof)
+        transfer = {'schema': 'f283-root-transfer-v1', 'producer_run_id': 1234,
+                    'wheel_artifact_id': '5678', 'cli_artifact_id': 9012,
+                    'proof_json': proof_text, 'proof_sha256': hashlib.sha256(proof_text.encode()).hexdigest(),
+                    'source_inputs_json': inputs_text, 'wheel_build_receipt_json': wheel_text,
+                    'cli_build_receipt_json': cli_text}
+        if mutate:
+            mutate(transfer)
+        text = json.dumps(transfer, separators=(', ', ': '))
+        if padding:
+            text = text.replace(': ', ': ' + ' ' * padding, 1)
+        return text
+
+    def f283_prepare_dispatch(self, directory, transfer_text, *extra, output='request.json'):
+        path = directory / 'transfer.json'
+        path.write_text(transfer_text)
+        arguments = [sys.executable, '-I', '-B', str(workflow.REPO / 'scripts/benchmark_f283.py'),
+                     '--prepare-dispatch', '--transfer', str(path),
+                     '--transfer-sha256', hashlib.sha256(path.read_bytes()).hexdigest(),
+                     '--source-ref', 'refs/heads/sprint/s96', '--workflow-sha', 'c' * 40,
+                     '--output', str(directory / output), *extra]
+        return subprocess.run(arguments, capture_output=True, text=True, cwd=workflow.REPO)
+
+    def test_f283_prepare_dispatch_writes_exact_local_request(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            transfer_text = self.f283_prepare_dispatch_transfer()
+            child = self.f283_prepare_dispatch(root, transfer_text)
+            self.assertEqual(child.returncode, 0, child.stderr)
+            request_path = root / 'request.json'
+            payload = request_path.read_bytes()
+            request = json.loads(payload)
+            self.assertEqual(request, {'ref': 'sprint/s96', 'inputs': {
+                'owner_compatibility': False, 'source_sha': 'b' * 40,
+                'source_ref': 'refs/heads/sprint/s96', 'workflow_sha': 'c' * 40,
+                'runner_label': 'ubuntu-24.04',
+                'config_sha': hashlib.sha256(transfer_text.encode()).hexdigest(),
+                'f283_benchmark': True, 'f283_approval_bundle': transfer_text}})
+            self.assertTrue(payload.endswith(b'\n'))
+            payload.decode('ascii')
+            self.assertIn(str(request_path), child.stdout)
+            self.assertIn(str(len(payload)) + ' bytes', child.stdout)
+            self.assertIn(hashlib.sha256(payload).hexdigest(), child.stdout)
+            self.assertNotIn('proof_json', child.stdout)
+            self.assertNotIn(transfer_text, child.stdout)
+            self.assertNotEqual(self.f283_prepare_dispatch(root, transfer_text).returncode, 0)
+            self.assertEqual(request_path.read_bytes(), payload)
+
+    def test_f283_prepare_dispatch_refuses_invalid_contracts_without_output(self):
+        def set_proof(transfer, proof):
+            text = json.dumps(proof)
+            transfer['proof_json'] = text
+            transfer['proof_sha256'] = hashlib.sha256(text.encode()).hexdigest()
+
+        def refusal(name, mutate=None, raw=None):
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    text = raw if raw is not None else self.f283_prepare_dispatch_transfer(mutate=mutate)
+                    self.assertNotEqual(self.f283_prepare_dispatch(root, text).returncode, 0)
+                    self.assertFalse((root / 'request.json').exists())
+                    self.assertFalse((root / 'request.json.partial').exists())
+        refusal('malformed_transfer', raw='{not json')
+        refusal('wrong_schema', lambda t: t.update(schema='f283-root-transfer-v2'))
+        refusal('missing_schema', lambda t: t.pop('schema'))
+        for name, value in [('bool_id', True), ('zero_id', 0), ('negative_id', -5), ('float_id', 1.5)]:
+            refusal(name, lambda t, value=value: t.update(producer_run_id=value))
+        refusal('proof_sha_mismatch', lambda t: t.update(proof_sha256='0' * 64))
+        refusal('missing_proof_text', lambda t: t.pop('proof_json'))
+        refusal('malformed_proof', lambda t: t.update(proof_json='{broken',
+                                                       proof_sha256=hashlib.sha256(b'{broken').hexdigest()))
+        refusal('wrong_proof_schema', lambda t: set_proof(t, {**json.loads(t['proof_json']), 'schema': 'other'}))
+        refusal('uppercase_source_commit', lambda t: set_proof(t, {**json.loads(t['proof_json']), 'source_commit': 'B' * 40}))
+        refusal('short_source_commit', lambda t: set_proof(t, {**json.loads(t['proof_json']), 'source_commit': 'b' * 39}))
+        refusal('attestation_pending', lambda t: set_proof(t, {**json.loads(t['proof_json']), 'build_mode_source_attestation_accepted': False}))
+        refusal('string_attestation', lambda t: set_proof(t, {**json.loads(t['proof_json']), 'build_mode_source_attestation_accepted': 'true'}))
+        refusal('missing_source_manifest', lambda t: set_proof(t, {key: value for key, value in json.loads(t['proof_json']).items()
+                                                                   if key != 'source_manifest'}))
+        refusal('receipt_identity_mismatch', lambda t: t.update(wheel_build_receipt_json=json.dumps({'kind': 'other'})))
+        refusal('missing_receipt_text', lambda t: t.pop('cli_build_receipt_json'))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            text = self.f283_prepare_dispatch_transfer()
+            for name, source_ref in [('plain_branch_ref', 'sprint/s96'), ('empty_branch_ref', 'refs/heads/')]:
+                with self.subTest(name=name):
+                    self.assertNotEqual(self.f283_prepare_dispatch(root, text, '--source-ref', source_ref).returncode, 0)
+                    self.assertFalse((root / 'request.json').exists())
+            for name, workflow_sha in [('uppercase_workflow_sha', 'C' * 40), ('short_workflow_sha', 'c' * 39)]:
+                with self.subTest(name=name):
+                    self.assertNotEqual(self.f283_prepare_dispatch(root, text, '--workflow-sha', workflow_sha).returncode, 0)
+                    self.assertFalse((root / 'request.json').exists())
+            for name, extra in [('invalid_transfer_sha_option', ('--transfer-sha256', 'x')),
+                                ('execution_proof_conflict', ('--proof', 'p', '--proof-sha256', '0' * 64)),
+                                ('execution_case_conflict', ('--case', '1'))]:
+                with self.subTest(name=name):
+                    self.assertNotEqual(self.f283_prepare_dispatch(root, text, *extra).returncode, 0)
+                    self.assertFalse((root / 'request.json').exists())
+            (root / 'request.json.partial').write_bytes(b'prior-partial-bytes')
+            self.assertNotEqual(self.f283_prepare_dispatch(root, text).returncode, 0)
+            self.assertEqual((root / 'request.json.partial').read_bytes(), b'prior-partial-bytes')
+            self.assertFalse((root / 'request.json').exists())
+
+    def test_f283_self_test_refuses_preparation_options(self):
+        completed = subprocess.run([sys.executable, '-I', '-B', str(workflow.REPO / 'scripts/benchmark_f283.py'),
+                                    '--self-test', '--transfer', 't', '--output', 'o'],
+                                   capture_output=True, text=True, cwd=workflow.REPO)
+        self.assertNotEqual(completed.returncode, 0)
+
+    def test_f283_prepare_dispatch_enforces_complete_request_byte_bound(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base = self.f283_prepare_dispatch(root, self.f283_prepare_dispatch_transfer())
+            self.assertEqual(base.returncode, 0, base.stderr)
+            size = len((root / 'request.json').read_bytes())
+            (root / 'request.json').unlink()
+            at_bound = self.f283_prepare_dispatch(root, self.f283_prepare_dispatch_transfer(padding=65535 - size))
+            self.assertEqual(at_bound.returncode, 0, at_bound.stderr)
+            self.assertEqual(len((root / 'request.json').read_bytes()), 65535)
+            (root / 'request.json').unlink()
+            above = self.f283_prepare_dispatch(root, self.f283_prepare_dispatch_transfer(padding=65536 - size))
+            self.assertNotEqual(above.returncode, 0)
+            self.assertFalse((root / 'request.json').exists())
+            self.assertFalse((root / 'request.json.partial').exists())
+
+    def test_f283_atomic_writer_preserves_prior_partial_and_cleans_own_temp(self):
+        from scripts import benchmark_f283
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            prior = root / 'report.json.partial'
+            prior.write_bytes(b'prior-partial-bytes')
+            with self.assertRaises(FileExistsError):
+                benchmark_f283.atomic_bytes(root / 'report.json', b'payload')
+            self.assertEqual(prior.read_bytes(), b'prior-partial-bytes')
+            self.assertFalse((root / 'report.json').exists())
+            with patch.object(benchmark_f283.os, 'link', side_effect=OSError('link refused')):
+                with self.assertRaises(OSError):
+                    benchmark_f283.atomic_bytes(root / 'other.json', b'payload')
+            self.assertFalse((root / 'other.json.partial').exists())
+            self.assertFalse((root / 'other.json').exists())
+            self.assertEqual(prior.read_bytes(), b'prior-partial-bytes')
+            benchmark_f283.atomic_json(root / 'final.json', {'complete': True, 'n': 1})
+            self.assertEqual((root / 'final.json').read_bytes(), b'{\n  "complete": true,\n  "n": 1\n}\n')
+            self.assertFalse((root / 'final.json.partial').exists())
+            self.assertEqual(prior.read_bytes(), b'prior-partial-bytes')
+            with self.assertRaises(RuntimeError):
+                benchmark_f283.atomic_bytes(root / 'final.json', b'again')
+            self.assertEqual((root / 'final.json').read_bytes(), b'{\n  "complete": true,\n  "n": 1\n}\n')
+
+    def test_f283_prepare_dispatch_emits_only_the_hashed_transfer_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            changed = self.f283_prepare_dispatch_transfer(mutate=lambda t: t.update(producer_run_id=999))
+            earlier_digest = hashlib.sha256(self.f283_prepare_dispatch_transfer().encode()).hexdigest()
+            child = self.f283_prepare_dispatch(root, changed, '--transfer-sha256', earlier_digest)
+            self.assertNotEqual(child.returncode, 0)
+            self.assertIn('File identity mismatch', child.stderr)
+            self.assertFalse((root / 'request.json').exists())
+            child = self.f283_prepare_dispatch(root, changed)
+            self.assertEqual(child.returncode, 0, child.stderr)
+            self.assertEqual(json.loads((root / 'request.json').read_text())['inputs']['f283_approval_bundle'], changed)
+
+    def test_f283_prepare_dispatch_emits_bundle_hashing_to_its_config_sha(self):
+        from scripts import benchmark_f283
+        original = self.f283_prepare_dispatch_transfer()
+        changed = self.f283_prepare_dispatch_transfer(mutate=lambda t: t.update(producer_run_id=999))
+        digest = hashlib.sha256(original.encode()).hexdigest()
+
+        def emitted_bundle_hashes_to_config_sha(path):
+            request = json.loads(path.read_bytes())
+            bundle = request['inputs']['f283_approval_bundle']
+            return hashlib.sha256(bundle.encode('utf-8')).hexdigest() == request['inputs']['config_sha']
+
+        def two_snapshot_substitution(pending, transfer_key, unpatched_read_bytes, unpatched_open):
+            # Controlled counterfactual source, labeled: the identity-check
+            # read sees the original transfer and any later payload read sees
+            # different valid transfer bytes. Deterministic, with no race,
+            # thread or sleep.
+            def read_bytes(path_self):
+                if str(path_self) == transfer_key:
+                    return pending.pop(0) if pending else changed.encode('utf-8')
+                return unpatched_read_bytes(path_self)
+
+            def opened(path_self, mode='r', *args, **kwargs):
+                if str(path_self) == transfer_key and mode == 'rb':
+                    return io.BytesIO(pending.pop(0) if pending else changed.encode('utf-8'))
+                return unpatched_open(path_self, mode, *args, **kwargs)
+            return read_bytes, opened
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            transfer_path = (root / 'transfer.json').resolve()
+            transfer_path.write_text(original)
+            transfer_key = str(transfer_path)
+            unpatched_read_bytes, unpatched_open = Path.read_bytes, Path.open
+            arguments = argparse.Namespace(output=str(root / 'request.json'), transfer=transfer_key,
+                                           transfer_sha256=digest, source_ref='refs/heads/sprint/s96',
+                                           workflow_sha='c' * 40)
+            first_read, later_reads = two_snapshot_substitution([original.encode('utf-8')], transfer_key,
+                                                                unpatched_read_bytes, unpatched_open)
+            with contextlib.redirect_stdout(io.StringIO()):
+                with patch.object(Path, 'read_bytes', first_read), patch.object(Path, 'open', later_reads):
+                    self.assertEqual(benchmark_f283.prepare_dispatch(arguments), 0)
+            request_path = root / 'request.json'
+            self.assertTrue(emitted_bundle_hashes_to_config_sha(request_path))
+            self.assertEqual(json.loads(request_path.read_bytes())['inputs']['f283_approval_bundle'], original)
+
+            # Counterfactual replica of the former checked_file-then-read_bytes
+            # pattern, labeled as counterfactual and not a historical product
+            # RED record: the hash read sees the original transfer and the
+            # payload read sees the changed one.
+            former_read, former_open = two_snapshot_substitution([original.encode('utf-8')], transfer_key,
+                                                                 unpatched_read_bytes, unpatched_open)
+
+            def counterfactual_former_payload_text():
+                path = Path(transfer_key)
+                if not (path.is_absolute() and path.is_file()):
+                    raise RuntimeError('Missing absolute file: ' + str(path))
+                with path.open('rb') as stream:
+                    if hashlib.file_digest(stream, 'sha256').hexdigest() != digest:
+                        raise RuntimeError('File identity mismatch: ' + str(path))
+                return path.read_bytes().decode('utf-8')
+
+            with patch.object(Path, 'read_bytes', former_read), patch.object(Path, 'open', former_open):
+                former_text = counterfactual_former_payload_text()
+            self.assertNotEqual(hashlib.sha256(former_text.encode()).hexdigest(), digest)
+            former_output = root / 'former-request.json'
+            former_request = {'ref': 'sprint/s96', 'inputs': {
+                'owner_compatibility': False,
+                'source_sha': json.loads(json.loads(former_text)['proof_json'])['source_commit'],
+                'source_ref': 'refs/heads/sprint/s96', 'workflow_sha': 'c' * 40,
+                'runner_label': 'ubuntu-24.04', 'config_sha': digest,
+                'f283_benchmark': True, 'f283_approval_bundle': former_text}}
+            benchmark_f283.atomic_bytes(former_output, (json.dumps(former_request, indent=2, allow_nan=False) + '\n').encode('ascii'))
+            self.assertFalse(emitted_bundle_hashes_to_config_sha(former_output))
+
     def test_ci_gate_rejects_failed_selected_jobs_and_accepts_unselected_skips(
         self,
     ) -> None:
@@ -1702,7 +2005,7 @@ class SprintWorkflowTests(unittest.TestCase):
             "supply-chain",
             "prose",
         }
-        self.assertEqual(needs, filtered_jobs | {"changes", "owner-compatibility", "no-default-features", "release-regressions", "clippy", "fmt", "doc", "package-oxml-layout", "semver-linux", "semver-macos", "semver-windows", "semver-sign"})
+        self.assertEqual(needs, filtered_jobs | {"changes", "owner-compatibility", "f283-linux-release-benchmarks", "no-default-features", "release-regressions", "clippy", "fmt", "doc", "package-oxml-layout", "semver-linux", "semver-macos", "semver-windows", "semver-sign"})
         step = self.yaml_step(gate, "Validate filtered jobs")
         environment = self.yaml_block(step, "        env:")
         self.assertEqual(
@@ -1715,6 +2018,8 @@ class SprintWorkflowTests(unittest.TestCase):
                 "SEMVER_SIGN: ${{ needs['semver-sign'].result }}",
                 "OWNER_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.owner_compatibility == true }}",
                 "OWNER_RESULT: ${{ needs['owner-compatibility'].result }}",
+                "F283_REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.f283_benchmark == true }}",
+                "F283_RESULT: ${{ needs['f283-linux-release-benchmarks'].result }}",
                 "NO_DEFAULT_FEATURES_RESULT: ${{ needs['no-default-features'].result }}",
                 "RELEASE_REGRESSIONS_RESULT: ${{ needs['release-regressions'].result }}",
                 "CLIPPY_RESULT: ${{ needs['clippy'].result }}",
@@ -2442,7 +2747,7 @@ class SprintWorkflowTests(unittest.TestCase):
         self.assertEqual(run(env), 0)
         for result in ("failure", "cancelled", "skipped", ""):
             self.assertNotEqual(run(dict(env, OWNER_RESULT=result)), 0)
-        for key in (*extras, "TEST", "MSRV", "WASM", "PYTHON_BINDINGS", "PRESENTATION_FIDELITY", "WORD_FIDELITY", "HASH_HARNESS", "SUPPLY_CHAIN", "PROSE", "CHANGES"):
+        for key in (*extras, "TEST", "MSRV", "WASM", "PYTHON_BINDINGS", "PRESENTATION_FIDELITY", "WORD_FIDELITY", "HASH_HARNESS", "SUPPLY_CHAIN", "PROSE", "CHANGES", "F283"):
             self.assertNotEqual(run(dict(env, **{key + "_RESULT": "success"})), 0, key)
         self.assertNotEqual(run(dict(env, OWNER_MODE="false")), 0)
         exclusion = "!(github.event_name == 'workflow_dispatch' && inputs.owner_compatibility == true)"
