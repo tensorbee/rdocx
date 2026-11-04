@@ -44521,6 +44521,10 @@ impl Document {
             toc_paragraphs.push(p);
         }
 
+        if headings.is_empty() {
+            toc_paragraphs.push(CT_P::new());
+        }
+
         let field_run = |xml: String| {
             let mut run = CT_R::new("");
             run.content.clear();
@@ -44610,7 +44614,7 @@ impl Document {
     ///
     /// Searches body paragraphs, tables (including nested), headers, footers,
     /// footnotes, endnotes, the text boxes of the body, headers and footers,
-    /// and the chart labels of the body, and the content controls at every
+    /// and the content controls at every
     /// level of them, inline controls included. It reads the text
     /// [`crate::Paragraph::text`] reads: the text of a tracked insertion or
     /// move destination, replaced inside that revision, and not deleted or
@@ -46058,7 +46062,7 @@ impl Document {
     ///
     /// This is called after the typed-model replacement and flush_to_package.
     fn replace_in_xml_parts(&mut self, pairs: &[(&str, &str)]) -> usize {
-        use rdocx_oxml::placeholder::{replace_many_in_chart_xml, replace_many_in_xml_part};
+        use rdocx_oxml::placeholder::replace_many_in_xml_part;
 
         let mut count = 0;
         let mut changed = false;
@@ -46072,20 +46076,6 @@ impl Document {
                 // writes twice.
                 if let Ok((new_xml, n)) = replace_many_in_xml_part(&xml, pairs)
                     && (n > 0 || new_xml != xml)
-                {
-                    self.package.set_part(&part_name, new_xml);
-                    count += n;
-                    changed = true;
-                }
-            }
-        }
-
-        // Collect chart part names
-        for part_name in self.chart_part_names() {
-            if let Some(xml) = self.package.get_part(&part_name) {
-                let xml = xml.to_vec();
-                if let Ok((new_xml, n)) = replace_many_in_chart_xml(&xml, pairs)
-                    && n > 0
                 {
                     self.package.set_part(&part_name, new_xml);
                     count += n;

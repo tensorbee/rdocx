@@ -2145,8 +2145,8 @@ method as `Document.try_replace_text`. The WASM binding keeps its infallible
 
 Literal replacement reaches the body, tables, content controls at every level,
 headers, footers, footnotes, endnotes, the text boxes of the body, headers, and
-footers, and the labels of the charts in the body. Regex replacement reaches
-the same stories except chart labels. Every normal note of the
+footers. Regex replacement reaches the same stories. Neither changes chart
+label caches or embedded workbooks. Every normal note of the
 relationship-resolved footnotes and endnotes parts is searched, its tables and
 block controls included. The separator, continuation separator, and
 continuation notice entries are not, and neither is an untyped entry at id 0 or
@@ -2162,8 +2162,9 @@ and `replace_all_regex`, the WASM replacement method, and
 `rdocx replace --expect` share these counts.
 
 Literal replacement reaches the body, tables, content controls at every level,
-headers, footers, footnotes, endnotes, text boxes, and chart labels. Regex
-replacement reaches the same stories except chart labels. Every normal note of
+headers, footers, footnotes, endnotes and the supported body/header/footer text
+boxes. Regex replacement reaches the same stories. Chart caches and embedded
+workbooks remain unchanged. Every normal note of
 the relationship-resolved footnotes and endnotes parts is searched, its tables
 and block controls included. The separator, continuation
 separator, and continuation notice entries are not, and neither is an untyped
@@ -4576,6 +4577,21 @@ The native canonicalization behind both picture insertion bindings may reconcile
 ## Word tables, physical pictures and internal links
 
 Table exposes signed removable indent, autofit, actual table style ID or display-name resolution, six look flags and checked empty-row, logical-column and complete-cell-split operations. Undefined, ambiguous and wrong-type styles refuse without publication. Existing nested Cell.add_table uses the checked physical owner provider. Structural edits invalidate held rows and cells, while a no-op split preserves their revision.
+
+Cell merging drops only a lone content-empty paragraph, disregarding its
+properties and root attributes for that decision. Nontext or opaque content,
+nested tables and multiple paragraphs remain in row-major order. An all-empty
+merge retains the origin paragraph including its formatting. Row and column
+additions inherit the source cell's last paragraph properties. An existing
+paragraph-mark run format takes priority over the last run's direct format.
+New paragraphs exclude numbering, section and paragraph revision ownership,
+while other unknown properties retain their bytes. Added cells have one empty
+paragraph. Split-cell additions keep their existing default paragraph format.
+
+Authored TOC insertion with no selected headings places its field end in a
+following empty paragraph, so adding headings afterward remains rebuildable.
+The title retains the field begin, instruction and separator. Imported TOC
+boundary refusals retain their existing policy and error text.
 
 PictureOptions exposes checked metadata, crop and the supported inline and floating placement vocabulary. Document.add_picture, Run.add_picture and Cell.add_picture import path or bytes and return frozen factory-created Picture snapshots. Document.pictures returns physical source order across admitted stories. Snapshots carry document origin, revision, physical owner and unchanged source identity. Document.set_picture_size accepts one snapshot and resizes that occurrence only. The former relationship-wide Python operation is explicitly named set_picture_sizes_for_relationship. Native relationship-wide sizing and replace_image retain their separate compatibility contracts. Foreign, stale, malformed and unsupported inputs refuse before publication.
 

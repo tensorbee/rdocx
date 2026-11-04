@@ -8502,3 +8502,133 @@ fn fx281_cli_chart_tables_and_separate_read_diagnostics() {
         );
     }
 }
+
+fn issue432_text_box_options() -> rdocx::TextBoxOptions {
+    rdocx::TextBoxOptions {
+        width: rdocx::Length::pt(120.0),
+        height: rdocx::Length::pt(40.0),
+        anchor: rdocx::PictureAnchor {
+            horizontal_relative_from: rdocx::DrawingHorizontalRelativeFrom::Column,
+            horizontal_offset: rdocx::Length::pt(12.0),
+            horizontal_alignment: None,
+            vertical_relative_from: rdocx::DrawingVerticalRelativeFrom::Paragraph,
+            vertical_offset: rdocx::Length::pt(6.0),
+            vertical_alignment: None,
+            wrap: rdocx::DrawingWrap::Square,
+            distance_top: rdocx::Length::pt(0.0),
+            distance_bottom: rdocx::Length::pt(0.0),
+            distance_left: rdocx::Length::pt(0.0),
+            distance_right: rdocx::Length::pt(0.0),
+            relative_height: 1,
+            behind_text: false,
+        },
+        rotation_degrees: 0.0,
+        text_direction: rdocx::TextBoxDirection::Horizontal,
+        fill_color: None,
+    }
+}
+
+#[test]
+fn issue432_cli_text_and_expected_replacement_agree_without_chart_mutation() {
+    for chart in [true, false] {
+        let workspace = TempWorkspace::new("issue432-agreement");
+        let input = workspace.path.join("input.docx");
+        let output = workspace.path.join("output.docx");
+        let mut document = Document::new();
+        document.add_paragraph("North body");
+        let expected = if chart {
+            let data = rdocx::ChartData {
+                categories: vec!["North".into(), "South".into()],
+                series: vec![("Sales".into(), vec![1.0, 2.0])],
+                ..Default::default()
+            };
+            document
+                .add_chart(
+                    rdocx::ChartKind::Bar,
+                    rdocx::Length::inches(3.0),
+                    rdocx::Length::inches(2.0),
+                    &data,
+                )
+                .unwrap();
+            1
+        } else {
+            document.set_header("North header");
+            document.set_footer("North footer");
+            for kind in [
+                rdocx::StoryKind::Body,
+                rdocx::StoryKind::Header,
+                rdocx::StoryKind::Footer,
+            ] {
+                let story = document
+                    .stories()
+                    .unwrap()
+                    .into_iter()
+                    .find(|story| story.kind() == kind)
+                    .unwrap();
+                document
+                    .add_text_box_to_story(&story, "North textbox", issue432_text_box_options())
+                    .unwrap();
+            }
+            6
+        };
+        document.save(&input).unwrap();
+        let plain = cli(&["text", path_text(&input)]);
+        assert_success(&plain, "issue432 text");
+        assert_eq!(
+            String::from_utf8(plain.stdout)
+                .unwrap()
+                .matches("North")
+                .count(),
+            expected
+        );
+        let json = cli(&["text", path_text(&input), "--json"]);
+        assert_success(&json, "issue432 JSON");
+        let value: Value = serde_json::from_slice(&json.stdout).unwrap();
+        assert_eq!(value["scope"], "all-supported-stories");
+        let body_count = value["paragraphs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|paragraph| paragraph["text"].as_str().unwrap().matches("North").count())
+            .sum::<usize>();
+        let story_count = value["stories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|story| story["items"].as_array().unwrap())
+            .map(|item| item["text"].as_str().unwrap().matches("North").count())
+            .sum::<usize>();
+        assert_eq!(body_count + story_count, expected);
+        let replaced = cli(&[
+            "replace",
+            path_text(&input),
+            "-p",
+            "North",
+            "-v",
+            "NORTH",
+            "--expect",
+            &expected.to_string(),
+            "-o",
+            path_text(&output),
+        ]);
+        assert_success(&replaced, "issue432 replace --expect");
+        let plain = cli(&["text", path_text(&output)]);
+        assert_success(&plain, "issue432 reopened text");
+        assert_eq!(
+            String::from_utf8(plain.stdout)
+                .unwrap()
+                .matches("NORTH")
+                .count(),
+            expected
+        );
+        assert_eq!(
+            Document::open(&output)
+                .unwrap()
+                .text_report()
+                .text
+                .matches("NORTH")
+                .count(),
+            expected
+        );
+    }
+}

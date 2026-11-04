@@ -735,6 +735,15 @@ and every unmodelled property remain in their original schema slots. The
 and run properties from the final direct, style, and numbering identities. It
 does not maintain a second reader model.
 
+Checked table merge concatenates substantive cell content in row-major order.
+It drops only a single paragraph with no content beyond properties and root
+attributes. Nontext and opaque children, nested tables and multiple empty
+paragraphs remain content. An all-empty merge keeps the origin paragraph and
+its formatting. New row and column cells continue the source cell's last
+paragraph properties and mark formatting, with direct last-run formatting as
+the fallback for an absent mark. List, section and paragraph revision ownership
+are excluded. New split-cell paragraphs retain their separate default format.
+
 `CT_PPr` types the complete authored paragraph-property set. Text frame
 placement, line-number suppression, document-grid right indentation, contextual
 spacing, mirrored indentation, frame overlap suppression, text flow, vertical
@@ -1158,6 +1167,12 @@ caches. Saved header and footer PAGE and NUMPAGES caches remain unchanged under
 the pinned Word policy, while dynamic rendering uses per-page values. Note PAGE
 and SECTION follow the unique body reference owner even when document-end note
 text is printed on a later physical page. No second layout resolves these facts.
+
+Authored table-of-contents insertion always gives its field a following
+paragraph for the end marker when no heading entries exist. The title holds
+the begin, instruction and separator. Later heading insertion can therefore
+use the same rebuild path as headings that preceded TOC insertion. This does
+not broaden the retained foreign single-paragraph TOC boundary policy.
 
 The native facade also rebuilds supported existing main-story table of
 contents fields. It reparses each owned instruction through the same recursive
@@ -2021,7 +2036,9 @@ before enclosing content controls and exposes every matching body coordinate.
 Paragraph text and run handles use one accepted-view walk. Direct runs, inline
 content-control runs, insertion runs, and move-destination runs retain recursive
 source paths in exact order. Deletion and move-source text stays excluded.
-Literal and regex replacement read the same runs in the same order. Body,
+Literal and regex replacement read the same runs in the same order. Chart
+label caches and embedded workbooks remain unchanged by either operation.
+Chart-data editing and template merge retain their separate chart behavior. Body,
 table-cell, nested-control, header, footer, and text-box traversal also uses
 the accepted view for readable text, replacement, export, links, and pictures.
 Producer identity on paragraph, run, table-row, and content-control owners

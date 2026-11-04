@@ -36825,3 +36825,166 @@ fn issue433_generated_toc_entries_draw_plain_and_not_underlined() {
         "generated TOC entries must not carry the Hyperlink underline"
     );
 }
+
+#[test]
+fn issue432_rebuild_toc_both_insert_orders() {
+    let mut outcomes = Vec::new();
+    for before_headings in [true, false] {
+        let mut document = Document::new();
+        if before_headings {
+            document.insert_toc(0, 2).unwrap();
+        }
+        document.add_paragraph("Introduction").style("Heading1");
+        document.add_paragraph("Methods").style("Heading2");
+        if !before_headings {
+            document.insert_toc(0, 2).unwrap();
+        }
+        let result = document.rebuild_toc();
+        match result {
+            Ok(report) => {
+                assert_eq!(report.entry_count, 2);
+                let mut reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+                assert_eq!(reopened.rebuild_toc().unwrap().entry_count, 2);
+                let xml = String::from_utf8(document_xml(&mut reopened)).unwrap();
+                assert!(xml.contains("Introduction") && xml.contains("Methods"));
+            }
+            Err(error) => outcomes.push(format!("before_headings={before_headings}: {error}")),
+        }
+    }
+    assert!(
+        outcomes.is_empty(),
+        "authored TOC must rebuild in both orders: {outcomes:?}"
+    );
+}
+
+#[test]
+fn issue432_replacement_skips_chart_cache_and_workbook() {
+    let mut original = Document::new();
+    original.add_paragraph("North");
+    let data = rdocx::ChartData {
+        categories: vec!["North".into(), "South".into()],
+        series: vec![("Sales".into(), vec![1.0, 2.0])],
+        ..Default::default()
+    };
+    original
+        .add_chart(
+            rdocx::ChartKind::Bar,
+            Length::inches(3.0),
+            Length::inches(2.0),
+            &data,
+        )
+        .unwrap();
+    let bytes = original.to_bytes().unwrap();
+    let package = OpcPackage::from_reader(std::io::Cursor::new(&bytes)).unwrap();
+    let companions = package
+        .zip_entries()
+        .unwrap()
+        .into_iter()
+        .filter(|(name, _)| name.contains("/charts/") || name.contains("/embeddings/"))
+        .map(|(name, bytes)| (name, bytes.into_owned()))
+        .collect::<Vec<_>>();
+    assert!(companions.iter().any(|(name, _)| name.ends_with(".xlsx")));
+    assert!(companions.iter().any(|(name, _)| name.ends_with(".xml")));
+    let mut observed = Vec::new();
+    for regex in [false, true] {
+        let mut document = Document::from_bytes(&bytes).unwrap();
+        let count = if regex {
+            document.replace_regex("North", "NORTH").unwrap()
+        } else {
+            document.try_replace_text("North", "NORTH").unwrap()
+        };
+        let output = document.to_bytes().unwrap();
+        let reopened = Document::from_bytes(&output).unwrap();
+        assert_eq!(reopened.text_report().text.matches("NORTH").count(), 1);
+        let after = OpcPackage::from_reader(std::io::Cursor::new(output)).unwrap();
+        let after = after
+            .zip_entries()
+            .unwrap()
+            .into_iter()
+            .map(|(name, bytes)| (name, bytes.into_owned()))
+            .collect::<BTreeMap<_, _>>();
+        for (name, source) in &companions {
+            assert_eq!(
+                after.get(name),
+                Some(source),
+                "companion changed regex={regex} part={name}"
+            );
+        }
+        observed.push((regex, count));
+    }
+    assert_eq!(observed, vec![(false, 1), (true, 1)]);
+}
+
+#[test]
+fn issue432_foreign_single_paragraph_toc_refuses_atomically() {
+    let mut original = Document::new();
+    let bytes = original.to_bytes().unwrap();
+    let mut package = OpcPackage::from_reader(std::io::Cursor::new(bytes)).unwrap();
+    package.set_part("/word/document.xml",br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Foreign title</w:t></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> TOC \o "1-2" \h </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Introduction</w:t></w:r></w:p></w:body></w:document>"#.to_vec());
+    let mut fixture = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut fixture).unwrap();
+    let mut document = Document::from_bytes(&fixture.into_inner()).unwrap();
+    let before = document.to_bytes().unwrap();
+    assert!(
+        document
+            .rebuild_toc()
+            .unwrap_err()
+            .to_string()
+            .contains("table of contents result must span paragraph boundaries")
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+}
+
+#[test]
+fn issue432_literal_and_regex_keep_text_box_story_counts() {
+    let mut source = Document::new();
+    source.add_paragraph("North body");
+    source.set_header("North header");
+    source.set_footer("North footer");
+    for kind in [StoryKind::Body, StoryKind::Header, StoryKind::Footer] {
+        let story = source
+            .stories()
+            .unwrap()
+            .into_iter()
+            .find(|story| story.kind() == kind)
+            .unwrap();
+        source
+            .add_text_box_to_story(&story, "North textbox", text_box_options())
+            .unwrap();
+    }
+    let bytes = source.to_bytes().unwrap();
+    for regex in [false, true] {
+        let mut document = Document::from_bytes(&bytes).unwrap();
+        let report = document.text_report();
+        assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+        let expected = report.text.matches("North").count();
+        assert_eq!(expected, 6);
+        let count = if regex {
+            document.replace_regex("North", "NORTH").unwrap()
+        } else {
+            document.try_replace_text("North", "NORTH").unwrap()
+        };
+        assert_eq!(count, expected);
+        let saved = document.to_bytes().unwrap();
+        let reopened = Document::from_bytes(&saved).unwrap();
+        assert_eq!(
+            reopened.text_report().text.matches("NORTH").count(),
+            expected
+        );
+        let package = OpcPackage::from_reader(std::io::Cursor::new(saved)).unwrap();
+        for (name, xml) in package.zip_entries().unwrap() {
+            if name == "word/document.xml"
+                || name.starts_with("word/header")
+                || name.starts_with("word/footer")
+            {
+                let xml = String::from_utf8_lossy(&xml);
+                assert!(!xml.contains("North"), "stale paired branch in {name}");
+                assert_eq!(
+                    xml.matches("NORTH").count(),
+                    3,
+                    "both textbox branches and ordinary story: {name}"
+                );
+            }
+        }
+    }
+}

@@ -16319,3 +16319,77 @@ def test_fx281_word_python_string_exports_project_current_chart_title():
         for token in ["Quarter", "Q1", "Zeta region", "1150"]:
             assert token in text
     assert document.to_bytes() == before
+
+
+@pytest.mark.parametrize("vertical", [False, True])
+def test_issue432_merge_removes_only_empty_cell_paragraphs(vertical):
+    from rdocx import Document
+    document = Document()
+    table = document.add_table(2 if vertical else 1, 1 if vertical else 2)
+    table.cell(0, 0).text = "Total"
+    target = table.cell(1, 0) if vertical else table.cell(0, 1)
+    table.cell(0, 0).merge(target)
+    reopened = Document.from_bytes(document.to_bytes())
+    assert [p.text for p in reopened.tables[0].cell(0, 0).paragraphs] == ["Total"]
+
+
+@pytest.mark.parametrize("operation", ["row", "before", "after"])
+def test_issue432_new_cells_inherit_paragraph_formatting(operation):
+    from rdocx import Document
+    from lxml import etree
+    document = Document()
+    table = document.add_table(1, 1)
+    paragraph = table.cell(0, 0).paragraphs[0]
+    paragraph.alignment = 1
+    paragraph.add_run("source").font.bold = True
+    if operation == "row":
+        table.add_row()
+        row, column = 1, 0
+    else:
+        table.insert_column(0, before=operation == "before")
+        row, column = 0, int(operation == "after")
+    reopened = Document.from_bytes(document.to_bytes())
+    assert reopened.tables[0].cell(row, column).text == ""
+    with zipfile.ZipFile(io.BytesIO(document.to_bytes())) as archive:
+        root = etree.fromstring(archive.read("word/document.xml"))
+    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    cell = root.xpath("//w:tbl/w:tr", namespaces=ns)[row].xpath("w:tc", namespaces=ns)[column]
+    assert cell.xpath("w:p/w:pPr/w:jc/@w:val", namespaces=ns) == ["center"]
+    assert cell.xpath("w:p/w:pPr/w:rPr/w:b", namespaces=ns)
+    assert not cell.xpath("w:p/w:pPr/w:numPr", namespaces=ns)
+
+
+@pytest.mark.parametrize("before_headings", [False, True])
+def test_issue432_authored_toc_rebuilds_in_both_orders(before_headings):
+    from rdocx import Document
+    document = Document()
+    if before_headings:
+        document.insert_toc(0, max_level=2)
+    document.add_paragraph("Introduction").style = "Heading1"
+    document.add_paragraph("Methods").style = "Heading2"
+    if not before_headings:
+        document.insert_toc(0, max_level=2)
+    assert document.rebuild_toc().entry_count == 2
+    reopened = Document.from_bytes(document.to_bytes())
+    assert reopened.rebuild_toc().entry_count == 2
+
+
+def test_issue432_literal_and_regex_preserve_chart_parts():
+    import rdocx
+    document = rdocx.Document()
+    document.add_paragraph("North")
+    data = rdocx.CategoryChartData()
+    data.categories = ["North", "South"]
+    data.add_series("Sales", [1, 2])
+    document.add_chart(51, data, rdocx.Inches(3), rdocx.Inches(2))
+    before = document.to_bytes()
+    with zipfile.ZipFile(io.BytesIO(before)) as archive:
+        companions = {name: archive.read(name) for name in archive.namelist()
+                      if name.startswith(("word/charts/", "word/embeddings/"))}
+    assert any(name.endswith(".xlsx") for name in companions)
+    for regex in [False, True]:
+        candidate = rdocx.Document.from_bytes(before)
+        count = candidate.replace_all_regex([("North", "NORTH")]) if regex else candidate.try_replace_text("North", "NORTH")
+        assert count == 1
+        with zipfile.ZipFile(io.BytesIO(candidate.to_bytes())) as archive:
+            assert {name: archive.read(name) for name in companions} == companions

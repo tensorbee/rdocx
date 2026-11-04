@@ -126,14 +126,15 @@ Exclusive final integrated hash owner only. This worker neither records nor edit
 
 ## Implementation checklist
 
-- [ ] Root affected final audit and approved canonical design/registration, authenticated Issue432/PR441 current identities.
-- [ ] Clean metadata-only Base exception, normal claim and /start-feature --claimed. Exclude all unrelated C1 carries.
-- [ ] Baseline RED fixtures in existing carriers for merge, inherited formatting, both TOC orders and chart exclusion. Separate expected GREEN preservation controls from semantic RED.
-- [ ] Implement only four C-owned clauses, retain existing atomicity/errors/raw preservation and no new source files/modules/public surface. Keep formatted_empty_cell cell-only for split_cell, add substantive inherited_empty_paragraph only to row/column routes and lock split unchanged.
-- [ ] Mandatory current CLI JSON/plain, native report/literal/regex, body/header/footer text-box duplicate-branch controls, native/Python table/TOC paths and WASM replacement route remain covered.
-- [ ] HLD03/HLD10 exact C sections updated, math/shape/notes/style/numbering ownership respected.
-- [ ] Scoped checks and authenticated GREEN receipts, self-review then actual independent microscope within original implementation cap.
-- [ ] /complete-feature --prepare only after independent review and scoped gate, with truthful pending final riders. Integrator owns totals, hash and final union.
+- [x] Root affected final audit and approved canonical design/registration, authenticated Issue432/PR441 current identities.
+- [x] Clean metadata-only Base exception, normal claim and /start-feature --claimed. Exclude all unrelated C1 carries.
+- [x] Baseline RED fixtures in existing carriers for merge, inherited formatting, both TOC orders and chart exclusion. Separate expected GREEN preservation controls from semantic RED.
+- [x] Implement only four C-owned clauses, retain existing atomicity/errors/raw preservation and no new source files/modules/public surface. Keep formatted_empty_cell cell-only for split_cell, add substantive inherited_empty_paragraph only to row/column routes and lock split unchanged.
+- [x] Actual local CLI JSON/plain, native report/literal/regex and body/header/footer text-box paired-branch controls pass. Native/Python/WASM source consumers are audited and public Python regressions pass AST. Installed runtime is not claimed.
+- [ ] Final installed Python3.9/3.12 and typing/stubs, WASM target/runtime, SDK/raw preservation, native residuals, integrated full/hash, archives/dry-runs and hosted CI remain pending.
+- [x] HLD03/HLD10 exact C sections updated, math/shape/notes/style/numbering ownership respected.
+- [x] Scoped checks and authenticated GREEN receipts, self-review then actual independent microscope within original implementation cap.
+- [x] /complete-feature --prepare only after independent review and scoped gate, with truthful pending final riders. Integrator owns totals, hash and final union.
 
 ## Coordination
 
@@ -146,3 +147,7 @@ No new product-policy question is manufactured. The bounded A8 current native/CL
 ## Root affected final approval and claim
 
 Codex affected final1 accepts this bounded contract with zero findings. Original three design peers remain consumed. Current Issue432 body and PR441 head are unchanged in the authenticated12:48UTC GET-only refresh. The prior draft/preparation statements above are historical. Root approves product implementation on a guarded clean metadata-only Base, with no F272 provider completion, no imported/story waiver and all final riders pending. Actual claim owner is codex in work/f-x277c-codex at /private/tmp/rdocx-s96-f277c-codex. No unfinished canonical C1 source enters that Base.
+
+## Local preparation evidence
+
+Root implemented this child and recorded source-pinned old-producer semantic RED and fixed-source GREEN in the existing progress record and /private/tmp/rdocx-s96-f277c-implementation. Identified Codex self-review1and actual independent microscope1are clean. Five unit, four native and one CLI new cases plus four native and three CLI existing controls pass. All-target/all-feature native/CLI Clippy, fmt, prose, whitespace and Python AST pass. This is local preparation only. The plan stays approved, delivery stays in-progress and every named final rider remains pending. Four labelled source commits retain distinct intentional behavioral changes, with final cumulative source equal to the reviewed candidate. No provider completion or sprint totals are recorded.
