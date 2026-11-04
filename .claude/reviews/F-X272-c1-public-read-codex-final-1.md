@@ -1,0 +1,13 @@
+# F-X272 C1 public read contract, Codex final 1
+
+USEFUL FACTS, POLICY NOT CLOSED. DeepSeek traced actual wrapper failure behavior and the named consumers. No source lease, implementation, fourth peer, counter reset or resource-policy amendment is approved.
+
+The different failure branches are confirmed by crates/rdocx-oxml/src/text.rs:10885 and :10924. Raw wrapper failure loses projected content, while simple-field failure keeps the original run. An unchanged signature alone does not preserve observable content. Small escaping model metadata remains required.
+
+P1 is incomplete for direct public uses. /private/tmp/rdocx-deepseek-harness/c1-public-read-contract/READ_CONTRACT.md:58 proposes reserving later view work at parent import and keeping run_wrapper_paragraph unchanged. But raw_run_wrapper_content is public and accepts raw bytes directly at crates/rdocx-oxml/src/text.rs:10971. accepted_view is public at :10822 and can be called on a paragraph assembled through public model fields, with no parent import. No persisted trusted admission proof or callable read-operation policy is provided for those cases. Parent parse reservation does not by itself prove every later view is already admitted.
+
+The report's double-charge claim also needs a precise operation lifetime. READ_CONTRACT.md:38 treats a later view call as a parser descendant of a completed parent import. The approved plan at .claude/plans/F-X272-design.md:3673 governs internal parser descendants sharing their active parent decision and forbids deriving fresh allowance from expanded XML. It does not explicitly make two separately invoked operations share one lifetime reservation forever. Distinguish nested child parsing from an independently invoked later read over original retained bytes, and distinguish those original bytes from its synthetic reconstructed paragraph. Do not use an inferred lifetime restriction to manufacture a product choice. This review does not approve per-wrapper renewed allowances inside one aggregate read.
+
+The three true public infallible model-producing functions still need an explicit over-budget outcome. Neither a parent-only proposal nor unqualified None proves whole-consumer compatibility. Close the direct-input and manually assembled model cases, identify genuine remaining choices with callable alternatives, and preserve small success, aliases, zero-growth and unused-URI cases. Do not claim the actual existing failure channel alone approves new silent loss of supported content.
+
+No tests, native or source qualification executed. Root direct review follows the focused author correction. STOP.

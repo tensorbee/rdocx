@@ -35,10 +35,10 @@
 | F-X280 | Complete Issue435 through child stories, completion umbrella | L | pending | - |
 | F-X280a | Refuse negative authored shape sizes before publication | S | in-progress | opencode |
 | F-X280b | Complete validation and damaged-input refusal | L | pending | - |
-| F-X280c | Validate stored PresentationML packages through the public file route | M | in-progress | opencode |
+| F-X280c | Validate stored PresentationML packages through the public file route | M | in-progress | codex |
 | F-X281 | Complete picture, chart, export and layout fidelity | XL | in-progress | codex |
 | F-X282 | Bound edit cost across styles, body and cells | M | in-progress | codex |
-| F-X283 | Bound whole-cell setters and Python open-replace-save cost | L | in-progress | codex |
+| F-X283 | Bound whole-cell setters and Python open-replace-save cost | L | in-progress | opencode |
 
 ## Sequencing note
 
@@ -59,6 +59,22 @@ The old unopened S96 bundle is split into S97 AcroForms (F-X242/243/244, all Iss
 The user added [Issue429](https://github.com/tensorbee/rdocx/issues/429) on2026-10-30and requires a concrete fix and validation before the authorized apology/reporter comment. Q-S96-03is answered: prepare Word0.17.0andshared/PowerPoint0.15.0with strict SemVer gates. Actual published-archive compiler probes establish conflicting .3Vec and .4Arc contracts, so a universal compatible Vec-only .14patch is not promised. The exact reporter clients compile with0.14.3. The amended F-X275plan retains that narrow workaround, a separately held optional OPC.4yank candidate, all compatible/yanked/equal API baselines and compiler canaries. Implementation, independent review and actual native/hosted/packaging proof remain due. The earlier capacity estimate predates this expansion. No comment, yank or publication has occurred.
 
 The user added [Issue430](https://github.com/tensorbee/rdocx/issues/430) on2026-10-30. F-X272owns the comparison amendment for added/removed footnotes, the existing note-text-edit control, ignored-note reference consistency and the separately reported following-paragraph rewrite. Actual issue/script identity and all five rows are retained in its existing plan and the S96plan. Q-S96-04 is answered for representation: pending comparison-owned footnote lifecycle uses hidden, zero-width STANDARD Word bookmarks, and imported fully valid convention markers follow the same convention. Preserve original unused notes. Cleanup of newly owned notes follows the selected owning revision's accept or reject outcome, retaining notes still referenced by the retained result. Normal-note identity, schema placement, custody and cross-document collisions, and selected-resolution package cleanup still require semantic contract closure. Native Word retention remains unvalidated. No Issue430 implementation is authorized before that closure. No Issue430 comment is authorized. The exact published0.16.4/Python3.14reproduction confirms both add/remove failures and an ignored-note dangling reference. The following-paragraph rewrite was not reproduced in the supplied controls. Current-source/native acceptance remains pending, and no430comment is authorized. This addition and Issue429invalidate the earlier capacity estimate. Current comparison repair continues without replacing its preserved RED observations.
+
+Q-A430-28 is answered: the user approved the exact [one-release native
+exception](/private/tmp/rdocx-cross-review/Q-A430-28-native-evidence-decision.json).
+Only the positive with two physical footnote references sharing one normal
+definition is unobserved under user-approved acceptance exception, never passed.
+The [V3 negative](/private/tmp/rdocx-cross-review/native430-alternative-reference-v3/NATIVE_SCALAR_FACTS.json),
+[V4 different-graph NOTEREF positive](/private/tmp/rdocx-cross-review/native430-noteref-v4/NATIVE_SCALAR_FACTS.json)
+and [V5 separate-owner native move](/private/tmp/rdocx-cross-review/native430-native-move-v5/NATIVE_SCALAR_FACTS.json)
+remain distinct evidence. A430-6/7 and Q-A430-22, physical inventories/cleanup,
+complete custody selection, partial-selection atomicity, original unused notes,
+lifecycle/reopen/selective resolution, bindings/CLI, full SDK including
+expected-invalid controls and actual comparison-output native checks on
+Word-admitted inputs remain mandatory. Stable backlog follow-up R-A430-28
+requires re-evaluation on a later Word release. Frozen V13 stays historical.
+No feature status/count change, provider readiness, Issue430implementation or
+publication approval follows. C1 remains incomplete.
 
 ## New GitHub intake, 2026-10-31
 
@@ -120,18 +136,93 @@ The user directed DeepSeek-only delivery and parallel implementation of ready ap
 
 Root applies a narrow coordination exception to the all-designs-first and clean-canonical claim gates: the unfinished F-X272 working changes remain byte-identical and excluded from the worker Base. Only reviewed planning and claim metadata is committed. Each new worker checkout is clean and its product source equals reviewed E2A, with approved plan and claim metadata added. No unfinished product source is committed to create this Base. This does not waive dependency completion, acceptance, independent implementation review, scoped validation, final native/schema/hash/binding/hosted gates or separate release approval.
 
+### Current operational evidence, 2026-11-01
+
+Native Word control recovered for bounded generated-document probes. Word 16.114.1 retained the two custody bookmark names, renumbered shared revision ids and moved the note marker inside an insertion. Accept All retained both markers and the note. Reject All retained the body marker and separator-only part while removing the note and its marker. The observation report is `.claude/reviews/S96-issue430-native-custody-format-observations.md`. Earlier unavailability statements are historical. This is synthetic format evidence, not compare implementation, selective resolution, schema or final native acceptance. The Issue430 author is repairing the recognition contract against these observations.
+
+F-X276 and F-X278 implementation workers run in separate DeepSeek worktrees. Their independent implementation reviews have not started. Root prepared those reviews and verified isolated cache prepopulation, without treating a cache as test evidence. The 18:16 UTC open GitHub refresh contains 18 pure issues and nine PRs with no body or head delta against the preceding packet. Its first independent audit remains pending, and it contains no fresh CI, comments or closed-history evidence.
+
+
+### Current operational checkpoint, 2026-11-02
+
+F-X276 implementation peer3 and F-X278 implementation peer2 are now running in their separate DeepSeek workers after verified author stops and frozen source/evidence packets. Earlier statements that implementation reviews had not started are historical. F-X276 has used two completed implementation peer passes and its third is the last permitted pass. F-X278 has used one completed implementation peer pass and its second is active. Root final review follows their peer repair cycles. Neither story is accepted or integrated by this checkpoint.
+
+F-X272 remains the dependency blocker. The completed C1 V11 author proposal failed Root targeted review3 with two design defects and one smell, recorded in `.claude/reviews/F-X272-c1-mechanism-codex-final-3.md`. Its same unfinished TEMP design phase continues with V12, without a fourth design peer or source lease. Issue430 V13's targeted native-gate timing amendment passed Root final10, while positive retained-reference native qualification and actual implementation remain due.
+
+F-X282's affected canonical design repairs passed Root final5, but its plan remains draft and it is pending implementation. F-X283's canonical design author has stopped with a matching frozen handoff. The plan stays draft, mandatory-open equivalence remains unclosed, and two design peer passes remain. GitHub read-only Task28 found18pure open issues and9open PRs with no change from Task27. Historical failed CI is not current-source qualification. Final integrated, native, rendering, installed binding, packaging and hosted gates remain pending.
+
 ## Codex implementation takeover, 2026-11-02
 
 The user explicitly directed Codex to take over implementation and integration for faster delivery. This supersedes the earlier DeepSeek-only assignment. F-X276 and F-X278 keep their original Bases and preserved worker paths on successor codex branches. Existing independent model reviews and assistance logs remain attributed to their actual authors. Codex workers implement separate stories in parallel and independent final review remains required. This changes ownership, not acceptance or final release approval.
 
 
+### Current operational checkpoint after takeover, 2026-11-02
+
+F-X276 completed all three implementation peers and clean Codex final2, then integrated locally at91dfb0a7c6b48c054fc4a28df6bca7994f717fc9 with its validated final-acceptance handoff consumed. Run state is reviewed, delivery stays in-progress and plan approved. At that clean integration all326 authenticated local build inputs matched. The preserved unfinished F-X272 source has since been restored, so this observation does not claim qualification of that dirty combined source. The F-X276 clean worker was removed without force, its branch and source commits retained, and the inactive incremental cache was reclaimed. Final integrated acceptance remains pending.
+
+F-X278 Codex author has stopped after targeted repairs and actual scoped checks. Its third independent implementation peer is now Codex, following the two actual DeepSeek peers. Root final review follows that phase. F-X283 author repaired its draft but explicitly left mandatory-open, dormant authority and other concrete closure items unresolved. F-X272 C1 still has a real raw-fallback regression and does not unblock its dependent stories. GitHub Task29 found18pure open issues and9open PRs without a delta, with no new-source CI proof. No push, reporter comment, tag or publication occurred.
+
 ## Next parallel resource wave, 2026-11-02
 
 F-X282 is claimed for Codex on the clean integrated F-X276/F-X278 source. It edits facade styles/cell publication, package sharing, binding run routes and their existing test/HLD carriers. Concurrent F-X272 source work is restricted to its OOXML qualifier kernels and tests, with shared facade/HLD edits paused. Its preserved unfinished source is excluded from this Base and remains neither complete nor a provider. The stories have no formal dependency edge. Later source reconciliation must preserve both checked-publication contracts and every final gate. The older resource-successor ordering is historical coordination, not a new dependency barrier.
 
+
+### Current operational checkpoint after F-X278 integration, 2026-11-02
+
+F-X278 completed its third independent peer, RF278-01 remediation and clean Codex final2, then integrated locally at52260431602d7b8e2b0c6b69d0af56c6f3c465d9. Independent composition review is clean and all seven focused integrated Issue431 controls pass. Its consumed clean worker is removed, with branch, exact source commits, progress archive and artifact evidence retained. Run state reviewed, plan approved and delivery in-progress. Final deterministic delta review, native, installed, packaging and hosted gates are not passed by this checkpoint.
+
+F-X282 is now running in its isolated Codex worker at Baseaff3f2b8744ed86755db8520c9bf6abeed5f2038. The restored F-X272 carry includes a clean targeted review of the shared instruction syntax/scalar prerequisite, with52field and19instruction tests passing. Exact raw-control fallback remains33capture passes and1failure, so C1 and its dependent stories remain incomplete. No release or reporter comment has been posted.
+
 ## Codex delivery wave after F-X282 integration
 
 F-X282 is locally integrated reviewed at28a36b761eac87e446ac35d2556313aaa68c76c1, including its separately labelled malformed-styles delta. Its exact release timings and all final gates remain pending. F-X281 and F-X283 designs are approved. F-X283 is claimed for Codex in a clean isolated worker and owns facade, binding, unpublished support and HLD03/10/12 resources next. F-X272 runs only its OOXML constructor/admission kernels and tests alongside it, with facade/binding/HLD changes paused. F-X281 implementation follows these shared resources. These are resource constraints, not new provider edges. No provider completion or final acceptance is implied.
+
+Root extended C1 scalar decoding through18paragraph/frame slots. The exact former paragraph-spacing failure and its extended matrix now pass. Two added actual compound run-property controls remain RED, with38capture passes and2failures. The older33/1 and37/1 producers remain historical. Complete constructor verdicts, summaries, normalization/scheduling, checked-entry coverage, Issue430 and all final gates remain due. F282 restored-union check,15issue437 controls and2ordinary field comparison controls pass, with the existing unused facade test variable warning retained.
+
+
+### Current Codex source and binding checkpoint
+
+The later compound and operation-facts source increments pass49capture controls, replacing the historical38/2producer above. Primary occurrence routes retain one original qualifier pass and raw outcomes govern weighted admission. Their bounded independent audit establishes zero new defects or smells. Root then implemented exact per-call borrowed-model affine normalization. Two new controls,52field-filter and49capture cases pass separately, with changed-crate warnings-denied Clippy and formatting passing. The bounded independent affine review establishes zero new defects or smells. These local observations do not complete C1, its provider edge, parser-side summaries, weighted/table maxima, derived/aggregate scheduling or Issue430.
+
+F-X283 implementation peer1 found a high retained-owner matching defect for a clean edited cell beside a nested table. All four actual installed edit-mode controls fail on the frozen author artifact and pass on Base. Its separate repair uses cached selected-table eligibility and remains under implementation, before peer2 and Root final. F-X281 remains approved and unclaimed behind the shared facade/binding/HLD resources. No full integrated or release gate has passed.
+
+The latest read-only GitHub Task31 refresh still observes18pure open issues and9open PRs, with no issue-body/state/update or PR-head change from Task30. Latest hosted sprint CI remains the older failed41162658315atdae129fa197cd4218e653ed71ae1496ac6967dce. This is no current-source CI result. No remote mutation, reporter comment, tag or publication occurred.
+
+
+### Exclusive F-X281 implementation phases
+
+F-X281 is claimed for Codex at4a220b6769fc2a5a2c90fc600f580478ea7e62f8in work/f-x281-codex. PhaseA edits only the approved media/chart/PowerPoint subset under oxml-media, oxml-pdf, oxml-chart, rpptx-oxml and rpptx-layout, with their existing test entrypoints. Word facade/binding, presentation facade/semantic export, HLD, manifests, baselines and trackers are reserved for a later explicit handback. The same source file, test binary or semantic HLD section is never held by both stories. All eight criteria and full HLD impact remain required before verification. This resource phasing supersedes earlier whole-story waiting, with no provider edge or gate change.
+
+The current F-X272 borrowed-model maxima source is frozen for independent bounded audit. Its composed3, authored2, table32lifecycle1, affine2, capture49and field-filter53cases pass separately, with final warnings-denied Clippy and formatting passing. Actual comparable guard-loop visits fall from699to363, with362computed summaries. These are model-loop observations, not release timing. Parser-side facts, complete outcomes, namespace/Result/derived/aggregate scheduling and Issue430 remain open.
+
+F-X283 D1 remediation is frozen for actual implementation peer2of3. Actual affected21installed cases,12neighbor controls and current-source internal C9diagnostic pass, with the latter distinct from installed injection. No Root final, preparation, integration or feature completion has occurred. The F281claim archive and retained stash preserve all unfinished source exactly. No push or release action occurred.
+
+
+### F-X283 reviewed integration and continued parallel implementation
+
+F-X283 completed its three implementation peers and clean Codex final review, then integrated locally at514a076e592517ef128e555f52cef1085fa702de. Independent immutable reconciliation authenticates all16prepared source paths and311declared build inputs at that commit. The handoff is consumed and run state reviewed. Its plan remains approved and delivery in-progress, with exact Linux release timings and installed, native, typing and final union gates pending. The unfinished canonical C1 carry was restored, including all four active parser-author paths byte-exact. Focused restored-union checking passed, and all five fx283 native controls passed after removal of an unused test local. These focused observations do not establish final acceptance.
+
+Codex continues F-X272 parser qualification in canonical OOXML files and F-X281 PhaseA rendering fixes in its separate worker. F-X281 later facade, export and HLD phases still require explicit resource reconciliation. F-X277, F-X279 and F-X280 retain their actual provider barriers. No push, reporter comment, release tag or publication has occurred.
+
+
+### Current Root implementation and GLM preparation checkpoint
+
+Root owns canonical F-X272. The connected scoped capture/insertion slice passes
+7related OXML controls,3facade unit controls and13affected native regressions,
+plus scoped checks and warnings-denied Clippy. An existing fixture additionally
+proves physical attribute-origin deduplication. Complete field/current and
+normalization provenance, derived admission reuse and Issue430 remain open.
+F-X277, F-X279 and F-X280 retain their actual provider barriers.
+
+GLM completed only A283-14 on high effort, followed by two focused repairs and
+clean Root final3. Its11affected tests and19runner controls pass. The reviewed
+source is a79028e1, with a validated external-CI preparation handoff retained in
+work/f-x283-opencode. This continuation is not yet integrated. Root has taken
+source and integration control back. A further independent GLM trial is allowed
+when a suitable story is ready, but none is assigned. All final external and
+union gates remain pending. GitHub intake at2026-11-03T00:11UTC found18open
+issues and9open PRs, unchanged, with no new-source CI result. No remote write,
+publication or completed delivery is claimed.
 
 
 ### Proposed F-X277 independent radical child and metadata-only claim route
@@ -157,3 +248,13 @@ F-X280 second delivery split, proposed: F-X280c owns original A280-4 as one inde
 Root affected final approves and claims F-X280c with opencode in /private/tmp/rdocx-s96-f280c-opencode. The prior proposed/draft paragraph is historical. This exact metadata-only coordination exception preserves all unfinished source and unrelated carry. Parent/remainder provider barriers, exhausted design peers, scoped implementation review and every final rider remain. No product run, provider completion or publication is claimed.
 
 Root affected final approves and claims F-X279a with codex in /private/tmp/rdocx-s96-f279a-codex. The prior proposed/draft paragraph is historical. This exact metadata-only coordination exception preserves all unfinished source and unrelated carry. Parent/remainder provider barriers, exhausted design peers, scoped implementation review and every final rider remain. No product run, provider completion or publication is claimed.
+
+
+On2026-11-04 Root approved recovery of the existing running F-X272 continuation
+into /private/tmp/rdocx-s96-f272-codex-recovery on work/f-x272-codex. The old
+claim history is retained under archive/s96-f-x272-codex-43ee90a9 and in the
+verified recovery packet. Its recovery Base is the metadata commit containing
+this decision. Product/test/HLD carry remains uncommitted in that worker.
+Canonical stays the sole shared-delivery integrator. This restores the real
+clean-tree integration gate for seven prepared independent workers, without
+unblocking any formal dependency or relaxing final acceptance.

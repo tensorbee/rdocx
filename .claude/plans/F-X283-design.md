@@ -993,43 +993,104 @@ actual current C9 binding-object diagnostic. No delivery completion is claimed.
 ## Approved final benchmark execution route
 
 The exact A283-1 through A283-4 workloads and thresholds remain unchanged.
-The reviewed local implementation is integrated at
-514a076e592517ef128e555f52cef1085fa702de. Resume the existing F-ID and worker
-branch for the missing callable final Linux gate, preserving original claim
-Base 101c34c4a6d5fa62d9ba0e0ff745fd44c9aeaf13 and all prior evidence.
-This adds no product dependency or public API and resets no review counter.
+The reviewed product implementation is integrated at
+514a076e592517ef128e555f52cef1085fa702de. The resumed worker preserves original
+Base 101c34c4a6d5fa62d9ba0e0ff745fd44c9aeaf13 and all prior evidence. No
+product dependency, public API, review counter or performance threshold changes.
 
-Add scripts/benchmark_f283.py from the reviewed TEMP runner, SHA-256
+Add scripts/benchmark_f283.py from the reviewed runner, SHA-256
 9d944b03b199e16e58e4d8b404f319c06b5722e9bf7933b9f382fe0ce6d07acc.
 Root asked under AGENTS.md's new-file rule and the user instructed continuation.
-The runner preserves the pinned original workloads, validates input geometry,
-and requires separately authenticated final source, release artifacts, build
-configuration and interpreter identities. Its 19 synthetic checks pass.
-These are tool checks, not product timings.
+The runner preserves the pinned workloads, checks input geometry and requires
+authenticated final source, release artifacts, build configuration and interpreter
+identities. Its 19 synthetic checks are tool evidence, not product timing.
 
-Use the already registered .github/workflows/ci.yml for a manual benchmark-only
-route. Keep existing default, push, PR, schedule and owner-only behavior.
-Benchmark mode selects only a native ubuntu-24.04 x86_64 CPython3.12 job with
-read-only permissions. Normal CI and SemVer signing remain separate.
-Existing scripts/sprint_workflow.py excludes only actual started, source-qualified
-benchmark attempts from normal CI authority. Skipped jobs and claimed inputs
-cannot exclude ordinary evidence. A later benchmark run cannot invalidate an
-applicable normal proof. Add the four focused cases to the existing controller
-test entrypoint. The concrete four-path TEMP patch is
-58ac548859df3e16ca4d3e8c37df96b2bb84a1abfe584e132e0a91e690fe2b1e.
-Root reviewed it with zero actionable findings and independently passed eight
-controller tests and 15 selector controls. Revalidate its exact inputs on adoption.
+The operative route after Codex final review2 is an optional benchmark job
+alongside the normal final CI invocation in the registered ci.yml. Preserve all
+existing normal and owner-only selectors. Keep CI gate unconditional with
+always(). Add the benchmark job to its needs and check its result: requested
+benchmarks must succeed, while an unrequested benchmark job must be skipped.
+The final ordinary manual CI invocation can request both normal validation and
+the exact performance workloads once. Never emit a successful required context
+merely because a benchmark-only route skipped normal validation.
 
-Update HLD15's CI and proof-authority intent before source freeze. Earlier
-HLD03, HLD10 and HLD12 product updates remain intact and have no new lease in
-this resumed phase. Source-qualified dispatch, authentic producer transfer,
-payload-size admission, exact Linux timings and the full union remain pending.
-No new workflow is added because its registration would require default-branch
-integration before this pre-close gate. No source push or dispatch is authorized
-by this plan revision alone. Use the workflow's reviewed source-availability
-checkpoint when its prerequisites actually pass.
+There is no benchmark-only mode and no new normal-SemVer authority exclusion.
+Restore the existing controller exactly. The new job retains its owner/source
+admission, read-only permissions, pinned second-phase release artifacts and
+conflicting-owner-mode refusal. Missing producer or interpreter proof, oversized
+transfer, failed timing or a missing workload remains failed or pending. No
+build, signing, publication or tag action belongs to the benchmark job.
 
-This extension triggers risk-routing's performance-budget, new-file,
-release-scripting, shared-consumer and evidence-adoption rows. Keep their final
-integrated checks and separate release approval. Local scope is the runner,
-route selectors and deciding controller regressions. No final gate is waived.
+Update the existing workflow tests for optional benchmark selection and the
+normal gate's requested-success versus unrequested-skip behavior. Preserve the
+existing owner, aggregate, signing and release checks. Local scope is the
+runner, deciding gate and affected workflow-policy controls. Full source-qualified
+CI, exact final Linux timings and all original union riders remain pending.
+
+HLD15 describes the implemented optional job and normal gate contract before
+freeze. Prior HLD03, HLD10 and HLD12 product updates remain intact with no new
+lease in this phase. Risk-routing's performance, new-file, release-scripting,
+shared-consumer and evidence-adoption obligations remain. No source push or
+dispatch is authorized by this revision alone. Use the reviewed source-availability
+checkpoint after its prerequisites pass. This technical revision supersedes the
+benchmark-only proposal rejected in .claude/reviews/F-X283-codex-final-2.md.
+
+
+## A283-14, one-story dispatch preparation trial
+
+Root assigns only this bounded implementation to GLM-5.3 Flash through OpenCode,
+requesting high effort. All other implementation stays with Codex. Original
+claim Base101c34 and prior reviewed product integration514a remain. This is an
+internal callable preparation step for the existing final benchmark route.
+
+Add --prepare-dispatch to the existing benchmark script. It takes --transfer,
+--transfer-sha256, --source-ref, --workflow-sha and --output. Output is an absolute
+new JSON file for a GitHub workflow dispatch request, never a network operation.
+Preparation works with the standard library on the current Mac and never imports
+rdocx, calls authenticate, starts benchmarks, loads a CLI or contacts any service.
+
+T1. Read the transfer as UTF-8 bytes, authenticate its exact supplied lowercase
+SHA-256, require schema f283-root-transfer-v1 and preserve its original text
+exactly in inputs.f283_approval_bundle. Do not normalize or rewrite it.
+
+T2. Before output, validate the already existing CI transfer contract: positive
+integer producer/artifact IDs received as numbers or decimal strings, exact
+proof_json SHA and schema, 40-character
+lowercase source_commit, accepted build-mode attestation, and SHA-256 identities
+of source_inputs_json, wheel_build_receipt_json and cli_build_receipt_json against
+the nested proof. These are received approvals, never approvals made by this tool.
+Reject bool IDs, incomplete records, malformed JSON and inconsistent identities.
+Do not read Linux artifact paths or infer actual build acceptance from file names.
+
+T3. Require a nonempty refs/heads/ branch source-ref and lowercase 40-character
+workflow-sha. Build ref from that branch name and all eight existing CI inputs:
+owner_compatibility=false, source_sha from the authenticated proof, source_ref,
+workflow_sha, runner_label=ubuntu-24.04, config_sha from the authenticated transfer,
+f283_benchmark=true and f283_approval_bundle with the exact original text. Use
+JSON booleans for the two typed boolean inputs. Do not add workflow input keys.
+
+T4. Serialize the complete request as ASCII JSON. Admit at most65,535bytes,
+including ref, inputs, formatting and final newline, before creating output.
+This intentionally conservative complete-request rule fits the documented input
+payload bound. Test exactly at and just above the bound using synthetic data.
+No truncation, dropped source identities or shortened approval data is permitted.
+
+T5. Refuse overwrite and leave no requested output on validation failure. Reuse
+the existing atomic writer where its byte serialization matches the size check.
+Print only a concise output path, byte count and digest, not approval contents.
+
+T6. Reject incompatible execution/self-test/case options. Original benchmark
+execution, --self-test and all pinned builder/timer AST behavior stay unchanged.
+Run the existing19synthetic checks and affected existing workflow tests, adding
+finite positive/negative command tests to the existing test entrypoint only.
+No product test, build, timing, package install, GitHub dispatch or new test file.
+
+T7. Update HLD15's optional benchmark preparation intent and the existing progress
+record. Do not touch other HLD, CI workflow, controller, trackers, manifests,
+baselines or product files. No new module, dependency, trait or generic framework.
+
+T8. Self-review once, preserve actual commands/exits, and stop with a concise
+handoff and pending evidence. Do not commit, push, tag or publish. Root reviews,
+requests up to three focused repair cycles if needed, then takes all work back.
+The previous runner9d944b03 predates this extension. Its workload semantics stay
+pinned, while the new runner identity awaits Root review and final qualification.

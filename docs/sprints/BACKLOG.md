@@ -867,6 +867,19 @@ Issue430is admitted under the existing in-progress F-X272. Its footnote topology
 ignored-story consistency and paragraph alignment rows require the pending amended
 contract and actual validation. The existing plan and S96plan hold that work.
 
+Q-A430-28 has an explicit user-approved one-release exception. Only the native
+positive for two physical footnote references sharing one normal definition is
+unobserved under user-approved acceptance exception, never passed. The
+[approved decision and V3/V4/V5 evidence](/private/tmp/rdocx-cross-review/Q-A430-28-native-evidence-decision.json)
+are reconciled in the existing F272 plan. A430-6/7 and Q-A430-22 physical
+inventory/cleanup/custody/atomicity, library lifecycle and reopen, applicable
+bindings/CLI, SDK including expected-invalid controls and native actual
+comparison-output checks on Word-admitted inputs remain mandatory.
+Stable follow-up R-A430-28: re-evaluate this unproved native same-owner positive
+on a later Word release and retain the prior negative evidence. This is not a
+permanent waiver or a new F-ID. No feature status/count, provider readiness,
+Issue430implementation authority or publication approval changes.
+
 The new S96 intake adds F-X276 through F-X282, pending and unclaimed, mapping
 Issues 431 to 437 and PRs 438, 441, 440, 444, 439, 442 and 443 respectively.
 Issue434 is one story F-X279 with an F-X272 provider dependency, not a second

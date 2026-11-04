@@ -169,7 +169,24 @@ Prepare an exact, reviewable optional yank packet for ONLY oxml-opc0.14.4, with 
 
 Retain the original release-note security constraint: describe pulldown-cmark0.13.5 and the advisory relevance accurately, without claiming that the disabled wikilink path was exploitable through the public importer. The current dependency and local layout changes require their genuinely affected fresh checks. Do not import donor archive measurements or classify an adapted PR as an unchanged merge. Preserve the established compression tolerance in archive qualification, the exact source/helper measurement identities and independent applicability assessment for any retained native/render proof.
 
-Rebuild contribution inventories from previous published family .4 tags through reviewed S96 source. Retain423 reporter set2374,424/425/426 reporter hadim and427/428 contributor hadim with their qualified outcomes. Add429 reporter arthrod to the affected migration/release-policy inventory and430 reporter lawrenceakka to Word notes only after actual qualified fixes. The eventual Word inventory has eight candidate records, not automatic inclusion before their acceptance. The shared/PowerPoint429 outcome must describe the actual minor/API-policy consequence and honest limits, without relabelling old S95.4 COW work as a new performance feature.
+Rebuild contribution inventories from previous published family .4 tags through the final reviewed S96 source. Retain423 reporter set2374,424/425/426 reporter hadim and427/428 contributor hadim with their qualified outcomes. Add429 reporter arthrod to the affected migration/release-policy inventory and430 reporter lawrenceakka to Word notes only after actual qualified fixes. The earlier423to430 candidate set is not the final sprint inventory. The shared/PowerPoint429 outcome must describe the actual minor/API-policy consequence and honest limits, without relabelling old S95.4 COW work as a new performance feature.
+
+The user folded the later issues and PRs into this sprint. The final inventory must also reconcile every accepted outcome below. GitHub Task23 under `/private/tmp/rdocx-cross-review/github-task23-root` authenticates the current record identities and hadim as the reporter or PR author for these later records. Its raw receipts are intake evidence, not product acceptance. Recheck mutable heads and final scope before release.
+
+| Story | Candidate issue and PR records | Selected-family attribution after actual acceptance |
+|---|---|---|
+| F-X276 | Issue431 and PR438 | Shared/PowerPoint0.15.0 outcomes only, no Word fix claim |
+| F-X277 | Issue432 and PR441 | Word0.17.0 markup outcomes |
+| F-X278 | Issue433 and PR440 | Word0.17.0 rendering and font policy. Shared API additions only where actually included, without claiming a new PowerPoint symbol behavior |
+| F-X279 | Issue434 and PR444 | Word0.17.0 comments, revisions and composition outcomes |
+| F-X280 | Issue435 and PR439 | Actual Word and shared/PowerPoint validation and package outcomes, scoped separately |
+| F-X281 | Issue436 and PR442 | Actual Word and shared/PowerPoint picture, chart, export and layout outcomes, scoped separately |
+| F-X282 | Issue437 and PR443 | Word Python performance and any qualified shared OPC accessor outcome, no invented PowerPoint performance claim |
+| F-X283 | Issue445 and the PR443 follow-up | Word Python whole-cell and open/replace/save outcomes. Attribute shared changes only if the final selected-family source actually contains them |
+
+Deduplicate PR443 as one contribution record per selected family while describing the distinct accepted F-X282 and F-X283 outcomes. Do not infer completion from a donor patch or count it twice. Every included record needs its link and specific authenticated credit. Exclusions, partial outcomes and unreduced rows remain explicit. A fixed old candidate count or a blanket all-records claim cannot qualify the final body.
+
+The current CHANGELOG and exact-inventory test describe the earlier scope and are not deciding expanded-sprint evidence. Once the fixes and their deciding validations pass, update both new family bodies and the existing exact inventory/credit controls to the actual accepted range. Remove the current no-new-PowerPoint assertions only when the corresponding PowerPoint outcomes are qualified. Preserve the complete published suffix from v0.16.4 unchanged. This scope reconciliation does not mark any candidate delivered, rewrite history or authorize comments or publication.
 
 The user explicitly authorized a429 reporter apology/status, conditioned on fixes and validation before posting. Keep it unsent until the concrete implemented repair and deciding validations pass, and describe exactly any prepared-versus-published and workaround-versus-registry disposition. No430 comment is authorized. Other release-bound notifications follow the canonical post-publication ceremony and separate final approval. No reporter-facing message is part of this preparation execution.
 
@@ -184,7 +201,7 @@ The user explicitly authorized a429 reporter apology/status, conditioned on fixe
 | Publication | wheels.yml and canonical /release | Selected family, authenticated compatibility proof, fresh mutable preflights and separate main-SHA approval | Sprint R, clean main M, tag, registry and release body |
 | Old-line recovery | Exact jubarte graphs, optional OPC.4 yank packet | Bounded real diagnostics, no universal compatibility or automatic registry action | Prepared candidate, separately approved future action, existing-lock limits |
 | Notes and credit | Existing CHANGELOG/release-note validators | Authentic issue/PR outcomes, immutable published suffix, family separation | Review/render, held429 reply, post-publication notifications |
-| Product acceptance | F-X271to274 including F-X272430 amendment | Their current contracts and final composition riders | Native/cache/reopen/render, installed, schema and full union |
+| Product acceptance | F-X271to274 and F-X276to283 including F-X272430 amendment | Their current contracts and final composition riders | Native/cache/reopen/render, installed, schema and full union |
 
 ## Behavior contracts and evidence
 
@@ -192,7 +209,7 @@ No public authoring method, XML policy or product feature flag is added here. F-
 
 ## Dependency readiness
 
-F-X270 is done in closed S95.4 and remains unchanged. F-X271to274 final S96 acceptance, F-X272430 extension and all retained native/schema/installed/hosted riders remain due. They are final acceptance dependencies, not an invented start cycle. Existing .5 local/hosted observations remain historical preparation and are not silently transferred to new versions or gate inputs. Root is sole canonical writer. Amend the current plan and dependent current wording before any new gate/version implementation.
+F-X270 is done in closed S95.4 and remains unchanged. F-X271to274 and F-X276to283 final S96 acceptance, the F-X272430 extension and all retained native/schema/installed/hosted riders remain due. They are final acceptance dependencies, not an invented start cycle. Existing .5 local/hosted observations remain historical preparation and are not silently transferred to new versions or gate inputs. Root is sole canonical writer. Amend the current plan and dependent current wording before any new gate/version implementation.
 
 ## Acceptance criteria
 
@@ -200,7 +217,7 @@ F-X270 is done in closed S95.4 and remains unchanged. F-X271to274 final S96 acce
 |---|---|---|---|---|
 | A1 | Exact7/15Rust and2Python candidates | All current carriers/pins/lock/project identities consistently.17/.15, no historical rewrite, rpptx-wasm.12.1 retained | Existing version-family mutation controls retargeted with honest old-source failures | Fresh selected-family registry/tag preflight later |
 | A2 | Published suffix from v0.16.4 at24af95d3 | Byte-identical suffix, exactly one new meaningful section per family | Existing suffix hash and mutation refusals | Independent family-note review and exact check/render |
-| A3 | Qualified423to430 inventory and final reviewed range | Every included record linked and specifically credited, every exclusion explained, no false unchanged-PR or old-line repair claim | Existing inventory tests and reviewed notification list | Fresh final intake and held communication boundary |
+| A3 | Qualified S96 inventory through F-X283, including the earlier423to430 and later431to445 candidate records, and final reviewed source range | Every actually included selected-family record linked and specifically credited, exclusions and partial outcomes explained, PR443 deduplicated, no false unchanged-PR, old-line repair or cross-family performance claim | Retargeted existing exact inventory and credit controls plus reviewed notification list, after actual deciding product validation | Fresh final intake, independent family-note review and held communication boundary |
 | A4 | Final-source22locally patched archives | Correct members/version/README metadata, each below10MiB | Existing inventory/size controls | One integrated verified packaging/README qualification |
 | A5 | New source-qualified workflows and downloaded payloads | All re-derived deciding jobs pass, four publication jobs skipped,26unique payloads authenticated | Existing build-only routing/inventory mutation controls plus SemVer dependency controls | Actual exact-SHA native/hosted job and artifact receipts |
 | A6 | Fresh host CLI/wheels and full product inputs | Exact.17/.15version/import identities, existing3.9/3.12priority and3.12typed/stub requirements, all product riders retained | Existing selected installed/ABI/current-metadata controls | One actual final installed/CLI/full/native union |

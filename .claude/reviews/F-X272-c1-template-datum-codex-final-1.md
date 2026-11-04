@@ -1,0 +1,11 @@
+# F-X272, template datum ledger, Root final 1
+
+Reviewed the bounded five-method datum increment against final-snapshot and FINAL_SOURCE_PINS.json in /private/tmp/rdocx-s96-root-c1-implementation/root-template-datums. Root inspected selected membership, scalar counting, checked accumulation and budget separation. Independent bounded support report SHA29d97191995bba88965416af9b5cc0c5badad783abd83ea8aedfbf84d9efad9d records0defects,0smells,0nitpicks. The operative plan records the actual Q-C1-03user choice and exact signatures. This is not another full peer pass or whole C1 acceptance.
+
+Verdict: 0 defects, 0 smells, 0 nitpicks within this increment.
+
+Checked ingress freezes the actual JSON root. Parent membership must be proved before key/index lookup. Actual selected children retain borrowed identities, and equal copied values cannot acquire membership. Containers provide no scalar allowance. String byte lengths, static null/bool text and allocation-free canonical Number formatting supply actual scalar lengths. Each selected occurrence grants64plus those bytes once, multiplied by the existing124factor. The independent template copy ledger predebits cumulative actual demand, checks overflow and retains refusal. It never changes the Field ledger. The existing workspace serde_json dependency is the only manifest/lock addition.
+
+Three focused tests pass, including1000empty/null operands, unused huge siblings, foreign/equal-value refusal, repeat selection, no revival after refusal, numeric extrema/exponents and Unicode parity. A controlled dedup-disabled mutant is explicitly a discriminator, not a historical product failure. Its compiled run has2assertion failures and1pass. The restored source passes161related tests. Source and executable hashes, actual child exits and unchanged-source observations are retained. Lower all-target/all-feature Clippy, formatting, affected prose and whitespace exit0. Overflow handling is source-inspected, without a separate overflow fixture claim.
+
+Actual native consumers, Word-source/model literal provenance, filter/parser allocations, callback input and subsequent owned copies remain unconnected here. Remaining C1 constructors/source recipes, Issue430 and final integrated native/schema/installed/hash/CI/performance gates remain mandatory. No provider completion, publication or sprint closure is recorded.
