@@ -6,6 +6,24 @@
 **Depends on**: F-X272. Design approval uses its bounded revised-owner preservation and refusal contract. Implementation needs actual provider completion. P1 and P2 below are F-X279 implementation and composition obligations, not additional F-X272 prerequisites. Three design peers are used. No fourth design peer. Root final follows this file. The implementation cap of three is separate and is not reset.
 **Test gate**: regression
 
+## Operative A279-2/C2 child split
+
+Root adopts complete A279-2/C2 into approved F-X279c. This exclusion overrides
+EVERY inherited A2/C2 acceptance, consumer, checklist, risk rider and source
+lease below. The retained exact A2 contract is historical lineage and parent
+composition context, never a duplicate B implementation lease. C owns Native
+comment markup/styles plus minimal lower comments original-binding admission.
+Root freezes separate C1 comments hunks for semantic integration. No new C1
+provider is consumed by C and no public namespace API or quota is added.
+
+B retains A279-1/3/5/6, P1/P2 and all comparison/import composition, with its
+actual F-X272 prerequisite unchanged. A retains all A279-4. Parent completion
+requires F272 and A/B/C. Original review lineage and caps remain, with no reset.
+Fresh native comment-candidate acceptance remains mandatory, not discharged by
+this split. Historical candidate constants remain until actual new native
+execution and integrator reconciliation. No product or provider completion is
+recorded. Normal clean C claim remains due.
+
 ## Operative design approval, 2026-11-05
 
 Root approves the exact canonically adopted contract previously accepted by

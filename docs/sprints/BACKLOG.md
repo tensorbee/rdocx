@@ -40,8 +40,8 @@ regenerated, never hand-edited.
 | M22, Word depth | 12 | 12 | 0 | 0 |
 | M23, From-scratch business documents | 24 | 24 | 0 | 0 |
 | M24, Modern DOCX authoring completeness | 54 | 32 | 0 | 22 |
-| X, Cross-cutting | 306 | 277 | 15 | 10 |
-| **Total** | **637** | **559** | **15** | **59** |
+| X, Cross-cutting | 307 | 277 | 15 | 11 |
+| **Total** | **638** | **559** | **15** | **60** |
 <!-- AUTOGEN:backlog-summary END -->
 
 ## All F-IDs
@@ -854,6 +854,7 @@ HLD14 contract before adopting contributor changes.
 | F-X279 | Complete Issue434 through children, completion umbrella | S96 | L | pending |
 | F-X279a | Expose owned revision text and one kind vocabulary | S96 | M | in-progress |
 | F-X279b | Complete comments, comparison and insert_document | S96 | L | pending |
+| F-X279c | Author comment markup and styles without changing reply ranges | S96 | M | pending |
 | F-X280 | Complete Issue435 through child stories, completion umbrella | S96 | L | pending |
 | F-X280a | Refuse negative authored shape sizes before publication | S96 | S | in-progress |
 | F-X280b | Complete validation and damaged-input refusal | S96 | L | in-progress |
@@ -907,3 +908,19 @@ F-X280b consumes the actual completed F-X272a plus F-X277b child chain, with
 both integrations ancestors of its clean Base and all final C1/open/OPC
 composition retained. No delivery ledger or final native/schema/full result
 follows from either prefix status.
+
+
+F-X279c is a prepared draft split of complete A279-2/C2. Root adoption and
+approval are pending. It consumes existing integrated comment/style APIs with
+minimal lower comments serializer/admission hunks. It does not consume C1,
+comparison or insert_document providers. F279b's actual F272 barrier and all
+remaining outcomes stay. The umbrella additionally waits for C on adoption.
+Original exhausted design peers and implementation cap remain unchanged.
+
+Root adopts the exact F-X279c split and approves its design after the independent
+Codex final review. C owns complete original A279-2/C2. All older draft or
+proposed C ownership text above is historical. B keeps A1/3/5/6, P1/P2 and its
+actual F272 barrier. The umbrella requires F272 plus A/B/C. The exact permitted
+lower comments writer/admission hunks reconcile with frozen C1 parser/scope
+hunks. The reviewed product Base987027d4 enters no product change here. Normal
+clean claim is next. All review caps and final/native gates remain unchanged.

@@ -8997,3 +8997,21 @@ Own complete original A279-4 including exact text rules, all eight kinds, constr
 **Spec reference**: Original F279 HLD03/04/10 comment/comparison/import contracts.
 
 Own complete original A279-1,2,3,5,6, P1/P2 composition and mandatory new-candidate native comment gate. A279-4 belongs wholly A. Preserve original final union, provider and review-cap obligations. Draft until Root affected final.
+
+
+### F-X279c, Author comment markup and styles without changing reply ranges
+
+**Sprint**: S96
+**Size**: M
+**Depends on**: none
+**Test gate**: regression
+**Spec reference**: HLD03 Shared Word document operations. HLD04 Part naming and Package integrity, comment creation and preservation. HLD10 Native Word facade stability and Python API shape.
+
+Own complete original A279-2/C2 comment markup/styles, original fixed-prefix
+writer admission, MC URI/local-name merge and imported preservation. Use the
+existing integrated Native comment/style APIs and minimal lower comments
+writer/admission hunks. Consume no C1 source/output/budget, comparison or import
+provider. Reconcile the separate C1 comments parser/scope hunks at integration.
+Fresh native comment-candidate acceptance and all original final riders remain
+mandatory. B retains A1/3/5/6, P1/P2 and F272. Parent completion requires A/B/C
+and F272. Existing review lineage and caps remain unchanged.

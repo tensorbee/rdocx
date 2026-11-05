@@ -3,8 +3,17 @@
 **Status**: approved
 **Sprint**: S96
 **Size**: L
-**Depends on**: F-X272, F-X279a, F-X279b
+**Depends on**: F-X272, F-X279a, F-X279b, F-X279c
 **Test gate**: regression
+
+## Operative comments-markup child split
+
+Root adopts and approves F-X279c for complete A279-2/C2 after the independent
+split final review. Parent completion requires F272 and A/B/C. B retains
+A279-1/3/5/6 and P1/P2 with its actual F272 implementation barrier. All older
+two-child ownership and A2-in-B text is historical and superseded. No peer cap,
+provider, native or final gate is reset or waived. Normal clean claim remains
+due, and no product completion follows from this adoption.
 
 ## Current contract approval
 

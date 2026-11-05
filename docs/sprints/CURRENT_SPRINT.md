@@ -33,6 +33,7 @@
 | F-X279 | Complete Issue434 through children, completion umbrella | L | pending | - |
 | F-X279a | Expose owned revision text and one kind vocabulary | M | in-progress | codex |
 | F-X279b | Complete comments, comparison and insert_document | L | pending | - |
+| F-X279c | Author comment markup and styles without changing reply ranges | M | pending | - |
 | F-X280 | Complete Issue435 through child stories, completion umbrella | L | pending | - |
 | F-X280a | Refuse negative authored shape sizes before publication | S | in-progress | opencode |
 | F-X280b | Complete validation and damaged-input refusal | L | in-progress | codex |
@@ -690,3 +691,23 @@ reconciliation and affected metadata checks. Both integrations must be
 ancestors of its clean claim Base. F-X277/F-X280 umbrellas and F-X279b retain
 their full parent barriers. The previous child-only scheduling exclusion is
 superseded for F-X280b only. No final validation result follows from this step.
+
+
+## Prepared independent comment-markup child
+
+F-X279c is draft and pending Root split adoption/approval. It proposes complete
+A279-2/C2 only, with no C1 source/output/budget or compare/import consumption.
+Root authorizes the proposed minimal lower comments serializer/admission hunk
+lease and freezes its separate C1 comments hunks for integration. Normal clean
+claim and scoped implementation remain due. F279b keeps its actual F272 barrier,
+A1/3/5/6 and P1/P2. The umbrella will wait for all three children and F272 on
+adoption. Fresh Word candidate acceptance and all original union riders remain
+mandatory. No review-cap reset, provider completion, claim or publication.
+
+Root adopts the exact F-X279c split and approves its design after the independent
+Codex final review. C owns complete original A279-2/C2. All older draft or
+proposed C ownership text above is historical. B keeps A1/3/5/6, P1/P2 and its
+actual F272 barrier. The umbrella requires F272 plus A/B/C. The exact permitted
+lower comments writer/admission hunks reconcile with frozen C1 parser/scope
+hunks. The reviewed product Base987027d4 enters no product change here. Normal
+clean claim is next. All review caps and final/native gates remain unchanged.
