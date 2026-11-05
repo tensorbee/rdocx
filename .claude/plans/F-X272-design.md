@@ -5864,3 +5864,53 @@ owner must acknowledge and implement the revised contract, preserve all45A/14G
 obligations subject to that explicit amendment, update HLD and obtain Root review.
 Its separate D1 opaque-owner repair is not waived. Parent C1 work continues.
 No provider readiness follows merely from the answered decision.
+
+### Explicit scoped Native row TextWalk consumer
+
+Root technically approves one additional doc-hidden method on the existing
+ScopedWordOperation after tracing Native template.rs parse_program and its row
+visitors. The paragraph-only method remains unchanged.
+
+```rust,ignore
+pub fn template_row_replaceable_texts(
+    &mut self,
+    source: &ScopedWordSource,
+) -> Result<(Vec<String>, Vec<usize>, Vec<usize>, bool)>;
+```
+
+The tuple contains owned actual stretch buffers, direct-view indices, all-view
+indices and the row-local preserved-sibling or content-control hazard. Each
+index addresses the returned buffer vector. Direct is not a subset of all:
+the existing direct control visitor includes SdtContent::Run Text concatenation,
+while the all visitor omits that variant. Preserve both substantive visitors,
+including their order and multiplicity. Direct still runs before all. Share a
+buffer between views only for the same actual parsed occurrence and stretch,
+never because strings compare equal. Returning two borrowed views must not
+materialize the same buffer again. Distinct physical equal text stays distinct.
+
+The method checks the same-operation source, carries its actual namespace and
+source maps through the existing wrapped-table checked parse once, and retains
+the existing first-row and error behavior. Actual successful parser companions
+provide physical Field ownership and selected Word facts. Commit only returned
+owners. Paragraph slices alone do not prove complete row coverage. Unknown
+capture or fallback remains unknown, never inferred fieldless. No second row
+parse, guessed traversal or extra input funding is authorized.
+
+Native retains program_marker and its dedicated-marker predicate on borrowed
+str views. The returned hazard covers only the existing row extra_xml preserved
+siblings and nonempty content_controls. Native still applies item.marker_unsafe,
+item.field_owned and inherited_field in their existing order. The lower helper
+does not adopt Native grammar or change marker acceptance. Shared applicable
+input and text-copy budgets remain unchanged, with actual registration and
+reservation before growth, sticky failures and no repeated baseline allowance.
+
+Implement and test direct-only control runs, shared paragraph views, nested
+cells/tables/controls, zero and multiple stretches, equal distinct occurrences,
+namespace closure, malformed whole rows, preserved siblings and existing marker
+refusals. Compare direct/all strings and marker outcomes with the old real
+visitors. Repeated calls consume existing role keys and cumulative demand.
+Add exactly this one method to the external compile canary and final strict
+SemVer inventory. No public type, model field, module, trait, generic or new
+quota is added. This is concrete technical reconciliation of the existing row
+consumer, not provider completion or acceptance of an unimplemented method.
+The sole owner acknowledges this contract revision before affected source edits.
