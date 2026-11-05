@@ -59,7 +59,7 @@ template_programs_initial at `crates/rdocx/src/document.rs:45811` consumes this
 actual first flush and uses its Source only when the connected producer returns
 one. It preserves related-story ordering and Comment exclusion. All selected
 initial physical-program raw copies pass through the scoped copy helper at
-`crates/rdocx/src/document.rs:16467`; table namespace closure retains the
+`crates/rdocx/src/document.rs:16467`. Table namespace closure retains the
 existing checked table parse and row-count validation. This is physical program
 inventory, not the later grammar TextWalk or second prepared writer. The real
 render caller at `crates/rdocx/src/template.rs:1783` preserves that distinction.
