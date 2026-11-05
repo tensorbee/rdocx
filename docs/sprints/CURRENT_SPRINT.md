@@ -554,3 +554,45 @@ All remaining B and umbrella contracts are approved after provider-contract
 reconciliation. Actual source/provider and final qualification gates remain.
 There are22delivery rows for the same13original contracts, with no added issue
 scope or aggregate effort. Claim and a second implementation worker are next.
+
+## Parallel implementation and diagnostic prequalification, 2026-11-05
+
+Approved designs and bounded review records are committed at876436a5.
+The complete existing Issue430 child F-X272a is claimed atbda1042c in
+`/private/tmp/rdocx-s96-f272a-codex`, branch `work/f-x272a-codex`, owner codex.
+Its Base has the same product tree as1d2c5a80. The child and sole parent C1
+writer now run separately, with serial semantic integration required.
+All45acceptance rows,14gates and Q-A430-28 remain unchanged. The other six
+unfinished designs are approved in run state, with actual provider barriers
+retained. No parent is completed or consumer unblocked by design approval.
+
+Workflow policy qualification passed247tests with2skips. The first sandbox
+attempt remains a failed environment observation, the retained escalated rerun
+is actual green. Prose, adapters and whitespace checks pass for the approved
+planning result. These are not final integrated product verification.
+
+The private current-base diagnostic archive now contains the exact reviewed
+union of the four accepted finite overlays, source SHA315fc5439839c84c.
+Scoped release typecheck and link exited0. Root independently authenticated
+its fresh binary044cb90b74151c27, actual source/build/profile identities,
+raw logs and successful small recorder-reservation and artificial COW controls.
+Both typed reservation lanes and all three artificial ownership lanes qualify.
+The new canonical composition/runtime reviews record their exact bounded scope.
+No heavy font/text history, quiet RSS, ordinary shipping calibration, final-H
+or provider acceptance follows. The old failed font activation remains failed.
+The complete4053file archive inventory and61handback input pins authenticate.
+Private archive and target writer control returned to Root, idle.
+
+Root accepted the connected C1 payload/map increment at its frozen source:
+54unique focused passes, seven scoped gates0 and an actual controlled omission
+exit101followed by exact restoration. Its bounded final has zero findings,
+with ordered/typed/Native and remaining C1 work still pending.
+
+The Issue430 implementer found a contradiction between unconditional special
+synthesis and exact destination inventory. Root recorded and corrected D1 in
+F-X272a-created-specials-contract-codex-final-1/2.md. Comparison creation now
+keeps exactly the edited input special inventory, including none. Authored
+defaults remain F-X277b work. The child owner acknowledged canonical plan
+72e61f37176cd5ae549c260d21f86175af6fa1f9a725bec8169106a4a8dc6925
+before the affected path resumed. All45acceptance rows and14gates remain
+byte-identical. No product gate or provider completion follows from this repair.

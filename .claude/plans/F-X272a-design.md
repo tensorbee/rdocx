@@ -45,6 +45,29 @@ inherited V13 preparation-status, paused-source, unapproved-amendment and
 adoption-after-C1 wording. Historical observations keep their original scope.
 No unperformed local, native, installed or final gate becomes a pass.
 
+## Created-part special inventory, approved correction
+
+Root corrects the creation-path contract defect identified in
+.claude/reviews/F-X272a-created-specials-contract-codex-final-1.md.
+The exact destination postcondition governs: creating a comparison part uses
+its actual edited-input special records, including an empty special inventory.
+Comparison does not synthesize an additional separator or continuation record.
+References below to synthesized specials mean records already present in the
+edited input, for example from its authoring producer or native fixture.
+No future F-X277b implementation is an assumed prerequisite of this child.
+
+This correction preserves all45acceptance rows and14gates. A430-17 additionally
+uses the existing add_footnote producer's present normal-only part: accept has
+exactly the edited special inventory, reject restores the absent original
+part, and pending/save/reopen preserves both destinations. Companion fixtures
+with existing edited specials keep those exact bytes. Normal owners at ids0
+andnegative1are never overwritten with manufactured specials. Existing
+both-present special preservation and precise empty-part refusal are unchanged.
+No synthesis-provenance representation, new public API or blanket refusal is
+introduced. F-X277b still owns authored separator defaults and its final
+composition with comparison remains required. The child owner acknowledges
+this revised plan before implementing the affected creation path.
+
 ## Spec reference
 
 - docs/hld/03-architecture.md, comparison and redline ownership, checked field
@@ -300,7 +323,7 @@ A part is present when the main document has one internal relationship of the ma
 | Original `o` | Edited `e` | Open unit | Accept effect | Reject effect |
 |---|---|---|---|---|
 | 0 | 0 | Absent, no unit | Absent | Absent |
-| 0 | 1 | Created from edited bytes with synthesized specials | Definition retained, part decided by the predicate | Definition and reference removed, predicate can unwind the creation to absent |
+| 0 | 1 | Created from edited bytes with exactly their existing special inventory | Definition retained, part decided by the predicate | Definition and reference removed, predicate can unwind the creation to absent |
 | 1 | 0 | Deletion toward edited-absent | Definition and reference removed, predicate can remove the part | Definition restored, part present |
 | 1 | 1 | Deletion toward separator-only, addition to special-only, or ordinary edit | Accept goes to the edited input: a deleted definition is removed, an added definition and reference are retained, specials retained, part present | Reject goes to the original input: a deleted definition is restored, an added definition and reference are removed, specials retained, part present |
 
@@ -575,7 +598,7 @@ implementation evidence and final integrated riders stay required and pending.
 - [ ] Extend the allocator used set with custody tokens and bookmark ids, Section 3.4.
 - [ ] Add id-independent pending recognition, normalized note placement, the open and completed lifetimes, retained tombstones, the order-independent part-presence predicate, accept-to-edited and reject-to-original destination states, originally absent part removal, still-open creation unwinding, library-emitted marker retirement at settlement, imported Word-resolved marker preservation and retirement, and last-note-marker cleanup.
 - [ ] Add per-element listing preservation and the private partial-unit selection check for id, author, date and internal id-set scopes, using actual current ids.
-- [ ] Add lifecycle, shared id at emit, part creation with synthesized specials, predicate-based removal on accepted edited-absent and rejected originally-absent, settlement cleanup and presence postconditions, ignored-story coherence, and unowned invalid and opaque preservation.
+- [ ] Add lifecycle, shared id at emit, part creation preserving the actual edited special inventory, predicate-based removal on accepted edited-absent and rejected originally-absent, settlement cleanup and presence postconditions, ignored-story coherence, and unowned invalid and opaque preservation.
 - [ ] Add local Rust, Python and CLI regressions, A430-13 to A430-45, update HLD03, HLD04 and HLD10.
 - [ ] Run local scoped regressions, declare every delta, run the final integrated union and obtain Root approval.
 
@@ -681,7 +704,7 @@ implementation evidence and final integrated riders stay required and pending.
 3. The destination rule depends on the approved prior-revision policy refusing later changes to a prior revision-bearing owner. If that policy is relaxed, the destination rule would need re-derivation.
 4. The retained-unowned-content rule and the partial-unit refusal are design rules over retained bytes. They are not native claims.
 5. The multi-reference unit rule is a design rule. The synthetic fixture has one reference. Final native observation remains a rider.
-6. With no current unit, an existing note part with no normal definition, no special and no unowned content refuses atomically with a precise empty-part error. Part creation emits the conventional specials `-1` and `0`, so a created part is never empty while its destination is present. A destination-absent current unit removes the part instead of publishing an empty one.
+6. With no current unit, an existing note part with no normal definition, no special and no unowned content refuses atomically with a precise empty-part error. Part creation preserves the actual edited special inventory. Existing authoring inputs may already contain conventional specials `-1` and `0`, but comparison does not add them when absent. A created part with a referenced normal owner is nonempty without specials. A destination-absent current unit removes the part instead of publishing an empty one.
 7. Selective resolution after Word normalization follows the per-selector predicates in Section 4. A scope is full when its own predicate matches every element of the unit, partial when it matches some, and empty when it matches none. Different current ids do not by themselves prevent an author or date selector from being full: a unit whose elements have ids 1, 2 and 3 but share an author and a matching timestamp is fully selected by the existing author and date methods. An id selector is full only when every element's current id equals the argument. A full selection resolves the unit, an empty selection leaves it pending, and a partial selection refuses atomically. `accept_all` and `reject_all` are full by construction, and the internal compare path selects every discovered element. No new public token API or user decision is required to state this contract, and the partial-unit atomic refusal is preserved.
 8. No unavoidable conflict remains between the native observations and the library contract. Word's retained markers and separator-only reject are observed Word bytes. The library resolver restores reject-to-original and accept-to-edited destinations and retires its own markers. Imported Word-resolved markers are preserved untouched. No lost provenance is invented and no input is silently narrowed.
 9. No source implementation, schema validator, selective native resolution, compare producer parity, mixed historical unit or full native rider is qualified. The bookmark representation remains the chosen direction. Its recognition and destination contracts are repaired here before adoption. Existing three design peers remain consumed. Root direct review follows this author remediation. No fourth peer and no counter reset.

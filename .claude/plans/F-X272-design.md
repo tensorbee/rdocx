@@ -5803,3 +5803,15 @@ hash baseline changes, extra aggregate effort, reporter comments or publication
 follow from this partition. Root final and actual combined reconciliation remain
 mandatory. The parent author acknowledges this scope change before affected
 note-comparison work, without pausing its unchanged C1 implementation.
+
+### Issue430 created-part special inventory correction
+
+The approved child F-X272a now resolves Root contract defect D1 from
+F-X272a-created-specials-contract-codex-final-1.md. Comparison creation keeps
+exactly the edited input special inventory, including no specials, rather
+than manufacturing conventional records. Existing examples with synthesized
+specials refer to records already in the edited input. All45childacceptance
+rows,14gates, destination identities, original-unused preservation and Q28
+remain unchanged. F-X277b retains authored defaults, no future provider is
+assumed. The parent completion rollup consumes this corrected child contract.
+This changes no C1 API, equation, metric or source/build lease.
