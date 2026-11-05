@@ -6052,3 +6052,37 @@ HLD03/HLD04 own the private parser/fact handback mechanism and HLD10 retains the
 public compatibility boundary. Existing public-API/parser/shared-consumer risk
 riders apply. Plan status stays approved, all unresolved work stays pending and
 no peer cap resets. The sole author acknowledges this revision before edits.
+
+### Borrow stored ordered Field input without materialization
+
+Root authorizes promoting the existing allocation-free
+Field::stored_ordered_result method in crates/rdocx-oxml/src/text.rs from
+pub(crate) to doc-hidden pub, preserving its exact body and signature:
+
+```rust
+pub fn stored_ordered_result(&self) -> Option<&CT_P>;
+```
+
+The concrete consumer is Native template-input membership freezing before clone,
+preparation or the actual model writer. The current public ordered-run getters
+compute a display String, and the owner-projection getter creates an owned
+normalized paragraph. Neither is a substitute for an inert borrowed view.
+This method only borrows stored state. It does not certify current cache
+eligibility, select Word input, decode raw XML, clone, normalize or grant work.
+Writer and reader branch guards remain authoritative when an operand is used.
+
+Freeze actual model identities and carry correspondence from the real clone or
+preparation producer. Do not recover it later through equality, changed ordinals
+or a persistent candidate-address catalog. Preserve Sdt Run inputs missed by the
+paragraph visitor and use absolute SdtContent indices for retained captures.
+Use the existing Field/Word regression carrier and final external client to
+check the borrowed lifetime, optional result and unchanged selection behavior.
+No standalone test binary, model field or public provenance type is added.
+
+The operation carrier count stays35. This is one additional borrowed accessor
+beside the four retained-XML accessors, included separately in the Rust0.17.0
+additive SemVer inventory and exact compile-client calls. No Python or WASM
+surface changes. Existing HLD03 and HLD10 describe the input/read boundary.
+Public-API, shared-consumer and resource riders remain due. This visibility
+change supplies no ordinary certificate or whole Native/provider completion.
+The sole writer acknowledges this revision before the visibility edit.
