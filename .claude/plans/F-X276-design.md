@@ -343,6 +343,58 @@ Expected unchanged. Saved OPC bytes, PDF, and PNG stay the same. The integrated 
 - [ ] Installed Python3.9 and3.12, typing, stubs and archive qualification.
 - [ ] Hosted CI and full public Markdown export benchmark.
 
+## Final Markdown measurement interpretation
+
+The full public Markdown export benchmark in the preceding checklist uses the
+Root-approved seven-route recipe of2026-11-02. This records the existing
+measurement decision, not a new product choice, performance budget or executed
+gate. Original benchmark provenance remains unlocated. Do not claim that this
+new technical recipe recovered the original benchmark. Plan status stays
+approved, final acceptance stays pending and prior review caps do not reset.
+
+Measure Rust default export, options export and save, Python string export,
+owned export and save, and CLI conversion. Use21independently generated,
+byte-frozen inputs: plain1/8/32slides, digit-prefix lengths1024/4096/16384
+with period/parenthesis and1/64runs, mixed1/8/32slides and chart1/8/32slides.
+Chart roles are title Quarter, categories Q1/Q2, series Zeta region and values
+1150/1190.5. The mixed cases retain notes, hidden slides, images, tables,
+whitespace, line breaks and split punctuation. Default configuration reaches
+all seven routes. Mixed cases also exercise admissible notes, hidden selection
+and detached-image options. Preserve actual defaults and detached string-export
+refusal as separate untimed controls. This yields213route/configuration rows,
+2130paired samples and84separate untimed chart-control observations.
+
+Each SDK model is opened fresh for five exports, with the first cold after open
+and four subsequent calls on that model. Preflight uses different instances.
+Each CLI sample includes a fresh process, open, export and publication. Alternate
+baseline/current order. Retain all raw samples and min/median/max. No warmup is
+discarded. Hashing, result inspection and independent Markdown structure checks
+are outside the measured call. Save includes actual publication. Run without
+concurrent compilation or other measurement work.
+
+Use actual release artifacts from baseline9a3b2960ccda7c3208ecb9b753c7019b64c086f5
+and the final integrated source, with pinned compiler, features, lock, profile,
+interpreter, host, fixtures and imported/binary identities. Authenticate real
+successful build receipts. Validate semantic/default/refusal behavior through
+a pinned independent CommonMark XML producer with tables and strikethrough.
+Retain changed escaping and added chart work as different output classes.
+Plain output is equivalent only after actual equality. Missing cases, failed
+semantics, source/artifact drift or incomplete results leave the gate pending.
+Report timing and growth without inventing an absolute cap or speed ratio.
+Word, HTML and WASM throughput remain excluded. All existing native, installed,
+hash/pixel, hosted and other final riders remain independently mandatory.
+
+The immutable preparation manifest SHA256 is
+`d243506bf42ec0e8ff83dee5b5f7cadd0fea28af8444c030604dc3a89e5af44d`.
+The Root recipe-decision SHA256 is
+`63c7fd140a2033419cd345d7efc3749be73168b796824b357af29a5082f27b19`.
+Their local preparation lives at
+/private/tmp/rdocx-cross-review/S96_MARKDOWN_BENCHMARK_PREPARATION.
+Root static inspection found no actionable preparation-source finding, but no
+Rust consumer build, fixture production or benchmark execution was performed.
+Actual validator qualification, final source/artifact refresh and runtime
+results are still required. This clarification changes no HLD product intent.
+
 ## Open questions
 
 | ID | Affected F-IDs and A-IDs | Decision | Status |
