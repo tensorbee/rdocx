@@ -4973,6 +4973,7 @@ before the substantive writer, producing short-lived current/frozen pairs.
 pub fn with_template_word_inputs(
     original_parts: Vec<(&'a str, &'a [u8])>,
     current_paragraphs: Vec<&'a CT_P>,
+    current_bodies: Vec<&'a CT_Body>,
     current_texts: Vec<&'a CT_Text>,
     current_fields: Vec<&'a Field>,
     current_word_sources: Vec<&'a [u8]>,
@@ -6086,3 +6087,43 @@ surface changes. Existing HLD03 and HLD10 describe the input/read boundary.
 Public-API, shared-consumer and resource riders remain due. This visibility
 change supplies no ordinary certificate or whole Native/provider completion.
 The sole writer acknowledges this revision before the visibility edit.
+
+### Actual body seeds for inert Word membership
+
+Root reconciles the existing with_template_word_inputs signature above by adding
+current_bodies: Vec<&CT_Body> immediately after current_paragraphs. No other
+parameter changes. This unpublished hidden Rust constructor now has seven
+parameters. It introduces no public type or additional carrier name. Update
+all real callers and the exact final external client together. The previously
+prepared six-parameter client remains historical preparation, not final proof.
+
+Native supplies actual borrowed main and glossary bodies before staging, plus
+the existing borrowed paragraph roots for notes. Its existing paragraph visitor
+keeps its read behavior and is reused for paragraph seed collection. A body
+seed reaches paragraph-free block controls and their lower-private retained
+original runs, which cannot be enrolled through direct current Run callbacks.
+The lower constructor uses the existing WordOwner::resource_children physical
+graph, including stored Field caches, revisions, Ruby, controls and drawing text.
+Inspect Text leaves and actual stored raw records at each visited owner. Dedup
+actual owner identity before expanding shared immutable subgraphs. Extend only
+membership catalogs. No parsing, lazy model projection, normalized String,
+resource admission, selected-input funding or model clone occurs here.
+
+Body, paragraph and Field seeds may overlap. Their same physical descendants
+are frozen once. Absolute control content indices select retained captures.
+Stored Field owner membership does not bypass current writer/cache eligibility.
+Keep Field private source/current relationships with the actual frozen Field.
+Raw records not reached by this physical graph remain explicitly outside this
+increment, with actual note/glossary root records supplied separately when used.
+No equal-bytes lookup, post-preparation ordinal matching or persistent candidate
+address catalog establishes correspondence. Actual clone and preparation
+producers still owe the approved TemplateWordLineage handback.
+
+Use existing lower and Native test carriers for a paragraph-free block control,
+retained original control runs, nested stored Field Text, revision and Ruby
+leaves, overlapping seeds and unchanged zero allowances before actual selection.
+Foreign candidate identities must still refuse. Existing Native read visitors
+must keep their prior outputs. HLD03/HLD10 and the Rust0.17.0 API inventory own
+this callable revision. Existing public-API/resource/shared-consumer and final
+riders remain due. Root acknowledges the reviewed revision before edits. This
+is no provider completion or peer-cap reset.
