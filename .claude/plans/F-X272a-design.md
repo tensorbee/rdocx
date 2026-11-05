@@ -22,6 +22,19 @@ or work-ledger helpers are excluded. Shared staging and HLD/test intersections
 are serially reconciled on integration. Any genuine unfinished-operation
 dependency discovered by actual implementation remains blocking.
 
+### Bounded Native document source lease
+
+Root authorizes a temporary child lease on existing
+`crates/rdocx/src/document.rs` for the custody repair's crate-private bridge to
+the existing physical story-owner and paragraph inventory, plus the Q-A430-08
+normal-note predicate in editable_note_owner. No new public API, file, module
+or C1 helper is authorized. The parent owner acknowledged a hold on this Native
+file while continuing lower oxml work. The child returns this finite lease
+explicitly before parent Native wiring resumes. Base and the dirty parent carry
+remain unchanged, with serial semantic integration required for this file.
+Empty and unknown note-type legacy reads remain unchanged. This coordination
+does not answer Q-A430-29 or complete a provider.
+
 ## Split scope and operative precedence
 
 This child owns the whole already authorized Issue430 amendment: all five issue
