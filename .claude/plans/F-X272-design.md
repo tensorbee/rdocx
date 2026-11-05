@@ -5985,3 +5985,70 @@ remain mandatory, with no unchecked validator or count-based custody proof.
 This parent remains in-progress. Its own completion still requires C1, the
 integrated child and actual applicable gates, with all final riders retained.
 No C1 implementation, budget, API or review-counter change follows here.
+
+### Same-operation whole-document factory bridge
+
+Root authorizes one concrete additive doc-hidden method on the existing lower
+operation type in crates/rdocx-oxml/src/document.rs:
+
+```rust
+pub fn source_document(
+    &mut self,
+    source: &ScopedWordSource,
+) -> Result<CT_Document>;
+```
+
+The named consumer is Native from_package_reusing's actual fresh main-document
+factory, reached by import_fragment_content_with_state. Its current
+CT_Document::from_xml call receives bytes only. The existing private
+from_xml_admitted already owns the single substantive Reader and actual
+body/paragraph/table/control constructor chain. Reuse that chain with the
+source's actual map, operation registry and unchanged initial-delivery flag.
+Validate the existing operation anchor before work. Preserve the existing
+admission, grammar, resource and error order. Return the real model and retain
+only operation-private facts observed by those actual factories. Do not add a
+public disposition type, expose private parser context or change document_block
+into a whole-document parser with different wrapper semantics.
+
+A successful model and joined returned Fields are still insufficient for
+ordinary or complete coverage. Record actual reached, constructed, fallback,
+opaque and unvisited outcomes as needed by the existing private consumer join.
+Unvisited or unsupported regions stay unproved. Only genuinely observed
+selected ownership and ordinary disposition may classify a payload owner.
+Later smartTag/customXml wrapper factories and other relevant actual consumers
+must join their own occurrences. A transient REF/PAGEREF inspection Field is
+not automatically a published XML owner. Do not infer raw fldSimple promotion
+from a helper definition without an actual caller. No extra parser, validator,
+normalization, output quota or input allowance is approved by this bridge.
+
+A private Native optional carrier context replaces the fresh factory call.
+It must not parse again after the old factory or reserialize a model to invent
+a source witness. Preserve root/background/declaration semantics and the
+hinted/kept alternatives. Those alternatives may carry actual prior producer
+facts or stay unproved. Do not disable reuse solely to manufacture observation.
+Bind facts to the exact actual main source occurrence. Repeat-produced packages
+carry their generated main source through from_part_content and
+import_content_staged. Opening those packages does not renew Original or
+frozen-model credit. Original raw fragment bytes captured before preparation
+remain distinct from later generated dependency or glossary output.
+
+Use existing regression carriers for ordinary versus source-aware document
+factory parity, empty and multiple Fields, imported aliases/shadows, retained
+root/background/raw bytes, generated-repeat origin, foreign-operation refusal
+and failed-factory nonpublication. Reuse the existing nested-wrapper/control
+late-construction discriminator rather than equating an empty outer Field list
+with ordinary XML. Preserve actual source/error/bytes parity and the disabled
+ordinary path. Batch affected local controls and gate them on the frozen source.
+Final Native, installed, resource/history, SemVer and all sprint riders remain
+mandatory. This callable alone supplies no completeness or provider checkpoint.
+
+This makes35authorized carrier names across the existing two opaque types,
+including as_bytes, with the existing accessors, two earlier helpers, core
+capture callable and residual helper inventoried separately. Add source_document
+to the exact external compile client and strict SemVer inventory after actual
+implementation. The addition is a Rust0.17.0 additive surface. No Python/WASM
+binding, new file/module/crate, feature, trait or generic is introduced. Existing
+HLD03/HLD04 own the private parser/fact handback mechanism and HLD10 retains the
+public compatibility boundary. Existing public-API/parser/shared-consumer risk
+riders apply. Plan status stays approved, all unresolved work stays pending and
+no peer cap resets. The sole author acknowledges this revision before edits.
