@@ -5850,3 +5850,14 @@ error/unwind restoration and no live receipt after completion. Ordinary None
 paths retain their behavior and allocation policy. This technical clarification
 approves no implementation or completed carrier/provider gate. The active
 owner acknowledges this exact revision before changing the final sink.
+
+### Q-A430-29 child recognition amendment pending
+
+The complete child F-X272a has an unanswered user choice about unmatched body
+custody markers beside unrelated revision-wrapped references. Existing bytes
+lack the removed owner identity, so neither adjacency nor a wrapper alone can
+prove a live custody association. The child retains its approved baseline and
+holds this affected route. It cannot complete or supply the parent rollup until
+Q-A430-29 is answered and actually implemented/reviewed. No new name grammar,
+input refusal or corruption-detection waiver is approved. Parent C1 APIs,
+metrics and active implementation lease are unaffected. Continue closed work.

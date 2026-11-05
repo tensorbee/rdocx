@@ -68,6 +68,40 @@ introduced. F-X277b still owns authored separator defaults and its final
 composition with comparison remains required. The child owner acknowledges
 this revised plan before implementing the affected creation path.
 
+## Q-A430-29 pending amendment, unmatched body custody
+
+The existing approved baseline and completed-pair behavior remain in force.
+One material convention decision is unanswered. The affected missing-N wrapped
+adjacency route is on hold, with no new protocol or broadened interpretation
+approved. Other closed implementation and evidence work may continue, but this
+child cannot complete, supply a provider checkpoint or enter release acceptance
+until the answer and its actual implementation/review are reconciled.
+
+The retained B name contains token and presence bits, not a surviving owner
+identity. After N and its definition/reference are removed, the next reference
+may belong to an unrelated existing note. A modeled revision wrapper alone is
+not positive ownership proof: an original unused note may acquire only a new
+reference, and its owner may retain unrelated prior revisions. Its persisted
+bytes can resemble a corrupt missing-N creation unit. No current revision id,
+numeric coincidence, chronology or next-sibling guess recovers the lost fact.
+
+The actual wrapped-reference-only discriminator leaves deleted-note5 B before
+new reference-only6 while note7 remains pending. Reject5 and reopen succeeds,
+then reject_all fails missing-N. The32case run has31passes and this one failure,
+not a clean matrix. Evidence is at
+`/private/tmp/rdocx-s96-f272a-local-evidence/q-a430-29-actual-wrapped-adjacency`.
+Its source snapshots are explicitly after-run captures, not invented pre-run
+custody. The prior unwrapped adjacency correction does not close this class.
+
+Q-A430-29 asks the user to choose preserving valid histories by treating
+unmatched B as retained/completed tombstone and refusing positively identifiable
+inconsistencies, or redesigning ownership metadata and requalifying Word.
+The recommendation preserves valid inputs but cannot detect every lost
+counterpart. A proposed signed-id name suffix is not approved or implemented,
+and would itself need proof about Word note-id rewriting. Elapsed time is not
+an answer. All45acceptance rows and14gates remain retained while this amendment
+is pending, with no scope reduction or new native exception.
+
 ## Spec reference
 
 - docs/hld/03-architecture.md, comparison and redline ownership, checked field
@@ -516,12 +550,13 @@ Rejected: wrapping the whole note root, a private snapshot part, one name in bot
 
 ## Open questions
 
-No unanswered product decision. The answered choices and exact boundaries remain below. Q-A430-28 is governed by the operative exception above.
+Q-A430-29 is pending as stated in the operative amendment hold above. All prior answered choices and exact boundaries remain below. Q-A430-28 is governed only by its exact operative exception.
 
 Q-S96-04 and Q-S96-07 keep original meanings. Q-S96-08 to Q-S96-12 are occupied by F-X277 records and Intake R2 and R3 closures. Q-S96-13 to Q-S96-15 appear only in superseded Issue430 V1.
 
 | ID | Decision | Status |
 |---|---|---|
+| Q-A430-29 | Legacy unmatched B cannot always distinguish a retained tombstone from a corrupt missing-N unit beside an unrelated wrapped reference. Preserve valid histories with positively provable inconsistency refusal, or redesign metadata and requalify Word | Pending user answer, affected route held, no elapsed-time approval |
 | Q-S96-04 | Hidden zero-width standard bookmarks for custody, imported valid markers follow, preserve unused notes | Answered |
 | Q-S96-07 | Unrelated Issue433 font policy | Answered |
 | Q-A430-01 | Pair by actual reference owner, run boundary, ordinal, refuse ambiguous moves and unmatched references. Multi-reference sites belong to one definition unit | Resolved |

@@ -596,3 +596,45 @@ defaults remain F-X277b work. The child owner acknowledged canonical plan
 72e61f37176cd5ae549c260d21f86175af6fa1f9a725bec8169106a4a8dc6925
 before the affected path resumed. All45acceptance rows and14gates remain
 byte-identical. No product gate or provider completion follows from this repair.
+
+## Overnight C1 format and child recognition checkpoint, 2026-11-05
+
+The real lower format_paragraph, selected JSON/callback transaction, mapped
+final serializer and direct ordered Text tranche has142unique focused passes.
+Root final1 identified D1, requested Text authority inferred through a nested
+reparse. The actual added discriminator exposes unproved SDT events. Its
+revision counterpart already has none. Direct-only structural containment now
+passes30affected cases and seven scoped gates, with Root final2 clean. Nested
+Text correspondence, four operations, committed publication coverage and Native
+wiring remain implementation work, not completed C1 or a provider checkpoint.
+
+Q-A430-29 is pending user answer. The existing marker convention cannot always
+distinguish a retained deleted-note body marker from a corrupt missing-N unit
+beside an unrelated revision-wrapped reference. The actual32case Native batch
+has31passes and one failure in this class, preserved with explicit after-run
+source capture limitations. The user was asked to choose valid-history
+preservation with positively identifiable inconsistency refusal, or a metadata
+redesign and Word requalification. No answer or new grammar is inferred.
+The affected child route is held while other closed implementation, tests and
+HLD work continues. Neither child nor parent can complete or unblock dependent
+claims until this decision and actual implementation/review close. The prior
+Q-A430-28 native-only exception is unchanged and does not waive this library
+recognition issue.
+
+The corrected three central referenced-note RED cases now have a sealed exact
+old-production build at claim Basebda1042c, frozen test/source inventories,
+successful fresh producer and copied binary34d909a34dae3a6a. Root checked all323
+tracked crate pins against Git Base, with only the test fixture changed, and
+all20custody files plus the actual named failures. Earlier unused and targeted
+unsealed observations keep their narrower scope. No repeated baseline run is
+needed absent invalidation. One independent CLI round trip passes locally.
+Installed Python, native/schema and whole-child qualification remain pending.
+
+A separate generated candidate probe tests, but does not approve, a numeric
+note-id suffix in marker names. Word16.114.1 saved normal note/reference
+IDs1000/2000 as1/2 while retaining all four literal IP1000/IP2000 suffixes.
+The saved output passes pinned SDK3.0.1 Microsoft365 validation with zero
+errors. Thus that simple current-ID binding fails this actual example. The
+original input remains unchanged and no protocol change follows. Evidence is
+`/private/tmp/rdocx-s96-word-story-diagnostic-only/rdocx-s96-q29-note-id-probe-20261105T050000Z/post-word-sdk-v1`.
+Q-A430-29 remains unanswered and its affected implementation stays held.
