@@ -5940,10 +5940,17 @@ expired-owner identity is authorized.
 One private substantive existing capture loop serves the unchanged public
 capture_element and the actual mapped lower textbox consumer. Transcript
 collection is disabled without allocation in the legacy path. Preserve the
-old writer events, nesting, error and EOF behavior exactly. Initial mapped mode
-uses trim=false and expand-empty=false. Unsupported reader modes, BOM coordinate
-uncertainty or failed transport proof yield the same captured bytes with None,
-not a new refusal, altered parse or ordinary/fieldless proof.
+old writer events, nesting, error and EOF behavior exactly. Default and trimmed
+Text modes may map only after the actual pinned QuickXML consumed-window and
+payload rules are established. Track trim_start and trim_end independently,
+including all-whitespace skipped before markup or EOF. Removed whitespace has
+no pair. CDATA, entity and markup event boundaries retain their actual producer
+semantics. Expansion and other unproved modes, BOM coordinate uncertainty or
+failed transport proof yield the same captured bytes with None, not a new
+refusal, altered parse or ordinary/fieldless proof. Preserve one actual Word
+operand identity and its decoded-range funding, never a new fixed input term
+per copied fragment. Both indentation and whitespace-bearing text payloads need
+discriminating controls, not just unchanged TOKEN text.
 
 For End normalization, copied name/punctuation fragments can remain mapped
 while removed whitespace has no pair. DocType maps only actual copied payload
