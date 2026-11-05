@@ -638,3 +638,22 @@ errors. Thus that simple current-ID binding fails this actual example. The
 original input remains unchanged and no protocol change follows. Evidence is
 `/private/tmp/rdocx-s96-word-story-diagnostic-only/rdocx-s96-q29-note-id-probe-20261105T050000Z/post-word-sdk-v1`.
 Q-A430-29 remains unanswered and its affected implementation stays held.
+
+## Current bounded review and answered decision checkpoint
+
+The user explicitly answered Q-A430-29 Preserve valid histories (Recommended).
+Canonical parent and child plans now require unmatched B tombstone handling
+without adjacent-reference ownership inference, retaining positive inconsistency
+refusal and the accepted missing-N detection limit. Actual implementation and
+review remain pending, with no new marker grammar or Q28 waiver.
+
+Root publication producer and model reviews are clean only within their bounded
+increments. The model increment authenticates69unique local passes, not complete
+C1 or a provider gate. Four methods, broader source/producer coverage and Native
+wiring remain open. The child D1 opaque-owner invariant reaches revision
+rewriting, unit membership, counting, listing and resolution. Its v4 repair
+reports52integration/5unit/1regression/1CLI passes with source stability, pending
+Root review. Earlier pending-decision and narrower test-count statements above
+are historical. No whole feature, final native/schema/binding or sprint gate is
+marked passed by these observations. The finite Native scanner visibility lease
+has been returned, with no child source imported into the parent carry.

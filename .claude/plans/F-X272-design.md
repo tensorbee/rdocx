@@ -5851,13 +5851,16 @@ paths retain their behavior and allocation policy. This technical clarification
 approves no implementation or completed carrier/provider gate. The active
 owner acknowledges this exact revision before changing the final sink.
 
-### Q-A430-29 child recognition amendment pending
+### Q-A430-29 child recognition amendment approved
 
-The complete child F-X272a has an unanswered user choice about unmatched body
-custody markers beside unrelated revision-wrapped references. Existing bytes
-lack the removed owner identity, so neither adjacency nor a wrapper alone can
-prove a live custody association. The child retains its approved baseline and
-holds this affected route. It cannot complete or supply the parent rollup until
-Q-A430-29 is answered and actually implemented/reviewed. No new name grammar,
-input refusal or corruption-detection waiver is approved. Parent C1 APIs,
-metrics and active implementation lease are unaffected. Continue closed work.
+The user explicitly chose Preserve valid histories (Recommended) in
+call_3b89d767d87c471bb71e618747fba848. The child operative amendment treats a valid
+unmatched B as retained tombstone or completed imported metadata under the
+existing lifetime rules, never binding the following unrelated reference by
+adjacency, wrapper or numeric coincidence. Positively identifiable inconsistency
+refusal remains, with the accepted inability to detect every missing-N corruption.
+No marker redesign, quota, C1 API or Q28 exception change follows. The child
+owner must acknowledge and implement the revised contract, preserve all45A/14G
+obligations subject to that explicit amendment, update HLD and obtain Root review.
+Its separate D1 opaque-owner repair is not waived. Parent C1 work continues.
+No provider readiness follows merely from the answered decision.
