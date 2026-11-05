@@ -6190,3 +6190,30 @@ remain the impact files. Final union and all prior residuals remain mandatory.
 
 Root technically approves this bounded extension after the clean independent
 design pass. Implementation and its constructor-return evidence remain pending.
+
+## Checked source transport copies, existing budget reconciliation
+
+Native assembly exposed an unclosed existing copy boundary. compose_sources
+materializes a new buffer from actual selected carrier images. This is checked
+operation work, not the narrow Q-C1-02 legacy-read exception. Apply the same
+existing Field publication-copy reservation used by repeat_source. Select the
+actual assembled source-map publication and positive delivered Field coverage,
+union their overlapping output images and count each distinct output occurrence.
+Equal provenance across two output copies cannot merge those output occurrences.
+Unknown regions remain unknown, and ordinary ranges grant no copy allowance.
+
+Validate anchors, ranges, checked lengths and constructor policy before the
+applicable reservation and byte growth. A failed preparation cannot consume a
+copy reservation. Shared refusal stays sticky. rewrite_imported_source already
+reserves its actual parent/payload copies before materialize_source and must
+not be debited again through a common helper. Namespace closure also owes its
+actual copy reservation before closure.write. A genuine no-copy move may avoid
+copy work while retaining the existing admission, constructor and delivery
+policy. Generated namespace insertions do not acquire source credit.
+
+This is reconciliation of the approved existing metric, with no new quota,
+public signature, parser, ordinary-complement certification or transport
+exemption. Keep separate Word-scalar and actual writer-publication handback
+gaps explicit. A producer lacking a positive fact cannot recover it by adding
+a parser solely to guess origin. Source inspection and local copy controls do
+not complete Native consumers or the final provider gate.
