@@ -84,8 +84,8 @@ Root's split instruction supersedes only the historical pin-update timing in
 that inherited paragraph. Preserve the historical WORD_COMMENT_CANDIDATE_SHA256,
 WORD_VERSION and WORD_BUILD constants until actual new native execution is
 available. Local regressions must record the actual candidate artifact and SHA
-without presenting the historical ignored self-hash test as passing on new
-bytes. Its current old-candidate assertion remains historical, not a new failure
+without presenting the historical nonignored self-hash guard as passing on
+new bytes. Its current old-candidate assertion remains historical, not a new failure
 or a waiver. After actual final native execution, the integrator reconciles
 those existing constants and records old/new identities in the labelled
 behavior commit. No old candidate digest or installed bundle version is an
