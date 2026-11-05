@@ -5977,7 +5977,11 @@ provider checkpoint to F-X277b's A277-2/3/6 implementation after actual prefix
 completion. Source audit found those rows use existing baseline mechanisms,
 not unfinished C1 carrier APIs. Separate-worktree implementation and serial
 semantic reconciliation preserve this parent's sole source writer and Base.
-F-X277's umbrella, F-X279/F-X279b and F-X280/F-X280b retain their parent barriers.
+F-X277's umbrella, F-X279/F-X279b and F-X280's umbrella retain their parent
+barriers. F-X280b may use the separately reviewed completed LOCAL F-X272a plus
+F-X277b chain for its exact raw-validation and note-provider prerequisites.
+Its final actual C1 open/error/resource/snapshot and both-family OPC composition
+remain mandatory, with no unchecked validator or count-based custody proof.
 This parent remains in-progress. Its own completion still requires C1, the
 integrated child and actual applicable gates, with all final riders retained.
 No C1 implementation, budget, API or review-counter change follows here.

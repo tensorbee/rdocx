@@ -27,7 +27,7 @@
 | F-X276 | Complete rpptx fit, table rows, fit text, Markdown and slide indexing | M | in-progress | codex |
 | F-X277 | Complete Issue432 through child stories, completion umbrella | L | pending | - |
 | F-X277a | Emit authored radical degrees and preserve imported absence | S | in-progress | codex |
-| F-X277b | Complete Word-like notes, links and numbering | L | in-progress | codex |
+| F-X277b | Complete Word-like notes, links and numbering | L | done | - |
 | F-X277c | Complete cells, authored TOC and chart-excluding replacement agreement | M | in-progress | codex |
 | F-X278 | Complete Word rendering fidelity and font policy | L | in-progress | codex |
 | F-X279 | Complete Issue434 through children, completion umbrella | L | pending | - |
@@ -679,3 +679,14 @@ normalization/reopen/sign interactions remain serial integration and final
 union obligations. The new F-X277b claim must use a clean Base descended from
 1c69b7e0 and import no unfinished parent carry. Source-only readiness and
 Root's affected design review justify this narrow replan, not weaker gates.
+
+Root completed the genuine LOCAL F-X277b provider checkpoint after exact
+source integration07f79679 and clean independent implementation final2. The
+actual pending-normal-id regression and affected scoped checks pass. Its plan
+remains approved with all final native/schema/installed/hash/C1/full riders
+pending, without AS_BUILT or SPRINT_TRACKER completion. F-X280b may use the
+completed F-X272a and F-X277b child chain only after the reviewed scheduling
+reconciliation and affected metadata checks. Both integrations must be
+ancestors of its clean claim Base. F-X277/F-X280 umbrellas and F-X279b retain
+their full parent barriers. The previous child-only scheduling exclusion is
+superseded for F-X280b only. No final validation result follows from this step.

@@ -40,8 +40,8 @@ regenerated, never hand-edited.
 | M22, Word depth | 12 | 12 | 0 | 0 |
 | M23, From-scratch business documents | 24 | 24 | 0 | 0 |
 | M24, Modern DOCX authoring completeness | 54 | 32 | 0 | 22 |
-| X, Cross-cutting | 306 | 276 | 15 | 11 |
-| **Total** | **637** | **558** | **15** | **60** |
+| X, Cross-cutting | 306 | 277 | 14 | 11 |
+| **Total** | **637** | **559** | **14** | **60** |
 <!-- AUTOGEN:backlog-summary END -->
 
 ## All F-IDs
@@ -848,7 +848,7 @@ HLD14 contract before adopting contributor changes.
 | F-X276 | Complete rpptx fit, table rows, fit text, Markdown and slide indexing | S96 | M | in-progress |
 | F-X277 | Complete Issue432 through child stories, completion umbrella | S96 | L | pending |
 | F-X277a | Emit authored radical degrees and preserve imported absence | S96 | S | in-progress |
-| F-X277b | Complete Word-like notes, links and numbering | S96 | L | in-progress |
+| F-X277b | Complete Word-like notes, links and numbering | S96 | L | done |
 | F-X277c | Complete cells, authored TOC and chart-excluding replacement agreement | S96 | M | in-progress |
 | F-X278 | Complete Word rendering fidelity and font policy | S96 | L | in-progress |
 | F-X279 | Complete Issue434 through children, completion umbrella | S96 | L | pending |
@@ -899,6 +899,11 @@ checkpoint at integrated1c69b7e0. Its approved plan retains all final acceptance
 riders and Q28 UNPROVED. F-X277b owns exactly A277-2/3/6 and uses that completed
 child dependency for separate-worktree implementation. This operative rule
 supersedes the older broad B range and its implementation-wide F-X272 edge.
-F-X277 still closes only after F-X272 and all three children qualify. F-X279b,
-F-X280b and their parent barriers are unchanged. No delivery ledger or final
-native/schema/full result follows from the prefix status.
+F-X277 still closes only after F-X272 and all three children qualify. F-X279b
+and both completion umbrellas retain their full parent barriers. F-X277b is
+done only at its approved genuine LOCAL checkpoint after integration07f79679
+and clean Root implementation final2. Its plan and final riders stay pending.
+F-X280b consumes the actual completed F-X272a plus F-X277b child chain, with
+both integrations ancestors of its clean Base and all final C1/open/OPC
+composition retained. No delivery ledger or final native/schema/full result
+follows from either prefix status.

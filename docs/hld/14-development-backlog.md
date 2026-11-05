@@ -8753,6 +8753,9 @@ partial-unit atomic refusal, mixed open transactions, settlement cleanup and
 accept/reject destination restoration across reopen. Preserve the approved
 bounded unchanged prior-revision owner policy and all existing public APIs.
 The one-release Q-A430-28 native exception remains unproved, never passed.
+Its actual completed LOCAL checkpoint may supply F-X277b and F-X280b only
+for their specified note identity and reserved custody prerequisites. Whole
+F-X272 and umbrella completion still require all actual final acceptance.
 
 Use existing comparison, allocator, resolver and staged-package APIs on the
 reviewed clean claim Base. No new C1 carrier API is a prerequisite. C1 and this
@@ -8824,7 +8827,7 @@ Complete Issue 432 and PR 441 final outcomes for Word-like written markup. Histo
 
 Completion edge F-X272 remains mandatory for this umbrella. Child implementation prerequisites follow their operative contracts, including F-X277b's actual completed LOCAL F-X272a checkpoint. Do not manufacture completion or use an oracle-only pending gate. Residual R-A277-7 foreign single-paragraph TOC stays with F-X277c. Authored note spacing and hyperlink changes require actual regression and final composition evidence. Attribute every intentional hash/pixel delta at the exclusive final union gate, without inventing an unnamed fifth key.
 
-Split ownership: F-X277 is the completion umbrella. A277-1 belongs wholly to F-X277a. A277-2, A277-3 and A277-6 belong wholly to F-X277b, using its actual F-X272a LOCAL checkpoint. A277-4, A277-5, A277-7 and A277-8 belong wholly to F-X277c. All children and the parent retain their actual original design-peer history. Root affected final audit does not create a fourth peer. F-X280's parent and F-X272 barriers remain unchanged. The parent estimate is historical aggregate effort and is not added to child implementation effort.
+Split ownership: F-X277 is the completion umbrella. A277-1 belongs wholly to F-X277a. A277-2, A277-3 and A277-6 belong wholly to F-X277b, using its actual F-X272a LOCAL checkpoint. A277-4, A277-5, A277-7 and A277-8 belong wholly to F-X277c. All children and the parent retain their actual original design-peer history. Root affected final audit does not create a fourth peer. F-X280's umbrella retains its full parent barriers. F-X280b follows its actual completed LOCAL child-provider chain. The parent estimate is historical aggregate effort and is not added to child implementation effort.
 
 ### F-X277a, Emit authored radical degrees and preserve imported absence
 
@@ -8853,7 +8856,9 @@ Separate worktrees isolate this work from unfinished C1. Serial semantic
 reconciliation and final C1 normalization/native/schema/installed/hash riders
 remain mandatory. No radical, cell, TOC or replacement scope belongs to B.
 The F-X277 umbrella still requires F-X272 and all three children. Original
-review history and allowances remain unchanged.
+review history and allowances remain unchanged. Its approved completed LOCAL
+A277-2 checkpoint may supply F-X280b's authored-note prerequisite, with final
+C1 and all native/schema/installed/hash riders retained.
 
 ### F-X278, Complete Word rendering fidelity and font policy
 
@@ -8907,11 +8912,11 @@ Own original Issue435 A280-7 only. One private sized_transform guards textbox, s
 
 **Sprint**: S96
 **Size**: L
-**Depends on**: F-X277 and F-X272, original approved-contract and actual-completion barriers unchanged
+**Depends on**: F-X272a and F-X277b, actual approved and completed genuine LOCAL child-provider checkpoints
 **Test gate**: regression
 **Spec reference**: 04-opc-and-packaging.md, package/validation contracts, and 10-bindings-spec.md, validation APIs.
 
-Own original A280-1/2/3/5/6, Word validation, both-family shared OPC duplicate/open refusal and bookmark criteria/residuals. F-X280a owns A280-7 and F-X280c owns A280-4. C does not complete shared open policy, and final duplicate/open composition remains due. Retain original provider/resource barriers, complete prior peer lineage and all final gates. Root pending Display-policy reconciliation remains proposed, not approved. The parent F-X280 rolls up all three children and all seven original criteria, with no second implementation or added effort estimate.
+Own original A280-1/2/3/5/6, Word validation, both-family shared OPC duplicate/open refusal and bookmark criteria/residuals. F-X280a owns A280-7 and F-X280c owns A280-4. C does not complete shared open policy, and final duplicate/open composition remains due. Use the completed child prefixes only for actual signed-note/custody and authored-note provider behavior. Both source integrations must precede the clean claim Base. Preserve complete peer lineage and all final C1 open/error/resource/snapshot and both-family OPC/C-file composition gates. Existing reviewed Display policy stays authoritative. The parent F-X280 rolls up all three children and all seven original criteria, with no second implementation or added effort estimate.
 
 ### F-X280c, Validate stored PresentationML packages through the public file route
 

@@ -63,6 +63,35 @@ unique RED/GREEN and scoped checks, with native/schema/installed/hash/full
 riders retained for the final integrated union. No AS_BUILT or SPRINT_TRACKER
 completion follows the prefix. Root's affected final review is required.
 
+## Approved LOCAL provider checkpoint for F-X280b
+
+The source integration07f79679 contains the exact independently reviewed
+product/test/HLD bytes from sourcee40193a3. The validated handoff was consumed.
+Root implementation final2 is zero defects and zero smells after actual
+four-case pending-normal-id RED and fixed-source GREEN, with two affected note
+controls and all-target/all-feature compilation and warnings-denied Clippy.
+Applicable preceding12integration and9unit observations include all operative
+A277-2/3/6 cases, with56affected provider and one existing marker control.
+Fixture failures, corrected Base controls and historical executable custody
+gaps remain explicit in the retained provenance. No source is relabelled and
+no unchanged gate is repeated to repair a historical artifact gap.
+
+Root approves these genuine LOCAL regression observations for run-sprint's
+provider-prefix route after the checkpoint review. Record existing run state
+completed and done BACKLOG/CURRENT_SPRINT cells, clearing owner, only after
+that review. Keep this plan approved and all final riders pending. Do not write
+AS_BUILT or SPRINT_TRACKER until actual final acceptance. Source07f79679 must
+be an ancestor of F-X280b's clean Base, alongside child integration1c69b7e0.
+
+Only F-X280b's actual A277-2 note-positive dependency uses this outgoing prefix.
+Its complete positive base and all validation behavior remain B's own tests.
+This later reconciliation supersedes inherited F-X280b whole-parent scheduling
+exclusions only. F-X277 and F-X280 umbrellas still require the whole F-X272
+and every original child. F-X279/F-X279b barriers remain unchanged. C1
+normalization, all same-document reopen/signing/output invariants, native,
+schema, installed bindings/typing, deterministic hashes, hosted and full union
+remain mandatory. This checkpoint supplies no final oracle or provider rollup.
+
 ## Operative local implementation checklist
 
 The operative A277-2/3/6 rows alone govern this worker. Other inherited

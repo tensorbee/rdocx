@@ -806,7 +806,7 @@ answers. Planned Word0.17.0andshared/PowerPoint0.15.0remain minor releases.
 No new product source file, module, crate, feature flag, trait or generic is
 introduced. Tests join existing entrypoints, not another linked test binary.
 
-## Approved LOCAL provider checkpoint for F-X277b
+## Approved LOCAL provider checkpoint for F-X277b and F-X280b
 
 Root approves run-sprint's genuine LOCAL prefix exception for this integrated
 child only. The actual reported regression
@@ -824,11 +824,14 @@ and done BACKLOG/CURRENT_SPRINT cells only after the checkpoint review. Keep
 this plan approved and preserve all45A/14Gfinal composition, native, SDK,
 installed binding, hash and full rider debt. Q28 remains its exact UNPROVED
 native positive. Do not write AS_BUILT or SPRINT_TRACKER until actual final
-acceptance. The child integration source must be an ancestor of F-X277b's clean
+acceptance. The child integration source must be an ancestor of each permitted consumer's clean
 Base. Parent F-X272 remains in-progress and cannot complete its own rollup or
 unblock the F-X277/F-X279/F-X280 umbrellas until all its actual work passes.
 
-Only F-X277b's executable A277-2/3/6 dependency is redirected to this child.
+Only F-X277b's executable A277-2/3/6 dependency and F-X280b's actual signed-note
+classification and reserved-bookmark custody dependency use this child prefix.
+F-X280b also requires the completed integrated F-X277b LOCAL checkpoint for its
+authored-note positive base. This supplies no F-X280b validation observation.
 Shared source and normalization interactions remain actual final-union work,
 not supplied by a completed status. A missing required API discovered during
 implementation is still blocking and is reported with source evidence.

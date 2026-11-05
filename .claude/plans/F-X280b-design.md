@@ -3,7 +3,7 @@
 **Status**: approved
 **Sprint**: S96
 **Size**: L
-**Depends on**: F-X277, F-X272
+**Depends on**: F-X272a, F-X277b
 **Test gate**: regression
 
 
@@ -14,10 +14,48 @@ Root approved this operative contract on2026-11-05 in
 complete F-X272a notes contract was adopted by F-X272. This section supersedes
 older draft, pending-approval and notes-contract-unapproved statements retained
 below as preparation history. It approves no implementation, provider, native
-observation or final gate. All original actual completion dependencies remain.
+observation or final gate. Actual child-prefix implementation dependencies follow the operative reconciliation below. The umbrellas retain their original final completion barriers.
 No review-peer allowance resets, no issue row is reduced and no extra source
 lease is created. Revalidate actual claim Base and applicable source inputs
 before implementation. GitHub intake remains stopped.
+
+## Operative child-prefix implementation prerequisites
+
+This approved technical scheduling reconciliation supersedes inherited
+whole-parent implementation barriers in this child only. Original
+A280-1/2/3/5/6, all existing public behavior, review history and final gates are
+unchanged. Implementation requires the actual completed genuine LOCAL
+F-X272a and F-X277b checkpoints, with their integrated source commits1c69b7e0
+and07f79679 ancestors of the clean claimed Base. Reviewed source or a pending
+oracle alone is insufficient. Claim only after the existing run state and
+BACKLOG/CURRENT_SPRINT records actually mark both prefixes completed.
+
+The pinned behavior audit READINESS_FACTS.md under
+/private/tmp/rdocx-s96-root-c1-implementation/native-template-support/f280b-readiness-20261105
+has SHA2561c41cd4160798aee9aee627098c92db0ff6a6d732d34e23b76dfcd8b9c5fbb2e.
+Actual signed normal/special note classification and reserved bookmark custody
+come from F-X272a. Actual authored separator, reference order and spacing,
+including pending-normal-id collisions and raw preservation, come from
+F-X277b. The raw schema subset, physical ZIP/open checks, forbidden-character
+mapping and bookmark count guard do not require an unfinished C1 callable.
+A280-2 still requires its real add_footnote, comparison, header and picture
+positive base. No note-provider dependency or positive control is waived.
+
+F-X280 and F-X277 umbrellas retain their full F-X272 and original child
+completion barriers. F-X279/F-X279b remain unchanged. F-X272 stays in-progress.
+The final union must use the SAME actual Document::from_package open predicate
+and retain Document::validate checked clone/serialization error channels and
+held state. Actual final C1 resource, constructor, source and refusal behavior
+must compose with B, without an unchecked success path. Duplicate counts never
+certify ownership, endpoint pairing or reserved comparison markers.
+
+Shared Native document, OPC, core lexical and HLD/test changes require serial
+semantic integration. B still owns both-family physical duplicate and literal
+forbidden-character refusal through actual open/validate/save, including
+F-X280c stored file and CLI consumers. C's indexed scanner is not physical ZIP
+proof. Preserve all native, schema, installed Python, typing, deterministic
+hash, hosted and full-sprint riders. No peer cap resets, new API, quota, scope,
+hash baseline or donor adoption follows. GitHub intake remains stopped.
 
 ## Split scope and inherited review lineage
 
