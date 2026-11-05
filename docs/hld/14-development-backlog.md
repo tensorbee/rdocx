@@ -9015,3 +9015,24 @@ provider. Reconcile the separate C1 comments parser/scope hunks at integration.
 Fresh native comment-candidate acceptance and all original final riders remain
 mandatory. B retains A1/3/5/6, P1/P2 and F272. Parent completion requires A/B/C
 and F272. Existing review lineage and caps remain unchanged.
+
+
+### F-X279d, Author crossing comment replies with initials
+
+**Sprint**: S96
+**Size**: M
+**Depends on**: none
+**Test gate**: regression
+**Spec reference**: HLD03 Shared Word document operations. HLD04 Part naming and
+Package integrity, comment anchors and checked publication. HLD10 Native Word
+facade stability and Python Word document operations.
+
+Draft complete A279-1 AUTHORING/initials, existing reply shims plus additive
+reply_to_with_initials, Python initials keyword and CLI --initials. Preserve
+crossing order, unique actual parent range, missing/ambiguous atomic refusal,
+save/reopen/remove/resolve and held views. Baseline Native comments/anchor and
+binding/CLI APIs predate unfinished C1 and C2. Preserve integrated C2 neighbor
+code, without claiming its formal final gate complete. No comparison/import
+lease. B retains P1/P2/C6 COMPOSITION and actual F272 prerequisite. On adoption
+parent completion requires F272 and A/B/C/D. Original caps and all final/native
+riders remain. No approval, claim or provider completion from this registration.

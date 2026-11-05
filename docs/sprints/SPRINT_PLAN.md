@@ -3337,6 +3337,7 @@ Every story is pending, with owner '-' until an actual claim on a clean Base. F-
 | F-X279a | Issue434 A279-4, PR444 | M | Complete owned revision snapshot text and snake_case kind across native/Python/CLI | None, actual reviewed clean product Base | Existing revision/Python/CLI/stub carriers, narrow HLD03/HLD10. No unchecked source helper | Read-only bytes unchanged, final actual union |
 | F-X279b | Issue434 A279-1,2,3,5,6, PR444 | L | Complete comments, comparison and insert_document | Actual F272 implementation unchanged | Original remainder source/HLD03/04/10, fresh native comment candidate gate | Original final union |
 | F-X279c | Proposed complete Issue434 A279-2/C2 child | M | Author comment markup/styles, preserve imported namespace/parts | None, Root adoption and clean reviewed Base required | Native comments, minimal lower comments writer/admission, disjoint existing Python tests, narrow HLD03/04/10 | Fresh native candidate and original final union, pending |
+| F-X279d | Draft complete A279-1 AUTHORING/initials child | M | Crossing reply topology, metadata, lifecycle and held-state atomicity | Proposed none, baseline helpers and Root split approval/clean claim required | Native comments, existing Python binding/stub and CLI parser/commands/tests, narrow HLD03/04/10. No C1 Native document/lower lease | Fresh exact native candidate and original final union, pending |
 | F-X280 | Issue 435, PR 439 | L | Completion umbrella for A280-1 to A280-7 final outcomes, including refuse-at-open for both libraries and both parts naming the part, with well-formed opaque content preserved verbatim. HLD04 and HLD10 added | Both child completions plus F-X277 note run order and F-X272 bookmark contract, approved contracts for design, actual completion for implementation | oxml-opc package, rdocx document, CLI, Python test_core, rpptx lib and tests, HLD04 and HLD10 | Unchanged |
 | F-X280a | Issue435 A280-7, PR439 | S | Complete negative-size authoring and native/Python atomicity, zero/table/connector controls | None. Clean reviewed metadata-only descendant of ed588 product Base | Existing rpptx lib/unit/integration, Python test_documented_examples and HLD10 shape paragraphs. Preserve F277a/F272 sections | Unchanged |
 | F-X280b | Issue435 A280-1/2/3/5/6, PR439 | L | Complete Word validation, shared package/open refusal and bookmark criteria | F-X277 and F-X272 unchanged | Original validation source/test/HLD04/HLD10 resources, no negative-size implementation | Unchanged |
@@ -4398,3 +4399,21 @@ actual F272 barrier. The umbrella requires F272 plus A/B/C. The exact permitted
 lower comments writer/admission hunks reconcile with frozen C1 parser/scope
 hunks. The reviewed product Base987027d4 enters no product change here. Normal
 clean claim is next. All review caps and final/native gates remain unchanged.
+
+
+### Prepared complete A279-1 authoring split
+
+F-X279d is draft, not approved or claimable. Its complete authoring/initials and
+reply lifecycle matrix is self-contained in the child plan. It uses existing
+baseline comment ownership, anchor, staging and binding/CLI helpers. Root must
+review and adopt the exact independence and source lease before implementation.
+Existing integrated C2 code is retained, with no formal provider completion
+inferred. No comparison, selective revision resolution, import or C1 active
+Native document/lower source is leased. B keeps P1/P2/C6 composition, A3/5/6 and
+actual F272 readiness. Upon adoption parent waits F272 and A/B/C/D, with original
+three exhausted design peers, implementation cap and all final/native riders.
+No existing issue outcome, self-hash obligation or fresh Word gate is removed.
+
+Root approves the F-X279d authoring split after final1. Its proposed-none
+provider edge is accepted from actual baseline caller proof. Normal claim is
+due. B retains P1/P2/C6 and actual F272 completion. All final riders remain.

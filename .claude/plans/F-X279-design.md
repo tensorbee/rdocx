@@ -6,6 +6,17 @@
 **Depends on**: F-X272, F-X279a, F-X279b, F-X279c
 **Test gate**: regression
 
+## Prepared crossing-reply authoring child split
+
+F-X279d is draft pending independent Root review/adoption and approval. It
+extracts complete A279-1 AUTHORING/initials and reply lifecycle/held-state evidence
+only. P1/P2 comparison and selective-resolution COMPOSITION, C6 and actual F272
+readiness stay B. A owns A4, C owns A2/C2 and B retains A3/5/6. The existing
+parent dependency header remains operative until adoption. After adoption the
+umbrella additionally requires D, with all original six-row and final/native
+riders unchanged. No source claim, formal provider completion or peer/cap reset
+follows from this prepared registration. Historical ownership below is retained.
+
 ## Operative comments-markup child split
 
 Root adopts and approves F-X279c for complete A279-2/C2 after the independent
@@ -101,3 +112,10 @@ source. No parent baseline recording or duplicate hash run.
 
 No unanswered product choice. Contract approval does not satisfy any actual
 provider, source, native or final qualification gate.
+
+## Operative Root adoption of reply authoring child
+
+Root approves independent F-X279d for complete reply authoring and initials.
+The umbrella now includes A, B, C and D plus the actual F272 requirement.
+P1/P2/C6 remain B. D consumes existing baseline authoring callables, not an
+unimplemented provider. All original final/native gates and review history stay.

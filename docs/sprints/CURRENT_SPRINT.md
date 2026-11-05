@@ -34,6 +34,7 @@
 | F-X279a | Expose owned revision text and one kind vocabulary | M | in-progress | codex |
 | F-X279b | Complete comments, comparison and insert_document | L | pending | - |
 | F-X279c | Author comment markup and styles without changing reply ranges | M | in-progress | codex |
+| F-X279d | Author crossing comment replies with initials | M | pending | - |
 | F-X280 | Complete Issue435 through child stories, completion umbrella | L | pending | - |
 | F-X280a | Refuse negative authored shape sizes before publication | S | in-progress | opencode |
 | F-X280b | Complete validation and damaged-input refusal | L | in-progress | codex |
@@ -711,3 +712,18 @@ actual F272 barrier. The umbrella requires F272 plus A/B/C. The exact permitted
 lower comments writer/admission hunks reconcile with frozen C1 parser/scope
 hunks. The reviewed product Base987027d4 enters no product change here. Normal
 clean claim is next. All review caps and final/native gates remain unchanged.
+
+
+### Prepared A279-1 authoring child
+
+F-X279d is draft pending Root split review/adoption and approval. Complete
+crossing-reply authoring/initials, lifecycle and held-state controls move only
+on adoption. Existing baseline authoring/anchor APIs supply its bounded seam.
+No unfinished C1/C2 provider is consumed, and integrated C2 neighbor behavior
+must remain. P1/P2/C6 comparison/resolution composition and F272 readiness stay
+B. Parent then waits F272 plus A/B/C/D. Exhausted peers, implementation cap and
+fresh Word/final union remain. No state transition, claim or completion recorded.
+
+Root adopts and approves F-X279d after independent split final1. Its authoring
+source is independent of C1. P1/P2/C6 remain with B and its F272 dependency.
+Normal claim is next. No final native or provider acceptance is implied.

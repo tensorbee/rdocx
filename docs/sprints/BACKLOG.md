@@ -855,6 +855,7 @@ HLD14 contract before adopting contributor changes.
 | F-X279a | Expose owned revision text and one kind vocabulary | S96 | M | in-progress |
 | F-X279b | Complete comments, comparison and insert_document | S96 | L | pending |
 | F-X279c | Author comment markup and styles without changing reply ranges | S96 | M | in-progress |
+| F-X279d | Author crossing comment replies with initials | S96 | M | pending |
 | F-X280 | Complete Issue435 through child stories, completion umbrella | S96 | L | pending |
 | F-X280a | Refuse negative authored shape sizes before publication | S96 | S | in-progress |
 | F-X280b | Complete validation and damaged-input refusal | S96 | L | in-progress |
@@ -924,3 +925,14 @@ actual F272 barrier. The umbrella requires F272 plus A/B/C. The exact permitted
 lower comments writer/admission hunks reconcile with frozen C1 parser/scope
 hunks. The reviewed product Base987027d4 enters no product change here. Normal
 clean claim is next. All review caps and final/native gates remain unchanged.
+
+
+F-X279d is a draft complete A279-1 authoring/initials split, pending independent
+Root adoption/approval. Existing baseline authoring helpers, not unfinished C1
+or C2 services, are the proposed dependency boundary. Preserve C2 neighbor code.
+B retains P1/P2/C6 composition and actual F272 implementation readiness. Parent
+requires D only after adoption, alongside F272/A/B/C and all final/native riders.
+No claim, approval, provider completion or review-cap reset is recorded here.
+
+Root approves the exact F-X279d authoring split after final1. Pending delivery
+status remains until normal claim. B retains comparison composition and F272.

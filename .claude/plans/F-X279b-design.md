@@ -6,6 +6,20 @@
 **Depends on**: F-X272. Design approval uses its bounded revised-owner preservation and refusal contract. Implementation needs actual provider completion. P1 and P2 below are F-X279 implementation and composition obligations, not additional F-X272 prerequisites. Three design peers are used. No fourth design peer. Root final follows this file. The implementation cap of three is separate and is not reset.
 **Test gate**: regression
 
+## Prepared A279-1 authoring child split, pending Root adoption
+
+F-X279d is a draft for complete A279-1 crossing-reply AUTHORING and initials,
+including C1 authoring and reply-specific C10 held-state/lifecycle controls.
+Until Root adopts this exact split, B ownership and its F272 barrier remain
+operative. On adoption D owns those authoring paths only. B retains all P1/P2
+comparison and selective-resolution COMPOSITION, C6, A279-3/5/6 and the actual
+F272 implementation prerequisite. C owns complete A279-2/C2 and A owns A279-4.
+This conditional clause supersedes inherited A1 authoring/source leases only
+upon adoption, never the retained A1 contract or P1/P2 protection/refusal rows.
+Parent completion then requires F272 and A/B/C/D with original final/native
+riders. Existing exhausted design peers, Root lineage and original implementation
+cap are preserved without reset. No claim, state transition or provider completion.
+
 ## Operative A279-2/C2 child split
 
 Root adopts complete A279-2/C2 into approved F-X279c. This exclusion overrides
@@ -528,3 +542,12 @@ Closure result: F6 is closed by the reviewed body-only native alternative and th
 Issue434 case1 introduces reply ranges and initials, and case3 introduces equal-split and one-word comparison behavior. Its donor is PR444. F-X272 A4 and A5 promise bounded preservation and refusal, not new crossing-reply topology. The current wholesale comment-snapshot guard at `crates/rdocx/src/comparison.rs:1006` and held-owner guard at `crates/rdocx/src/comparison.rs:2991` retain those boundaries. Shared markers in a plain paragraph are a separate composition case at `crates/rdocx/src/comparison.rs:13442` and `crates/rdocx/src/comparison.rs:17549`.
 
 Root therefore assigns P1 and P2 to this story's existing A279-1, A279-3 and C6. No formal dependency edge, public API, user decision, acceptance row, native gate or review counter changes. Earlier pinned preparation statements that called them provider assumptions remain historical. Current-source RED/GREEN, source revalidation, formal approval and actual provider completion are still due. This plan-only reconciliation is not product implementation or a clean design review.
+
+## Operative Root adoption of reply authoring split
+
+Root approves F-X279d after split final1. D now exclusively owns A279-1
+authoring/initials, its authoring matrix and reply-specific held-state/lifecycle
+controls. Every inherited B authoring source lease and checklist is superseded
+for that scope only. B retains P1/P2/C6 comparison and resolution composition,
+A279-3/5/6 and its real F272 provider requirement. C retains A279-2 and A all
+A279-4. No acceptance disappears or review cap resets.
