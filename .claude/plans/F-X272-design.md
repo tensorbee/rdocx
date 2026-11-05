@@ -6217,3 +6217,48 @@ exemption. Keep separate Word-scalar and actual writer-publication handback
 gaps explicit. A producer lacking a positive fact cannot recover it by adding
 a parser solely to guess origin. Source inspection and local copy controls do
 not complete Native consumers or the final provider gate.
+
+## Checked w14 declaration source handback
+
+The next actual producer bridge uses this additive doc-hidden method on
+ScopedWordOperation. It adds one method to the previous35-method carrier
+inventory, with no existing signature removal or change. Include it in the
+external caller and final strict SemVer inventories.
+
+```rust,ignore
+pub fn declare_source_w14_on_root(
+    &mut self,
+    source: ScopedWordSource,
+) -> Result<ScopedWordSource>;
+```
+
+The named existing consumers are source_model_document and the actual scoped
+MainPartBlocks assembly. Share the existing declare_w14_on_part_root decision
+and insertion location through a concrete private planner in the existing
+text module. Do not duplicate its uses-w14 or already-declared predicate.
+Determine physical insertion from the actual live reader/input origin, including
+UTF8 BOM. Preserve ordinary helper output and error policy, apart from fixing
+an actual BOM position bug if the shared planner exposes one. Record any such
+output correction explicitly with its actual discriminating evidence.
+
+The method validates operation identity and sticky refusal. A no-insertion
+result retains the original bytes without copying or renewing an input role.
+For insertion, prepare the exact selected before/after source images and the
+actual declaration bytes, then use checked composition as the actual buffer
+producer. All applicable existing reservations precede that byte growth.
+Generated declarations gain no source credit. Constructor facts, mapped
+publication, Word events and delivered coverage follow the real producer.
+
+Native assembly consumes this actual Source before obtaining any separately
+required legacy record through paid repeat_source/finish_source. It must not
+mutate a legacy Vec first and recover a Source by equality afterward. Keep
+target-event replay and later writer/parser handbacks separately pending.
+No new public type, generic, quota or namespace policy is introduced.
+
+Local controls distinguish no-op moves, root binding already present including
+a foreign URI, missing declaration with actual use, no-use input, aliases/BOM,
+foreign operation, exhausted known-Field copy work and unchanged caller state
+on failed preparation. Compare ordinary/scoped output through the actual
+shared helper, and require a real generated w14 main program with its Source
+handback. No extra parser solely to qualify origin is permitted. HLD03/04/10
+remain the existing impact list. Whole C1 and every final rider remain pending.
