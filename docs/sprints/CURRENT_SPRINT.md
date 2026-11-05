@@ -34,7 +34,7 @@
 | F-X279a | Expose owned revision text and one kind vocabulary | M | in-progress | codex |
 | F-X279b | Complete comments, comparison and insert_document | L | pending | - |
 | F-X279c | Author comment markup and styles without changing reply ranges | M | in-progress | codex |
-| F-X279d | Author crossing comment replies with initials | M | pending | - |
+| F-X279d | Author crossing comment replies with initials | M | in-progress | codex |
 | F-X280 | Complete Issue435 through child stories, completion umbrella | L | pending | - |
 | F-X280a | Refuse negative authored shape sizes before publication | S | in-progress | opencode |
 | F-X280b | Complete validation and damaged-input refusal | L | in-progress | codex |
