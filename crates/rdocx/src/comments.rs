@@ -1644,6 +1644,7 @@ impl Document {
         text: &str,
         date: Option<&str>,
     ) -> Result<()> {
+        self.prepare_comment_authoring()?;
         let mut occupied =
             occupied_para_ids(self.comments.as_ref(), self.comments_extended.as_ref());
         let (paragraphs, paragraph_ids, para_id) = comment_text_paragraphs(text, &mut occupied)?;
@@ -1671,6 +1672,100 @@ impl Document {
                 done: None,
                 extra_attributes: Vec::new(),
             });
+        Ok(())
+    }
+
+    /// Prepare only the part being authored. Imported parts remain unchanged
+    /// until an add or reply actually needs these Word conventions.
+    fn prepare_comment_authoring(&mut self) -> Result<()> {
+        use rdocx_oxml::styles::StyleType;
+        let definitions = [
+            ("CommentText", StyleType::Paragraph, "Normal"),
+            (
+                "CommentReference",
+                StyleType::Character,
+                "DefaultParagraphFont",
+            ),
+        ];
+        for (id, kind, _) in &definitions {
+            if let Some(existing) = self.styles.get_by_id(id)
+                && existing.style_type != *kind
+            {
+                return Err(Error::Other(format!(
+                    "comment style {id} has the wrong type"
+                )));
+            }
+        }
+        for (id, kind, base) in definitions {
+            if self.styles.get_by_id(id).is_some() {
+                continue;
+            }
+            let mut builder = if kind == StyleType::Paragraph {
+                crate::StyleBuilder::paragraph(id, id)
+            } else {
+                crate::StyleBuilder::character(id, id)
+            };
+            if self.styles.get_by_id(base).is_some() {
+                builder = builder.based_on(base);
+            }
+            self.add_style(builder)?;
+        }
+        let attributes = &mut self
+            .comments
+            .as_mut()
+            .expect("comment model exists")
+            .root_attributes;
+        const MC: &str = "http://schemas.openxmlformats.org/markup-compatibility/2006";
+        let namespace = |prefix: &str| {
+            attributes
+                .iter()
+                .find(|(name, _)| name == &format!("xmlns:{prefix}"))
+                .map(|(_, value)| value.as_str())
+        };
+        let existing = attributes.iter().position(|(name, _)| {
+            name.split_once(':').is_some_and(|(prefix, local)| {
+                local == "Ignorable" && namespace(prefix) == Some(MC)
+            })
+        });
+        if let Some(index) = existing {
+            let tokens = &mut attributes[index].1;
+            if !tokens.split_whitespace().any(|token| token == "w14") {
+                if !tokens.is_empty() {
+                    tokens.push(' ');
+                }
+                tokens.push_str("w14");
+            }
+        } else {
+            let prefix = attributes
+                .iter()
+                .find_map(|(name, uri)| {
+                    name.strip_prefix("xmlns:")
+                        .filter(|_| uri == MC)
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| {
+                    (0usize..)
+                        .map(|index| {
+                            if index == 0 {
+                                "mc".to_owned()
+                            } else {
+                                format!("mc{index}")
+                            }
+                        })
+                        .find(|prefix| namespace(prefix).is_none())
+                        .expect("finite attribute list")
+                });
+            if namespace(&prefix).is_none() {
+                attributes.push((format!("xmlns:{prefix}"), MC.to_owned()));
+            }
+            attributes.push((format!("{prefix}:Ignorable"), "w14".to_owned()));
+        }
+        if !attributes.iter().any(|(name, _)| name == "xmlns:w14") {
+            attributes.push((
+                "xmlns:w14".to_owned(),
+                "http://schemas.microsoft.com/office/word/2010/wordml".to_owned(),
+            ));
+        }
         Ok(())
     }
 
@@ -1716,6 +1811,7 @@ impl Document {
                     .position(|item| item.id == parent_id)
             })
             .ok_or_else(|| Error::Other(format!("comment id {parent_id} does not exist")))?;
+        self.prepare_comment_authoring()?;
         let existing_parent_para_id = last_para_id(
             &self
                 .comments
@@ -2090,8 +2186,22 @@ fn comment_text_paragraphs(
 ) -> Result<(Vec<CT_P>, Vec<Option<String>>, String)> {
     let mut paragraphs = Vec::new();
     let mut paragraph_ids = Vec::new();
-    for line in text.split('\n') {
+    for (index, line) in text.split('\n').enumerate() {
         let mut paragraph = CT_P::new();
+        paragraph
+            .properties
+            .get_or_insert_with(Default::default)
+            .style_id = Some("CommentText".to_owned());
+        if index == 0 {
+            let mut reference = rdocx_oxml::text::CT_R::new("");
+            reference.content.clear();
+            reference
+                .properties
+                .get_or_insert_with(Default::default)
+                .style_id = Some("CommentReference".to_owned());
+            reference.extra_xml.push(b"<w:annotationRef/>".to_vec());
+            paragraph.runs.push(reference);
+        }
         paragraph.add_run(line.strip_suffix('\r').unwrap_or(line));
         paragraphs.push(paragraph);
         paragraph_ids.push(Some(allocate_para_id_from_occupied(occupied)?));
@@ -3674,6 +3784,317 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn issue434_comment_markup_and_optional_ids() {
+        let mut document = Document::new();
+        document.add_paragraph("anchor");
+        let root = document
+            .add_comment_on_text("anchor", 0, "Ada", Some("AL"), "first\nsecond", None)
+            .unwrap();
+        document.reply_to(root, "Ben", "reply\nline").unwrap();
+        let comments = document.comments.as_ref().unwrap();
+        assert_eq!(comments.comments.len(), 2);
+        for comment in &comments.comments {
+            assert_eq!(comment.paragraphs.len(), 2);
+            for (index, paragraph) in comment.paragraphs.iter().enumerate() {
+                assert_eq!(
+                    paragraph
+                        .properties
+                        .as_ref()
+                        .and_then(|p| p.style_id.as_deref()),
+                    Some("CommentText")
+                );
+                let annotation = paragraph
+                    .runs
+                    .iter()
+                    .filter(|run| {
+                        run.extra_xml
+                            .iter()
+                            .any(|raw| raw.windows(13).any(|part| part == b"annotationRef"))
+                    })
+                    .count();
+                assert_eq!(annotation, usize::from(index == 0));
+                if index == 0 {
+                    assert_eq!(
+                        paragraph.runs[0]
+                            .properties
+                            .as_ref()
+                            .and_then(|p| p.style_id.as_deref()),
+                        Some("CommentReference")
+                    );
+                }
+            }
+        }
+        let xml = String::from_utf8(comments.to_xml().unwrap()).unwrap();
+        assert_eq!(xml.matches("<w:annotationRef").count(), 2);
+        assert!(xml.find("<w:pPr>").unwrap() < xml.find("<w:annotationRef").unwrap());
+        let mc = "http://schemas.openxmlformats.org/markup-compatibility/2006";
+        assert!(
+            comments
+                .root_attributes
+                .iter()
+                .any(|(name, value)| name == "xmlns:mc" && value == mc)
+        );
+        assert!(
+            comments
+                .root_attributes
+                .iter()
+                .any(|(name, value)| name == "mc:Ignorable"
+                    && value.split_ascii_whitespace().any(|token| token == "w14"))
+        );
+        assert!(
+            !document
+                .package
+                .parts
+                .keys()
+                .any(|name| name.ends_with("commentsIds.xml"))
+        );
+        let reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(reopened.comments().len(), 2);
+        assert_eq!(
+            reopened.style("CommentText").unwrap().style_type(),
+            rdocx_oxml::styles::StyleType::Paragraph
+        );
+        assert_eq!(
+            reopened.style("CommentReference").unwrap().style_type(),
+            rdocx_oxml::styles::StyleType::Character
+        );
+    }
+
+    #[test]
+    fn issue434_comment_styles_without_bases_keep_existing_order_and_definitions() {
+        use crate::style::StyleBuilder;
+        let mut document = Document::new();
+        let styles = std::sync::Arc::make_mut(&mut document.styles);
+        styles.styles.retain(|style| {
+            !matches!(
+                style.style_id.as_str(),
+                "Normal" | "DefaultParagraphFont" | "CommentText" | "CommentReference"
+            )
+        });
+        styles.extra_xml.push(b"<w:latentStyles/>".to_vec());
+        document
+            .add_style(StyleBuilder::paragraph("ExistingC2", "Existing C2"))
+            .unwrap();
+        let previous = document.styles.get_by_id("ExistingC2").unwrap().clone();
+        document.add_paragraph("anchor");
+        document
+            .add_comment_on_text("anchor", 0, "Ada", None, "text", None)
+            .unwrap();
+        assert_eq!(document.styles.get_by_id("ExistingC2"), Some(&previous));
+        for id in ["CommentText", "CommentReference"] {
+            assert!(document.styles.get_by_id(id).unwrap().based_on.is_none());
+        }
+        let xml = String::from_utf8(document.styles.to_xml().unwrap()).unwrap();
+        assert!(
+            xml.find("<w:latentStyles").unwrap() < xml.find("w:styleId=\"ExistingC2\"").unwrap()
+        );
+        assert!(
+            xml.find("w:styleId=\"ExistingC2\"").unwrap()
+                < xml.find("w:styleId=\"CommentText\"").unwrap()
+        );
+        assert!(
+            xml.find("w:styleId=\"CommentText\"").unwrap()
+                < xml.find("w:styleId=\"CommentReference\"").unwrap()
+        );
+    }
+
+    #[test]
+    fn issue434_comment_wrong_style_types_refuse_both_add_and_reply_atomically() {
+        use crate::style::StyleBuilder;
+        for reply in [false, true] {
+            for (id, kind) in [
+                ("CommentText", rdocx_oxml::styles::StyleType::Character),
+                ("CommentReference", rdocx_oxml::styles::StyleType::Paragraph),
+            ] {
+                let mut document = Document::new();
+                document.add_paragraph("anchor");
+                let parent = reply.then(|| {
+                    document
+                        .add_comment_on_text("anchor", 0, "Ada", None, "root", None)
+                        .unwrap()
+                });
+                if let Some(style) = std::sync::Arc::make_mut(&mut document.styles)
+                    .styles
+                    .iter_mut()
+                    .find(|style| style.style_id == id)
+                {
+                    style.style_type = kind;
+                } else {
+                    document
+                        .add_style(if kind == rdocx_oxml::styles::StyleType::Character {
+                            StyleBuilder::character(id, id)
+                        } else {
+                            StyleBuilder::paragraph(id, id)
+                        })
+                        .unwrap();
+                }
+                let before_comments = document.comments.clone();
+                let before_styles = std::sync::Arc::clone(&document.styles);
+                let before_parts = document.package.parts.clone();
+                let before_body = document.document.clone();
+                let result = if let Some(parent) = parent {
+                    document.reply_to(parent, "Ben", "reply")
+                } else {
+                    document.add_comment_on_text("anchor", 0, "Ada", None, "new", None)
+                };
+                assert!(result.is_err(), "{id} wrong type, reply={reply}");
+                assert_eq!(document.comments, before_comments);
+                assert_eq!(document.styles, before_styles);
+                assert_eq!(document.package.parts, before_parts);
+                assert_eq!(document.document, before_body);
+            }
+        }
+    }
+
+    #[test]
+    fn issue434_comment_mc_aliases_preserve_tokens_and_foreign_prefixes() {
+        const MC: &str = "http://schemas.openxmlformats.org/markup-compatibility/2006";
+        for alias in [false, true] {
+            let mut document = Document::new();
+            document.add_paragraph("anchor");
+            let parent = document
+                .add_comment_on_text("anchor", 0, "Ada", None, "root", None)
+                .unwrap();
+            let comments = document.comments.as_mut().unwrap();
+            comments.root_attributes = vec![
+                ("xmlns:mc".into(), "urn:foreign-mc".into()),
+                ("mc:opaque".into(), "preserved".into()),
+                ("xmlns:mc1".into(), "urn:occupied".into()),
+            ];
+            if alias {
+                comments.root_attributes.extend([
+                    ("xmlns:compat".into(), MC.into()),
+                    ("compat:Ignorable".into(), "w15 custom".into()),
+                ]);
+            }
+            document.reply_to(parent, "Ben", "reply").unwrap();
+            let comments = document.comments.as_ref().unwrap();
+            assert!(
+                comments
+                    .root_attributes
+                    .contains(&("xmlns:mc".into(), "urn:foreign-mc".into()))
+            );
+            assert!(
+                comments
+                    .root_attributes
+                    .contains(&("mc:opaque".into(), "preserved".into()))
+            );
+            let binding = |prefix: &str| {
+                comments
+                    .root_attributes
+                    .iter()
+                    .find(|(name, _)| name == &format!("xmlns:{prefix}"))
+                    .map(|(_, value)| value.as_str())
+            };
+            let lists: Vec<_> = comments
+                .root_attributes
+                .iter()
+                .filter(|(name, _)| {
+                    name.split_once(':').is_some_and(|(prefix, local)| {
+                        local == "Ignorable" && binding(prefix) == Some(MC)
+                    })
+                })
+                .collect();
+            assert_eq!(lists.len(), 1);
+            assert_eq!(lists[0].1, if alias { "w15 custom w14" } else { "w14" });
+            if alias {
+                assert_eq!(lists[0].0, "compat:Ignorable");
+            }
+        }
+    }
+
+    #[test]
+    fn issue434_comment_imported_bytes_optional_ids_and_original_binding_rollback() {
+        for foreign in [None, Some("w"), Some("w14")] {
+            let mut seed = Document::new();
+            seed.add_paragraph("anchor");
+            let id = seed
+                .add_comment_on_text("anchor", 0, "Ada", None, "root", None)
+                .unwrap();
+            seed.flush_to_package().unwrap();
+            let part = seed.comments_part_name.clone().unwrap();
+            let original =
+                String::from_utf8(seed.package.get_part(&part).unwrap().to_vec()).unwrap();
+            let mut source = original.replace(" mc:Ignorable=\"w14\"", "");
+            source = source.replace("<w:p ", "<w:p xmlns:unused=\"urn:unused\" ");
+            if let Some(prefix) = foreign {
+                let namespace = if prefix == "w" {
+                    rdocx_oxml::namespace::W_NS
+                } else {
+                    "http://schemas.microsoft.com/office/word/2010/wordml"
+                };
+                let alias = if prefix == "w" { "word" } else { "ext" };
+                source = source.replace(&format!("{prefix}:"), &format!("{alias}:"));
+                source = source.replace(
+                    &format!("xmlns:{prefix}=\"{namespace}\""),
+                    &format!("xmlns:{alias}=\"{namespace}\" xmlns:{prefix}=\"urn:producer\""),
+                );
+                source = source.replace(
+                    &format!("</{}comments>", if prefix == "w" { "word:" } else { "w:" }),
+                    &format!(
+                        "<{prefix}:opaque/></{}comments>",
+                        if prefix == "w" { "word:" } else { "w:" }
+                    ),
+                );
+            }
+            seed.package.set_part(&part, source.as_bytes().to_vec());
+            let ids = b"<w16cid:commentsIds xmlns:w16cid=\"http://schemas.microsoft.com/office/word/2016/wordml/cid\"/>".to_vec();
+            seed.package.set_part("/word/commentsIds.xml", ids.clone());
+            seed.package.content_types.add_override(
+                "/word/commentsIds.xml",
+                "application/vnd.ms-word.commentsIds+xml",
+            );
+            seed.package
+                .get_or_create_part_rels(&seed.doc_part_name)
+                .add(
+                    "http://schemas.microsoft.com/office/2016/09/relationships/commentsIds",
+                    "commentsIds.xml",
+                );
+            let mut zip = std::io::Cursor::new(Vec::new());
+            seed.package.write_to(&mut zip).unwrap();
+            let mut document = Document::from_bytes(&zip.into_inner()).unwrap();
+            let before = document.to_bytes().unwrap();
+            assert_eq!(document.package.get_part(&part).unwrap(), source.as_bytes());
+            let parts = document.package.parts.clone();
+            let styles = std::sync::Arc::clone(&document.styles);
+            let result = document.reply_to(id, "Ben", "reply");
+            if foreign.is_some() {
+                assert!(result.is_err());
+                assert_eq!(document.package.parts, parts);
+                assert_eq!(document.styles, styles);
+                assert_eq!(document.to_bytes().unwrap(), before);
+            } else {
+                result.unwrap();
+                document.to_bytes().unwrap();
+                assert_eq!(
+                    document.package.get_part("/word/commentsIds.xml").unwrap(),
+                    ids
+                );
+                assert_eq!(
+                    document
+                        .package
+                        .get_part_rels(&document.doc_part_name)
+                        .unwrap()
+                        .to_xml()
+                        .unwrap(),
+                    seed.package
+                        .get_part_rels(&seed.doc_part_name)
+                        .unwrap()
+                        .to_xml()
+                        .unwrap()
+                );
+                assert_eq!(
+                    document
+                        .package
+                        .content_types
+                        .override_for("/word/commentsIds.xml"),
+                    Some("application/vnd.ms-word.commentsIds+xml")
+                );
+            }
+        }
+    }
+
     const WORD_VERSION: &str = "16.104";
     const WORD_BUILD: &str = "16.104.25121423";
     const WORD_COMMENT_CANDIDATE_SHA256: &str =
@@ -4395,6 +4816,24 @@ mod tests {
                     .text(),
                 expected
             );
+            for (index, paragraph) in comment.paragraphs.iter().enumerate() {
+                assert_eq!(
+                    paragraph
+                        .properties
+                        .as_ref()
+                        .and_then(|p| p.style_id.as_deref()),
+                    Some("CommentText")
+                );
+                assert_eq!(
+                    paragraph
+                        .runs
+                        .iter()
+                        .flat_map(|run| &run.extra_xml)
+                        .filter(|raw| raw.windows(13).any(|part| part == b"annotationRef"))
+                        .count(),
+                    usize::from(index == 0)
+                );
+            }
             for para_id in comment.paragraph_ids.iter().flatten() {
                 assert!(occupied.insert(para_id.clone()));
             }

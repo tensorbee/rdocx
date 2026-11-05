@@ -1701,6 +1701,14 @@ comments-extended relationship graph reachable from the main document, with
 matching overrides and namespace declarations. A failed validation or
 allocation leaves anchors, typed parts, relationships, and overrides unchanged.
 
+Authored Word comments use canonical w and w14 writer bindings. Original
+foreign bindings at the comments root, a comment, or its actual paragraph
+destination refuse when their retained declarations would reinterpret generated
+names. The check precedes serialization and does not scan opaque descendants.
+Compatible aliases remain supported and opaque children retain their source.
+MC metadata is merged only when a comment is authored. commentsIds is optional,
+never synthesized, and an existing part and its graph remain unchanged.
+
 Comment moves stage marker removal, narrowly qualified Google wrapper pruning,
 destination placement and package reopen together. Unchanged definition and
 companion parts retain their owned identities. Typed run references retain

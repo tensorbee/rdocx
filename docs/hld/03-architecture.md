@@ -2561,6 +2561,14 @@ its paragraphs, which `Document::paragraph_story_location` returns for a
 paragraph index. The staged
 path validates both endpoints and edits cloned paragraphs before it creates
 comment relationships, so any path, run, or package failure publishes nothing.
+Authored comments and replies use CommentText on each paragraph and a first
+CommentReference run containing annotationRef only in the first paragraph.
+Missing styles append after existing definitions, with basedOn only when its
+base exists. A conflicting style type refuses the staged mutation. Authored
+comment roots merge the MC Ignorable attribute by expanded name, preserve its
+existing tokens and producer bindings, and append w14 when absent.
+Untouched imported comment parts gain no styles or MC attributes.
+
 Replies follow paragraph-id parent linkage through each comment's last
 paragraph, as `w15:commentEx` keys it, each line of a comment text is one
 paragraph. Resolution applies to the thread root, and removal deletes the

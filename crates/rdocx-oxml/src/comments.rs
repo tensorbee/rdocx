@@ -113,8 +113,33 @@ impl CT_Comments {
 
     /// Serialize with fixed WordprocessingML prefixes and schema child order.
     pub fn to_xml(&self) -> Result<Vec<u8>> {
-        for comment in &self.comments {
-            for paragraph in &comment.paragraphs {
+        validate_writer_bindings(&self.root_attributes, "comments root")?;
+        for (comment_index, comment) in self.comments.iter().enumerate() {
+            validate_writer_bindings(
+                &comment.extra_attributes,
+                &format!("comment {comment_index}"),
+            )?;
+            for (paragraph_index, paragraph) in comment.paragraphs.iter().enumerate() {
+                for (position, raw) in &paragraph.extra_xml {
+                    if CT_P::raw_is_root_attributes(*position, raw) {
+                        let mut reader = Reader::from_reader(raw.as_slice());
+                        loop {
+                            match reader.read_event()? {
+                                Event::Start(start) | Event::Empty(start) => {
+                                    validate_writer_bindings(
+                                        &capture_attributes(&start, &[], &[])?,
+                                        &format!(
+                                            "comment {comment_index} paragraph {paragraph_index}"
+                                        ),
+                                    )?;
+                                    break;
+                                }
+                                Event::Eof => break,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
                 paragraph.validate_resource_limits()?;
             }
         }
@@ -146,7 +171,7 @@ impl CT_Comments {
         {
             root.push_attribute(("xmlns:w14", W14_NS));
         }
-        push_preserved_attributes(&mut root, &self.root_attributes, true);
+        push_preserved_attributes(&mut root, &self.root_attributes);
         writer.write_event(Event::Start(root))?;
 
         write_raw_at(&mut writer, &self.extra_xml, 0)?;
@@ -343,7 +368,7 @@ fn write_comment<W: Write>(writer: &mut Writer<W>, comment: &CT_Comment) -> Resu
     }
     let mut id = itoa::Buffer::new();
     start.push_attribute(("w:id", id.format(comment.id)));
-    push_preserved_attributes(&mut start, &comment.extra_attributes, false);
+    push_preserved_attributes(&mut start, &comment.extra_attributes);
     writer.write_event(Event::Start(start))?;
 
     write_raw_at(writer, &comment.extra_xml, 0)?;
@@ -358,20 +383,26 @@ fn write_comment<W: Write>(writer: &mut Writer<W>, comment: &CT_Comment) -> Resu
     Ok(())
 }
 
-fn push_preserved_attributes(
-    start: &mut BytesStart<'_>,
-    attributes: &[(String, String)],
-    root: bool,
-) {
+fn validate_writer_bindings(attributes: &[(String, String)], location: &str) -> Result<()> {
     for (name, value) in attributes {
-        // The serializer writes the fixed `w` and `w14` prefixes, so their
-        // root declarations bind the namespaces it writes.
-        let value = match name.as_str() {
-            "xmlns:w" if root => W_NS,
-            "xmlns:w14" if root => W14_NS,
-            _ => value.as_str(),
+        let required = match name.as_str() {
+            "xmlns:w" => W_NS,
+            "xmlns:w14" => W14_NS,
+            _ => continue,
         };
-        start.push_attribute((name.as_str(), value));
+        if value != required {
+            return Err(OxmlError::InvalidValue(format!(
+                "{location}: fixed writer prefix {} has foreign namespace {value}",
+                name.trim_start_matches("xmlns:")
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn push_preserved_attributes(start: &mut BytesStart<'_>, attributes: &[(String, String)]) {
+    for (name, value) in attributes {
+        start.push_attribute((name.as_str(), value.as_str()));
     }
 }
 
@@ -443,6 +474,66 @@ fn write_raw_at<W: Write>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn issue434_comments_root_refuses_foreign_canonical_bindings() {
+        for (prefix, namespace) in [("w", crate::namespace::W_NS), ("w14", super::W14_NS)] {
+            let raw = format!(
+                r#"<d:comments xmlns:d="{}" xmlns:x="{}" xmlns:{prefix}="urn:producer"><d:comment d:id="0"><d:p x:paraId="12345678"><d:r><d:t>x</d:t></d:r></d:p></d:comment><{prefix}:opaque/></d:comments>"#,
+                crate::namespace::W_NS,
+                namespace
+            );
+            let comments = super::CT_Comments::from_xml(raw.as_bytes()).unwrap();
+            assert!(
+                comments.to_xml().is_err(),
+                "must not rebind foreign canonical {prefix}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue434_comments_owned_destinations_refuse_foreign_original_bindings() {
+        for inner in [
+            r#"<d:comment xmlns:w="urn:producer" d:id="0"><d:p><d:r><d:t>x</d:t></d:r></d:p></d:comment>"#,
+            r#"<d:comment d:id="0"><d:p xmlns:w14="urn:producer" w14:opaque="keep" x:paraId="12345678"><d:r><d:t>x</d:t></d:r></d:p></d:comment>"#,
+        ] {
+            let raw = format!(
+                r#"<d:comments xmlns:d="{}" xmlns:x="{}">{inner}</d:comments>"#,
+                crate::namespace::W_NS,
+                super::W14_NS
+            );
+            let comments = super::CT_Comments::from_xml(raw.as_bytes()).unwrap();
+            assert!(
+                comments.to_xml().is_err(),
+                "must inspect original owned destination: {inner}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue434_comments_valid_aliases_and_unused_local_declarations_stay_supported() {
+        let raw = format!(
+            r#"<d:comments xmlns:d="{}" xmlns:x="{}" xmlns:producer="urn:producer"><d:comment d:id="0"><d:p xmlns:w14="urn:unused" x:paraId="12345678"><d:r><d:t>x</d:t></d:r></d:p><producer:opaque/></d:comment></d:comments>"#,
+            crate::namespace::W_NS,
+            super::W14_NS
+        );
+        let comments = super::CT_Comments::from_xml(raw.as_bytes()).unwrap();
+        let output = comments.to_xml().unwrap();
+        let again = super::CT_Comments::from_xml(&output).unwrap();
+        assert_eq!(
+            again.comments[0].paragraph_ids,
+            [Some("12345678".to_owned())]
+        );
+        assert_eq!(again.comments[0].paragraphs[0].text(), "x");
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("<producer:opaque"));
+        assert!(output.contains("urn:producer"));
+        assert!(
+            !output.contains("Ignorable"),
+            "ordinary serialization must not author MC"
+        );
+        assert!(!output.contains("annotationRef"));
+    }
+
     use super::*;
 
     #[test]

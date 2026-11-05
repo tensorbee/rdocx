@@ -16636,3 +16636,110 @@ def test_issue435_bookmarks_sharing_an_id_open_and_validate():
     report = opened.validate()
     assert report.is_valid
     assert any("bookmark id 2" in item.message for item in report.findings)
+
+
+@pytest.mark.parametrize("reply", [False, True])
+@pytest.mark.parametrize("style_id,wrong_type", [
+    ("CommentText", "character"), ("CommentReference", "paragraph"),
+])
+def test_issue434_comment_style_refusal_keeps_held_views_and_bytes(reply, style_id, wrong_type):
+    import rdocx
+    import xml.etree.ElementTree as ET
+
+    document = rdocx.Document()
+    document.add_paragraph("anchor")
+    parent = document.add_comment_on_text("anchor", author="Ada", text="root") if reply else None
+    w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
+    def conflicting_style(raw):
+        root = ET.fromstring(raw)
+        for style in list(root):
+            if style.get(f"{{{w}}}styleId") == style_id:
+                root.remove(style)
+        ET.SubElement(root, f"{{{w}}}style", {
+            f"{{{w}}}styleId": style_id, f"{{{w}}}type": wrong_type,
+        })
+        return ET.tostring(root)
+
+    document = _fx261_replace_part(document, "word/styles.xml", conflicting_style)
+    held = document.paragraphs[0]
+    run = held.runs[0]
+    before = document.to_bytes()
+    before_comments = [(comment.id, comment.text) for comment in document.comments]
+    with pytest.raises(rdocx.RdocxError, match="wrong type"):
+        if reply:
+            document.reply_to(parent, author="Ben", text="reply")
+        else:
+            document.add_comment_on_text("anchor", author="Ada", text="new")
+    assert document.to_bytes() == before
+    assert [(comment.id, comment.text) for comment in document.comments] == before_comments
+    assert held.text == run.text == "anchor"
+
+
+def test_issue434_python_authored_comment_markup_and_untouched_import():
+    import rdocx
+    import xml.etree.ElementTree as ET
+
+    w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    mc = "http://schemas.openxmlformats.org/markup-compatibility/2006"
+    ns = {"w": w}
+    document = rdocx.Document()
+    document.add_paragraph("anchor")
+    root_id = document.add_comment_on_text("anchor", author="Ada", text="first\nsecond")
+    document.reply_to(root_id, author="Ben", text="reply\nline")
+    with zipfile.ZipFile(io.BytesIO(document.to_bytes())) as package:
+        comments_bytes = package.read("word/comments.xml")
+        comments = ET.fromstring(comments_bytes)
+        assert comments.get(f"{{{mc}}}Ignorable").split() == ["w14"]
+        assert "word/commentsIds.xml" not in package.namelist()
+        for comment in comments.findall("w:comment", ns):
+            paragraphs = comment.findall("w:p", ns)
+            assert len(paragraphs) == 2
+            for index, paragraph in enumerate(paragraphs):
+                assert paragraph.find("w:pPr/w:pStyle", ns).get(f"{{{w}}}val") == "CommentText"
+                assert len(paragraph.findall("w:r/w:annotationRef", ns)) == int(index == 0)
+            assert paragraphs[0].find("w:r/w:rPr/w:rStyle", ns).get(f"{{{w}}}val") == "CommentReference"
+    # Saving an imported comment part must not globally add authoring conventions.
+    imported_bytes = comments_bytes.replace(b' mc:Ignorable="w14"', b'')
+    imported = _fx261_replace_part(document, "word/comments.xml", lambda _: imported_bytes)
+    with zipfile.ZipFile(io.BytesIO(imported.to_bytes())) as package:
+        assert package.read("word/comments.xml") == imported_bytes
+    assert [comment.text for comment in imported.comments] == ["first\nsecond", "reply\nline"]
+
+
+@pytest.mark.parametrize("destination,prefix", [("root", "w"), ("root", "w14"),
+                                                ("comment", "w"), ("paragraph", "w14")])
+def test_issue434_comment_namespace_refusal_preserves_held_views(destination, prefix):
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("anchor")
+    parent = document.add_comment_on_text("anchor", author="Ada", text="root")
+    w = b"http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    w14 = b"http://schemas.microsoft.com/office/word/2010/wordml"
+
+    def foreign_destination(raw):
+        if destination == "root":
+            p = prefix.encode()
+            namespace = w if p == b"w" else w14
+            raw = raw.replace(p + b":", b"alias:")
+            return raw.replace(b'xmlns:' + p + b'="' + namespace + b'"',
+                               b'xmlns:alias="' + namespace + b'" xmlns:' + p + b'="urn:producer"')
+        if destination == "comment":
+            start = raw.index(b"<w:comment ")
+            end = raw.index(b"</w:comment>", start) + len(b"</w:comment>")
+            comment = raw[start:end].replace(b"w:", b"alias:")
+            comment = comment.replace(b"<alias:comment ", b'<alias:comment xmlns:alias="' + w + b'" xmlns:w="urn:producer" w:opaque="kept" ', 1)
+            return raw[:start] + comment + raw[end:]
+        raw = raw.replace(b'<w:p ', b'<w:p xmlns:alias="' + w14 + b'" xmlns:w14="urn:producer" w14:opaque="kept" ', 1)
+        return raw.replace(b'w14:paraId=', b'alias:paraId=', 1)
+
+    document = _fx261_replace_part(document, "word/comments.xml", foreign_destination)
+    held = document.paragraphs[0]
+    run = held.runs[0]
+    before = document.to_bytes()
+    with pytest.raises(rdocx.RdocxError, match="fixed writer prefix"):
+        document.reply_to(parent, author="Ben", text="reply")
+    assert document.to_bytes() == before
+    assert held.text == run.text == "anchor"
+    assert len(document.comments) == 1

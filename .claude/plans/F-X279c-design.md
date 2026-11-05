@@ -236,16 +236,17 @@ union measures and attributes actual deltas once.
 ## Implementation checklist
 
 - [x] Root split review/adoption/approval and exact source lease.
-- [ ] Normal clean claim at the recorded metadata-only descendant.
-- [ ] Scoped actual RED/GREEN and authored/imported atomicity controls.
-- [ ] Native-only helper changes plus minimal lower original-binding admission.
+- [x] Normal clean claim at the recorded metadata-only descendant.
+- [x] Scoped actual RED/GREEN and authored/imported atomicity controls.
+- [x] Native-only helper changes plus minimal lower original-binding admission.
 - [ ] Preserve C1 parser/scope hunks at integration, without whole-file adoption.
-- [ ] Narrow HLD intent, independent microscope, scoped gate and handoff.
+- [x] Narrow HLD intent, independent microscope, scoped gate and handoff.
 - [ ] Final fresh native candidate, installed/schema/hash/typing/CI riders.
 
 ## Open questions
 
 No new product choice. Root approves the split and exact clean-source lease.
-Normal claim and actual native evidence remain pending. If clean-helper inspection
+Normal claim and scoped implementation are complete. Actual native evidence and
+final integrated acceptance remain pending. If clean-helper inspection
 fails during implementation, report the missing seam rather than inventing a
 new API, relaxing A279-2 or consuming unfinished C1.

@@ -2409,6 +2409,13 @@ in the literal text, and a match whose range would also show text that the
 literal text leaves out, such as a field result, is not exact. Python exposes
 it with keyword `author`, `text`, `occurrence`, `initials` and `date`
 arguments.
+Comment authoring in Rust and Python uses CommentText paragraphs and a
+CommentReference annotation run in the first paragraph. Missing style definitions
+are appended without inventing absent base styles. Incompatible existing style
+types and fixed writer namespace destinations refuse atomically. Python held
+views and document revisions remain unchanged on refusal, while a successful
+add or reply publishes once. Untouched imported comment parts remain unchanged.
+
 Native `move_comment(id, StoryRunRange)` and `move_comment_to_text(id, anchor,
 occurrence)` move an existing root thread without changing its numeric id or
 metadata. Python exposes `move_comment(id, range)` and
