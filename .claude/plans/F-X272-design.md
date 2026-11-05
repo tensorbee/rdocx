@@ -5914,3 +5914,51 @@ SemVer inventory. No public type, model field, module, trait, generic or new
 quota is added. This is concrete technical reconciliation of the existing row
 consumer, not provider completion or acceptance of an unimplemented method.
 The sole owner acknowledges this contract revision before affected source edits.
+
+### Same-producer core capture transcript
+
+Root technically approves one additive doc-hidden core callable after reading
+oxml-core raw_xml.rs capture_element and the actual scoped textbox seam.
+
+```rust,ignore
+pub fn capture_element_with_source_ranges(
+    reader: &mut Reader<&[u8]>,
+    start: &BytesStart<'_>,
+    input: &[u8],
+    opening: Range<usize>,
+) -> Result<(Vec<u8>, Option<Vec<(Range<usize>, Range<usize>)>>)>;
+```
+
+Each pair is a known absolute input range and its captured-output range for
+actual copied bytes. Output gaps are Generated. Removed source bytes have no
+copy pair. The caller supplies the already consumed opening-event range.
+The core producer verifies the same live reader/input backing, actual consumed
+position and physical header payload. Numeric occurrence bounds establish the
+candidate mapping, byte checks validate it. No search for equal content or
+expired-owner identity is authorized.
+
+One private substantive existing capture loop serves the unchanged public
+capture_element and the actual mapped lower textbox consumer. Transcript
+collection is disabled without allocation in the legacy path. Preserve the
+old writer events, nesting, error and EOF behavior exactly. Initial mapped mode
+uses trim=false and expand-empty=false. Unsupported reader modes, BOM coordinate
+uncertainty or failed transport proof yield the same captured bytes with None,
+not a new refusal, altered parse or ordinary/fieldless proof.
+
+For End normalization, copied name/punctuation fragments can remain mapped
+while removed whitespace has no pair. DocType maps only actual copied payload
+and closing delimiter, with canonical keyword/space Generated. Every other
+event needs its actual producer transcript. Generated framing creates no
+Original, Field, Word or current-input credit. This byte transport does not
+certify complete Field ownership or resolve a lost actual Field map by itself.
+Existing capture/output and sticky work rules remain unchanged.
+
+Require real old/plain versus mapped byte/error parity, source/output bounds,
+all existing event variants, normalized End/DocType, entities, nesting, EOF,
+reader position, unproved modes and the disabled-transcript legacy path.
+Connect the actual lower scoped walker rather than adding a speculative
+consumer. Include this exact core callable in the external compile canary and
+final strict SemVer inventory alongside the operation methods. No new public
+type, module, trait, generic, quota or lower duplicate parser is approved.
+The sole owner acknowledges the exact revision before affected edits. This is
+technical API reconciliation, not implementation or provider acceptance.
