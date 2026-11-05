@@ -6160,3 +6160,33 @@ versus inserted intervals, predecessor drop and overlapping Field priority.
 HLD03/HLD04/HLD10 describe the partial private facts. This is one bounded
 consumer handback, not whole relevant-consumer closure, implementation of the
 two imported-payload methods, actual Native lineage or provider acceptance.
+
+### Positive ordinary property events from actual readers
+
+Extend the private positive ordinary sidecar to the existing successful qualified
+Empty pStyle and rStyle property-reader branches only. The actual property
+reader supplies event bounds after its current value-attribute decoder succeeds.
+Forward those facts through the already-required scoped property parse and
+actual capture copy transcript. Do not add a parser, QName pre-scan or generic
+ordinary classification. Ordinary None callers allocate no new transcript.
+
+Facts remain staged through the actual retained constructor-return chain.
+Discard them when a temporary successful property belongs to a run or owner
+that is later discarded or preserved only as raw fallback. Whole document
+success cannot commit observations from discarded candidates. Apply actual
+Field coverage first, including selected Field cache properties. A style element
+inside a proved Field remains Field-owned. Start variants, unknown property
+children and whole pPr/rPr subtrees remain unproved. A retained smartTag or
+customXml wrapper can forward only its own later actual property-reader result
+through its captured map. Initial document parsing cannot invent that result.
+
+Local evidence distinguishes qualified Empty observations from retained Start
+forms, foreign or shadowed names, value decoder and parent failures, mapped
+capture normalization, aliases/BOM, Field priority and copied-versus-generated
+transport. This private extension changes no public signature, valid-input
+acceptance, allowance or quota. Relationship, drawing and other raw identity
+owners still require their own actual consumer handoff. HLD03/HLD04/HLD10
+remain the impact files. Final union and all prior residuals remain mandatory.
+
+Root technically approves this bounded extension after the clean independent
+design pass. Implementation and its constructor-return evidence remain pending.
