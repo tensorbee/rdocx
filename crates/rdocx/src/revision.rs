@@ -8,6 +8,7 @@ use quick_xml::{Reader, XmlVersion};
 pub use rdocx_oxml::RevisionKind;
 use rdocx_oxml::text::CT_P;
 use rdocx_oxml::{CT_Document, CT_Revision};
+use sha2::{Digest, Sha256};
 
 use crate::{Document, Error, ParagraphRef, Result, StoryId};
 
@@ -215,27 +216,27 @@ pub(crate) enum RevisionScope<'a> {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-struct RevisionMetadata {
-    kind: RevisionKind,
-    id: i32,
-    author: String,
-    timestamp: Option<String>,
+pub(crate) struct RevisionMetadata {
+    pub(crate) kind: RevisionKind,
+    pub(crate) id: i32,
+    pub(crate) author: String,
+    pub(crate) timestamp: Option<String>,
 }
 
-struct XmlElement {
-    start: usize,
-    open_end: usize,
-    close_start: usize,
-    end: usize,
-    name: String,
-    local: String,
-    word: bool,
-    modeled: bool,
-    empty: bool,
-    parent: Option<usize>,
-    children: Vec<usize>,
-    revision: Option<RevisionMetadata>,
-    namespace_declarations: NamespaceDeclarations,
+pub(crate) struct XmlElement {
+    pub(crate) start: usize,
+    pub(crate) open_end: usize,
+    pub(crate) close_start: usize,
+    pub(crate) end: usize,
+    pub(crate) name: String,
+    pub(crate) local: String,
+    pub(crate) word: bool,
+    pub(crate) modeled: bool,
+    pub(crate) empty: bool,
+    pub(crate) parent: Option<usize>,
+    pub(crate) children: Vec<usize>,
+    pub(crate) revision: Option<RevisionMetadata>,
+    pub(crate) namespace_declarations: NamespaceDeclarations,
     field_marker: Option<String>,
     snapshot_field_marker: Option<String>,
     snapshot_scalar: String,
@@ -274,10 +275,11 @@ struct SnapshotField {
     result: bool,
 }
 
-struct XmlTree<'a> {
+pub(crate) struct XmlTree<'a> {
     source: &'a [u8],
-    elements: Vec<XmlElement>,
-    root: usize,
+    pub(crate) elements: Vec<XmlElement>,
+    pub(crate) root: usize,
+    note_admission: Option<Vec<bool>>,
 }
 
 struct RenderState<'a> {
@@ -301,6 +303,115 @@ impl RenderState<'_> {
                 range.end += offset;
             }
         }
+    }
+}
+
+/// Operation-private source transport for the comparison Field publication.
+/// Ordinary public revision resolution never creates or carries this observer.
+pub(crate) struct NotePublication {
+    pub(crate) part_name: String,
+    pub(crate) revision_id: i32,
+    pub(crate) roots: Vec<Option<Range<usize>>>,
+    pub(crate) output: Option<Vec<u8>>,
+    source_hash: Option<[u8; 32]>,
+}
+
+impl NotePublication {
+    pub(crate) fn new(part_name: &str, revision_id: i32, roots: &[Range<usize>]) -> Self {
+        Self {
+            part_name: part_name.to_owned(),
+            revision_id,
+            roots: roots.iter().cloned().map(Some).collect(),
+            output: None,
+            source_hash: None,
+        }
+    }
+
+    fn validate_source(&self, source: &[u8]) -> Result<()> {
+        if self.source_hash != Some(Sha256::digest(source).into()) {
+            return Err(Error::Other(
+                "note publication transport lost its actual source phase".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn remove_ranges(
+        &mut self,
+        part: &str,
+        source: &[u8],
+        ranges: &[Range<usize>],
+    ) -> Result<()> {
+        if self.part_name != part {
+            return Ok(());
+        }
+        self.validate_source(source)?;
+        let mut previous = 0;
+        for range in ranges {
+            if range.start >= range.end || range.end > source.len() || range.start < previous {
+                return Err(Error::Other(
+                    "note publication edits overlap or leave their actual source".into(),
+                ));
+            }
+            previous = range.end;
+        }
+        for range in self.roots.iter().flatten() {
+            if range.start >= range.end || range.end > source.len() {
+                return Err(Error::Other(
+                    "note publication root is outside its actual source".into(),
+                ));
+            }
+            for edit in ranges {
+                if edit.start < range.end
+                    && edit.end > range.start
+                    && !(edit.start <= range.start && edit.end >= range.end)
+                {
+                    return Err(Error::Other(
+                        "note publication root partially overlaps a retired source owner".into(),
+                    ));
+                }
+            }
+        }
+        for root in &mut self.roots {
+            let Some(range) = root else {
+                continue;
+            };
+            if range.start >= range.end || range.end > source.len() {
+                return Err(Error::Other(
+                    "note publication root is outside its actual source".into(),
+                ));
+            }
+            let mut removed = false;
+            let mut shift = 0;
+            for edit in ranges {
+                if edit.start <= range.start && edit.end >= range.end {
+                    removed = true;
+                    break;
+                }
+                if edit.start < range.end && edit.end > range.start {
+                    return Err(Error::Other(
+                        "note publication root partially overlaps a retired source owner".into(),
+                    ));
+                }
+                if edit.end <= range.start {
+                    shift += edit.len();
+                }
+            }
+            *root = if removed {
+                None
+            } else {
+                Some(range.start - shift..range.end - shift)
+            };
+        }
+        let mut hash = Sha256::new();
+        let mut cursor = 0;
+        for range in ranges {
+            hash.update(&source[cursor..range.start]);
+            cursor = range.end;
+        }
+        hash.update(&source[cursor..]);
+        self.source_hash = Some(hash.finalize().into());
+        Ok(())
     }
 }
 
@@ -362,8 +473,39 @@ impl Document {
         resolution: Resolution,
         scope: RevisionScope<'_>,
     ) -> Result<usize> {
+        self.resolve_revisions_with_note_publication(resolution, scope, None)
+    }
+
+    pub(crate) fn resolve_revisions_with_note_publication(
+        &mut self,
+        resolution: Resolution,
+        scope: RevisionScope<'_>,
+        mut publication: Option<&mut NotePublication>,
+    ) -> Result<usize> {
         let mut candidate = self.clone_for_staging();
         candidate.prepare_staged_package()?;
+        let footnote_custody = crate::comparison::validate_footnote_custody(&candidate, &scope)?;
+        if let Some(trace) = publication.as_deref_mut() {
+            if candidate.footnotes_part_name.as_deref() != Some(trace.part_name.as_str()) {
+                return Err(Error::Other(
+                    "publication trace has no positively discovered note part".into(),
+                ));
+            }
+            let bytes = candidate
+                .package
+                .get_part(&trace.part_name)
+                .ok_or_else(|| Error::Other("publication note part is missing".into()))?;
+            let roots = trace
+                .roots
+                .iter()
+                .cloned()
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| Error::Other("publication starts with a missing root".into()))?;
+            let mut tree = XmlTree::parse(bytes)?;
+            tree.qualify_note_revisions()?;
+            publication_root_indices(&tree, resolution, &scope, trace.revision_id, &roots)?;
+            trace.source_hash = Some(Sha256::digest(bytes).into());
+        }
         let source = candidate
             .package
             .get_part(&candidate.doc_part_name)
@@ -399,6 +541,15 @@ impl Document {
             candidate.package.set_part(&candidate.doc_part_name, output);
         }
 
+        let removed_note_revisions = crate::comparison::remove_selected_footnote_definitions(
+            &mut candidate,
+            &footnote_custody,
+            matches!(resolution, Resolution::Accept),
+            publication.as_deref_mut(),
+        )?;
+        resolved = resolved
+            .checked_add(removed_note_revisions)
+            .ok_or_else(|| Error::Other("resolved revision count overflowed".into()))?;
         let story_parts = crate::comparison::revision_story_parts(&candidate)?;
         for (_, part_name) in story_parts {
             let part = candidate
@@ -406,7 +557,45 @@ impl Document {
                 .get_part(&part_name)
                 .ok_or_else(|| Error::Other(format!("missing revision story part {part_name}")))?
                 .to_vec();
-            let (updated, count) = resolve_story_xml(&part, resolution, scope.clone())?;
+            let (updated, count) = if let Some(trace) = publication
+                .as_deref_mut()
+                .filter(|trace| trace.part_name == part_name)
+            {
+                trace.validate_source(&part)?;
+                let active = trace
+                    .roots
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, root)| root.clone().map(|root| (index, root)))
+                    .collect::<Vec<_>>();
+                let (updated, count, mapped) = if active.is_empty() {
+                    let (updated, count) = resolve_story_xml(&part, resolution, scope.clone())?;
+                    (updated, count, Vec::new())
+                } else {
+                    resolve_story_xml_with_publication_roots(
+                        &part,
+                        resolution,
+                        scope.clone(),
+                        trace.revision_id,
+                        &active
+                            .iter()
+                            .map(|(_, root)| root.clone())
+                            .collect::<Vec<_>>(),
+                    )?
+                };
+                if mapped.len() != active.len() {
+                    return Err(Error::Other(
+                        "publication renderer changed its root inventory".into(),
+                    ));
+                }
+                for ((index, _), root) in active.into_iter().zip(mapped) {
+                    trace.roots[index] = root;
+                }
+                trace.source_hash = Some(Sha256::digest(&updated).into());
+                (updated, count)
+            } else {
+                resolve_story_xml(&part, resolution, scope.clone())?
+            };
             if count > 0 {
                 candidate.package.set_part(&part_name, updated);
                 resolved = resolved
@@ -451,8 +640,24 @@ impl Document {
         if resolved == 0 {
             return Ok(0);
         }
+        crate::comparison::settle_footnote_custody(
+            &mut candidate,
+            &footnote_custody,
+            matches!(resolution, Resolution::Accept),
+            publication.as_deref_mut(),
+        )?;
         candidate.reconcile_comment_removal(self)?;
         candidate = crate::comparison::reopen_staged(candidate)?;
+        if let Some(trace) = publication {
+            if let Some(bytes) = candidate.package.get_part(&trace.part_name) {
+                trace.validate_source(bytes)?;
+                trace.output = Some(bytes.to_vec());
+            } else if trace.roots.iter().any(Option::is_some) {
+                return Err(Error::Other(
+                    "publication part disappeared with retained roots".into(),
+                ));
+            }
+        }
         self.commit_staged_mutation(candidate);
         Ok(resolved)
     }
@@ -475,7 +680,8 @@ pub(crate) fn resolve_story_xml_with_leaf_ranges(
     scope: RevisionScope<'_>,
     leaves: &[Range<usize>],
 ) -> Result<ResolvedStoryLeaves> {
-    let tree = XmlTree::parse(source)?;
+    let mut tree = XmlTree::parse(source)?;
+    tree.qualify_note_revisions()?;
     let mut selected = Vec::with_capacity(leaves.len());
     let mut previous_end = 0;
     for range in leaves {
@@ -518,7 +724,20 @@ pub(crate) fn resolve_story_xml_with_publication_roots(
     publication: i32,
     roots: &[Range<usize>],
 ) -> Result<ResolvedStoryLeaves> {
-    let tree = XmlTree::parse(source)?;
+    let mut tree = XmlTree::parse(source)?;
+    tree.qualify_note_revisions()?;
+    let selected = publication_root_indices(&tree, resolution, &scope, publication, roots)?;
+    render_with_source_ranges(&tree, resolution, scope, selected)
+}
+
+fn publication_root_indices(
+    tree: &XmlTree<'_>,
+    resolution: Resolution,
+    scope: &RevisionScope<'_>,
+    publication: i32,
+    roots: &[Range<usize>],
+) -> Result<Vec<usize>> {
+    let source = tree.source;
     let mut selected = Vec::with_capacity(roots.len());
     let mut previous = 0usize;
     let mut parent = None;
@@ -700,9 +919,9 @@ pub(crate) fn resolve_story_xml_with_publication_roots(
             if !tree.elements[child].word || tree.elements[child].local != "fldChar" {
                 continue;
             }
-            match marker(&tree, child)?.as_str() {
+            match marker(tree, child)?.as_str() {
                 "begin" => {
-                    if depth == 0 && (slot != 0 || !edge(&tree, run, child, true)) {
+                    if depth == 0 && (slot != 0 || !edge(tree, run, child, true)) {
                         return Err(Error::Other(
                             "publication begins with a shared or partial field run".into(),
                         ));
@@ -721,7 +940,7 @@ pub(crate) fn resolve_story_xml_with_publication_roots(
                 }
                 "separate" if depth > 1 => {}
                 "end" if depth > 0 => {
-                    if depth == 1 && (slot + 1 != selected.len() || !edge(&tree, run, child, false))
+                    if depth == 1 && (slot + 1 != selected.len() || !edge(tree, run, child, false))
                     {
                         return Err(Error::Other(
                             "publication ends with a shared or partial field run".into(),
@@ -742,7 +961,7 @@ pub(crate) fn resolve_story_xml_with_publication_roots(
             "publication lacks one complete actual complex field".into(),
         ));
     }
-    render_with_source_ranges(&tree, resolution, scope, selected)
+    Ok(selected)
 }
 
 fn render_with_source_ranges(
@@ -772,7 +991,8 @@ fn render_with_source_ranges(
 }
 
 pub(crate) fn modeled_revision_count(source: &[u8]) -> Result<usize> {
-    let tree = XmlTree::parse(source)?;
+    let mut tree = XmlTree::parse(source)?;
+    tree.qualify_note_revisions()?;
     Ok(tree
         .elements
         .iter()
@@ -784,7 +1004,8 @@ pub(crate) fn modeled_revision_count(source: &[u8]) -> Result<usize> {
 /// range of each element and its `w:id`. These are the elements that
 /// [`modeled_revision_count`] counts.
 pub(crate) fn modeled_revision_spans(source: &[u8]) -> Result<Vec<(Range<usize>, i32)>> {
-    let tree = XmlTree::parse(source)?;
+    let mut tree = XmlTree::parse(source)?;
+    tree.qualify_note_revisions()?;
     Ok(tree
         .elements
         .iter()
@@ -801,7 +1022,8 @@ pub(crate) fn story_part_revisions(
     source: &[u8],
     owners: &[(Range<usize>, StoryId)],
 ) -> Result<Vec<StoryRevision>> {
-    let tree = XmlTree::parse(source)?;
+    let mut tree = XmlTree::parse(source)?;
+    tree.qualify_note_revisions()?;
     let facts = tree.snapshot_facts();
     tree.elements
         .iter()
@@ -845,7 +1067,7 @@ pub(crate) fn validate_revision_timestamp(value: &str) -> Result<()> {
 }
 
 impl RevisionScope<'_> {
-    fn matches(&self, metadata: &RevisionMetadata) -> bool {
+    pub(crate) fn matches(&self, metadata: &RevisionMetadata) -> bool {
         match self {
             Self::All => true,
             Self::Author(author) => metadata.author == *author,
@@ -1210,6 +1432,61 @@ fn snapshot_field_transition_from(
 }
 
 impl<'a> XmlTree<'a> {
+    // Physical roots come from the same admitted story inventory as discovery.
+    // Fold ordinary modeled ancestry once. Only a positively admitted child
+    // story may restart that ancestry across a drawing's opaque envelope.
+    pub(crate) fn admitted_story_elements(&self, root_kind: crate::StoryKind) -> Result<Vec<bool>> {
+        let roots = crate::document::scan_story_owners_with_special(self.source, root_kind, true)?
+            .into_iter()
+            .map(|owner| (owner.full.start, owner.full.end))
+            .collect::<HashSet<_>>();
+        let mut admitted = Vec::with_capacity(self.elements.len());
+        for element in &self.elements {
+            let actual_root = roots.contains(&(element.start, element.end));
+            let parent_admitted = element.parent.is_some_and(|parent| admitted[parent]);
+            admitted.push(element.word && element.modeled && (actual_root || parent_admitted));
+        }
+        Ok(admitted)
+    }
+
+    // This removes metadata only. It neither promotes invalid/special note
+    // owners to normal nor changes the inherited generic textbox parser policy.
+    pub(crate) fn qualify_note_revisions(&mut self) -> Result<()> {
+        let root = &self.elements[self.root];
+        if !root.word || root.local != "footnotes" {
+            return Ok(());
+        }
+        let admitted = self.admitted_story_elements(crate::StoryKind::Footnote)?;
+        for (element, admitted) in self.elements.iter_mut().zip(&admitted) {
+            if !admitted {
+                element.revision = None;
+            }
+        }
+        self.note_admission = Some(admitted);
+        Ok(())
+    }
+
+    // The revision parser models structural containers, while scalar run
+    // content remains raw. Only recognized scalar leaves of an admitted run
+    // share its semantic authority. Opaque ancestors do not transmit it.
+    fn semantic_element(&self, index: usize) -> bool {
+        self.note_admission.as_ref().is_none_or(|admitted| {
+            let element = &self.elements[index];
+            admitted[index]
+                || element.word
+                    && element.children.is_empty()
+                    && matches!(
+                        element.local.as_str(),
+                        "t" | "delText" | "instrText" | "delInstrText"
+                    )
+                    && element.parent.is_some_and(|parent| {
+                        admitted[parent]
+                            && self.elements[parent].word
+                            && self.elements[parent].local == "r"
+                    })
+        })
+    }
+
     /// Build source context once for the whole snapshot batch. Persistent
     /// scalar field heads share prefixes without copying stacks or source text.
     fn snapshot_facts(&self) -> SnapshotFacts {
@@ -1947,7 +2224,7 @@ impl<'a> XmlTree<'a> {
         Ok(retiring)
     }
 
-    fn parse(source: &'a [u8]) -> Result<Self> {
+    pub(crate) fn parse(source: &'a [u8]) -> Result<Self> {
         Self::parse_in_scope(source, &NamespaceScope::new())
     }
 
@@ -2047,7 +2324,47 @@ impl<'a> XmlTree<'a> {
             source,
             elements,
             root: root.ok_or_else(|| Error::Other("XML has no root element".to_owned()))?,
+            note_admission: None,
         })
+    }
+
+    /// Read a selected custody attribute in this tree's actual ancestor scope.
+    pub(crate) fn word_attribute(&self, index: usize, wanted: &str) -> Result<Option<String>> {
+        let mut ancestors = Vec::new();
+        let mut current = Some(index);
+        while let Some(at) = current {
+            ancestors.push(at);
+            current = self.elements[at].parent;
+        }
+        let mut scope = NamespaceScope::new();
+        for at in ancestors.into_iter().rev() {
+            scope.extend(self.elements[at].namespace_declarations.iter().cloned());
+        }
+        let element = &self.elements[index];
+        let mut reader = Reader::from_reader(&self.source[element.start..element.open_end]);
+        let (Event::Start(start) | Event::Empty(start)) = reader
+            .read_event()
+            .map_err(|error| Error::Other(error.to_string()))?
+        else {
+            return Err(Error::Other("note custody element has no start".into()));
+        };
+        for attribute in start.attributes() {
+            let attribute = attribute.map_err(|error| Error::Other(error.to_string()))?;
+            let key = std::str::from_utf8(attribute.key.as_ref())
+                .map_err(|error| Error::Other(error.to_string()))?;
+            let Some((prefix, local)) = key.split_once(':') else {
+                continue;
+            };
+            if local == wanted && scope.get(prefix).map(String::as_str) == Some(WORD_NS) {
+                return Ok(Some(
+                    attribute
+                        .decoded_and_normalized_value(XmlVersion::Implicit1_0, start.decoder())
+                        .map_err(|error| Error::Other(error.to_string()))?
+                        .into_owned(),
+                ));
+            }
+        }
+        Ok(None)
     }
 
     fn direct_word_child(&self, index: usize, local: &str) -> Result<usize> {
@@ -2059,7 +2376,7 @@ impl<'a> XmlTree<'a> {
             .ok_or_else(|| Error::Other(format!("rendered properties have no direct Word {local}")))
     }
 
-    fn source_scope(&self, index: usize) -> NamespaceDeclarations {
+    pub(crate) fn source_scope(&self, index: usize) -> NamespaceDeclarations {
         let mut ancestors = Vec::new();
         let mut current = Some(index);
         while let Some(index) = current {
@@ -2142,18 +2459,20 @@ impl<'a> XmlTree<'a> {
         destination: &[(String, String)],
     ) -> Result<Vec<u8>> {
         let element = &self.elements[index];
-        if state.retiring_simple_fields.contains(&index) {
+        let semantic = self.semantic_element(index);
+        if semantic && state.retiring_simple_fields.contains(&index) {
             self.validate_selected_descendants(index, state)?;
             return Ok(Vec::new());
         }
         if let Some(metadata) = &element.revision
+            && semantic
             && state.scope.matches(metadata)
         {
             state.resolved.insert(index);
             return self.render_selected_revision(index, metadata.kind, state, destination);
         }
 
-        if matches!(state.resolution, Resolution::Reject) {
+        if semantic && matches!(state.resolution, Resolution::Reject) {
             let changes = self.selected_property_changes(index, state)?;
             if let Some((_, prior)) = changes.first().copied() {
                 for (selected, _) in &changes {
@@ -2181,7 +2500,11 @@ impl<'a> XmlTree<'a> {
             }
         }
 
-        let markers = self.selected_owner_markers(index, state);
+        let markers = if semantic {
+            self.selected_owner_markers(index, state)
+        } else {
+            Vec::new()
+        };
         if markers.iter().any(|marker| {
             let kind = self.elements[*marker]
                 .revision
@@ -2249,10 +2572,11 @@ impl<'a> XmlTree<'a> {
             &element.namespace_declarations,
         );
         // Rejected deleted text reads as text again, and a deleted field
-        // instruction as an instruction.
+        // instruction as an instruction, only in its admitted source role.
+        let semantic = self.semantic_element(index);
         let restored_local = match element.local.as_str() {
-            "delText" if convert_deleted_text && element.word => Some("t"),
-            "delInstrText" if convert_deleted_text && element.word => Some("instrText"),
+            "delText" if semantic && convert_deleted_text && element.word => Some("t"),
+            "delInstrText" if semantic && convert_deleted_text && element.word => Some("instrText"),
             _ => None,
         };
         if element.empty {
@@ -2275,19 +2599,26 @@ impl<'a> XmlTree<'a> {
             return Ok(output);
         }
 
-        let resolves_paragraph_property_change = element.word
+        let resolves_paragraph_property_change = semantic
+            && element.word
             && element.local == "pPr"
             && !self.selected_property_changes(index, state)?.is_empty();
-        let removes_empty_property_shell = element.word
+        let removes_empty_property_shell = semantic
+            && element.word
             && matches!(element.local.as_str(), "pPr" | "rPr" | "trPr" | "numPr")
             && (resolves_paragraph_property_change
                 || self.subtree_contains_selected_contextual_marker(index, state));
         let inner =
             self.render_inner_with_namespaces(index, state, convert_deleted_text, &current_scope)?;
-        if element.word && element.local == "tbl" && self.owned_rows_all_remove(index, state) {
+        if semantic
+            && element.word
+            && element.local == "tbl"
+            && self.owned_rows_all_remove(index, state)
+        {
             return Ok(Vec::new());
         }
-        if element.word
+        if semantic
+            && element.word
             && element.local == "hyperlink"
             && inner.iter().all(u8::is_ascii_whitespace)
             && self.owned_content_all_removes(index, state)
@@ -2348,7 +2679,8 @@ impl<'a> XmlTree<'a> {
             let child = element.children[child_index];
             let child_element = &self.elements[child];
             output.extend_from_slice(&self.source[cursor..child_element.start]);
-            if child_element.word
+            if self.semantic_element(child)
+                && child_element.word
                 && child_element.local == "p"
                 && !state.discarded
                 && self.paragraph_mark_removes(child, state)
@@ -2372,7 +2704,10 @@ impl<'a> XmlTree<'a> {
                         Error::Other("cannot remove the final paragraph mark".to_owned())
                     })?;
                     let next_element = &self.elements[next];
-                    if next_element.word && next_element.local == "tbl" {
+                    if self.semantic_element(next)
+                        && next_element.word
+                        && next_element.local == "tbl"
+                    {
                         if !self.owned_rows_all_remove(next, state) {
                             before_table = true;
                             break;
@@ -2381,7 +2716,10 @@ impl<'a> XmlTree<'a> {
                         next_index += 1;
                         continue;
                     }
-                    if !next_element.word || next_element.local != "p" {
+                    if !self.semantic_element(next)
+                        || !next_element.word
+                        || next_element.local != "p"
+                    {
                         return Err(Error::Other(
                             "paragraph mark removal requires an adjacent paragraph".to_owned(),
                         ));
@@ -4272,4 +4610,55 @@ fn issue434_field_checkpoint_deletion_forks_preserve_current_and_local_modes() {
             .collect::<Vec<_>>(),
         ["", "", "outside visible", "", "", "later visible"]
     );
+}
+
+#[test]
+fn issue430_note_publication_removal_transport_preserves_ranges_and_classifies_drop() {
+    let source = b"AAfirstBBsecondCC";
+    let mut trace = NotePublication::new("/word/footnotes.xml", 7, &[2..7, 9..15]);
+    trace.source_hash = Some(Sha256::digest(source).into());
+    trace
+        .remove_ranges("/word/footnotes.xml", source, std::slice::from_ref(&(0..2)))
+        .unwrap();
+    assert_eq!(trace.roots, vec![Some(0..5), Some(7..13)]);
+    trace
+        .remove_ranges(
+            "/word/footnotes.xml",
+            b"firstBBsecondCC",
+            std::slice::from_ref(&(0..5)),
+        )
+        .unwrap();
+    assert_eq!(trace.roots, vec![None, Some(2..8)]);
+    trace.validate_source(b"BBsecondCC").unwrap();
+    let roots = trace.roots.clone();
+    let hash = trace.source_hash;
+    assert!(
+        trace
+            .remove_ranges(
+                "/word/footnotes.xml",
+                b"BBsecondCC",
+                std::slice::from_ref(&(3..4))
+            )
+            .is_err()
+    );
+    assert_eq!(trace.roots, roots);
+    assert_eq!(trace.source_hash, hash);
+    assert!(
+        trace
+            .remove_ranges(
+                "/word/footnotes.xml",
+                b"XXsecondCC",
+                std::slice::from_ref(&(0..2))
+            )
+            .is_err()
+    );
+    assert_eq!(trace.roots, roots);
+    assert_eq!(trace.source_hash, hash);
+    assert!(
+        trace
+            .remove_ranges("/word/footnotes.xml", b"BBsecondCC", &[0..2, 1..2])
+            .is_err()
+    );
+    assert_eq!(trace.roots, roots);
+    assert_eq!(trace.source_hash, hash);
 }

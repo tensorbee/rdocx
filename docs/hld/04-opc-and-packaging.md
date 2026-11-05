@@ -1694,8 +1694,50 @@ deterministic save path writes the validated result later and preserves every
 unrelated part and relationship.
 
 Document comparison uses the same package boundary. It clones the complete
-typed document and package state, resolves identical story shells and
-relationships, and aligns modeled owners in each nonignored story. The prepared
+typed document and package state, resolves compatible story shells and
+relationships, and aligns modeled owners in each nonignored story.
+Normal-footnote additions and removals use checked discovery of exactly one
+internal footnotes relationship, its existing target and matching content type.
+Duplicate identities, missing targets and ambiguous relationship multiplicity
+refuse before publication. Numeric note ids remain destination identities.
+Omitted and explicit-normal owners at any signed id are normal. Explicit empty
+and unknown owners preserve legacy reading and exact imported bytes, with any
+owner or reference change refused. Namespace-qualified attributes use the actual
+inherited and local bindings.
+
+Footnote definition custody is persisted by two zero-width standard bookmark
+pairs. Names encode a persistent token and transaction-local presence bits.
+Recognition checks actual pair cardinality, effective namespace, adjacent ends,
+owner and reference association, first note paragraph placement and current
+revision wrappers. The note pair is inside an added content insertion and
+outside a deleted content wrapper. Token identity does not depend on current
+revision ids. Pending and resolved tombstones are open while any unit in the
+part remains pending. Completed imported markers are excluded from open votes,
+preserved when untouched and retired before an affected comparison emits new
+custody. Save and reopen rediscover these states from bytes without a custom
+part or in-memory history.
+
+Creation reserves the part, relationship and override through existing bundle
+allocation and carries the edited input's exact special inventory. It does not
+manufacture missing specials. Selective resolution removes only a fully selected
+owned definition whose references are removed. Original unused and still
+referenced notes remain. Unowned invalid and opaque records keep the part.
+With no retained normal definition or unowned record, an open original-absent
+or edited-absent vote removes the part. Otherwise imported specials remain.
+Removing a part removes its main relationship, override and own relationships.
+Definition-owned relationships and targets are removed only after checking
+remaining references and package-wide sharing. Unrelated relationships retain
+their ids and order. Settlement retires every library pair, while tombstones
+remain if another unit is pending. A body pair without a note counterpart has
+no surviving owner identity. It does not bind an adjacent reference, including
+one in a revision wrapper. It follows the existing tombstone or completed-marker
+lifetime without selecting or deleting unrelated definitions. Positively bound
+note pairs still require exact normal owner, reference, token, bits and pair
+cardinality. A note pair without its body pair refuses. The convention cannot
+distinguish every missing-note-pair corruption from an identical valid history.
+Checked reopen, signature invalidation and
+ordinary held-handle invalidation precede atomic publication. Any refusal keeps
+the original live model, package graph, handles and output unchanged. The prepared
 package's main-document bytes are authoritative. Exact source spans flow through
 body items, paragraphs, tables, rows, cells, controls, and runs, including when
 another child of the same owner changes. An unchanged drawing-bearing run keeps

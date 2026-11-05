@@ -1481,7 +1481,52 @@ sidecars. A changed paragraph records its prior base properties in
 differences retain the original bytes and produce stable
 `ComparisonDiagnostic` values at the actual story path. Inputs
 with differing story shells are rejected unless their story category is
-ignored. Inputs may hold existing modeled revisions, such as the redline of an
+ignored or the change is a supported normal-footnote topology change.
+Footnote comparison binds physical reference occurrences to their actual note
+ids. It aligns the body owners and run boundaries, preserves repeated references
+without synthesizing another site, and preserves original unused definitions.
+A new unreferenced definition is refused. Omitted type and explicit `normal`
+identify normal notes at every signed id. The three explicit separator types
+remain special. Empty and unknown types keep their legacy read projection, but
+their owner bytes and reference identity must remain unchanged. Classification
+uses each attribute's effective Word namespace, including local prefix shadows.
+
+Added and removed definitions use paired hidden standard bookmarks in the body
+and first note paragraph. Names carry a persistent token and the emitting
+transaction's original and edited part-presence bits. The body pair precedes the
+first actual reference outside its revision wrapper. An added note's pair is
+inside its content insertion. A deleted note's pair stays outside the deletion.
+Tokens and bookmark ids are reserved before allocating new comparison ids.
+A token is identity, independent of every current revision id and token order.
+Listing and id, author and date scopes still operate on revision elements.
+Selection of some, but not all, elements of one definition's custody unit refuses
+atomically. Shared references belong to the same definition unit.
+
+While any unit remains pending, resolved units retain zero-width tombstones.
+A valid body pair without a note pair has no surviving note-owner identity.
+It stays a tombstone in an open part or completed imported metadata in a settled
+part. A following reference or revision wrapper cannot identify its former owner.
+Positively bound units still require exact normal definition and reference
+ownership, matching token and bits, valid pair cardinality and no duplicate
+binding. A note pair without its body pair refuses. Identical bytes can represent
+either a valid removed-note history or missing-note-pair corruption, so complete
+corruption detection is not claimed. Actual revision publication, listing,
+selection and counting use admitted story-owner boundaries. Opaque textbox
+lookalikes remain raw, while genuine textbox structural revisions remain active.
+All open units' bits vote until settlement, including units from earlier
+comparisons and reopened packages. After resolving definitions, the part is
+absent exactly when no normal definition or unowned invalid or opaque record
+remains and an open unit either began without the part or targets its absence.
+Special-only original parts therefore remain when both presence bits are one.
+Creating a part carries the actual edited special inventory, including none.
+Accept restores the edited identities and inventory, and reject restores the
+original. Settlement physically retires library custody pairs. A marker left
+by Word in an already completed part is preserved when untouched and retired
+before editing its owner or part or emitting new custody there. Ignored notes
+retain original bytes and cannot supply a dangling new body reference. Endnote
+topology retains its existing refusal while ordinary text edits remain supported.
+
+Inputs may hold existing modeled revisions, such as the redline of an
 earlier comparison. A story owner that holds one, a paragraph, table, or
 content control, or the story's own section properties, is kept with its
 original bytes when both inputs hold it unchanged. Any other change to it is

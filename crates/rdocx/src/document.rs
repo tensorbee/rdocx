@@ -16772,6 +16772,7 @@ fn owner_kind(local_name: &[u8]) -> Option<StoryKind> {
 fn editable_note_owner(reader: &NsReader<&[u8]>, element: &BytesStart<'_>) -> Result<bool> {
     let mut id = None;
     let mut separator = false;
+    let mut normal_type = true;
     for attribute in element.attributes() {
         let attribute = attribute
             .map_err(|error| Error::Other(format!("story owner attribute scan failed: {error}")))?;
@@ -16790,6 +16791,7 @@ fn editable_note_owner(reader: &NsReader<&[u8]>, element: &BytesStart<'_>) -> Re
                     value.as_ref(),
                     "separator" | "continuationSeparator" | "continuationNotice"
                 );
+                normal_type = value == "normal";
             }
             b"id" => {
                 id = attribute
@@ -16803,7 +16805,7 @@ fn editable_note_owner(reader: &NsReader<&[u8]>, element: &BytesStart<'_>) -> Re
             _ => {}
         }
     }
-    Ok(!separator && id.unwrap_or(0) > 0)
+    Ok(!separator && id.is_some_and(|id| normal_type || id > 0))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -17113,7 +17115,35 @@ pub(crate) fn scan_story_owners(xml: &[u8], root_kind: StoryKind) -> Result<Vec<
     scan_story_owners_with_special(xml, root_kind, false)
 }
 
-fn scan_story_owners_with_special(
+// Read-only physical paragraph membership for the existing custody convention.
+// These ranges belong only to this input, and confer no edit authority.
+pub(crate) fn admitted_story_paragraph_spans(
+    xml: &[u8],
+    root_kind: StoryKind,
+) -> Result<Vec<Range<usize>>> {
+    let owners = scan_story_owners_with_special(xml, root_kind, true)?
+        .into_iter()
+        .map(|owner| {
+            let story = StoryId {
+                kind: owner.kind,
+                part_name: String::new(),
+                owner_index: owner.owner_index,
+                fingerprint: owner.fingerprint,
+            };
+            (story, owner)
+        })
+        .collect::<Vec<_>>();
+    let mut paragraphs = story_range_paragraph_spans(xml, &owners)?
+        .into_iter()
+        .flatten()
+        .map(|(_, span)| span)
+        .collect::<Vec<_>>();
+    paragraphs.sort_by_key(|span| (span.start, span.end));
+    paragraphs.dedup();
+    Ok(paragraphs)
+}
+
+pub(crate) fn scan_story_owners_with_special(
     xml: &[u8],
     root_kind: StoryKind,
     include_special: bool,

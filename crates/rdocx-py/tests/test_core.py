@@ -16450,3 +16450,93 @@ def test_issue434_revision_text_owned_snapshots_save_reopen_and_accept():
     assert document.accept_all() == 3
     assert document.revisions == ()
     assert [(revision.kind, revision.text) for revision in held] == expected
+
+
+def test_issue430_compare_note_creation_survives_reopen_and_reject():
+    import rdocx
+
+    original = rdocx.Document()
+    original.add_paragraph("seller")
+    original.add_paragraph("payment")
+    edited = rdocx.Document.from_bytes(original.to_bytes())
+    edited.add_footnote(edited.paragraphs[0], "new note")
+    live = original.paragraphs[0]
+    before = original.to_bytes()
+    with pytest.raises(rdocx.RdocxError, match="ignored footnotes"):
+        original.compare(edited, "Issue430", "2026-11-05T00:00:00Z",
+                         ignored_stories=["footnote"])
+    assert original.to_bytes() == before
+    assert live.text == "seller"
+    assert original.compare(edited, "Issue430", "2026-11-05T00:00:00Z") == ()
+    with pytest.raises(rdocx.StaleElementError):
+        _ = live.text
+    pending = original.to_bytes()
+    with zipfile.ZipFile(io.BytesIO(pending)) as archive:
+        assert b"_rdocxCmpNoteF" in archive.read("word/document.xml")
+        assert b"_rdocxCmpNoteF" in archive.read("word/footnotes.xml")
+    for accept in (True, False):
+        resolved = rdocx.Document.from_bytes(pending)
+        count = resolved.accept_all() if accept else resolved.reject_all()
+        assert count > 0
+        with zipfile.ZipFile(io.BytesIO(resolved.to_bytes())) as archive:
+            assert ("word/footnotes.xml" in archive.namelist()) is accept
+            assert all(b"_rdocxCmpNoteF" not in archive.read(name)
+                       for name in archive.namelist() if name.endswith(".xml"))
+        assert any(paragraph.text == "payment" for paragraph in resolved.paragraphs)
+
+
+def test_issue430_compare_note_removal_keeps_reject_destination():
+    import rdocx
+
+    original = rdocx.Document()
+    original.add_paragraph("seller")
+    note = original.add_footnote(original.paragraphs[0], "original note")
+    edited = rdocx.Document.from_bytes(original.to_bytes())
+    edited.remove_footnote(note.id)
+    original.compare(edited, "Issue430", "2026-11-05T00:00:00Z")
+    pending = original.to_bytes()
+    rejected = rdocx.Document.from_bytes(pending)
+    rejected.reject_all()
+    with zipfile.ZipFile(io.BytesIO(rejected.to_bytes())) as archive:
+        assert b"original note" in archive.read("word/footnotes.xml")
+        assert b"footnoteReference" in archive.read("word/document.xml")
+
+
+def test_issue430_normalized_element_ids_require_complete_custody_selection():
+    import rdocx
+
+    original = rdocx.Document()
+    original.add_paragraph("body")
+    edited = rdocx.Document.from_bytes(original.to_bytes())
+    edited.add_footnote(edited.paragraphs[0], "note")
+    original.compare(edited, "Issue430", "2026-11-05T00:00:00Z")
+    identifiers = []
+
+    def renumber(match):
+        identifiers.append(len(identifiers) + 1)
+        return match[1] + str(identifiers[-1]).encode() + match[2]
+
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(original.to_bytes())) as source:
+        with zipfile.ZipFile(output, "w") as destination:
+            for info in source.infolist():
+                payload = source.read(info.filename)
+                if info.filename in ("word/document.xml", "word/footnotes.xml"):
+                    payload = re.sub(rb'(<w:ins\b[^>]*\bw:id=")\d+("[^>]*>)',
+                                     renumber, payload)
+                destination.writestr(info, payload)
+    assert len(identifiers) >= 3
+    pending = output.getvalue()
+    partial = rdocx.Document.from_bytes(pending)
+    before = partial.to_bytes()
+    with pytest.raises(rdocx.RdocxError, match="partial footnote custody"):
+        partial.accept_revision_id(identifiers[0])
+    assert partial.to_bytes() == before
+    partial.accept_revisions_by_author("Issue430")
+    with zipfile.ZipFile(io.BytesIO(partial.to_bytes())) as archive:
+        assert b"note" in archive.read("word/footnotes.xml")
+        assert b"_rdocxCmpNoteF" not in archive.read("word/footnotes.xml")
+    rejected = rdocx.Document.from_bytes(pending)
+    rejected.reject_all()
+    with zipfile.ZipFile(io.BytesIO(rejected.to_bytes())) as archive:
+        assert "word/footnotes.xml" not in archive.namelist()

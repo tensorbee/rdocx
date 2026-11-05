@@ -1,12 +1,12 @@
 //! Footnote and endnote elements: `CT_Footnotes`, `CT_Footnote`.
 
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, Event};
-use quick_xml::{Reader, Writer};
+use quick_xml::{Reader, Writer, XmlVersion};
 
 use crate::error::Result;
 use crate::namespace::{W_NS, matches_local_name};
 use crate::numbering::word_prefixes_at;
-use crate::properties::is_word_element;
+use crate::properties::{is_word_attribute, is_word_element};
 use crate::text::{CT_P, ROOT_R_BINDING, declare_w14_on_part_root, root_binding_scope};
 
 /// `ST_FtnEdn` — what a note in the stream is for.
@@ -114,28 +114,31 @@ impl CT_Footnotes {
                     {
                         let mut id: i32 = 0;
                         let mut note_type = NoteType::Normal;
+                        let mut raw_type = None;
                         for attr in e.attributes().flatten() {
-                            if matches_local_name(attr.key.as_ref(), b"id") {
+                            if is_word_attribute(attr.key.as_ref(), b"id", &prefixes) {
                                 id = std::str::from_utf8(&attr.value)
                                     .unwrap_or("0")
                                     .parse()
                                     .unwrap_or(0);
-                            } else if matches_local_name(attr.key.as_ref(), b"type") {
-                                note_type = NoteType::from_str(
-                                    std::str::from_utf8(&attr.value).unwrap_or(""),
-                                );
+                            } else if is_word_attribute(attr.key.as_ref(), b"type", &prefixes) {
+                                let value = attr.decoded_and_normalized_value(
+                                    XmlVersion::Implicit1_0,
+                                    e.decoder(),
+                                )?;
+                                note_type = NoteType::from_str(&value);
+                                raw_type = Some(value.into_owned());
                             }
                         }
 
-                        // `w:type` decides what an entry is, because the ids
-                        // separators conventionally use are a convention
-                        // rather than a rule, and a `continuationSeparator`
-                        // sitting at id 1 must not read as note number one.
-                        //
-                        // An untyped entry at id 0 or below is still treated
-                        // as a separator. That is the older convention, and
-                        // producers that predate writing `w:type` rely on it.
-                        if note_type == NoteType::Normal && id <= 0 {
+                        // Omitted and explicit normal types are normal at every id.
+                        // Retain only the historical read of invalid empty/unknown
+                        // types at nonpositive ids. Comparison discriminates those
+                        // retained raw states separately before allowing an edit.
+                        if id <= 0
+                            && note_type == NoteType::Normal
+                            && raw_type.as_deref().is_some_and(|value| value != "normal")
+                        {
                             note_type = NoteType::Separator;
                         }
 
@@ -280,6 +283,34 @@ fn parse_footnote_content(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn issue430_normal_notes_at_every_signed_id() {
+        for id in [-1, 0, 2] {
+            for kind in ["", " w:type=\"normal\""] {
+                let xml = format!(
+                    r#"<w:footnotes xmlns:w="{W_NS}"><w:footnote w:id="{id}"{kind}><w:p><w:r><w:t>normal</w:t></w:r></w:p></w:footnote></w:footnotes>"#
+                );
+                let notes = CT_Footnotes::from_xml(xml.as_bytes()).unwrap();
+                assert_eq!(
+                    notes.footnotes[0].note_type,
+                    NoteType::Normal,
+                    "id={id} type={kind}"
+                );
+                assert!(notes.get_by_id(id).is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn issue430_note_attributes_use_actual_word_namespace() {
+        let xml = format!(
+            r#"<q:footnotes xmlns:q="{W_NS}" xmlns:x="urn:foreign"><q:footnote q:id="7" x:id="99" x:type="separator"><q:p/></q:footnote></q:footnotes>"#
+        );
+        let notes = CT_Footnotes::from_xml(xml.as_bytes()).unwrap();
+        assert_eq!(notes.footnotes[0].id, 7);
+        assert_eq!(notes.footnotes[0].note_type, NoteType::Normal);
+    }
+
     use super::*;
 
     #[test]
@@ -324,11 +355,11 @@ mod tests {
         </w:footnotes>"#;
 
         let footnotes = CT_Footnotes::from_xml(xml).unwrap();
-        // The untyped id=0 entry is retained as a separator, so a round trip
-        // preserves it, but it is not reachable as a note.
+        // An omitted type is normal even at id0. Conventional separator ids
+        // cannot override the schema type.
         assert_eq!(footnotes.footnotes.len(), 3);
-        assert_eq!(footnotes.footnotes[0].note_type, NoteType::Separator);
-        assert!(footnotes.get_by_id(0).is_none());
+        assert_eq!(footnotes.footnotes[0].note_type, NoteType::Normal);
+        assert!(footnotes.get_by_id(0).is_some());
 
         let first = footnotes.get_by_id(1).unwrap();
         assert_eq!(first.paragraphs.len(), 1);
@@ -350,7 +381,7 @@ mod tests {
 
         let endnotes = CT_Footnotes::from_xml(xml).unwrap();
         assert_eq!(endnotes.footnotes.len(), 2);
-        assert_eq!(endnotes.footnotes[0].note_type, NoteType::Separator);
+        assert_eq!(endnotes.footnotes[0].note_type, NoteType::Normal);
         assert_eq!(
             endnotes.get_by_id(1).unwrap().paragraphs[0].text(),
             "An endnote."

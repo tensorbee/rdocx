@@ -2958,6 +2958,43 @@ formatting, textual whitespace, fields, comments, and any public
 `ComparisonStoryKind`. The non-exhaustive story enum names the main, header,
 footer, comment, text-box, footnote, and endnote categories. The comparison
 surface covers relationship-resolved stories, fields, and nested text boxes.
+Normal-footnote topology is supported through the same native, Python and CLI
+comparison entry points. Physical reference sites retain their actual note ids.
+Omitted and explicit-normal types are normal at any signed id. Empty or unknown
+types preserve their legacy read result and exact source while changes to their
+owner or reference refuse. New unused definitions refuse, and original unused
+or still referenced definitions remain.
+
+Added and removed definitions carry hidden zero-width standard bookmark pairs.
+The name's token is persistent ownership identity, independent of current
+revision ids. The original and edited part-presence bits belong to the emitting
+transaction. `story_revisions` and CLI revision listing expose every revision
+element separately. Id selectors compare actual current ids, and author and
+date selectors compare each element's metadata. A partial custody-unit selection
+refuses atomically, including when a token happens to equal an unrelated id.
+No selector treats the token as a request to select the unit.
+
+Accept restores edited note identities, reference inventory, special records
+and part presence. Reject restores the original destination. Creating a part
+carries the actual edited special inventory, including none. An open creation
+unwinds to absence after its final owned note is rejected unless retained
+unowned content requires the part. Resolved units keep tombstones while another
+unit is pending, and settlement physically retires library markers. An unmatched
+body pair has no surviving note-owner identity and cannot group or select an
+adjacent reference, even inside a revision wrapper. Its ordinary revisions keep
+their ordinary selectors. Exact note-present owner, reference, token, bits and
+pair checks remain mandatory, and a note pair without its body pair refuses.
+Missing note-pair corruption cannot always be distinguished from identical valid
+removed-note histories. Opaque revision-shaped payload does not add listing or
+resolution counts. Genuine admitted textbox and structural revisions still do.
+Reopen
+reads the same persisted units and part-presence votes without chronology or
+process-local history. Imported Word-completed markers stay exact when untouched
+and retire before an affected comparison edits their owner or part or adds
+custody. Ignored footnote stories retain original parts and refuse body changes
+that would leave a missing note target. Endnote text comparison remains
+supported, while new endnote topology remains refused. These operations use
+existing held-handle invalidation and leave all live state unchanged on refusal.
 Word and character revisions group changed stretches as deletions followed by
 insertions. Whitespace between changes folds, while a non-whitespace anchor
 folds only when its joined word count is strictly shorter than both changed

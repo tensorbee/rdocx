@@ -825,6 +825,16 @@ impl IdAllocator {
         Ok(id)
     }
 
+    fn allocate_note_token(&mut self) -> Result<i32> {
+        let id = self.allocate()?;
+        if id > 999_999_999 {
+            return Err(Error::Other(
+                "comparison note custody token exceeds its nine-digit representation".into(),
+            ));
+        }
+        Ok(id)
+    }
+
     fn revision(
         &mut self,
         kind: &str,
@@ -914,8 +924,17 @@ impl Document {
     ) -> Result<Vec<ComparisonDiagnostic>> {
         validate_revision_timestamp(timestamp)?;
         validate_comparison_options(options)?;
-        let original = comparison_input(self)?;
+        let mut original = comparison_input(self)?;
         let mut edited = comparison_input(edited)?;
+        if !story_ignored(options, ComparisonStoryKind::Footnote) {
+            retire_completed_footnote_inputs(&mut original, &mut edited)?;
+            reconcile_footnote_custody_inputs(&original, &mut edited)?;
+        }
+        preflight_footnote_inputs(
+            &original,
+            &edited,
+            story_ignored(options, ComparisonStoryKind::Footnote),
+        )?;
         if original.package.contains_part(COMMENT_COMPARISON_PART)
             || edited.package.contains_part(COMMENT_COMPARISON_PART)
         {
@@ -1042,6 +1061,8 @@ impl Document {
             original_stories.retain(|story| story.kind != ComparisonStoryKind::Comment);
             edited_stories.retain(|story| story.kind != ComparisonStoryKind::Comment);
         }
+        original_stories.retain(|story| story.kind != ComparisonStoryKind::Footnote);
+        edited_stories.retain(|story| story.kind != ComparisonStoryKind::Footnote);
         if original_stories != edited_stories {
             return Err(Error::Other(
                 "document comparison requires identical related-story shells".to_owned(),
@@ -1073,7 +1094,11 @@ impl Document {
                     break;
                 }
             }
-            if stories_unchanged && !snapshot_comments {
+            if stories_unchanged
+                && !snapshot_comments
+                && FootnotePart::of(&original)?.map(|part| part.xml)
+                    == FootnotePart::of(&edited)?.map(|part| part.xml)
+            {
                 return Ok(Vec::new());
             }
         }
@@ -1093,6 +1118,12 @@ impl Document {
                 options,
             )?);
             used_ids.extend(word_ids_with_options(story_xml(&edited, story)?, options)?);
+        }
+        for document in [&original, &edited] {
+            if let Some(part) = FootnotePart::of(document)? {
+                used_ids.extend(word_ids_with_options(part.xml.as_bytes(), options)?);
+            }
+            used_ids.extend(footnote_custody_reserved_ids(document)?);
         }
         let input_ids = used_ids.clone();
         let mut metadata = Metadata {
@@ -1197,6 +1228,13 @@ impl Document {
             )?;
             candidate.package.set_part(&story.part_name, tracked_story);
         }
+        compare_footnote_parts(
+            &original,
+            &edited,
+            &mut candidate,
+            &mut metadata,
+            &mut diagnostics,
+        )?;
         if snapshot_comments {
             let revision_id = metadata.ids.allocate()?;
             let mut carried_comments = edited_comments.clone();
@@ -1309,11 +1347,30 @@ impl Document {
             .difference(&input_ids)
             .copied()
             .collect::<HashSet<_>>();
+        let mut field_stories = original_stories.clone();
+        if !story_ignored(options, ComparisonStoryKind::Footnote)
+            && let Some(part) = FootnotePart::of(&original)?.or(FootnotePart::of(&edited)?)
+        {
+            field_stories.push(StoryPart {
+                kind: ComparisonStoryKind::Footnote,
+                part_name: part.name,
+            });
+        }
+
         if existing_revisions {
+            let mut prior_stories = original_stories.clone();
+            if !story_ignored(options, ComparisonStoryKind::Footnote)
+                && let Some(part) = FootnotePart::of(&original)?
+            {
+                prior_stories.push(StoryPart {
+                    kind: ComparisonStoryKind::Footnote,
+                    part_name: part.name,
+                });
+            }
             refuse_changed_existing_revisions(
                 &original,
                 &candidate,
-                &original_stories,
+                &prior_stories,
                 options,
                 &new_ids,
             )?;
@@ -1324,6 +1381,7 @@ impl Document {
             &original_stories,
             options,
             &text_box_markers,
+            Some(&new_ids),
         )?;
         let mut edited_package =
             normalized_package(&edited, &edited_stories, options, &text_box_markers)?;
@@ -1339,6 +1397,7 @@ impl Document {
                 &original_stories,
                 options,
                 &text_box_markers,
+                Some(&new_ids),
             );
             let diagnostic_original =
                 normalized_package(&original, &original_stories, options, &text_box_markers);
@@ -1388,11 +1447,12 @@ impl Document {
             &candidate,
             &mut accepted_body,
             &edited_package,
-            &original_stories,
+            &field_stories,
             &metadata.field_conversions,
             1,
             &new_ids,
         )?;
+        verify_footnote_destination(&candidate, &edited, &new_ids, true, options)?;
         if accepted_body != edited_package {
             return Err(comparison_postcondition_error(
                 "acceptance",
@@ -1416,6 +1476,7 @@ impl Document {
             &original_stories,
             options,
             &text_box_markers,
+            Some(&new_ids),
         )?;
         let mut original_package =
             normalized_package(&original, &original_stories, options, &text_box_markers)?;
@@ -1426,11 +1487,12 @@ impl Document {
             &candidate,
             &mut rejected_package,
             &original_package,
-            &original_stories,
+            &field_stories,
             &metadata.field_conversions,
             0,
             &new_ids,
         )?;
+        verify_footnote_destination(&candidate, &original, &new_ids, false, options)?;
         if rejected_package != original_package {
             return Err(comparison_postcondition_error(
                 "rejection",
@@ -1690,6 +1752,20 @@ fn remap_equivalent_story_relationships(
             edited,
             &left.part_name,
             &right.part_name,
+            &mut reserved_media,
+            &mut charts,
+        )?);
+    }
+    if let Some(right) = FootnotePart::of(edited)? {
+        let left = FootnotePart::of(original)?;
+        let owner = left
+            .as_ref()
+            .map_or(right.name.as_str(), |part| part.name.as_str());
+        carried.extend(remap_equivalent_owner_relationships(
+            original,
+            edited,
+            owner,
+            &right.name,
             &mut reserved_media,
             &mut charts,
         )?);
@@ -2391,9 +2467,14 @@ fn compare_owned_story(
         if matches!(
             story.kind,
             ComparisonStoryKind::Footnote | ComparisonStoryKind::Endnote
-        ) && !normal_note_owner(left_xml)?
+        ) && !normal_note_owner(left_xml, original_bindings)?
         {
-            if original_owners[index] != edited_owners[index] {
+            if original_owners[index] != edited_owners[index]
+                || (matches!(
+                    raw_note_type_in_scope(left_xml, original_bindings)?,
+                    RawNoteType::Empty | RawNoteType::Unknown
+                ) && left_xml != right_xml)
+            {
                 return Err(Error::Other(format!(
                     "{} separator shell changed at {}[{index}]",
                     story.kind.label(),
@@ -3681,28 +3762,1988 @@ fn canonical_owned_story(xml: &str, owner_local: &str) -> Result<(Vec<String>, V
     Ok((skeleton, owners))
 }
 
-fn normal_note_owner(xml: &str) -> Result<bool> {
-    let mut reader = NsReader::from_reader(xml.as_bytes());
-    reader.config_mut().trim_text(false);
-    let mut buffer = Vec::new();
-    let (_, event) = reader
-        .read_resolved_event_into(&mut buffer)
-        .map_err(|error| Error::Other(format!("comparison XML scan failed: {error}")))?;
-    let (Event::Start(element) | Event::Empty(element)) = event else {
-        return Err(Error::Other(
-            "comparison note has no owner element".to_owned(),
-        ));
-    };
-    for attribute in element.attributes() {
-        let attribute = attribute.map_err(|error| Error::Other(error.to_string()))?;
-        let (namespace, local) = reader.resolver().resolve_attribute(attribute.key);
-        if local.as_ref() == b"type"
-            && matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == W_NS.as_bytes())
+const FOOTNOTE_CONTENT_TYPE: &str =
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml";
+
+#[derive(PartialEq, Eq)]
+enum FootnoteRootAnchor {
+    Normal(i32),
+    Retained(usize),
+}
+
+#[derive(Clone)]
+struct FootnoteOwner {
+    id: Option<i32>,
+    kind: RawNoteType,
+    span: Range<usize>,
+    inner: Range<usize>,
+    bindings: NamespaceBindings,
+}
+
+#[derive(Clone)]
+struct FootnotePart {
+    name: String,
+    xml: String,
+    owners: Vec<FootnoteOwner>,
+}
+
+impl FootnotePart {
+    fn of(document: &Document) -> Result<Option<Self>> {
+        let relationships = document.package.get_part_rels(&document.doc_part_name);
+        let links = relationships
+            .into_iter()
+            .flat_map(|rels| &rels.items)
+            .filter(|rel| rel.rel_type == rel_types::FOOTNOTES)
+            .collect::<Vec<_>>();
+        if links.is_empty() {
+            return Ok(None);
+        }
+        if links.len() != 1 || !crate::document::relationship_is_internal(links[0]) {
+            return Err(Error::Other(
+                "footnotes require exactly one internal relationship".into(),
+            ));
+        }
+        let name = OpcPackage::resolve_rel_target(&document.doc_part_name, &links[0].target);
+        if document.package.content_types.content_type_for(&name) != Some(FOOTNOTE_CONTENT_TYPE) {
+            return Err(Error::Other(format!(
+                "footnotes content type is invalid in {name}"
+            )));
+        }
+        let xml = std::str::from_utf8(
+            document
+                .package
+                .get_part(&name)
+                .ok_or_else(|| Error::Other(format!("missing footnotes part {name}")))?,
+        )
+        .map_err(utf8_error)?
+        .to_owned();
+        Self::parse(name, xml).map(Some)
+    }
+
+    fn parse(name: String, xml: String) -> Result<Self> {
+        let bindings = root_namespace_bindings(&xml, "footnotes", &[])?;
+        let tree = crate::revision::XmlTree::parse(xml.as_bytes())?;
+        let mut owners = Vec::new();
+        let mut ids = HashSet::new();
+        for &index in &tree.elements[tree.root].children {
+            let element = &tree.elements[index];
+            if !element.word || element.local != "footnote" {
+                continue;
+            }
+            let id = tree
+                .word_attribute(index, "id")?
+                .and_then(|value| value.parse().ok());
+            if let Some(id) = id
+                && !ids.insert(id)
+            {
+                return Err(Error::Other(format!(
+                    "ambiguous duplicate footnote owner {id} in {name}"
+                )));
+            }
+            let span = element.start..element.end;
+            let owner_xml = &xml[span.clone()];
+            owners.push(FootnoteOwner {
+                id,
+                kind: raw_note_type_in_scope(owner_xml, &bindings)?,
+                inner: element.open_end..element.close_start,
+                bindings: root_namespace_bindings(owner_xml, "footnote", &bindings)?,
+                span,
+            });
+        }
+        drop(tree);
+        Ok(Self { name, xml, owners })
+    }
+
+    fn normal(&self) -> BTreeMap<i32, &FootnoteOwner> {
+        self.owners
+            .iter()
+            .filter(|owner| {
+                matches!(
+                    owner.kind,
+                    RawNoteType::Omitted | RawNoteType::ExplicitNormal
+                )
+            })
+            .filter_map(|owner| owner.id.map(|id| (id, owner)))
+            .collect()
+    }
+
+    fn root_items(&self) -> Result<Vec<(Option<i32>, Range<usize>)>> {
+        let tree = crate::revision::XmlTree::parse(self.xml.as_bytes())?;
+        let root = &tree.elements[tree.root];
+        let mut cursor = root.open_end;
+        let mut items = Vec::new();
+        for &index in &root.children {
+            let node = &tree.elements[index];
+            if !self.xml[cursor..node.start]
+                .bytes()
+                .all(|byte| byte.is_ascii_whitespace())
+            {
+                items.push((None, cursor..node.start));
+            }
+            let normal = self
+                .owners
+                .iter()
+                .find(|owner| {
+                    owner.span.start == node.start
+                        && matches!(
+                            owner.kind,
+                            RawNoteType::Omitted | RawNoteType::ExplicitNormal
+                        )
+                })
+                .and_then(|owner| owner.id);
+            items.push((normal, node.start..node.end));
+            cursor = node.end;
+        }
+        if !self.xml[cursor..root.close_start]
+            .bytes()
+            .all(|byte| byte.is_ascii_whitespace())
         {
-            return Ok(attribute.value.as_ref().is_empty());
+            items.push((None, cursor..root.close_start));
+        }
+        Ok(items)
+    }
+
+    fn retained_records(&self) -> Result<Vec<String>> {
+        Ok(self
+            .root_items()?
+            .into_iter()
+            .filter(|(id, _)| id.is_none())
+            .map(|(_, range)| self.xml[range].to_owned())
+            .collect())
+    }
+
+    fn unowned_record_count(&self) -> Result<usize> {
+        let specials = self
+            .owners
+            .iter()
+            .filter(|owner| {
+                matches!(
+                    owner.kind,
+                    RawNoteType::Separator
+                        | RawNoteType::ContinuationSeparator
+                        | RawNoteType::ContinuationNotice
+                )
+            })
+            .count();
+        Ok(self.retained_records()?.len().saturating_sub(specials))
+    }
+
+    fn retained_shell(&self) -> Result<(Vec<String>, Vec<Vec<String>>)> {
+        let mut xml = self.xml.clone();
+        for owner in self.owners.iter().rev().filter(|owner| {
+            matches!(
+                owner.kind,
+                RawNoteType::Omitted | RawNoteType::ExplicitNormal
+            ) && owner.id.is_some()
+        }) {
+            xml.replace_range(owner.span.clone(), "");
+        }
+        canonical_owned_story(&xml, "footnote")
+    }
+}
+
+#[derive(Clone)]
+struct FootnoteReferenceSite {
+    part: String,
+    id: i32,
+    run: Range<usize>,
+    paragraph: Range<usize>,
+    revision: Option<Range<usize>>,
+}
+
+fn footnote_reference_sites(document: &Document) -> Result<Vec<FootnoteReferenceSite>> {
+    let mut parts = vec![(StoryKind::Body, document.doc_part_name.clone())];
+    parts.extend(
+        revision_story_parts(document)?
+            .into_iter()
+            .filter(|(kind, _)| !matches!(kind, StoryKind::Footnote | StoryKind::Endnote)),
+    );
+    parts.sort_by(|left, right| left.1.cmp(&right.1));
+    parts.dedup_by(|left, right| left.1 == right.1);
+    let mut sites = Vec::new();
+    for (kind, part) in parts {
+        let bytes = document
+            .package
+            .get_part(&part)
+            .ok_or_else(|| Error::Other(format!("missing reference story {part}")))?;
+        let tree = crate::revision::XmlTree::parse(bytes)?;
+        let admitted = tree.admitted_story_elements(kind)?;
+        for (index, element) in tree.elements.iter().enumerate() {
+            if !element.word || element.local != "footnoteReference" {
+                continue;
+            }
+            let Some(run_index) = element.parent.filter(|&parent| {
+                tree.elements[parent].word && tree.elements[parent].local == "r" && admitted[parent]
+            }) else {
+                continue;
+            };
+            let run = &tree.elements[run_index];
+            let mut parent = run.parent;
+            let mut paragraph = None;
+            let mut revision = None;
+            while let Some(at) = parent {
+                let ancestor = &tree.elements[at];
+                if ancestor.revision.is_some() && revision.is_none() {
+                    revision = Some(ancestor.start..ancestor.end);
+                }
+                if ancestor.word && ancestor.local == "p" {
+                    paragraph = Some(ancestor.start..ancestor.end);
+                    break;
+                }
+                parent = ancestor.parent;
+            }
+            let paragraph = paragraph
+                .ok_or_else(|| Error::Other("footnote reference has no paragraph owner".into()))?;
+            let id = tree
+                .word_attribute(index, "id")?
+                .and_then(|value| value.parse::<i32>().ok())
+                .ok_or_else(|| {
+                    Error::Other(format!("invalid footnote reference identity in {part}"))
+                })?;
+            sites.push(FootnoteReferenceSite {
+                part: part.clone(),
+                id,
+                run: run.start..run.end,
+                paragraph,
+                revision,
+            });
+        }
+    }
+    Ok(sites)
+}
+
+fn note_references_have_same_owners(
+    original: &Document,
+    edited: &Document,
+    id: i32,
+) -> Result<bool> {
+    let left = footnote_reference_sites(original)?;
+    let right = footnote_reference_sites(edited)?;
+    let parts = left
+        .iter()
+        .chain(&right)
+        .filter(|site| site.id == id)
+        .map(|site| site.part.clone())
+        .collect::<HashSet<_>>();
+    for part in parts {
+        let (Some(left_xml), Some(right_xml)) = (
+            original.package.get_part(&part),
+            edited.package.get_part(&part),
+        ) else {
+            return Ok(false);
+        };
+        let left_source = std::str::from_utf8(left_xml).map_err(utf8_error)?;
+        let right_source = std::str::from_utf8(right_xml).map_err(utf8_error)?;
+        let left_tree = crate::revision::XmlTree::parse(left_xml)?;
+        let right_tree = crate::revision::XmlTree::parse(right_xml)?;
+        let paragraphs = |tree: &crate::revision::XmlTree<'_>,
+                          source: &str|
+         -> Result<Vec<(Range<usize>, String)>> {
+            tree.elements
+                .iter()
+                .filter(|node| node.word && node.local == "p" && node.modeled)
+                .map(|node| {
+                    let closed = source_child(source, node.start..node.end)?;
+                    let signature =
+                        canonical_owned_story(&format!("<scope>{closed}</scope>"), "p")?;
+                    Ok((node.start..node.end, format!("{signature:?}")))
+                })
+                .collect()
+        };
+        let l = paragraphs(&left_tree, left_source)?;
+        let r = paragraphs(&right_tree, right_source)?;
+        let aligned = align(
+            &l.iter()
+                .map(|(_, signature)| signature.clone())
+                .collect::<Vec<_>>(),
+            &r.iter()
+                .map(|(_, signature)| signature.clone())
+                .collect::<Vec<_>>(),
+        );
+        let mut paired = HashMap::new();
+        for (a, b) in aligned {
+            if let (Some(a), Some(b)) = (a, b) {
+                paired.insert(l[a].0.start, r[b].0.start);
+            }
+        }
+        let key = |site: &FootnoteReferenceSite,
+                   tree: &crate::revision::XmlTree<'_>,
+                   sites: &[FootnoteReferenceSite],
+                   at: usize| {
+            let run = tree
+                .elements
+                .iter()
+                .filter(|node| {
+                    node.word
+                        && node.local == "r"
+                        && node.start >= site.paragraph.start
+                        && node.end <= site.paragraph.end
+                        && node.start < site.run.start
+                })
+                .count();
+            let ordinal = sites[..at]
+                .iter()
+                .filter(|other| other.part == site.part && other.run == site.run)
+                .count();
+            (run, ordinal)
+        };
+        let mut a = Vec::new();
+        let mut b = Vec::new();
+        for (at, site) in left
+            .iter()
+            .enumerate()
+            .filter(|(_, site)| site.part == part && site.id == id)
+        {
+            let Some(&paragraph) = paired.get(&site.paragraph.start) else {
+                return Ok(false);
+            };
+            a.push((paragraph, key(site, &left_tree, &left, at)));
+        }
+        for (at, site) in right
+            .iter()
+            .enumerate()
+            .filter(|(_, site)| site.part == part && site.id == id)
+        {
+            b.push((site.paragraph.start, key(site, &right_tree, &right, at)));
+        }
+        if a != b {
+            return Ok(false);
         }
     }
     Ok(true)
+}
+
+fn validate_footnote_reference_owners(
+    part: Option<&FootnotePart>,
+    sites: &[FootnoteReferenceSite],
+) -> Result<()> {
+    for site in sites {
+        let owner = part
+            .and_then(|part| part.owners.iter().find(|owner| owner.id == Some(site.id)))
+            .ok_or_else(|| {
+                Error::Other(format!(
+                    "footnote reference {} in {} has no owner",
+                    site.id, site.part
+                ))
+            })?;
+        if matches!(
+            owner.kind,
+            RawNoteType::Separator
+                | RawNoteType::ContinuationSeparator
+                | RawNoteType::ContinuationNotice
+        ) {
+            return Err(Error::Other(format!(
+                "footnote reference {} targets a special owner",
+                site.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn preflight_footnote_inputs(original: &Document, edited: &Document, ignored: bool) -> Result<()> {
+    let left = FootnotePart::of(original)?;
+    let right = FootnotePart::of(edited)?;
+    let left_refs = footnote_reference_sites(original)?;
+    let right_refs = footnote_reference_sites(edited)?;
+    for document in [original, edited] {
+        if let Some(part) = FootnotePart::of(document)?
+            && part.normal().is_empty()
+            && part.retained_records()?.is_empty()
+            && validate_footnote_custody(document, &crate::revision::RevisionScope::All)?.is_empty()
+        {
+            return Err(Error::Other(format!(
+                "empty footnotes part {} has no custody or retained records",
+                part.name
+            )));
+        }
+    }
+    for (part, sites) in [(&left, &left_refs), (&right, &right_refs)] {
+        validate_footnote_reference_owners(part.as_ref(), sites)?;
+    }
+    for (part, other) in [(&left, &right), (&right, &left)] {
+        if let Some(part) = part {
+            for owner in &part.owners {
+                if !matches!(owner.kind, RawNoteType::Empty | RawNoteType::Unknown) {
+                    continue;
+                }
+                let same = other.as_ref().and_then(|other| {
+                    other
+                        .owners
+                        .iter()
+                        .find(|candidate| candidate.id == owner.id)
+                        .map(|candidate| &other.xml[candidate.span.clone()])
+                }) == Some(&part.xml[owner.span.clone()]);
+                let references_same = owner
+                    .id
+                    .map(|id| note_references_have_same_owners(original, edited, id))
+                    .transpose()?
+                    .unwrap_or(true);
+                if !same || !references_same {
+                    return Err(Error::Other(format!(
+                        "changed invalid footnote owner or reference {:?}",
+                        owner.id
+                    )));
+                }
+            }
+        }
+    }
+    if ignored {
+        for site in right_refs {
+            if !left
+                .as_ref()
+                .is_some_and(|part| part.normal().contains_key(&site.id))
+            {
+                return Err(Error::Other(format!(
+                    "ignored footnotes cannot supply reference {}",
+                    site.id
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+struct NoteMarker {
+    token: i32,
+    original: bool,
+    edited: bool,
+    family: char,
+    part: String,
+    span: Range<usize>,
+    pair_id: i32,
+    owner: Option<i32>,
+    reference: Option<i32>,
+}
+
+#[derive(Clone)]
+pub(crate) struct FootnoteCustody {
+    token: i32,
+    original: bool,
+    edited: bool,
+    owner: Option<i32>,
+    addition: Option<bool>,
+    selected: bool,
+    revisions: Vec<crate::revision::RevisionMetadata>,
+}
+
+fn note_marker_name(name: &str) -> Option<(i32, bool, bool, char)> {
+    let tail = name.strip_prefix("_rdocxCmpNoteF")?;
+    let (digits, bits) = tail.split_once('P')?;
+    if digits.is_empty()
+        || digits.len() > 9
+        || !digits.bytes().all(|b| b.is_ascii_digit())
+        || (digits.len() > 1 && digits.starts_with('0'))
+        || bits.len() != 3
+    {
+        return None;
+    }
+    let bytes = bits.as_bytes();
+    if !matches!(bytes[0], b'0' | b'1')
+        || !matches!(bytes[1], b'0' | b'1')
+        || !matches!(bytes[2], b'B' | b'N')
+    {
+        return None;
+    }
+    Some((
+        digits.parse().ok()?,
+        bytes[0] == b'1',
+        bytes[1] == b'1',
+        char::from(bytes[2]),
+    ))
+}
+
+fn note_markers(document: &Document) -> Result<Vec<NoteMarker>> {
+    let note_part = FootnotePart::of(document)?;
+    let mut parts = vec![(document.doc_part_name.clone(), StoryKind::Body)];
+    parts.extend(story_parts(document)?.into_iter().map(|part| {
+        let kind = match part.kind {
+            ComparisonStoryKind::Header => StoryKind::Header,
+            ComparisonStoryKind::Footer => StoryKind::Footer,
+            ComparisonStoryKind::Comment => StoryKind::Comment,
+            ComparisonStoryKind::Footnote => StoryKind::Footnote,
+            ComparisonStoryKind::Endnote => StoryKind::Endnote,
+            ComparisonStoryKind::Main | ComparisonStoryKind::TextBox => StoryKind::Body,
+        };
+        (part.part_name, kind)
+    }));
+    parts.sort_by(|left, right| left.0.cmp(&right.0));
+    parts.dedup_by(|left, right| left.0 == right.0);
+    let mut markers = Vec::new();
+    for (part, kind) in parts {
+        let source = document
+            .package
+            .get_part(&part)
+            .ok_or_else(|| Error::Other(format!("missing custody story {part}")))?;
+        let tree = crate::revision::XmlTree::parse(source)?;
+        let paragraphs = crate::document::admitted_story_paragraph_spans(source, kind)?;
+        // The real owner inventory excludes opaque descendant stories. Also
+        // require the marker's own path to that paragraph to stay modeled.
+        let marker_paragraph = |index: usize| {
+            // Bookmarks themselves are retained raw leaves in XmlTree. Their
+            // actual containing path, rather than that leaf classification,
+            // must be admitted and modeled.
+            let mut at = tree.elements[index].parent;
+            while let Some(index) = at {
+                let node = &tree.elements[index];
+                if !node.word || !node.modeled {
+                    return None;
+                }
+                if node.local == "p" {
+                    return paragraphs
+                        .contains(&(node.start..node.end))
+                        .then_some(index);
+                }
+                at = node.parent;
+            }
+            None
+        };
+        let mut names = HashSet::new();
+        for (index, node) in tree.elements.iter().enumerate() {
+            if !node.word || node.local != "bookmarkStart" || marker_paragraph(index).is_none() {
+                continue;
+            }
+            let Some(name) = tree.word_attribute(index, "name")? else {
+                continue;
+            };
+            let Some((token, original, edited, family)) = note_marker_name(&name) else {
+                continue;
+            };
+            let Some(parent) = node.parent else {
+                continue;
+            };
+            let siblings = &tree.elements[parent].children;
+            let position = siblings
+                .iter()
+                .position(|child| *child == index)
+                .expect("bookmark child");
+            let Some(&end_index) = siblings.get(position + 1) else {
+                return Err(Error::Other(
+                    "custody bookmark pair has no adjacent end".into(),
+                ));
+            };
+            let end = &tree.elements[end_index];
+            let Some(pair_id) = tree
+                .word_attribute(index, "id")?
+                .and_then(|id| id.parse::<i32>().ok())
+            else {
+                return Err(Error::Other("custody bookmark pair has no valid id".into()));
+            };
+            if !end.word
+                || end.local != "bookmarkEnd"
+                || node.end != end.start
+                || tree.word_attribute(end_index, "id")?.as_deref()
+                    != Some(pair_id.to_string().as_str())
+            {
+                return Err(Error::Other(
+                    "custody bookmark pair has an invalid adjacent end".into(),
+                ));
+            }
+            let occurrences = tree
+                .elements
+                .iter()
+                .enumerate()
+                .filter(|(at, e)| {
+                    e.word
+                        && matches!(e.local.as_str(), "bookmarkStart" | "bookmarkEnd")
+                        && marker_paragraph(*at).is_some()
+                })
+                .map(|(i, _)| tree.word_attribute(i, "id"))
+                .collect::<Result<Vec<_>>>()?
+                .iter()
+                .filter(|id| id.as_deref() == Some(pair_id.to_string().as_str()))
+                .count();
+            if occurrences != 2 || !names.insert(name) {
+                return Err(Error::Other(
+                    "duplicate custody bookmark name or pair id".into(),
+                ));
+            }
+            let p = if tree.elements[parent].word && tree.elements[parent].local == "p" {
+                Some(parent)
+            } else {
+                tree.elements[parent].parent.filter(|&at| {
+                    tree.elements[at].word
+                        && tree.elements[at].local == "p"
+                        && tree.elements[parent].revision.is_some()
+                })
+            };
+            let Some(paragraph) = p else {
+                return Err(Error::Other(
+                    "custody pair has no direct paragraph owner".into(),
+                ));
+            };
+            if family == 'B' && paragraph != parent {
+                return Err(Error::Other(
+                    "body custody pair is inside a revision".into(),
+                ));
+            }
+            let mut owner = None;
+            let mut owner_index = None;
+            let mut ancestor = Some(paragraph);
+            while let Some(at) = ancestor {
+                if tree.elements[at].word && tree.elements[at].local == "footnote" {
+                    owner = tree
+                        .word_attribute(at, "id")?
+                        .and_then(|value| value.parse().ok());
+                    owner_index = Some(at);
+                    break;
+                }
+                ancestor = tree.elements[at].parent;
+            }
+            if family == 'N' {
+                let Some(at) = owner_index else {
+                    return Err(Error::Other("note custody pair has no note owner".into()));
+                };
+                let owner_node = &tree.elements[at];
+                let actual_owner = note_part
+                    .as_ref()
+                    .filter(|notes| notes.name == part)
+                    .and_then(|notes| {
+                        notes.owners.iter().find(|owner| {
+                            owner.span == (owner_node.start..owner_node.end)
+                                && matches!(
+                                    owner.kind,
+                                    RawNoteType::Omitted | RawNoteType::ExplicitNormal
+                                )
+                                && owner.id.is_some()
+                        })
+                    });
+                if actual_owner.is_none() {
+                    return Err(Error::Other(
+                        "note custody pair has no actual normal definition".into(),
+                    ));
+                }
+                let first = paragraphs.iter().find(|span| {
+                    span.start >= owner_node.open_end && span.end <= owner_node.close_start
+                });
+                if first != Some(&(tree.elements[paragraph].start..tree.elements[paragraph].end)) {
+                    return Err(Error::Other(
+                        "note custody pair is not in its first note paragraph".into(),
+                    ));
+                }
+            }
+            if family == 'B' && owner.is_some() {
+                return Err(Error::Other("body custody pair is in a note owner".into()));
+            }
+            let mut reference = None;
+            if family == 'B'
+                && let Some(&next) = siblings.get(position + 2)
+            {
+                let following = &tree.elements[next];
+                let eligible =
+                    following.word && (following.local == "r" || following.revision.is_some());
+                for (at, child) in tree.elements.iter().enumerate().filter(|(_, e)| {
+                    eligible && e.start >= following.start && e.end <= following.end
+                }) {
+                    if child.word && child.local == "footnoteReference" {
+                        reference = tree
+                            .word_attribute(at, "id")?
+                            .and_then(|value| value.parse().ok());
+                        break;
+                    }
+                }
+            }
+
+            markers.push(NoteMarker {
+                token,
+                original,
+                edited,
+                family,
+                part: part.clone(),
+                span: node.start..end.end,
+                pair_id,
+                owner,
+                reference,
+            });
+        }
+    }
+    Ok(markers)
+}
+
+fn footnote_custody_reserved_ids(document: &Document) -> Result<HashSet<i32>> {
+    Ok(note_markers(document)?
+        .iter()
+        .flat_map(|marker| [marker.token, marker.pair_id])
+        .collect())
+}
+
+pub(crate) fn validate_footnote_custody(
+    document: &Document,
+    scope: &crate::revision::RevisionScope<'_>,
+) -> Result<Vec<FootnoteCustody>> {
+    let markers = note_markers(document)?;
+    let Some(part) = FootnotePart::of(document)? else {
+        if markers.iter().any(|marker| marker.family == 'N') {
+            return Err(Error::Other("custody marker has no footnotes part".into()));
+        }
+        // Physical reference coherence is independent of the orphan bookmark.
+        validate_footnote_reference_owners(None, &footnote_reference_sites(document)?)?;
+        return Ok(markers
+            .iter()
+            .filter(|marker| marker.family == 'B')
+            .map(|marker| FootnoteCustody {
+                token: marker.token,
+                original: marker.original,
+                edited: marker.edited,
+                owner: None,
+                addition: None,
+                selected: false,
+                revisions: Vec::new(),
+            })
+            .collect());
+    };
+    let normal = part.normal();
+    let sites = footnote_reference_sites(document)?;
+    let mut note_tree = crate::revision::XmlTree::parse(part.xml.as_bytes())?;
+    note_tree.qualify_note_revisions()?;
+    let mut units = Vec::new();
+    let mut used_notes = HashSet::new();
+    let mut owned_definitions = HashSet::new();
+    for body in markers.iter().filter(|marker| marker.family == 'B') {
+        let notes = markers
+            .iter()
+            .filter(|note| note.family == 'N' && note.token == body.token)
+            .collect::<Vec<_>>();
+        if notes.len() > 1 {
+            return Err(Error::Other(
+                "custody token binds multiple note owners".into(),
+            ));
+        }
+        let note = notes.first().copied();
+        if let Some(note) = note {
+            if note.owner.is_none() {
+                return Err(Error::Other(
+                    "note custody counterpart has no physical note identity".into(),
+                ));
+            }
+            if note.original != body.original || note.edited != body.edited {
+                return Err(Error::Other("custody part-presence bits disagree".into()));
+            }
+            if body.reference != note.owner {
+                return Err(Error::Other(
+                    "custody reference and note owner disagree".into(),
+                ));
+            }
+            if !used_notes.insert((note.part.clone(), note.span.start))
+                || !owned_definitions.insert(note.owner)
+            {
+                return Err(Error::Other(
+                    "multiple custody units bind one physical note owner".into(),
+                ));
+            }
+        }
+        // An unmatched body pair has no surviving note-owner identity. A
+        // following run or revision wrapper may belong to an unrelated note.
+        let owner = note.and_then(|note| note.owner);
+        if let Some(owner) = owner
+            && !normal.contains_key(&owner)
+        {
+            return Err(Error::Other(
+                "custody is bound to a missing or non-normal note".into(),
+            ));
+        }
+        let mut revisions = Vec::new();
+        let mut addition = None;
+        if let Some(id) = owner {
+            let actual_owner = normal[&id];
+            for node in &note_tree.elements {
+                if node.start >= actual_owner.inner.start
+                    && node.end <= actual_owner.inner.end
+                    && let Some(metadata) = &node.revision
+                {
+                    let add = match metadata.kind {
+                        crate::revision::RevisionKind::Insertion => true,
+                        crate::revision::RevisionKind::Deletion => false,
+                        _ => {
+                            return Err(Error::Other(
+                                "custody note has an unsupported revision kind".into(),
+                            ));
+                        }
+                    };
+                    if addition.is_some_and(|value| value != add) {
+                        return Err(Error::Other(
+                            "custody note revision directions disagree".into(),
+                        ));
+                    }
+                    addition = Some(add);
+                    revisions.push(metadata.clone());
+                }
+            }
+            for site in sites.iter().filter(|site| site.id == id) {
+                let bytes = document
+                    .package
+                    .get_part(&site.part)
+                    .expect("reference part");
+                let tree = crate::revision::XmlTree::parse(bytes)?;
+                let metadata = site
+                    .revision
+                    .as_ref()
+                    .and_then(|range| {
+                        tree.elements
+                            .iter()
+                            .find(|node| node.start == range.start && node.end == range.end)
+                    })
+                    .and_then(|node| node.revision.clone());
+                if let Some(metadata) = metadata {
+                    let add = match metadata.kind {
+                        crate::revision::RevisionKind::Insertion => true,
+                        crate::revision::RevisionKind::Deletion => false,
+                        _ => {
+                            return Err(Error::Other(
+                                "custody reference has an unsupported revision kind".into(),
+                            ));
+                        }
+                    };
+                    if addition.is_some_and(|value| value != add) {
+                        return Err(Error::Other(
+                            "custody body/note revision directions disagree".into(),
+                        ));
+                    }
+                    addition = Some(add);
+                    revisions.push(metadata);
+                } else if addition.is_some() {
+                    return Err(Error::Other(
+                        "pending custody reference lost its revision wrapper".into(),
+                    ));
+                }
+            }
+        }
+        let selected = revisions
+            .iter()
+            .filter(|metadata| scope.matches(metadata))
+            .count();
+        if selected > 0 && selected != revisions.len() {
+            return Err(Error::Other(format!(
+                "partial footnote custody selection for token {}",
+                body.token
+            )));
+        }
+        units.push(FootnoteCustody {
+            token: body.token,
+            original: body.original,
+            edited: body.edited,
+            owner,
+            addition,
+            selected: selected > 0,
+            revisions,
+        });
+    }
+    if markers
+        .iter()
+        .filter(|marker| marker.family == 'N')
+        .any(|note| !used_notes.contains(&(note.part.clone(), note.span.start)))
+    {
+        return Err(Error::Other(
+            "note custody marker is missing its body counterpart".into(),
+        ));
+    }
+    Ok(units)
+}
+
+/// Selected definition retirement precedes the ordinary story renderer, whose
+/// final-paragraph rule applies to retained owners, not a removed note owner.
+pub(crate) fn remove_selected_footnote_definitions(
+    document: &mut Document,
+    units: &[FootnoteCustody],
+    accept: bool,
+    publication: Option<&mut crate::revision::NotePublication>,
+) -> Result<usize> {
+    let Some(mut part) = FootnotePart::of(document)? else {
+        return Ok(0);
+    };
+    let mut tree = crate::revision::XmlTree::parse(part.xml.as_bytes())?;
+    tree.qualify_note_revisions()?;
+    let normal = part.normal();
+    let mut ranges = Vec::new();
+    let mut count = 0usize;
+    let mut removed_links = HashSet::new();
+    for unit in units
+        .iter()
+        .filter(|unit| unit.selected && unit.addition.is_some_and(|addition| addition != accept))
+    {
+        if let Some(owner) = unit.owner.and_then(|id| normal.get(&id)) {
+            count = count
+                .checked_add(
+                    tree.elements
+                        .iter()
+                        .filter(|node| {
+                            node.start >= owner.inner.start
+                                && node.end <= owner.inner.end
+                                && node.revision.is_some()
+                        })
+                        .count(),
+                )
+                .ok_or_else(|| Error::Other("resolved note revision count overflowed".into()))?;
+            removed_links.extend(crate::document::xml_relationship_ids_in_order(
+                close_note_fragment(&part.xml[owner.span.clone()], &owner.bindings)?.as_bytes(),
+            )?);
+            ranges.push(owner.span.clone());
+        }
+    }
+    if ranges.is_empty() {
+        return Ok(0);
+    }
+    drop(normal);
+    drop(tree);
+    ranges.sort_by_key(|range| range.start);
+    ranges.dedup();
+    if let Some(trace) = publication {
+        trace.remove_ranges(&part.name, part.xml.as_bytes(), &ranges)?;
+    }
+    for range in ranges.into_iter().rev() {
+        part.xml.replace_range(range, "");
+    }
+    let retained_links = crate::document::xml_relationship_ids_in_order(part.xml.as_bytes())?
+        .into_iter()
+        .collect::<HashSet<_>>();
+    removed_links.retain(|id| !retained_links.contains(id));
+    crate::document::set_story_source_xml(document, &part.name, part.xml.into_bytes())?;
+    remove_note_owned_relationships(document, &part.name, &removed_links)?;
+    Ok(count)
+}
+
+pub(crate) fn settle_footnote_custody(
+    document: &mut Document,
+    units: &[FootnoteCustody],
+    accept: bool,
+    mut publication: Option<&mut crate::revision::NotePublication>,
+) -> Result<()> {
+    if !units.iter().any(|unit| !unit.revisions.is_empty()) {
+        return Ok(());
+    }
+    let Some(mut part) = FootnotePart::of(document)? else {
+        return Err(Error::Other(
+            "footnotes part disappeared before custody settlement".into(),
+        ));
+    };
+    let refs = footnote_reference_sites(document)?;
+    let mut removals = Vec::new();
+    for unit in units
+        .iter()
+        .filter(|unit| unit.selected && unit.addition.is_some_and(|addition| addition != accept))
+    {
+        if let Some(id) = unit.owner {
+            if refs.iter().any(|site| site.id == id) {
+                return Err(Error::Other(
+                    "resolved note deletion retained a live reference".into(),
+                ));
+            }
+            if let Some(owner) = part.normal().get(&id) {
+                removals.push(owner.span.clone());
+            }
+        }
+    }
+    removals.sort_by_key(|range| range.start);
+    removals.dedup();
+    if let Some(trace) = publication.as_deref_mut() {
+        trace.remove_ranges(&part.name, part.xml.as_bytes(), &removals)?;
+    }
+    for range in removals.into_iter().rev() {
+        part.xml.replace_range(range, "");
+    }
+    crate::document::set_story_source_xml(document, &part.name, part.xml.into_bytes())?;
+    let part = FootnotePart::of(document)?.expect("installed notes");
+    let pending = units
+        .iter()
+        .any(|unit| !unit.revisions.is_empty() && !unit.selected);
+    let unowned = part.unowned_record_count()?;
+    let open = units.iter().any(|unit| !unit.revisions.is_empty());
+    let absent = open
+        && part.normal().is_empty()
+        && unowned == 0
+        && (units.iter().any(|unit| !unit.original) || units.iter().any(|unit| !unit.edited));
+    if !pending {
+        retire_note_markers(document, units, publication)?;
+        if absent {
+            remove_footnotes_part(document, &part.name)?;
+        }
+    }
+    Ok(())
+}
+
+fn retire_note_markers(
+    document: &mut Document,
+    units: &[FootnoteCustody],
+    mut publication: Option<&mut crate::revision::NotePublication>,
+) -> Result<()> {
+    let tokens = units.iter().map(|unit| unit.token).collect::<HashSet<_>>();
+    let mut by_part = BTreeMap::<String, Vec<Range<usize>>>::new();
+    for marker in note_markers(document)?
+        .into_iter()
+        .filter(|marker| tokens.contains(&marker.token))
+    {
+        by_part.entry(marker.part).or_default().push(marker.span);
+    }
+    for (part, mut spans) in by_part {
+        let mut bytes = document
+            .package
+            .get_part(&part)
+            .expect("marker part")
+            .to_vec();
+        spans.sort_by_key(|span| span.start);
+        spans.dedup();
+        if let Some(trace) = publication.as_deref_mut() {
+            trace.remove_ranges(&part, &bytes, &spans)?;
+        }
+        for span in spans.into_iter().rev() {
+            bytes.drain(span);
+        }
+        crate::document::set_story_source_xml(document, &part, bytes)?;
+    }
+    Ok(())
+}
+
+fn remove_note_owned_relationships(
+    document: &mut Document,
+    owner: &str,
+    ids: &HashSet<String>,
+) -> Result<()> {
+    let mut targets = Vec::new();
+    if let Some(rels) = document.package.get_part_rels_mut(owner) {
+        rels.items.retain(|rel| {
+            if !ids.contains(&rel.id) {
+                return true;
+            }
+            if crate::document::relationship_is_internal(rel) {
+                targets.push(OpcPackage::resolve_rel_target(owner, &rel.target));
+            }
+            false
+        });
+    }
+    remove_unshared_note_targets(document, targets, None)?;
+    Ok(())
+}
+
+fn remove_unshared_note_targets(
+    document: &mut Document,
+    mut targets: Vec<String>,
+    required_absent: Option<&str>,
+) -> Result<()> {
+    // Sharing is tested outside the complete retiring closure. Internal edges,
+    // including cycles, do not make an otherwise unshared closure live.
+    let mut candidates = BTreeMap::new();
+    while let Some(target) = targets.pop() {
+        let key = target.to_ascii_lowercase();
+        if candidates.contains_key(&key) {
+            continue;
+        }
+        if !document.package.contains_part(&target) {
+            return Err(Error::Other(format!(
+                "note-owned target is missing: {target}"
+            )));
+        }
+        if let Some(rels) = document.package.get_part_rels(&target) {
+            targets.extend(
+                rels.items
+                    .iter()
+                    .filter(|rel| crate::document::relationship_is_internal(rel))
+                    .map(|rel| OpcPackage::resolve_rel_target(&target, &rel.target)),
+            );
+        }
+        candidates.insert(key, target);
+    }
+    let mut live = HashSet::new();
+    let mut roots = Vec::new();
+    for (owner, rels) in &document.package.part_rels {
+        if candidates.contains_key(&owner.to_ascii_lowercase()) {
+            continue;
+        }
+        roots.extend(
+            rels.items
+                .iter()
+                .filter(|rel| crate::document::relationship_is_internal(rel))
+                .map(|rel| OpcPackage::resolve_rel_target(owner, &rel.target)),
+        );
+    }
+    roots.extend(
+        document
+            .package
+            .package_rels
+            .items
+            .iter()
+            .filter(|rel| crate::document::relationship_is_internal(rel))
+            .map(|rel| OpcPackage::resolve_rel_target("/", &rel.target)),
+    );
+    while let Some(target) = roots.pop() {
+        let key = target.to_ascii_lowercase();
+        if !candidates.contains_key(&key) || !live.insert(key) {
+            continue;
+        }
+        if let Some(rels) = document.package.get_part_rels(&target) {
+            roots.extend(
+                rels.items
+                    .iter()
+                    .filter(|rel| crate::document::relationship_is_internal(rel))
+                    .map(|rel| OpcPackage::resolve_rel_target(&target, &rel.target)),
+            );
+        }
+    }
+    if required_absent.is_some_and(|owner| live.contains(&owner.to_ascii_lowercase())) {
+        return Err(Error::Other(
+            "footnotes part is shared by a retained package relationship".into(),
+        ));
+    }
+    for (key, target) in candidates {
+        if live.contains(&key) {
+            continue;
+        }
+        document.package.remove_part(&target);
+        document.package.remove_part_rels(&target);
+        document.package.content_types.remove_override(&target);
+    }
+    Ok(())
+}
+
+fn remove_footnotes_part(document: &mut Document, name: &str) -> Result<()> {
+    if let Some(relationships) = document.package.get_part_rels_mut(&document.doc_part_name) {
+        relationships.items.retain(|relationship| {
+            relationship.rel_type != rel_types::FOOTNOTES
+                || OpcPackage::resolve_rel_target(&document.doc_part_name, &relationship.target)
+                    != name
+        });
+    }
+    remove_unshared_note_targets(document, vec![name.to_owned()], Some(name))?;
+    document.footnotes = rdocx_oxml::footnotes::CT_Footnotes::new();
+    document.footnotes_part_name = None;
+    document.footnotes_dirty = false;
+    Ok(())
+}
+
+fn rewrite_note_marker_pair(
+    document: &mut Document,
+    marker: &NoteMarker,
+    token: i32,
+    pair_id: i32,
+) -> Result<()> {
+    let bytes = document
+        .package
+        .get_part(&marker.part)
+        .expect("custody marker part")
+        .to_vec();
+    let tree = crate::revision::XmlTree::parse(&bytes)?;
+    let name = format!(
+        "_rdocxCmpNoteF{token}P{}{}{}",
+        u8::from(marker.original),
+        u8::from(marker.edited),
+        marker.family
+    );
+    let id = pair_id.to_string();
+    let mut edits = Vec::new();
+    for (index, node) in tree
+        .elements
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.start >= marker.span.start && node.end <= marker.span.end)
+    {
+        if !node.word || !matches!(node.local.as_str(), "bookmarkStart" | "bookmarkEnd") {
+            continue;
+        }
+        let scope = tree
+            .source_scope(index)
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        let mut reader = Reader::from_reader(&bytes[node.start..node.open_end]);
+        let event = reader
+            .read_event()
+            .map_err(|error| Error::Other(error.to_string()))?;
+        let start = match event {
+            Event::Start(start) | Event::Empty(start) => start,
+            _ => unreachable!("marker opening"),
+        };
+        let mut updated = BytesStart::new(node.name.as_str());
+        for attribute in start.attributes() {
+            let attribute = attribute.map_err(|error| Error::Other(error.to_string()))?;
+            let key = std::str::from_utf8(attribute.key.as_ref()).map_err(utf8_error)?;
+            let local = key
+                .split_once(':')
+                .filter(|(prefix, _)| scope.get(*prefix).is_some_and(|uri| uri == W_NS))
+                .map(|(_, local)| local);
+            match local {
+                Some("id") => updated.push_attribute((key, id.as_str())),
+                Some("name") => updated.push_attribute((key, name.as_str())),
+                _ => updated.push_attribute((key.as_bytes(), attribute.value.as_ref())),
+            }
+        }
+        let mut writer = Writer::new(Vec::new());
+        writer.write_event(if node.empty {
+            Event::Empty(updated)
+        } else {
+            Event::Start(updated)
+        })?;
+        edits.push((node.start..node.open_end, writer.into_inner()));
+    }
+    let mut updated = bytes;
+    for (range, value) in edits.into_iter().rev() {
+        updated.splice(range, value);
+    }
+    crate::document::set_story_source_xml(document, &marker.part, updated)
+}
+
+/// Input collisions change only the positively associated bookmark identities.
+/// Numeric footnote and current revision identities remain untouched.
+fn reconcile_footnote_custody_inputs(original: &Document, edited: &mut Document) -> Result<()> {
+    let left = validate_footnote_custody(original, &crate::revision::RevisionScope::All)?;
+    let right = validate_footnote_custody(edited, &crate::revision::RevisionScope::All)?;
+    let left_markers = note_markers(original)?;
+    if left_markers.is_empty() {
+        return Ok(());
+    }
+    let mut occupied = footnote_custody_reserved_ids(original)?;
+    occupied.extend(footnote_custody_reserved_ids(edited)?);
+    for document in [original, &*edited] {
+        let mut parts = vec![document.doc_part_name.clone()];
+        parts.extend(
+            story_parts(document)?
+                .into_iter()
+                .map(|story| story.part_name),
+        );
+        for name in parts {
+            occupied.extend(word_ids(
+                document.package.get_part(&name).expect("comparison story"),
+            )?);
+        }
+    }
+    let mut ids = IdAllocator::new(occupied);
+    for unit in right {
+        let same = if let Some(owner) = unit.owner {
+            let candidates = left
+                .iter()
+                .filter(|other| other.owner == Some(owner))
+                .collect::<Vec<_>>();
+            if candidates.len() > 1 {
+                return Err(Error::Other(
+                    "ambiguous imported custody owner association".into(),
+                ));
+            }
+            if note_references_have_same_owners(original, edited, owner)? {
+                candidates.first().copied()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(other) = same {
+            if unit.original != other.original || unit.edited != other.edited {
+                return Err(Error::Other(
+                    "paired custody owner has different transaction bits".into(),
+                ));
+            }
+            for family in ['B', 'N'] {
+                let left = left_markers
+                    .iter()
+                    .find(|marker| marker.token == other.token && marker.family == family);
+                let right = note_markers(edited)?
+                    .into_iter()
+                    .find(|marker| marker.token == unit.token && marker.family == family);
+                if let (Some(left), Some(right)) = (left, right) {
+                    rewrite_note_marker_pair(edited, &right, other.token, left.pair_id)?;
+                }
+            }
+        } else {
+            let markers = note_markers(edited)?
+                .into_iter()
+                .filter(|marker| marker.token == unit.token)
+                .collect::<Vec<_>>();
+            let collision = left.iter().any(|other| other.token == unit.token)
+                || markers.iter().any(|right| {
+                    left_markers
+                        .iter()
+                        .any(|left| left.pair_id == right.pair_id && left.part == right.part)
+                });
+            if collision {
+                let token = ids.allocate_note_token()?;
+                for marker in markers {
+                    let pair_id = ids.allocate()?;
+                    rewrite_note_marker_pair(edited, &marker, token, pair_id)?;
+                }
+            }
+        }
+    }
+    validate_footnote_custody(edited, &crate::revision::RevisionScope::All)?;
+    Ok(())
+}
+
+fn retire_completed_footnote_inputs(original: &mut Document, edited: &mut Document) -> Result<()> {
+    let left = FootnotePart::of(original)?;
+    let right = FootnotePart::of(edited)?;
+    if left.as_ref().map(|part| &part.xml) == right.as_ref().map(|part| &part.xml) {
+        return Ok(());
+    }
+    for document in [original, edited] {
+        let units = validate_footnote_custody(document, &crate::revision::RevisionScope::All)?;
+        if !units.iter().any(|unit| !unit.revisions.is_empty()) {
+            retire_note_markers(document, &units, None)?;
+        }
+    }
+    Ok(())
+}
+
+fn note_bookmark(token: i32, original: bool, edited: bool, family: char, id: i32) -> String {
+    format!(
+        r#"<w:bookmarkStart xmlns:w="{W_NS}" w:id="{id}" w:name="_rdocxCmpNoteF{token}P{}{}{family}"/><w:bookmarkEnd xmlns:w="{W_NS}" w:id="{id}"/>"#,
+        u8::from(original),
+        u8::from(edited)
+    )
+}
+
+fn close_note_fragment(xml: &str, bindings: &NamespaceBindings) -> Result<String> {
+    let scope = bindings
+        .iter()
+        .filter_map(|(name, value)| {
+            if name == "xmlns" {
+                Some((String::new(), value.clone()))
+            } else {
+                name.strip_prefix("xmlns:")
+                    .map(|prefix| (prefix.to_owned(), value.clone()))
+            }
+        })
+        .collect::<BTreeMap<_, _>>();
+    String::from_utf8(crate::document::close_content_fragment_namespaces(
+        xml.as_bytes(),
+        &scope,
+    )?)
+    .map_err(utf8_error)
+}
+
+// Temporary read grammar carries the inherited context on its own wrapper.
+// Retained child bytes, especially an opaque first child, remain untouched.
+fn note_fragment_envelope(xml: &str, bindings: &NamespaceBindings, note: bool) -> Result<String> {
+    let scoped = close_note_fragment(xml, bindings)?;
+    let mut reader = NsReader::from_str(&scoped);
+    let modeled_root = loop {
+        let (namespace, event) = reader
+            .read_resolved_event()
+            .map_err(|error| Error::Other(error.to_string()))?;
+        match event {
+            Event::Start(root) | Event::Empty(root) => {
+                break matches!(namespace, ResolveResult::Bound(uri) if uri.as_ref() == W_NS.as_bytes())
+                    && matches!(root.local_name().as_ref(), b"p" | b"tbl" | b"sdt");
+            }
+            Event::Eof => break false,
+            _ => {}
+        }
+    };
+    // Preserve the established modeled-root namespace publication. An opaque
+    // first child instead receives context from the temporary wrapper alone.
+    if modeled_root {
+        return Ok(if note {
+            format!(
+                "<w:footnotes xmlns:w=\"{W_NS}\"><w:footnote>{scoped}</w:footnote></w:footnotes>"
+            )
+        } else {
+            format!("<w:tc xmlns:w=\"{W_NS}\">{scoped}</w:tc>")
+        });
+    }
+    let mut suffix = 0usize;
+    let prefix = loop {
+        let prefix = format!("rdocxnote{suffix}");
+        if !bindings
+            .iter()
+            .any(|(name, _)| name == &format!("xmlns:{prefix}"))
+        {
+            break prefix;
+        }
+        suffix += 1;
+    };
+    let name = format!("{prefix}:{}", if note { "footnotes" } else { "tc" });
+    let note_name = format!("{prefix}:footnote");
+    let binding = format!("xmlns:{prefix}");
+    let mut root = BytesStart::new(name.as_str());
+    root.push_attribute((binding.as_str(), W_NS));
+    for (key, value) in bindings {
+        root.push_attribute((key.as_str(), value.as_str()));
+    }
+    let mut writer = Writer::new(Vec::new());
+    writer.write_event(Event::Start(root))?;
+    if note {
+        writer.write_event(Event::Start(BytesStart::new(note_name.as_str())))?;
+    }
+    writer.get_mut().extend_from_slice(xml.as_bytes());
+    if note {
+        writer.write_event(Event::End(BytesEnd::new(note_name.as_str())))?;
+    }
+    writer.write_event(Event::End(BytesEnd::new(name.as_str())))?;
+    String::from_utf8(writer.into_inner()).map_err(utf8_error)
+}
+
+fn compare_footnote_parts(
+    original: &Document,
+    edited: &Document,
+    candidate: &mut Document,
+    metadata: &mut Metadata<'_>,
+    diagnostics: &mut Vec<ComparisonDiagnostic>,
+) -> Result<()> {
+    if story_ignored(metadata.options, ComparisonStoryKind::Footnote) {
+        return Ok(());
+    }
+    let left = FootnotePart::of(original)?;
+    let right = FootnotePart::of(edited)?;
+    if left.is_none() && right.is_none() {
+        return Ok(());
+    }
+    // Generated Word markup must carry its own binding beside retained aliases
+    // and producer-local shadows in the related part.
+    metadata.ids.local_word_binding = true;
+    if let (Some(left), Some(right)) = (&left, &right)
+        && (left.name != right.name
+            || left.retained_shell()? != right.retained_shell()?
+            || left.retained_records()? != right.retained_records()?)
+    {
+        return Err(Error::Other(
+            "footnotes retained root/special/opaque shell changed".into(),
+        ));
+    }
+
+    let empty = BTreeMap::new();
+    let left_normal = left
+        .as_ref()
+        .map(FootnotePart::normal)
+        .unwrap_or_else(|| empty.clone());
+    let right_normal = right
+        .as_ref()
+        .map(FootnotePart::normal)
+        .unwrap_or_else(|| empty.clone());
+    let left_refs = footnote_reference_sites(original)?;
+    let right_refs = footnote_reference_sites(edited)?;
+    let added = right
+        .as_ref()
+        .map(|part| {
+            part.owners
+                .iter()
+                .filter_map(|owner| {
+                    owner
+                        .id
+                        .filter(|id| right_normal.contains_key(id) && !left_normal.contains_key(id))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let removed = left
+        .as_ref()
+        .map(|part| {
+            part.owners
+                .iter()
+                .filter_map(|owner| {
+                    owner
+                        .id
+                        .filter(|id| left_normal.contains_key(id) && !right_normal.contains_key(id))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for id in &added {
+        if !right_refs.iter().any(|site| site.id == *id) {
+            return Err(Error::Other(format!(
+                "new unused footnote {id} cannot be compared"
+            )));
+        }
+    }
+    for id in &removed {
+        if !left_refs.iter().any(|site| site.id == *id) {
+            return Err(Error::Other(format!(
+                "comparison cannot remove original unused footnote {id}"
+            )));
+        }
+    }
+    if (left.is_none() || right.is_none()) && added.is_empty() && removed.is_empty() {
+        return Err(Error::Other(
+            "footnote part presence changed without a referenced normal owner".into(),
+        ));
+    }
+
+    let mut part = left
+        .as_ref()
+        .or(right.as_ref())
+        .expect("one part exists")
+        .clone();
+    let mut replacements = Vec::new();
+    let mut insertions = BTreeMap::<usize, String>::new();
+    let common = left_normal
+        .keys()
+        .filter(|id| right_normal.contains_key(id))
+        .copied()
+        .collect::<HashSet<_>>();
+    let anchors = |part: &FootnotePart| -> Result<Vec<(FootnoteRootAnchor, Range<usize>)>> {
+        let mut retained = 0usize;
+        Ok(part
+            .root_items()?
+            .into_iter()
+            .filter_map(|(id, range)| {
+                if let Some(id) = id {
+                    common
+                        .contains(&id)
+                        .then_some((FootnoteRootAnchor::Normal(id), range))
+                } else {
+                    let key = FootnoteRootAnchor::Retained(retained);
+                    retained += 1;
+                    Some((key, range))
+                }
+            })
+            .collect())
+    };
+    let left_anchors = left.as_ref().map(anchors).transpose()?.unwrap_or_default();
+    let right_anchors = right.as_ref().map(anchors).transpose()?.unwrap_or_default();
+    if left.is_some()
+        && right.is_some()
+        && left_anchors.iter().map(|(key, _)| key).collect::<Vec<_>>()
+            != right_anchors.iter().map(|(key, _)| key).collect::<Vec<_>>()
+    {
+        return Err(Error::Other("footnote retained owner order changed".into()));
+    }
+    let mut emitted = false;
+    for (&id, left_owner) in &left_normal {
+        if let Some(right_owner) = right_normal.get(&id) {
+            let l = left.as_ref().expect("left owner");
+            let r = right.as_ref().expect("right owner");
+            let inner = compare_story_inner(
+                &l.xml[left_owner.inner.clone()],
+                &r.xml[right_owner.inner.clone()],
+                &format!(
+                    "{}:{}/footnote-id[{id}]",
+                    ComparisonStoryKind::Footnote.label(),
+                    l.name
+                ),
+                "w",
+                &left_owner.bindings,
+                &right_owner.bindings,
+                metadata,
+                diagnostics,
+            )?;
+            let mut owner = l.xml[left_owner.span.clone()].to_owned();
+            let relative = left_owner.inner.start - left_owner.span.start
+                ..left_owner.inner.end - left_owner.span.start;
+            owner.replace_range(relative, &inner);
+            replacements.push((left_owner.span.clone(), owner));
+        }
+    }
+    for (ids, addition) in [(&removed, false), (&added, true)] {
+        for &id in ids {
+            let (source, owner) = if addition {
+                (right.as_ref().expect("added owner"), right_normal[&id])
+            } else {
+                (left.as_ref().expect("removed owner"), left_normal[&id])
+            };
+            let token = metadata.ids.allocate_note_token()?;
+            let body_id = metadata.ids.allocate()?;
+            let note_id = metadata.ids.allocate()?;
+            let inner = &source.xml[owner.inner.clone()];
+            let envelope = note_fragment_envelope(inner, &owner.bindings, false)?;
+            let marked =
+                marked_cell_xml(&envelope, if addition { "ins" } else { "del" }, metadata)?;
+            let mut tracked = marked[element_inner_range_any_prefix(&marked, "tc")?].to_owned();
+            tracked = unify_note_revision_ids(&tracked, &owner.bindings, token)?;
+            let note_mark = note_bookmark(token, left.is_some(), right.is_some(), 'N', note_id);
+            tracked = insert_note_marker(&tracked, &owner.bindings, &note_mark, addition)?;
+            let mut owner_xml = source.xml[owner.span.clone()].to_owned();
+            owner_xml.replace_range(
+                owner.inner.start - owner.span.start..owner.inner.end - owner.span.start,
+                &tracked,
+            );
+            owner_xml = close_note_fragment(&owner_xml, &owner.bindings)?;
+            if addition && left.is_some() {
+                let next = right_anchors
+                    .iter()
+                    .find(|(_, range)| range.start >= owner.span.end);
+                let at = if let Some((key, _)) = next {
+                    left_anchors
+                        .iter()
+                        .find(|(candidate, _)| candidate == key)
+                        .expect("matched retained anchor")
+                        .1
+                        .start
+                } else {
+                    root_inner_range(&part.xml, "footnotes")?.end
+                };
+                insertions.entry(at).or_default().push_str(&owner_xml);
+            } else {
+                replacements.push((owner.span.clone(), owner_xml));
+            }
+            let body_mark = note_bookmark(token, left.is_some(), right.is_some(), 'B', body_id);
+            bind_note_reference_revisions(candidate, id, addition, token, &body_mark, metadata)?;
+            emitted = true;
+        }
+    }
+    replacements.extend(insertions.into_iter().map(|(at, value)| (at..at, value)));
+    replacements.sort_by_key(|(range, _)| (range.start, range.end));
+    for (range, value) in replacements.into_iter().rev() {
+        part.xml.replace_range(range, &value);
+    }
+    if left.is_none() {
+        let name = candidate.reserve_document_part_bundle(
+            None,
+            &part.name,
+            rel_types::FOOTNOTES,
+            FOOTNOTE_CONTENT_TYPE,
+        )?;
+        if name != part.name {
+            return Err(Error::Other(
+                "created footnotes part name changed destination identity".into(),
+            ));
+        }
+        candidate.footnotes_part_name = Some(name);
+    }
+    crate::document::set_story_source_xml(candidate, &part.name, part.xml.into_bytes())?;
+    if emitted {
+        validate_footnote_custody(candidate, &crate::revision::RevisionScope::All)?;
+    }
+    Ok(())
+}
+
+fn unify_note_revision_ids(xml: &str, bindings: &NamespaceBindings, token: i32) -> Result<String> {
+    let wrapped = note_fragment_envelope(xml, bindings, true)?;
+    let mut tree = crate::revision::XmlTree::parse(wrapped.as_bytes())?;
+    tree.qualify_note_revisions()?;
+    let root = &tree.elements[tree.elements[tree.root].children[0]];
+    let mut edits = Vec::new();
+    for (index, node) in tree
+        .elements
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.revision.is_some())
+    {
+        let mut reader = Reader::from_str(&wrapped[node.start..node.open_end]);
+        let event = reader
+            .read_event()
+            .map_err(|error| Error::Other(error.to_string()))?;
+        let start = match event {
+            Event::Start(start) | Event::Empty(start) => start,
+            _ => continue,
+        };
+        let mut out = BytesStart::new(node.name.clone());
+        let mut chain = Vec::new();
+        let mut parent = Some(index);
+        while let Some(at) = parent {
+            chain.push(at);
+            parent = tree.elements[at].parent;
+        }
+        let mut scope = BTreeMap::new();
+        for at in chain.into_iter().rev() {
+            scope.extend(tree.elements[at].namespace_declarations.iter().cloned());
+        }
+        for attribute in start.attributes().with_checks(false) {
+            let attribute = attribute.map_err(|error| Error::Other(error.to_string()))?;
+            let key = std::str::from_utf8(attribute.key.as_ref()).map_err(utf8_error)?;
+            if key == "xmlns:w"
+                || key.split_once(':').is_some_and(|(prefix, local)| {
+                    local == "id" && scope.get(prefix).is_some_and(|uri| uri == W_NS)
+                })
+            {
+                continue;
+            }
+            out.push_attribute((key.as_bytes(), attribute.value.as_ref()));
+        }
+        out.push_attribute(("w:id", token.to_string().as_str()));
+        out.push_attribute(("xmlns:w", W_NS));
+        let mut writer = Writer::new(Vec::new());
+        writer
+            .write_event(if node.empty {
+                Event::Empty(out)
+            } else {
+                Event::Start(out)
+            })
+            .map_err(|error| Error::Other(error.to_string()))?;
+        edits.push((
+            node.start..node.open_end,
+            String::from_utf8(writer.into_inner()).map_err(utf8_error)?,
+        ));
+    }
+    let mut output = wrapped[root.open_end..root.close_start].to_owned();
+    for (range, value) in edits.into_iter().rev() {
+        output.replace_range(
+            range.start - root.open_end..range.end - root.open_end,
+            &value,
+        );
+    }
+    Ok(output)
+}
+
+fn insert_note_marker(
+    xml: &str,
+    bindings: &NamespaceBindings,
+    marker: &str,
+    addition: bool,
+) -> Result<String> {
+    let wrapped = note_fragment_envelope(xml, bindings, true)?;
+    let mut tree = crate::revision::XmlTree::parse(wrapped.as_bytes())?;
+    tree.qualify_note_revisions()?;
+    let root = &tree.elements[tree.elements[tree.root].children[0]];
+    let paragraphs =
+        crate::document::admitted_story_paragraph_spans(wrapped.as_bytes(), StoryKind::Footnote)?;
+    let first = paragraphs
+        .first()
+        .ok_or_else(|| Error::Other("note custody requires its first note paragraph".into()))?;
+    let paragraph = tree
+        .elements
+        .iter()
+        .position(|node| node.word && node.local == "p" && (node.start..node.end) == *first)
+        .ok_or_else(|| Error::Other("admitted note paragraph has no physical node".into()))?;
+    let p = &tree.elements[paragraph];
+    let mut at = p.open_end;
+    let mut insertion = false;
+    for &child in &p.children {
+        let node = &tree.elements[child];
+        if node.word && node.local == "pPr" {
+            at = node.end;
+            continue;
+        }
+        if addition && node.word && node.local == "ins" {
+            at = node.open_end;
+            insertion = true;
+        }
+        break;
+    }
+    let mut owned_marker = marker.to_owned();
+    if addition && !insertion {
+        let mark = tree
+            .elements
+            .iter()
+            .find(|node| {
+                node.start >= p.open_end
+                    && node.end <= p.close_start
+                    && node.revision.as_ref().is_some_and(|revision| {
+                        revision.kind == crate::revision::RevisionKind::Insertion
+                    })
+            })
+            .ok_or_else(|| Error::Other("added note has no paragraph-mark insertion".into()))?;
+        let mut reader = Reader::from_str(&wrapped[mark.start..mark.open_end]);
+        let start = match reader
+            .read_event()
+            .map_err(|error| Error::Other(error.to_string()))?
+        {
+            Event::Empty(start) | Event::Start(start) => start,
+            _ => unreachable!("revision opening"),
+        };
+        let mut writer = Writer::new(Vec::new());
+        writer.write_event(Event::Start(start.to_owned()))?;
+        writer.get_mut().extend_from_slice(marker.as_bytes());
+        writer.write_event(Event::End(BytesEnd::new(mark.name.as_str())))?;
+        owned_marker = String::from_utf8(writer.into_inner()).map_err(utf8_error)?;
+    }
+    let mut result = wrapped[root.open_end..root.close_start].to_owned();
+    result.insert_str(at - root.open_end, &owned_marker);
+    Ok(result)
+}
+
+fn bind_note_reference_revisions(
+    document: &mut Document,
+    id: i32,
+    addition: bool,
+    token: i32,
+    marker: &str,
+    metadata: &Metadata<'_>,
+) -> Result<()> {
+    let sites = footnote_reference_sites(document)?
+        .into_iter()
+        .filter(|site| site.id == id)
+        .collect::<Vec<_>>();
+    if sites.is_empty() {
+        return Err(Error::Other(format!(
+            "missing tracked physical reference for footnote {id}"
+        )));
+    }
+    let mut parts = BTreeMap::<String, Vec<FootnoteReferenceSite>>::new();
+    for site in sites {
+        parts.entry(site.part.clone()).or_default().push(site);
+    }
+    let mut first = true;
+    for (part, sites) in parts {
+        let source = std::str::from_utf8(document.package.get_part(&part).expect("reference part"))
+            .map_err(utf8_error)?
+            .to_owned();
+        let tree = crate::revision::XmlTree::parse(source.as_bytes())?;
+        let mut edits = BTreeMap::<usize, (Range<usize>, String)>::new();
+        let mut grouped = BTreeMap::<usize, (Range<usize>, Vec<Range<usize>>)>::new();
+        for site in sites {
+            let revision = site
+                .revision
+                .clone()
+                .ok_or_else(|| Error::Other(format!("new note {id} reference is not tracked")))?;
+            let node = tree
+                .elements
+                .iter()
+                .find(|node| node.start == revision.start && node.end == revision.end)
+                .expect("reference revision");
+            let expected = if addition { "ins" } else { "del" };
+            if node.local != expected
+                || node
+                    .parent
+                    .is_none_or(|parent| tree.elements[parent].start != site.paragraph.start)
+            {
+                return Err(Error::Other(format!(
+                    "footnote {id} has an ambiguous reference revision owner"
+                )));
+            }
+            grouped
+                .entry(node.start)
+                .or_insert_with(|| (revision, Vec::new()))
+                .1
+                .push(site.run);
+        }
+        for (at, (revision, mut runs)) in grouped {
+            let node = tree
+                .elements
+                .iter()
+                .find(|node| node.start == at)
+                .expect("grouped revision");
+            let expected = if addition { "ins" } else { "del" };
+            runs.sort_by_key(|range| range.start);
+            runs.dedup();
+            let old_open = &source[node.start..node.open_end];
+            let close = &source[node.close_start..node.end];
+            let mut replacement = String::new();
+            let mut cursor = node.open_end;
+            for run in runs {
+                if cursor < run.start {
+                    replacement.push_str(old_open);
+                    replacement.push_str(&source[cursor..run.start]);
+                    replacement.push_str(close);
+                }
+                if first {
+                    replacement.push_str(marker);
+                    first = false;
+                }
+                replacement.push_str(&format!("<w:{expected} xmlns:w=\"{W_NS}\" w:id=\"{token}\" w:author=\"{}\" w:date=\"{}\">",quick_xml::escape::escape(metadata.author),quick_xml::escape::escape(metadata.timestamp)));
+                replacement.push_str(&source[run.clone()]);
+                replacement.push_str(&format!("</w:{expected}>"));
+                cursor = run.end;
+            }
+            if cursor < node.close_start {
+                replacement.push_str(old_open);
+                replacement.push_str(&source[cursor..node.close_start]);
+                replacement.push_str(close);
+            }
+            edits.insert(at, (revision, replacement));
+        }
+        let mut output = source;
+        for (_, (range, value)) in edits.into_iter().rev() {
+            output.replace_range(range, &value);
+        }
+        crate::document::set_story_source_xml(document, &part, output.into_bytes())?;
+    }
+    Ok(())
+}
+
+fn verify_footnote_destination(
+    candidate: &Document,
+    wanted: &Document,
+    ids: &HashSet<i32>,
+    accept: bool,
+    options: &ComparisonOptions,
+) -> Result<()> {
+    if story_ignored(options, ComparisonStoryKind::Footnote) {
+        return Ok(());
+    }
+    let mut actual = candidate.clone_for_staging();
+    if accept {
+        actual.accept_revision_ids(ids)?;
+    } else {
+        actual.reject_revision_ids(ids)?;
+    }
+    let units = validate_footnote_custody(candidate, &crate::revision::RevisionScope::Ids(ids))?;
+    project_resolved_note_tombstones(candidate, &mut actual, &units)?;
+    let left = FootnotePart::of(&actual)?;
+    let right = FootnotePart::of(wanted)?;
+    match (&left, &right) {
+        (None, None) => Ok(()),
+        (Some(left), Some(right)) if left.name == right.name => {
+            let (left_root, left_owners) = canonical_owned_story(&left.xml, "footnote")?;
+            let (right_root, right_owners) = canonical_owned_story(&right.xml, "footnote")?;
+            // The grouped package guard proves each normal body, including
+            // its source residuals and established empty-property equivalence.
+            // Root owner tokens independently retain exact note identities/types.
+            if left_root != right_root
+                || left_owners
+                    .iter()
+                    .map(|owner| owner.first())
+                    .collect::<Vec<_>>()
+                    != right_owners
+                        .iter()
+                        .map(|owner| owner.first())
+                        .collect::<Vec<_>>()
+                || left.retained_records()? != right.retained_records()?
+            {
+                return Err(Error::Other(format!(
+                    "comparison {} does not reproduce exact footnote destination",
+                    if accept { "acceptance" } else { "rejection" }
+                )));
+            }
+            Ok(())
+        }
+        _ => Err(Error::Other(
+            "comparison does not reproduce footnote destination part identity/presence".into(),
+        )),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RawNoteType {
+    Omitted,
+    Empty,
+    ExplicitNormal,
+    Separator,
+    ContinuationSeparator,
+    ContinuationNotice,
+    Unknown,
+}
+
+fn raw_note_attribute_in_scope(
+    xml: &str,
+    inherited: &[(String, String)],
+    wanted: &str,
+) -> Result<Option<String>> {
+    let mut reader = Reader::from_str(xml);
+    let event = reader
+        .read_event()
+        .map_err(|error| Error::Other(error.to_string()))?;
+    let (Event::Start(element) | Event::Empty(element)) = event else {
+        return Err(Error::Other("comparison note has no owner element".into()));
+    };
+    let local = std::str::from_utf8(element.local_name().as_ref())
+        .map_err(utf8_error)?
+        .to_owned();
+    let bindings = root_namespace_bindings(xml, &local, inherited)?;
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|error| Error::Other(error.to_string()))?;
+        let key = std::str::from_utf8(attribute.key.as_ref()).map_err(utf8_error)?;
+        let Some((prefix, local)) = key.split_once(':') else {
+            continue;
+        };
+        if local != wanted
+            || !bindings
+                .iter()
+                .any(|(name, uri)| name == &format!("xmlns:{prefix}") && uri == W_NS)
+        {
+            continue;
+        }
+        return attribute
+            .decoded_and_normalized_value(XmlVersion::Implicit1_0, element.decoder())
+            .map(|value| Some(value.into_owned()))
+            .map_err(|error| Error::Other(error.to_string()));
+    }
+    Ok(None)
+}
+
+fn raw_note_type_in_scope(xml: &str, inherited: &[(String, String)]) -> Result<RawNoteType> {
+    Ok(
+        match raw_note_attribute_in_scope(xml, inherited, "type")?.as_deref() {
+            None => RawNoteType::Omitted,
+            Some("") => RawNoteType::Empty,
+            Some("normal") => RawNoteType::ExplicitNormal,
+            Some("separator") => RawNoteType::Separator,
+            Some("continuationSeparator") => RawNoteType::ContinuationSeparator,
+            Some("continuationNotice") => RawNoteType::ContinuationNotice,
+            Some(_) => RawNoteType::Unknown,
+        },
+    )
+}
+
+fn normal_note_owner(xml: &str, inherited: &[(String, String)]) -> Result<bool> {
+    Ok(matches!(
+        raw_note_type_in_scope(xml, inherited)?,
+        RawNoteType::Omitted | RawNoteType::ExplicitNormal
+    ))
 }
 
 pub(crate) fn reopen_staged(candidate: Document) -> Result<Document> {
@@ -3802,6 +5843,21 @@ fn comparison_text_box_markers(
             text_box_marker_local(original_xml, edited_xml, &prefix)?,
         );
     }
+    if !story_ignored(options, ComparisonStoryKind::Footnote) {
+        let left = FootnotePart::of(original)?;
+        let right = FootnotePart::of(edited)?;
+        if let Some(part) = left.as_ref().or(right.as_ref()) {
+            let prefix = root_prefix(&part.xml, "footnotes")?;
+            let marker = text_box_marker_local(
+                left.as_ref().map_or("", |part| part.xml.as_str()),
+                right.as_ref().map_or("", |part| part.xml.as_str()),
+                &prefix,
+            )?;
+            for part in left.iter().chain(right.iter()) {
+                markers.related.insert(part.name.clone(), marker.clone());
+            }
+        }
+    }
     Ok(markers)
 }
 
@@ -3854,10 +5910,86 @@ fn resolved_package(
     stories: &[StoryPart],
     options: &ComparisonOptions,
     text_box_markers: &TextBoxMarkers,
+    custody_ids: Option<&HashSet<i32>>,
 ) -> Result<NormalizedPackage> {
     let mut resolved = candidate.clone_for_staging();
+    let units = custody_ids
+        .map(|ids| validate_footnote_custody(candidate, &crate::revision::RevisionScope::Ids(ids)))
+        .transpose()?;
     resolve(&mut resolved)?;
+    if let Some(units) = units {
+        project_resolved_note_tombstones(candidate, &mut resolved, &units)?;
+    }
     normalized_package(&resolved, stories, options, text_box_markers)
+}
+
+/// Comparison guards may omit only the current fully resolved units' transient
+/// pairs. Their persisted result still retains them until the part settles.
+fn project_resolved_note_tombstones(
+    before: &Document,
+    after: &mut Document,
+    units: &[FootnoteCustody],
+) -> Result<()> {
+    let current = validate_footnote_custody(after, &crate::revision::RevisionScope::All)?;
+    if !current.iter().any(|unit| !unit.revisions.is_empty()) {
+        return Ok(());
+    }
+    let retained = units
+        .iter()
+        .filter(|unit| !unit.selected)
+        .map(|unit| unit.token)
+        .collect::<HashSet<_>>();
+    let prior = note_markers(before)?
+        .into_iter()
+        .filter(|marker| retained.contains(&marker.token))
+        .collect::<Vec<_>>();
+    let actual = note_markers(after)?;
+    for marker in prior {
+        let found = actual
+            .iter()
+            .filter(|other| {
+                other.token == marker.token
+                    && other.family == marker.family
+                    && other.part == marker.part
+            })
+            .collect::<Vec<_>>();
+        if found.len() != 1
+            || before
+                .package
+                .get_part(&marker.part)
+                .expect("prior marker part")[marker.span.clone()]
+                != after
+                    .package
+                    .get_part(&found[0].part)
+                    .expect("retained marker part")[found[0].span.clone()]
+        {
+            return Err(Error::Other(
+                "comparison changed a prior custody pair".into(),
+            ));
+        }
+    }
+    let projected = units
+        .iter()
+        .filter(|unit| unit.selected)
+        .cloned()
+        .collect::<Vec<_>>();
+    for unit in &projected {
+        let Some(actual) = current.iter().find(|other| other.token == unit.token) else {
+            return Err(Error::Other(
+                "resolved current custody tombstone disappeared while another unit is pending"
+                    .into(),
+            ));
+        };
+        if !actual.revisions.is_empty()
+            || actual.original != unit.original
+            || actual.edited != unit.edited
+        {
+            return Err(Error::Other(
+                "resolved current custody tombstone changed state or bits".into(),
+            ));
+        }
+    }
+    retire_note_markers(after, &projected, None)
 }
 
 /// Check each guard role against freshly read input occurrences and the actual
@@ -4014,17 +6146,38 @@ fn validate_field_conversion_role(
                     .ok_or_else(|| Error::Other("publication root part offset overflow".into()))
             })
             .collect::<Result<Vec<_>>>()?;
-        let (transported, _, mapped) = crate::revision::resolve_story_xml_with_publication_roots(
-            bytes,
-            if role == 0 {
-                crate::revision::Resolution::Reject
+        let resolution = if role == 0 {
+            crate::revision::Resolution::Reject
+        } else {
+            crate::revision::Resolution::Accept
+        };
+        let (transported, mapped) =
+            if FootnotePart::of(candidate)?.is_some_and(|notes| notes.name == part) {
+                let mut trace =
+                    crate::revision::NotePublication::new(part, witness.revision_ids[role], &roots);
+                let mut carrier = candidate.clone_for_staging();
+                carrier.resolve_revisions_with_note_publication(
+                    resolution,
+                    crate::revision::RevisionScope::Ids(new_ids),
+                    Some(&mut trace),
+                )?;
+                (
+                    trace.output.ok_or_else(|| {
+                        Error::Other("selected publication note part was removed".into())
+                    })?,
+                    trace.roots,
+                )
             } else {
-                crate::revision::Resolution::Accept
-            },
-            crate::revision::RevisionScope::Ids(new_ids),
-            witness.revision_ids[role],
-            &roots,
-        )?;
+                let (transported, _, mapped) =
+                    crate::revision::resolve_story_xml_with_publication_roots(
+                        bytes,
+                        resolution,
+                        crate::revision::RevisionScope::Ids(new_ids),
+                        witness.revision_ids[role],
+                        &roots,
+                    )?;
+                (transported, mapped)
+            };
         let mut ranges = Vec::with_capacity(mapped.len());
         let mut previous = None;
         for range in mapped {
@@ -4469,6 +6622,32 @@ fn normalized_package(
                     .map(String::as_str),
             )?,
         ));
+    }
+    if !story_ignored(options, ComparisonStoryKind::Footnote)
+        && !stories
+            .iter()
+            .any(|story| story.kind == ComparisonStoryKind::Footnote)
+        && let Some(part) = FootnotePart::of(document)?
+    {
+        let groups = guard_story_owners(
+            document,
+            &part.name,
+            part.xml.as_bytes(),
+            ComparisonStoryKind::Footnote,
+            options,
+            text_box_markers.related.get(&part.name).map(String::as_str),
+            true,
+        )?;
+        if groups.len() != part.normal().len() {
+            return Err(Error::Other(
+                "note guard did not cover every actual normal owner".into(),
+            ));
+        }
+        related.extend(
+            groups
+                .into_iter()
+                .map(|items| (ComparisonStoryKind::Footnote, part.name.clone(), items)),
+        );
     }
     let source = document
         .package
@@ -5648,6 +7827,23 @@ fn guard_story_part(
     options: &ComparisonOptions,
     marker: Option<&str>,
 ) -> Result<Vec<GuardItem>> {
+    Ok(
+        guard_story_owners(document, owner, xml, kind, options, marker, false)?
+            .into_iter()
+            .flatten()
+            .collect(),
+    )
+}
+
+fn guard_story_owners(
+    document: &Document,
+    owner: &str,
+    xml: &[u8],
+    kind: ComparisonStoryKind,
+    options: &ComparisonOptions,
+    marker: Option<&str>,
+    note_id_locations: bool,
+) -> Result<Vec<Vec<GuardItem>>> {
     let source = std::str::from_utf8(xml).map_err(utf8_error)?;
     let masked;
     let original_source = source;
@@ -5674,36 +7870,61 @@ fn guard_story_part(
     let root_bindings = root_namespace_bindings(source, kind.root_local(), &[])?;
     let mut output = Vec::new();
     if let Some(local) = kind.owner_local() {
-        for (index, span) in direct_word_element_spans(source, local)?
-            .into_iter()
-            .enumerate()
-        {
+        let spans = if note_id_locations {
+            FootnotePart::parse(owner.to_owned(), source.to_owned())?
+                .owners
+                .into_iter()
+                .filter(|record| {
+                    record.id.is_some()
+                        && matches!(
+                            record.kind,
+                            RawNoteType::Omitted | RawNoteType::ExplicitNormal
+                        )
+                })
+                .map(|record| record.span)
+                .collect()
+        } else {
+            direct_word_element_spans(source, local)?
+        };
+        for (index, span) in spans.into_iter().enumerate() {
             let owner_start = span.start;
             let actual = &source[span];
             if matches!(
                 kind,
                 ComparisonStoryKind::Footnote | ComparisonStoryKind::Endnote
-            ) && !normal_note_owner(actual)?
+            ) && !normal_note_owner(actual, &root_bindings)?
             {
                 continue;
             }
             let inner = element_inner_range_any_prefix(actual, local)?;
             let bindings = root_namespace_bindings(actual, local, &root_bindings)?;
             let model = story_document(&actual[inner.clone()], &bindings)?;
-            output.extend(guard_source_body_at(
+            let location = if note_id_locations {
+                let Some(id) = raw_note_attribute_in_scope(actual, &root_bindings, "id")?
+                    .and_then(|value| value.parse::<i32>().ok())
+                else {
+                    return Err(Error::Other(
+                        "normal note guard lost its qualified owner identity".into(),
+                    ));
+                };
+                format!("{}:{owner}/{local}-id[{id}]", kind.label())
+            } else {
+                format!("{}:{owner}/{local}[{index}]", kind.label())
+            };
+            output.push(guard_source_body_at(
                 &model,
                 &actual[inner.clone()],
                 &bindings,
                 document,
                 owner,
                 options,
-                &format!("{}:{owner}/{local}[{index}]", kind.label()),
+                &location,
                 Some((owner_start + inner.start, coordinates.clone())),
             )?);
         }
     } else {
         let model = story_document(&source[root.clone()], &root_bindings)?;
-        output = guard_source_body_at(
+        output = vec![guard_source_body_at(
             &model,
             &source[root.clone()],
             &root_bindings,
@@ -5712,7 +7933,7 @@ fn guard_story_part(
             options,
             &format!("{}:{owner}", kind.label()),
             Some((root.start, coordinates)),
-        )?;
+        )?];
     }
     Ok(output)
 }
@@ -5738,6 +7959,7 @@ fn normalized_story_part(
         std::str::from_utf8(xml).map_err(utf8_error)?
     };
     let root = root_inner_range(xml, kind.root_local())?;
+    let root_bindings = root_namespace_bindings(xml, kind.root_local(), &[])?;
     if let Some(owner_local) = kind.owner_local() {
         let mut normalized = Vec::new();
         for owner in direct_word_element_spans(xml, owner_local)? {
@@ -5745,7 +7967,7 @@ fn normalized_story_part(
             if matches!(
                 kind,
                 ComparisonStoryKind::Footnote | ComparisonStoryKind::Endnote
-            ) && !normal_note_owner(owner_xml)?
+            ) && !normal_note_owner(owner_xml, &root_bindings)?
             {
                 continue;
             }
@@ -20608,6 +22830,189 @@ mod tests {
     }
 
     #[test]
+    fn issue430_note_marker_keeps_admitted_table_and_control_paragraphs() {
+        let paragraph = r#"<w:p><w:pPr><w:rPr><w:ins w:id="7" w:author="A" w:date="2026-11-05T00:00:00Z"/></w:rPr></w:pPr><w:ins w:id="7" w:author="A" w:date="2026-11-05T00:00:00Z"><w:r><w:t>actual</w:t></w:r></w:ins></w:p>"#;
+        for content in [
+            format!("<w:tbl><w:tblPr/><w:tblGrid/><w:tr><w:tc>{paragraph}</w:tc></w:tr></w:tbl>"),
+            format!("<w:sdt><w:sdtPr/><w:sdtContent>{paragraph}</w:sdtContent></w:sdt>"),
+        ] {
+            let bindings = vec![("xmlns:w".to_owned(), W_NS.to_owned())];
+            let marker = super::note_bookmark(7, false, true, 'N', 81);
+            let marked = super::insert_note_marker(&content, &bindings, &marker, true).unwrap();
+            assert!(marked.contains(&format!("{marker}<w:r>")));
+            assert!(marked.contains("actual"));
+        }
+    }
+
+    #[test]
+    fn issue430_grouped_note_guard_preserves_owner_partition() {
+        let make = |first: &str, second: &str| {
+            let mut document = Document::new();
+            document.add_paragraph("body");
+            document.add_footnote("seed");
+            let xml = format!(
+                r#"<w:footnotes xmlns:w="{W_NS}"><w:footnote w:id="42">{first}</w:footnote><w:footnote w:id="7">{second}</w:footnote></w:footnotes>"#
+            );
+            document
+                .package
+                .set_part("/word/footnotes.xml", xml.as_bytes().to_vec());
+            (super::reopen_staged(document).unwrap(), xml)
+        };
+        let paragraph = |text| format!("<w:p><w:r><w:t>{text}</w:t></w:r></w:p>");
+        let (left, left_xml) = make(
+            &format!("{}{}", paragraph("P"), paragraph("Q")),
+            &paragraph("R"),
+        );
+        let (right, right_xml) = make(
+            &paragraph("P"),
+            &format!("{}{}", paragraph("Q"), paragraph("R")),
+        );
+        let options = ComparisonOptions::default();
+        let flat = |document: &Document, xml: &str| {
+            super::guard_story_part(
+                document,
+                "/word/footnotes.xml",
+                xml.as_bytes(),
+                super::ComparisonStoryKind::Footnote,
+                &options,
+                None,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            flat(&left, &left_xml),
+            flat(&right, &right_xml),
+            "old flattened carrier alone cannot prove note boundaries"
+        );
+        let grouped = |document: &Document, xml: &str| {
+            super::guard_story_owners(
+                document,
+                "/word/footnotes.xml",
+                xml.as_bytes(),
+                super::ComparisonStoryKind::Footnote,
+                &options,
+                None,
+                true,
+            )
+            .unwrap()
+        };
+        let left_grouped = grouped(&left, &left_xml);
+        let right_grouped = grouped(&right, &right_xml);
+        assert_eq!(
+            left_grouped.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+        assert_eq!(
+            right_grouped.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_ne!(left_grouped, right_grouped);
+        let markers = super::TextBoxMarkers::default();
+        assert_ne!(
+            super::normalized_package(&left, &[], &options, &markers).unwrap(),
+            super::normalized_package(&right, &[], &options, &markers).unwrap()
+        );
+    }
+
+    #[test]
+    fn issue430_comparison_rebinds_different_owner_collision_without_changing_note_or_revision_ids()
+    {
+        let make = |id| {
+            let mut document = Document::new();
+            document.add_paragraph("body");
+            document.add_footnote("seed");
+            let body = format!(
+                r#"<w:p><w:bookmarkStart w:id="80" w:name="_rdocxCmpNoteF7P01B"/><w:bookmarkEnd w:id="80"/><w:ins w:id="1" w:author="A"><w:r><w:footnoteReference w:id="{id}"/></w:r></w:ins></w:p>"#
+            );
+            let main = super::replace_body_inner(
+                document.package.get_part(&document.doc_part_name).unwrap(),
+                &body,
+            )
+            .unwrap();
+            let part = document.doc_part_name.clone();
+            crate::document::set_story_source_xml(&mut document, &part, main.into_bytes()).unwrap();
+            let notes = format!(
+                r#"<w:footnotes xmlns:w="{W_NS}"><w:footnote w:id="{id}"><w:p><w:pPr><w:rPr><w:ins w:id="2" w:author="A"/></w:rPr></w:pPr><w:ins w:id="3" w:author="A"><w:bookmarkStart w:id="81" w:name="_rdocxCmpNoteF7P01N"/><w:bookmarkEnd w:id="81"/><w:r><w:t>note</w:t></w:r></w:ins></w:p></w:footnote></w:footnotes>"#
+            );
+            crate::document::set_story_source_xml(
+                &mut document,
+                "/word/footnotes.xml",
+                notes.into_bytes(),
+            )
+            .unwrap();
+            super::reopen_staged(document).unwrap()
+        };
+        let left = make(5);
+        let mut right = make(6);
+        let before_notes = right.footnotes();
+        super::reconcile_footnote_custody_inputs(&left, &mut right).unwrap();
+        let units =
+            super::validate_footnote_custody(&right, &crate::revision::RevisionScope::All).unwrap();
+        assert_eq!(units.len(), 1);
+        assert_ne!(units[0].token, 7);
+        assert_eq!(units[0].owner, Some(6));
+        assert_eq!(right.footnotes(), before_notes);
+        assert_eq!(
+            right
+                .footnotes()
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            vec![6]
+        );
+        assert!(
+            right
+                .story_revisions()
+                .unwrap()
+                .iter()
+                .any(|revision| revision.text() == "note")
+        );
+        assert_eq!(
+            right
+                .story_revisions()
+                .unwrap()
+                .iter()
+                .map(|revision| revision.id())
+                .collect::<std::collections::HashSet<_>>(),
+            std::collections::HashSet::from([1, 2, 3])
+        );
+        assert!(
+            super::note_markers(&right)
+                .unwrap()
+                .iter()
+                .all(|marker| marker.pair_id != 80 && marker.pair_id != 81)
+        );
+    }
+
+    #[test]
+    fn issue430_comparison_note_part_failure_is_atomic() {
+        let mut original = Document::new();
+        original.add_paragraph("body");
+        let mut edited = Document::from_bytes(&original.to_bytes().unwrap()).unwrap();
+        let id = edited.add_footnote("note");
+        edited.paragraph_mut(0).unwrap().add_footnote_ref(id);
+        let before = original.to_bytes().unwrap();
+        let before_graph = original.package.part_rels.clone();
+        let before_overrides = original.package.content_types.overrides.clone();
+        FAIL_AFTER_COMPARISON_STAGING.with(|fail| fail.set(true));
+        let error = original
+            .compare(&edited, "A", "2026-11-05T00:00:00Z")
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("staged comparison postcondition")
+        );
+        assert_eq!(original.to_bytes().unwrap(), before);
+        assert_eq!(
+            format!("{:?}", original.package.part_rels),
+            format!("{before_graph:?}")
+        );
+        assert_eq!(original.package.content_types.overrides, before_overrides);
+        assert!(super::FootnotePart::of(&original).unwrap().is_none());
+    }
+
+    #[test]
     fn staged_comparison_postcondition_failure_preserves_bytes_and_layout_cache() {
         let mut original = Document::new();
         original.add_paragraph("original");
@@ -21410,6 +23815,7 @@ mod tests {
                 &[],
                 &options,
                 &markers,
+                None,
             )
             .unwrap();
             let rejected = resolved_package(
@@ -21418,6 +23824,7 @@ mod tests {
                 &[],
                 &options,
                 &markers,
+                None,
             )
             .unwrap();
             let wanted_accepted = normalized_package(&edited, &[], &options, &markers).unwrap();
@@ -22324,6 +24731,7 @@ mod tests {
                         &[],
                         &options,
                         &markers,
+                        None,
                     );
                     let rejected = resolved_package(
                         &candidate,
@@ -22331,6 +24739,7 @@ mod tests {
                         &[],
                         &options,
                         &markers,
+                        None,
                     );
                     let wanted_accepted = normalized_package(&edited, &[], &options, &markers);
                     let wanted_rejected = normalized_package(&before, &[], &options, &markers);

@@ -648,19 +648,20 @@ implementation evidence and final integrated riders stay required and pending.
 
 ## Implementation checklist
 
-- [ ] Confirm Q-A430-04 closure at Root final 4, Q-A430-08 and Q-A430-11 as answered, Q-A430-16 and Q-A430-17 at V8, Q-A430-18 to Q-A430-22 at V9, Q-A430-23 to Q-A430-26 at V10, and Q-A430-27 at V11.
-- [ ] Confirm Q-A430-07 and Q-A430-12 to Q-A430-15 at Root final.
-- [ ] Confirm the G430-02 amendment: selected-reference cleanup observed on the sole-reference control, controlled shared-reference negative recorded, and retained-reference positive deferred to a final rider pending a Word-admitted representation. Obtain the bounded pre-approval G430-01 note-body and G430-03 observations. Do not manufacture an all-gates-before-code dependency.
-- [ ] Add private `RawNoteType`, readers, preflight and post-pass inside `rdocx`.
-- [ ] Repair explicit normal and omitted type. Keep the explicit empty and explicit unknown non-empty `id <= 0` fallback unchanged.
-- [ ] Resolve `w:type` and `w:id` by prefix in the parser and pass bindings at every classifier call.
-- [ ] Add reference inventory, multi-reference grouping, pairing, custody emission with body marker outside and note marker inside the content wrapper, persistent token, bits, recognition, decoding, rebinding and ambiguity refusal.
-- [ ] Extend the allocator used set with custody tokens and bookmark ids, Section 3.4.
-- [ ] Add id-independent pending recognition, normalized note placement, the open and completed lifetimes, retained tombstones, the order-independent part-presence predicate, accept-to-edited and reject-to-original destination states, originally absent part removal, still-open creation unwinding, library-emitted marker retirement at settlement, imported Word-resolved marker preservation and retirement, and last-note-marker cleanup.
-- [ ] Add per-element listing preservation and the private partial-unit selection check for id, author, date and internal id-set scopes, using actual current ids.
-- [ ] Add lifecycle, shared id at emit, part creation preserving the actual edited special inventory, predicate-based removal on accepted edited-absent and rejected originally-absent, settlement cleanup and presence postconditions, ignored-story coherence, and unowned invalid and opaque preservation.
-- [ ] Add local Rust, Python and CLI regressions, A430-13 to A430-45, update HLD03, HLD04 and HLD10.
-- [ ] Run local scoped regressions, declare every delta, run the final integrated union and obtain Root approval.
+- [x] Confirm Q-A430-04 closure at Root final 4, Q-A430-08 and Q-A430-11 as answered, Q-A430-16 and Q-A430-17 at V8, Q-A430-18 to Q-A430-22 at V9, Q-A430-23 to Q-A430-26 at V10, and Q-A430-27 at V11.
+- [x] Confirm Q-A430-07 and Q-A430-12 to Q-A430-15 at Root final.
+- [x] Confirm the G430-02 amendment: selected-reference cleanup observed on the sole-reference control, controlled shared-reference negative recorded, and retained-reference positive deferred to a final rider pending a Word-admitted representation. Obtain the bounded pre-approval G430-01 note-body and G430-03 observations. Do not manufacture an all-gates-before-code dependency.
+- [x] Add private `RawNoteType`, readers, preflight and post-pass inside `rdocx`.
+- [x] Repair explicit normal and omitted type. Keep the explicit empty and explicit unknown non-empty `id <= 0` fallback unchanged.
+- [x] Resolve `w:type` and `w:id` by prefix in the parser and pass bindings at every classifier call.
+- [x] Add reference inventory, multi-reference grouping, pairing, custody emission with body marker outside and note marker inside the content wrapper, persistent token, bits, recognition, decoding, rebinding and ambiguity refusal.
+- [x] Extend the allocator used set with custody tokens and bookmark ids, Section 3.4.
+- [x] Add id-independent pending recognition, normalized note placement, the open and completed lifetimes, retained tombstones, the order-independent part-presence predicate, accept-to-edited and reject-to-original destination states, originally absent part removal, still-open creation unwinding, library-emitted marker retirement at settlement, imported Word-resolved marker preservation and retirement, and last-note-marker cleanup.
+- [x] Add per-element listing preservation and the private partial-unit selection check for id, author, date and internal id-set scopes, using actual current ids.
+- [x] Add lifecycle, shared id at emit, part creation preserving the actual edited special inventory, predicate-based removal on accepted edited-absent and rejected originally-absent, settlement cleanup and presence postconditions, ignored-story coherence, and unowned invalid and opaque preservation.
+- [x] Add local Rust, Python and CLI regressions, A430-13 to A430-45, update HLD03, HLD04 and HLD10.
+- [x] Run local scoped regressions, declare expected deltas and obtain clean independent Root local approval.
+- [ ] Run the final integrated union and obtain final Root approval after the native, SDK, installed binding, hash and full riders.
 
 - Preserve all45A430rows and14G430rows in actual evidence accounting.
 - Use only existing source/test carriers and preserve unmodelled XML verbatim.
@@ -668,6 +669,25 @@ implementation evidence and final integrated riders stay required and pending.
 - Run self-review, actual Root microscope and /verify --scoped F-X272a.
 - Prepare the structured handoff only after Root review is clean.
 - Never write AS_BUILT or SPRINT_TRACKER from the worker, push, tag or publish.
+
+### Local sprint-final-acceptance checkpoint
+
+Implementation and local verification are ready for integration under canonical
+contract74876618207bcd6863b882ea85391f9574b888c195132e3f2718d3638898d531.
+Root custody-recognition final4 reports zero defects and zero smells. Actual
+local evidence is56integration cases with no exclusions or ignores,5unit,
+1reported-regression and1CLI cases, prose0, all-targets/all-features scoped
+Clippy0 and workspace format0. Python carriers are written and syntax-checked,
+not installed-product evidence. HLD03,04and10 describe this behavior.
+
+The current implementation supersedes historical preparation-only wording
+without rewriting earlier observations. All45A430and14G430rows remain in the
+existing progress evidence map. Final integrated composition, Word-admitted
+native outputs, pinned SDK3.0.1 schema checks, installed Python3.9/3.12, strict
+mypy/stubtest, final CLI composition, archive dry-run/size, hash harness and
+/verify --full remain pending. Q28's exact shared-reference native positive is
+UNPROVED under its one-release exception. No provider dependency or delivery
+completion follows local readiness. The plan stays approved.
 
 ## Detailed discriminating countercases
 

@@ -412193,3 +412193,113 @@ fn issue425_textbox_semantic_observer_rejects_wrong_text_missing_bold_and_italic
     );
     assert!(issue425_observe_bold_textbox(&xml.replace("<q:b/>", "<w:b/>"), &["New."]).is_err());
 }
+
+#[test]
+fn issue430_reported_word_granularity_note_cases_and_payment_control() {
+    fn draft(rows: &[(&str, Option<&str>)]) -> Document {
+        let mut document = Document::new();
+        for (index, (text, note)) in rows.iter().enumerate() {
+            document.add_paragraph(text);
+            if let Some(note) = note {
+                let location = document.paragraph_story_location(index).unwrap().unwrap();
+                document.create_footnote(&location, note).unwrap();
+            }
+        }
+        Document::from_bytes(&document.to_bytes().unwrap()).unwrap()
+    }
+    let original_rows = [
+        (
+            "The buyer took delivery on 12 June.",
+            Some("Delivery note, p.1."),
+        ),
+        ("Payment was due in thirty days.", None),
+    ];
+    let added = [
+        original_rows[0],
+        (
+            "The seller wrote twice to ask for payment.",
+            Some("Letter of 1 July, p.2."),
+        ),
+        original_rows[1],
+    ];
+    let removed = [(original_rows[0].0, None), original_rows[1]];
+    let changed = [
+        (original_rows[0].0, Some("Delivery note, p.2.")),
+        original_rows[1],
+    ];
+    let options = rdocx::ComparisonOptions {
+        granularity: rdocx::ComparisonGranularity::Word,
+        ..Default::default()
+    };
+    for (name, rows, notes) in [
+        ("added", added.as_slice(), 2),
+        ("removed", removed.as_slice(), 0),
+        ("changed", changed.as_slice(), 1),
+    ] {
+        let mut original = draft(&original_rows);
+        let edited = draft(rows);
+        original
+            .compare_with_options(&edited, "Reviewer", "2026-10-30T12:00:00Z", &options)
+            .unwrap();
+        if name == "changed" {
+            assert_eq!(original.story_revisions().unwrap().len(), 2);
+        }
+        let pending = original.to_bytes().unwrap();
+        let mut accepted = Document::from_bytes(&pending).unwrap();
+        accepted.accept_all().unwrap();
+        assert_eq!(accepted.footnotes().len(), notes);
+        assert_eq!(accepted.text(), draft(rows).text());
+        let mut rejected = Document::from_bytes(&pending).unwrap();
+        rejected.reject_all().unwrap();
+        assert_eq!(rejected.footnotes().len(), 1);
+        assert_eq!(rejected.text(), draft(&original_rows).text());
+        assert!(
+            accepted
+                .paragraphs()
+                .iter()
+                .any(|p| p.text() == "Payment was due in thirty days.")
+        );
+    }
+    let ignored = rdocx::ComparisonOptions {
+        ignored_stories: vec![rdocx::ComparisonStoryKind::Footnote],
+        ..options.clone()
+    };
+    let mut original = draft(&original_rows);
+    let before = original.to_bytes().unwrap();
+    assert!(
+        original
+            .compare_with_options(&draft(&added), "Reviewer", "2026-10-30T12:00:00Z", &ignored)
+            .is_err()
+    );
+    assert_eq!(original.to_bytes().unwrap(), before);
+    original
+        .compare_with_options(
+            &draft(&removed),
+            "Reviewer",
+            "2026-10-30T12:00:00Z",
+            &ignored,
+        )
+        .unwrap();
+    original.accept_all().unwrap();
+    assert_eq!(original.footnotes().len(), 1);
+    for note in [None, Some("Delivery note, p.1.")] {
+        let left = [(original_rows[0].0, note), original_rows[1]];
+        let right = [
+            left[0],
+            ("The seller wrote twice to ask for payment.", None),
+            left[1],
+        ];
+        let mut original = draft(&left);
+        original
+            .compare_with_options(&draft(&right), "Reviewer", "2026-10-30T12:00:00Z", &options)
+            .unwrap();
+        assert!(
+            original
+                .story_revisions()
+                .unwrap()
+                .iter()
+                .all(|revision| !revision.text().contains("Payment was due")),
+            "payment owner gained revisions in no-new-note control"
+        );
+    }
+}

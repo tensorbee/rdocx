@@ -8733,3 +8733,55 @@ fn issue434_revision_kinds_match_python_without_changing_story_labels_or_tsv_col
     assert_eq!(rows[2][3], "run_property_change");
     assert_eq!(fs::read(&input).unwrap(), before);
 }
+
+#[test]
+fn issue430_compare_note_creation_listing_and_destination_cleanup() {
+    let temp = TempWorkspace::new("issue430-note-lifecycle");
+    let old = temp.path.join("old.docx");
+    let new = temp.path.join("new.docx");
+    let pending = temp.path.join("pending.docx");
+    let accepted = temp.path.join("accepted.docx");
+    let rejected = temp.path.join("rejected.docx");
+    let mut original = Document::new();
+    original.add_paragraph("seller");
+    original.add_paragraph("payment");
+    original.save(&old).unwrap();
+    let mut edited = Document::open(&old).unwrap();
+    let id = edited.add_footnote("note");
+    edited.paragraph_mut(0).unwrap().add_footnote_ref(id);
+    edited.save(&new).unwrap();
+    compare_record(&old, &new, &pending, &[]);
+    let listed = cli(&["revision", "list", path_text(&pending), "--json"]);
+    assert_success(&listed, "issue430 list");
+    let value: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    let records = value["revisions"].as_array().unwrap();
+    assert!(records.iter().any(|row| row["story"]["kind"] == "footnote"));
+    for (operation, destination, count, present) in [
+        ("accept", &accepted, 1, true),
+        ("reject", &rejected, 0, false),
+    ] {
+        let resolved = cli(&[
+            "revision",
+            operation,
+            path_text(&pending),
+            "--output",
+            path_text(destination),
+            "--json",
+        ]);
+        assert_success(&resolved, "issue430 resolution");
+        let value: Value = serde_json::from_slice(&resolved.stdout).unwrap();
+        assert_eq!(value["resolved"].as_u64(), Some(records.len() as u64));
+        let mut doc = Document::open(destination).unwrap();
+        assert_eq!(doc.footnotes().len(), count);
+        assert!(doc.text().contains("payment"));
+        let package =
+            OpcPackage::from_reader(std::io::Cursor::new(doc.to_bytes().unwrap())).unwrap();
+        assert_eq!(package.contains_part("/word/footnotes.xml"), present);
+        assert!(
+            package
+                .parts
+                .values()
+                .all(|xml| !String::from_utf8_lossy(xml).contains("_rdocxCmpNoteF"))
+        );
+    }
+}
