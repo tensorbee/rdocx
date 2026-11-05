@@ -57,6 +57,19 @@ proof. Preserve all native, schema, installed Python, typing, deterministic
 hash, hosted and full-sprint riders. No peer cap resets, new API, quota, scope,
 hash baseline or donor adoption follows. GitHub intake remains stopped.
 
+## Existing Rust test carrier reconciliation
+
+The new named Word regression scenarios use the existing
+crates/rdocx/tests/integration_test.rs entrypoint. This retains the regression
+category, actual baseline RED/GREEN, every acceptance row and all final riders.
+The existing regression_test.rs carrier has412305lines at the claimed Base,
+compared with39477in integration_test.rs, which already carries the actual
+note-provider controls. No existing test is deleted, no new binary or file is
+added and no whole-suite gate is substituted. This operative path correction
+supersedes the inherited regression_test.rs placement for these new Word cases.
+Other crates' existing test carriers and the actual claim Base stay unchanged.
+The worker acknowledges this revision before the affected new test placement.
+
 ## Split scope and inherited review lineage
 
 Operative implementation scope is original A280-1, A280-2, A280-3, A280-5 and A280-6 only. Original A280-4 and sections4/5, its Rust file API, stored PowerPoint scanner, CLI/help and parsed Python/Display distinction are delegated completely to F-X280c. All original A280-4 rows and source descriptions below are preserved historical contract context, not a second implementation lease. B exclusively retains shared OPC exact-duplicate and forbidden-character open policy and all both-family A280-3/A280-5 delivery. C's indexed-identity source scan is not a duplicate ZIP proof. The final parent must verify B refusals compose through C file/CLI routes. This delegation does not complete B or either provider. A280-7 and its entire negative-size authoring matrix are owned by F-X280a. Historical source/preparation, complete issue rows and prior review records below remain intact for attribution and whole-issue accounting. Their A280-7 source/helper/test descriptions are reference to delegated work, not a second implementation lease. All three original design peers remain exhausted, no reset or fourth peer. F277 and F272 design/provider barriers remain unchanged for this remainder. The delegated C design already preserves the reviewed F-X276 Display policy. That child contract does not approve B. Historical Debug instructions below are not authority to undo reviewed F276 Display behavior. F280a completion does not satisfy either provider. The parent F280 remains the completion umbrella.
