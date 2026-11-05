@@ -4511,7 +4511,16 @@ and known semantic mappings retain precedence.
 Document exposes HTML and Markdown, CLI-equivalent text and owned TextReport, typed ODT, RTF and EPUB payloads with complete ordered diagnostic tuples, and explicit body word and character counts. Validation accepts an owned document snapshot, bytes or a path. Package decode and path errors propagate, while admitted advisory findings preserve native severity, order and validity.
 
 Document.validate and module validate_file share the native physical-owner
-validation used by the Word CLI. Identified paragraphs inside block content
+validation used by the Word CLI. The byte, path and live-document routes also
+share the bounded Word subset and actual open predicate described in
+`04-opc-and-packaging.md`. Findings preserve native severity, order and
+validity, including the ten-per-part subset cap and omitted-count summary.
+Shared OPC forbidden-character read errors become validation error findings
+naming the part and code point, while both Python open constructors raise
+their existing `PackageError`. Exact duplicate ZIP part names also refuse
+both open constructors. Imported ordinary repeated bookmark ids remain
+admitted, with advisory warnings and existing ownership checks preserved.
+ Identified paragraphs inside block content
 controls retain inherited producer namespace bindings, including qualified
 paraId and textId, through open, save and reopen. This does not relax genuine
 owner mismatch or malformed-source refusal. Imported content-control type markers keep

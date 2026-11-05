@@ -16590,3 +16590,49 @@ def test_issue432_hyperlink_style_and_numbering_survive_real_publishers():
     for item in (numbering.findall(w + "num")[0], numbering.findall(w + "num")[-1]):
         definition = item.find(w + "abstractNumId").get(w + "val")
         assert abstracts[definition].find(w + "lvl/" + w + "numFmt").get(w + "val") == "bullet"
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_issue435_python_open_refuses_damaged_xml_naming_the_part(duplicate):
+    import rdocx
+
+    owner = rdocx.Document()
+    owner.add_paragraph("Issue435 seed")
+    before = owner.to_bytes()
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(before)) as source, zipfile.ZipFile(output, "w") as target:
+        for info in source.infolist():
+            data = source.read(info)
+            if info.filename == "word/document.xml" and not duplicate:
+                data = data.replace(b"Issue435 seed", b"Issue435 \x01seed")
+            target.writestr(info, data)
+        if duplicate:
+            with pytest.warns(UserWarning, match="Duplicate name"):
+                target.writestr("word/document.xml", source.read("word/document.xml"))
+    damaged = output.getvalue()
+    with pytest.raises(rdocx.PackageError, match="word/document.xml") as failure:
+        rdocx.Document.from_bytes(damaged)
+    assert "duplicate" in str(failure.value).lower() if duplicate else "U+0001" in str(failure.value)
+    if not duplicate:
+        report = rdocx.validate_bytes(damaged)
+        assert not report.is_valid
+        assert any("word/document.xml" in item.message and "U+0001" in item.message for item in report.findings)
+    assert owner.to_bytes() == before
+    assert owner.paragraphs[0].text == "Issue435 seed"
+
+
+def test_issue435_bookmarks_sharing_an_id_open_and_validate():
+    import rdocx
+
+    body = (b"<w:p><w:bookmarkStart w:id='2' w:name='first'/><w:r><w:t>first</w:t></w:r>"
+            b"<w:bookmarkEnd w:id='2'/><w:bookmarkStart w:id='2' w:name='second'/>"
+            b"<w:r><w:t>second</w:t></w:r><w:bookmarkEnd w:id='2'/></w:p>")
+    document = rdocx.Document()
+    document.add_paragraph("seed")
+    def replace(data):
+        return re.sub(br"<w:body>.*?</w:body>", b"<w:body>" + body + b"</w:body>", data, flags=re.S)
+    opened = _fx261_replace_part(document, "word/document.xml", replace)
+    assert "firstsecond" in opened.text()
+    report = opened.validate()
+    assert report.is_valid
+    assert any("bookmark id 2" in item.message for item in report.findings)

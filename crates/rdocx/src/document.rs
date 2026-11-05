@@ -5050,6 +5050,7 @@ fn empty_section_properties() -> CT_SectPr {
 pub(crate) struct DocumentIdentifiers {
     relationship_ids: HashMap<String, HashSet<String>>,
     bookmark_ids: HashSet<i32>,
+    repeated_bookmark_ids: HashMap<i32, usize>,
     comment_ids: HashSet<i32>,
     drawing_ids: HashSet<u32>,
     /// Per part, the `wp:docPr/@id` values the opened XML repeats, with
@@ -5120,6 +5121,7 @@ impl DocumentIdentifiers {
         let mut identifiers = Self {
             relationship_ids: HashMap::new(),
             bookmark_ids: HashSet::new(),
+            repeated_bookmark_ids: HashMap::new(),
             comment_ids: HashSet::new(),
             drawing_ids: HashSet::new(),
             repeated_drawing_ids: HashMap::new(),
@@ -5350,7 +5352,9 @@ impl DocumentIdentifiers {
                 *part_drawing_ids.entry(value).or_default() += 1;
             }
             IdentifierDefinition::Bookmark(value) => {
-                Self::insert_unique(&mut self.bookmark_ids, value, "bookmark")?;
+                if !self.bookmark_ids.insert(value) {
+                    *self.repeated_bookmark_ids.entry(value).or_insert(1) += 1;
+                }
             }
             IdentifierDefinition::Comment(value) => {
                 Self::insert_unique(&mut self.comment_ids, value, "comment")?;
@@ -5514,6 +5518,22 @@ impl DocumentIdentifiers {
         match added.first() {
             Some((part_name, id)) => Err(Error::Other(format!(
                 "duplicate drawing id {id} in authored XML of part {part_name}"
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    fn reject_new_repeated_bookmark_ids(&self, source: &Self) -> Result<()> {
+        let added = self
+            .repeated_bookmark_ids
+            .iter()
+            .filter_map(|(id, count)| {
+                (*count > source.repeated_bookmark_ids.get(id).copied().unwrap_or(1)).then_some(*id)
+            })
+            .min();
+        match added {
+            Some(id) => Err(Error::Other(format!(
+                "duplicate bookmark id {id} in authored XML"
             ))),
             None => Ok(()),
         }
@@ -5972,6 +5992,8 @@ impl DocumentIdentifiers {
     }
 
     fn reconcile_provenance(&mut self, source: &Self) {
+        self.repeated_bookmark_ids
+            .clone_from(&source.repeated_bookmark_ids);
         self.repeated_drawing_ids
             .clone_from(&source.repeated_drawing_ids);
         self.preserved_relationship_ids = intersect_relationship_registry(
@@ -25869,6 +25891,9 @@ impl Document {
         reopened
             .identifiers
             .reject_new_repeated_drawing_ids(&provenance)?;
+        reopened
+            .identifiers
+            .reject_new_repeated_bookmark_ids(&provenance)?;
         reopened.identifiers.reconcile_provenance(&provenance);
         reopened.restore_live_numbering(
             &self.published_abstract_by_live,
@@ -64053,6 +64078,72 @@ mod tests {
     }
 
     #[test]
+    fn issue435_bookmark_replay_counts_global_occupancy_without_merging_owners() {
+        let mut package =
+            OpcPackage::with_main_part("word/document.xml", content_types::WORD_DOCUMENT);
+        package
+            .content_types
+            .add_override("/word/header1.xml", HeaderFooterKind::Header.content_type());
+        package
+            .get_or_create_part_rels("/word/document.xml")
+            .add(rel_types::HEADER, "header1.xml");
+        package.set_part("/word/document.xml", format!(r#"<w:document xmlns:w="{WORD_NAMESPACE}"><w:body><w:p><w:bookmarkStart w:id="2" w:name="body"/><w:r><w:t>body</w:t></w:r><w:bookmarkEnd w:id="2"/></w:p></w:body></w:document>"#).into_bytes());
+        package.set_part("/word/header1.xml", format!(r#"<w:hdr xmlns:w="{WORD_NAMESPACE}"><w:p><w:bookmarkStart w:id="&#50;" w:name="header"/><w:bookmarkEnd w:id="2"/></w:p></w:hdr>"#).into_bytes());
+        let first = DocumentIdentifiers::scan(&package).unwrap();
+        let mut replay = DocumentIdentifiers::scan_reusing(&package, Some(&first), None).unwrap();
+        assert_eq!(first.repeated_bookmark_ids, HashMap::from([(2, 2)]));
+        assert_eq!(replay.repeated_bookmark_ids, first.repeated_bookmark_ids);
+        assert_ne!(replay.reserve_bookmark_id().unwrap(), 2);
+        package.set_part("/word/header1.xml", format!(r#"<w:hdr xmlns:w="{WORD_NAMESPACE}"><w:p><w:bookmarkStart w:id="2" w:name="first"/><w:bookmarkEnd w:id="2"/><w:bookmarkStart w:id="2" w:name="second"/><w:bookmarkEnd w:id="2"/></w:p></w:hdr>"#).into_bytes());
+        let changed = DocumentIdentifiers::scan_reusing(&package, Some(&first), None).unwrap();
+        assert_eq!(changed.repeated_bookmark_ids, HashMap::from([(2, 3)]));
+        assert!(changed.reject_new_repeated_bookmark_ids(&first).is_err());
+    }
+
+    #[test]
+    fn issue435_bookmark_repeat_guard_runs_before_both_reopen_provenance_paths() {
+        let mut seed = Document::new();
+        seed.add_paragraph("source");
+        seed.to_bytes().unwrap();
+        let duplicate = format!(
+            r#"<w:document xmlns:w="{WORD_NAMESPACE}"><w:body><w:p><w:bookmarkStart w:id="2" w:name="first"/><w:bookmarkEnd w:id="2"/><w:bookmarkStart w:id="2" w:name="second"/><w:r><w:t>source</w:t></w:r><w:bookmarkEnd w:id="2"/></w:p></w:body></w:document>"#
+        );
+        for in_memory in [true, false] {
+            let mut candidate = seed.clone_for_staging();
+            candidate.package.set_part(
+                &candidate.doc_part_name.clone(),
+                duplicate.as_bytes().to_vec(),
+            );
+            let result = candidate.reopen_staged(in_memory, PackageReadLimits::UNBOUNDED);
+            assert!(
+                matches!(&result, Err(error) if error.to_string().contains("duplicate bookmark id 2 in authored XML")),
+                "path={in_memory}: {}",
+                result
+                    .as_ref()
+                    .err()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "accepted".to_owned())
+            );
+        }
+        let mut package = seed.saved_package().unwrap();
+        package.set_part(&seed.doc_part_name, duplicate.into_bytes());
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        package.write_to(&mut bytes).unwrap();
+        let imported = Document::from_bytes(bytes.get_ref()).unwrap();
+        for in_memory in [true, false] {
+            let kept = imported
+                .clone_for_staging()
+                .reopen_staged(in_memory, PackageReadLimits::UNBOUNDED)
+                .unwrap();
+            assert_eq!(
+                kept.identifiers.repeated_bookmark_ids,
+                HashMap::from([(2, 2)])
+            );
+            assert_eq!(kept.text(), "source\n");
+        }
+    }
+
+    #[test]
     fn foreign_doc_pr_does_not_enter_drawing_identity_scope() {
         let mut package =
             OpcPackage::with_main_part("word/document.xml", content_types::WORD_DOCUMENT);
@@ -82613,15 +82704,673 @@ fn document_word_value(
     Ok(None)
 }
 
+// Finite validator-only tables, matching the transitional body/p/r child
+// inventories. These do not become parser admission or a full schema engine.
+const BODY_CHILDREN: &[&str] = &["altChunk", "customXml", "sdt", "p", "tbl", "sectPr"];
+const PARAGRAPH_CHILDREN: &[&str] = &[
+    "pPr",
+    "r",
+    "bdo",
+    "dir",
+    "fldSimple",
+    "hyperlink",
+    "smartTag",
+    "customXml",
+    "sdt",
+    "subDoc",
+    "contentPart",
+];
+const RANGE_CHILDREN: &[&str] = &[
+    "bookmarkStart",
+    "bookmarkEnd",
+    "commentRangeStart",
+    "commentRangeEnd",
+    "customXmlDelRangeStart",
+    "customXmlDelRangeEnd",
+    "customXmlInsRangeStart",
+    "customXmlInsRangeEnd",
+    "customXmlMoveFromRangeStart",
+    "customXmlMoveFromRangeEnd",
+    "customXmlMoveToRangeStart",
+    "customXmlMoveToRangeEnd",
+    "moveFromRangeStart",
+    "moveFromRangeEnd",
+    "moveToRangeStart",
+    "moveToRangeEnd",
+    "ins",
+    "del",
+    "moveFrom",
+    "moveTo",
+    "permStart",
+    "permEnd",
+    "proofErr",
+];
+const RUN_CHILDREN: &[&str] = &[
+    "rPr",
+    "br",
+    "t",
+    "delText",
+    "instrText",
+    "delInstrText",
+    "noBreakHyphen",
+    "softHyphen",
+    "dayShort",
+    "monthShort",
+    "yearShort",
+    "dayLong",
+    "monthLong",
+    "yearLong",
+    "annotationRef",
+    "footnoteRef",
+    "endnoteRef",
+    "separator",
+    "continuationSeparator",
+    "sym",
+    "pgNum",
+    "cr",
+    "tab",
+    "object",
+    "pict",
+    "fldChar",
+    "ruby",
+    "footnoteReference",
+    "endnoteReference",
+    "commentReference",
+    "drawing",
+    "ptab",
+    "lastRenderedPageBreak",
+    "contentPart",
+];
+const PARAGRAPH_JC: &[&str] = &[
+    "start",
+    "center",
+    "end",
+    "both",
+    "mediumKashida",
+    "distribute",
+    "numTab",
+    "highKashida",
+    "lowKashida",
+    "thaiDistribute",
+    "left",
+    "right",
+];
+const TABLE_JC: &[&str] = &["start", "center", "end", "left", "right"];
+const ELEMENT_ONLY: &[&str] = &[
+    "body",
+    "p",
+    "r",
+    "pPr",
+    "rPr",
+    "tbl",
+    "tblPr",
+    "tblGrid",
+    "tr",
+    "trPr",
+    "tc",
+    "tcPr",
+    "sectPr",
+    "sdt",
+    "sdtPr",
+    "sdtContent",
+    "hyperlink",
+    "fldSimple",
+    "smartTag",
+    "customXml",
+    "ins",
+    "del",
+    "moveFrom",
+    "moveTo",
+    "dir",
+    "bdo",
+];
+const MAX_POSITIVE_COORDINATE: i64 = 27_273_042_316_900;
+const MAX_STORY_FINDINGS: usize = 10;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SchemaNamespace {
+    Word,
+    Math,
+    Drawing,
+    WordDrawing,
+    KnownContainer,
+    Foreign,
+}
+
+impl SchemaNamespace {
+    fn resolved(namespace: &ResolveResult<'_>) -> Self {
+        match namespace {
+            ResolveResult::Bound(Namespace(uri)) if *uri == W_NS.as_bytes() => Self::Word,
+            ResolveResult::Bound(Namespace(uri)) if *uri == M_NS.as_bytes() => Self::Math,
+            ResolveResult::Bound(Namespace(uri)) if *uri == drawing_ns::A.as_bytes() => {
+                Self::Drawing
+            }
+            ResolveResult::Bound(Namespace(uri)) if *uri == drawing_ns::WP.as_bytes() => {
+                Self::WordDrawing
+            }
+            ResolveResult::Bound(Namespace(uri))
+                if [
+                    MC_NS.as_bytes(),
+                    drawing_ns::PIC.as_bytes(),
+                    b"http://schemas.microsoft.com/office/word/2010/wordprocessingShape",
+                    b"http://schemas.microsoft.com/office/word/2010/wordprocessingGroup",
+                    b"urn:schemas-microsoft-com:vml",
+                    b"urn:schemas-microsoft-com:office:office",
+                ]
+                .contains(uri) =>
+            {
+                Self::KnownContainer
+            }
+            _ => Self::Foreign,
+        }
+    }
+}
+
+struct StoryScanFrame {
+    namespace: SchemaNamespace,
+    local: String,
+    opaque: bool,
+    deleted: bool,
+    children: usize,
+    section_seen: bool,
+    radical_degree: bool,
+    radical_expression: bool,
+}
+
+struct StoryScanContext<'a> {
+    part: &'a str,
+    relationships: HashSet<&'a str>,
+    notes: &'a [HashSet<i32>; 2],
+    findings: Vec<ValidationFinding>,
+    suppressed: usize,
+    suppressed_error: bool,
+    bookmarks: BTreeMap<i32, usize>,
+}
+
+impl StoryScanContext<'_> {
+    fn finding(&mut self, severity: ValidationSeverity, message: String) {
+        if self.findings.len() < MAX_STORY_FINDINGS {
+            self.findings.push(ValidationFinding {
+                severity,
+                message: format!("part {}: {message}", self.part),
+            });
+        } else {
+            self.suppressed += 1;
+            self.suppressed_error |= severity == ValidationSeverity::Error;
+        }
+    }
+
+    fn error(&mut self, message: String) {
+        self.finding(ValidationSeverity::Error, message);
+    }
+
+    fn child(&mut self, parent: &mut StoryScanFrame, namespace: SchemaNamespace, local: &str) {
+        if parent.opaque || namespace == SchemaNamespace::Foreign {
+            return;
+        }
+        if parent.namespace == SchemaNamespace::Word && namespace == SchemaNamespace::Word {
+            let allowed = match parent.local.as_str() {
+                "body" => Some(BODY_CHILDREN),
+                "p" => Some(PARAGRAPH_CHILDREN),
+                "r" => Some(RUN_CHILDREN),
+                _ => None,
+            };
+            let range =
+                matches!(parent.local.as_str(), "body" | "p") && RANGE_CHILDREN.contains(&local);
+            if allowed.is_some_and(|allowed| !allowed.contains(&local) && !range) {
+                self.error(format!("w:{local} is not allowed in w:{}", parent.local));
+            }
+            if ((parent.local == "p" && local == "pPr") || (parent.local == "r" && local == "rPr"))
+                && parent.children != 0
+            {
+                self.error(format!(
+                    "w:{local} is not the first child of w:{}",
+                    parent.local
+                ));
+            }
+            if parent.local == "body" {
+                if parent.section_seen {
+                    self.error(format!(
+                        "w:{local} follows w:sectPr, the last child of w:body"
+                    ));
+                }
+                parent.section_seen |= local == "sectPr";
+            }
+        }
+        if parent.namespace == SchemaNamespace::Math
+            && parent.local == "rad"
+            && namespace == SchemaNamespace::Math
+        {
+            parent.radical_degree |= local == "deg";
+            parent.radical_expression |= local == "e";
+        }
+        parent.children += 1;
+    }
+
+    fn close(&mut self, frame: StoryScanFrame) {
+        if !frame.opaque && frame.namespace == SchemaNamespace::Math && frame.local == "rad" {
+            if !frame.radical_degree {
+                self.error("m:rad is missing required child m:deg".into());
+            }
+            if !frame.radical_expression {
+                self.error("m:rad is missing required child m:e".into());
+            }
+        }
+    }
+
+    fn element(
+        &mut self,
+        reader: &NsReader<&[u8]>,
+        element: &BytesStart<'_>,
+        namespace: SchemaNamespace,
+        open: &mut Vec<StoryScanFrame>,
+        empty: bool,
+    ) -> std::result::Result<(), String> {
+        let local = std::str::from_utf8(element.local_name().as_ref())
+            .map_err(|error| error.to_string())?
+            .to_owned();
+        let opaque =
+            open.last().is_some_and(|frame| frame.opaque) || namespace == SchemaNamespace::Foreign;
+        let deleted = open.last().is_some_and(|frame| frame.deleted)
+            || (!opaque && namespace == SchemaNamespace::Word && local == "del");
+        let mut attributes = BTreeMap::new();
+        for attribute in element.attributes() {
+            let attribute = attribute.map_err(|error| error.to_string())?;
+            let (attribute_namespace, name) = reader.resolver().resolve_attribute(attribute.key);
+            let value = attribute
+                .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+                .map_err(|error| error.to_string())?;
+            if matches!(&attribute_namespace, ResolveResult::Bound(Namespace(uri)) if *uri == b"http://schemas.openxmlformats.org/officeDocument/2006/relationships")
+                && !self.relationships.contains(value.as_ref())
+            {
+                self.error(format!(
+                    "{}:{} references dangling relationship id {value}",
+                    local,
+                    String::from_utf8_lossy(name.as_ref())
+                ));
+            }
+            if word_element(&attribute_namespace) {
+                attributes.insert(name.as_ref().to_vec(), value.into_owned());
+            } else if !opaque
+                && matches!(
+                    namespace,
+                    SchemaNamespace::Drawing | SchemaNamespace::WordDrawing
+                )
+                && matches!(local.as_str(), "ext" | "extent")
+                && matches!(attribute_namespace, ResolveResult::Unbound)
+                && matches!(name.as_ref(), b"cx" | b"cy")
+                && value
+                    .parse::<i64>()
+                    .ok()
+                    .is_none_or(|value| !(0..=MAX_POSITIVE_COORDINATE).contains(&value))
+            {
+                self.error(format!(
+                    "{local}/@{}={value:?} is not ST_PositiveCoordinate",
+                    String::from_utf8_lossy(name.as_ref())
+                ));
+            }
+        }
+        if let Some(parent) = open.last_mut() {
+            self.child(parent, namespace, &local);
+        }
+        if !opaque && namespace == SchemaNamespace::Word {
+            if matches!(local.as_str(), "ins" | "del" | "moveFrom" | "moveTo") {
+                for name in [b"id".as_slice(), b"author".as_slice()] {
+                    if !attributes.contains_key(name) {
+                        self.error(format!(
+                            "w:{local} is missing required w:{}",
+                            String::from_utf8_lossy(name)
+                        ));
+                    }
+                }
+            }
+            if let Some(value) = attributes.get(b"val".as_slice()) {
+                if local == "jc" {
+                    let table = open.last().is_some_and(|frame| {
+                        frame.namespace == SchemaNamespace::Word
+                            && matches!(frame.local.as_str(), "tblPr" | "tblPrEx")
+                    });
+                    let allowed = if table { TABLE_JC } else { PARAGRAPH_JC };
+                    if !allowed.contains(&value.as_str()) {
+                        self.error(format!(
+                            "w:jc w:val={value:?} is not an {} value",
+                            if table { "ST_JcTable" } else { "ST_Jc" }
+                        ));
+                    }
+                } else if local == "color"
+                    && value != "auto"
+                    && !(value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                {
+                    self.error(format!("w:color w:val={value:?} is not ST_HexColor"));
+                }
+            }
+            if matches!(local.as_str(), "footnoteReference" | "endnoteReference") {
+                let family = usize::from(local == "endnoteReference");
+                let value = attributes.get(b"id".as_slice());
+                if value
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .is_none_or(|id| !self.notes[family].contains(&id))
+                {
+                    self.error(format!(
+                        "w:{local} references missing {} id {}",
+                        if family == 0 { "footnote" } else { "endnote" },
+                        value.map_or("(absent)", String::as_str)
+                    ));
+                }
+            }
+            if deleted && matches!(local.as_str(), "t" | "instrText") {
+                self.error(format!(
+                    "w:{local} inside w:del must use w:{}",
+                    if local == "t" {
+                        "delText"
+                    } else {
+                        "delInstrText"
+                    }
+                ));
+            }
+            if local == "bookmarkStart"
+                && let Some(id) = attributes
+                    .get(b"id".as_slice())
+                    .and_then(|value| value.parse::<i32>().ok())
+            {
+                *self.bookmarks.entry(id).or_default() += 1;
+            }
+        }
+        let frame = StoryScanFrame {
+            namespace,
+            local,
+            opaque,
+            deleted,
+            children: 0,
+            section_seen: false,
+            radical_degree: false,
+            radical_expression: false,
+        };
+        if empty {
+            self.close(frame);
+        } else {
+            open.push(frame);
+        }
+        Ok(())
+    }
+
+    fn text(&mut self, open: &[StoryScanFrame], whitespace: bool) {
+        if !whitespace
+            && let Some(frame) = open.last()
+            && !frame.opaque
+            && frame.namespace == SchemaNamespace::Word
+            && ELEMENT_ONLY.contains(&frame.local.as_str())
+        {
+            self.error(format!(
+                "text directly inside w:{} is not allowed",
+                frame.local
+            ));
+        }
+    }
+}
+
+fn document_story_findings(
+    package: &OpcPackage,
+    part: &str,
+    xml: &[u8],
+    notes: &[HashSet<i32>; 2],
+) -> Vec<ValidationFinding> {
+    let mut context = StoryScanContext {
+        part,
+        relationships: package
+            .get_part_rels(part)
+            .into_iter()
+            .flat_map(|relationships| &relationships.items)
+            .map(|relationship| relationship.id.as_str())
+            .collect(),
+        notes,
+        findings: Vec::new(),
+        suppressed: 0,
+        suppressed_error: false,
+        bookmarks: BTreeMap::new(),
+    };
+    let mut reader = NsReader::from_reader(xml);
+    let mut open = Vec::new();
+    let mut buffer = Vec::new();
+    while let Ok((namespace, event)) = reader.read_resolved_event_into(&mut buffer) {
+        let namespace = SchemaNamespace::resolved(&namespace);
+        match event {
+            Event::Start(ref element) | Event::Empty(ref element) => {
+                if context
+                    .element(
+                        &reader,
+                        element,
+                        namespace,
+                        &mut open,
+                        matches!(event, Event::Empty(_)),
+                    )
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Event::End(_) => {
+                if let Some(frame) = open.pop() {
+                    context.close(frame);
+                }
+            }
+            Event::Text(text) => context.text(&open, text.iter().all(u8::is_ascii_whitespace)),
+            Event::CData(text) => context.text(&open, text.iter().all(u8::is_ascii_whitespace)),
+            Event::GeneralRef(reference) => context.text(
+                &open,
+                reference
+                    .resolve_char_ref()
+                    .ok()
+                    .flatten()
+                    .is_some_and(xml_1_0_whitespace),
+            ),
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    let bookmarks = std::mem::take(&mut context.bookmarks);
+    for (id, count) in bookmarks {
+        if count > 1 {
+            context.finding(
+                ValidationSeverity::Warning,
+                format!("bookmark id {id} is used by {count} bookmarks"),
+            );
+        }
+    }
+    if context.suppressed != 0 {
+        context.findings.push(ValidationFinding {
+            severity: if context.suppressed_error {
+                ValidationSeverity::Error
+            } else {
+                ValidationSeverity::Warning
+            },
+            message: format!(
+                "part {part}: {} additional subset finding(s) omitted",
+                context.suppressed
+            ),
+        });
+    }
+    context.findings
+}
+
+fn document_note_ids(package: &OpcPackage, relationship_type: &str, local: &[u8]) -> HashSet<i32> {
+    let mut ids = HashSet::new();
+    let Some(main) = package.main_document_part() else {
+        return ids;
+    };
+    let Some(relationship) = package.get_part_rels(&main).and_then(|relationships| {
+        relationships.items.iter().find(|relationship| {
+            relationship.rel_type == relationship_type && relationship_is_internal(relationship)
+        })
+    }) else {
+        return ids;
+    };
+    let part = OpcPackage::resolve_rel_target(&main, &relationship.target);
+    let Some(xml) = package.get_part(&part) else {
+        return ids;
+    };
+    let mut reader = NsReader::from_reader(xml);
+    let mut depth = 0usize;
+    let mut qualified_root = false;
+    let mut buffer = Vec::new();
+    while let Ok((namespace, event)) = reader.read_resolved_event_into(&mut buffer) {
+        match event {
+            Event::Start(ref element) | Event::Empty(ref element) => {
+                if depth == 0 {
+                    qualified_root = word_element(&namespace)
+                        && element.local_name().as_ref()
+                            == if local == b"footnote" {
+                                &b"footnotes"[..]
+                            } else {
+                                &b"endnotes"[..]
+                            };
+                }
+                if qualified_root
+                    && depth == 1
+                    && word_element(&namespace)
+                    && element.local_name().as_ref() == local
+                    && editable_note_owner(&reader, element).unwrap_or(false)
+                {
+                    for attribute in element.attributes().flatten() {
+                        let (namespace, name) = reader.resolver().resolve_attribute(attribute.key);
+                        if word_element(&namespace)
+                            && name.as_ref() == b"id"
+                            && let Ok(value) = attribute.decoded_and_normalized_value(
+                                XmlVersion::Implicit1_0,
+                                reader.decoder(),
+                            )
+                            && let Ok(id) = value.parse::<i32>()
+                        {
+                            ids.insert(id);
+                        }
+                    }
+                }
+                if matches!(event, Event::Start(_)) {
+                    depth += 1;
+                }
+            }
+            Event::End(_) => depth = depth.saturating_sub(1),
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    ids
+}
+
+fn document_xml_lexical_fault(xml: &[u8]) -> Option<String> {
+    // Match the existing OPC UTF-8/BOM and UTF-16 signature frontier without
+    // replacing or rewriting the stored part. Other encodings stay unproved.
+    let utf16 = if let Some(body) = xml.strip_prefix(&[0xff, 0xfe]) {
+        Some((body, true))
+    } else if let Some(body) = xml.strip_prefix(&[0xfe, 0xff]) {
+        Some((body, false))
+    } else if xml.len() >= 4 && xml[1] == 0 && xml[3] == 0 {
+        Some((xml, true))
+    } else if xml.len() >= 4 && xml[0] == 0 && xml[2] == 0 {
+        Some((xml, false))
+    } else {
+        None
+    };
+    let decoded;
+    let xml = if let Some((body, little_endian)) = utf16 {
+        if !body.len().is_multiple_of(2) {
+            return Some("odd UTF-16 byte length".into());
+        }
+        let units = body
+            .chunks_exact(2)
+            .map(|pair| {
+                if little_endian {
+                    u16::from_le_bytes([pair[0], pair[1]])
+                } else {
+                    u16::from_be_bytes([pair[0], pair[1]])
+                }
+            })
+            .collect::<Vec<_>>();
+        decoded = match String::from_utf16(&units) {
+            Ok(decoded) => decoded,
+            Err(error) => return Some(error.to_string()),
+        };
+        decoded.as_bytes()
+    } else {
+        xml.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(xml)
+    };
+    if let Err(error) = oxml_core::xml::validate_strict_xml_1_0(xml) {
+        return Some(format!("{error:?}"));
+    }
+    let mut reader = quick_xml::Reader::from_reader(xml);
+    let mut depth = 0usize;
+    let mut roots = 0usize;
+    let mut doctype = false;
+    loop {
+        let before = reader.buffer_position();
+        match reader.read_event() {
+            Ok(Event::Decl(_)) if before != 0 => {
+                return Some("XML declaration is not first".into());
+            }
+            Ok(Event::DocType(_)) => {
+                if doctype || roots != 0 || depth != 0 {
+                    return Some("document type is not in the prolog".into());
+                }
+                doctype = true;
+            }
+            Ok(Event::Start(_)) => {
+                if depth == 0 {
+                    roots += 1;
+                }
+                depth += 1;
+            }
+            Ok(Event::Empty(_)) if depth == 0 => roots += 1,
+            Ok(Event::End(_)) => depth = depth.saturating_sub(1),
+            Ok(Event::Text(text)) if depth == 0 && !text.iter().all(u8::is_ascii_whitespace) => {
+                return Some("text outside root element".into());
+            }
+            Ok(Event::CData(_) | Event::GeneralRef(_)) if depth == 0 => {
+                return Some("text outside root element".into());
+            }
+            Ok(Event::Eof) => {
+                return if roots == 1 && depth == 0 {
+                    None
+                } else {
+                    Some("expected exactly one complete root element".into())
+                };
+            }
+            Err(error) => return Some(error.to_string()),
+            _ => {}
+        }
+    }
+}
+
+fn validate_document_read(
+    read: std::result::Result<OpcPackage, oxml_opc::OpcError>,
+) -> Result<ValidationReport> {
+    match read {
+        Ok(package) => validate_document_package(package),
+        Err(oxml_opc::OpcError::InvalidXmlCharacter {
+            part,
+            code_point,
+            line,
+            column,
+        }) => Ok(document_validation_report(
+            vec![format!(
+                "part {part} is not well-formed XML: it holds U+{code_point:04X} at line {line}, column {column}, a character XML 1.0 forbids"
+            )],
+            Vec::new(),
+        )),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Validate serialized document bytes without changing a live document.
 /// Non-package input and unexplained document-open failures remain errors.
 pub fn validate_document_bytes(bytes: &[u8]) -> Result<ValidationReport> {
-    validate_document_package(OpcPackage::from_reader(std::io::Cursor::new(bytes))?)
+    validate_document_read(OpcPackage::from_reader(std::io::Cursor::new(bytes)))
 }
 
 /// Validate a document package at a path with the same findings as byte validation.
 pub fn validate_document_file(path: impl AsRef<Path>) -> Result<ValidationReport> {
-    validate_document_package(OpcPackage::open(path)?)
+    validate_document_read(OpcPackage::open(path))
 }
 
 fn document_validation_report(errors: Vec<String>, warnings: Vec<String>) -> ValidationReport {
@@ -82728,8 +83477,13 @@ fn validate_document_package(package: OpcPackage) -> Result<ValidationReport> {
     // Every XML part the main document relates to must be well formed. The
     // style ids that its story parts name are checked once the document opens.
     let mut style_references = Vec::new();
+    let mut checked_xml = HashSet::new();
+    let notes = [
+        document_note_ids(&package, rel_types::FOOTNOTES, b"footnote"),
+        document_note_ids(&package, rel_types::ENDNOTES, b"endnote"),
+    ];
     if let Some(doc_part) = package.main_document_part() {
-        let mut parts = vec![(doc_part.clone(), true)];
+        let mut parts = BTreeMap::from([(part_name_identity(&doc_part), (doc_part.clone(), true))]);
         for rel in package
             .get_part_rels(&doc_part)
             .iter()
@@ -82740,11 +83494,12 @@ fn validate_document_package(package: OpcPackage) -> Result<ValidationReport> {
             }
             let target = oxml_opc::OpcPackage::resolve_rel_target(&doc_part, &rel.target);
             let story = STORY_TEXT_RELATIONSHIPS.contains(&rel.rel_type.as_str());
-            if !parts.iter().any(|(known, _)| *known == target) {
-                parts.push((target, story));
-            }
+            parts
+                .entry(part_name_identity(&target))
+                .and_modify(|(_, has_story_role)| *has_story_role |= story)
+                .or_insert((target, story));
         }
-        for (part_name, story) in parts {
+        for (_, (part_name, story)) in parts {
             let is_xml = package
                 .content_types
                 .content_type_for(&part_name)
@@ -82754,17 +83509,49 @@ fn validate_document_package(package: OpcPackage) -> Result<ValidationReport> {
             let Some(xml) = package.get_part(&part_name).filter(|_| is_xml) else {
                 continue;
             };
-            match document_style_references(xml) {
-                Err(detail) => {
-                    errors.push(format!("part {part_name} is not well-formed XML: {detail}"));
-                }
-                Ok(references) if story => style_references.extend(
-                    references
-                        .into_iter()
-                        .map(|(kind, style_id)| (kind, style_id, part_name.clone())),
-                ),
-                Ok(_) => {}
+            if !checked_xml.insert(part_name_identity(&part_name)) {
+                continue;
             }
+            if let Some(detail) = document_xml_lexical_fault(xml) {
+                errors.push(format!("part {part_name} is not well-formed XML: {detail}"));
+                continue;
+            }
+            if story {
+                for finding in document_story_findings(&package, &part_name, xml, &notes) {
+                    match finding.severity {
+                        ValidationSeverity::Error => errors.push(finding.message),
+                        ValidationSeverity::Warning => warnings.push(finding.message),
+                    }
+                }
+                match document_style_references(xml) {
+                    Err(detail) => {
+                        errors.push(format!("part {part_name} is not well-formed XML: {detail}"));
+                    }
+                    Ok(references) => style_references.extend(
+                        references
+                            .into_iter()
+                            .map(|(kind, style_id)| (kind, style_id, part_name.clone())),
+                    ),
+                }
+            }
+        }
+    }
+
+    let mut other_xml = package
+        .parts
+        .iter()
+        .filter(|(part, _)| {
+            !checked_xml.contains(&part_name_identity(part))
+                && package
+                    .content_types
+                    .content_type_for(part)
+                    .is_some_and(|content_type| content_type.to_ascii_lowercase().ends_with("xml"))
+        })
+        .collect::<Vec<_>>();
+    other_xml.sort_by_key(|(part, _)| *part);
+    for (part, xml) in other_xml {
+        if let Some(detail) = document_xml_lexical_fault(xml) {
+            errors.push(format!("part {part} is not well-formed XML: {detail}"));
         }
     }
 

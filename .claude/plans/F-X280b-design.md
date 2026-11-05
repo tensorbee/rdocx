@@ -423,20 +423,21 @@ Expected unchanged. `scripts/hash_baseline.json` must not move. Do not change RE
 
 ## Implementation checklist
 
-- [ ] Rebase onto a clean Base before claim and before a shared approved design commit, after F272 and F277 actual completion for implementation. Do not claim from the dirty packet tree.
-- [ ] Add OPC exact duplicate-name refusal and forbidden XML character read refusal.
-- [ ] Add the rdocx schema subset, dangling-reference checks, and other-XML-part well-formedness.
-- [ ] Add rdocx shared bookmark-id tolerance and the provisional mutation guard.
-- [ ] Add rpptx stored-package validation and `validate_presentation_file`.
-- [ ] Keep `Presentation.validate` parsed-model. Do not add a Python stored-package function.
-- [ ] Add the negative shape-size guard.
-- [ ] Update CLI help and READMEs.
-- [ ] Update HLD04 and HLD10. Confirm HLD03, HLD06, HLD12, and HLD14 need no change.
-- [ ] Add RED and GREEN tests in existing carriers only.
-- [ ] Run scoped checks and microscope. Do not run the final union per worker.
-- [ ] Keep the hash baseline unchanged. Do not move README measurements.
-- [ ] Record strict SemVer entries. Do not publish.
-- [ ] Obtain approved F277 and F272 contracts before approval. Obtain actual completion and genuine LOCAL checkpoints before implementation.
+- [x] Work from the claimed clean Base2e3c0780 on the sole-owned worker branch. Actual completed LOCAL F272a1c69b7e0 and F277b07f79679 are ancestors. The operative child-prefix section supersedes inherited whole-parent barriers. No dirty carry was imported or rebase performed.
+- [x] Add OPC exact duplicate-name refusal and forbidden XML character read refusal.
+- [x] Add the rdocx schema subset, dangling-reference checks, and other-XML-part well-formedness.
+- [x] Add rdocx shared bookmark-id tolerance and the provisional mutation guard on both actual reopen paths.
+- [x] Retain the already-integrated F-X280c stored-package validation and `validate_presentation_file`. That source is outside B's implementation ownership.
+- [x] Keep `Presentation.validate` parsed-model. Do not add a Python stored-package function.
+- [x] Retain the already-integrated F-X280a negative shape-size guard. That source is outside B's implementation ownership.
+- [x] Update the Word CLI help and README, preserving integrated sibling documentation.
+- [x] Update HLD04 and HLD10. Confirm HLD03, HLD06, HLD12, and HLD14 need no change.
+- [x] Add actual RED and GREEN tests in existing carriers only. Preserve later GREEN-only controls, fixture/compiler distinctions and original missing snapshot limits.
+- [x] Run scoped checks and independent Root microscope. Root pass1 D1 through D4 are closed locally by clean Root pass2. The affected successor Word cohort passes16tests and scoped strict lint passes. No final union was run per worker.
+- [x] Keep the hash baseline unchanged. Do not move README measurements. Actual hash/pixel qualification remains at final.
+- [x] Retain strict SemVer entries in the compatibility section for Word0.17.0 and shared PowerPoint0.15.0. Do not publish. Final compatibility and publication evidence remain due.
+- [x] Obtain approved F272/F277 contracts and actual completed genuine LOCAL child-prefix checkpoints before implementation.
+- [ ] Run the final integrated workspace, C1 composition, native Word/PowerPoint, SDK/schema, LibreOffice, hash/pixel, installed Python3.9/3.12, wheels, typing/stubs, WASM, documentation/archive/packaging and hosted CI gates. Preserve sprint-final-acceptance preparation and approved plan status until actual acceptance.
 
 ## Open questions
 

@@ -37927,6 +37927,87 @@ fn issue435_temp_directory(label: &str) -> PathBuf {
     ))
 }
 
+#[test]
+fn issue435_shared_opc_refusal_reaches_presentation_and_stored_file_validation() {
+    let source = issue435_probe_deck().to_bytes().unwrap();
+    for duplicate in [false, true] {
+        let mut archive = zip::ZipArchive::new(Cursor::new(&source)).unwrap();
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let mut slide = None;
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).unwrap();
+            let name = entry.name().unwrap().into_owned();
+            let mut data = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut data).unwrap();
+            if name == "ppt/slides/slide1.xml" {
+                if duplicate {
+                    slide = Some(data.clone());
+                } else {
+                    data = String::from_utf8(data)
+                        .unwrap()
+                        .replacen("<a:t>", "<a:t>\u{1}", 1)
+                        .into_bytes();
+                }
+            }
+            writer
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            std::io::Write::write_all(&mut writer, &data).unwrap();
+        }
+        if let Some(data) = slide {
+            writer
+                .start_file(
+                    "ppt/slides/slide9.xml",
+                    zip::write::SimpleFileOptions::default(),
+                )
+                .unwrap();
+            std::io::Write::write_all(&mut writer, &data).unwrap();
+        }
+        let mut bytes = writer.finish().unwrap().into_inner();
+        if duplicate {
+            for offset in 0..bytes.len().saturating_sub(46) {
+                let header = if bytes[offset..].starts_with(b"PK\x01\x02") {
+                    46
+                } else if bytes[offset..].starts_with(b"PK\x03\x04") {
+                    30
+                } else {
+                    continue;
+                };
+                let start = offset + header;
+                if bytes.get(start..start + 21) == Some(b"ppt/slides/slide9.xml") {
+                    bytes[start..start + 21].copy_from_slice(b"ppt/slides/slide1.xml");
+                }
+            }
+        }
+        let before = bytes.clone();
+        let error = Presentation::from_bytes(&bytes).unwrap_err();
+        assert!(
+            error.to_string().contains("ppt/slides/slide1.xml"),
+            "{error}"
+        );
+        let directory = issue435_temp_directory("shared-open");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("fault.pptx");
+        fs::write(&path, &bytes).unwrap();
+        if duplicate {
+            let error = rpptx::validate_presentation_file(&path).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("duplicate OPC part name: ppt/slides/slide1.xml")
+            );
+        } else {
+            let issues = rpptx::validate_presentation_file(&path).unwrap();
+            assert_eq!(issues.len(), 1);
+            assert!(
+                matches!(&issues[0], rpptx::ValidationIssue::InvalidXmlChild { part, message, .. } if part == "/ppt/slides/slide1.xml" && message.contains("U+0001"))
+            );
+        }
+        assert_eq!(fs::read(&path).unwrap(), before);
+        fs::remove_dir_all(directory).unwrap();
+    }
+}
+
 fn issue435_probe_deck() -> Presentation {
     let mut deck = Presentation::new().unwrap();
     deck.add_slide(6).unwrap();
@@ -38573,8 +38654,7 @@ fn issue435_stored_file_route_reports_faults_the_parsed_projection_hides() {
     assert!(
         issues.iter().any(|issue| matches!(issue,
             rpptx::ValidationIssue::InvalidXmlChild { part, message, .. }
-                if part == "/customXml/char1.xml" && message.contains("ForbiddenLiteralCharacter")),
-        ),
+                if part == "/customXml/char1.xml" && message.contains("U+0001")),),
         "{issues:?}"
     );
 }
@@ -38943,9 +39023,8 @@ fn issue435_stored_root_rejects_outside_root_character_events() {
 #[test]
 fn issue435_stored_metadata_identity_follows_the_loader() {
     // A binary part whose name merely ends in the metadata filename is not
-    // original metadata and must stay under its MIME frontier. The writer
-    // refuses such bytes for a suffix-named XML entry, so the fixture is a
-    // raw archive.
+    // original metadata and must stay under its MIME frontier on read and
+    // write. The raw archive exercises the stored validator independently.
     let decoy = issue435_raw_zip_fixture(
         "stored-metadata-id",
         "binary-suffix-decoy",
@@ -38992,7 +39071,7 @@ fn issue435_stored_metadata_identity_follows_the_loader() {
         issues.iter().any(|issue| matches!(issue,
             rpptx::ValidationIssue::InvalidXmlChild { part, message, .. }
                 if part.eq_ignore_ascii_case("/[Content_Types].xml")
-                    && message.contains("ForbiddenLiteralCharacter")),),
+                    && message.contains("U+0001")),),
         "{issues:?}"
     );
 }

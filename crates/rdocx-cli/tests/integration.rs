@@ -8785,3 +8785,171 @@ fn issue430_compare_note_creation_listing_and_destination_cleanup() {
         );
     }
 }
+
+// Stored ZIP fixture construction bypasses the serializer's intentional refusal
+// so the CLI receives actual damaged source bytes, including correct CRCs.
+fn issue435_raw_package_zip(package: &OpcPackage, part: &str, duplicate: bool) -> Vec<u8> {
+    let mut entries = vec![
+        (
+            "[Content_Types].xml".to_owned(),
+            package.content_types.to_xml().unwrap(),
+        ),
+        (
+            "_rels/.rels".to_owned(),
+            package.package_rels.to_xml().unwrap(),
+        ),
+    ];
+    for (owner, relationships) in &package.part_rels {
+        let (directory, file) = owner.trim_start_matches('/').rsplit_once('/').unwrap();
+        entries.push((
+            format!("{directory}/_rels/{file}.rels"),
+            relationships.to_xml().unwrap(),
+        ));
+    }
+    for (name, data) in &package.parts {
+        let mut data = data.to_vec();
+        if name == part && !duplicate {
+            let offset = data
+                .windows(b"Issue435 seed".len())
+                .position(|text| text == b"Issue435 seed")
+                .unwrap();
+            data[offset] = 1;
+        }
+        entries.push((name.trim_start_matches('/').to_owned(), data));
+    }
+    if duplicate {
+        entries.push((
+            part.trim_start_matches('/').to_owned(),
+            package.get_part(part).unwrap().to_vec(),
+        ));
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut output = Vec::new();
+    let mut central = Vec::new();
+    for (name, data) in &entries {
+        let offset = output.len() as u32;
+        let mut crc = !0u32;
+        for byte in data {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xedb8_8320 & 0u32.wrapping_sub(crc & 1));
+            }
+        }
+        let crc = !crc;
+        let size = data.len() as u32;
+        let length = name.len() as u16;
+        output.extend_from_slice(b"PK\x03\x04");
+        for value in [20u16, 0, 0, 0, 0] {
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [crc, size, size] {
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+        output.extend_from_slice(&length.to_le_bytes());
+        output.extend_from_slice(&0u16.to_le_bytes());
+        output.extend_from_slice(name.as_bytes());
+        output.extend_from_slice(data);
+        central.extend_from_slice(b"PK\x01\x02");
+        for value in [20u16, 20, 0, 0, 0, 0] {
+            central.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [crc, size, size] {
+            central.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in [length, 0, 0, 0, 0] {
+            central.extend_from_slice(&value.to_le_bytes());
+        }
+        central.extend_from_slice(&0u32.to_le_bytes());
+        central.extend_from_slice(&offset.to_le_bytes());
+        central.extend_from_slice(name.as_bytes());
+    }
+    let start = output.len() as u32;
+    let size = central.len() as u32;
+    output.extend_from_slice(&central);
+    output.extend_from_slice(b"PK\x05\x06");
+    for value in [0u16, 0, entries.len() as u16, entries.len() as u16] {
+        output.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in [size, start] {
+        output.extend_from_slice(&value.to_le_bytes());
+    }
+    output.extend_from_slice(&0u16.to_le_bytes());
+    output
+}
+
+#[test]
+fn issue435_cli_reports_shared_package_faults_and_preserves_input() {
+    let temp = TempWorkspace::new("issue435-shared");
+    let mut document = Document::new();
+    document.add_paragraph("Issue435 seed");
+    let source = document.to_bytes().unwrap();
+    let package = OpcPackage::from_reader(std::io::Cursor::new(&source)).unwrap();
+    for duplicate in [false, true] {
+        let bytes = issue435_raw_package_zip(&package, "/word/document.xml", duplicate);
+        let input = temp.path.join(if duplicate {
+            "duplicate.docx"
+        } else {
+            "forbidden.docx"
+        });
+        fs::write(&input, &bytes).unwrap();
+        for command in ["validate", "text"] {
+            let output = cli(&[command, path_text(&input)]);
+            assert!(!output.status.success());
+            let message = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(message.contains("word/document.xml"), "{message}");
+            assert!(
+                message.to_ascii_lowercase().contains(if duplicate {
+                    "duplicate"
+                } else {
+                    "u+0001"
+                }),
+                "{message}"
+            );
+            assert_eq!(fs::read(&input).unwrap(), bytes);
+        }
+    }
+    let help = cli(&["validate", "--help"]);
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("not a full schema validator"), "{help}");
+}
+
+#[test]
+fn issue435_cli_subset_and_repeated_bookmarks_match_library_validation() {
+    let temp = TempWorkspace::new("issue435-word-subset");
+    let mut document = Document::new();
+    document.add_paragraph("seed");
+    let source = document.to_bytes().unwrap();
+    for (body, valid) in [
+        ("<w:p><w:bogus/></w:p>", false),
+        (
+            "<w:p><w:bookmarkStart w:id='2' w:name='first'/><w:r><w:t>first</w:t></w:r><w:bookmarkEnd w:id='2'/><w:bookmarkStart w:id='2' w:name='second'/><w:r><w:t>second</w:t></w:r><w:bookmarkEnd w:id='2'/></w:p>",
+            true,
+        ),
+    ] {
+        let mut package = OpcPackage::from_reader(std::io::Cursor::new(&source)).unwrap();
+        let xml = format!(
+            "<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'><w:body>{body}</w:body></w:document>"
+        );
+        package.set_part("/word/document.xml", xml.into_bytes());
+        let input = temp.path.join("subset.docx");
+        package.save(&input).unwrap();
+        let before = fs::read(&input).unwrap();
+        let report = rdocx::validate_document_file(&input).unwrap();
+        let output = cli(&["validate", path_text(&input)]);
+        assert_eq!(output.status.success(), valid);
+        assert_eq!(report.is_valid(), valid);
+        let message = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            message.contains(if valid { "bookmark id 2" } else { "w:bogus" }),
+            "{message}"
+        );
+        if valid {
+            assert_success(&cli(&["text", path_text(&input)]), "repeated bookmark text");
+        }
+        assert_eq!(fs::read(&input).unwrap(), before);
+    }
+}

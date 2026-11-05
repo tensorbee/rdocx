@@ -78,23 +78,18 @@ serialization. Package serialization validates content-type identity, part
 identity, relationship-owner identity, every relationship-id scope, and output
 ZIP entry identity before opening or truncating a destination path.
 
-**No save writes a character XML 1.0 cannot carry.** Serialization refuses
-`[Content_Types].xml`, every relationship part, and every UTF-8 or UTF-16
-part whose content type ends in `xml` when its bytes hold such a character:
-a C0 control other than tab, LF and CR, or U+FFFE or U+FFFF. The error names
-the part, the code point, and its line and column. A part whose content type
-does not end in `xml`, such as a VML drawing
-(`application/vnd.openxmlformats-officedocument.vmlDrawing`), is not scanned.
-This is the one place every writer of both formats passes, so a value stored
-through an infallible setter or a public field is caught here. An entry that
-already held such a character when the package was read is written back while
-its bytes are unchanged, so producer content passes through verbatim. The
-check is fail-closed: any edit that re-serializes such a part, or a
-relationship part whose source held one, refuses the save rather than write it
-again. The fallible entry points that take free text refuse such a value
-earlier, naming it and the one-based character position, as python-docx and
-python-pptx refuse such strings. DrawingML `a:t` text set through the text
-setters is the exception, stored as `_xHHHH_` as python-pptx stores it.
+**No read or save admits a literal character XML 1.0 cannot carry.**
+The shared OPC reader and serializer refuse `[Content_Types].xml`, every
+relationship part, and every UTF-8 or UTF-16 part whose content type ends in
+`xml` when its bytes hold a C0 control other than tab, LF and CR, or U+FFFE
+or U+FFFF. The error names the part, code point, line and column. Read refusal
+applies to imported producer bytes too. There is no unchanged XML exception
+and no sanitization. Well-formed opaque XML remains verbatim. Opaque non-XML
+parts and binary content are preserved without an XML character scan. A VML
+drawing with content type `application/vnd.openxmlformats-officedocument.vmlDrawing`
+is one such non-XML part. Fallible free-text entry points refuse earlier,
+naming the one-based character position. DrawingML `a:t` setters retain their
+existing `_xHHHH_` text encoding. A legitimate literal `_x0001_` is preserved.
 
 **Saves are deterministic.** Both `part_rels` and `parts` are emitted in sorted
 key order, so writing the same package twice produces byte-identical output.
@@ -1309,6 +1304,35 @@ advances. Fill bytes and truncated input return safely. Preserve these
 invariants when the reader moves to `oxml-media`.
 
 ## Package integrity
+
+### Stored-package validation and damaged-input refusal
+
+Both package read routes refuse physical exact duplicate ZIP part names
+before choosing a winner, including unbounded reads. ZIP names use the ZIP
+reader's UTF-8-then-CP437 decoding and existing normalized, case-insensitive
+OPC identity. An unreconciled physical entry-count discrepancy is an invalid
+ZIP rather than an accepted package. Forbidden literal XML characters refuse
+open with the part and code point named. Validators report these as their
+existing error findings or invalid-XML issues. Other malformed XML parts are
+reported without rewriting the source bytes.
+
+Word validation checks a bounded raw subset on related XML story parts:
+qualified body, paragraph and run children and ordering, element-only text,
+justification and color values, tracked-change id and author, drawing extent
+bounds, radical degree and expression children, dangling relationship and
+normal-note references, and deleted text spelling. Relationship attributes
+are checked by namespace URI in their owning part, including aliases and
+opaque elements. Foreign payload stays opaque for semantic checks. At most
+ten new subset findings per part are retained, followed by an omitted-count
+summary, without suppressing existing package findings. The validator also
+uses the actual document-open predicate. It is not a full schema validator.
+
+Imported ordinary bookmark ids may repeat within or across story parts.
+Their multiplicity is retained separately from the globally occupied id set,
+so allocation avoids occupied ids and authored changes cannot introduce or
+increase repeats on either candidate reopen route. This does not weaken
+physical pairing, reserved-marker ownership or custody checks. Validation
+may warn about ordinary repeated ids. No imported renumbering policy is added.
 
 A qualified self-closing Word comment owner has an empty paragraph inventory.
 Its record and opaque attributes remain byte-preserved through listing, field

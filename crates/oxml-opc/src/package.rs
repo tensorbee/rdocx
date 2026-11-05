@@ -82,10 +82,6 @@ pub struct OpcPackage {
     /// Set only by a byte read or a reread of such a package. A hand-built
     /// package is not a baseline, and reread then uses the ZIP.
     trusted_baseline: bool,
-    /// The bytes of each XML entry that was read already holding a character
-    /// XML 1.0 cannot carry, keyed by ZIP entry name. Such producer bytes
-    /// are written back verbatim, while no writer can add such a character.
-    malformed_source_entries: HashMap<String, Vec<u8>>,
 }
 
 impl OpcPackage {
@@ -122,17 +118,26 @@ impl OpcPackage {
         mut reader: R,
         limits: PackageReadLimits,
     ) -> Result<Self> {
-        if limits.max_entries != usize::MAX {
-            let entry_count = pre_index_entry_count(&mut reader)?;
-            if entry_count > limits.max_entries as u64 {
-                return Err(OpcError::PackageLimitExceeded {
-                    kind: "entry count",
-                    limit: limits.max_entries as u64,
-                });
-            }
+        let entry_count = pre_index_entry_count(&mut reader)?;
+        if entry_count > limits.max_entries as u64 {
+            return Err(OpcError::PackageLimitExceeded {
+                kind: "entry count",
+                limit: limits.max_entries as u64,
+            });
         }
 
-        let mut archive = ZipArchive::new(reader)?;
+        let mut archive = ZipArchive::new(&mut reader)?;
+        if entry_count > archive.len() as u64 {
+            let directory_start = archive.central_directory_start();
+            let metadata = archive.metadata();
+            drop(archive);
+            let name =
+                physical_duplicate_part_name(&mut reader, directory_start, entry_count, &metadata)?
+                    .ok_or_else(|| {
+                        invalid_zip("central directory entry count differs from ZIP index")
+                    })?;
+            return Err(OpcError::DuplicatePartName(name));
+        }
         if archive.len() > limits.max_entries {
             return Err(OpcError::PackageLimitExceeded {
                 kind: "entry count",
@@ -200,6 +205,22 @@ impl OpcPackage {
             .ok_or_else(|| OpcError::PartNotFound("[Content_Types].xml".into()))?;
         let content_types = ContentTypes::from_xml(ct_xml)?;
 
+        let mut entry_names = raw_parts.keys().collect::<Vec<_>>();
+        entry_names.sort();
+        for name in entry_names {
+            if is_xml_entry(&content_types, name)
+                && let Some((code_point, line, column)) =
+                    first_invalid_xml_character(&raw_parts[name])
+            {
+                return Err(OpcError::InvalidXmlCharacter {
+                    part: format!("/{}", name.trim_start_matches('/')),
+                    code_point,
+                    line,
+                    column,
+                });
+            }
+        }
+
         // Parse package-level relationships: _rels/.rels
         let package_rels = if let Some(rels_xml) =
             deterministic_part_key(&raw_parts, "/_rels/.rels").and_then(|name| raw_parts.get(name))
@@ -247,20 +268,11 @@ impl OpcPackage {
             parts.insert(normalized, Arc::new(data.clone()));
         }
 
-        let malformed_source_entries = raw_parts
-            .iter()
-            .filter(|(name, data)| {
-                is_xml_entry(&content_types, name) && first_invalid_xml_character(data).is_some()
-            })
-            .map(|(name, data)| (name.clone(), data.clone()))
-            .collect();
-
         Ok(OpcPackage {
             content_types,
             package_rels,
             part_rels,
             parts,
-            malformed_source_entries,
             content_types_source: Some(ContentTypesSource {
                 xml: ct_xml.clone(),
                 content_types: ContentTypes::from_xml(ct_xml)?,
@@ -315,14 +327,12 @@ impl OpcPackage {
     /// untrusted, so the known hand-built fallback is the ZIP path because
     /// the flag is false, not because the flag inspected the map. The parts this package
     /// still shares with `read` are taken to pass the checks of a write
-    /// because a read or an earlier reread made them: with a `read` built
-    /// in memory, a shared part holding a character XML 1.0 forbids rereads
-    /// where a write fails. Relationships and content types that still hold
+    /// because a read or an earlier reread made them. Read-proved XML has
+    /// already passed the forbidden-character check. Relationships and content types that still hold
     /// what they were read from are kept as they are, and only what changed
     /// is serialized and parsed again. A package with a name a write would
     /// store under another entry name, a part too large for a plain ZIP
-    /// entry, or producer bytes holding a forbidden character goes through
-    /// the ZIP.
+    /// entry goes through the ZIP.
     #[doc(hidden)]
     pub fn reread(mut self, read: &OpcPackage) -> Result<Self> {
         let renamed_part = |name: &String| {
@@ -334,8 +344,6 @@ impl OpcPackage {
                 || name.eq_ignore_ascii_case("/[Content_Types].xml")
         };
         if !read.trusted_baseline
-            || !self.malformed_source_entries.is_empty()
-            || !read.malformed_source_entries.is_empty()
             || self.parts.keys().any(renamed_part)
             || self.part_rels.keys().any(|owner| !written_as_is(owner))
             || self
@@ -463,7 +471,6 @@ impl OpcPackage {
     pub fn same_package_as(&self, other: &OpcPackage) -> bool {
         self.content_types == other.content_types
             && self.content_types_source == other.content_types_source
-            && self.malformed_source_entries == other.malformed_source_entries
             && self.package_rels.same_as(&other.package_rels)
             && self.part_rels.len() == other.part_rels.len()
             && self.part_rels.iter().all(|(owner, relationships)| {
@@ -693,7 +700,6 @@ impl OpcPackage {
             part_rels: HashMap::new(),
             parts: HashMap::new(),
             content_types_source: None,
-            malformed_source_entries: HashMap::new(),
             trusted_baseline: false,
         }
     }
@@ -762,16 +768,12 @@ impl OpcPackage {
 }
 
 impl OpcPackage {
-    /// Refuses an entry to be written that holds a character XML 1.0 cannot
-    /// carry, unless it is the exact bytes a producer wrote into the source.
+    /// Refuse a forbidden literal XML character, including in unchanged parts.
     fn reject_written_xml_characters(&self, entry: &str, data: &[u8]) -> Result<()> {
         let Some((code_point, line, column)) = first_invalid_xml_character(data) else {
             return Ok(());
         };
         let name = entry.strip_prefix('/').unwrap_or(entry);
-        if self.malformed_source_entries.get(name).map(Vec::as_slice) == Some(data) {
-            return Ok(());
-        }
         Err(OpcError::InvalidXmlCharacter {
             part: format!("/{name}"),
             code_point,
@@ -786,7 +788,7 @@ impl OpcPackage {
 fn is_xml_entry(content_types: &ContentTypes, name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.ends_with(".rels")
-        || lower.ends_with("[content_types].xml")
+        || part_identity(name) == part_identity("/[Content_Types].xml")
         || content_types
             .content_type_for(&format!("/{}", name.strip_prefix('/').unwrap_or(name)))
             .is_some_and(|content_type| content_type.to_ascii_lowercase().ends_with("xml"))
@@ -1013,6 +1015,55 @@ fn pre_index_entry_count<R: Read + Seek>(reader: &mut R) -> Result<u64> {
         .max();
 
     entry_count.ok_or_else(|| invalid_zip("valid end of central directory not found"))
+}
+
+// File and Cursor readers share the same physical directory scan. Indexed
+// metadata supplies zip's actual UTF-8/CP437 decoder for each raw name, so
+// this guard adds no second name encoding policy.
+fn physical_duplicate_part_name<R: Read + Seek>(
+    reader: &mut R,
+    directory_start: u64,
+    count: u64,
+    metadata: &zip::read::ZipArchiveMetadata,
+) -> Result<Option<String>> {
+    let mut decoded = HashMap::new();
+    for index in 0..metadata.len() {
+        let entry = metadata.entry(index)?;
+        let name = if entry.is_dir() {
+            None
+        } else {
+            Some(
+                normalize_part_name(entry.name()?.as_ref())
+                    .trim_start_matches('/')
+                    .to_owned(),
+            )
+        };
+        decoded.insert(entry.name_raw().to_vec(), name);
+    }
+    reader.seek(SeekFrom::Start(directory_start))?;
+    let mut identities = HashSet::new();
+    for _ in 0..count {
+        let mut header = [0; 46];
+        reader.read_exact(&mut header)?;
+        if !header.starts_with(b"PK\x01\x02") {
+            return Err(invalid_zip("invalid central directory entry"));
+        }
+        let name_length = usize::from(read_u16(&header, 28).expect("fixed central header"));
+        let mut raw_name = vec![0; name_length];
+        reader.read_exact(&mut raw_name)?;
+        let name = decoded
+            .get(&raw_name)
+            .ok_or_else(|| invalid_zip("central directory name is not indexed"))?;
+        if let Some(name) = name
+            && !identities.insert(name.to_ascii_lowercase())
+        {
+            return Ok(Some(name.clone()));
+        }
+        let extra = u32::from(read_u16(&header, 30).expect("fixed central header"));
+        let comment = u32::from(read_u16(&header, 32).expect("fixed central header"));
+        reader.seek(SeekFrom::Current(i64::from(extra + comment)))?;
+    }
+    Ok(None)
 }
 
 fn eocd_entry_count(tail: &[u8], tail_start: u64, file_len: u64, offset: usize) -> Option<u64> {
@@ -1434,6 +1485,116 @@ fn part_name_to_rels_path(part_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn issue435_exact_physical_duplicate_parts_are_named_on_every_read_route() {
+        for (name, other) in [
+            ("word/document.xml", "word/documenx.xml"),
+            ("ppt/slides/slide1.xml", "ppt/slides/slide2.xml"),
+        ] {
+            let mut bytes = package_zip(&[
+                ("[Content_Types].xml", MINIMAL_CONTENT_TYPES),
+                (name, b"<first/>"),
+                (other, b"<second/>"),
+            ])
+            .into_inner();
+            replace_zip_name(&mut bytes, other.as_bytes(), name.as_bytes(), true);
+            let original = bytes.clone();
+            assert_eq!(
+                pre_index_entry_count(&mut std::io::Cursor::new(&bytes)).unwrap(),
+                3
+            );
+            assert_eq!(
+                ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap().len(),
+                2,
+                "the physical duplicate must really be hidden by indexing"
+            );
+            for limits in [
+                PackageReadLimits::UNBOUNDED,
+                PackageReadLimits {
+                    max_entries: 8,
+                    max_part_uncompressed_bytes: 4096,
+                    max_total_uncompressed_bytes: 8192,
+                },
+            ] {
+                let result =
+                    OpcPackage::from_reader_with_limits(std::io::Cursor::new(&bytes), limits);
+                assert!(
+                    matches!(&result, Err(OpcError::DuplicatePartName(part)) if part == name),
+                    "physical duplicate {name} must be named, got {result:?}"
+                );
+            }
+            assert_eq!(bytes, original);
+        }
+    }
+
+    #[test]
+    fn issue435_literal_forbidden_characters_refuse_xml_reads_without_sanitizing() {
+        for name in [
+            "word/document.xml",
+            "ppt/slides/slide1.xml",
+            "docProps/app.xml",
+        ] {
+            let bytes = package_zip(&[
+                ("[Content_Types].xml", MINIMAL_CONTENT_TYPES),
+                (name, b"<root>\x01</root>"),
+            ])
+            .into_inner();
+            let original = bytes.clone();
+            let result = OpcPackage::from_reader(std::io::Cursor::new(&bytes));
+            assert!(
+                matches!(&result,
+                Err(OpcError::InvalidXmlCharacter { part, code_point: 1, line: 1, column: 7 })
+                if part == &format!("/{name}")),
+                "{name}: {result:?}"
+            );
+            assert_eq!(bytes, original);
+        }
+        let package = OpcPackage::from_reader(package_zip(&[
+            ("[Content_Types].xml", MINIMAL_CONTENT_TYPES),
+            (
+                "custom/opaque.xml",
+                b"<foreign xmlns='urn:opaque'>_x0001_\t\r\n</foreign>",
+            ),
+            ("binary.bin", b"\x00\x01\xff"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            package.get_part("/binary.bin"),
+            Some(b"\x00\x01\xff".as_slice())
+        );
+        let saved = package_bytes(&package);
+        let reopened = OpcPackage::from_reader(std::io::Cursor::new(saved)).unwrap();
+        assert_eq!(
+            reopened.get_part("/custom/opaque.xml"),
+            package.get_part("/custom/opaque.xml")
+        );
+    }
+
+    #[test]
+    fn issue435_physical_duplicate_guard_reuses_zip_non_ascii_decoding() {
+        for utf8 in [false, true] {
+            let mut bytes = package_zip(&[
+                ("[Content_Types].xml", MINIMAL_CONTENT_TYPES),
+                ("aa.bin", b"first"),
+                ("bb.bin", b"second"),
+            ])
+            .into_inner();
+            for name in [b"aa.bin", b"bb.bin"] {
+                replace_zip_name(&mut bytes, name, b"x\x82.bin", utf8);
+            }
+            assert!(
+                matches!(OpcPackage::from_reader(std::io::Cursor::new(&bytes)),
+                Err(OpcError::DuplicatePartName(name)) if name == "xé.bin")
+            );
+            let mut prefixed = b"self-extracting-prefix".to_vec();
+            prefixed.extend_from_slice(&bytes);
+            assert!(
+                matches!(OpcPackage::from_reader(std::io::Cursor::new(prefixed)),
+                Err(OpcError::DuplicatePartName(name)) if name == "xé.bin")
+            );
+        }
+    }
 
     #[test]
     fn shared_part_lookup_reuses_case_equivalent_allocation() {
@@ -2497,8 +2658,7 @@ mod tests {
         );
         package.part_rels.clear();
 
-        // A producer part that already held one is written back verbatim,
-        // and only a writer's change to it is refused.
+        // Imported producer XML follows the same refusal on read.
         let producer = "<p:presentation>producer\u{1}</p:presentation>".as_bytes();
         package.set_part("/ppt/presentation.xml", b"<p:presentation/>".to_vec());
         let mut valid = std::io::Cursor::new(Vec::new());
@@ -2519,27 +2679,10 @@ mod tests {
             rebuilt.write_all(&data).unwrap();
         }
         let source = rebuilt.finish().unwrap().into_inner();
-        let mut reopened = OpcPackage::from_reader(std::io::Cursor::new(source)).unwrap();
-        let mut saved = std::io::Cursor::new(Vec::new());
-        reopened
-            .write_to(&mut saved)
-            .expect("producer bytes pass through");
-        saved.set_position(0);
-        assert_eq!(
-            OpcPackage::from_reader(saved)
-                .unwrap()
-                .get_part("/ppt/presentation.xml"),
-            Some(producer)
-        );
-        reopened.set_part(
-            "/ppt/presentation.xml",
-            "<p:presentation>written\u{1}</p:presentation>"
-                .as_bytes()
-                .to_vec(),
-        );
         assert!(matches!(
-            reopened.write_to(std::io::Cursor::new(Vec::new())),
-            Err(OpcError::InvalidXmlCharacter { code_point: 1, .. })
+            OpcPackage::from_reader(std::io::Cursor::new(source)),
+            Err(OpcError::InvalidXmlCharacter { part, code_point: 1, .. })
+                if part == "/ppt/presentation.xml"
         ));
     }
 

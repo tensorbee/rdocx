@@ -280,6 +280,16 @@ missing part, a part without a content type, or a prefix that `mc:Ignorable`
 or `mc:MustUnderstand` lists without a namespace declaration. Empty
 paragraphs, heading level gaps, and missing metadata are warnings only.
 
+The documented WordprocessingML subset also checks well-formed XML 1.0 in
+XML parts, style ids, direct body/p/r children and order, text placement,
+paragraph/table `jc` values, `color`, tracked-change `id` and `author`, drawing
+extents, required `m:rad` children, relationship ids, note references and deleted
+text. Relationship attributes use their actual namespace and owning part.
+Repeated imported bookmark ids are warnings. This is not a full schema
+validator. Both Word and PowerPoint opens refuse exact duplicate ZIP part names
+and literal forbidden XML characters, naming the affected part. Validators
+report the character fault without rewriting it to an OOXML escape.
+
 
 Run `rdocx --help` or `rdocx <command> --help` for the complete option set.
 

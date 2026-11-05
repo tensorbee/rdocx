@@ -234,7 +234,13 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Validate OOXML conformance
+    /// Validate the package and a documented WordprocessingML subset
+    ///
+    /// Checks package relationships, well-formed XML 1.0, style ids, body/p/r
+    /// children and order, text placement, jc and color, tracked-change id and
+    /// author, extents, m:rad required children, relationship ids, note references
+    /// and deleted text. Repeated bookmark ids are warnings. This is not a full
+    /// schema validator.
     Validate {
         /// Path to the DOCX file
         file: PathBuf,

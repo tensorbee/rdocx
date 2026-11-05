@@ -149,6 +149,7 @@ fn story_item_links_resolve_only_through_the_checked_owner() {
         r#"<w:body><w:p><w:hyperlink r:id="scopedLink"><w:r><w:t>body link</w:t></w:r></w:hyperlink></w:p><w:sdt><w:sdtContent><w:sdt><w:sdtContent><w:p><w:hyperlink w:anchor="nested-target"><w:r><w:t>nested link</w:t></w:r></w:hyperlink></w:p></w:sdtContent></w:sdt><w:p><w:hyperlink w:anchor="after-target"><w:r><w:t>after link</w:t></w:r></w:hyperlink></w:p></w:sdtContent></w:sdt>"#,
         1,
     );
+    assert!(body.contains("w:name='body'"));
     package.set_part("/word/document.xml", body.into_bytes());
     let header = std::str::from_utf8(package.get_part("/word/header-story.xml").unwrap()).unwrap();
     let header = header.replacen(
@@ -39474,4 +39475,718 @@ fn issue432_pending_signed_normal_id_occupies_special_slot() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+fn issue435_replace_zip_part(bytes: &[u8], name: &str, replacement: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).unwrap();
+        let entry_name = entry.name().unwrap().into_owned();
+        let mut data = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut data).unwrap();
+        writer
+            .start_file(&entry_name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer
+            .write_all(if entry_name == name {
+                replacement
+            } else {
+                &data
+            })
+            .unwrap();
+    }
+    writer.finish().unwrap().into_inner()
+}
+
+fn issue435_body_bytes(body: &str) -> Vec<u8> {
+    let mut seed = Document::new();
+    seed.add_paragraph("seed");
+    let source = seed.to_bytes().unwrap();
+    let xml = format!(
+        r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>{body}</w:body></w:document>"#
+    );
+    issue435_replace_zip_part(&source, "word/document.xml", xml.as_bytes())
+}
+
+#[test]
+fn issue435_validate_reports_wordprocessingml_schema_faults() {
+    let valid = "<w:p><w:r><w:t>valid</w:t></w:r></w:p>";
+    assert!(
+        rdocx::validate_document_bytes(&issue435_body_bytes(valid))
+            .unwrap()
+            .is_valid()
+    );
+    let cases = [
+        ("<w:p><w:r/><w:pPr/></w:p>", "w:pPr"),
+        ("<w:p><w:r><w:t>text</w:t><w:rPr/></w:r></w:p>", "w:rPr"),
+        ("<w:p><w:bogus/></w:p>", "bogus"),
+        ("<w:p><w:pPr><w:jc w:val='middle'/></w:pPr></w:p>", "ST_Jc"),
+        (
+            "<w:p><w:r><w:rPr><w:color w:val='#FF0000'/></w:rPr></w:r></w:p>",
+            "ST_HexColor",
+        ),
+        ("<w:p><w:r>direct text</w:r></w:p>", "text directly"),
+        ("<w:sectPr/><w:p/>", "follows w:sectPr"),
+        (
+            "<w:p><w:ins w:author='A'><w:r><w:t>new</w:t></w:r></w:ins></w:p>",
+            "w:id",
+        ),
+        (
+            "<w:p><w:del w:id='2'><w:r><w:delText>old</w:delText></w:r></w:del></w:p>",
+            "w:author",
+        ),
+        (
+            "<w:p><w:r><w:drawing><wp:extent cx='-914400' cy='1'/></w:drawing></w:r></w:p>",
+            "ST_PositiveCoordinate",
+        ),
+        (
+            "<w:p><m:oMath><m:rad><m:radPr><m:degHide m:val='1'/></m:radPr><m:e/></m:rad></m:oMath></w:p>",
+            "m:deg",
+        ),
+    ];
+    let mut missed = Vec::new();
+    for (body, expected) in cases {
+        match rdocx::validate_document_bytes(&issue435_body_bytes(body)) {
+            Ok(report)
+                if !report.is_valid()
+                    && report.findings.iter().any(|finding| {
+                        finding.message.contains("word/document.xml")
+                            && finding.message.contains(expected)
+                    }) => {}
+            result => missed.push(format!("expected {expected} for {body}, got {result:?}")),
+        }
+    }
+    let radical = "<w:p><m:oMath><m:rad><m:deg/><m:e/></m:rad></m:oMath></w:p>";
+    assert!(
+        rdocx::validate_document_bytes(&issue435_body_bytes(radical))
+            .unwrap()
+            .is_valid()
+    );
+    assert!(missed.is_empty(), "{}", missed.join("\n"));
+}
+
+#[test]
+fn issue435_validate_reports_related_and_auxiliary_xml_faults() {
+    let valid = issue435_body_bytes("<w:p><w:r><w:t>valid</w:t></w:r></w:p>");
+    let malformed = issue435_replace_zip_part(
+        &valid,
+        "docProps/app.xml",
+        b"<Properties><x>A & B</x></Properties>",
+    );
+    let report = rdocx::validate_document_bytes(&malformed).unwrap();
+    assert!(
+        !report.is_valid()
+            && report
+                .findings
+                .iter()
+                .any(|finding| finding.message.contains("docProps/app.xml")),
+        "{report:?}"
+    );
+}
+
+#[test]
+fn issue435_validate_reports_dangling_references_and_deleted_text() {
+    let mut missed = Vec::new();
+    for (body, expected) in [
+        (
+            "<w:p><w:r><w:drawing><a:blip r:embed='rId999'/></w:drawing></w:r></w:p>",
+            "rId999",
+        ),
+        (
+            "<w:p><w:r><w:drawing><a:blip xmlns:rel='http://schemas.openxmlformats.org/officeDocument/2006/relationships' rel:embed='rId998'/></w:drawing></w:r></w:p>",
+            "rId998",
+        ),
+        (
+            "<w:p/><w:sectPr><w:headerReference w:type='default' r:id='rId997'/></w:sectPr>",
+            "rId997",
+        ),
+        (
+            "<w:p><w:r><w:footnoteReference w:id='99'/></w:r></w:p>",
+            "99",
+        ),
+        (
+            "<w:p><w:del w:id='1' w:author='A'><w:r><w:t>deleted</w:t></w:r></w:del></w:p>",
+            "w:delText",
+        ),
+    ] {
+        match rdocx::validate_document_bytes(&issue435_body_bytes(body)) {
+            Ok(report)
+                if !report.is_valid()
+                    && report.findings.iter().any(|finding| {
+                        finding.message.contains("word/document.xml")
+                            && finding.message.contains(expected)
+                    }) => {}
+            result => missed.push(format!("expected {expected}, got {result:?}")),
+        }
+    }
+    assert!(missed.is_empty(), "{}", missed.join("\n"));
+}
+
+#[test]
+fn issue435_forbidden_xml_is_a_validation_finding_and_an_open_error() {
+    let bytes = issue435_body_bytes("<w:p><w:r><w:t>literal\u{1}</w:t></w:r></w:p>");
+    let result = rdocx::validate_document_bytes(&bytes);
+    assert!(
+        matches!(&result, Ok(report) if !report.is_valid() && report.findings.iter().any(|finding| finding.message.contains("word/document.xml") && finding.message.contains("U+0001"))),
+        "{result:?}"
+    );
+    assert!(
+        Document::from_bytes(&bytes).is_err(),
+        "open must refuse literal U+0001"
+    );
+}
+
+#[test]
+fn issue435_bookmarks_sharing_an_id_open_and_render() {
+    let body = "<w:p><w:bookmarkStart w:id='2' w:name='first'/><w:r><w:t>first</w:t></w:r><w:bookmarkEnd w:id='2'/><w:bookmarkStart w:id='2' w:name='second'/><w:r><w:t>second</w:t></w:r><w:bookmarkEnd w:id='2'/></w:p>";
+    let bytes = issue435_body_bytes(body);
+    let document =
+        Document::from_bytes(&bytes).expect("ordinary imported repeated bookmarks must open");
+    assert_eq!(document.text(), "firstsecond\n");
+    assert!(!document.to_pdf_deterministic().unwrap().is_empty());
+    let report = rdocx::validate_document_bytes(&bytes).unwrap();
+    assert!(
+        report.is_valid(),
+        "ordinary repeated bookmarks are not errors: {report:?}"
+    );
+    assert!(report.findings.iter().any(|finding| finding.severity
+        == rdocx::ValidationSeverity::Warning
+        && finding.message.contains("bookmark id 2")));
+}
+
+#[test]
+fn issue435_authored_note_comparison_header_and_picture_base_is_valid() {
+    let mut document = Document::new();
+    document.add_paragraph("original");
+    let id = document.add_footnote("source note");
+    document.paragraph_mut(0).unwrap().add_footnote_ref(id);
+    document.set_header("header");
+    document.add_picture(
+        &mhtml_pixel_png(),
+        "pixel.png",
+        Length::pt(12.0),
+        Length::pt(12.0),
+    );
+    let mut edited = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+    edited.replace_text("original", "updated");
+    document
+        .compare(&edited, "Reviewer", ISSUE430_DATE)
+        .unwrap();
+    let bytes = document.to_bytes().unwrap();
+    let report = rdocx::validate_document_bytes(&bytes).unwrap();
+    assert!(
+        report.is_valid(),
+        "actual note/comparison/header/picture base: {report:?}"
+    );
+    assert!(document.validate().unwrap().is_valid());
+    let reopened = Document::from_bytes(&bytes).unwrap();
+    assert!(reopened.text().contains("updated"));
+}
+
+#[test]
+fn issue435_subset_respects_qualified_scopes_and_opaque_payloads() {
+    for body in [
+        "<q:p xmlns:q='http://schemas.openxmlformats.org/wordprocessingml/2006/main'><q:r><q:t>alias</q:t></q:r></q:p>",
+        "<p xmlns='http://schemas.openxmlformats.org/wordprocessingml/2006/main'><r><t>default</t></r></p>",
+        "<w:p><w:pPr><w:jc val='middle'/></w:pPr><x:opaque xmlns:x='urn:opaque'><w:p><w:bogus/></w:p><m:rad/></x:opaque></w:p>",
+        "<w:p><x:opaque xmlns:x='urn:opaque'><w:p xmlns:w='urn:foreign'><w:bogus/></w:p></x:opaque><w:r><w:t>kept</w:t></w:r></w:p>",
+    ] {
+        let bytes = issue435_body_bytes(body);
+        let report = rdocx::validate_document_bytes(&bytes).unwrap();
+        assert!(
+            report.is_valid(),
+            "opaque or valid qualified control: {body}, {report:?}"
+        );
+    }
+    for (body, expected) in [
+        (
+            "<w:p><w:pPr><q:jc xmlns:q='http://schemas.openxmlformats.org/wordprocessingml/2006/main' q:val='middle'/></w:pPr></w:p>",
+            "ST_Jc",
+        ),
+        (
+            "<p xmlns='http://schemas.openxmlformats.org/wordprocessingml/2006/main'><r><t>first</t></r></p><w:p><w:bogus></w:bogus></w:p>",
+            "bogus",
+        ),
+        (
+            "<w:p><x:opaque xmlns:x='urn:opaque' xmlns:rel='http://schemas.openxmlformats.org/officeDocument/2006/relationships' rel:id='lost'/></w:p>",
+            "lost",
+        ),
+    ] {
+        let report = rdocx::validate_document_bytes(&issue435_body_bytes(body)).unwrap();
+        assert!(
+            !report.is_valid()
+                && report
+                    .findings
+                    .iter()
+                    .any(|finding| finding.message.contains(expected)),
+            "{body}: {report:?}"
+        );
+    }
+}
+
+#[test]
+fn issue435_subset_finding_cap_keeps_existing_package_errors() {
+    let bytes = issue435_body_bytes(&format!("<w:p>{}</w:p>", "<w:bogus/>".repeat(25)));
+    let mut reader = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+    let mut rels = String::new();
+    std::io::Read::read_to_string(
+        &mut reader.by_name("word/_rels/document.xml.rels").unwrap(),
+        &mut rels,
+    )
+    .unwrap();
+    let rels = rels.replace(
+        "</Relationships>",
+        "<Relationship Id='missing' Type='urn:custom' Target='missing.xml'/></Relationships>",
+    );
+    let bytes = issue435_replace_zip_part(&bytes, "word/_rels/document.xml.rels", rels.as_bytes());
+    let first = rdocx::validate_document_bytes(&bytes).unwrap();
+    let second = rdocx::validate_document_bytes(&bytes).unwrap();
+    assert_eq!(first, second, "new findings are deterministic");
+    assert_eq!(
+        first
+            .findings
+            .iter()
+            .filter(|finding| finding.message.contains("not allowed in w:p"))
+            .count(),
+        10
+    );
+    assert_eq!(
+        first
+            .findings
+            .iter()
+            .filter(|finding| finding.message.contains("15 additional subset"))
+            .count(),
+        1
+    );
+    assert!(
+        first.findings.iter().any(|finding| finding
+            .message
+            .contains("relationship missing points at missing part")),
+        "unrelated package error must not be hidden: {first:?}"
+    );
+}
+
+#[test]
+fn issue435_auxiliary_xml_lexical_checks_preserve_supported_encodings() {
+    let base = issue435_body_bytes("<w:p><w:r><w:t>body</w:t></w:r></w:p>");
+    for xml in [
+        "<root/><root/>",
+        "<root/>outside",
+        "<root/><?xml version='1.0'?>",
+        "<root/><![CDATA[]]>",
+        "<root bad:name='value'/>",
+        "<root a='1' a='2'/>",
+    ] {
+        let bytes = issue435_replace_zip_part(&base, "docProps/app.xml", xml.as_bytes());
+        let report = rdocx::validate_document_bytes(&bytes).unwrap();
+        assert!(
+            !report.is_valid()
+                && report
+                    .findings
+                    .iter()
+                    .any(|finding| finding.message.contains("docProps/app.xml")
+                        && finding.message.contains("well-formed XML")),
+            "{xml}: {report:?}"
+        );
+    }
+    let text = "<root xmlns='urn:opaque'>_x0001_ é</root>";
+    for little in [true, false] {
+        for bom in [true, false] {
+            let mut xml = if bom {
+                if little {
+                    vec![0xff, 0xfe]
+                } else {
+                    vec![0xfe, 0xff]
+                }
+            } else {
+                Vec::new()
+            };
+            for unit in text.encode_utf16() {
+                xml.extend_from_slice(&if little {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                });
+            }
+            let bytes = issue435_replace_zip_part(&base, "docProps/app.xml", &xml);
+            assert!(rdocx::validate_document_bytes(&bytes).unwrap().is_valid());
+            let mut opened = Document::from_bytes(&bytes).unwrap();
+            let saved = opened.to_bytes().unwrap();
+            let package = OpcPackage::from_reader(std::io::Cursor::new(saved)).unwrap();
+            assert_eq!(package.get_part("/docProps/app.xml"), Some(xml.as_slice()));
+        }
+    }
+}
+
+#[test]
+fn issue435_normal_note_references_use_related_parts_and_signed_ids() {
+    let mut seed = Document::new();
+    let note = seed.add_footnote("note");
+    seed.add_paragraph("body").add_footnote_ref(note);
+    let source = seed.to_bytes().unwrap();
+    for local in ["footnote", "endnote"] {
+        for id in [-7, 0, 4] {
+            for note_type in ["", " w:type='normal'"] {
+                let mut package = OpcPackage::from_reader(std::io::Cursor::new(&source)).unwrap();
+                let relationship_type = if local == "footnote" {
+                    rel_types::FOOTNOTES
+                } else {
+                    rel_types::ENDNOTES
+                };
+                let part = format!("/word/{local}s.xml");
+                let content_type = if local == "footnote" {
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml"
+                } else {
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml"
+                };
+                if local == "endnote" {
+                    package.content_types.add_override(&part, content_type);
+                    package
+                        .get_or_create_part_rels("/word/document.xml")
+                        .add(relationship_type, "endnotes.xml");
+                }
+                package.set_part("/word/document.xml", format!("<w:document xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'><w:body><w:p><w:r><w:{local}Reference w:id='{id}'/></w:r></w:p></w:body></w:document>").into_bytes());
+                let root = format!(
+                    "<w:{local}s xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'><w:{local} w:id='{id}'{note_type}><w:p><w:r><w:t>note</w:t></w:r></w:p></w:{local}></w:{local}s>"
+                );
+                package.set_part(&part, root.as_bytes().to_vec());
+                let mut bytes = std::io::Cursor::new(Vec::new());
+                package.write_to(&mut bytes).unwrap();
+                let report = rdocx::validate_document_bytes(bytes.get_ref()).unwrap();
+                assert!(
+                    report.is_valid(),
+                    "normal {local} {id} {note_type}: {report:?}"
+                );
+                let wrong_scope = root
+                    .replace(&format!("<w:{local}s "), "<x:opaque xmlns:x='urn:opaque' ")
+                    .replace(&format!("</w:{local}s>"), "</x:opaque>");
+                package.set_part(&part, wrong_scope.into_bytes());
+                let mut bytes = std::io::Cursor::new(Vec::new());
+                package.write_to(&mut bytes).unwrap();
+                let report = rdocx::validate_document_bytes(bytes.get_ref()).unwrap();
+                assert!(
+                    report.findings.iter().any(|finding| finding
+                        .message
+                        .contains(&format!("missing {local} id {id}"))),
+                    "foreign root cannot own {local}: {report:?}"
+                );
+                package.set_part(
+                    &part,
+                    root.replace(
+                        &format!("w:id='{id}'{note_type}"),
+                        &format!("w:id='{id}' w:type='separator'"),
+                    )
+                    .into_bytes(),
+                );
+                let mut bytes = std::io::Cursor::new(Vec::new());
+                package.write_to(&mut bytes).unwrap();
+                let report = rdocx::validate_document_bytes(bytes.get_ref()).unwrap();
+                assert!(
+                    report.findings.iter().any(|finding| finding
+                        .message
+                        .contains(&format!("missing {local} id {id}"))),
+                    "special note is not normal: {report:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn issue435_body_and_header_bookmark_repeats_open_render_and_keep_allocation() {
+    let mut seed = Document::new();
+    seed.add_paragraph("body");
+    seed.set_header("header");
+    let source = seed.to_bytes().unwrap();
+    let mut package = OpcPackage::from_reader(std::io::Cursor::new(&source)).unwrap();
+    let document =
+        String::from_utf8(package.get_part("/word/document.xml").unwrap().to_vec()).unwrap();
+    let body = document.replace(
+        "<w:p>",
+        "<w:p><w:bookmarkStart w:id='2' w:name='body'/><w:bookmarkEnd w:id='2'/>",
+    );
+    assert!(body.contains("w:name='body'"));
+    package.set_part("/word/document.xml", body.into_bytes());
+    let header = package
+        .get_part_rels("/word/document.xml")
+        .unwrap()
+        .items
+        .iter()
+        .find(|rel| rel.rel_type == rel_types::HEADER)
+        .unwrap();
+    let header = OpcPackage::resolve_rel_target("/word/document.xml", &header.target);
+    let xml = "<w:hdr xmlns:w='http://schemas.openxmlformats.org/wordprocessingml/2006/main'><w:p><w:bookmarkStart w:id='2' w:name='header'/><w:r><w:t>header</w:t></w:r><w:bookmarkEnd w:id='2'/></w:p></w:hdr>".to_owned();
+    package.set_part(&header, xml.into_bytes());
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    let mut opened = Document::from_bytes(bytes.get_ref()).unwrap();
+    assert!(opened.text().contains("body"));
+    assert!(!opened.to_pdf_deterministic().unwrap().is_empty());
+    assert!(
+        rdocx::validate_document_bytes(bytes.get_ref())
+            .unwrap()
+            .is_valid()
+    );
+    let range = rdocx::RunRange {
+        start: rdocx::RunPosition {
+            body_index: 0,
+            run_index: 0,
+        },
+        end: rdocx::RunPosition {
+            body_index: 0,
+            run_index: 1,
+        },
+    };
+    assert_ne!(opened.add_bookmark("authored", range).unwrap(), 2);
+    let saved = opened.to_bytes().unwrap();
+    let reopened = Document::from_bytes(&saved).unwrap();
+    assert!(reopened.text().contains("body"));
+    let package = OpcPackage::from_reader(std::io::Cursor::new(&saved)).unwrap();
+    assert!(String::from_utf8_lossy(package.get_part(&header).unwrap()).contains("header"));
+}
+
+#[test]
+fn issue435_review_d1_real_picture_extent_is_checked_through_known_containers() {
+    let mut seed = Document::new();
+    seed.add_picture(
+        &mhtml_pixel_png(),
+        "pixel.png",
+        Length::pt(12.0),
+        Length::pt(12.0),
+    );
+    let original = seed.to_bytes().unwrap();
+    assert!(
+        rdocx::validate_document_bytes(&original)
+            .unwrap()
+            .is_valid()
+    );
+    let package = OpcPackage::from_reader(std::io::Cursor::new(&original)).unwrap();
+    let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+    assert!(xml.contains("<pic:pic") && xml.contains("<pic:spPr>"));
+    let offset = xml.find("<a:ext ").unwrap();
+    let damaged = format!(
+        "{}{}",
+        &xml[..offset],
+        xml[offset..].replacen("cx=\"", "cx=\"-", 1)
+    );
+    assert_eq!(
+        xml.split("<wp:extent").nth(1).unwrap().split("/>").next(),
+        damaged
+            .split("<wp:extent")
+            .nth(1)
+            .unwrap()
+            .split("/>")
+            .next()
+    );
+    let bytes = issue435_replace_zip_part(&original, "word/document.xml", damaged.as_bytes());
+    let report = rdocx::validate_document_bytes(&bytes).unwrap();
+    assert!(
+        report.findings.iter().any(
+            |finding| finding.severity == rdocx::ValidationSeverity::Error
+                && finding.message.contains("word/document.xml")
+                && finding.message.contains("ST_PositiveCoordinate")
+        ),
+        "{report:?}"
+    );
+    let opaque = issue435_body_bytes(
+        "<w:p><x:payload xmlns:x='urn:opaque'><a:xfrm><a:ext cx='-1' cy='1'/></a:xfrm></x:payload></w:p>",
+    );
+    assert!(rdocx::validate_document_bytes(&opaque).unwrap().is_valid());
+}
+
+#[test]
+fn issue435_review_d2_related_opaque_utf16_keeps_the_auxiliary_frontier() {
+    let mut seed = Document::new();
+    seed.add_paragraph("source");
+    let original = seed.to_bytes().unwrap();
+    let mut missed = Vec::new();
+    for little in [true, false] {
+        for bom in [true, false] {
+            let mut xml = if bom {
+                if little {
+                    vec![0xff, 0xfe]
+                } else {
+                    vec![0xfe, 0xff]
+                }
+            } else {
+                Vec::new()
+            };
+            for unit in "<opaque xmlns='urn:opaque'>é _x0001_</opaque>".encode_utf16() {
+                xml.extend_from_slice(&if little {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                });
+            }
+            for related in [false, true] {
+                let mut package = OpcPackage::from_reader(std::io::Cursor::new(&original)).unwrap();
+                package
+                    .content_types
+                    .add_override("/customXml/opaque.xml", "application/xml");
+                package.set_part("/customXml/opaque.xml", xml.clone());
+                if related {
+                    package
+                        .get_or_create_part_rels("/word/document.xml")
+                        .add("urn:opaque", "../customXml/opaque.xml");
+                }
+                let mut bytes = std::io::Cursor::new(Vec::new());
+                package.write_to(&mut bytes).unwrap();
+                let mut opened = Document::from_bytes(bytes.get_ref())
+                    .expect("opaque related UTF16 is actually admitted by open");
+                let saved = opened.to_bytes().unwrap();
+                let reopened = Document::from_bytes(&saved).unwrap();
+                assert!(reopened.text().contains("source"));
+                let saved_package = OpcPackage::from_reader(std::io::Cursor::new(&saved)).unwrap();
+                assert_eq!(
+                    saved_package.get_part("/customXml/opaque.xml"),
+                    Some(xml.as_slice())
+                );
+                let report = rdocx::validate_document_bytes(bytes.get_ref()).unwrap();
+                if !report.is_valid() {
+                    missed.push(format!(
+                        "little={little},bom={bom},related={related}: {report:?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(missed.is_empty(), "{}", missed.join("\n"));
+}
+
+#[test]
+fn issue435_review_d3_shared_target_story_roles_union_before_deduplication() {
+    let mut seed = Document::new();
+    seed.add_paragraph("source");
+    seed.set_header("header");
+    let original = seed.to_bytes().unwrap();
+    let mut missed = Vec::new();
+    for custom_first in [true, false] {
+        for alias in ["header1.xml", "HEADER1.XML", "./header1.xml"] {
+            for faulty in [false, true] {
+                let mut package = OpcPackage::from_reader(std::io::Cursor::new(&original)).unwrap();
+                let rels = package.get_or_create_part_rels("/word/document.xml");
+                let header = rels
+                    .items
+                    .iter()
+                    .find(|rel| rel.rel_type == rel_types::HEADER)
+                    .unwrap()
+                    .target
+                    .clone();
+                assert_eq!(header, "header1.xml");
+                rels.add("urn:custom-header-reference", alias);
+                if custom_first {
+                    rels.items.rotate_right(1);
+                }
+                if faulty {
+                    let xml =
+                        String::from_utf8(package.get_part("/word/header1.xml").unwrap().to_vec())
+                            .unwrap()
+                            .replacen("</w:p>", "<w:bogus/></w:p>", 1);
+                    assert!(xml.contains("<w:bogus/>"));
+                    package.set_part("/word/header1.xml", xml.into_bytes());
+                }
+                let mut bytes = std::io::Cursor::new(Vec::new());
+                package.write_to(&mut bytes).unwrap();
+                Document::from_bytes(bytes.get_ref())
+                    .expect("valid and unknown-child header remain open-admitted");
+                let report = rdocx::validate_document_bytes(bytes.get_ref()).unwrap();
+                let correct = if faulty {
+                    report.findings.iter().any(|finding| {
+                        finding.severity == rdocx::ValidationSeverity::Error
+                            && finding.message.to_ascii_lowercase().contains("header1.xml")
+                            && finding.message.contains("w:bogus")
+                    })
+                } else {
+                    report.is_valid()
+                };
+                if !correct {
+                    missed.push(format!(
+                        "first={custom_first},alias={alias},faulty={faulty}: {report:?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(missed.is_empty(), "{}", missed.join("\n"));
+}
+
+#[test]
+fn issue435_review_d4_clone_refuses_ambiguous_imported_repeat_before_publication() {
+    let bytes = issue435_body_bytes(
+        "<w:p><w:bookmarkStart w:id='2' w:name='first'/><w:r><w:t>source</w:t></w:r><w:bookmarkEnd w:id='2'/><w:bookmarkStart w:id='2' w:name='second'/><w:r><w:t>repeat</w:t></w:r><w:bookmarkEnd w:id='2'/></w:p><w:p><w:r><w:t>destination</w:t></w:r></w:p>",
+    );
+    let mut document = Document::from_bytes(&bytes).unwrap();
+    let body = body_story(&document);
+    let held_source = document.story_items(&body).unwrap()[0].location().clone();
+    let held_destination = document.story_items(&body).unwrap()[1].location().clone();
+    let held_source_xml = document.paragraph_element_xml(&held_source).unwrap();
+    let held_destination_xml = document.paragraph_element_xml(&held_destination).unwrap();
+    let before = document.to_bytes().unwrap();
+    let error = document
+        .clone_content(&held_source, &rdocx::ContentLocation::end(body.clone()))
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("content fragment bookmark ownership is incomplete or ambiguous"),
+        "{error}"
+    );
+    assert_eq!(document.to_bytes().unwrap(), before);
+    assert_eq!(
+        document.paragraph_element_xml(&held_source).unwrap(),
+        held_source_xml
+    );
+    assert_eq!(
+        document.paragraph_element_xml(&held_destination).unwrap(),
+        held_destination_xml
+    );
+    let fresh = document.story_items(&body).unwrap();
+    assert_eq!(fresh[0].location(), &held_source);
+    assert_eq!(fresh[1].location(), &held_destination);
+    let mut reopened = Document::from_bytes(&before).unwrap();
+    assert_eq!(reopened.to_bytes().unwrap(), before);
+    assert_eq!(reopened.text(), document.text());
+    // An unrelated real clone remains valid with the imported repeats intact.
+    document
+        .clone_content(&held_destination, &rdocx::ContentLocation::end(body))
+        .unwrap();
+    let saved = document.to_bytes().unwrap();
+    let reopened = Document::from_bytes(&saved).unwrap();
+    assert_eq!(reopened.text().matches("destination").count(), 2);
+    assert!(rdocx::validate_document_bytes(&saved).unwrap().is_valid());
+}
+
+#[test]
+fn issue435_review_d1_authored_shape_extent_is_checked() {
+    let mut seed = Document::new();
+    seed.add_paragraph("source");
+    seed.add_text_box_to_story(&body_story(&seed), "text box", text_box_options())
+        .unwrap();
+    let original = seed.to_bytes().unwrap();
+    assert!(
+        rdocx::validate_document_bytes(&original)
+            .unwrap()
+            .is_valid()
+    );
+    let package = OpcPackage::from_reader(std::io::Cursor::new(&original)).unwrap();
+    let xml = std::str::from_utf8(package.get_part("/word/document.xml").unwrap()).unwrap();
+    assert!(xml.contains("<wps:wsp>") && xml.contains("<wps:spPr>"));
+    let offset = xml.find("<a:ext ").unwrap();
+    let damaged = format!(
+        "{}{}",
+        &xml[..offset],
+        xml[offset..].replacen("cx=\"", "cx=\"-", 1)
+    );
+    let bytes = issue435_replace_zip_part(&original, "word/document.xml", damaged.as_bytes());
+    let report = rdocx::validate_document_bytes(&bytes).unwrap();
+    assert!(
+        report.findings.iter().any(
+            |finding| finding.severity == rdocx::ValidationSeverity::Error
+                && finding.message.contains("word/document.xml")
+                && finding.message.contains("ST_PositiveCoordinate")
+        ),
+        "{report:?}"
+    );
 }

@@ -12865,3 +12865,29 @@ def test_issue435_add_textbox_and_add_shape_refuse_a_negative_size(tmp_path):
     assert reopened_group[0].width == 500000
     assert reopened_group[1].width == 10
     assert reopened.slides[0].shapes.add_textbox(0, 0, 1, 1) is not None
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_issue435_python_open_refuses_damaged_xml_naming_the_part(duplicate):
+    import rpptx
+
+    owner = rpptx.Presentation()
+    slide = owner.slides.add_slide(owner.slide_layouts[6])
+    held = slide.shapes.add_textbox(0, 0, 1000000, 500000)
+    held.text = "Issue435 seed"
+    before = owner.to_bytes()
+    output = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(before)) as source, zipfile.ZipFile(output, "w") as target:
+        for info in source.infolist():
+            data = source.read(info)
+            if info.filename == "ppt/slides/slide1.xml" and not duplicate:
+                data = data.replace(b"Issue435 seed", b"Issue435 \x01seed")
+            target.writestr(info, data)
+        if duplicate:
+            with pytest.warns(UserWarning, match="Duplicate name"):
+                target.writestr("ppt/slides/slide1.xml", source.read("ppt/slides/slide1.xml"))
+    with pytest.raises(rpptx.PackageError, match="ppt/slides/slide1.xml") as failure:
+        rpptx.Presentation.from_bytes(output.getvalue())
+    assert "duplicate" in str(failure.value).lower() if duplicate else "U+0001" in str(failure.value)
+    assert owner.to_bytes() == before
+    assert held.text == "Issue435 seed"
