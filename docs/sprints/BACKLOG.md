@@ -40,8 +40,8 @@ regenerated, never hand-edited.
 | M22, Word depth | 12 | 12 | 0 | 0 |
 | M23, From-scratch business documents | 24 | 24 | 0 | 0 |
 | M24, Modern DOCX authoring completeness | 54 | 32 | 0 | 22 |
-| X, Cross-cutting | 306 | 275 | 14 | 13 |
-| **Total** | **637** | **557** | **14** | **62** |
+| X, Cross-cutting | 306 | 275 | 15 | 12 |
+| **Total** | **637** | **557** | **15** | **61** |
 <!-- AUTOGEN:backlog-summary END -->
 
 ## All F-IDs
@@ -841,7 +841,7 @@ HLD14 contract before adopting contributor changes.
 | F-X270 | Prepare Word 0.16.4 and PowerPoint 0.14.4 patch releases | S95.4 | L | done |
 | F-X271 | Restore pinned viewer downloads and planning policy | S96 | M | in-progress |
 | F-X272 | Preserve existing revisions during document comparison | S96 | L | in-progress |
-| F-X272a | Compare and resolve footnote ownership and lifecycle | S96 | L | pending |
+| F-X272a | Compare and resolve footnote ownership and lifecycle | S96 | L | in-progress |
 | F-X273 | Repair header body clearance and complete TOC navigation | S96 | L | done |
 | F-X274 | Honor section and field page-number formats | S96 | M | in-progress |
 | F-X275 | Prepare Word 0.17.0 and shared/PowerPoint 0.15.0 with strict SemVer gates | S96 | L | in-progress |

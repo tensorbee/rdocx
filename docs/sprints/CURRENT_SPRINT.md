@@ -20,7 +20,7 @@
 |------|-------|------|--------|-------|
 | F-X271 | Restore pinned viewer downloads and planning policy | M | in-progress | codex |
 | F-X272 | Preserve existing revisions during document comparison | L | in-progress | codex |
-| F-X272a | Compare and resolve footnote ownership and lifecycle | L | pending | - |
+| F-X272a | Compare and resolve footnote ownership and lifecycle | L | in-progress | codex |
 | F-X273 | Repair header body clearance and complete TOC navigation | L | done | - |
 | F-X274 | Honor section and field page-number formats | M | in-progress | codex |
 | F-X275 | Prepare Word 0.17.0 and shared/PowerPoint 0.15.0 with strict SemVer gates | L | in-progress | codex |
