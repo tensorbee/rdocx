@@ -392,8 +392,30 @@ Their local preparation lives at
 /private/tmp/rdocx-cross-review/S96_MARKDOWN_BENCHMARK_PREPARATION.
 Root static inspection found no actionable preparation-source finding, but no
 Rust consumer build, fixture production or benchmark execution was performed.
-Actual validator qualification, final source/artifact refresh and runtime
-results are still required. This clarification changes no HLD product intent.
+Tool-only validator qualification is recorded below. Final source/artifact
+refresh and actual product runtime results remain required. This clarification
+changes no HLD product intent.
+
+The qualified independent parser is cmark-gfm0.29.0.gfm.13. Its executable
+SHA256 is
+`f05a86b6961401e2f732f91b7864a43fe6d61598c67b96a17e5d4eda51eb94b2`.
+Use its recorded absolute executable with `--to xml --extension table
+--extension strikethrough <input>`. The eight actual tool controls pass. This
+is parser-tool evidence only, with no product fixture or benchmark execution.
+Authenticate its retained qualification/build/source receipts and binary before
+final use. Do not rebuild or rerun unchanged qualification merely for metadata.
+
+Final execution must import the accepted table-cell collector successor from
+`table-cell-collector-v2`, utility SHA256
+`a4e0a492a1f13b08b383bebc7cebc44fdbcf58bbc157a4d959385bcefb54109b`,
+alongside the unchanged prepared companion scripts. Its independent final2
+review is clean. Sixteen actual tiny Markdown controls reproduce the old
+15-cell false acceptance and prove the successor counts real table cells only.
+The existing16-cell threshold, selection/default behavior and image checks stay
+unchanged. Bind the actual imported utility, validator, companions and execution
+context digests in the final artifact envelope. Keep the immutable original
+manifest/context untouched. This tool repair is not product semantic acceptance,
+timing, a new performance limit or a reset of the feature review history.
 
 ## Open questions
 
