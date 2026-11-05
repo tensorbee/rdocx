@@ -5815,3 +5815,38 @@ rows,14gates, destination identities, original-unused preservation and Q28
 remain unchanged. F-X277b retains authored defaults, no future provider is
 assumed. The parent completion rollup consumes this corrected child contract.
 This changes no C1 API, equation, metric or source/build lease.
+
+### Concrete mapped final-buffer transport
+
+The existing final Word block serializer uses a live Writer<Vec<u8>> proof.
+Its final byte copying is transport outside the normalization producer metric,
+as stated in Incremental normalized XML emission boundary. The connected
+format_paragraph carrier may use the existing private NormalizedWordOutput
+at this exact final caller to return its actual source map and Word events.
+This preserves the old Vec transport behavior and changes no API or equation.
+
+The private sink binds only the same live mutable final Writer and existing
+ledger identity. Its lexical guard restores on ordinary error and unwind and
+holds no metadata lock during Writer reentry. A matching active final-writer
+identity is required at that sink. Publication role, equal bytes, a caller
+boolean or merely having an ambient final lease cannot authorize transport.
+Nested normalization writers remain ordinary full-demand sinks even in that
+same operation. No source input, Field Original/current credit or prepaid
+receipt follows from this final-buffer role.
+
+Actual inner escaped XML, changed records, generated Field output and namespace
+closure keep their existing pre-growth reservations, byte demand, errors and
+sticky refusal. The final sink changes only outer copying that the old Vec
+never charged, and obtains maps/events during that same serialization.
+Retain the existing concrete Vec validation path. Any new generic factoring
+must have both actual Vec and Normalized caller instantiations in the working
+implementation, not a proposed second caller or a forwarding-only wrapper.
+
+Required controls compare actual old Vec and connected final bytes, errors,
+normalized demand and map/event coordinates. Prove zero outer-copy allowance
+parity with actual unchanged Vec behavior, full nested-record demand on the
+same ledger, generated Field and closure charges, wrong-writer isolation,
+error/unwind restoration and no live receipt after completion. Ordinary None
+paths retain their behavior and allocation policy. This technical clarification
+approves no implementation or completed carrier/provider gate. The active
+owner acknowledges this exact revision before changing the final sink.
