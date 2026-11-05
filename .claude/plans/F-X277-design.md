@@ -102,3 +102,13 @@ All three original design peers remain exhausted for both extracted contracts. R
 ## Open questions
 
 No unanswered product choice. Root has approved the three-child ownership contract. Actual source, provider, claim and final acceptance gates remain pending.
+
+## Operative F-X277b scheduling clarification
+
+F-X277b's A277-2/3/6 implementation consumes the genuine completed LOCAL
+F-X272a notes prefix, as specified in its operative plan. This supersedes
+inherited statements that B must wait for all parent C1 work before starting.
+It does not change this umbrella's Depends on list. F-X277 still closes only
+after F-X272 and all three children meet their actual gates, including their
+shared-source and final normalization/reopen/sign qualification. No completed
+umbrella or F-X280 dependency follows from the child checkpoint.

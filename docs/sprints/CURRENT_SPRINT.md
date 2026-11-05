@@ -20,7 +20,7 @@
 |------|-------|------|--------|-------|
 | F-X271 | Restore pinned viewer downloads and planning policy | M | in-progress | codex |
 | F-X272 | Preserve existing revisions during document comparison | L | in-progress | codex |
-| F-X272a | Compare and resolve footnote ownership and lifecycle | L | in-progress | codex |
+| F-X272a | Compare and resolve footnote ownership and lifecycle | L | done | - |
 | F-X273 | Repair header body clearance and complete TOC navigation | L | done | - |
 | F-X274 | Honor section and field page-number formats | M | in-progress | codex |
 | F-X275 | Prepare Word 0.17.0 and shared/PowerPoint 0.15.0 with strict SemVer gates | L | in-progress | codex |
@@ -667,3 +667,15 @@ worktree was removed without force and its branch retained. Delivery remains
 in-progress, the plan approved and all final composition/native/SDK/installed/
 hash/full riders pending. Q28 remains its exact UNPROVED native exception.
 F-X272 still owns the unfinished C1 work and cannot unblock dependents yet.
+
+Root completed F-X272a's approved genuine LOCAL provider checkpoint using its
+actual reported regression,56integration,5unit,1CLI and clean Root final4 at
+integrated1c69b7e0. Run state is completed and its table cell done with owner
+cleared, while plan approval and every final rider remain pending. No AS_BUILT
+or SPRINT_TRACKER completion is written. Only F-X277b A277-2/3/6 now consumes
+this actual child prerequisite. F-X272 and the F-X277/F-X279/F-X280 umbrellas,
+plus F-X279b/F-X280b, retain their actual parent gates. Shared source and Field
+normalization/reopen/sign interactions remain serial integration and final
+union obligations. The new F-X277b claim must use a clean Base descended from
+1c69b7e0 and import no unfinished parent carry. Source-only readiness and
+Root's affected design review justify this narrow replan, not weaker gates.

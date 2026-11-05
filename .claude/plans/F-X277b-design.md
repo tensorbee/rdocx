@@ -3,7 +3,7 @@
 **Status**: approved
 **Sprint**: S96
 **Size**: L
-**Depends on**: F-X272
+**Depends on**: F-X272a
 **Test gate**: regression
 
 
@@ -14,10 +14,54 @@ Root approved this operative contract on2026-11-05 in
 complete F-X272a notes contract was adopted by F-X272. This section supersedes
 older draft, pending-approval and notes-contract-unapproved statements retained
 below as preparation history. It approves no implementation, provider, native
-observation or final gate. All original actual completion dependencies remain.
+observation or final gate. The operative implementation prerequisite is the completed LOCAL F-X272a prefix below. Parent F-X272 remains required by the final umbrella and integrated composition.
 No review-peer allowance resets, no issue row is reduced and no extra source
 lease is created. Revalidate actual claim Base and applicable source inputs
 before implementation. GitHub intake remains stopped.
+
+## Operative implementation dependency reconciliation
+
+Root approves this narrow scheduling replan after the complete Issue430 child
+was integrated at1c69b7e0. F-X277b owns only A277-2, A277-3 and A277-6. Its
+implementation prerequisite is F-X272a's genuine LOCAL provider checkpoint,
+not completion of unrelated unfinished C1 carrier work. That checkpoint must
+actually be completed in the existing run state and backlog before claim, and
+its integrated source must be an ancestor of the worker Base. Reviewed alone
+is insufficient. No implementation is authorized before those records exist.
+
+The source-pinned readiness audit at
+`/private/tmp/rdocx-s96-root-c1-implementation/native-template-support/f277b-readiness-20261105/READINESS_FACTS.md`
+has SHA2563446a5ca958c821d6f0a0c9f9b1a9752912cfcc8e04385e2cbb90d48cd0a45ac.
+A277-2 uses existing authoring/additive raw-part publication and the integrated
+normal/special identity repair. A277-3 uses existing constructors, source_runs
+and staged preparation. A277-6 implements its own absent numbering maps and
+restore/inverse-reopen behavior through existing flush/reopen/sign mechanisms.
+No missing parent C1 through C5 callable or prerequisite behavior was found for
+these three rows. Typed unknown attributes are not recovered into the model.
+Their existing package bytes remain authoritative through additive publication.
+Typed Empty/Unknown fallback is not positive evidence of an actual special type.
+Determine existing type presence from actual raw namespace-qualified source,
+reusing the child's private classification mechanism where applicable without
+changing legacy typed-read behavior or exposing a new public type.
+
+This section supersedes every inherited F-X272 implementation barrier in this
+child only. Parent F-X277 still waits for F-X272 and all its children. F-X279,
+F-X279b, F-X280 and F-X280b retain their existing barriers. Shared Native staging,
+Field preparation, lower parser, numbering, HLD and test intersections require
+serial semantic reconciliation against both contracts and actual focused
+integration checks. The final union must exercise C1 normalization, both real
+reopen paths, signing and all named output/handle invariants. Neither child
+prefix completion nor this replan qualifies those observations or completes C1.
+
+No scope, signature, budget, hash baseline or review allowance changes. Keep
+all actual design and implementation counters. Use a separate clean worktree
+with the actual lowercase host owner. No unfinished parent carry enters its
+Base. No contributed patch is adopted in this claim and GitHub intake stays
+stopped. Existing source is revalidated at claim. A later donor adoption still
+requires its own actual identity/source reconciliation. Local work batches its
+unique RED/GREEN and scoped checks, with native/schema/installed/hash/full
+riders retained for the final integrated union. No AS_BUILT or SPRINT_TRACKER
+completion follows the prefix. Root's affected final review is required.
 
 ## Split scope and inherited review lineage
 

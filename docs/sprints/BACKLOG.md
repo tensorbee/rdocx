@@ -40,8 +40,8 @@ regenerated, never hand-edited.
 | M22, Word depth | 12 | 12 | 0 | 0 |
 | M23, From-scratch business documents | 24 | 24 | 0 | 0 |
 | M24, Modern DOCX authoring completeness | 54 | 32 | 0 | 22 |
-| X, Cross-cutting | 306 | 275 | 15 | 12 |
-| **Total** | **637** | **557** | **15** | **61** |
+| X, Cross-cutting | 306 | 276 | 14 | 12 |
+| **Total** | **637** | **558** | **14** | **61** |
 <!-- AUTOGEN:backlog-summary END -->
 
 ## All F-IDs
@@ -841,7 +841,7 @@ HLD14 contract before adopting contributor changes.
 | F-X270 | Prepare Word 0.16.4 and PowerPoint 0.14.4 patch releases | S95.4 | L | done |
 | F-X271 | Restore pinned viewer downloads and planning policy | S96 | M | in-progress |
 | F-X272 | Preserve existing revisions during document comparison | S96 | L | in-progress |
-| F-X272a | Compare and resolve footnote ownership and lifecycle | S96 | L | in-progress |
+| F-X272a | Compare and resolve footnote ownership and lifecycle | S96 | L | done |
 | F-X273 | Repair header body clearance and complete TOC navigation | S96 | L | done |
 | F-X274 | Honor section and field page-number formats | S96 | M | in-progress |
 | F-X275 | Prepare Word 0.17.0 and shared/PowerPoint 0.15.0 with strict SemVer gates | S96 | L | in-progress |
@@ -893,3 +893,12 @@ new stories have no invented product edge. Q-S96-07 is answered: bundled default
 
 
 F-X277 is split without reducing Issue432 scope. F-X277a independently owns A277-1 and has no provider edge. F-X277b owns A277-2 through A277-8 and retains F-X272. The parent closes only after both children and its F-X272 edge satisfy actual gates. F-X280 retains its F-X277 and F-X272 dependencies. These child rows are delivery decomposition of existing scope, not two new issue contracts or extra aggregate effort. Original design peers remain exhausted. No status or provider completion follows from registration.
+
+F-X272a is done only as the approved genuine LOCAL provider implementation
+checkpoint at integrated1c69b7e0. Its approved plan retains all final acceptance
+riders and Q28 UNPROVED. F-X277b owns exactly A277-2/3/6 and uses that completed
+child dependency for separate-worktree implementation. This operative rule
+supersedes the older broad B range and its implementation-wide F-X272 edge.
+F-X277 still closes only after F-X272 and all three children qualify. F-X279b,
+F-X280b and their parent barriers are unchanged. No delivery ledger or final
+native/schema/full result follows from the prefix status.

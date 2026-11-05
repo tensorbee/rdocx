@@ -5969,3 +5969,15 @@ final strict SemVer inventory alongside the operation methods. No new public
 type, module, trait, generic, quota or lower duplicate parser is approved.
 The sole owner acknowledges the exact revision before affected edits. This is
 technical API reconciliation, not implementation or provider acceptance.
+
+### Existing-API F-X277b scheduling clarification
+
+The integrated Issue430 child F-X272a may supply its approved genuine LOCAL
+provider checkpoint to F-X277b's A277-2/3/6 implementation after actual prefix
+completion. Source audit found those rows use existing baseline mechanisms,
+not unfinished C1 carrier APIs. Separate-worktree implementation and serial
+semantic reconciliation preserve this parent's sole source writer and Base.
+F-X277's umbrella, F-X279/F-X279b and F-X280/F-X280b retain their parent barriers.
+This parent remains in-progress. Its own completion still requires C1, the
+integrated child and actual applicable gates, with all final riders retained.
+No C1 implementation, budget, API or review-counter change follows here.

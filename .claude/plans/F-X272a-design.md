@@ -805,3 +805,30 @@ Normal-at-any-id and changed invalid-type refusal follow the existing user
 answers. Planned Word0.17.0andshared/PowerPoint0.15.0remain minor releases.
 No new product source file, module, crate, feature flag, trait or generic is
 introduced. Tests join existing entrypoints, not another linked test binary.
+
+## Approved LOCAL provider checkpoint for F-X277b
+
+Root approves run-sprint's genuine LOCAL prefix exception for this integrated
+child only. The actual reported regression
+issue430_reported_word_granularity_note_cases_and_payment_control passed,
+alongside56integration cases with no exclusions,5unit and1CLI cases. Scoped
+all-target/all-feature Clippy and format passed. Actual old-source failures and
+fixed-source receipts remain pinned in the existing v6 packet. Independent
+Root custody-recognition final4 has zero defects and zero smells. Integration
+at1c69b7e0 preserves all11reviewed product/test/HLD paths exactly. Later canonical
+commits before this checkpoint change planning/review metadata only.
+
+These are genuine local regression gates, not an oracle-only dependency.
+Record provider implementation completed and clear owner in existing run state
+and done BACKLOG/CURRENT_SPRINT cells only after the checkpoint review. Keep
+this plan approved and preserve all45A/14Gfinal composition, native, SDK,
+installed binding, hash and full rider debt. Q28 remains its exact UNPROVED
+native positive. Do not write AS_BUILT or SPRINT_TRACKER until actual final
+acceptance. The child integration source must be an ancestor of F-X277b's clean
+Base. Parent F-X272 remains in-progress and cannot complete its own rollup or
+unblock the F-X277/F-X279/F-X280 umbrellas until all its actual work passes.
+
+Only F-X277b's executable A277-2/3/6 dependency is redirected to this child.
+Shared source and normalization interactions remain actual final-union work,
+not supplied by a completed status. A missing required API discovered during
+implementation is still blocking and is reported with source evidence.
