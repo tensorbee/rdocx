@@ -7318,6 +7318,8 @@ pub struct Document {
     pub(crate) styles: Arc<CT_Styles>,
     styles_part_cache: Option<StylesPartCache>,
     pub(crate) numbering: Option<CT_Numbering>,
+    published_abstract_by_live: HashMap<u32, u32>,
+    published_instance_by_live: HashMap<u32, u32>,
     /// Boxed, because debug builds keep many copies of `Document` on deep
     /// stacks, and the fifteen-field model would otherwise grow every one.
     pub(crate) core_properties: Option<Box<CoreProperties>>,
@@ -15328,6 +15330,174 @@ pub(crate) fn set_story_source_xml(
     Ok(())
 }
 
+// Source-qualified types, rather than the legacy typed unknown-type fallback,
+// decide whether an imported part already owns an authored special record.
+fn missing_note_specials(
+    existing: &rdocx_oxml::footnotes::CT_Footnotes,
+    source: Option<&[u8]>,
+    kind: StoryKind,
+    pending_normal_id: Option<i32>,
+) -> Result<Vec<rdocx_oxml::footnotes::CT_Footnote>> {
+    use crate::comparison::{RawNoteType, raw_note_attribute_in_scope, raw_note_type_in_scope};
+    use rdocx_oxml::footnotes::{CT_Footnote, NoteType};
+    let mut separator = false;
+    let mut continuation = false;
+    let mut occupied = existing
+        .footnotes
+        .iter()
+        .map(|note| note.id)
+        .collect::<HashSet<_>>();
+    if let Some(id) = pending_normal_id {
+        occupied.insert(id);
+    }
+    if let Some(source) = source {
+        for owner in scan_story_owners_with_special(source, kind, true)? {
+            if owner.kind != kind {
+                continue;
+            }
+            let scope = story_namespace_scope_at(source, owner.full.start)?;
+            let xml = std::str::from_utf8(&source[owner.full])
+                .map_err(|error| Error::Other(format!("note source is not UTF-8: {error}")))?;
+            let bindings = scope
+                .into_iter()
+                .map(|(prefix, uri)| {
+                    (
+                        if prefix.is_empty() {
+                            "xmlns".into()
+                        } else {
+                            format!("xmlns:{prefix}")
+                        },
+                        uri,
+                    )
+                })
+                .collect::<Vec<_>>();
+            if let Some(id) = raw_note_attribute_in_scope(xml, &bindings, "id")?
+                .and_then(|id| id.parse::<i32>().ok())
+            {
+                occupied.insert(id);
+            }
+            match raw_note_type_in_scope(xml, &bindings)? {
+                RawNoteType::Separator => separator = true,
+                RawNoteType::ContinuationSeparator => continuation = true,
+                _ => {}
+            }
+        }
+    }
+    let mut additions = Vec::new();
+    for (id, note_type, present, child) in [
+        (
+            -1,
+            NoteType::Separator,
+            separator,
+            b"<w:separator/>".as_slice(),
+        ),
+        (
+            0,
+            NoteType::ContinuationSeparator,
+            continuation,
+            b"<w:continuationSeparator/>".as_slice(),
+        ),
+    ] {
+        if present || occupied.contains(&id) {
+            continue;
+        }
+        let mut run = CT_R::new("");
+        run.content.clear();
+        run.extra_xml.push(child.to_vec());
+        run.extra_xml_positions.push(0);
+        let mut paragraph = CT_P::new();
+        paragraph.runs.push(run);
+        additions.push(CT_Footnote {
+            id,
+            note_type,
+            paragraphs: vec![paragraph],
+        });
+    }
+    Ok(additions)
+}
+
+fn owners_reference_hyperlink_style(mut pending: Vec<WordXmlOwner<'_>>) -> bool {
+    fn styled(run: &CT_R) -> bool {
+        run.properties
+            .as_ref()
+            .and_then(|properties| properties.style_id.as_deref())
+            == Some("Hyperlink")
+    }
+    fn revision_styled(revision: &CT_Revision) -> bool {
+        if let Some(paragraph) = revision.content_paragraph() {
+            return paragraph.source_runs().into_iter().any(styled);
+        }
+        matches!(revision.content(), rdocx_oxml::revision::RevisionContent::Runs(runs) if runs.iter().any(styled))
+            || revision
+                .nested_revisions()
+                .iter()
+                .any(|(_, nested)| revision_styled(nested))
+    }
+    while let Some(owner) = pending.pop() {
+        match owner {
+            WordXmlOwner::Paragraph(paragraph) => {
+                if paragraph.source_runs().into_iter().any(styled) {
+                    return true;
+                }
+            }
+            WordXmlOwner::Run(run) => {
+                if styled(run) {
+                    return true;
+                }
+            }
+            WordXmlOwner::Table(table) => {
+                pending.extend(table.rows.iter().map(WordXmlOwner::Row));
+                pending.extend(
+                    table
+                        .content_controls
+                        .iter()
+                        .map(|(_, _, control)| WordXmlOwner::Control(control)),
+                );
+            }
+            WordXmlOwner::Row(row) => {
+                pending.extend(row.cells.iter().map(WordXmlOwner::Cell));
+                pending.extend(
+                    row.content_controls
+                        .iter()
+                        .map(|(_, _, control)| WordXmlOwner::Control(control)),
+                );
+            }
+            WordXmlOwner::Cell(cell) => {
+                pending.extend(cell.content.iter().map(|item| match item {
+                    CellContent::Paragraph(paragraph) => WordXmlOwner::Paragraph(paragraph),
+                    CellContent::Table(table) => WordXmlOwner::Table(table),
+                    CellContent::ContentControl(control) => WordXmlOwner::Control(control),
+                }));
+            }
+            WordXmlOwner::Control(control) => {
+                if control
+                    .revisions()
+                    .iter()
+                    .any(|(_, revision)| revision_styled(revision))
+                {
+                    return true;
+                }
+                for item in &control.content {
+                    match item {
+                        SdtContent::Paragraph(paragraph) => {
+                            pending.push(WordXmlOwner::Paragraph(paragraph))
+                        }
+                        SdtContent::Run(run) => pending.push(WordXmlOwner::Run(run)),
+                        SdtContent::Table(table) => pending.push(WordXmlOwner::Table(table)),
+                        SdtContent::Row(row) => pending.push(WordXmlOwner::Row(row)),
+                        SdtContent::Cell(cell) => pending.push(WordXmlOwner::Cell(cell)),
+                        SdtContent::ContentControl(control) => {
+                            pending.push(WordXmlOwner::Control(control))
+                        }
+                        SdtContent::RawXml(_) => {}
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 fn serialized_note_fragment(
     note: &rdocx_oxml::footnotes::CT_Footnote,
     kind: StoryKind,
@@ -22658,6 +22828,8 @@ impl Document {
             styles,
             styles_part_cache,
             numbering: None,
+            published_abstract_by_live: HashMap::new(),
+            published_instance_by_live: HashMap::new(),
             core_properties,
             application_properties,
             custom_properties: None,
@@ -22818,6 +22990,8 @@ impl Document {
             styles: Arc::clone(&self.styles),
             styles_part_cache: self.styles_part_cache.clone(),
             numbering: self.numbering.clone(),
+            published_abstract_by_live: self.published_abstract_by_live.clone(),
+            published_instance_by_live: self.published_instance_by_live.clone(),
             core_properties: self.core_properties.clone(),
             application_properties: self.application_properties.clone(),
             custom_properties: self.custom_properties.clone(),
@@ -22878,7 +23052,6 @@ impl Document {
 
     fn canonicalize_typed_identifiers(&mut self) -> Result<()> {
         self.canonicalize_bookmark_ids()?;
-        self.canonicalize_numbering_ids()?;
         Ok(())
     }
 
@@ -22992,9 +23165,9 @@ impl Document {
         Ok(())
     }
 
-    fn canonicalize_numbering_ids(&mut self) -> Result<()> {
+    fn canonicalize_numbering_ids(&mut self) -> Result<(HashMap<u32, u32>, HashMap<u32, u32>)> {
         let Some(numbering) = self.numbering.as_ref() else {
-            return Ok(());
+            return Ok((HashMap::new(), HashMap::new()));
         };
         let mut semantic_nums = Vec::new();
         visit_body_paragraphs(&self.document.body.content, false, &mut |paragraph| {
@@ -23093,7 +23266,7 @@ impl Document {
                 .sort_by_key(|definition| definition.abstract_num_id);
             numbering.nums.sort_by_key(|instance| instance.num_id);
         }
-        Ok(())
+        Ok((abstract_remap, num_remap))
     }
 
     fn opaque_relationship_ids_from_serialized_story(
@@ -24993,6 +25166,8 @@ impl Document {
             styles,
             styles_part_cache,
             numbering,
+            published_abstract_by_live: HashMap::new(),
+            published_instance_by_live: HashMap::new(),
             core_properties,
             application_properties,
             custom_properties,
@@ -25454,8 +25629,73 @@ impl Document {
         Ok(encrypted)
     }
 
+    fn ensure_referenced_hyperlink_style(&mut self) -> Result<()> {
+        if self.styles.get_by_id("Hyperlink").is_some() {
+            return Ok(());
+        }
+        let body = self
+            .document
+            .body
+            .content
+            .iter()
+            .filter_map(|item| match item {
+                BodyContent::Paragraph(paragraph) => Some(WordXmlOwner::Paragraph(paragraph)),
+                BodyContent::Table(table) => Some(WordXmlOwner::Table(table)),
+                BodyContent::ContentControl(control) => Some(WordXmlOwner::Control(control)),
+                BodyContent::RawXml(_) => None,
+            })
+            .collect();
+        let mut referenced = owners_reference_hyperlink_style(body);
+        for (rel_id, is_header) in self.header_footer_rel_ids() {
+            if !referenced && let Some(story) = self.load_header_footer(&rel_id, is_header) {
+                referenced = owners_reference_hyperlink_style(
+                    story
+                        .paragraphs
+                        .iter()
+                        .map(WordXmlOwner::Paragraph)
+                        .collect(),
+                );
+            }
+        }
+        if !referenced {
+            referenced = owners_reference_hyperlink_style(
+                self.footnotes
+                    .footnotes
+                    .iter()
+                    .flat_map(|note| &note.paragraphs)
+                    .map(WordXmlOwner::Paragraph)
+                    .collect(),
+            );
+        }
+        if !referenced
+            && let Some(part) = self.note_part_name(StoryKind::Endnote)?
+            && let Some(source) = self.package.get_part(&part)
+            && let Ok(notes) = rdocx_oxml::footnotes::CT_Footnotes::from_xml(source)
+        {
+            referenced = owners_reference_hyperlink_style(
+                notes
+                    .footnotes
+                    .iter()
+                    .flat_map(|note| &note.paragraphs)
+                    .map(WordXmlOwner::Paragraph)
+                    .collect(),
+            );
+        }
+        if referenced {
+            self.add_style(
+                StyleBuilder::character("Hyperlink", "Hyperlink").run_properties(CT_RPr {
+                    color: Some("0563C1".into()),
+                    underline: Some(rdocx_oxml::shared::ST_Underline::Single),
+                    ..Default::default()
+                }),
+            )?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn prepare_staged_package(&mut self) -> Result<bool> {
         let normalized = self.prepare_current_field_models()?;
+        self.ensure_referenced_hyperlink_style()?;
         #[cfg(test)]
         eprintln!("FX211_PREPARE_STAGE preflight-before");
         self.preflight_flush_required_bundles()?;
@@ -25630,6 +25870,11 @@ impl Document {
             .identifiers
             .reject_new_repeated_drawing_ids(&provenance)?;
         reopened.identifiers.reconcile_provenance(&provenance);
+        reopened.restore_live_numbering(
+            &self.published_abstract_by_live,
+            &self.published_instance_by_live,
+            &provenance,
+        )?;
         reopened.custom_properties_owned = custom_properties_owned;
         reopened.settings_owned = settings_owned;
         if let Some(settings) = owned_settings {
@@ -25646,6 +25891,103 @@ impl Document {
         reopened.install_carried_body_scans(carried_scans);
         reopened.install_carried_blocks(carried_blocks);
         Ok(reopened)
+    }
+
+    fn restore_live_numbering(
+        &mut self,
+        abstract_map: &HashMap<u32, u32>,
+        instance_map: &HashMap<u32, u32>,
+        provenance: &DocumentIdentifiers,
+    ) -> Result<()> {
+        if abstract_map.is_empty() && instance_map.is_empty() {
+            return Ok(());
+        }
+        let numbering = self
+            .numbering
+            .as_mut()
+            .ok_or_else(|| Error::Other("published numbering model is missing".into()))?;
+        for published in abstract_map.values() {
+            if !numbering
+                .abstract_nums
+                .iter()
+                .any(|definition| definition.abstract_num_id == *published)
+            {
+                return Err(Error::Other(
+                    "published abstract numbering ID is missing".into(),
+                ));
+            }
+        }
+        for published in instance_map.values() {
+            if !numbering
+                .nums
+                .iter()
+                .any(|instance| instance.num_id == *published)
+            {
+                return Err(Error::Other(
+                    "published numbering instance ID is missing".into(),
+                ));
+            }
+        }
+        let abstract_inverse = abstract_map
+            .iter()
+            .map(|(live, published)| (*published, *live))
+            .collect::<HashMap<_, _>>();
+        let instance_inverse = instance_map
+            .iter()
+            .map(|(live, published)| (*published, *live))
+            .collect::<HashMap<_, _>>();
+        let published_ids = numbering
+            .nums
+            .iter()
+            .map(|instance| instance.num_id)
+            .collect::<HashSet<_>>();
+        let mut missing_body_id = false;
+        visit_body_paragraphs_mut(&mut self.document.body.content, &mut |paragraph| {
+            if let Some(id) = paragraph
+                .properties
+                .as_mut()
+                .and_then(|properties| properties.num_id.as_mut())
+                && let Some(live) = instance_inverse.get(id)
+            {
+                missing_body_id |= !published_ids.contains(id);
+                *id = *live;
+            }
+        });
+        if missing_body_id {
+            return Err(Error::Other(
+                "published body numbering ID is missing".into(),
+            ));
+        }
+        for definition in &mut numbering.abstract_nums {
+            if let Some(live) = abstract_inverse.get(&definition.abstract_num_id) {
+                definition.abstract_num_id = *live;
+            }
+        }
+        for instance in &mut numbering.nums {
+            if let Some(live) = instance_inverse.get(&instance.num_id) {
+                instance.num_id = *live;
+            }
+            if let Some(live) = abstract_inverse.get(&instance.abstract_num_id) {
+                instance.abstract_num_id = *live;
+            }
+        }
+        self.identifiers.abstract_numbering_ids = numbering
+            .abstract_nums
+            .iter()
+            .map(|definition| definition.abstract_num_id)
+            .collect();
+        self.identifiers.numbering_instance_ids = numbering
+            .nums
+            .iter()
+            .map(|instance| instance.num_id)
+            .collect();
+        self.identifiers.preserved_abstract_numbering_ids =
+            provenance.preserved_abstract_numbering_ids.clone();
+        self.identifiers.preserved_numbering_instance_ids =
+            provenance.preserved_numbering_instance_ids.clone();
+        self.published_abstract_by_live = abstract_map.clone();
+        self.published_instance_by_live = instance_map.clone();
+        Ok(())
     }
 
     /// Compare current writer bytes without constructing an owned result when
@@ -26320,10 +26662,73 @@ impl Document {
         Ok(false)
     }
 
+    /// Restore live numbering immediately after writing its package projection.
+    fn flush_numbering_emission(&mut self) -> Result<(HashMap<u32, u32>, HashMap<u32, u32>)> {
+        let numbering = self.numbering.clone();
+        let abstract_ids = self.identifiers.abstract_numbering_ids.clone();
+        let instance_ids = self.identifiers.numbering_instance_ids.clone();
+        let mut body_ids = Vec::new();
+        visit_body_paragraphs(&self.document.body.content, false, &mut |paragraph| {
+            body_ids.push(
+                paragraph
+                    .properties
+                    .as_ref()
+                    .and_then(|properties| properties.num_id),
+            );
+        });
+        let (abstract_map, instance_map) = self.canonicalize_numbering_ids()?;
+        let result = (|| {
+            self.flush_document_to_package()?;
+            // Serialize numbering definitions if we have any
+            if let Some(numbering_xml) = self
+                .numbering
+                .as_ref()
+                .map(CT_Numbering::to_xml)
+                .transpose()?
+            {
+                let numbering_part_name = self.numbering_part_name.clone();
+                let numbering_part = self
+                    .reserve_document_part_bundle(
+                        numbering_part_name.as_deref(),
+                        DEFAULT_NUMBERING_PART,
+                        rel_types::NUMBERING,
+                        NUMBERING_CONTENT_TYPE,
+                    )
+                    .map_err(|error| {
+                        Error::Other(format!("numbering relationship allocation failed: {error}"))
+                    })?;
+                self.numbering_part_name = Some(numbering_part.clone());
+                let numbering_changed = self
+                    .package
+                    .get_part(&numbering_part)
+                    .and_then(|xml| CT_Numbering::from_xml(xml).ok())
+                    .as_ref()
+                    != self.numbering.as_ref();
+                if numbering_changed {
+                    self.package.set_part(&numbering_part, numbering_xml);
+                }
+            }
+
+            Ok(())
+        })();
+        self.numbering = numbering;
+        self.identifiers.abstract_numbering_ids = abstract_ids;
+        self.identifiers.numbering_instance_ids = instance_ids;
+        let mut body_ids = body_ids.into_iter();
+        visit_body_paragraphs_mut(&mut self.document.body.content, &mut |paragraph| {
+            let original = body_ids
+                .next()
+                .expect("publication preserves paragraph inventory");
+            if let Some(properties) = &mut paragraph.properties {
+                properties.num_id = original;
+            }
+        });
+        result.map(|()| (abstract_map, instance_map))
+    }
+
     /// Write the in-memory document/styles back into the OPC package parts.
     pub(crate) fn flush_to_package(&mut self) -> Result<()> {
-        self.flush_document_to_package()?;
-
+        let (abstract_map, instance_map) = self.flush_numbering_emission()?;
         // Unchanged proved styles share their model and source bytes through staging.
         let styles_part_name = self.styles_part_name.clone();
         let styles_part = self
@@ -26360,36 +26765,6 @@ impl Document {
                 parsed: Arc::clone(&self.styles),
                 proof: StylesSerializationProof::Serializable,
             });
-        }
-
-        // Serialize numbering definitions if we have any
-        if let Some(numbering_xml) = self
-            .numbering
-            .as_ref()
-            .map(CT_Numbering::to_xml)
-            .transpose()?
-        {
-            let numbering_part_name = self.numbering_part_name.clone();
-            let numbering_part = self
-                .reserve_document_part_bundle(
-                    numbering_part_name.as_deref(),
-                    DEFAULT_NUMBERING_PART,
-                    rel_types::NUMBERING,
-                    NUMBERING_CONTENT_TYPE,
-                )
-                .map_err(|error| {
-                    Error::Other(format!("numbering relationship allocation failed: {error}"))
-                })?;
-            self.numbering_part_name = Some(numbering_part.clone());
-            let numbering_changed = self
-                .package
-                .get_part(&numbering_part)
-                .and_then(|xml| CT_Numbering::from_xml(xml).ok())
-                .as_ref()
-                != self.numbering.as_ref();
-            if numbering_changed {
-                self.package.set_part(&numbering_part, numbering_xml);
-            }
         }
 
         // F-155 exposes settings as a read-only projection. Parsed settings
@@ -26542,6 +26917,8 @@ impl Document {
             }
         }
 
+        self.published_abstract_by_live = abstract_map;
+        self.published_instance_by_live = instance_map;
         Ok(())
     }
 
@@ -33937,6 +34314,17 @@ impl Document {
                 )
                 .expect("an in-memory document can publish its note style");
         }
+        let specials = missing_note_specials(
+            &candidate.footnotes,
+            candidate
+                .footnotes_part_name
+                .as_deref()
+                .and_then(|part| candidate.package.get_part(part)),
+            StoryKind::Footnote,
+            Some(id),
+        )
+        .expect("an in-memory document can inspect its note specials");
+        candidate.footnotes.footnotes.extend(specials);
         let mut p = CT_P::new();
         let mut marker = CT_R::new("");
         marker.properties = Some(CT_RPr {
@@ -33947,6 +34335,7 @@ impl Document {
         marker.extra_xml.push(b"<w:footnoteRef/>".to_vec());
         marker.extra_xml_positions.push(1);
         p.runs.push(marker);
+        p.add_run(" ");
         p.add_run(text);
         candidate.footnotes.footnotes.push(CT_Footnote {
             id,
@@ -34010,6 +34399,16 @@ impl Document {
             .ok_or_else(|| {
                 Error::Other("note reference run boundary is out of range".to_owned())
             })?;
+        let specials = missing_note_specials(
+            &candidate.footnotes,
+            candidate
+                .footnotes_part_name
+                .as_deref()
+                .and_then(|part| candidate.package.get_part(part)),
+            StoryKind::Footnote,
+            None,
+        )?;
+        candidate.footnotes.footnotes.extend(specials);
         let occupied = candidate
             .footnotes
             .footnotes
@@ -34033,6 +34432,7 @@ impl Document {
         note_marker.extra_xml.push(b"<w:footnoteRef/>".to_vec());
         note_marker.extra_xml_positions.push(1);
         paragraph.runs.push(note_marker);
+        paragraph.add_run(" ");
         paragraph.add_run(text);
         candidate
             .footnotes
@@ -34141,15 +34541,20 @@ impl Document {
         note_marker.extra_xml.push(b"<w:endnoteRef/>".to_vec());
         note_marker.extra_xml_positions.push(1);
         paragraph.runs.push(note_marker);
+        paragraph.add_run(" ");
         paragraph.add_run(text);
         let note = rdocx_oxml::footnotes::CT_Footnote {
             id,
             note_type: rdocx_oxml::footnotes::NoteType::Normal,
             paragraphs: vec![paragraph],
         };
-        let fragment = serialized_note_fragment(&note, StoryKind::Endnote)?;
-        let updated =
-            append_story_fragments_to_root(&source, b"endnotes", b"endnote", &[fragment])?;
+        let mut fragments =
+            missing_note_specials(&existing, Some(&source), StoryKind::Endnote, Some(id))?
+                .iter()
+                .map(|note| serialized_note_fragment(note, StoryKind::Endnote))
+                .collect::<Result<Vec<_>>>()?;
+        fragments.push(serialized_note_fragment(&note, StoryKind::Endnote)?);
+        let updated = append_story_fragments_to_root(&source, b"endnotes", b"endnote", &fragments)?;
         set_story_source_xml(&mut candidate, &part_name, updated)?;
         candidate.invalidate_layout();
         let mut run = CT_R::new("");
@@ -34247,6 +34652,7 @@ impl Document {
         let mut paragraph = CT_P::new();
         let marker_run = CT_R::new(mark);
         paragraph.runs.push(marker_run);
+        paragraph.add_run(" ");
         paragraph.add_run(text);
         let note = rdocx_oxml::footnotes::CT_Footnote {
             id,
@@ -64022,6 +64428,317 @@ mod tests {
                 .is_some_and(|suffix| suffix.parse::<u32>().is_ok())
         );
         assert!(!styles.id.starts_with("rdocxDeferred"));
+    }
+
+    #[test]
+    fn issue432_hyperlink_outer_control_run_and_revision_boundaries() {
+        let styled = r#"<w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>typed</w:t></w:r>"#;
+        for payload in [
+            styled.to_owned(),
+            format!(r#"<w:ins w:id="1" w:author="a">{styled}</w:ins>"#),
+            format!(r#"<w:del w:id="1" w:author="a">{styled}</w:del>"#),
+            format!(
+                r#"<w:moveFrom w:id="1" w:author="a"><w:ins w:id="2" w:author="a">{styled}</w:ins></w:moveFrom>"#
+            ),
+            format!(r#"<w:sdt><w:sdtContent>{styled}</w:sdtContent></w:sdt>"#),
+        ] {
+            let xml = format!(
+                r#"<w:sdt xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:sdtContent>{payload}</w:sdtContent></w:sdt>"#
+            );
+            let mut reader = quick_xml::Reader::from_str(&xml);
+            let Event::Start(start) = reader.read_event().unwrap() else {
+                panic!("control root");
+            };
+            let control = CT_Sdt::from_xml(&mut reader, &start).unwrap();
+            assert!(
+                control
+                    .content
+                    .iter()
+                    .any(|item| matches!(item, SdtContent::Run(_) | SdtContent::ContentControl(_)))
+                    || !control.revisions().is_empty(),
+                "actual typed owner: {payload}"
+            );
+            assert!(
+                owners_reference_hyperlink_style(vec![WordXmlOwner::Control(&control)]),
+                "{payload}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue432_publication_refusal_restores_live_numbering_and_source() {
+        let mut document = Document::new();
+        document.add_paragraph("body");
+        let decimal = document
+            .add_numbering_definition(&[ListLevel::new(ListNumberFormat::Decimal)])
+            .unwrap();
+        let bullet = document
+            .add_numbering_definition(&[ListLevel::new(ListNumberFormat::Bullet)])
+            .unwrap();
+        let instance = document.add_numbering_instance(bullet, &[]).unwrap();
+        document.add_numbering_instance(decimal, &[]).unwrap();
+        document
+            .paragraph_mut(0)
+            .unwrap()
+            .set_numbering(instance, 0);
+        document.flush_to_package().unwrap();
+        let model = document.numbering.clone();
+        let abstract_ids = document.identifiers.abstract_numbering_ids.clone();
+        let instance_ids = document.identifiers.numbering_instance_ids.clone();
+        let abstract_map = document.published_abstract_by_live.clone();
+        let instance_map = document.published_instance_by_live.clone();
+        document.package.set_part(
+            document.styles_part_name.as_ref().unwrap(),
+            b"<broken".to_vec(),
+        );
+        assert!(
+            document.flush_to_package().is_err(),
+            "actual write failure after temporary numbering permutation"
+        );
+        assert_eq!(document.numbering, model);
+        assert_eq!(
+            document.paragraph(0).unwrap().numbering(),
+            Some((instance, 0))
+        );
+        assert_eq!(document.identifiers.abstract_numbering_ids, abstract_ids);
+        assert_eq!(document.identifiers.numbering_instance_ids, instance_ids);
+        assert_eq!(document.published_abstract_by_live, abstract_map);
+        assert_eq!(document.published_instance_by_live, instance_map);
+
+        let mut missing = Document::new();
+        missing.add_paragraph("body");
+        let id = missing
+            .add_numbering_definition(&[ListLevel::new(ListNumberFormat::Bullet)])
+            .unwrap();
+        missing.add_numbering_instance(id, &[]).unwrap();
+        missing.prepare_staged_package().unwrap();
+        let numbering_part = missing.numbering_part_name.clone().unwrap();
+        missing
+            .package
+            .set_part(&numbering_part, CT_Numbering::new().to_xml().unwrap());
+        assert!(missing.reopen_prepared_staged().is_err());
+
+        let mut document = Document::new();
+        document
+            .add_paragraph("")
+            .add_internal_hyperlink("link", "target", None);
+        let before = document.package.parts.clone();
+        let model = document.document.clone();
+        let location = document.paragraph_story_location(0).unwrap().unwrap();
+        FAIL_NEXT_STAGED_REOPEN.set(true);
+        assert!(document.create_footnote(&location, "refused").is_err());
+        assert!(document.style("Hyperlink").is_none());
+        assert_eq!(document.package.parts, before);
+        assert_eq!(document.document, model);
+    }
+
+    #[test]
+    fn issue432_numbering_normalizing_assign_back_and_both_real_reopens() {
+        let mut document = Document::new();
+        document.add_paragraph("body");
+        let decimal = document
+            .add_numbering_definition(&[ListLevel::new(ListNumberFormat::Decimal)])
+            .unwrap();
+        let bullet = document
+            .add_numbering_definition(&[ListLevel::new(ListNumberFormat::Bullet)])
+            .unwrap();
+        let first = document.add_numbering_instance(bullet, &[]).unwrap();
+        document.add_numbering_instance(decimal, &[]).unwrap();
+        document.paragraph_mut(0).unwrap().set_numbering(first, 0);
+        // A parsed revision-owned cache has an actual ordered owner. Direct
+        // public-cache assignment requires fallible normalization on output.
+        let paragraph = CT_P::from_xml_fragment(br#"<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:fldSimple w:instr=" DOCPROPERTY Title "><w:ins w:id="41" w:author="Prior"><w:r><w:t>old</w:t></w:r></w:ins></w:fldSimple></w:p>"#).unwrap();
+        let mut field = paragraph
+            .runs
+            .iter()
+            .flat_map(|run| &run.content)
+            .find_map(|content| {
+                if let RunContent::Field(field) = content {
+                    Some(field.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("actual parsed field");
+        assert!(
+            field.cached_result_owner_projection().unwrap().is_some(),
+            "actual retained ordered owner"
+        );
+        field.cached_result = "current".into();
+        let mut run = CT_R::new("");
+        run.content = vec![RunContent::Field(field)];
+        let BodyContent::Paragraph(paragraph) = &mut document.document.body.content[0] else {
+            panic!("body paragraph");
+        };
+        paragraph.runs.push(run);
+        assert!(
+            document
+                .clone_for_staging()
+                .prepare_current_field_models()
+                .unwrap(),
+            "fixture must actually take normalizing assign-back"
+        );
+        let bytes = document.to_bytes().unwrap();
+        assert!(
+            !document
+                .clone_for_staging()
+                .prepare_current_field_models()
+                .unwrap(),
+            "actual normalized model assigned back"
+        );
+        assert_eq!(
+            document.numbering_instance(first).unwrap().definition_id,
+            bullet
+        );
+        assert_eq!(
+            document.numbering_definition(bullet).unwrap().levels[0]
+                .properties
+                .format,
+            ListNumberFormat::Bullet
+        );
+        assert_eq!(document.paragraph(0).unwrap().numbering(), Some((first, 0)));
+        let BodyContent::Paragraph(paragraph) = &mut document.document.body.content[0] else {
+            panic!("body paragraph");
+        };
+        let field = paragraph
+            .runs
+            .iter_mut()
+            .flat_map(|run| &mut run.content)
+            .find_map(|content| {
+                if let RunContent::Field(field) = content {
+                    Some(field)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        field.cached_result = "saved".into();
+        assert!(
+            document
+                .clone_for_staging()
+                .prepare_current_field_models()
+                .unwrap(),
+            "save must also normalize an actual ordered owner"
+        );
+        let path = std::env::temp_dir().join(format!(
+            "rdocx-f277b-normalized-{}.docx",
+            std::process::id()
+        ));
+        document.save(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert!(
+            !document
+                .clone_for_staging()
+                .prepare_current_field_models()
+                .unwrap()
+        );
+        assert_eq!(
+            document.numbering_instance(first).unwrap().definition_id,
+            bullet
+        );
+        assert_eq!(
+            document.numbering_definition(bullet).unwrap().levels[0]
+                .properties
+                .format,
+            ListNumberFormat::Bullet
+        );
+        let process = Document::from_bytes(&bytes).unwrap();
+        assert_eq!(
+            process.numbering_definition(0).unwrap().levels[0]
+                .properties
+                .format,
+            ListNumberFormat::Bullet
+        );
+        for through_zip in [false, true] {
+            let mut candidate = document.clone_for_staging();
+            candidate.prepare_staged_package().unwrap();
+            let restored = candidate
+                .reopen_staged(!through_zip, PackageReadLimits::UNBOUNDED)
+                .unwrap();
+            assert_eq!(
+                restored.numbering_instance(first).unwrap().definition_id,
+                bullet
+            );
+            assert_eq!(
+                restored.numbering_definition(bullet).unwrap().levels[0]
+                    .properties
+                    .format,
+                ListNumberFormat::Bullet
+            );
+            assert_eq!(
+                restored.identifiers.preserved_abstract_numbering_ids,
+                document.identifiers.preserved_abstract_numbering_ids
+            );
+            assert_eq!(
+                restored.identifiers.preserved_numbering_instance_ids,
+                document.identifiers.preserved_numbering_instance_ids
+            );
+        }
+    }
+
+    #[cfg(all(feature = "digital-signatures", not(target_arch = "wasm32")))]
+    #[test]
+    fn issue432_numbering_sign_unchanged_save_mutation_and_reopen() {
+        let mut document = Document::new();
+        document.add_paragraph("signed");
+        let decimal = document
+            .add_numbering_definition(&[ListLevel::new(ListNumberFormat::Decimal)])
+            .unwrap();
+        let bullet = document
+            .add_numbering_definition(&[ListLevel::new(ListNumberFormat::Bullet)])
+            .unwrap();
+        let first = document.add_numbering_instance(bullet, &[]).unwrap();
+        document.add_numbering_instance(decimal, &[]).unwrap();
+        document.paragraph_mut(0).unwrap().set_numbering(first, 0);
+        document
+            .sign(
+                &signature_fixture("TEST_PRIVATE_KEY_PKCS8_BASE64"),
+                &signature_fixture("TEST_CERTIFICATE_DER_BASE64"),
+            )
+            .unwrap();
+        assert_eq!(
+            document.numbering_instance(first).unwrap().definition_id,
+            bullet
+        );
+        assert_eq!(
+            document.numbering_definition(bullet).unwrap().levels[0]
+                .properties
+                .format,
+            ListNumberFormat::Bullet
+        );
+        let path =
+            std::env::temp_dir().join(format!("rdocx-f277b-signed-{}.docx", std::process::id()));
+        document.save(&path).unwrap();
+        let unchanged = Document::open(&path).unwrap();
+        let unchanged_reports = unchanged.verify_signatures().unwrap();
+        assert_eq!(unchanged_reports.len(), 1, "actual retained signature");
+        assert!(
+            unchanged_reports[0].cryptographically_valid && unchanged_reports[0].coverage_complete
+        );
+        document.add_numbering_instance(bullet, &[]).unwrap();
+        document.save(&path).unwrap();
+        let changed = Document::open(&path).unwrap();
+        assert!(
+            changed
+                .verify_signatures()
+                .unwrap()
+                .iter()
+                .any(|report| !report.cryptographically_valid || !report.coverage_complete)
+        );
+        std::fs::remove_file(path).unwrap();
+        let location = document.paragraph_story_location(0).unwrap().unwrap();
+        document.create_footnote(&location, "post-sign").unwrap();
+        assert_eq!(
+            document.numbering_instance(first).unwrap().definition_id,
+            bullet
+        );
+        assert_eq!(
+            document.numbering_definition(bullet).unwrap().levels[0]
+                .properties
+                .format,
+            ListNumberFormat::Bullet
+        );
+        document.add_numbering_instance(bullet, &[]).unwrap();
     }
 
     #[cfg(all(feature = "digital-signatures", not(target_arch = "wasm32")))]

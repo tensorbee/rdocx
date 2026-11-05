@@ -1786,6 +1786,16 @@ one effective header variant without changing the caller-owned even-and-odd
 header setting. Every operation serializes and reopens the staged package
 before publishing it.
 
+Normal footnote and endnote authoring appends explicit separator and
+continuationSeparator records at ids -1 and 0 when their actual qualified types
+are absent and those ids are unoccupied. A selected pending normal-note id is
+already occupied for this decision. Existing raw records and collisions
+remain untouched, and special records are not normal story owners. Fresh note
+markers write run properties before the reference, then one space run and the
+unchanged caller text. Custom marks likewise precede one new space run. Imported
+note text is unchanged. The existing additive flush appends new footnote
+fragments to the original part bytes, preserving producer metadata.
+
 Footnotes, endnotes, and authored separator and continuation records are laid
 out into a `NoteRegistry` before pagination, and the paginator reserves, splits
 and draws them. Note placement is part of
@@ -2038,8 +2048,9 @@ owners or editable text.
 Footnote creation and removal stage the note part and body references as one
 package candidate. Reorder moves the exact note element bytes and retains its
 internal ID. Common story content, relationship, and comment operations edit
-rich note bodies through the resolved note owner. Each successful mutation
-reopens the candidate before it replaces live state.
+rich note bodies through the resolved note owner. `create_footnote_at` and
+`create_endnote_at` reopen the candidate before replacing live state. `add_footnote` publishes its additive note update through
+`commit_staged_mutation` without reopening.
 
 Word writes a text box twice in a run's
 `mc:AlternateContent`, as DrawingML in `mc:Choice` and as VML in

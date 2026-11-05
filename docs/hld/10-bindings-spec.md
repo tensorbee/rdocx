@@ -1348,6 +1348,26 @@ direct modes. These getter reads create no owner nodes or scope generations.
 
 ## Native Word facade stability
 
+New runs from all three Paragraph hyperlink constructors reference character
+style id `Hyperlink` and preserve later direct formatting. Shared staged
+preparation adds a missing definition with colour `0563C1` and single underline
+when a physical typed source run references that id. Body tables and controls,
+retained revisions, headers, footers, footnotes and endnotes participate.
+Opaque XML and comments do not supply references. Existing style ids and bare
+imported links retain their semantics. Output publication retains the existing
+field-normalization assign-back condition. A real committed staged mutation
+can install the prepared definition in the live document.
+
+Returned numbering ids remain live handles throughout the same Document,
+including signing, normalizing save and same-document note or picture reopen.
+A temporary emission permutation writes deterministic first-use package ids,
+then restores the live model, body numbering properties and identifier sets on
+both success and failure. Separate private abstract and instance maps translate
+both actual reopen paths back to live ids while retaining imported-id custody.
+An unchanged save after signing preserves the signature. A process reopen
+starts a new Document whose handles use the published ids. `part_xml` exposes
+published package ids, while numbering queries use the live model.
+
 Native Rust exposes `Document::paragraph_visibility(&self) -> Result<Vec<bool>>`.
 Each flag matches one `Document::paragraphs()` item in encounter order. The
 inventory includes direct body paragraphs and admitted block-control

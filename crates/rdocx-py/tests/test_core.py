@@ -5601,7 +5601,7 @@ def test_fx201_note_reference_creation_uses_checked_paragraph():
     reference = document.add_paragraph("reference")
     retired_run = reference.runs[0]
     note = document.add_footnote(reference, "note content")
-    assert note.paragraphs[0].text == "note content"
+    assert note.paragraphs[0].text == " note content"
     assert reference.text == "reference"
     with pytest.raises(rdocx.StaleElementError):
         _ = retired_run.text
@@ -6031,7 +6031,7 @@ def test_fx201_checked_note_cell_boundary_preserves_other_owners_and_refuses_sta
     table.cell(0, 0).text = "cell reference"
     reference = document.tables[0].cell(0, 0).paragraphs[0].runs[0]
     note = getattr(document, "add_" + family)(reference, family + " content")
-    assert note.paragraphs[0].text == family + " content"
+    assert note.paragraphs[0].text == " " + family + " content"
     before = document.to_bytes()
     with pytest.raises(rdocx.StaleElementError):
         getattr(document, "add_" + family)(reference, "stale refused")
@@ -10422,7 +10422,7 @@ def test_form_protection_and_permission_composition():
         (cell_run, "cell held"),
         (header, "header held"),
         (header_run, "header held"),
-        (note, "note held"),
+        (note, " note held"),
         (note_run, "note held"),
     )
     before = document.to_bytes()
@@ -10468,7 +10468,7 @@ def test_form_protection_and_permission_composition():
     assert document.paragraphs[0].text == body.text == "body held"
     assert document.tables[0].cell(0, 0).text == cell.text == "cell held"
     assert document.section(0).header.paragraphs[0].text == header.text == "header held"
-    assert _story_paragraph(document, "footnote").text == note.text == "note held"
+    assert _story_paragraph(document, "footnote").text == note.text == " note held"
     removed = document.remove_document_protection()
     assert removed is not None and _protection_fields(removed) == _protection_fields(full)
     with pytest.raises(AttributeError):
@@ -16540,3 +16540,53 @@ def test_issue430_normalized_element_ids_require_complete_custody_selection():
     rejected.reject_all()
     with zipfile.ZipFile(io.BytesIO(rejected.to_bytes())) as archive:
         assert "word/footnotes.xml" not in archive.namelist()
+
+
+@pytest.mark.parametrize("family", ("footnote", "endnote"))
+@pytest.mark.parametrize("text", ("", "Source note", " text"))
+def test_issue432_note_defaults_and_space(family, text):
+    import rdocx
+
+    document = rdocx.Document()
+    document.add_paragraph("reference")
+    note = getattr(document, "add_" + family)(document.paragraphs[0], text)
+    assert note.id == 2
+    assert note.paragraphs[0].text == " " + text
+    with zipfile.ZipFile(io.BytesIO(document.to_bytes())) as archive:
+        notes = ET.fromstring(archive.read("word/" + family + "s.xml"))
+        settings = archive.read("word/settings.xml")
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    assert sorted(item.get(w + "type", "normal") for item in notes) == [
+        "continuationSeparator", "normal", "separator"
+    ]
+    for item in notes:
+        if item.get(w + "type") != "normal":
+            assert not list(item.iter(w + "t"))
+    assert b"footnotePr" not in settings and b"endnotePr" not in settings
+
+
+def test_issue432_hyperlink_style_and_numbering_survive_real_publishers():
+    import rdocx
+
+    document = rdocx.Document()
+    decimal = document.add_numbering_definition([rdocx.ListLevel(format="decimal")])
+    bullet = document.add_numbering_definition([rdocx.ListLevel(format="bullet")])
+    instance = document.add_numbering_instance(bullet)
+    document.add_numbering_instance(decimal)
+    document.add_paragraph("reference").numbering = (instance, 0)
+    document.paragraphs[0].add_hyperlink("external", "https://example.test/").font.bold = True
+    document.add_footnote(document.paragraphs[0], "note")
+    # This Python publisher uses the actual configured story-picture path.
+    document.add_picture(_one_pixel_png(), filename="pixel.png")
+    document.add_numbering_instance(bullet)
+    with zipfile.ZipFile(io.BytesIO(document.to_bytes())) as archive:
+        body = ET.fromstring(archive.read("word/document.xml"))
+        styles = ET.fromstring(archive.read("word/styles.xml"))
+        numbering = ET.fromstring(archive.read("word/numbering.xml"))
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    assert body.find(".//" + w + "hyperlink/" + w + "r/" + w + "rPr/" + w + "rStyle").get(w + "val") == "Hyperlink"
+    assert styles.find(f"{w}style[@{w}styleId='Hyperlink']") is not None
+    abstracts = {item.get(w + "abstractNumId"): item for item in numbering.findall(w + "abstractNum")}
+    for item in (numbering.findall(w + "num")[0], numbering.findall(w + "num")[-1]):
+        definition = item.find(w + "abstractNumId").get(w + "val")
+        assert abstracts[definition].find(w + "lvl/" + w + "numFmt").get(w + "val") == "bullet"

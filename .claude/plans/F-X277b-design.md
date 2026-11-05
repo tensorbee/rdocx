@@ -63,6 +63,37 @@ unique RED/GREEN and scoped checks, with native/schema/installed/hash/full
 riders retained for the final integrated union. No AS_BUILT or SPRINT_TRACKER
 completion follows the prefix. Root's affected final review is required.
 
+## Operative local implementation checklist
+
+The operative A277-2/3/6 rows alone govern this worker. Other inherited
+implementation items remain historical or delegated. No donor patch was adopted.
+The original exhausted design-peer counters are unchanged. Independent
+implementation pass1 found D1. Its first repair has actual RED/GREEN evidence.
+Actual independent Root pass2 reports zero defects and zero smells, closes D1
+and accepts local sprint-final-acceptance preparation. Two implementation
+passes are consumed. No further confirmation review is needed for this source.
+
+- [x] Revalidate clean claimed Base d1da8b8e8d6c9f26821e71b19e11fa0a2d44229e,
+  completed LOCAL provider records and ancestor1c69b7e0.
+- [x] Implement additive source-qualified missing specials and exact note spacing,
+  retaining both allocation formulas, imported raw bytes and occupied ids.
+- [x] Style the three actual hyperlink constructors and prepare missing definitions
+  through physical typed source references at shared staged preparation.
+- [x] Implement live numbering maps, temporary emission with unconditional restore,
+  both inverse real reopen paths and unchanged normalizing assign-back semantics.
+- [x] Update exactly HLD03, HLD04 and HLD10 with B-only implemented intent.
+- [x] Finish final affected local regression refresh and scoped format/lint checks.
+- [x] Obtain independent zero-defect, zero-smell implementation microscope,
+  actual Root final pass2 in .claude/reviews/F-X277b-implementation-codex-final-2.md.
+- [ ] Final integrated union: schema/native/oracle, installed Python binding and
+  typing, C1 composition, deterministic hash wave, full/native/hosted/packaging
+  and all inherited final riders. No baseline was changed by this worker.
+
+Actual local per-case provenance remains in the existing progress record and
+/private/tmp/rdocx-s96-f277b-local-evidence/PROVENANCE.md. Fixture failures and
+Base PASS controls are distinguished from observed semantic RED. The plan
+remains approved for sprint-final-acceptance preparation only.
+
 ## Split scope and inherited review lineage
 
 Operative second split: only A277-2, A277-3 and A277-6 remain in this child. A277-4, A277-5, A277-7 and the WHOLE A277-8 obligation, including actual text/report/replacement and text-box agreement, belong exclusively to F-X277c. This rule overrides every inherited scope range, acceptance row, checklist, risk rider and historical residual below. Retained C-owned text is historical context, never duplicate delivery. In particular the old inferred CLI text-box count mismatch and proposed waiver are superseded pending actual current observations. R-A277-7 foreign one-paragraph TOC remains recorded by C. F272 remains a genuine dependency of B. All three design peers remain exhausted. B and parent remain draft. Root affected final audit is required.

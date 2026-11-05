@@ -153,6 +153,13 @@ source part, owner kind, source-order ordinal, and a structural fingerprint.
 Any changed owner makes a retained identity stale before indexed content can be
 resolved.
 
+Ordinary footnote and endnote creation adds missing explicit separator and
+continuationSeparator records within the note part when their conventional
+ids are free. Actual namespace-qualified source types determine presence,
+including positive-id specials. Occupied ids and imported raw bytes remain
+unchanged. Creation does not add settings `w:footnotePr` or `w:endnotePr` lists.
+The explicit note-policy API retains its separate settings behavior.
+
 Rich footnote authoring reserves the relationship-resolved footnotes part,
 adds one normal note with an available internal ID, and inserts its body
 reference in one staged package. Reorder moves only the selected note element

@@ -5688,7 +5688,7 @@ pub(crate) enum RawNoteType {
     Unknown,
 }
 
-fn raw_note_attribute_in_scope(
+pub(crate) fn raw_note_attribute_in_scope(
     xml: &str,
     inherited: &[(String, String)],
     wanted: &str,
@@ -5725,7 +5725,10 @@ fn raw_note_attribute_in_scope(
     Ok(None)
 }
 
-fn raw_note_type_in_scope(xml: &str, inherited: &[(String, String)]) -> Result<RawNoteType> {
+pub(crate) fn raw_note_type_in_scope(
+    xml: &str,
+    inherited: &[(String, String)],
+) -> Result<RawNoteType> {
     Ok(
         match raw_note_attribute_in_scope(xml, inherited, "type")?.as_deref() {
             None => RawNoteType::Omitted,

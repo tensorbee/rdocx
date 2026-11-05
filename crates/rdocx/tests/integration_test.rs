@@ -38902,3 +38902,576 @@ fn issue430_custody_note_rejection_preserves_opaque_deleted_text_literals() {
         issue430_assert_settled(&mut rejected, &[5], true);
     }
 }
+
+#[test]
+fn issue432_note_mark_order_separators_and_space() {
+    let mut doc = Document::new();
+    doc.add_paragraph("body");
+    assert_eq!(doc.add_footnote("Source note"), 2);
+    let location = doc.paragraph_story_location(0).unwrap().unwrap();
+    doc.create_endnote(&location, "End note").unwrap();
+    for (part, word) in [
+        ("word/footnotes.xml", "footnote"),
+        ("word/endnotes.xml", "endnote"),
+    ] {
+        let xml = doc.part_xml(part).unwrap();
+        assert!(
+            xml.contains("w:type=\"separator\""),
+            "missing separator: {xml}"
+        );
+        assert!(
+            xml.contains("w:type=\"continuationSeparator\""),
+            "missing continuation: {xml}"
+        );
+        assert!(xml.contains(&format!("<w:{word}Ref/>")), "{xml}");
+        assert!(
+            xml.contains("<w:t xml:space=\"preserve\"> </w:t>"),
+            "missing space run: {xml}"
+        );
+    }
+    assert_eq!(
+        doc.footnotes().iter().find(|(id, _)| *id == 2).unwrap().1,
+        " Source note"
+    );
+}
+
+#[test]
+fn issue432_low_level_hyperlinks_carry_hyperlink_style() {
+    let mut doc = Document::new();
+    let rid = doc.add_hyperlink_relationship("https://example.test");
+    doc.add_paragraph("").add_hyperlink("link", &rid).bold(true);
+    let body = doc.part_xml("word/document.xml").unwrap();
+    assert!(body.contains("<w:rStyle w:val=\"Hyperlink\""), "{body}");
+    let styles = doc.part_xml("word/styles.xml").unwrap();
+    assert!(styles.contains("w:styleId=\"Hyperlink\""), "{styles}");
+    assert!(
+        doc.style("Hyperlink").is_none(),
+        "output must not force assign-back"
+    );
+    let location = doc.paragraph_story_location(0).unwrap().unwrap();
+    doc.create_footnote(&location, "note").unwrap();
+    assert!(
+        doc.style("Hyperlink").is_some(),
+        "real reopen commits definition"
+    );
+}
+
+#[test]
+fn issue432_numbering_id_survives_note_and_picture_publication() {
+    let mut doc = Document::new();
+    doc.add_paragraph("body");
+    let unused = doc
+        .add_numbering_definition(&[ListLevel::new(ListNumberFormat::Decimal)])
+        .unwrap();
+    let bullet = doc
+        .add_numbering_definition(&[ListLevel::new(ListNumberFormat::Bullet)])
+        .unwrap();
+    let first = doc.add_numbering_instance(bullet, &[]).unwrap();
+    doc.add_numbering_instance(unused, &[]).unwrap();
+    let location = doc.paragraph_story_location(0).unwrap().unwrap();
+    doc.create_footnote(&location, "note").unwrap();
+    assert_eq!(
+        doc.numbering_instance(first).unwrap().definition_id,
+        bullet,
+        "same-document reopen must preserve live definition id"
+    );
+    assert_eq!(
+        doc.numbering_definition(bullet).unwrap().levels[0]
+            .properties
+            .format,
+        ListNumberFormat::Bullet
+    );
+    let body = doc
+        .stories()
+        .unwrap()
+        .into_iter()
+        .find(|story| story.kind() == StoryKind::Body)
+        .unwrap();
+    doc.add_picture_with_options(
+        &body,
+        &mhtml_pixel_png(),
+        "pixel.png",
+        rdocx::PictureOptions {
+            width: Length::pt(12.0),
+            height: Length::pt(12.0),
+            crop: None,
+            anchor: None,
+            name: None,
+            description: None,
+            title: None,
+            decorative: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(doc.numbering_instance(first).unwrap().definition_id, bullet);
+    assert_eq!(
+        doc.numbering_definition(bullet).unwrap().levels[0]
+            .properties
+            .format,
+        ListNumberFormat::Bullet
+    );
+    doc.add_numbering_instance(bullet, &[]).unwrap();
+    let bytes = doc.to_bytes().unwrap();
+    let reopened = Document::from_bytes(&bytes).unwrap();
+    assert_eq!(
+        reopened.numbering_definition(0).unwrap().levels[0]
+            .properties
+            .format,
+        ListNumberFormat::Bullet
+    );
+    assert_eq!(
+        doc.numbering_definition(bullet).unwrap().levels[0]
+            .properties
+            .format,
+        ListNumberFormat::Bullet
+    );
+}
+
+#[test]
+fn issue432_note_defaults_preserve_whitespace_imports_and_collisions() {
+    for endnote in [false, true] {
+        for mark in [None, Some("* ")] {
+            for text in ["", " text", "text"] {
+                let mut doc = Document::new();
+                doc.add_paragraph("body");
+                let location = doc.paragraph_story_location(0).unwrap().unwrap();
+                let id = match (endnote, mark) {
+                    (false, None) => doc.create_footnote(&location, text),
+                    (true, None) => doc.create_endnote(&location, text),
+                    (false, Some(mark)) => doc.create_footnote_with_mark(&location, text, mark),
+                    (true, Some(mark)) => doc.create_endnote_with_mark(&location, text, mark),
+                }
+                .unwrap();
+                assert_eq!(id, 2);
+                let part = if endnote {
+                    "word/endnotes.xml"
+                } else {
+                    "word/footnotes.xml"
+                };
+                let xml = doc.part_xml(part).unwrap();
+                let notes = rdocx_oxml::footnotes::CT_Footnotes::from_xml(xml.as_bytes()).unwrap();
+                let note = notes.footnotes.iter().find(|note| note.id == id).unwrap();
+                assert_eq!(
+                    note.paragraphs[0].text(),
+                    format!("{} {text}", mark.unwrap_or(""))
+                );
+                assert_eq!(note.paragraphs[0].runs.len(), 3);
+                for special in notes.footnotes.iter().filter(|note| note.id <= 0) {
+                    assert!(special.paragraphs[0].runs[0].content.is_empty());
+                    assert!(special.paragraphs[0].runs[0].properties.is_none());
+                }
+                assert_eq!(xml.matches("w:type=\"separator\"").count(), 1);
+                assert_eq!(xml.matches("w:type=\"continuationSeparator\"").count(), 1);
+                let location = doc.paragraph_story_location(0).unwrap().unwrap();
+                if endnote {
+                    doc.create_endnote(&location, "second").unwrap();
+                } else {
+                    doc.create_footnote(&location, "second").unwrap();
+                }
+                let again = doc.part_xml(part).unwrap();
+                assert_eq!(again.matches("w:type=\"separator\"").count(), 1);
+                assert_eq!(again.matches("w:type=\"continuationSeparator\"").count(), 1);
+                assert!(
+                    !doc.part_xml("word/settings.xml")
+                        .unwrap()
+                        .contains("notePr")
+                );
+                let before = doc.to_bytes().unwrap();
+                let location = doc.paragraph_story_location(0).unwrap().unwrap();
+                assert!(
+                    doc.create_footnote_with_mark(&location, "refused", "")
+                        .is_err()
+                );
+                assert_eq!(doc.to_bytes().unwrap(), before);
+            }
+        }
+    }
+    let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    for endnote in [false, true] {
+        for collisions in [false, true] {
+            let mut seed = Document::new();
+            seed.add_paragraph("body");
+            let location = seed.paragraph_story_location(0).unwrap().unwrap();
+            if endnote {
+                seed.create_endnote(&location, "seed").unwrap();
+            } else {
+                seed.create_footnote(&location, "seed").unwrap();
+            }
+            let mut package =
+                OpcPackage::from_reader(std::io::Cursor::new(seed.to_bytes().unwrap())).unwrap();
+            let (part, root, item) = if endnote {
+                ("/word/endnotes.xml", "endnotes", "endnote")
+            } else {
+                ("/word/footnotes.xml", "footnotes", "footnote")
+            };
+            let imported = if collisions {
+                format!(
+                    r#"<n:{item} n:id="-1" n:type="normal" x:keep="raw"><n:p><n:r><n:t>OLD</n:t></n:r></n:p></n:{item}><n:{item} n:id="0"><n:p/></n:{item}>"#
+                )
+            } else {
+                // The legacy typed fallback calls this a Separator. Its actual
+                // qualified type is unknown, so it cannot suppress the new one.
+                format!(
+                    r#"<n:{item} n:id="-7" n:type="unknown" x:keep="raw"><n:p><n:r><n:t>OLD</n:t></n:r></n:p></n:{item}>"#
+                )
+            };
+            let source = format!(
+                r#"<n:{root} xmlns:n="{word}" xmlns:x="urn:producer">{imported}</n:{root}>"#
+            );
+            package.set_part(part, source.into_bytes());
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            package.write_to(&mut bytes).unwrap();
+            let mut doc = Document::from_bytes(bytes.get_ref()).unwrap();
+            let location = doc.paragraph_story_location(0).unwrap().unwrap();
+            if endnote {
+                doc.create_endnote(&location, "new").unwrap();
+            } else {
+                assert_eq!(doc.add_footnote("new"), if collisions { 1 } else { -6 });
+            }
+            let output = doc.part_xml(part).unwrap();
+            assert!(
+                output.contains(&imported),
+                "imported bytes changed: {output}"
+            );
+            if !endnote {
+                let location = doc.paragraph_story_location(0).unwrap().unwrap();
+                doc.create_footnote(&location, "checked publication")
+                    .unwrap();
+                assert!(
+                    doc.part_xml(part).unwrap().contains(&imported),
+                    "create_footnote_at must also preserve exact imported bytes"
+                );
+            }
+
+            assert_eq!(
+                output.contains("w:type=\"separator\""),
+                !collisions,
+                "{output}"
+            );
+            assert_eq!(
+                output.contains("w:type=\"continuationSeparator\""),
+                !collisions,
+                "{output}"
+            );
+        }
+    }
+    // Keep the legacy max-based allocator's separator-only result of1.
+    let mut doc = Document::new();
+    doc.add_footnote("seed");
+    let mut package =
+        OpcPackage::from_reader(std::io::Cursor::new(doc.to_bytes().unwrap())).unwrap();
+    package.set_part("/word/footnotes.xml", format!(r#"<w:footnotes xmlns:w="{word}"><w:footnote w:type="separator" w:id="-1"><w:p/></w:footnote><w:footnote w:type="continuationSeparator" w:id="0"><w:p/></w:footnote></w:footnotes>"#).into_bytes());
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    package.write_to(&mut bytes).unwrap();
+    let mut imported = Document::from_bytes(bytes.get_ref()).unwrap();
+    assert_eq!(imported.add_footnote("next"), 1);
+}
+
+#[test]
+fn issue432_hyperlink_publication_uses_typed_sources_and_style_ids() {
+    let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    for (source, expected) in [
+        (
+            r#"<w:p><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>typed</w:t></w:r></w:p>"#,
+            true,
+        ),
+        (
+            r#"<w:p><w:sdt><w:sdtPr/><w:sdtContent><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>control</w:t></w:r></w:sdtContent></w:sdt></w:p>"#,
+            true,
+        ),
+        (
+            r#"<w:p><w:del w:id="1" w:author="a"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:delText>deleted</w:delText></w:r></w:del></w:p>"#,
+            true,
+        ),
+        (
+            r#"<w:p><w:hyperlink w:anchor="target"><w:r><w:t>bare</w:t></w:r></w:hyperlink></w:p>"#,
+            false,
+        ),
+        (
+            r#"<w:p><x:opaque xmlns:x="urn:opaque"><w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>opaque</w:t></w:r></x:opaque></w:p>"#,
+            false,
+        ),
+        (r#"<w:p><w:r><w:t>plain</w:t></w:r></w:p>"#, false),
+    ] {
+        let doc = fx268_document_with_xml(&format!(
+            r#"<w:document xmlns:w="{word}"><w:body>{source}</w:body></w:document>"#
+        ));
+        assert!(doc.style("Hyperlink").is_none());
+        assert_eq!(
+            doc.part_xml("word/styles.xml")
+                .unwrap()
+                .contains("w:styleId=\"Hyperlink\""),
+            expected,
+            "{source}"
+        );
+    }
+    let mut doc = Document::new();
+    doc.add_style(
+        StyleBuilder::character("MyLink", "Hyperlink").run_properties(CT_RPr {
+            bold: Some(true),
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    let rid = doc.add_hyperlink_relationship("https://example.test");
+    let mut paragraph = doc.add_paragraph("");
+    paragraph
+        .add_hyperlink_with_tooltip("external", &rid, Some("tip"))
+        .unwrap()
+        .italic(true)
+        .color("123456");
+    paragraph
+        .add_internal_hyperlink("internal", "target", None)
+        .bold(true);
+    let body = doc.part_xml("word/document.xml").unwrap();
+    assert_eq!(body.matches("<w:rStyle w:val=\"Hyperlink\"").count(), 2);
+    assert!(body.contains("123456"));
+    let styles = doc.part_xml("word/styles.xml").unwrap();
+    assert!(styles.contains("w:styleId=\"MyLink\""));
+    assert!(styles.contains("w:styleId=\"Hyperlink\""));
+    doc.add_style(
+        StyleBuilder::paragraph("Hyperlink", "producer").run_properties(CT_RPr {
+            color: Some("ABCDEF".into()),
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    let styles = doc.part_xml("word/styles.xml").unwrap();
+    assert!(styles.contains("ABCDEF"));
+    assert!(!styles.contains("0563C1"));
+}
+
+#[test]
+fn issue432_numbering_published_ids_agree_across_output_modes_and_orders() {
+    let mut outputs = Vec::new();
+    for reversed in [false, true] {
+        let mut doc = Document::new();
+        let first = doc
+            .add_numbering_definition(&[ListLevel::new(if reversed {
+                ListNumberFormat::Decimal
+            } else {
+                ListNumberFormat::Bullet
+            })])
+            .unwrap();
+        let second = doc
+            .add_numbering_definition(&[ListLevel::new(if reversed {
+                ListNumberFormat::Bullet
+            } else {
+                ListNumberFormat::Decimal
+            })])
+            .unwrap();
+        let (bullet, decimal) = if reversed {
+            (second, first)
+        } else {
+            (first, second)
+        };
+        let (bullet_num, decimal_num) = if reversed {
+            let decimal_num = doc.add_numbering_instance(decimal, &[]).unwrap();
+            (
+                doc.add_numbering_instance(bullet, &[]).unwrap(),
+                decimal_num,
+            )
+        } else {
+            let bullet_num = doc.add_numbering_instance(bullet, &[]).unwrap();
+            (
+                bullet_num,
+                doc.add_numbering_instance(decimal, &[]).unwrap(),
+            )
+        };
+        doc.add_paragraph("bullet").numbering(bullet_num, 0);
+        doc.add_paragraph("decimal").numbering(decimal_num, 0);
+        let bytes = doc.to_bytes().unwrap();
+        let class = doc.to_bytes_as(WordPackageClass::Document).unwrap();
+        assert_eq!(bytes, class);
+        let flat = doc.to_flat_opc_bytes().unwrap();
+        let from_flat = Document::from_flat_opc_bytes(&flat).unwrap();
+        let root = |xml: String| {
+            xml.split_once("?>")
+                .map_or(xml.as_str(), |(_, root)| root)
+                .trim_start()
+                .to_owned()
+        };
+        assert_eq!(
+            root(doc.part_xml("word/numbering.xml").unwrap()),
+            root(from_flat.part_xml("word/numbering.xml").unwrap())
+        );
+        #[cfg(all(feature = "agile-encryption", not(target_arch = "wasm32")))]
+        {
+            let encrypted = doc.to_encrypted_bytes("password").unwrap();
+            let reopened = Document::from_encrypted_bytes(&encrypted, "password").unwrap();
+            assert_eq!(
+                root(doc.part_xml("word/numbering.xml").unwrap()),
+                root(reopened.part_xml("word/numbering.xml").unwrap())
+            );
+        }
+        assert_eq!(
+            doc.numbering_instance(bullet_num).unwrap().definition_id,
+            bullet
+        );
+        outputs.push(bytes);
+    }
+    assert_eq!(
+        outputs[0], outputs[1],
+        "first-use equivalent constructions publish identical bytes"
+    );
+}
+
+#[test]
+fn issue432_hyperlink_definition_publication_covers_named_stories() {
+    let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let styled = r#"<w:r><w:rPr><w:rStyle w:val="Hyperlink"/></w:rPr><w:t>source</w:t></w:r>"#;
+    for kind in [
+        StoryKind::Header,
+        StoryKind::Footer,
+        StoryKind::Footnote,
+        StoryKind::Endnote,
+        StoryKind::Comment,
+    ] {
+        let mut seed = Document::new();
+        seed.add_paragraph("body");
+        let location = seed.paragraph_story_location(0).unwrap().unwrap();
+        match kind {
+            StoryKind::Header => seed.set_header("seed"),
+            StoryKind::Footer => seed.set_footer("seed"),
+            StoryKind::Footnote => {
+                seed.create_footnote(&location, "seed").unwrap();
+            }
+            StoryKind::Endnote => {
+                seed.create_endnote(&location, "seed").unwrap();
+            }
+            StoryKind::Comment => {
+                seed.add_comment(
+                    RunRange {
+                        start: RunPosition {
+                            body_index: 0,
+                            run_index: 0,
+                        },
+                        end: RunPosition {
+                            body_index: 0,
+                            run_index: 1,
+                        },
+                    },
+                    "Author",
+                    None,
+                    "seed",
+                )
+                .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let part = seed
+            .stories()
+            .unwrap()
+            .into_iter()
+            .find(|story| story.kind() == kind)
+            .unwrap()
+            .part_name()
+            .to_owned();
+        let mut package =
+            OpcPackage::from_reader(std::io::Cursor::new(seed.to_bytes().unwrap())).unwrap();
+        let xml = match kind {
+            StoryKind::Header => format!(r#"<w:hdr xmlns:w="{word}"><w:p>{styled}</w:p></w:hdr>"#),
+            StoryKind::Footer => format!(r#"<w:ftr xmlns:w="{word}"><w:p>{styled}</w:p></w:ftr>"#),
+            StoryKind::Footnote => format!(
+                r#"<w:footnotes xmlns:w="{word}"><w:footnote w:id="2"><w:p>{styled}</w:p></w:footnote></w:footnotes>"#
+            ),
+            StoryKind::Endnote => format!(
+                r#"<w:endnotes xmlns:w="{word}"><w:endnote w:id="2"><w:p>{styled}</w:p></w:endnote></w:endnotes>"#
+            ),
+            StoryKind::Comment => format!(
+                r#"<w:comments xmlns:w="{word}"><w:comment w:id="0" w:author="Author"><w:p>{styled}</w:p></w:comment></w:comments>"#
+            ),
+            _ => unreachable!(),
+        };
+        package.set_part(&part, xml.as_bytes().to_vec());
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        package.write_to(&mut bytes).unwrap();
+        let doc = Document::from_bytes(bytes.get_ref()).unwrap();
+        assert!(doc.style("Hyperlink").is_none());
+        assert_eq!(
+            doc.part_xml("word/styles.xml")
+                .unwrap()
+                .contains("w:styleId=\"Hyperlink\""),
+            kind != StoryKind::Comment,
+            "{kind:?}"
+        );
+        assert_eq!(
+            doc.part_xml(&part).unwrap(),
+            xml,
+            "style scan must not rewrite source story"
+        );
+    }
+}
+
+#[test]
+fn issue432_pending_signed_normal_id_occupies_special_slot() {
+    let word = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+    let mut failures = Vec::new();
+    for existing_id in [-2, -1] {
+        for explicit in [false, true] {
+            let mut seed = Document::new();
+            seed.add_footnote("seed");
+            let mut package =
+                OpcPackage::from_reader(std::io::Cursor::new(seed.to_bytes().unwrap())).unwrap();
+            let kind = if explicit { " w:type=\"normal\"" } else { "" };
+            let imported = format!(
+                r#"<w:footnote w:id="{existing_id}"{kind} producer="exact"><w:p><w:r><w:t>OLD</w:t></w:r></w:p></w:footnote>"#
+            );
+            package.set_part(
+                "/word/footnotes.xml",
+                format!(r#"<w:footnotes xmlns:w="{word}">{imported}</w:footnotes>"#).into_bytes(),
+            );
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            package.write_to(&mut bytes).unwrap();
+            let mut doc = Document::from_bytes(bytes.get_ref()).unwrap();
+            let id = doc.add_footnote("new normal");
+            assert_eq!(
+                id,
+                existing_id + 1,
+                "legacy allocator must remain unchanged"
+            );
+            let output = doc.part_xml("word/footnotes.xml").unwrap();
+            assert!(
+                output.contains(&imported),
+                "exact imported raw owner must survive"
+            );
+            let notes = rdocx_oxml::footnotes::CT_Footnotes::from_xml(output.as_bytes()).unwrap();
+            let ids = notes
+                .footnotes
+                .iter()
+                .map(|note| note.id)
+                .collect::<std::collections::HashSet<_>>();
+            if ids.len() != notes.footnotes.len() {
+                failures.push(format!(
+                    "existing={existing_id}, explicit={explicit}: duplicate ids {:?}",
+                    notes
+                        .footnotes
+                        .iter()
+                        .map(|note| (note.id, note.note_type))
+                        .collect::<Vec<_>>()
+                ));
+            }
+            assert!(notes.footnotes.iter().any(|note| note.id == id
+                && note.note_type == rdocx_oxml::footnotes::NoteType::Normal
+                && note.paragraphs[0].text() == " new normal"));
+            if notes.footnotes.iter().any(|note| {
+                note.id == id && note.note_type != rdocx_oxml::footnotes::NoteType::Normal
+            }) {
+                failures.push(format!("existing={existing_id}, explicit={explicit}: pending normal slot also acquired a special"));
+            }
+            let reopened = Document::from_bytes(&doc.to_bytes().unwrap()).unwrap();
+            assert!(
+                reopened
+                    .footnotes()
+                    .contains(&(id, " new normal".to_owned()))
+            );
+            assert!(
+                reopened
+                    .part_xml("word/footnotes.xml")
+                    .unwrap()
+                    .contains(&imported)
+            );
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
