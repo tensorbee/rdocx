@@ -40,8 +40,8 @@ regenerated, never hand-edited.
 | M22, Word depth | 12 | 12 | 0 | 0 |
 | M23, From-scratch business documents | 24 | 24 | 0 | 0 |
 | M24, Modern DOCX authoring completeness | 54 | 32 | 0 | 22 |
-| X, Cross-cutting | 306 | 276 | 14 | 12 |
-| **Total** | **637** | **558** | **14** | **61** |
+| X, Cross-cutting | 306 | 276 | 15 | 11 |
+| **Total** | **637** | **558** | **15** | **60** |
 <!-- AUTOGEN:backlog-summary END -->
 
 ## All F-IDs
@@ -848,7 +848,7 @@ HLD14 contract before adopting contributor changes.
 | F-X276 | Complete rpptx fit, table rows, fit text, Markdown and slide indexing | S96 | M | in-progress |
 | F-X277 | Complete Issue432 through child stories, completion umbrella | S96 | L | pending |
 | F-X277a | Emit authored radical degrees and preserve imported absence | S96 | S | in-progress |
-| F-X277b | Complete Word-like notes, links and numbering | S96 | L | pending |
+| F-X277b | Complete Word-like notes, links and numbering | S96 | L | in-progress |
 | F-X277c | Complete cells, authored TOC and chart-excluding replacement agreement | S96 | M | in-progress |
 | F-X278 | Complete Word rendering fidelity and font policy | S96 | L | in-progress |
 | F-X279 | Complete Issue434 through children, completion umbrella | S96 | L | pending |

@@ -27,7 +27,7 @@
 | F-X276 | Complete rpptx fit, table rows, fit text, Markdown and slide indexing | M | in-progress | codex |
 | F-X277 | Complete Issue432 through child stories, completion umbrella | L | pending | - |
 | F-X277a | Emit authored radical degrees and preserve imported absence | S | in-progress | codex |
-| F-X277b | Complete Word-like notes, links and numbering | L | pending | - |
+| F-X277b | Complete Word-like notes, links and numbering | L | in-progress | codex |
 | F-X277c | Complete cells, authored TOC and chart-excluding replacement agreement | M | in-progress | codex |
 | F-X278 | Complete Word rendering fidelity and font policy | L | in-progress | codex |
 | F-X279 | Complete Issue434 through children, completion umbrella | L | pending | - |
