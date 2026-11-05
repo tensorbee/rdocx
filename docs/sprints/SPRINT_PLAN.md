@@ -3161,6 +3161,7 @@ Codex root approved the refresh4 extension on 2026-10-25 after reading the recon
 |------|-------|------|
 | F-X271 | Restore pinned viewer downloads and planning policy | M |
 | F-X272 | Preserve existing revisions during document comparison | L |
+| F-X272a | Compare and resolve footnote ownership and lifecycle, existing Issue430 child | L |
 | F-X273 | Repair header body clearance and complete TOC navigation | L |
 | F-X274 | Honor section and field page-number formats | M |
 
@@ -4291,7 +4292,12 @@ read the issue and independently authenticated the15member intake packet at
 /private/tmp/rdocx-s96-run-refresh/issue430-intake-v1. Unrelated historical PR search
 hits are excluded. No external message was posted or authorized for430.
 
-F-X272owns this comparison contract amendment. Retain all five rows: inserted
+F-X272 owns this comparison contract amendment, delegated in full to F-X272a.
+The parent retains its completion rollup and C1 work. The approved child uses
+existing baseline APIs in an isolated clean worktree while C1 continues, with
+serial semantic reconciliation and all original review/gate debt retained.
+This is delivery decomposition, not new issue scope or aggregate effort.
+Retain all five rows: inserted
 middle paragraph plus new note, removal of the final normal note, the existing
 note-text-edit positive, excluded-note reference consistency, and preservation
 of the following unchanged paragraph. F-X275owns eventual Word-family release

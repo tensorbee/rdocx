@@ -1,15 +1,27 @@
 # F-X280b, Complete validation and damaged-input refusal
 
-**Status**: draft
+**Status**: approved
 **Sprint**: S96
 **Size**: L
 **Depends on**: F-X277, F-X272
 **Test gate**: regression
 
 
+## Current contract approval
+
+Root approved this operative contract on2026-11-05 in
+.claude/reviews/S96-dependent-contract-approval-codex-final-1.md after the
+complete F-X272a notes contract was adopted by F-X272. This section supersedes
+older draft, pending-approval and notes-contract-unapproved statements retained
+below as preparation history. It approves no implementation, provider, native
+observation or final gate. All original actual completion dependencies remain.
+No review-peer allowance resets, no issue row is reduced and no extra source
+lease is created. Revalidate actual claim Base and applicable source inputs
+before implementation. GitHub intake remains stopped.
+
 ## Split scope and inherited review lineage
 
-Operative implementation scope is original A280-1, A280-2, A280-3, A280-5 and A280-6 only. Original A280-4 and sections4/5, its Rust file API, stored PowerPoint scanner, CLI/help and parsed Python/Display distinction are delegated completely to F-X280c. All original A280-4 rows and source descriptions below are preserved historical contract context, not a second implementation lease. B exclusively retains shared OPC exact-duplicate and forbidden-character open policy and all both-family A280-3/A280-5 delivery. C's indexed-identity source scan is not a duplicate ZIP proof. The final parent must verify B refusals compose through C file/CLI routes. This delegation does not complete B or either provider. A280-7 and its entire negative-size authoring matrix are owned by F-X280a. Historical source/preparation, complete issue rows and prior review records below remain intact for attribution and whole-issue accounting. Their A280-7 source/helper/test descriptions are reference to delegated work, not a second implementation lease. All three original design peers remain exhausted, no reset or fourth peer. F277 and F272 design/provider barriers remain unchanged for this remainder. Root's separate pending Display-policy reconciliation applies to the delegated C consumer contract and remains subject to affected Root audit, not approval of B. Historical Debug instructions below are not authority to undo reviewed F276 Display behavior. F280a completion does not satisfy either provider. The parent F280 remains the completion umbrella.
+Operative implementation scope is original A280-1, A280-2, A280-3, A280-5 and A280-6 only. Original A280-4 and sections4/5, its Rust file API, stored PowerPoint scanner, CLI/help and parsed Python/Display distinction are delegated completely to F-X280c. All original A280-4 rows and source descriptions below are preserved historical contract context, not a second implementation lease. B exclusively retains shared OPC exact-duplicate and forbidden-character open policy and all both-family A280-3/A280-5 delivery. C's indexed-identity source scan is not a duplicate ZIP proof. The final parent must verify B refusals compose through C file/CLI routes. This delegation does not complete B or either provider. A280-7 and its entire negative-size authoring matrix are owned by F-X280a. Historical source/preparation, complete issue rows and prior review records below remain intact for attribution and whole-issue accounting. Their A280-7 source/helper/test descriptions are reference to delegated work, not a second implementation lease. All three original design peers remain exhausted, no reset or fourth peer. F277 and F272 design/provider barriers remain unchanged for this remainder. The delegated C design already preserves the reviewed F-X276 Display policy. That child contract does not approve B. Historical Debug instructions below are not authority to undo reviewed F276 Display behavior. F280a completion does not satisfy either provider. The parent F280 remains the completion umbrella.
 
 ## Preparation provenance
 
@@ -20,6 +32,44 @@ Dependency note: F-X277 note run order and F-X272 existing bookmark ownership, f
 ## Operative source revalidation
 
 The original source preparation used `sprint/s96` at `e2a31e58a9b0af20f0ec374e3561c2e599abb0cd`. At original transfer time C4 production was locally accepted but its test repair was pending. That transfer-time pending state is historical. The later accepted LOCAL C4 result is recorded in `.claude/reviews/F-X272-c4-codex-final-2.md`. Root reconciled bookmark-tolerance ownership and the existing drawing-id tolerance at current HEAD `b3d6e4f241db985b3a5c421b97083c8ed9faac63`. C1 remains under implementation and F-X272 is not a completed provider. Q-S96-07 is answered as bundled default with opt-in system fallback. Other source pins, the actual implementation Base and donor still require revalidation before claim. Older rejection, pause and question wording is historical. This plan-only reconciliation does not approve, claim, implement or record a baseline.
+
+## Proposed whole-remainder closure, 2026-11-03
+
+This section reconciles the complete operative A280-1/2/3/5/6 contract for Root review. Status stays draft. It is not another design peer, claim or provider completion. Later A280-4 and A280-7 approach, API, test and HLD rows remain historical parent context and are delivered only by C and A respectively. B must still prove A280-3/A280-5 through both families and the delegated C file/CLI consumers, rather than copying C's scanner or declaring those faults complete when C is integrated.
+
+### Existing consumers and publication boundaries
+
+- A280-1/A280-2 extend the existing `rdocx::validate_document_bytes`, `validate_document_file`, and `Document::validate` routes. Python `rdocx.validate_bytes(data)`, `validate_file(path)` and `Document.validate()` retain their actual `ValidationReport` return and existing package-error mapping. CLI `rdocx validate FILE` consumes that same report and ignores warnings for its success status. The byte/file validators inspect stored package bytes. `Document::validate` validates its existing cloned serialized snapshot, not an independent original-file oracle, and existing snapshot construction errors remain errors without changing the held document.
+- A280-5 must convert `OpcError::InvalidXmlCharacter` at the byte/file OPC read boundary, before the current `?` propagates it, into one Error finding with the exact part and code point. The live snapshot route reaches the byte validator only if its existing checked serialization succeeds. Other unexplained package/decode/open errors keep their existing error channel. The delegated C Rust file function already specifies the matching `InvalidXmlChild` conversion and must be exercised after B's shared OPC refusal activates it. No Python stored PowerPoint API is added.
+- A280-1/A280-2 perform deterministic raw-part checks before `Document::from_package`, while retaining the current unrelated package/style/section checks and warnings. The ten-findings-per-part plus summary rule bounds the new subset findings without hiding an existing package error. Only the named direct-parent grammars of `w:body`, `w:p` and `w:r` are checked. Unknown foreign payload and other parent grammars remain outside this finite subset, rather than acquiring a generic transparent-wrapper schema claim.
+- Note-reference existence uses the relationship-resolved footnote/endnote parts belonging to this package. Do not infer ownership from a hard-coded filename, another part's id set or a positive-id cutoff. Signed IDs, including zero or negative, are not by themselves missing definitions. Existing F272 normal/special-note classification, invalid-type preservation/refusal and reserved comparison-marker ownership remain authoritative. B adds the promised dangling-reference check, not a new note-type normalization policy.
+- Namespace-qualified attributes are resolved against each actual source scope, including aliases, default resets and sibling restoration. Relationship attributes use the actual relationships URI and the current part's relationship scope. Attribute defaults never inherit an element's default namespace. Reuse the approved shared strict lexical helper after its actual serial integration, without cloning C's private finite PresentationML scanner or adding a second XML framework.
+
+### Imported bookmark counts and actual staged lifecycle
+
+The existing occupied `bookmark_ids` set remains package-wide. The proposed `repeated_bookmark_ids` map records total occurrences only for IDs with at least two definitions. The first definition occupies the set, the second establishes count 2, and later definitions increment that count. Replayed `ScannedIdentifierPart::definitions` and freshly scanned definitions pass through the same `define` counter. Opening and `scan_reusing` recompute current counts from actual definitions, not a reused source allowance, while invalid IDs and other existing identifier refusals remain unchanged.
+
+The new candidate-versus-source guard runs in existing `reopen_staged` after both actual opening branches and before `reconcile_provenance` copies retained source allowance. This is the common boundary already used by `reject_new_repeated_drawing_ids`. Compare candidate count to the source's allowance, with one as the nonrepeated default. Retain the existing drawing guard separately. Only after that comparison may reconciliation carry the source repeated-bookmark allowance under the proposed existing rule. Do not overwrite candidate facts before comparing them or skip the guard on the in-memory optimized reopen path.
+
+Current publisher inventory includes raw paragraph/run/table/cell/section replacement, content insertion, fragment import, clone/move and checked related-story edits through their existing prepared-reopen route. Add representative A280-6 controls that introduce a repeated marker through a raw XML replacement and a fragment/relocation route, proving actual rollback, held/fresh state and reopened bytes. `reserve_bookmark_id` and `reserve_preferred_bookmark_id` continue to allocate from the occupied set. Authored/TOC canonicalization remains limited to its existing authored identities. Read-only observation, render and existing ordinary output behavior do not gain a new imported renumber or pairing policy.
+
+An allowed count is not a physical-pair or custody proof. A count-preserving end swap stays subject to the existing F272 checks, and source-reserved comparison marker validity cannot be granted by ordinary duplicate tolerance. Same-part and cross-part imports, distinct IDs, newly reserved IDs, unchanged duplicate import plus an unrelated permitted edit, and newly increased repetitions distinguish the proposed tolerance from blanket acceptance or blanket refusal. Warning counts are deterministic per actual part and do not merge names or endpoints by ID.
+
+### Shared physical ZIP and character composition
+
+The existing shared read helper remains the only duplicate-name and literal-character refusal owner. The physical central-directory scan must use the repository's actual decoded-name policy, then existing OPC normalization and case-insensitive identity. Current zip 9.0.3 tries UTF-8 independently of the flag and otherwise CP437. Do not introduce a strict raw UTF-8 name policy in this story. Keep declared entry-count limits, ZIP64/end-record validation and existing directory handling. If an indexed-count discrepancy cannot be explained by a recoverable repeated normalized name, retain the planned invalid-ZIP error rather than inventing a duplicate label.
+
+Exercise A280-3 on both unbounded and bounded read routes, with exact duplicated `word/document.xml` and `ppt/slides/slide1.xml`, normalized identity controls and retained valid non-ASCII decoded names. Both Python open constructors must receive the actual named package error. Exercise A280-5 both main parts plus one auxiliary XML part recognized by the existing XML classifier, with valid binary and literal `_x0001_` controls. The ordinary write-time check remains required after successful construction, including caller-assembled candidates. No special read marker or unchanged-byte carve-out may allow a newly introduced forbidden literal character to be written.
+
+Final composition with C uses the same duplicated and forbidden-character packages through `rpptx::validate_presentation_file` and `rpptx validate`. Duplicate ZIP refusal remains an error naming the part, while the caught forbidden-character fault becomes a stored issue naming that part. Existing Display rendering stays unchanged. C's indexed unique-entry source frontier never substitutes for B's physical duplicate proof.
+
+B documentation changes in the existing HLD04/HLD10 and README carriers cover the shared open policy and Word report/subset behavior. Preserve C's already reviewed PresentationML scanner/source-frontier, Display and parsed-Python descriptions, and A's shape-size paragraphs. Later inherited C/A checklist rows are not B's implementation work.
+
+### Dependency and decision boundary
+
+F-X277 and F-X272 remain the exact formal dependencies. Their approved contracts permit only dependent design review, and actual completion plus any explicitly approved and passed genuine LOCAL provider checkpoint is required before B implementation. Current F272 is in-progress and F277 remains pending. The clean actual claim Base must be revalidated after their work and serial C/A integration. Shared carriers are a serial resource constraint, not an invented new formal provider edge or a waiver of the original ones.
+
+Q-F280-01/02/03 and Q-S96-04/07 retain their existing answers. No new user product decision is identified by this factual closure. Original A280-1/2/3/5/6, native/schema/installed/CLI final riders, strict SemVer releases, parent issue accounting and all three consumed original design peers remain unchanged. Root must review this proposal and actual provider contract closure before design approval. No final gate or timing result is supplied here.
 
 ## 0. Preparation identity and source scope
 
@@ -109,11 +159,11 @@ Add `pub fn validate_presentation_file(path: impl AsRef<Path>) -> Result<Vec<Val
   - `presentation.xml` children must follow `CT_Presentation` order. Unknown children are `InvalidXmlChild`.
   - slide, layout, master, notes, and handout parts are checked for unknown shape-tree children, `p:cNvPr` missing `id` or `name`, and a table row cell count that differs from the `a:gridCol` count.
 - Then `Presentation::from_read_package(package)`. If it opens, append `presentation.validate()` issues, deduplicated. If it fails and stored issues exist, return the stored issues. If it fails with no stored issues, return the error.
-- CLI `rpptx validate` uses `validate_presentation_file`, prints each issue with `{issue:?}`, and exits 1 if any. Update `crates/rpptx-cli/src/main.rs` help and `crates/rpptx-cli/README.md` to name the stored-package checks and say it is not a full schema validator.
+- CLI `rpptx validate` uses `validate_presentation_file`, prints each issue with `{issue}` using its existing Display implementation, and exits 1 if any. Update `crates/rpptx-cli/src/main.rs` help and `crates/rpptx-cli/README.md` to name the stored-package checks and say it is not a full schema validator.
 
 ### 5. Python reconciliation
 
-- Keep `Presentation.validate()` parsed-model and cheap. It returns a tuple of `ValidationIssue` with a snake_case `kind` and a `message` equal to the CLI Debug line, as HLD10 says. It does not read the stored package.
+- Keep `Presentation.validate()` parsed-model and cheap. It returns a tuple of `ValidationIssue` with a snake_case `kind` and a `message` equal to the CLI Display sentence, preserving F-X276 and current HLD10. It does not read the stored package.
 - A280-4 requires the CLI and `rpptx::validate_presentation_file`. This story does not add a Python stored-package function. `Presentation.validate()` stays parsed-model. The CLI and the Rust file function are the promised stored routes. Q-F280-02 is closed by scope.
 - Do not add `rpptx.validate_bytes` in this story. It is speculative and not required by Issue 435.
 - Update HLD10 to state that `Presentation.validate()` is parsed-model and the CLI uses the stored route. No Python stored-package function is added.

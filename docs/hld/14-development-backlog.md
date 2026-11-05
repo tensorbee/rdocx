@@ -8737,6 +8737,31 @@ The oracle-tooling boundary also requires explicit shared enabled-kerning policy
 
 Finish every criterion of Issue 425 using the current own commits of PR 427, not its stale base or donor archive measurements. Preserve unchanged existing revision owners byte for byte, allocate new ids without collisions and add the new reviewer's changes elsewhere across body and related stories. CLI counts only newly created revisions, with binding/stub behavior aligned. Prove author-filtered accept/reject reconstruct both inputs while retaining the first review. Cover no-op, ignored stories/comments, tables/controls, headers, notes, section changes, comment graphs, moved/deleted owners and late atomic refusal. PR 427 still refuses changes to a revision-bearing owner. Implement those required cases or explicitly meet the issue's documented-limitation plus usable-workaround alternative before closure. The contribution calls this Combine-like preservation, while Word Compare uses accepted-view semantics. Verify that compatibility fact before approving the bounded policy. Ignored stories retain their current id-seeding exclusions, so do not claim global id uniqueness from compared-story allocation. No blanket Word Compare parity follows from the supplied positive. Preserve S95.4 physical/live-owner and package-cache invariants. Full native/installed and composition acceptance stays due.
 
+### F-X272a, Compare and resolve footnote ownership and lifecycle
+
+**Sprint**: S96
+**Size**: L
+**Depends on**: F-X229, F-X230, F-X245
+**Test gate**: regression
+
+Deliver the complete already admitted Issue430 contract as a child of F-X272.
+Cover all five issue rows, all45supporting acceptance rows and14evidence gates:
+normal-note identity, added/removed referenced definitions, source-preserved
+unused/invalid/opaque notes, coherent ignored stories, following-paragraph
+alignment, persistent standard-bookmark custody, per-element selectors,
+partial-unit atomic refusal, mixed open transactions, settlement cleanup and
+accept/reject destination restoration across reopen. Preserve the approved
+bounded unchanged prior-revision owner policy and all existing public APIs.
+The one-release Q-A430-28 native exception remains unproved, never passed.
+
+Use existing comparison, allocator, resolver and staged-package APIs on the
+reviewed clean claim Base. No new C1 carrier API is a prerequisite. C1 and this
+child use separate worktrees, then require serial semantic reconciliation and
+final combined qualification. Any actually required unfinished operation is a
+real blocker, not permission to weaken a case. The parent cannot complete or
+unblock F-X277/F-X279/F-X280 until this child and its own C1 work satisfy their
+actual gates. Splitting adds no issue scope, aggregate effort or review passes.
+
 ### F-X273, Repair header body clearance and complete TOC navigation
 
 **Sprint**: S96

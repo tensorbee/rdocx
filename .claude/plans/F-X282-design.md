@@ -582,3 +582,215 @@ Scoped current-worktree reads on 2026-11-01 and 2026-11-02, not a full citation 
 - `set_story_source_xml` is at `document.rs:15263-15354`. It rewrites the main part, reparses the model, installs `main_part_blocks` and calls `package.set_part` at `15334`. `replace_story_content` calls it at `31277` after building the candidate XML.
 
 No accepted preparation clause was invalidated by those reads. `try_replace_text`, `add_row`, `clone_row`, the cell-paragraph collectors, and the Python binding routes were not re-walked. The 919-file per-path hashes in the preparation remain historical packet pins. Implementation-Base revalidation before claim stays required. This adoption does not treat that packet as a clean Base.
+
+
+## Root technical pin for the inherited Issue407 secondary sampler
+
+This specifies the already required fresh median-of-seven and separate cold
+and warm observations. It changes no fixture, method, threshold or original
+mean-of-three gate. Historical F-X266 and F-X268 source pins stay unchanged.
+The authenticated original issue407 script, its default-template factory,
+first paragraph, rich six-run RPR and 100/1000 sizes remain authority.
+
+Keep the original script observation separate and unchanged, including its
+size-print serialization, Paragraph20 handle acquisition, shared document and
+read3 then insert3 then remove3 sequence. Its original enclosing three-call
+timer and mean are not replaced by seven individual calls or renamed a cold
+median. Retain its actual stdout, status and batch observations.
+
+The secondary sample is ONE actual public call. Run seven trials in one fresh
+Python process using the final authenticated release Python3.12 artifact.
+For each trial use methods Paragraph.xml, insert_paragraph, remove_content in
+that fixed order. Even trials use states cold then warm and sizes100then1000.
+Odd trials use warm then cold and sizes1000then100. Each matrix cell gets a
+fresh exact original build(N) document, with no sharing across cells. This is
+84fresh documents and84single-call timed observations. The original factory's
+additional first paragraph remains present and disclosed, not counted as N.
+
+| Method | Cold timed call after fresh build | Warm prefix and timed call |
+|---|---|---|
+| Paragraph.xml | Acquire p=doc.paragraphs[20] outside timer, then first p.xml | Acquire the same handle outside timer, call p.xml once untimed, then time p.xml |
+| insert_paragraph | First doc.insert_paragraph(10,"x") | One untimed identical insertion, then time a second identical insertion |
+| remove_content | First doc.remove_content(10) | One untimed identical removal, then time a second identical removal |
+
+Cold means first target operation on that document after required setup, not
+cold interpreter, allocator or handle lookup. Warm mutation starts with exactly
+one prior same-method edit. It intentionally has one extra inserted paragraph
+or one removed paragraph. Every warm replica follows that same history. Do not
+restore it with another operation or share another method's edited document.
+Secondary removal therefore consumes original rich paragraphs, while the
+unchanged primary sequence removes its preceding inserted paragraphs. Report
+these distinct states rather than mixing their results.
+
+Do not serialize the measured secondary document for size or provenance before
+its clock. Audit actual package/main XML using separate untimed exact fixtures.
+Factory, open, imports, required handle acquisition, one warmup, sample recording,
+hashing, semantic inspection and destruction stay outside the interval. The
+public call's own lookup, validation, returned-value creation and publication
+stay inside. Retain its result until the end timestamp, then inspect/drop it.
+There are42untimed warmups and126total target calls in the measured matrix.
+
+Retain each raw start/end/elapsed, trial, method, requested size, state, order and
+actual target history. Compute separate cold and warm medians from exactly
+seven single-call values for each method/size/state. Each retains the unchanged
+inclusive large<=3*max(small,1ms) gate on unrounded values. No pooling, minimum,
+mean substitution, outlier removal, early stop or favorable rerun is permitted.
+An operation/protocol/identity error preserves partial data and fails incomplete.
+A complete ratio failure remains complete but fails its gate.
+
+Actual final source/build/extension/stub/wheel/interpreter/config linkage and
+before/after identity remain mandatory. Placeholder or incomplete authority
+fails before product imports or timing. No concurrent compilation or xdist runs.
+Prepare isolated fake-factory, action-history, ordering, timer-boundary,
+median/equality, primary-separation and failure/drift controls before using the
+recorder. Synthetic elapsed values are not product performance. Root must review
+its source and controls before execution. This technical pin alone passes no
+performance or sprint gate.
+
+### Final Q22 history evidence roles
+
+Root technically reconciles the inherited F268Q18/Q22rider with the actual
+private N100 result. The fixed20000paragraph by6run font workload, distinct
+font values, shared terminal value, original fixture, N/4N lifecycle and quiet
+paired RSS protocol remain mandatory. It does not become a different operation
+or fixture. The actual archived observer-enabled N100 worker failed its
+three-cache activation assertion with20000/0/0observed counts. Preserve that
+failed row and assertion unchanged. Its emitted observations are diagnostic
+facts, not an accepted activated-history gate.
+
+The actual font route publishes checked paragraph fragments. It does not
+request the scoped text proof, relationship remap decoder or recorded
+qualification COW loop. An inactive memo family is not positively qualified by
+this workload. The separate three-paragraph same/same/marker text companion
+prepared in the existing history-companion proposal is adopted as additional
+positive history evidence. It uses the specified real checked no-match warmup
+then100and400distinct successful scoped text publications, with the same final
+text and unchanged siblings, structure, identifiers, relationships and part
+inventory. It never substitutes for the fixed font or deciding RSS fixture.
+
+Authorize finite private companion authoring and Root review. Record actual
+producer creation and owner lifetime without adding a strong baseline, and
+compare complete semantics with a genuine no-Weak lane. The existing one-noop
+positive probe does not qualify changing history. Original font evidence and
+positive memo-family evidence have distinct named obligations. No successor
+may relabel the old failed row, silently remove its assertion or claim that
+empty COW transcripts prove neutrality. Final integrated source, immutable
+policy, actual artifacts, recorder completeness, full lifecycle/current-root
+analysis and ordinary calibration remain required before acceptance.
+
+Actual Native COW observer qualification remains separate and unproved. The
+text companion is not assumed to reach it. Identify the real producer/caller
+and qualify its actual branch before any neutrality claim. Weak-header
+retirement alone is not moved or transitive payload destruction. No retention
+threshold, resource equation, public signature or cache policy changes here.
+
+### Finite private Native COW calibration control
+
+Root technically approves TEMP source preparation of the three artificial
+ownership lanes described by the frozen COW control proposal SHA256
+`f4bab638f07caa42062424078fe5f0a5458458a6971c5c14440ebf31e740571f`.
+The exact types and five private signatures in that proposal are authorized
+inside the existing private document.rs diagnostic overlay, without shipping
+API, model, workload, policy-mode or numeric acceptance changes. This approval
+is not runtime qualification, another history peer or provider completion.
+
+The control uses the existing authored nested-relationship remap caller and a
+fresh equivalent existing fixture per lane. It selects the final changed child
+only after the actual edited record returns, using the original physical child
+layout and real edit transcript. Require one changed child, no tail edit,
+unchanged child count, a new actual Arc and an unset memo. Ambiguous, skipped
+or failed cases are unqualified. Never clear a memo or force qualification.
+
+Lane0adds no owner, lane1adds exactly one Weak, and lane2adds exactly one strong
+Arc lease with no pre-call Weak. The ordinary six Weak hooks stay disabled,
+with the existing scalar recorder active. Observe the actual successful
+attempted make_mut call at1/0,1/1and2/0counts, requiring nonempty immediate
+Vec storage. Hold all leases lexically through the actual call and inspect old
+and new owners only while alive. Restore prior diagnostic state and release
+holders on normal return, error and unwind, without a mutable TLS borrow across
+the production call.
+
+Complete saved-part, model, identifier and reopened semantics must agree across
+lanes. These explicit artificial states calibrate Native branch mechanics,
+not natural application sharing or history neutrality. Weak expiry identifies
+Arc allocation retirement and does not prove moved/transitive payload death.
+The unchanged font and additional text histories, quiet RSS, ordinary-artifact
+calibration and final-H source/build qualification remain mandatory. Prepare
+the exact finite overlay now for Root source review, then rebase it with the
+other accepted overlays before one final diagnostic build.
+
+### Separately named fixed-font lifecycle companion
+
+Root explicitly authorizes a new private fixed-font lifecycle worker and
+consumer under the existing Final Q22 history evidence roles. The old failed
+font worker, its all-three-family assertion, the actual exit101row and the
+unchanged v4 comparer remain byte-identical and unqualified. This is a new
+versioned evidence role, never a renamed old result or a silently removed
+assertion. Positive memo-family history remains the separate text companion.
+
+The new enabled/no-Weak dispatches preserve the exact fixed20000paragraph by
+six-run input, paragraph0/run0 Run::set_font checked edit route, distinct
+S96 RSS history distinct values and common S96 RSS history terminal value.
+Preserve the original font-operation count, actual save before observation,
+post-save strong control, clone/drop, reopen/drop and document/control drop
+sequence. Do not substitute Document::set_font, another fixture, text edits,
+extra warmup or artificially activated cache calls. The actual fixture hash
+and source/build/artifact identity must be authenticated by the final runner.
+
+Keep actual producer records, completeness, current-root/liveness values, all
+three observed activation counts, full semantics,29mandatory identifier fields,
+namespaces, package parts and relationships. This role records which families
+the real font route reaches. It does not require inactive decoder/scoped
+families to become positive or label them qualified. Preserve the actual
+all-three positive-activation status, including false, without conflating it
+with complete lifecycle evidence. An empty COW list remains unqualified for
+observer neutrality. Weak expiry is not transitive payload destruction.
+
+Use distinct worker names and an explicit fixed-font-lifecycle record role or
+marker. The separate consumer verifies its exact dispatch, actual successful
+process outcome, immutable Normal policy, fixed fixture, full source/build/
+profile/binary joins, complete lifecycle/root vectors and full enabled/no-Weak
+semantic equality. Validate the same-N pair before N400, then the complete
+N100/N400 common initial and terminal state. No failed old N100 can authorize
+its old N400 successor. Source-shaped controls do not prove real execution.
+
+This preserves the existing fixed-font N/4N and no-per-edit-history obligations
+as distinct evidence from positive text history and actual COW calibration.
+Consumer completion alone must not assert bounded history, allocation
+neutrality or RSS acceptance. Root still adjudicates concrete current/baseline
+ownership, all applicable actual final evidence and unchanged quiet paired RSS.
+No numeric threshold, source permission, workload, public API or cache policy
+changes. Prepare the finite source/consumer delta for Root review before the
+one final-H diagnostic build. Existing history-source review caps stay used.
+
+### Native recorder reservation-failure control
+
+Root authorizes one finite private diagnostic source control for the existing
+recorder completeness failure path. This supplements the eight extracted
+reentry controls. It is not a new product gate, policy mode, quota, public API
+or claim of allocator exhaustion or product refusal.
+
+Factor the identical checked-add, Vec::try_reserve and incomplete-state/failed-
+flag handling from the two actual note functions into one substantive private
+helper in existing document.rs. Production callers pass additional1and retain
+their existing event operation assignment, return-before-push and push order.
+The generic parameter is justified by the two existing actual instantiations,
+Vec<PrivateHistoryProofEvent> and Vec<PrivateHistoryCowEvent>. No trait, module
+or public model field is introduced.
+
+A separately named ignored control in document::tests uses the actual empty
+typed recorder vectors and additional usize::MAX. Assert the checked addition
+succeeds on length0so the earlier arithmetic check cannot explain refusal.
+Observe the shared reservation helper fail, both completeness mechanisms
+invalidate, no event push and sticky incomplete state. Preserve initial guard
+state and reset/restore through the existing recorder lifecycle. The test
+must not request OS OOM or substitute an unrelated Vec probe for the actual
+helper. Keep ordinary additional1semantics and actual caller outcomes unchanged.
+
+Report this honestly as controlled reservation-error/completeness evidence on
+a capacity-overflow-sized request. It does not prove failure of ordinary
+try_reserve1under allocator exhaustion, global fault injection, library output
+refusal, observer neutrality or memory-history acceptance. Exact final-H
+compilation and execution remain required. Prepare the source delta in a
+separate TEMP overlay for Root review before the final diagnostic composition.
+Existing old worker bodies, records and failed evidence remain unchanged.

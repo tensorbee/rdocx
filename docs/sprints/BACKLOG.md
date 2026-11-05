@@ -40,8 +40,8 @@ regenerated, never hand-edited.
 | M22, Word depth | 12 | 12 | 0 | 0 |
 | M23, From-scratch business documents | 24 | 24 | 0 | 0 |
 | M24, Modern DOCX authoring completeness | 54 | 32 | 0 | 22 |
-| X, Cross-cutting | 305 | 275 | 14 | 12 |
-| **Total** | **636** | **557** | **14** | **61** |
+| X, Cross-cutting | 306 | 275 | 14 | 13 |
+| **Total** | **637** | **557** | **14** | **62** |
 <!-- AUTOGEN:backlog-summary END -->
 
 ## All F-IDs
@@ -841,6 +841,7 @@ HLD14 contract before adopting contributor changes.
 | F-X270 | Prepare Word 0.16.4 and PowerPoint 0.14.4 patch releases | S95.4 | L | done |
 | F-X271 | Restore pinned viewer downloads and planning policy | S96 | M | in-progress |
 | F-X272 | Preserve existing revisions during document comparison | S96 | L | in-progress |
+| F-X272a | Compare and resolve footnote ownership and lifecycle | S96 | L | pending |
 | F-X273 | Repair header body clearance and complete TOC navigation | S96 | L | done |
 | F-X274 | Honor section and field page-number formats | S96 | M | in-progress |
 | F-X275 | Prepare Word 0.17.0 and shared/PowerPoint 0.15.0 with strict SemVer gates | S96 | L | in-progress |
@@ -863,9 +864,11 @@ HLD14 contract before adopting contributor changes.
 
 <!-- AUTOGEN:backlog-MX END -->
 
-Issue430is admitted under the existing in-progress F-X272. Its footnote topology,
-ignored-story consistency and paragraph alignment rows require the pending amended
-contract and actual validation. The existing plan and S96plan hold that work.
+Issue430 remains part of the existing F-X272 completion contract. Its complete
+footnote topology, ignored-story consistency, lifecycle and paragraph alignment
+work is delegated to F-X272a under the approved reviewed contract. Parent C1 and
+the child use distinct worktrees and require serial semantic reconciliation.
+No parent provider or final acceptance follows from this delivery split.
 
 Q-A430-28 has an explicit user-approved one-release exception. Only the native
 positive for two physical footnote references sharing one normal definition is

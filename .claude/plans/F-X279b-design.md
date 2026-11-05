@@ -1,16 +1,39 @@
 # F-X279b, Complete comment ranges, comparison and insert_document
 
-**Status**: draft
+**Status**: approved
 **Sprint**: S96
 **Size**: L
 **Depends on**: F-X272. Design approval uses its bounded revised-owner preservation and refusal contract. Implementation needs actual provider completion. P1 and P2 below are F-X279 implementation and composition obligations, not additional F-X272 prerequisites. Three design peers are used. No fourth design peer. Root final follows this file. The implementation cap of three is separate and is not reset.
 **Test gate**: regression
+
+## Operative design approval, 2026-11-05
+
+Root approves the exact canonically adopted contract previously accepted by
+Root affected final2. Before this approval-only metadata change its SHA256 was
+`f6ed528ddc7ca8ae694bf1e5736f557177310d871f78c605cdcd164076f25fb0`.
+The applicable F-X272 A4/A5 preservation/refusal contract remains approved.
+Its implementation is unfinished and does not authorize this story to start.
+Three design peers remain consumed, and no confirmation peer or new design
+review ran. The existing final2 review is adopted into the canonical review
+directory with its original bytes and historical applicability intact.
+
+This operative approval supersedes the historical draft, proposed, prepared
+and awaiting-final wording retained below. Source revalidation and a clean
+committed Base remain due at claim, after the genuine F-X272 provider checkpoint.
+No source lease, implementation, provider completion or final native acceptance
+follows. The approved-design metadata commit and run-state approval transition
+remain pending the coordinated planning checkpoint. All original B outcomes,
+A4 exclusion, P1/P2 ownership, native gates and implementation review cap stay.
 
 ## Operative split ownership
 
 This draft remainder owns only A279-1, A279-2, A279-3, A279-5 and A279-6. A279-4 in its entirety belongs to F-X279a, including native owned snapshot text, all eight kind labels, Python constructor/getter/stub and CLI JSON/human vocabulary. This exclusion overrides EVERY inherited acceptance, consumer, checklist, risk rider and source reference below. Retained A4/C7 text is historical lineage or contextual preservation, never duplicate delivery or a B source lease. Shared revision.rs may be touched by B only for actual comparison/resolution requirements, integrating A's projection without replacing its contract.
 
 F272 remains an actual B implementation prerequisite. P1/P2 crossing-reply composition remains B work, not new F272 prerequisites. Mandatory fresh comment-candidate native gate and all six original criteria remain with B/parent final union. No A279-4 split or Q-A430-28 can waive that gate. All three design peers remain exhausted. Root affected final remains required. This file stays draft. The original implementation cap remains three.
+
+## Prepared Root closure repair, 2026-11-03
+
+Root affected final1identified two closure defects, original comment fixed-prefix collisions and missing table-context/style merge order. The technical repairs below retain every original B outcome and A4 exclusion, add no public namespace API or quota, and preserve native/Python import boundaries. This is a prepared patch only until coordinated canonical adoption. It does not approve this draft, satisfy the unfinished F272 provider checkpoint, grant an implementation lease or reset either review cap. Whole-B Root disposition follows exact-source adoption/applicability.
 
 ## Historical preparation provenance
 
@@ -122,6 +145,10 @@ Later paragraphs have `CommentText` and no annotation run. `w:annotationRef` is 
 When either style id is absent, authoring creates it after `w:latentStyles` and after existing `w:style` siblings, never at index 0. `CommentText` is a paragraph style and `CommentReference` is a character style. `w:basedOn` is written only when `Normal` or `DefaultParagraphFont` respectively already exists. If either base is absent, that style has no `w:basedOn`. If the style id exists with the wrong type, authoring refuses atomically and writes neither the comment nor a second style. Existing style bytes stay. Style names, priority and donor sizes are not acceptance values.
 
 For a comments part this story creates, the root declares `xmlns:mc` and `mc:Ignorable` including `w14`, in addition to the existing `xmlns:w` and `xmlns:w14` behavior. If a preserved `mc:Ignorable` exists, add `w14` when missing and keep the other tokens and order. Do not duplicate `xmlns:mc`. On an imported part that is actually authored, identify an existing Ignorable attribute by its Markup Compatibility namespace URI and local name, not solely the literal prefix. Reuse an existing correctly bound namespace prefix when available. Otherwise use canonical mc if free, or a fresh unused prefix if mc belongs to preserved producer content. Do not rebind or delete foreign declarations/attributes. Merge w14 into the one existing MC token list without changing the other token order. New parts retain the exact canonical mc expectation from Issue434. Extend C2 with aliased MC and occupied foreign-mc controls beside untouched-save controls. This is Root technical reconciliation of imported-preservation invariants, not a new public API or a blanket refusal. An untouched reopen and save of an imported comments part does not gain `mc` or styles merely because `to_xml` runs. Imported unknown root attributes and children stay verbatim. `commentsIds.xml` is not created. An imported part of that name stays byte for byte, including relationships and content type.
+
+Fixed-writer admission precedes authoring publication. Inspect the original comments root attributes before push_preserved_attributes can replace xmlns:w or xmlns:w14. An explicit canonical w binding to a foreign URI, or canonical w14 binding to a foreign URI, is incompatible with this bounded fixed-prefix writer and refuses atomically with the existing location-qualified XML error. Do not silently canonicalize the imported URI. Apply the same original-binding check at actual owned comment/paragraph destinations where their retained declarations would change the expanded type of a generated fixed-prefix element or attribute. The check concerns typed writer destinations, not an attempt to validate or rewrite opaque payload XML. Use the existing namespace/context machinery in the current comments/OXML files, without a new public namespace API, parser policy or quota. Validate before either primary add path or reply publishes its staged candidate, including reply_to_staged which bypasses push_comment_definition. CT_Comments serialization must not retain the current forced foreign root rebinding.
+
+A genuine Word/W14 alias with canonical names absent or correctly bound remains supported. For accepted authoring the fixed w14 declaration is correctly bound before adding that Ignorable token. Occupied foreign mc still uses the existing correctly bound MC alias or a fresh unused alias, without blanket alias refusal. A valid imported W14 alias beside foreign canonical w14 and a preserved producer w14:opaque child is the atomic-refusal control. A corresponding foreign canonical w root is separate. Root, existing comment/style/package bytes, cached layout and held Python revision remain unchanged on refusal. Untouched imported source-save stays byte-identical and does not invoke authoring merely to add styles or declarations. Positive alias/MC controls inspect expanded generated names and retained producer identities after save/reopen. This is technical closure of imported-preservation and atomicity, not a newly promised general prefix-renaming engine.
 
 The pin `WORD_COMMENT_CANDIDATE_SHA256` at `comments.rs:3679` is `b7e1f39a5af80d9928ed671fa45557d485c2c70c8761439a09df66c027274995`, Word `16.104`, build `16.104.25121423`. That is historical. Authoring changes the candidate bytes. Update the constant only in the labelled behavior commit with old and new self-hash. Do not present the self-hash as Word evidence. Root observed installed Word `16.114.1 (26102031)`. A fresh native open of the new candidate on the actually installed version is mandatory and unperformed. The ignored `word_opens_comment_reply_and_resolved_thread_without_repair` currently generates the candidate and checks its digest plus installed bundle version. It does not itself open Word. Keep it as the candidate-generation/pin check, update both WORD_VERSION and WORD_BUILD to the actual final bundle values alongside the new candidate digest, and preserve old/new identities in the labelled behavior commit. The inspected installed bundle is CFBundleShortVersionString16.114.1 and CFBundleVersion16.114.26102031, not a runtime/open observation. Actual native acceptance additionally requires a separate CUA-controlled open of those exact new bytes without repair and the required thread/range/resolved-state observations. Record candidate SHA, actual running Word version/build, custody and the observed result. Existing Word custody and generated-folder permissions still govern. No AppleScript fallback is implied. Q-A430-28 applies only to its named shared-footnote-owner observation and cannot waive this comment gate. Until actual execution, A279-2 native evidence remains pending.
 
@@ -245,7 +272,7 @@ Add one private function in `field.rs`:
 fn prepare_fragment_body_effective_defaults(fragment: &mut Document) -> Result<()>
 ```
 
-It runs only when the preservation bit is set. It prepares body paragraphs only. It covers `CT_P::runs` through `visit_body_paragraphs_mut` at `document.rs:21437`, including table cells. It does not rewrite footnote, endnote or comment parts. Python's existing note, endnote and comment import, style remap and unknown XML preservation are unchanged. This is deliberate: A279-5 is body font and Root withdrew the native companion obligation.
+It runs only when the preservation bit is set. It prepares body paragraphs only. An existing-file concrete private body/table walk visits the same typed paragraph owners and carries the actual enclosing table style context. The old paragraph-only callback cannot supply tblStyle and is not itself the table-context implementation. Descending into a table selects that physical table's applicable nonconditional basedOn chain, with cycle/missing-style behavior retained from the existing style helpers. No generic visitor, new module or public traversal API is introduced. It covers `CT_P::runs`, including modeled hyperlink spans because those index the same run vector, and the promised table-cell paragraphs. It does not rewrite footnote, endnote or comment parts. Python's existing note, endnote and comment import, style remap and unknown XML preservation are unchanged. This is deliberate: A279-5 is body font and Root withdrew the native companion obligation.
 
 Exact ordering in `import_fragment_content_with_state` at `field.rs:5205`:
 
@@ -261,9 +288,11 @@ Exact ordering in `import_fragment_content_with_state` at `field.rs:5205`:
 For each body paragraph:
 
 - If `pStyle` is absent and the default paragraph style exists, set `pStyle` to that id. `remap_fragment_style_collisions` at `field.rs:6259` renames it on collision and patches the reference.
-- For each run in `CT_P::runs`, compute `resolved = resolve_run_properties(pstyle, rstyle, &fragment.styles)` at `style.rs:1014` and `style_only` with `doc_defaults = None`.
-- If the paragraph is inside a table with `tblStyle`, merge that table style's `basedOn` chain `rPr` into both with the private `merge_table_style_run_properties`. Conditional table styles are not applied. This is bounded and adds no resolver, trait or generic.
+- For each run in `CT_P::runs`, compute both source-effective and no-docDefaults comparison values with the same actual paragraph, character and table contexts. Outside a table the existing resolve_run_properties ordering remains.
+- Inside a table, compose source document defaults, then the applicable nonconditional table-style basedOn run properties, then paragraph-style run properties, then character-style run properties. The comparison omits only document defaults and preserves all remaining context/order. Do not merge table properties after resolved paragraph/character values and do not fill only unset values after document defaults. Direct run components retain priority and are never overwritten. Reuse the existing style-chain/property merge operations in the same files. Conditional table styles are not applied. No new resolver abstraction, trait or generic is added.
 - If `resolved.font_ascii`, `resolved.font_hansi` or `resolved.sz` differ from `style_only`, write those fields and `sz` as direct formatting when the run does not already set them.
+
+C8 includes a conflict control, within its already promised ordinary table/character-style frontier: different fonts and sizes on document defaults, the table base, paragraph style, character style and an explicitly formatted run. The actual stronger paragraph/character/direct component wins rather than the table base. An inherited-default-only run still preserves the source effective pair. Compare original A bytes, inserted model values and saved/reopened body XML through Rust and Python. Inline SDT, revised raw payload and conditional table formatting are not silently added as new font-materialization promises.
 
 Storage stays half-points. `Pt(14)` is `28` and destination Calibri 11 pt is `22`. The three routes are a renamed style, a style carrying B's defaults, and direct formatting, and they must agree on ascii family and half-point size. Character styles use `resolve_run_properties`. Table styles use the bounded chain merge. Conditional table formatting is outside A279-5.
 

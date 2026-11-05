@@ -1,10 +1,22 @@
 # F-X279, Complete Issue434 through bounded child stories
 
-**Status**: draft
+**Status**: approved
 **Sprint**: S96
 **Size**: L
 **Depends on**: F-X272, F-X279a, F-X279b
 **Test gate**: regression
+
+## Current contract approval
+
+Root approved this operative contract on2026-11-05 in
+.claude/reviews/S96-dependent-contract-approval-codex-final-1.md after the
+complete F-X272a notes contract was adopted by F-X272. This section supersedes
+older draft, pending-approval and notes-contract-unapproved statements retained
+below as preparation history. It approves no implementation, provider, native
+observation or final gate. All original actual completion dependencies remain.
+No review-peer allowance resets, no issue row is reduced and no extra source
+lease is created. Revalidate actual claim Base and applicable source inputs
+before implementation. GitHub intake remains stopped.
 
 ## Problem
 
@@ -38,4 +50,45 @@ Child product HLD ownership is explicit in their plans. Integrator updates HLD14
 
 ## Review lineage and adoption
 
-All three original design peers are exhausted and not reset. Root affected final audit and canonical approval remain due. Both children and this umbrella stay draft. The three-pass implementation cap is not reset. Root owns exact metadata-only Base exception, current issue/PR authentication, normal claim, integration and final evidence. Parent completion never follows from a draft split.
+All three original design peers are exhausted and not reset. Both child contracts and this umbrella are approved. Actual provider and source acceptance remain due. The three-pass implementation cap is not reset. Root owns exact metadata-only Base exception, current issue/PR authentication, normal claim, integration and final evidence. Parent completion never follows from a draft split.
+
+## Consumer map
+
+A279-4 is owned by F-X279a across Rust/Python/CLI revision snapshots. Original
+A279-1/2/3/5/6 are owned by F-X279b across comment, compare and insertion
+consumers. This parent consumes their real final source/evidence without
+duplicating product implementation or qualification.
+
+## Behavior contracts and evidence
+
+The complete six-row original contract is preserved in the two child plans.
+F-X272 completion remains a genuine prerequisite. Child review or approval is
+not parent completion. No new public API or imported-state policy is added.
+
+## Test matrix
+
+A-only readiness leaves the parent pending. B local readiness retains all final
+riders. Final rollup requires both actual child completions, the real F272
+provider and original six-row accepted evidence exactly once.
+
+## Risk routing
+
+Completion/evidence adoption and contributed-issue accounting require affected
+final metadata checks. Product riders are the child union, run once at final H.
+
+## Hash harness
+
+Consume only actual reviewed child delta attribution at the final integrated
+source. No parent baseline recording or duplicate hash run.
+
+## Implementation checklist
+
+- [ ] Confirm actual F272 completion before B starts.
+- [ ] Consume both actual reviewed child integrations.
+- [ ] Reconcile all six rows and original native/installed/schema/full riders.
+- [ ] Complete parent records once after actual final qualification.
+
+## Open questions
+
+No unanswered product choice. Contract approval does not satisfy any actual
+provider, source, native or final qualification gate.

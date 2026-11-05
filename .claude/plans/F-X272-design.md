@@ -4618,7 +4618,7 @@ pub fn format_paragraph(
 pub fn rewrite_imported_source(
     &mut self,
     source: ScopedWordSource,
-    edits: Vec<(Range<usize>, Vec<u8>)>,
+    edits: Vec<(Range<usize>, ScopedWordSource)>,
 ) -> Result<ScopedWordSource>;
 ```
 
@@ -4933,3 +4933,873 @@ stickiness/overflow, no event on failed full validation, unchanged error/callbac
 order, and every actual native carrier-copy site. Include the actual returned
 signature in the final hidden-public SemVer inventory after implementation.
 This technical reconciliation alone implements or accepts none of the bridge.
+
+
+### Native Word grammar carrier seam, Root approved
+
+Root approves this technical carrier contract on2026-11-04 after reviewing the
+exact V2 supplement, actual source call order, substantive writer boundaries and
+incoming Field scalar authority. This is design/API authorization, not source
+implementation, another design peer, provider completion or native acceptance.
+Existing methods and signatures stay unchanged. No new public type, model field,
+module, trait, generic framework, origin-ID API or quota is authorized. The eight
+additive doc-hidden methods below belong to existing ScopedWordOperation and
+must enter the final Rust SemVer inventory and actual external compile canary.
+CT_Text and Field name the existing crate::text types. Range and BTreeMap are
+the standard-library types, not new aliases or public carriers. Current cache
+membership is Word-only input, distinct from Original OPC and Field facts.
+
+Source preparation identity: V2 patch SHA256
+eb89844bdf21ffe63dc794cfb0c76f19dcf7d11472e0863d1c529288c1075b54,
+applied to plan5b81417f71c0c894857622fd6542cbf0e6835909fa4f56ac4adfb36350369b52.
+The exact normative contract is inline here. Temporary proposals and source
+line observations are evidence custody, not a second plan authority. Current
+emitter work is unaffected. Native implementation must consume this contract
+before starting. Issue430 V13 remains separately unadopted and unimplemented.
+
+
+The Native private `TemplateWordLineage<'a>` is operation-local correspondence,
+not funding. At the actual staging clone producer, it records structured
+owner/control/table/run/content paths to actual frozen borrowed `CT_Text` and
+needed Field input facts. It includes direct block-control runs as well as
+paragraphs, tables, notes and glossary owners. At an actual Field-only run
+replacement it forwards ordinary sibling Text slots and the actual surviving
+Field facts. Changed or newly inserted output without that producer witness is
+Generated. No later String pointer, ordinal, hash or value equality discovers
+an origin. Native resolves paths under an immutable candidate borrow immediately
+before the substantive writer, producing short-lived current/frozen pairs.
+
+```rust,ignore
+pub fn with_template_word_inputs(
+    original_parts: Vec<(&'a str, &'a [u8])>,
+    current_paragraphs: Vec<&'a CT_P>,
+    current_texts: Vec<&'a CT_Text>,
+    current_fields: Vec<&'a Field>,
+    current_word_sources: Vec<&'a [u8]>,
+    data: &'a serde_json::Value,
+) -> Result<Self>;
+pub fn source_model_body_item(
+    &mut self,
+    frame: &CT_Document,
+    item: &BodyContent,
+    ancestors: &[&[(String, String)]],
+    text_origins: &[(&CT_Text, &'a CT_Text)],
+    field_origins: &[(&Field, &'a Field)],
+    raw_origins: &[(&[u8], &'a [u8])],
+) -> Result<ScopedWordSource>;
+pub fn source_model_document(
+    &mut self,
+    document: &CT_Document,
+    text_origins: &[(&CT_Text, &'a CT_Text)],
+    field_origins: &[(&Field, &'a Field)],
+    raw_origins: &[(&[u8], &'a [u8])],
+) -> Result<ScopedWordSource>;
+pub fn source_model_notes(
+    &mut self,
+    notes: &crate::footnotes::CT_Footnotes,
+    endnotes: bool,
+    text_origins: &[(&CT_Text, &'a CT_Text)],
+    field_origins: &[(&Field, &'a Field)],
+    raw_origins: &[(&[u8], &'a [u8])],
+) -> Result<ScopedWordSource>;
+pub fn source_model_glossary(
+    &mut self,
+    glossary: &crate::glossary::CT_GlossaryDocument,
+    text_origins: &[(&CT_Text, &'a CT_Text)],
+    field_origins: &[(&Field, &'a Field)],
+    raw_origins: &[(&[u8], &'a [u8])],
+) -> Result<ScopedWordSource>;
+pub fn source_current_word_record(
+    &mut self,
+    record: &'a [u8],
+    range: Range<usize>,
+) -> Result<ScopedWordSource>;
+pub fn compose_sources(
+    &mut self,
+    pieces: &[(Option<&ScopedWordSource>, Range<usize>, &[u8])],
+) -> Result<ScopedWordSource>;
+pub fn close_source_namespaces(
+    &mut self,
+    source: ScopedWordSource,
+    scope: &BTreeMap<String, String>,
+) -> Result<ScopedWordSource>;
+```
+
+The new factory freezes actual membership without inspecting or crediting all
+text. Existing `with_template_inputs` is unchanged. Frozen current-source slices
+must be complete actual held cache, serialization-proof or incoming model-
+retained XML records selected by Native. Fabricated part names and arbitrary
+generated buffers are excluded. Exact duplicate
+registrations share membership. Overlapping views of the same backing record
+must not become independent origin domains. Native retains the owning Arc for
+the operation lifetime and presents that ingress-frozen record only from the
+actual selected transport branch. This CURRENT SOURCE role grants Word text
+provenance only, never Original OPC/A or Field C0 eligibility.
+
+Before any writer/output growth, validate frozen membership and duplicate
+current Text/Field keys in the pair lists. Current borrows and list borrows are
+shorter than `'a` and remain immutable through the synchronous actual writer.
+An invocation-local address index may identify those borrowed current objects
+only during that invocation. It is not a persistent current-pointer catalog.
+The lower membership check does not itself prove pairing: the Native actual
+clone and mutation producers supply that correspondence. Field pairs are
+consumed by the existing real Field source/normalization input bridge, forwarding
+already eligible frozen facts rather than registering candidate values. They
+must not be unused API placeholders or supply Word cache bytes to Field work.
+
+`source_model_body_item` shares the exact existing
+`CT_Document::body_item_xml_with_ancestor_declarations` implementation, including
+ancestor-envelope admission, actual part root, foreign-w paragraph Source branch,
+and ordinary Publication branch. It neither adds normalization nor substitutes
+a standalone paragraph serializer. The whole-document method shares the exact
+existing `write_part(PartWrite::Whole)` path, including root bindings, declaration
+and actual w14 insertion positions. Notes share the exact existing
+`CT_Footnotes::to_xml_footnotes` or `to_xml_endnotes` substantive writer selected
+by the existing family. The Native single-note fragment producer uses the same
+existing one-note container writer and actual parsed fragment interval.
+Glossary shares its existing `CT_GlossaryDocument::to_xml` substantive writer.
+No forced reserialization of retained records is permitted to manufacture tags.
+
+`ScopedWordSource` privately carries Word text event/decoded-interval facts
+beside its existing Field correspondence and constructor facts. Typed Text tags
+are created at the actual CT_R Text emission, from the supplied current/frozen
+witness. Internal Field cloning, cache selection or normalization forwards its
+own actual source and Field facts before the selected writer changes owner.
+Raw Field/wrapper/revision transport uses actual source pieces, not a match to
+rendered or cached display text. No new original or current role is inferred
+from a parsed Field cache or an equal duplicated representation.
+
+`compose_sources` is the one slice/assembly method. For Some(source), bytes must
+be empty and range selects that same-operation carrier. For None, range must be
+0..0 and bytes are actual newly generated output with no origin. Validate every
+operation, bound, overflow and layout before growth. A single Some piece serves
+slice callers. Namespace closure shares the existing exact closure plan and
+forwards surviving facts through its actual insertions. Constructor facts are
+transformed only under their existing prepared-context proof or requalified
+through the actual reader. Neither composition nor closure renews allowance.
+Actual Field materialization/transport reservations remain applicable, distinct
+from lazy Word text selection and subsequent native text-copy demand.
+
+#### Actual caller and closure matrix
+
+| Actual producer or consumer | Required connection and discriminator |
+|---|---|
+| render_grammar ingress and clone_for_staging | Freeze original parts, current model owners and preexisting current records before cloning. Build the private lineage at that actual clone, without credit. Unsaved Text absent from OPC must retain its frozen owner. |
+| prepare_current_field_models | Forward ordinary sibling slots at the exact run replacement. Changed Field outputs retain only actual eligible source/current facts. A generated equal sibling receives no witness. |
+| MainPartBlocks::serialize changed-child branch | The new body-item method is the actual emitted byte producer, with real ancestor declarations. Preserve foreign-w and opaque root attributes byte for byte. |
+| MainPartBlocks full writer fallback | The whole-document method is the actual fallback producer. Carry Text tags through exact root/w14 insertion and scanner body/item spans. No whole-writer-only shortcut omits changed child emission. |
+| Preexisting cached Arc blocks and serialization-proof copy | Transport the actual frozen CURRENT SOURCE record. Select an exclusive source/model origin role only for each final initial program source before parse_program. Cache buffers produced during this operation retain prior origins and never become new input. |
+| Program item slicing and row/direct/all visits | Use same-operation carrier slicing/assembly, namespace closure and actual physical item spans. Repeated visits union one origin. No output ordinal or equal-byte lookup establishes identity. |
+| Actual CT_R parser and placeholder TextWalk | Attach facts only when actual decode constructs RunContent::Text, including its actual consumed text span and decoded offsets. Custom note marks and unselected opaque owners are not stamped Text. The same walk registers visited intervals before String aggregation grows. |
+| Simple Field and smartTag/customXml wrappers | Forward actual captured maps, content slices and generated shells into recursive parser companions. Follow wrapper parents during selection. Changed/complex cache displays not visited by this walk gain nothing. |
+| Retained revisions and actual refresh | Unchanged raw transport carries its real source facts. Actual refresh serialization, wrapper assembly and reparse forward emitted facts. Do not recover cache owners by text equality. |
+| Footnote/endnote additions and whole related-model flush | Use the notes writer on actual witnessed owners, then carrier fragment slicing/append. Preserve old family root, separators and error order. Existing imported XML takes its actual source route. |
+| Related cache refresh and glossary flush | Reparse with the carried event/slot facts, and forward them at actual model installation. The glossary method covers the real typed flush. Unrelated comments/opaque parts remain unselected. |
+| Raw textbox prepass | Preserve its actual program-range exclusions and original-only token discovery. Its consumed input is disjoint from checked program ranges. New replacement pieces are Generated. |
+| Structural replay, copied notes, loops and MCE aliases | Forward ParsedProgram/ProgramExecution facts and shared callback events. Copied notes clone existing execution rather than parse_program again. Every actual copy pays demand, while original Word intervals never reactivate. |
+| Default and separator operands | Their grammar strings use the selected actual original/current Text facts. Decoding or filtering those literals creates generated demand, never JSON64 or new Field input. |
+
+Required deciding cases include equal original/generated text, unsaved model
+edits, ordinary Text beside a normalized Field, actual block-control runs,
+partial-body and whole fallback parity, cached current-source choice, repeated
+row/table/alias visits, unchanged raw wrappers, revision refresh, note append and
+cache reopen, glossary input, and copied-note execution without new parse credit.
+A reopened Document forms a new genuine input domain. Each case observes actual
+Native grammar aggregation and cumulative refusal before later copy allocation,
+not merely a helper map. Original Field equations, no renewed generated funding,
+full schema/native/installed/hosted riders and whole C1 obligations remain intact.
+
+These signatures and actual writer hooks are authorized together. If an exact
+notes/glossary or raw-refresh caller cannot consume the
+proposed carrier without changing its existing byte/error route, that exact
+producer blocks the complete batch and returns for a specific amendment. It is
+not silently classified as ordinary typed Text or declared complete by the
+main-body tests. No implementation or acceptance follows from this supplement.
+
+
+#### Incoming Field scalar Word origins, distinct from Field work
+
+The existing `field_origins` pair parameter has a concrete Word-text consumer.
+A newly authored `Field::new("CUSTOM", template_text)` may hold its incoming
+Word grammar solely in `cached_result`, with no frozen CT_Text. Do not call the
+later generated Text uncredited merely because it was not a CT_Text at ingress,
+or credited merely because the surrounding Field has C0. A private Word-only
+origin identifies the actual frozen Field, its `CachedResult` scalar slot and
+a decoded UTF8 interval. It supplies only the actual bytes selected by grammar,
+with neither template64 nor any Field A/B/C/P input term. The factory's actual
+frozen Field membership is inert until this scalar is selected by its actual
+writer route. Duplicate cache representations and equal text are not new slots.
+
+At the actual Native clone and Field-only replacement producers, Field pair
+facts carry the selected incoming slot relationship, not every future value of
+that Field. Lower internal Field clone producers forward the same scalar origin
+explicitly while the cache authority is unchanged. An incoming model cache edit
+made before operation ingress belongs to that frozen scalar. A cache computed
+or replaced after ingress is Generated unless its actual producer forwards an
+existing source/decoded interval. Never attach the old scalar origin to all
+future `cached_result` values merely because the Field pair survives.
+
+The actual authority sequence is `write_field_with_result_properties`, followed
+by its retained/ordered/New form selection and `write_field_result_run`.
+`typed_cache()` wins when its existing display predicate selects those runs.
+`new_result_runs()` is the next physical-run authority. Those paths use actual
+Text or nested Field facts in the selected runs. They do not also activate the
+parent scalar origin. Only the scalar fallback selects the current incoming
+`cached_result` slot. Empty PAGE/NUMPAGES fallback text `"1"` is generated and
+receives no origin from the empty cached_result. Existing equality predicates
+remain the semantic authority selector, never the provenance-discovery method.
+
+The scalar event producer is `write_field_result_content_inner` and its actual
+`FieldResultParts` traversal into `write_field_text_with_source`, not only the
+ordinary CT_R Text branch. Forward a private borrowed selected-scalar witness
+through this exact call. Preserve each actual part's decoded offsets from the
+selected incoming cached_result. Tab and break parts are not Text intervals
+and supply no Text bytes to a Text-only grammar walk. Do not construct a new
+public FieldResult variant or recover offsets by searching emitted strings.
+
+The same witness must reach the actual scalar replacement producer in
+`update_simple_field_source` and `update_complex_field_source`, including their
+first-result and missing-result branches. Newly emitted Text XML is generated
+for Field-source ownership but carries this separate Word-only incoming scalar
+origin when that actual branch uses the frozen cache. Existing raw source
+pieces retain their own origin instead. Both roles remain separate in the
+carrier so this never manufactures Original A or renewed Field current input.
+
+For ordered normalization, `ordered_normalization_plan.cache_override` selects
+`requested` from the incoming Field cache. An actual
+`replace_ordered_result_text` copies/splits that requested scalar into the
+replacement runs and must forward its intervals there before subsequent
+serialization/reparse. Normalization derived from child changes instead keeps
+the child Text/Field source facts actually used. The later parent
+cached_result/derived_parent_cache assignment from accepted_text is a computed
+summary, not a new scalar input origin. Existing output/source recipes carry
+surviving facts at their actual edit and parse producers, without comparisons
+to equal display strings. Unchanged Parsed Simple raw transport is the separate
+retained-source route, not this scalar fallback and not a second cache credit.
+
+Required discriminators add a newly authored CUSTOM Field whose only cache is
+a default/separator template string, a dirty incoming model cache assignment
+before ingress, an explicit incoming cache override normalized into ordered
+runs, selected typed-cache precedence, an unchanged Parsed Simple raw template,
+and a fresh computed display equal to a frozen scalar. The computed duplicate
+gets no renewed input. Repeated writer/row/alias reads and duplicate cache
+displays union the same selected scalar interval once. All tests reach actual
+Native grammar aggregation, including note/glossary consumers where applicable.
+Field and Word counters must demonstrate their independent input roles.
+
+`compose_sources` describes only an ordered physical producer transcript of
+surviving carrier slices and newly produced bytes. It is not a new generic XML
+validator. Existing original/current Field guard coverage, actual constructor
+fallbacks and all other C1 resource debt remain separately required. These
+specific additions are part of this approved bridge contract and supply no
+implementation or acceptance proof.
+
+
+### Deferred incoming result roles, Root approved
+
+Root approves this complete private-role reconciliation on2026-11-04 after
+reviewing the actual omitted OUTER cache authority, the original mapped2/mapped3
+refusals, initial source constructor and frozen-model entry paths, and existing
+Field/property input equations. This is technical design authorization only,
+not another peer, implementation acceptance, provider completion or permission
+for a conservative refusal. It adds no public method, type, model member, quota
+or per-node fixed term. The local helper/reference equation stays identical.
+
+The exact approved behavior is inline below. Source preparation SHA256 is
+763d9d2b3b0ef30b181d0c3944758b5dad5686c641602c5bd5b039fbd060b599.
+Original source and frozen model each require their own actual ingress proof.
+Produced carriers and Original A correspondence alone create neither role.
+Existing successful-constructor facts remain unchanged, while actual previously
+omitted ordinary result operands may supply their existing C term once when
+selected. The valid raw-only reproductions and their model equivalents must
+pass actual end-to-end operation tests before this class is accepted.
+
+#### Existing equations retained
+
+The actual Field current helper is normalization_input_work (text.rs:4582), calling initial_field_work_bytes (2026) and legacy_field_work_bytes (2059). Its cache operand is cached_result.len, with no64perText. initial_field_work_base (1999) is raw instruction + instruction name + cached display + supplied scope. Argument/switch64 terms stay restricted to their existing instruction roles. affected_source_dynamic_work uses the unchanged124coefficient. The local Field helper/reference MUST remain numerically identical.
+
+The actual selected property helper is CT_RPr::selected_input_work (run_properties.rs:660). It computes retained-owner-work(B, empty-scope, C), where B includes existing retained source/attribute records and C is selected_current_bytes (710): actual UTF-8 strings, canonical lexical numeric/enumeration bytes, existing1byte bool representation, and2hex bytes for tint/shade. No serialized RPr or sizeof estimate is an input. Unknown retained namespace/attribute records do not become affine semantic C.
+
+At operation level, selected original role addition has the existing form deltaA_union +124*deltaC. Legitimate frozen-model B/C remains the existing separate ingress route. A raw record reconstructed during a source parser is NOT a fresh model-B baseline. New deferred source property bytes already covered by A cannot also add the same retained B again.
+
+#### Exact role inventory and owner
+
+Keep two distinct private identities:
+
+- Original Field identity/facts for that actual successful physical Field occurrence, with the unchanged original Field helper current.
+- Original result-operand identity bound to the NEAREST successful containing Field result owner, actual original run/atom occurrence and concrete role. This is supplied by original capture/constructor proof, never an index after edits or Original pieces alone.
+
+The result role can be a small private enum with Scalar(content_slot) and Properties for an actual original run occurrence. Its key includes the containing original Field key, original physical run range/partition and the actual first constructor's stable content slot. An ordinal is valid only as a component of that canonical factory delivery proof. Do not add a generic graph, public ID or source_id identity.
+
+A provisional capture receipt carries the result-owner frame until that containing Field actually succeeds. At successful delivery bind it to that Field's original fact and record the cache authority actually selected by the constructor: ordered accepted text versus direct run cache versus skipped raw result. Late None/error does not bind or fund it. These facts stay inert until a selected producer consumes the corresponding original result input.
+
+#### Scalar measurement and nested exclusion
+
+After actual original run/Text construction under that receipt, retain borrowed canonical display length facts, not a second source text decoder. For ordinary Text/DeletedText selected by the actual accepted/current mode, use CT_Text.text.len. Existing cached_run_display (text.rs:6537) and CT_R::content_text (7580) define the other original cache spellings: tab/newline/carriage return one UTF-8 byte, page/column break one byte with their cache control code, selected custom note marks their actual string bytes, and font-encoded symbols/drawings/comment markers no display bytes. Reuse those concrete policies. A first implementation must not silently assume every RunContent variant is Text.
+
+STOP at RunContent::Field. Do not count its cached_result/projected_text as a new deferred scalar of OUTER. It has its own original Field current authority and may have its own deferred result owner. Also do not use paragraph.accepted_text, CT_R::text or cached_run_display's aggregate String as the new registration input: those aggregate helpers include nested Field display. The new visitor uses their same NONFIELD scalar selection decisions only.
+
+This exclusion does not rewrite historical base terms. An original Field constructor that already aggregated a nested display into its actual cached_result retains that old local current term exactly. It receives no extra deferred role for that same included operand. The supplement prevents new duplicate funding, not a retroactive change to the local equation.
+
+For raw ordinary text omitted from initial OUTER.cached_result, activate its genuine selected original scalar bytes once. For an ordered OUTER whose accepted-text cache already included that same physical scalar, mark its deferred role covered by the base authority and add zero. Do not decide coverage by equal output text. The original constructor branch and actual physical operand membership prove it. Equal strings at distinct physical occurrences remain distinct original inputs. Multiple edits/spans or split runs within one original atom do not renew it.
+
+#### Properties measurement and selection
+
+Use the SAME actual source writer's property selection. Original decoded run properties become eligible only when the selected producer actually preserves/clones/emits them as input, before the relevant generated allocation. Parsing an unrelated wrapper does not finance its properties. Existing explicit outer-result properties versus cached fallback selection must not be replaced by a second guessed selector.
+
+Factor selected_input_work's EXISTING measurement into a private substantive terms method, e.g. selected_input_terms(&self) -> Result<(usize,usize)> for retained B and semantic C. selected_input_work then applies the exact old retained_owner_work formula. The two actual consumers are existing frozen model ingress and new deferred original-source selection. This is a numerical decomposition of the current helper, not an additional formula.
+
+For source receipts, use actual original property-record physical ranges to intersect the operation A union and take current C only from genuinely selected original typed semantic values. Do not add the returned aggregate B+124C blindly when its B is already original A. Retained name/value tuples created by parsing are not extra incoming stored-source B. If a retained item has no exact physical correspondence and did not exist at checked-model ingress, record that missing proof instead of treating the new tuple allocation as baseline.
+
+A later supplied replacement RPr is genuine new caller input under its approved formatting role, not original properties. Old original properties may fund a prior required phase only if that phase actually consumed them. Unused/superseded old properties cannot be added simply to finance their replacements. The earlier C0/C1 phase-lifetime clarification applies unchanged.
+
+#### Narrow private API/data responsibilities
+
+1. The actual simple/complex constructor creates a provisional ResultInputFrame for its actual result region/context and selected cache authority. Original Raw capture records a view of it beside WordExtraSourceMaps. At successful containing Field delivery, registry binds that frame to the physical Field fact. No public Field/CT_P sidecar is added.
+2. WordFieldInput and captured cursor transport the deferred view through actual slice/shell/capture operations independently of initial_delivery=false. The registry stores inert source-role facts keyed by actual original atom/run occurrence and owner. Actual run construction may report canonical scalar lengths and property physical spans through this private cursor/return-out seam.
+3. Existing pre-edit mapped text walk builds the actual original wrappers under their real context. It stages successful deferred scalar/property facts but does not activate unrelated parents/operands just because text_runs visited them.
+4. The selected-match/Field-ancestor pass in placeholder.rs:171-205 already knows which Field producers will run. Extend its substantive registration to consume the selected containing Field/result inputs needed by those actual producers, before candidate cloning/splitting and generation. Use the proven original result-owner receipt, not candidate addresses. If a whole selected Field source phase actually consumes other original cache runs, that actual producer may activate those original inputs once. An unread unrelated raw branch remains inert.
+5. A private WordOperationWork method such as register_original_result_inputs(owner_receipt, actual_selected_role_views) performs checked A-union/C-dedup updates under the existing ledger. Private registry methods resolve actual successful delivery proof and previously covered base roles. They do not compute authority from arbitrary supplied lengths.
+6. Derived candidate clones, split Text, wrapper splices and refreshed Field reparse forward consumed role keys only. They cannot call the original-result registration with a new role or recredit their generated cache. set_simple_field_source_in forwards old original facts only. Actual source/current maps remain independent from authority.
+
+These are authorized internal signature shapes in the existing modules, not public additions. The same actual parser/writer policies must supply role/view information. If a path cannot produce the proof, keep that exact path open rather than apply a permissive map-only fallback.
+
+#### Context, changes and errors
+
+The capability distinguishes original capture context from actual consuming context. Raw wrappers use detached implicit w plus local declarations. Stored simple Field result uses its actual parse scope. A borrowed unchanged capture preserves the same receipt. Generated/changed source does not mint one. An independently captured unchanged child can retain its receipt across an outer edit only when the actual producer forwards the same child and unchanged reader context.
+
+For an unread outer wrapper edited before any original child/result role was proved, Original map fragments alone do not establish original dispatch or namespace meaning. That remains a compatibility obligation needing original producer facts, NOT an approved new refusal boundary. This supplement grants no permission to reject formerly accepted valid operations.
+
+Ordinary malformed/unsupported None never creates original result facts. Resource errors retain actual producer classification and propagate in existing order. Already reached successful deliveries and spent work remain sticky after later failure. Public candidate publication remains atomic.
+
+#### Complete discriminator set
+
+- Exact mapped2/mapped3 original fixture, no inserted direct typed cache run.
+- Same ordinary Raw result with NO INNER, and with an empty/tiny INNER cache. Report actual results, no source-derived runtime claims.
+- Large ordinary original Text plus two small property edits, and large original semantic font string. Original raw/property bytes already in A must not fund a second B copy.
+- An OUTER ordered accepted-text cache already including the same original raw Text: delta deferred scalar credit is zero.
+- Nested Field cache only versus adjacent ordinary Text: parent deferred visitor adds ordinary atom bytes only, not child display. Direct-child aggregate terms retain the old reference exactly.
+- Multiple edits/splits/repeated parses and MCE/template replay of one original operand: no renewal. Two distinct original equal atoms remain distinct.
+- Unused huge raw wrapper and two unchanged1MiB captures stay inert/accepted under existing applicable checks.
+- First read after independently proved unchanged-child transport versus unread namespace-envelope change. No fabricated original role from A pieces.
+- Actual malformed None/resource failure and public atomicity controls, exact helper/reference numerical equality, selected input/property term equality with the old helper.
+
+Root authorizes the complete original and frozen-model role below. No new role is already implemented by that authorization, and restoring INNER credit alone does not prove the full class.
+
+
+#### Amendment: actual frozen-model ingress
+
+The capability must cover BOTH existing ingress roles. A private DeferredOwner enum can distinguish Original(actual original successful owner/capture witness) from FrozenModel(actual selected frozen Field/current-owner membership and retained Raw-slot witness). FrozenModel is not an Original locator, supplies no OPC part/range and cannot fund A. The same scalar/property measurement and base-covered exclusion rules above apply.
+
+For source_model_paragraph, bind the FrozenModel witness while source_model_paragraph still borrows the admitted current paragraph and register_model_fields still walks its actual frozen Fields, BEFORE clone, normalization or writing. The operation's existing paragraph/Field membership is authority. Freeze the actual Field-to-result/retained-source/Raw-slot relationship and consuming context there. Record current branch authority and which operands are already covered by the initial cached_result/current terms. No eager raw decoding or credit follows. An unsaved caller-assembled model is a real supported ingress, not generated callback output.
+
+A Raw slot key is its actual frozen owner relationship plus captured initial slot/record identity, with the existing retained source/paragraph relationship anchoring it. Slot number is only a component of that frozen proof, never a candidate ordinal after edits. A shared immutable Raw slot reached through two projection edges retains the SAME baseline role identity and credit once. Distinct genuinely existing current Field values retain their separate existing current-input identities, even if their retained source is shared. Preserve that distinction rather than using one pointer, source_id or equal text for both rules. The owner enum authorizes the relationship, while the role dedup key identifies the actual baseline operand occurrence.
+
+At the actual clone/serializer producer, explicitly forward that FrozenModel receipt through the real paired Field/result/raw-slot correspondence and source-piece maps into the produced carrier. This receipt does not relabel the produced carrier as frozen model input. Ordinary produced(map,registry) cannot recreate it. The first real eligible raw reader may stage decoded scalar/property facts under the preserved receipt, and actual selected Field-result consumption activates them once. Generated normalized sources, candidate clones, callback strings and later parse allocations do not mint new FrozenModel membership.
+
+B remains the existing retained-input union. The frozen Raw/source record may already have been selected by register_model_fields and funded once through retained_inputs/stored_inputs. Do not add that B again when its deferred operands are decoded. C additions contain only the actual selected, previously uncovered ordinary scalar/semantic property bytes. No Field64, no scope guessing, no generated-output C, and no change to normalization_input_work/local reference. Property raw records already included in that B likewise cannot add another retained contribution through selected_input_work.
+
+Use the same small internal registration consumer for both variants, with origin-specific proof resolution and common checked role dedup/measurement. Actual native body-item/frozen-model entry must select these witnesses before staging/flush and forward them through its real producer. A post-flush paragraph cannot be registered as another frozen model. Add the unsaved incoming-model analogue of the no-INNER fixture, repeated source_model calls, shared-slot DAG and distinct divergent-current controls, retaining source/None/resource ordering and no runtime claims here. The initial OPC-only proposal by itself does NOT close this model path.
+
+
+### Root approved finite imported XML payload and publication coverage
+
+This technical contract uses the existing normalization-output metric and two
+existing opaque public types. It adds one doc-hidden operation method:
+
+```rust
+pub fn source_imported_field_xml(
+    &mut self,
+    source: &ScopedWordSource,
+    owner: Range<usize>,
+    value: &str,
+    escape: bool,
+) -> Result<ScopedWordSource>;
+```
+
+The still-unimplemented rewrite_imported_source signature above now consumes
+moved ScopedWordSource payloads in its edit list, replacing the earlier owned
+Vec payload argument. The new method performs actual raw or five-character
+escaped XML fragment production after exact reservation. It is not a paragraph
+parser or a new XML validator. Both modes preserve the existing native byte
+policy, including raw values and unchanged carriage returns. No template-copy,
+Original, model-current or callback input credit follows from producing it.
+
+Private payload-only metadata binds the actual parent source occurrence and
+nonempty source owner interval. The existing opaque payload owns its produced
+buffer and exact one-shot prepaid receipt together. No ambient exemption stays
+active while it waits in an edit list. A pointer lookup, equal bytes, matching
+length or Generated source map cannot manufacture that receipt. Unrelated
+prepared sources are not prepaid scalar payloads. Moving the payload into the
+rewrite transfers its actual receipt, consumed only during the synchronous
+copy of that exact produced buffer. Fresh changed-record Field prefix/suffix
+and other unprepaid output still reserve before growth. Dropping or failing
+never refunds spent work. Later repeat or changed-record production pays again.
+
+Publication coverage is private metadata independent of Original/input roles.
+Actual successful simple and complex constructors report selected current
+source child/shell intervals. Model Field writers mark their actual output.
+Source map slice, assembly, closure and splice transcripts forward this same
+coverage. Nested overlap is unioned in current coordinates, while separate
+published copies each consume demand. Source equality and inverse Original
+lookup cannot establish coverage. A pending or failed constructor is not a
+successful Field and unknown coverage is not a proof of fieldless input.
+
+For successful shared-run splitting, preserve its actual selected Field ranges,
+including its existing invisible-outside folding. When the existing splitter
+falls back, retain independently committed actual constructor-owned child and
+necessary shell/property intervals. Leave unowned outside bytes ordinary.
+Do not infer the hypothetical successful splitter result, mark the whole shared
+run Field, add another parser or reject the formerly accepted fallback. Capture
+annotations must come from actual run and wrapper producers and follow their
+real assembly transcript. A run-only solution does not qualify owned hyperlink,
+control or companion-source paths. Failed/incomplete candidates grant nothing.
+
+The payload owner witness must be wholly selected Field or wholly ordinary.
+Ordinary payloads receive no Field debit or receipt. Empty insertion coordinates
+have no side-based ownership. An empty scalar uses its actual nonempty enclosing
+qualified event only when its full coverage proves the owner. Mixed ownership
+cannot be rounded, prorated or made a new valid-input refusal. Supply actual
+producer subrange proof or retain that case as unfinished compatibility work.
+The rewrite validates all anchors, parent bindings, edit containment, bounds,
+nonoverlap and length overflow before its output grows. Empty edit lists move
+without a fabricated copy. Equal-byte allocated replacements remain production.
+
+Named actual native consumers are patch_word_values, patch_relationship_ids,
+add_identity_attribute_edit, add_attribute_value_edit, the complex instrText
+replacement, replace_fragment_store_id and uniquify_drawing_ids_in_xml. Their
+selected replacements are existing UTF-8 strings. Preserve raw versus escaped
+policy and all decoder, REF parser, namespace and source-span rules. Keep final
+payload recipes private in existing native files. Complete each stage's old
+scan and semantic checks before payload reservation, preserving no-match and
+numeric range-exhaustion errors. Selected docPr integers may use a ten-byte
+stack decimal producer after those checks. Do not move the REF parser lower or
+replace unrelated arbitrary FieldSourceEdit Vec users through this finite seam.
+Decoded instruction accumulation and unescaped scratch strings are not emitted
+XML or automatically template text-copy demand. Their existing applicable
+constructor/scalar bounds still need actual qualification, without a new heap
+quota. A later XML escape/output producer reserves its own applicable demand.
+
+Required controls cover raw/escaped identity, every escape and CR, deletion and
+empty values, ordinary versus Field versus mixed owner, foreign operation and
+parent, failed composition with sticky work, single-use receipt and fresh
+repeat, duplicate numeric ids at exhaustion, malformed later scanner input,
+no-match store errors, and complete bytes/error/map parity. Confirm the actual
+orphan-instrText shared-run fallback discriminator before claiming that route
+covered. Large outside text, nested fields, paired tabs/breaks/custom marks and
+wrapper assembly must preserve exact selected coverage and unchanged behavior.
+This approval supplies no implementation, provider completion or final rider.
+
+### Genuine scoped caller-literal current input
+
+Root technically reconciles the existing incoming C1 role with the actual
+scoped literal API. A current public control replaces a102-byte PAGE Field's
+TOKEN cache with an actual caller-owned65536-byte String and succeeds. The
+shared-work connection must preserve that acceptance. The replacement remains
+Generated in source correspondence. Its distinct actual incoming caller-value
+role may fund only the existing applicable Field current-scalar term once.
+Neither original A credit, template64, a new multiplier nor unused padding
+follows from this role. Internally produced template replay is not this input.
+
+Authorize one additive doc-hidden substantive method on ScopedWordOperation:
+replace_block_with_literal_input, with the existing replace_block arguments
+and an additional borrowed Cell<bool> delivery flag. It owns the real existing
+prepare, complete block parse, edit and final publication path. The existing
+replace_block compatibility entry creates one local flag for that real external
+call and enters the same substantive implementation. No new opaque type,
+module, generic, public facade signature or independently tunable budget is
+authorized. Add this method to the final hidden-public SemVer inventory and
+compile its exact signature in the existing external-consumer canary.
+
+The two actual Native public invocation routes create one local delivery flag
+per real caller replacement. Private candidate and paired-alias calls forward
+the same borrowed replacement and flag synchronously. A paired alias cannot
+renew it. A different literal invocation gets its own event even when text is
+equal. This is an explicit producer protocol, like the genuine callback event,
+not text equality, pointer discovery or an unforgeable public capability. A
+computed replay cannot manufacture such an event. Do not reuse one event for
+different values or repurpose the callback or JSON input roles.
+
+At the unchanged literal match-selection boundary, validate the actual accepted
+match and containing Field ancestors before output growth. Activate exact
+replacement UTF8bytes under the existing Field current-value multiplier only
+when that real incoming value is consumed by an affected Field. Empty needle,
+no match, a rejected crossing match and fieldless replacement add no Field
+credit. Register all selected inputs and checked arithmetic before mutating
+credit or the flag. Ordinary validation/error order and selected-first count
+mismatch or zero-count return stay unchanged. Actual earlier consumed C0
+remains governed by the existing phase-lifetime rule. Candidate models, emitted
+XML, reparsed output and wrapper maps cannot renew input. Sticky refusal cannot
+be cleared by another event, and failed operations do not refund used credit.
+
+Required discriminators include the observed65536-byte accepted caller value,
+empty and zero-match unused values, fieldless output, exact accepted-match
+selection across run/wrapper boundaries, repeated paired aliases with one
+event, equal distinct real invocations, generated replay without a new event,
+and a late resource/namespace failure leaving original bytes and maps intact.
+Preserve one final Field writeback for all actual literal matches. Raw/control
+map companions and the actual final-writer transport proof remain separate
+mandatory producer obligations. This clarification authorizes implementation,
+not acceptance or provider completion.
+
+### Retained literal text mutation metric units
+
+Root reconciles the scoped literal carrier with the existing4410to4424metric
+units. Updating an existing CT_Text slot does not create a new Text constructor
+entry. Unescaped model String allocation or copying is not emitted XML and is
+not automatically Q-C1-03template-copy demand. The narrow operation-produced
+text-copy amendment names the concrete Native default-format, template and
+filter carriers. It does not authorize a generic aggregate cached-String byte
+quota over every lower model edit. Do not sum such byte lengths into
+constructor_actions, XML output or the template ledger. No new counter or
+accepted-input restriction follows from the literal connection.
+
+Actual applicable local current/scalar checks and complete physical-fact copy
+reservations still need their genuine before-growth producer coverage. A
+passing XML guard proves neither earlier String allocation nor complete current
+role qualification. Report those boundaries precisely and preserve any
+unqualified existing-metric obligation. This clarification does not waive
+preallocation checks, new typed result action reservations or final C1/provider
+acceptance. It prevents an unrelated heap quota from being invented while the
+coherent shared-work carrier is reviewed.
+
+### Explicit scoped template TextWalk consumer
+
+Root technically approves one additional doc-hidden method on the existing
+ScopedWordOperation after tracing the actual cross-crate boundary. Native
+parse_program currently calls public placeholder::replaceable_texts after the
+lower paragraph parser returns. A crate-private lower walk alone cannot connect
+that caller to the operation's Word interval facts. Source creation or automatic
+walking inside source_paragraph would incorrectly select unvisited input.
+
+```rust,ignore
+pub fn template_replaceable_texts(
+    &mut self,
+    source: &ScopedWordSource,
+) -> Result<Vec<String>>;
+```
+
+The explicit method accepts only a source from this same operation. It shares
+the existing paragraph admission, exact parse/map companions and Field fact
+registration, then runs the same substantive lower placeholder TextWalk. That
+actual walk activates only the proved Word intervals it visits before String
+aggregation grows. It uses the existing selected-input and text-copy equations,
+without a new quota or eager all-Text grant. Repeated calls retain consumed role
+keys and cumulative demand. Generated equal text has no new input authority.
+Malformed source and resource failure keep their existing ordering and sticky
+operation policy. No input credit follows merely from constructing a source.
+
+Existing source_paragraph retains its existing behavior and grants no automatic
+Word text selection. Existing public placeholder::replaceable_texts and its
+legacy direct-read exception stay unchanged. Native paragraph grammar replaces
+its detached parser/public-reader pair with this explicit scoped consumer.
+Row direct/all visits preserve the actual whole-row validation and refusal
+order, existing paragraph visitation and marker predicates. They use actual
+physical paragraph slices with carried facts and namespace closure, rather
+than value matching, invented traversal or extra input per repeated visit. An
+incompatible concrete row consumer requires explicit technical reconciliation
+before any additional API is added.
+
+This raises the final hidden-method inventory from30to31with no new public
+type, model field, module or generic. Update the external compile canary and
+actual SemVer inventory. The change is technical design authorization, not
+implementation, another peer, provider completion or runtime acceptance.
+
+### Explicit scoped Native Field preparation consumer
+
+Root technically approves one further doc-hidden method on the existing
+ScopedWordOperation after verifying the actual early Field normalization
+cross-crate boundary. Native prepared_current_field clones before source-model
+serialization, and its public lower normalizer creates fresh local work. Later
+Field pairs or source writers cannot recover newly created Text origins or
+replace that earlier producer's call order.
+
+```rust,ignore
+pub fn prepare_template_field(
+    &mut self,
+    current: &Field,
+    frozen: &'a Field,
+    normalize: bool,
+) -> Result<Field>;
+```
+
+Native retains its existing preflight_current_field call and raw-preservation
+bypass, then supplies the actual inverse bypass result as normalize. Validate
+frozen membership and establish the genuine clone producer's correspondence
+before cloning. With normalize=false, preserve the existing imported-raw
+clone path and inert provenance. Do not add eager semantic validation, admission
+or Field-current activation that defeats that raw acceptance. Existing
+non-template prepared_current_field callers keep their current behavior.
+
+With normalize=true, retain the existing recursive order through instruction
+arguments and switch arguments, actual cached children, then the parent owner.
+Use the existing substantive normalization producers with inherited operation
+work. Preserve each existing local Field equation, error and raw-fallback
+boundary. Forward the selected incoming CachedResult interval at the actual
+requested copy, FieldResultPart construction, nested assignment, selected
+writer and reparse. Computed derived_parent_cache and accepted-text summaries
+remain generated. No value match discovers an origin.
+
+The method returns the normalized Field and retains its actual produced source
+and constructor correspondence in operation-private facts. Those facts must
+survive Native's real model installation and later synchronous writer pairs,
+without public model fields, a self-referential return type or a persistent
+candidate-address catalog. Frozen Field identity and actual producer/slot
+relationships distinguish divergent current values sharing retained source.
+The explicit Native producer supplies correspondence, as with the approved
+writer pair lists. Membership alone is not proof that arbitrary values pair.
+
+Word CachedResult input remains inert until the actual scoped TextWalk selects
+its proved Text intervals. No JSON64, eager all-Field Word credit, generated
+cache input or renewed role follows from preparation. Repeated preparation
+retains the same input identities and cumulative demand. Existing actual
+normalization and fact-copy reservations remain applicable before growth.
+
+The final hidden-method inventory is32across the same two opaque types. Update
+the external compile canary with this exact return and both normalization
+branches. This technical authorization implements or accepts none of the
+bridge, adds no public type/module/trait/generic or quota, and does not reset
+review caps or complete the C1/provider gate.
+
+### Frozen retained XML Word source correspondence
+
+Root technically extends the existing Word-only CURRENT SOURCE catalog to
+complete actual retained XML byte records in the incoming model, frozen before
+Native staging. The earlier cache/proof-only wording did not already cover
+those records. This explicit extension preserves genuine dirty-model raw
+textbox input without promoting a serialized candidate buffer to new input.
+It changes no numeric allowance or Field/local-input formula.
+
+The four existing approved source_model_body_item, source_model_document,
+source_model_notes and source_model_glossary signatures above now each have
+the final argument raw_origins: &[(&[u8], &'a [u8])]. There is no new type or
+method in this signature amendment. Native's actual clone and mutation
+producers supply structured retained-record current/frozen correspondence,
+including Drawing and run extra XML. Membership is frozen in the existing
+current_word_sources constructor argument without eager decoding or credit.
+
+Before writer growth, validate frozen membership, exact view bounds and
+duplicate current keys in the invocation-borrowed pair list. The concrete
+retained XML emitter forwards copied intervals from that actual current record
+to its paired frozen record. Its lexical context lasts only through the
+synchronous writer. No equality search, inferred model ordinal or persistent
+candidate-pointer catalog discovers a source. Namespace insertions and new
+replacement bytes remain generated. Encoded root-attribute metadata is not a
+Word Text witness.
+
+Copied records and overlapping views retain one frozen input domain. Separate
+real input records remain distinct. Actual existing clone/slot relationships
+forward facts through further publications. Only an actual accepted Word Text
+parser and the selected scoped walk activate decoded intervals, once. The
+CURRENT SOURCE role grants no Original A, Field C0, JSON64 or eager all-XML
+credit. Keep the existing exclusive origin choice for each initial program
+source. Missing correspondence cannot become permission for a new refusal
+boundary or a fresh baseline.
+
+This amendment is technical design authorization for the already required raw
+textbox/current-source compatibility. The hidden-method inventory remains32,
+and the four unpublished signatures and external compile canary must agree.
+No implementation, new peer or provider completion is claimed. The separate
+raw textbox scoped consumer still needs its exact final signature recorded
+before implementation.
+
+### Scoped original-literal textbox consumer
+
+Root technically approves this additional doc-hidden method on the existing
+ScopedWordOperation after tracing both raw textbox visits and simple-Field
+reachability. The earlier part-name-only proposal is not adopted. Actual
+post-staging raw sources may differ from frozen package bytes, so the method
+consumes and returns same-operation carriers with their real provenance.
+
+```rust,ignore
+pub fn replace_original_template_literals(
+    &mut self,
+    source: &ScopedWordSource,
+    excluded: &[Range<usize>],
+    replacements: &[(&str, &str, &[&'a serde_json::Value])],
+) -> Result<(ScopedWordSource, usize, Vec<String>)>;
+```
+
+Share the exact existing replace_original_literals_in_xml_part substantive
+walker, duplicate/nested-box handling, paragraph capture and exclusions.
+Preserve its actual namespace, validation, matching and error order. The actual
+paragraph decoder and scoped TextWalk receive the consumed source spans and
+constructor companions. Do not discover an origin from a callback paragraph
+ordinal, equal bytes or generated serialization. Select proved decoded Word
+intervals once and reserve actual discovery/aggregation copies before growth.
+The returned source carries the actual copied/generated rewrite recipe for
+Native publication and reacquired programs. Replacement bytes remain generated.
+
+Native main input uses its real source_model_document output. Related parts
+reuse actual flush/publish carriers. Neither substitutes frozen part-name
+bytes for the actual current source or creates an input baseline from output.
+Actual incoming retained raw XML uses the separately approved frozen-record
+pairs. Preserve checked program exclusions and original-only token discovery.
+
+Each replacement triple supplies its original token spelling, prepared text
+and the exact borrowed JSON operands actually used to produce that text.
+Validate membership before relevant growth. Affected Field selection uses the
+same existing actual operand roles as format_paragraph, without treating a
+derived String as a new caller-literal event. Join forwards its actually used
+children. Word literals and default-only results have empty JSON dependencies.
+Unused Null/default inputs receive no inferred credit. Word text-copy and
+Field-current roles remain distinct. No JSON64is added to a Field equation.
+Raw formatter expressions retain their existing early refusal, so this method
+adds no callback flag or new callback behavior.
+
+Empty replacements perform discovery and return the actual original sources.
+For Native's nonempty rewrite call, scoped mode may avoid collecting its
+genuinely unused second discovery result and return an empty sources vector,
+while still performing every actual matching walk and required validation.
+If the implementation retains that allocation, it must reserve its real copy.
+The existing public legacy tuple always retains its current semantics. No
+new conservative refusal, renewed source credit or omitted scan is authorized.
+
+The final hidden-method inventory is33across the same two opaque types. Update
+the external compile canary and four amended raw-origin writer signatures.
+This is technical API/consumer authorization only, not source implementation,
+another peer, provider completion or native acceptance.
+
+### Move already-owned first Text into scoped stretches
+
+Root approves a producer optimization within the existing scoped TextWalk API
+to preserve zero-input no-op consumers. An empty PAGE or NUMPAGES Simple Field
+emits generated1, which remains generated and contributes no Word input.
+Copying that parsed result into a new one-byte stretch would require credit
+that the input does not supply. The method already owns its required parsed
+paragraph and wrapper models, so it may move the first uniquely owned Text
+String directly into each returned stretch instead.
+
+Share the same TextWalk selection and boundaries with the existing reader.
+The built walk may first register exactly the proved Text intervals that it
+will actually visit, without copying Strings or parsing again, then aggregate
+owned pieces. This prevents an earlier generated append from refusing solely
+because legitimate later visited input has not yet been registered. It does
+not select unvisited owners, attributes or opaque content. Actual genuine Word
+selection still occurs when the first String moves and is not skipped merely
+because that move costs no new copy.
+
+Move only an already-required uniquely owned parsed Text buffer. A clone,
+Cow-to-owned conversion, Arc::make_mut copy or extra parse cannot manufacture a
+free buffer. Shared/nonmovable pieces retain their actual charged copy path.
+Reserve every actual later copy or append before growth. An all-generated
+multi-piece stretch still refuses when its actual demand is unfunded. No
+quota, allowance, input role, public signature or model field changes.
+
+The borrowed public replaceable_texts behavior stays unchanged. Full original
+construction and validation/error order precede owned consumption, and shared
+caller models are never mutated. Controls must establish actual generated1
+no-op success, zero new input credit, refusal of a later real unfunded copy,
+borrowed-reader output/boundary parity and a reachable mixed generated-prefix/
+later-genuine-input case. Unsupported wrappers alone do not prove the generated1
+bug. The hidden-method inventory stays33and the current canary signatures are
+unchanged. This is implementation authorization, not a completed acceptance.
+
+### Immutable access to actual retained model records
+
+Root authorizes four additive doc-hidden borrowed-data accessors on existing
+lower model types for the actual Native pre-clone input census and synchronous
+current/frozen writer pairing. The glossary root, each doc part and each
+revision retain separate private raw buffers that their existing publishers
+copy. Public typed projections and equal package bytes are not substitutes
+for those actual incoming records.
+
+```rust,ignore
+impl CT_GlossaryDocument {
+    pub fn retained_xml(&self) -> &[u8];
+}
+impl CT_DocPart {
+    pub fn retained_xml(&self) -> &[u8];
+}
+impl CT_Revision {
+    pub fn retained_xml(&self) -> &[u8];
+}
+impl CT_Sdt {
+    pub fn retained_run_xml(&self, content_index: usize) -> Option<&[u8]>;
+}
+```
+
+Each accessor borrows only its stored buffer, without cloning, serializing,
+normalizing, selecting Word input or granting any work. The three Vec-backed
+owners return an empty slice if their stored record is empty. The control
+lookup uses the actual stored absolute SdtContent index, not run ordinal.
+Missing capture returns None. This exposes no private source/provenance type,
+mutable access, public model field, new module, trait or generic.
+
+Stored control capture does not assert current serialization eligibility. Its
+existing private writer guard still checks the original run and pending Field
+replacement. Pending-edit buffers remain distinct. Native freezes records
+before clone and carries only actual clone/mutation owner and slot relations.
+An index after arbitrary public content splices cannot establish provenance.
+No equality discovery, package-byte search or persistent candidate-address
+catalog is authorized. Actual writer consumption remains the authority for
+copied intervals and lazy TextWalk selection remains the authority for input.
+
+Add exact borrowed lifetime calls and optional-control lookup to the existing
+external canary and SemVer inventory. There remain33authorized methods across
+the two opaque carrier types, plus these four accessors on existing model
+types. No new type or binding is added. Final union compilation and actual
+Native consumer tests remain required. This finite access amendment is no
+implementation acceptance, peer reset, provider completion or new refusal.
+
+### Movable prepared Field receipt identity
+
+The actual prepare_template_field return moves into Native staging and later
+writer pairs. A shared FieldSource Arc cannot identify divergent incoming
+CachedResult occurrences. Root therefore explicitly permits one private inert
+producer receipt identity on existing Field, with its substantive payload
+remaining in operation-private facts. This satisfies the existing ban on a
+public model field and persistent candidate-address catalog.
+
+Use the existing operation anchor and a checked operation-local occurrence
+identity, for example Option<(Weak<()>, usize)>, or an equally small private
+concrete identity. Do not store source bytes, a model, a frozen reference,
+provenance map, Work or mutable allowance on Field. The ordinary path is None
+without an extra allocation. Actual prepared clone/move forwarding preserves
+the identity. Ordinary constructors/parsers do not manufacture it. Dropping
+the operation releases its facts, with no source retained by the token.
+Foreign or expired receipts are not authority and create no new broad legacy
+refusal. Existing Field equality, serialization and public behavior stay the
+same.
+
+Receipt presence is not proof that public cached_result or nested children
+still contain original values after mutation. Actual requested-copy,
+normalization assignment, selected writer/reparse and Native clone/mutation
+producer relations must forward the proved intervals. Changed/generated bytes
+receive no inherited input merely because their Field retains a token. The
+operation resolves the receipt only under those actual producer facts, with
+no String address/equality discovery or candidate pointer history.
+
+Repeated preparation and actual clones may have separate producer receipts,
+but their Word input roles still resolve to the same frozen operands and union
+once. Divergent ingress Fields sharing FieldSource remain distinct. Controls
+must distinguish those cases, actual move/clone delivery, generated mutation,
+foreign/dead receipts and ordinary None behavior. Field and Word allowance
+rules are unchanged. There is no additional public method/type or canary
+signature change, and no implementation or provider acceptance follows.
+
+### Issue430 child partition and concurrent source ownership
+
+Root approves the complete existing Issue430 contract as F-X272a, whose sole
+canonical design is .claude/plans/F-X272a-design.md. All45A430rows,14G430gates,
+five original issue rows, prior review history and Q-A430-28 remain intact.
+This section supersedes older unadopted/paused/adoption-after-C1 wording only
+for that child. It changes none of this parent's carrier API signatures,
+equations, C1 obligations or acceptance debt.
+
+F-X272 retains the comparison/source C1 author and existing worktree, branch,
+Base and dirty source. F-X272a may use a distinct clean reviewed worktree and
+existing baseline APIs after ordinary claim/start. Its native comparison,
+revision custody/cleanup and lower note-type parser work has no demonstrated
+dependency on a new unfinished C1 carrier callable. Shared source files are
+serial integration resources. An actual required unfinished operation would
+remain a genuine blocker and must not be bypassed.
+
+The parent cannot complete or unblock F-X277/F-X279/F-X280 until its own work
+and the integrated child meet actual local gates, with all final riders still
+pending where the workflow permits the provider checkpoint. Child approval,
+claim or scoped results alone never complete the parent. No peer cap resets,
+hash baseline changes, extra aggregate effort, reporter comments or publication
+follow from this partition. Root final and actual combined reconciliation remain
+mandatory. The parent author acknowledges this scope change before affected
+note-comparison work, without pausing its unchanged C1 implementation.

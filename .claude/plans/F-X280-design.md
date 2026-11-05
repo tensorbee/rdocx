@@ -1,10 +1,22 @@
 # F-X280, Complete Issue435 through bounded child stories
 
-**Status**: draft
+**Status**: approved
 **Sprint**: S96
 **Size**: L
 **Depends on**: F-X277, F-X272, F-X280a, F-X280b, F-X280c
 **Test gate**: regression
+
+## Current contract approval
+
+Root approved this operative contract on2026-11-05 in
+.claude/reviews/S96-dependent-contract-approval-codex-final-1.md after the
+complete F-X272a notes contract was adopted by F-X272. This section supersedes
+older draft, pending-approval and notes-contract-unapproved statements retained
+below as preparation history. It approves no implementation, provider, native
+observation or final gate. All original actual completion dependencies remain.
+No review-peer allowance resets, no issue row is reduced and no extra source
+lease is created. Revalidate actual claim Base and applicable source inputs
+before implementation. GitHub intake remains stopped.
 
 ## Problem
 
@@ -18,7 +30,7 @@ Original Issue435/PR439 has seven criteria. A280-7 is independent of the unfinis
 
 ## Approach
 
-Partition without narrowing or duplicating original issue scope. F-X280a owns negative authored shape dimensions across native/Python entrypoints, zero and table/connector controls. F-X280b owns original A280-1/2/3/5/6, Word validation, damaged-package/open refusal and bookmark tolerance contracts, residuals and original provider barriers. F-X280c owns complete A280-4 stored PowerPoint validation, Rust file API, CLI/help and unchanged Python parsed/Display contract. Root must audit the applicable pending Display/source-frontier reconciliation before approving C. Childc does not complete B's RPPTX duplicate/open-forbidden obligations. Consume all three actual handoffs and final integrated evidence once. Do not create fake parent production work or rerun child local tests for paperwork.
+Partition without narrowing or duplicating original issue scope. F-X280a owns negative authored shape dimensions across native/Python entrypoints, zero and table/connector controls. F-X280b owns original A280-1/2/3/5/6, Word validation, damaged-package/open refusal and bookmark tolerance contracts, residuals and original provider barriers. F-X280c owns complete A280-4 stored PowerPoint validation, Rust file API, CLI/help and unchanged Python parsed/Display contract. The approved C contract retains its reviewed Display/source-frontier reconciliation. Childc does not complete B's RPPTX duplicate/open-forbidden obligations. Consume all three actual handoffs and final integrated evidence once. Do not create fake parent production work or rerun child local tests for paperwork.
 
 ## Consumer map
 
@@ -67,4 +79,4 @@ All three original design peers remain used and exhausted. F280b preserves full 
 
 ## Open questions
 
-No new product policy. Second split/design approval, original-source/encoding/metadata ordering audit, hunk/resource window, exact metadata/path exception and actual evidence remain pending. Prior Root Display reconciliation is applied to the C draft for affected audit, not marked approved. B/parent remain draft and keep all original provider/final gates.
+No unanswered product policy. All three child contracts and this completion ownership are approved. Original source/encoding/metadata ordering, actual provider completion, source claims, integration and final evidence remain required. B/parent approval does not remove those gates.

@@ -20,6 +20,7 @@
 |------|-------|------|--------|-------|
 | F-X271 | Restore pinned viewer downloads and planning policy | M | in-progress | codex |
 | F-X272 | Preserve existing revisions during document comparison | L | in-progress | codex |
+| F-X272a | Compare and resolve footnote ownership and lifecycle | L | pending | - |
 | F-X273 | Repair header body clearance and complete TOC navigation | L | done | - |
 | F-X274 | Honor section and field page-number formats | M | in-progress | codex |
 | F-X275 | Prepare Word 0.17.0 and shared/PowerPoint 0.15.0 with strict SemVer gates | L | in-progress | codex |
@@ -258,3 +259,298 @@ this decision. Product/test/HLD carry remains uncommitted in that worker.
 Canonical stays the sole shared-delivery integrator. This restores the real
 clean-tree integration gate for seven prepared independent workers, without
 unblocking any formal dependency or relaxing final acceptance.
+
+### Integrated source and active continuation, 2026-11-04
+
+Seven prepared workers are now integrated locally: F-X283, F-X277a, F-X280a,
+F-X277c, F-X279a, F-X280c and F-X281. The canonical integration head is
+1d2c5a803d346da4a7b65b1bf8ac7e590ad1492c. Their structured handoffs were consumed,
+and20focused interaction checks passed. Their clean consumed worktrees were
+removed without force, with branches retained. Run state remains reviewed
+until final acceptance. No full union, hosted CI or release result follows.
+
+The unfinished F-X272 carry was preserved and reconciled onto that head in its
+recovered worker. Its sole source/build writer continues C1. Root accepted the
+bounded Drawing/revision650-test, section277-test, OfficeMath87-test and retained
+border/tab/numbering161-test increments with zero new findings after
+authenticating source, binary and actual regression receipts.
+Remaining generated producers, decoding/current work, constructor fidelity,
+original/frozen provenance and Native integration remain open. Issue430 and
+the three dependent remainders retain their barriers. Repairs to their existing
+draft designs do not approve or unblock implementation.
+
+Final performance preparation now includes reviewed original403 and original407
+observers, preserving their distinct approved sampling protocols. These have
+only static/fake qualification. A separate private release-counter prototype
+is under Root review and repair, and memory-retention preparation continues in
+parallel. No final timing, counter or RSS gate is claimed. GitHub intake at
+2026-11-04T14:46UTC found18open issues and9open PRs unchanged. No remote write,
+reporter comment, tag or publication occurred.
+
+### Continued C1 and diagnostic preparation, 2026-11-04
+
+Root accepted the bounded instruction/legacy XML producer increment after
+reviewing patch9342742336fe96f34a43018e0fe9ddb40cc2514e72c022ec54bd3237e83586e7.
+The actual affected cohort passed162cases without exclusions, two controlled
+omissions compiled and failed as intended, and five scoped checks passed.
+The prior legacy drawing-summary failure is repaired with unchanged affine
+terms. Large simple-field lock edits now produce one record, with alias,
+default-Word, foreign-w, lexical and repeated-refusal controls. The sole source
+author continues the shared revision/hyperlink constructor policy. Decoder,
+capture/current work, full constructor outcomes, original/model result roles
+and Native integration remain open. No provider edge is unblocked.
+
+The private release-counter prototype now passes an actual optimized native
+and Python-binding library check on archived1d2c. Its earlier compiler failures
+and repaired context-path mismatch remain recorded. The reusable private memory
+diagnostic now typechecks with numbering, family and relationship/drawing modes.
+It uses immutable startup policies and fresh processes sharing one executable
+identity. These are current-base preparation checks, not final source, MSRV,
+counter execution or RSS acceptance. Complete combined omission, root/styles
+owners, actual activation, calibration and separate history proof remain due.
+
+Read-only GitHub intake at2026-11-04T16:08UTC found the same18open issues and9open
+PRs, with no issue, PR, CI or run delta. No remote write or publication occurred.
+
+Root accepted the bounded revision/hyperlink constructor increment with zero
+new findings. Its actual affected cohort passed227cases, with a compiled
+pre-increment failure and controlled producer-role omissions retained. The
+existing revision depth remains32. Ordinary revision fallback stays distinct
+from classified checked Resource errors. Actual nested captures retain original
+field offsets and identity. Ruby Started-property late-None admission is the
+next reproduced repair. Whole C1 and its provider barriers remain open.
+
+The combined private memory diagnostic now passes native and Python-binding
+typechecks and has one successfully linked optimized native test artifact at
+archived1d2c. Actual compiler output reports optimization3 and disabled debug
+assertions. Artifact calibration, semantic execution, binding imports, actual
+activation, final source and MSRV qualification, RSS and separate history proof
+remain pending. Complete All omission is source preparation, not an acceptance
+result. The semantic launcher is undergoing independent repair review before
+use. Read-only GitHub intake at2026-11-04T17:18UTC again found no delta.
+
+The bounded Ruby capture repair now passes 243 affected tests and five scoped
+checks, with Root final2 clean. Higher containing-capture and current-work
+obligations remain open. Drawing work continues without provider completion.
+The current-base Rust retention companion has actually passed both Normal and
+All, with identical complete semantics across eight lifecycle phases and all
+29 mandatory identifier fields. All optional-owner absence checks also pass.
+This is private prototype evidence, not final source, Office, RSS or timing
+acceptance. Two unrelated diagnostic assertion repairs await their batched link.
+
+The first direct Python diagnostic artifact crashed during package import,
+before hooks or fixtures. Its failed evidence remains preserved. The normal
+extension-module replacement now links successfully with actual host-symbol
+arguments and no separate libpython dependency. Replacement startup and the
+binding matrix remain pending. Read-only GitHub refresh at18:34UTC completed
+14 actual HTTP200 GETs with no issue, PR, check or run delta. No remote write,
+reporter comment, tag or publication occurred.
+
+The proper private Python extension now actually passes136fresh-process checks
+with128complete Normal-to-omission semantic comparisons. Four corrected
+root/styles endpoint checks also pass in the separate nativev6artifact. The
+original failed import and diagnostic assertions remain recorded as failures.
+These results qualify archived1d2cprivate prototypes, not final C1, installed
+wheels, MSRV, memory or timing acceptance.
+
+Root accepted the Drawing namespace repair at283affected passes and the actual
+Field/revision factory-root role increment at293affected passes. The latter
+refuses a reproduced over-budget selected capture before any Run construction,
+where the old source constructed250runs first. Its introduced early-error versus
+future-capture regression is separately retained and repaired. Generic selector
+facts, complete constructor/current/capture fidelity, original/frozen result
+roles, opaque ingress and Native consumers remain open. C1 and its provider
+barriers are unchanged. The sole author continues shared selector groundwork.
+
+Read-only GitHub refresh at19:45UTC completed14HTTP200GETs with no issue, PR,
+head, body, check or run delta. Maintenance found809GiBavailable and no safe
+clean-worktree removal candidate. No source push, reporter comment, tag or
+publication occurred.
+
+Shared selector groundwork now passes80affected checks and Root final1 with
+zero findings. It preserves simple-field complete scanning, whole-source first
+positive short circuit and matching-end error precedence. The4focused and16
+related checks are subsets, not additional unique passes. No selector collector,
+context reuse or generic admission change is implemented by this increment.
+The next source/context eligibility proposal precedes that code. Authorized
+Docker metadata inspection succeeded but identified no unused sprint-owned
+resources, so nothing was stopped or deleted.
+
+Root accepted the original opaque-ingress increment at103affected passes and
+the success-only direct selector increment at266affected passes. The first
+preserves large opaque attributes through the actual shared-work path. The
+second avoids repeated direct-field selector scans on its proved source route.
+Neither completes generic constructor context, deferred current roles or Native
+carriers. The author is connecting real parser-return maps for table/control
+replacement. Genuine caller-literal input accounting remains explicit.
+
+The private history-v5 diagnostic now actually typechecks, links and passes its
+positive activation probe. It observes9namespace,6decoder and3scoped events,
+with no COW qualification events. The earlier actual compiler failure remains
+recorded. Full history, observer neutrality and final-source acceptance remain
+pending. Read-only GitHub refresh at21:21UTC completed14HTTP200GETs with no
+issue, PR or CI delta. No remote write or publication occurred.
+
+Root accepted the bounded block-parser map increment after removing one
+forwarding-only helper in a separate repair. Its86affected tests, repaired
+three-test subset and scoped checks pass. Actual constructor component paths
+and namespace insertion maps now survive table/control parsing. Public
+shared-work replacement remains disconnected. The next bounded repair fixes
+Publication paragraph roots when an imported w prefix names a foreign URI.
+The canonical literal-input decision adds one pending hidden Rust method,
+bringing the prepared inventory to30methods without a new type or quota.
+
+The archived private N100 no-Weak history diagnostic completed successfully.
+Its actual standalone semantic record passes the unchanged consumer schema.
+It has zero producer and COW observations, so it supplies no observer-pair,
+allocation-neutrality, payload-expiry or final-source qualification. The first
+attempt failed in its controller and was stopped, with incomplete raw evidence
+retained. The corrected runner reaped its child normally.
+
+The bounded paragraph Publication namespace repair passes76affected checks
+and Root final1. It preserves actual foreign expanded names and canonical
+bytes through the real paragraph publisher. Affected borrowed property-probe
+parity was repaired before acceptance. Other block and absent-w contexts stay
+open. The author now connects the shared-work literal carrier and Native event.
+
+The private observer-enabled N100 history test failed its actual activation
+assertion with observed namespace/decoder/scoped counts20000/0/0. Its child
+exited101and was reaped normally, without a resource stop or controller error.
+Raw terminal observations are retained and are not a passed history gate.
+Source/contract diagnosis precedes further history rows. No N400 ran.
+
+Root accepted the lower scoped literal carrier after two concrete repairs.
+Actual generated paragraphs in imported Empty cells now have constructor
+companions. Two added lower validations were removed after comparison with
+the preserved old artifact, restoring all seven compatibility transcripts.
+Repaired87affected tests and scoped gates pass. Native's existing character
+validation is unchanged, and its real once-only event forwarding is next.
+Current/scalar, fact-copy, constructor, deferred and grammar obligations remain
+open before C1/provider acceptance.
+
+The additional private text-history source preparation passes Root final2after
+separating genuine workload activity from diagnostic safety queries. No build
+or run qualifies it yet. The font N100 failure remains unchanged. Hourly
+GitHub intake at23:24UTC recovered after a transient HTTP502and found no
+issue, PR, check or CI delta across14successful GETs. Maintenance found no
+safely removable sprint-owned resource, with788GiBavailable.
+
+Root accepted Native literal-event forwarding after7affected tests and four
+scoped gates. Both validated invocation routes now share the actual once-only
+input event across selected and paired aliases. A controlled omission returned
+an incorrect success and was caught before restoration. Current/frozen/original,
+constructor and remaining Native grammar obligations still block C1 completion.
+The worker has resumed those obligations with its sole product lease.
+
+The additional private text-history consumer repair passes Root final3. It now
+rejects impossible increases across the three source-proved pure-drop edges,
+while allowing arbitrary publication liveness to vary. Its293synthetic controls
+await independent mechanical replay. This is preparation only, with actual
+final-source execution, COW calibration and payload attribution still pending.
+
+The user stopped GitHub intake before the next planned request. No new network
+request ran this cycle. All four available agent slots now focus on existing
+sprint work. The C1 author batches eight Native grammar origin methods and
+formatting/replay consumers. An offline agent traces its hardest frozen-field
+CachedResult producer seam, while Root prepares final execution and reviews.
+
+Independent replay authenticated all293private text-consumer controls and13
+offline discriminators without discrepancies. The new private child controller
+passed independent repair review and Root final1after fixing spec-byte custody.
+Its12mocked failure controls pass. No real text-history child, final-H build or
+COW calibration ran. The original font-history failure remains unchanged.
+
+Root formally approved F-X279b's exact previously reviewed and adopted design
+contract. This is approval-only metadata, with no new peer or source change.
+Its implementation still waits for the genuine F-X272 provider checkpoint and
+a clean revalidated claim Base. The coordinated design commit and run-state
+approval transition remain pending. The notes and validation remainder designs
+retain their existing provider-contract barriers.
+
+The Native grammar bridge exposed two concrete cross-crate consumer gaps.
+Root approved explicit scoped TextWalk and early Field preparation methods on
+the existing operation, preserving lazy Word selection and the existing Native
+raw-input bypass. The final hidden-method inventory is32across the same two
+opaque types. Exact external canary amendments are authenticated and remain
+uncompiled until the completed union. The author acknowledged the latest
+contract and ordinary compilation passes for current source/writer groundwork.
+This is provisional implementation, not provider acceptance.
+
+Four initial Native-grammar bridge controls are genuinely green on provisional
+source. Broader wrapper/Field/raw textbox connections remain in progress. Root
+explicitly authorized genuine incoming retained-XML correspondence for the
+four model writers and a scoped raw textbox consumer with actual used JSON
+dependencies. These preserve dirty raw-model input and simple-Field replacement
+without discovering origins by equality or granting derived strings new input.
+The final authorized hidden-method count is33, with canary amendments pending
+authentication. No completed-union API or provider claim follows.
+
+The separate private Native COW source passes Root final1and independent
+mechanical authentication. All36source controls pass, with no actual Rust
+typecheck or Native matrix run. A finite execution-controller adaptation is
+being prepared in parallel, preserving actual child custody and unproved
+neutrality/history labels.
+
+The C1 author reports11green Word-carrier controls, including a generated PAGE
+result at zero input allowance without a copy, later unfunded copy refusal and
+mixed generated-prefix/later genuine input. The coherent source increment is
+under scoped checks before Root review. The owned-first-buffer contract is
+acknowledged. Whole C1 and provider completion remain pending.
+
+Root accepted the prepared private text build-custody repair, COW controller
+and fixed-font lifecycle source/controller. These retain separate workload
+roles and complete source identity checks. Root also accepted the finite
+recorder reservation-failure source control, independently authenticating
+14custody files,47retained pins and exact baseline reconstruction. None of
+these preparation approvals is actual final-H Rust or Native execution.
+The execution map is being refreshed without modifying frozen evidence.
+
+Root accepted the frozen direct Word-carrier increment after11new and25related
+passes plus seven scoped gates. Both14path snapshots,51retained source/config
+pins, the binary and exact patch reconstruction authenticate. The author keeps
+the sole implementation lease for glossary, Field and remaining Native closure.
+Root authorized four borrowed retained-record accessors on existing models to
+resolve actual pre-clone source access. Stored control capture does not assert
+writer eligibility. The external canary/inventory update is preparation only.
+The final execution map now pins all accepted diagnostic overlays, preserving
+its frozen predecessors. Final integrated source and actual qualification are
+still pending. GitHub intake remains stopped.
+
+Glossary and the four borrowed retained-record accessors pass an ordinary
+Native all-target check on provisional source. Root clarified one private
+inert Field receipt for actual prepared-result move/clone delivery, with its
+payload operation-private. Receipt presence cannot authorize changed public
+cache bytes. The author continues actual producer implementation and controls.
+The dependent-design contract audit finds no new user product decision. Existing
+notes adoption, affected design approval and genuine provider gates remain.
+
+The frozen glossary/Field increment has18scoped and49distinct existing passes,
+plus seven scoped gates. Root final1finds zero defects and one structural smell:
+two glossary edit assemblers duplicate the same policy. The author will remove
+that duplication in the next grouped successor. Root authenticated both
+nine-path snapshots,51source/config pins, binary and full patch reconstruction.
+The subsequent actual shared-FieldSource raw-record route passes an ordinary
+check and focused control, provisionally. It grants no scalar authority from
+shared raw storage. Parsed changed-cache/ordered lineage and Native wiring
+remain open. The read-only Word control channel responds again with an approved
+generated fixture visible. No new export or native acceptance ran.
+
+Root accepted the next seven-path parsed/accepted companion increment with
+21scoped and56distinct existing passes,77unique in total, plus seven scoped
+gates. The single glossary edit engine closes S1. Actual hyperlink and Ruby
+base Text companions retain run-local coordinates, excluding phonetic and
+late-None content. Controlled map omission fails both physical-origin checks.
+Both snapshots,51source/config pins, binary and full patch authenticate.
+The author now implements actual Text payload receipt and Field-record map
+handback. Changed-cache, ordered-result and Native closure remain pending.
+
+Root approved F-X272a as the complete existing Issue430 child after verifying
+there is no required new C1 carrier API. Its45acceptance rows and14gate rows
+match reviewed V13, retaining Q-A430-28 as unproved. Parent C1 remains running
+and unchanged, with its author acknowledging the partition. Separate clean
+worktrees and serial semantic reconciliation replace the earlier scheduling
+condition, without completing F272 or unblocking its dependent implementations.
+All remaining B and umbrella contracts are approved after provider-contract
+reconciliation. Actual source/provider and final qualification gates remain.
+There are22delivery rows for the same13original contracts, with no added issue
+scope or aggregate effort. Claim and a second implementation worker are next.
