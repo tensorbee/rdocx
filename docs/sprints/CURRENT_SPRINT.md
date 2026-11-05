@@ -657,3 +657,13 @@ Root review. Earlier pending-decision and narrower test-count statements above
 are historical. No whole feature, final native/schema/binding or sprint gate is
 marked passed by these observations. The finite Native scanner visibility lease
 has been returned, with no child source imported into the parent carry.
+
+F-X272a is locally integrated as reviewed at1c69b7e0 after clean Root final4.
+The validated27246080handoff is consumed, with all11product/test/HLD paths
+matching the reviewed v6 source exactly. Only approved checklist metadata
+required reconciliation. Actual56integration,5unit,1regression and1CLI
+observations plus scoped lint/format remain local evidence. The clean worker
+worktree was removed without force and its branch retained. Delivery remains
+in-progress, the plan approved and all final composition/native/SDK/installed/
+hash/full riders pending. Q28 remains its exact UNPROVED native exception.
+F-X272 still owns the unfinished C1 work and cannot unblock dependents yet.
