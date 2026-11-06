@@ -5002,6 +5002,7 @@ pub fn source_model_notes(
     text_origins: &[(&CT_Text, &'a CT_Text)],
     field_origins: &[(&Field, &'a Field)],
     raw_origins: &[(&[u8], &'a [u8])],
+    prepare_drawing_namespaces: bool,
 ) -> Result<ScopedWordSource>;
 pub fn source_model_glossary(
     &mut self,
@@ -6268,7 +6269,8 @@ remain the existing impact list. Whole C1 and every final rider remain pending.
 The actual canonicalization/optimized reparse consumers cannot pass ordinary
 returned CT_Text through the original frozen-model reference arguments. Close
 that callable gap with these two additive doc-hidden operation methods. Existing
-36 signatures remain unchanged. The carrier method inventory becomes38, and
+36 signatures remain unchanged except the explicit note-producer mode amendment
+below. The carrier method inventory becomes38, and
 there is no new public type or constructor.
 
 ```rust,ignore
@@ -6319,7 +6321,8 @@ SemVer/external caller inventory includes both additive calls.
 
 Adopt the same returned-model companion for the actual note-family reader and
 writer. The full additive operation inventory becomes40, preserving the prior
-36 signatures and the two document/body methods above.
+36 signatures and the two document/body methods above, subject to the explicit
+note-producer mode amendment below.
 
 ```rust,ignore
 pub fn source_notes(&mut self, source: &ScopedWordSource) -> Result<CT_Footnotes>;
@@ -6361,7 +6364,7 @@ deferred security assessment and final union gates remain pending.
 The existing Native serialized_note_fragment emits a selected note under a
 one-note part root. A returned note at physical index greater than0 cannot use
 the whole returned-vector receipt as index0. Adopt this additive doc-hidden
-method, preserving all40 existing carrier signatures and seven accessors:
+method, preserving the existing40 carrier names and seven accessors:
 
 ```rust,ignore
 pub fn source_model_note_from_read(
@@ -6387,3 +6390,34 @@ control with distinguishable preceding content in both families. Keep whole-note
 flush and initial frozen-clone writers on their existing methods. Include the
 additive call in external caller inventory. No new public type, quota, input
 allowance or broader note-editing contract is introduced.
+
+## Exact Native note drawing preparation mode
+
+The same initial source_model_notes method serves two actual Native producers.
+Whole-new-part flush already prepares fresh inline/anchor drawing namespaces.
+The selected one-note fragment producer does not. Preserve that distinction by
+adding the final prepare_drawing_namespaces bool to the canonical signature
+above. This supersedes only the earlier unchanged-signature statement for this
+one unreleased doc-hidden method. Carrier names stay41 and accessors stay7.
+All other40 carrier signatures remain unchanged.
+
+Pass true only from the actual whole-new-part producer that already performs
+authored drawing namespace preparation. Pass false from the initial selected
+one-note container. The selected returned-reader writer retains its ordinary
+selected-fragment behavior. Use a private scoped FieldXmlEmission context and
+the same substantive note/drawing writers. Fresh raw_xml=None inline/anchor
+roots receive the existing local r/wp declarations only in the prepared mode.
+Parsed/raw drawings and opaque bytes stay unchanged. No posthoc equality-based
+origin, additional parser, public type, quota or new namespace policy is added.
+
+Check actual producer parity separately for selected append and whole-new-part
+flush in both families, including inline/anchor cases and the charged downstream
+Text consumer. Do not label a whole-part preparation fixture as selected-append
+parity. Public special-note replacement also uses a selected-record producer
+and must retain its existing behavior.
+
+The pinned local v0.16.4 document.rs contains neither ScopedWordOperation nor
+source_model_notes. This is an amendment to the unreleased C1 bridge, not a
+change to a published signature. Preserve earlier external compile observations
+as historical and update the final external caller to the amended signature.
+No new output delta or user-visible policy change is approved here.
