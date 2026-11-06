@@ -6439,3 +6439,38 @@ Actual whole-reader output supplies its ordinary Text/raw companion to the
 next substantive writer. Field-bearing and replacement-child factories may
 retain their existing optimized route only when an actual same-operation
 companion is available. Ordinary optimized Some controls remain unchanged.
+
+## Derived Field preparation handback
+
+The repeated-fragment loader returns Fields from an actual same-operation
+reader. Those Fields are not frozen operation inputs, so Native must not call
+ordinary prepared_current_field or register their model as new ingress. Add
+this unreleased doc-hidden operation to preserve the existing preparation order:
+
+```rust,ignore
+pub fn prepare_template_field_from_read(
+    &mut self,
+    current: &Field,
+    source: &ScopedWordSource,
+    normalize: bool,
+) -> Result<Field>;
+```
+
+The final carrier inventory becomes42 names with7 borrowed accessors. All
+existing41 signatures remain unchanged. Require this operation's successful
+model-read Source and an actual mapped parsed Field from the paired returned
+model. The caller retains that pairing as for the returned-model writers.
+Forward existing original/source and prepared-root facts through the same
+Field clone and normalization implementation. Do not add a local model to the
+frozen catalog, create another operation or grant a new input allowance.
+
+The Native preflight still chooses unchanged imported bypass versus actual
+normalization. Failed semantic preparation remains atomic and sticky resource
+refusal stays on the shared operation. Actual downstream read/prepare/write
+controls must include a parsed Field, a prepared model Field, nested cached
+content, bypass behavior and the next charged Text consumer. Foreign-operation
+Sources, Sources without a successful read and unregistered Fields must refuse.
+Same-operation caller pairing remains an explicit responsibility, as with the
+existing returned-model writers and the deferred pairing assessment. Extend the external compile inventory after
+source closure. This is functional producer closure, not completion or a
+waiver of deferred assessment and final riders.
