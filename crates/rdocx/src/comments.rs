@@ -2075,10 +2075,7 @@ impl Document {
         if self.comments.as_ref().is_some_and(|comments| {
             comments.comments.is_empty()
                 && comments.extra_xml.is_empty()
-                && comments
-                    .root_attributes
-                    .iter()
-                    .all(|(key, _)| key == "xmlns" || key.starts_with("xmlns:"))
+                && only_authored_comment_root_attributes(&comments.root_attributes)
         }) && self.comments_owned
         {
             if let Some(part) = self.comments_part_name.take() {
@@ -2103,6 +2100,35 @@ impl Document {
             self.comments_extended_owned = false;
         }
     }
+}
+
+fn only_authored_comment_root_attributes(attributes: &[(String, String)]) -> bool {
+    let binding = |prefix: &str| {
+        attributes
+            .iter()
+            .find(|(name, _)| name == &format!("xmlns:{prefix}"))
+            .map(|(_, uri)| uri.as_str())
+    };
+    let mut ignorable = false;
+    attributes.iter().all(|(name, value)| {
+        if name == "xmlns" || name.starts_with("xmlns:") {
+            return true;
+        }
+        let Some((prefix, local)) = name.split_once(':') else {
+            return false;
+        };
+        if local != "Ignorable"
+            || binding(prefix)
+                != Some("http://schemas.openxmlformats.org/markup-compatibility/2006")
+            || binding("w14") != Some("http://schemas.microsoft.com/office/word/2010/wordml")
+            || !value.split_whitespace().eq(["w14"])
+            || ignorable
+        {
+            return false;
+        }
+        ignorable = true;
+        true
+    })
 }
 
 fn validate_comment_date(date: Option<&str>) -> Result<()> {
@@ -4091,6 +4117,69 @@ mod tests {
                         .override_for("/word/commentsIds.xml"),
                     Some("application/vnd.ms-word.commentsIds+xml")
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn issue434_comment_owned_cleanup_preserves_producer_metadata_and_imported_aliases() {
+        for mode in 0..8 {
+            let mut document = Document::new();
+            document.add_paragraph("anchor");
+            document
+                .add_comment_on_text("anchor", 0, "Ada", None, "root", None)
+                .unwrap();
+            if mode == 7 {
+                document = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+                assert!(!document.comments_owned);
+            }
+            let comments = document.comments.as_mut().unwrap();
+            comments.comments.clear();
+            if mode == 1 {
+                for (name, _) in &mut comments.root_attributes {
+                    if name == "xmlns:mc" {
+                        *name = "xmlns:compat".to_owned();
+                    } else if name == "mc:Ignorable" {
+                        *name = "compat:Ignorable".to_owned();
+                    }
+                }
+            } else if mode == 2 {
+                comments
+                    .root_attributes
+                    .iter_mut()
+                    .find(|(name, _)| name == "xmlns:w14")
+                    .unwrap()
+                    .1 = "urn:producer".to_owned();
+            } else if mode == 3 {
+                comments
+                    .root_attributes
+                    .iter_mut()
+                    .find(|(name, _)| name == "mc:Ignorable")
+                    .unwrap()
+                    .1 = "w14 producer".to_owned();
+            } else if mode == 4 {
+                comments
+                    .root_attributes
+                    .iter_mut()
+                    .find(|(name, _)| name == "xmlns:mc")
+                    .unwrap()
+                    .1 = "urn:producer".to_owned();
+            } else if mode == 5 {
+                comments
+                    .root_attributes
+                    .push(("producer".to_owned(), "keep".to_owned()));
+            } else if mode == 6 {
+                comments
+                    .extra_xml
+                    .push((0, b"<keep xmlns=\"urn:producer\"/>".to_vec()));
+            }
+            let before = comments.clone();
+            document.remove_owned_empty_comment_parts();
+            if mode < 2 {
+                assert!(document.comments_part_name.is_none(), "mode={mode}");
+            } else {
+                assert!(document.comments_part_name.is_some(), "mode={mode}");
+                assert_eq!(document.comments.as_ref(), Some(&before));
             }
         }
     }

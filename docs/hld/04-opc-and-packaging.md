@@ -989,7 +989,9 @@ and both overrides together. An ordinary save retains an accepted standard
 override and unrelated comments-extended sidecar XML. Existing custom targets
 remain authoritative, and removal of the final API-owned thread removes only
 the parts, relationships, and overrides created by the typed model only when
-no opaque root attributes or children remain. Imported empty parts and
+no opaque root attributes or children remain. Authored MC Ignorable metadata
+with only the correctly bound w14 token is library metadata for this cleanup.
+Other tokens, foreign bindings and producer attributes still retain the part. Imported empty parts and
 unrelated companion payload are retained.
 
 Modern PowerPoint collaboration follows two independent relationship scopes.
