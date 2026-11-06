@@ -6659,3 +6659,32 @@ These are ordinary functional regressions, not a deeper security assessment.
 HLD03/04/10 describe the private live-ID staging and final canonical projection.
 All existing provider, final native/oracle/full/installed/hash/CI/release
 requirements remain. No provider or sprint completion follows this approval.
+
+## Current local provider implementation acceptance
+
+Root accepts the completed local implementation at the source identities in
+/private/tmp/rdocx-s96-root-c1-implementation/native-template-support/returned-reader-functional-batch/ROOT_TAKEOVER/root-canonical-join-1/LOCAL_PROVIDER_EVIDENCE.json.
+The named genuine LOCAL regression gate passes30Rust Issue425 cases,35focused
+comparison cases,2CLI cases and4freshauthenticated opt2Python nodes. Supporting
+scoped cohorts, external46/7client compilation and affected warnings-denied
+all-target/all-feature Clippy pass. Whole-provider Root final1reports zero
+defects and zero smells. Current source includes the reviewed canonical joins
+and private internal-live/final-canonical numbering clarification. No known
+ordinary local implementation finding remains in the approved contract.
+
+This is the approved LOCAL provider checkpoint for run-sprint after actual
+structured handoff validation and integration. It permits recording provider
+implementation completed in existing run state and done delivery dependency
+cells only when the integrated source is an ancestor of the consumer Base.
+It does not itself claim integration or unblock a consumer. The original
+recorded recovery Base706e857f and later source reconciliation HEAD1d2c5a80
+remain distinguished, with all failed attempts retained.
+
+Keep this plan approved and the final checklist item pending. AS_BUILT and
+SPRINT_TRACKER wait for actual final acceptance. All named final Word/SDK/LO,
+full installed/typing, corpus/hash/pixel, hosted CI, performance, WASM/archive,
+workspace and sprint review obligations remain. The narrow Q-A430-28 positive
+native observation stays unproved under its user-approved exception. Generic
+typed note attribute recovery is outside the operative contract, not a claimed
+repair. Optional deeper security work stays deferred separately. Publication
+still requires final sprint close and a separate approval at the reviewed SHA.
