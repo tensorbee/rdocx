@@ -27,3 +27,9 @@ Zero nitpicks.
 ## Not found
 
 No separate note classification, package corruption or story ordering defect is asserted. The related source readers elsewhere already have the necessary callable contract. Deeper deferred security assessment remains deferred. Comments, final provider microscope, scoped gate, canonical reconciliation and final sprint riders remain pending. Only this review report was written. Remediation begins in a separate source phase.
+
+## Additional caller of D1 confirmed before remediation
+
+`crates/rdocx/src/document.rs:26296`, `crates/rdocx/src/document.rs:26300`, `crates/rdocx/src/field.rs:5267`, `crates/rdocx/src/field.rs:5297`
+
+The imported-fragment loader receives the actual related Source graph, but its initial live footnote cache still uses ordinary `CT_Footnotes::from_xml`. The resulting model is immediately consumed by scoped fragment preparation. This is another publisher of the same missing actual note-reader handoff, not a new policy or security assessment. Endnotes have no analogous initial typed cache here. Repair the actual successful reader. Preserve earlier root-namespace error order, absent/missing-part defaults and ordinary malformed-note fallback. Actual scoped resource refusal must propagate through the existing operation channel. No runtime result is asserted by this additional source inspection.
