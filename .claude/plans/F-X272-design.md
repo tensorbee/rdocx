@@ -6625,3 +6625,37 @@ HLD impact remains exactly03-architecture.md for shared operation and reader/
 writer lifecycle,04-opc-and-packaging.md for comments parts and opaque/namespace
 preservation, and10-bindings-spec.md for hidden Rust carrier inventory. There is
 no Python or CLI method addition. All prior C1 and provider residuals remain.
+
+## Internal template numbering projection closure
+
+Root approves this private scheduling clarification after the actual canonical
+join regressions. It changes no public API, quota, input allowance or review
+cap. The existing optional TemplateMainWriter distinguishes private internal
+template staging from ordinary/final public package projection. With that
+context present, the shared substantive flush emits the actual live main model
+and its matching live numbering definitions once. It performs no numeric
+permutation and returns empty remap tables. The operation-bound Source and
+its temporary package bytes therefore describe the same numbering ID space.
+
+Without that context, retain the existing canonical numbering projection,
+unconditional live-model/body restoration and emitted maps. This includes
+rendering's final prepare_and_reopen_staged and ordinary save, sign, output
+and same-document reopen paths. Public canonical output and original live
+numbering handles retain F277b's contract. Internal fragment imports still
+use their existing actual allocation/remap policy. No blind inverse, new
+source catalog, output-equality origin lookup or second Field materialization
+is added. Remove the superseded duplicate pre-publication Source/descriptor
+capture and temporary fragment workaround when the common producer already
+emits a consistent live package.
+
+Local composition controls preserve the exact original callback location,
+actual same-document selected instance and start override through scalar and
+repeated rendering, and a prepared Field with numbering present. Existing
+numbering publication/restoration/refusal and scoped template/loader/import
+controls remain applicable. The earlier base-level-reader diagnostic is an
+invalid premise, with its correction preserved. The corrected actual instance
+override counterexample and all real Field-copy refusals remain retained.
+These are ordinary functional regressions, not a deeper security assessment.
+HLD03/04/10 describe the private live-ID staging and final canonical projection.
+All existing provider, final native/oracle/full/installed/hash/CI/release
+requirements remain. No provider or sprint completion follows this approval.

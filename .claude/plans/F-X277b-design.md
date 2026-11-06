@@ -670,3 +670,18 @@ tree is not inspected. Revalidate its actual tree before claim. Formal approval
 awaits coordinated canonical notes-contract adoption, and implementation still
 awaits genuine F-X272 provider completion. All final deterministic hash, native,
 schema, binding, packaging and CI riders remain pending.
+
+## Private template staging reconciliation
+
+Root's F272 integration clarification preserves this child's public numbering
+contract. Existing TemplateMainWriter staging is private internal model work,
+not a public output boundary. It may emit a consistent live-ID body and live
+numbering part without permutation, returning empty remaps. Final ordinary
+publication, including template rendering's final prepare_and_reopen_staged,
+retains canonical numbering emission, unconditional restoration and actual
+reopen translation. Same-Document handles and body bindings remain protected.
+This avoids an extra Field materialization and a mixed live/published temporary
+fragment. It adds no public mode, quota, API, gate or review allowance. The
+F272 HLD impact and focused integration controls own this private composition
+repair. This child's prefix and final evidence keep their actual source
+identities, with final integrated qualification still pending.
