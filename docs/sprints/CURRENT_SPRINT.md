@@ -19,7 +19,7 @@
 | F-ID | Title | Size | Status | Owner |
 |------|-------|------|--------|-------|
 | F-X271 | Restore pinned viewer downloads and planning policy | M | in-progress | codex |
-| F-X272 | Preserve existing revisions during document comparison | L | in-progress | codex |
+| F-X272 | Preserve existing revisions during document comparison | L | done | - |
 | F-X272a | Compare and resolve footnote ownership and lifecycle | L | done | - |
 | F-X273 | Repair header body clearance and complete TOC navigation | L | done | - |
 | F-X274 | Honor section and field page-number formats | M | in-progress | codex |
@@ -729,3 +729,14 @@ final review and exact-source integration reconciliation. Its authoring source
 is independent of C1. Scoped Native31, Python30, public Rust and actual CLI
 controls pass. P1/P2/C6 remain B with its F272 dependency. Fresh Word, installed
 bindings and the final union remain pending. No provider acceptance is implied.
+
+Root completed the approved genuine LOCAL F-X272 provider checkpoint at
+integrated5a4c5c0b after validated handoff consumption and clean whole-provider
+Root final1. Actual30Rust,35comparison,2CLI and4fresh authenticated installed
+Python local cases pass, with affected scoped compilation and lint evidence.
+Run state is completed and the dependency cells are done with owner cleared.
+The plan remains approved. All named final native, SDK, installed typing,
+workspace, hash, pixel, CI and performance riders remain pending. AS_BUILT
+and SPRINT_TRACKER wait for final union acceptance. F-X279b may now claim a
+clean Base descended from this integration. No final oracle or release claim
+follows from the local checkpoint.
