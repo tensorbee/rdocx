@@ -3,7 +3,7 @@
 **Status**: approved
 **Sprint**: S96
 **Size**: L
-**Depends on**: F-X272, F-X279a, F-X279b, F-X279c
+**Depends on**: F-X272, F-X279a, F-X279b, F-X279c, F-X279d
 **Test gate**: regression
 
 ## Prepared crossing-reply authoring child split

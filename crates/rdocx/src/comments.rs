@@ -4802,10 +4802,10 @@ mod tests {
         }
     }
 
-    const WORD_VERSION: &str = "16.104";
-    const WORD_BUILD: &str = "16.104.25121423";
+    const WORD_VERSION: &str = "16.114.1";
+    const WORD_BUILD: &str = "16.114.26102031";
     const WORD_COMMENT_CANDIDATE_SHA256: &str =
-        "b7e1f39a5af80d9928ed671fa45557d485c2c70c8761439a09df66c027274995";
+        "03ca23e64efcb01433b403db1f63712851dd37ec1bb4cb89eb6c4b9f00e140d3";
 
     fn word_comment_candidate() -> Document {
         let mut document =

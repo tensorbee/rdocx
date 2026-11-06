@@ -6,6 +6,29 @@
 **Depends on**: none
 **Test gate**: regression
 
+## Fresh integrated candidate observation, 2026-11-06
+
+Root generated the new candidate from the authenticated integrated Rust source,
+validated its exact bytes with SDK3.0.1 Microsoft365 with zero errors, and opened
+a byte-identical generated-only work copy through CUA on Word16.114.1(26102031).
+The actual candidate SHA256 is
+03ca23e64efcb01433b403db1f63712851dd37ec1bb4cb89eb6c4b9f00e140d3.
+Word opened without repair and displayed the full sentence anchor, Ada root,
+Ben reply in order and resolved thread state. Initials AL are present in the
+authenticated input XML but not displayed as initials by this Word UI. Original
+and work bytes remain unchanged, only the candidate window was closed, and the
+same15 prior generated windows remain. Actual evidence is retained under
+/private/tmp/rdocx-s96-word-story-diagnostic-only/f-x279c-final-6be9db2b-attempt2.
+
+The historical old-pin assertion actually failed after writing the new candidate,
+which is not a passed guard. The three existing constants now record the actual
+candidate and installed bundle16.114.1/16.114.26102031 after native observation.
+Both existing post-pin guards actually passed in one batch, and the regenerated
+candidate matches the observed SHA. All other final union riders remain pending. This
+settles this fresh native-open observation only, not final feature completion
+or B crossing-range comparison. Earlier pending-at-writing statements below are
+historical and do not override this actual result.
+
 ## Split approval and review lineage
 
 Root approves this exact split after independent final review in
