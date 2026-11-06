@@ -740,3 +740,25 @@ workspace, hash, pixel, CI and performance riders remain pending. AS_BUILT
 and SPRINT_TRACKER wait for final union acceptance. F-X279b may now claim a
 clean Base descended from this integration. No final oracle or release claim
 follows from the local checkpoint.
+
+
+## Final implementation integration and pre-freeze records, 2026-11-06
+
+F-X279b is locally integrated as reviewed at2d387312 after the original three
+implementation peers and clean Root affected final3. Exact worker/source
+reconciliation passed without semantic conflict. Rust21, Native29, CLI4plus9
+and fresh authenticated installed Python41 pass locally. Its handoff is consumed,
+clean worktree removed and branch retained. The feature remains in progress with
+its approved plan and all final union riders pending.
+
+Both family contribution notes are adopted atb63c9a06 with published history
+byte-exact. Actual22archive records are refreshed at6be9db2b, preserving all
+historical speed rows. The fresh comment candidate has actual SDK zero errors
+and CUA no-repair Word16.114.1(26102031) open with the complete sentence anchor,
+ordered Ada/Ben thread and resolved state. Both regenerated pin guards pass,
+with exact candidate03ca23e64efcb01433b403db1f63712851dd37ec1bb4cb89eb6c4b9f00e140d3
+recorded atcac5c421. Only the affected rdocx archive is remeasured afterward.
+This native observation does not discharge B crossing-range comparison or other
+native controls. Q28 remains unproved under its narrow exception. Full integrated
+verification, installed/typing, hash/pixels, performance and actual hosted CI are
+still pending. No final delivery ledger, push, release tag or publication follows.
