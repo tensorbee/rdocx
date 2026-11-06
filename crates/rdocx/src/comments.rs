@@ -5,7 +5,7 @@ use std::ops::Range;
 
 use oxml_opc::OpcPackage;
 use quick_xml::XmlVersion;
-use quick_xml::events::{BytesStart, Event};
+use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::name::{Namespace, ResolveResult};
 use quick_xml::reader::NsReader;
 use rdocx_oxml::comments::{CT_Comment, CT_Comments};
@@ -13,9 +13,9 @@ use rdocx_oxml::comments_extended::{CT_CommentEx, CT_CommentsEx};
 use rdocx_oxml::content_control::{CT_Sdt, SdtContent};
 use rdocx_oxml::document::BodyContent;
 use rdocx_oxml::table::{CT_Row, CT_Tbl, CT_Tc, CellContent};
-use rdocx_oxml::text::{CT_P, RangeAnchor};
+use rdocx_oxml::text::{CT_P, CT_R, RangeAnchor, RunContent};
 #[cfg(test)]
-use rdocx_oxml::text::{CT_R, CommentRangeMarker, HyperlinkSpan, RunContent};
+use rdocx_oxml::text::{CommentRangeMarker, HyperlinkSpan};
 
 use crate::document::visit_body_paragraphs_mut;
 use crate::{ContentLocation, Document, Error, Result};
@@ -1772,7 +1772,7 @@ impl Document {
     /// Add a reply linked to the selected comment's last paragraph. Each line
     /// of `text` becomes one paragraph of the reply.
     pub fn reply_to(&mut self, parent_id: i32, author: &str, text: &str) -> Result<i32> {
-        self.reply_to_with_date(parent_id, author, text, None)
+        self.reply_to_with_initials(parent_id, author, None, text, None)
     }
 
     /// Add a dated reply linked to the selected comment's last paragraph.
@@ -1786,8 +1786,24 @@ impl Document {
         text: &str,
         date: Option<&str>,
     ) -> Result<i32> {
+        self.reply_to_with_initials(parent_id, author, None, text, date)
+    }
+
+    /// Add a reply with optional author initials and timestamp.
+    ///
+    /// The reply has its own crossing range around the selected parent's text
+    /// and reference. A parent without a projectable range/reference refuses.
+    pub fn reply_to_with_initials(
+        &mut self,
+        parent_id: i32,
+        author: &str,
+        initials: Option<&str>,
+        text: &str,
+        date: Option<&str>,
+    ) -> Result<i32> {
+        reject_non_xml_comment(author, initials, text)?;
         let mut candidate = self.clone_for_staging();
-        let id = candidate.reply_to_staged(parent_id, author, text, date)?;
+        let id = candidate.reply_to_staged(parent_id, author, initials, text, date)?;
         candidate.flush_dirty_related_story_models()?;
         self.commit_staged_mutation(candidate);
         Ok(id)
@@ -1797,6 +1813,7 @@ impl Document {
         &mut self,
         parent_id: i32,
         author: &str,
+        initials: Option<&str>,
         text: &str,
         date: Option<&str>,
     ) -> Result<i32> {
@@ -1811,6 +1828,7 @@ impl Document {
                     .position(|item| item.id == parent_id)
             })
             .ok_or_else(|| Error::Other(format!("comment id {parent_id} does not exist")))?;
+        let id = self.anchor_reply_to_parent(parent_id)?;
         self.prepare_comment_authoring()?;
         let existing_parent_para_id = last_para_id(
             &self
@@ -1829,7 +1847,6 @@ impl Document {
         let (paragraphs, paragraph_ids, para_id) = comment_text_paragraphs(text, &mut occupied)?;
         self.ensure_comment_models()?;
         self.ensure_comment_relationships()?;
-        let id = self.identifiers.reserve_comment_id()?;
 
         let comments = self.comments.as_mut().expect("model was initialized");
         let parent = &mut comments.comments[parent_index];
@@ -1844,7 +1861,7 @@ impl Document {
             id,
             author: Some(author.to_owned()),
             date: date.map(str::to_owned),
-            initials: None,
+            initials: initials.map(str::to_owned),
             paragraphs,
             paragraph_ids,
             extra_attributes: Vec::new(),
@@ -1875,6 +1892,112 @@ impl Document {
         });
         self.comments_dirty = true;
         self.invalidate_layout();
+        Ok(id)
+    }
+
+    /// Reuse checked story endpoints, extending the reply through the parent's
+    /// reference run. Physical start adjacency is then enforced in that same
+    /// owner without moving or rewriting any intervening producer payload.
+    fn anchor_reply_to_parent(&mut self, parent_id: i32) -> Result<i32> {
+        let no_range = || Error::Other(format!("comment id {parent_id} has no range to reply to"));
+        self.flush_to_package()?;
+        let parent = self.comment_anchor(parent_id)?.ok_or_else(no_range)?;
+        let story = parent.start.location.story().clone();
+        let inventory = self.comment_source_inventory_at(&self.doc_part_name)?;
+        let mut counts = [0usize; 3];
+        for (part, markers) in &inventory {
+            for marker in markers.iter().filter(|marker| marker.id == parent_id) {
+                if part != story.part_name() {
+                    return Err(no_range());
+                }
+                counts[marker.family] += 1;
+            }
+        }
+        if counts != [1, 1, 1] || parent.end.location.story() != &story {
+            return Err(no_range());
+        }
+        let markers = inventory.get(story.part_name()).ok_or_else(no_range)?;
+        let parent_end = markers
+            .iter()
+            .find(|marker| marker.id == parent_id && marker.family == 1)
+            .ok_or_else(no_range)?;
+        let parent_reference = markers
+            .iter()
+            .find(|marker| marker.id == parent_id && marker.family == 2)
+            .ok_or_else(no_range)?;
+        if parent_end.span.end > parent_reference.span.start {
+            return Err(no_range());
+        }
+        let mut reference = None;
+        for (_, _, location, raw) in self.comment_story_range_paragraphs()? {
+            if location.story() != &story {
+                continue;
+            }
+            let paragraph = CT_P::from_xml_fragment(&raw)?;
+            for (index, path) in paragraph.accepted_run_paths().iter().enumerate() {
+                let run = paragraph.accepted_run(path).ok_or_else(no_range)?;
+                if !run.content.iter().any(|content| match content {
+                    RunContent::CommentReference { id, .. } => *id == parent_id,
+                    _ => false,
+                }) {
+                    continue;
+                }
+                if reference.is_some()
+                    || location != parent.end.location
+                    || index != parent.end.run_index
+                {
+                    return Err(no_range());
+                }
+                if !reply_reference_has_only_metadata(run, parent_id)? {
+                    return Err(no_range());
+                }
+                reference = Some(StoryRunPosition {
+                    location: location.clone(),
+                    run_index: index + 1,
+                });
+            }
+        }
+        let end = reference.ok_or_else(no_range)?;
+        let id = self.identifiers.reserve_comment_id()?;
+        self.anchor_story_range(
+            &StoryRunRange {
+                start: parent.start,
+                end,
+            },
+            RangeAnchor::Comment(id),
+            "comment reply",
+            false,
+        )?;
+        let refreshed = self
+            .stories()?
+            .into_iter()
+            .find(|candidate| {
+                candidate.kind() == story.kind()
+                    && candidate.part_name() == story.part_name()
+                    && candidate.owner_index() == story.owner_index()
+            })
+            .ok_or_else(no_range)?;
+        let (mut xml, owner) = self.story_owner_span(&refreshed)?;
+        let markers = comment_source_markers(&xml)?;
+        let selected = |selected_id| {
+            markers.iter().find(|marker| {
+                marker.id == selected_id && marker.family == 0 && owner.contains(&marker.span.start)
+            })
+        };
+        let parent_start = selected(parent_id).ok_or_else(no_range)?.span.clone();
+        let reply_start = selected(id).ok_or_else(no_range)?.span.clone();
+        if parent_start.end != reply_start.start {
+            let marker = xml[reply_start.clone()].to_vec();
+            let destination = parent_start.end
+                - if reply_start.end <= parent_start.start {
+                    reply_start.len()
+                } else {
+                    0
+                };
+            xml.drain(reply_start);
+            xml.splice(destination..destination, marker);
+            self.write_story_part(story.part_name(), xml)?;
+        }
         Ok(id)
     }
 
@@ -2202,6 +2325,79 @@ fn last_para_id(comment: &CT_Comment) -> Option<&str> {
 /// link naming any of them, as older producers wrote, still finds it.
 fn para_ids(comment: &CT_Comment) -> impl Iterator<Item = &str> {
     comment.paragraph_ids.iter().filter_map(Option::as_deref)
+}
+
+/// Prove the whole selected reference run adds no unrelated payload. The
+/// existing writer supplies retained namespace context for raw empty Word Text,
+/// which the preservation parser keeps as raw XML rather than typed content.
+fn reply_reference_has_only_metadata(run: &CT_R, parent_id: i32) -> rdocx_oxml::Result<bool> {
+    let mut remainder = run.clone();
+    remainder.remove_comment_references(&[parent_id]);
+    if !remainder.content.iter().all(|content| match content {
+        RunContent::Text(text) => text.text.is_empty(),
+        _ => false,
+    }) || !remainder.alt_drawings.is_empty()
+    {
+        return Ok(false);
+    }
+    if remainder.extra_xml.iter().enumerate().all(|(index, raw)| {
+        remainder
+            .extra_xml_positions
+            .get(index)
+            .is_some_and(|encoded| CT_R::raw_child_is_root_attributes(*encoded))
+            && rdocx_oxml::text::is_root_attribute_record(raw)
+    }) {
+        return Ok(true);
+    }
+    let mut writer = quick_xml::Writer::new(Vec::new());
+    let mut wrapper = BytesStart::new("rdocxReplyMetadata");
+    wrapper.push_attribute(("xmlns:w", rdocx_oxml::namespace::W_NS));
+    writer.write_event(Event::Start(wrapper))?;
+    remainder.to_xml(&mut writer)?;
+    writer.write_event(Event::End(BytesEnd::new("rdocxReplyMetadata")))?;
+    let xml = writer.into_inner();
+    let mut reader = NsReader::from_reader(xml.as_slice());
+    let mut buffer = Vec::new();
+    let mut depth = 0;
+    loop {
+        match reader.read_event_into(&mut buffer)? {
+            Event::Start(element) | Event::Empty(element) => {
+                let end = reader.buffer_position() as usize;
+                let empty = xml.get(end.saturating_sub(2)..end) == Some(b"/>");
+                let (namespace, local) = reader.resolver().resolve_element(element.name());
+                let word = matches!(namespace, ResolveResult::Bound(Namespace(uri)) if uri == rdocx_oxml::namespace::W_NS.as_bytes());
+                if depth == 1 && (!word || local.as_ref() != b"r") {
+                    return Ok(false);
+                }
+                if depth == 2 {
+                    if !word || !matches!(local.as_ref(), b"rPr" | b"t") {
+                        return Ok(false);
+                    }
+                    if !empty && local.as_ref() == b"rPr" {
+                        reader.read_to_end_into(element.name(), &mut Vec::new())?;
+                    } else if !empty {
+                        // Empty typed Text serializes as paired tags. Raw opaque
+                        // children inside Text are never treated as metadata.
+                        loop {
+                            match reader.read_event_into(&mut Vec::new())? {
+                                Event::End(end) if end.name() == element.name() => break,
+                                Event::Text(text) if text.is_empty() => {}
+                                Event::CData(text) if text.is_empty() => {}
+                                _ => return Ok(false),
+                            }
+                        }
+                    }
+                } else if !empty {
+                    depth += 1;
+                }
+            }
+            Event::End(_) => depth -= 1,
+            Event::Text(text) if text.iter().all(u8::is_ascii_whitespace) => {}
+            Event::Eof => return Ok(depth == 0),
+            _ => return Ok(false),
+        }
+        buffer.clear();
+    }
 }
 
 /// Build one comment paragraph per line of `text`, each with a fresh
@@ -4117,6 +4313,419 @@ mod tests {
                         .override_for("/word/commentsIds.xml"),
                     Some("application/vnd.ms-word.commentsIds+xml")
                 );
+            }
+        }
+    }
+
+    fn issue434_reply_markers(document: &mut Document, part: &str) -> Vec<(usize, i32)> {
+        document.flush_to_package().unwrap();
+        comment_source_markers(document.package.get_part(part).unwrap())
+            .unwrap()
+            .into_iter()
+            .map(|marker| (marker.family, marker.id))
+            .collect()
+    }
+
+    #[test]
+    fn issue434_reply_crossing_repeated_and_selected_parent() {
+        let mut document = Document::new();
+        document.add_paragraph("thirty");
+        let root = document
+            .add_comment_on_text("thirty", 0, "Ada", None, "root", None)
+            .unwrap();
+        let first = document.reply_to(root, "Ben", "one\ntwo").unwrap();
+        let part = document.doc_part_name.clone();
+        assert_eq!(
+            issue434_reply_markers(&mut document, &part),
+            [
+                (0, root),
+                (0, first),
+                (1, root),
+                (2, root),
+                (1, first),
+                (2, first)
+            ]
+        );
+        let sibling = document.reply_to(root, "Cy", "sibling").unwrap();
+        let child = document.reply_to(first, "Dee", "child").unwrap();
+        assert_eq!(
+            issue434_reply_markers(&mut document, &part),
+            [
+                (0, root),
+                (0, sibling),
+                (0, first),
+                (0, child),
+                (1, root),
+                (2, root),
+                (1, sibling),
+                (2, sibling),
+                (1, first),
+                (2, first),
+                (1, child),
+                (2, child)
+            ]
+        );
+        assert_eq!(
+            document.comment_anchor_text(child).unwrap().as_deref(),
+            Some("thirty")
+        );
+        assert!(document.remove_comment(child).unwrap());
+        assert!(document.resolve_comment(first, true).unwrap());
+        assert_eq!(
+            document
+                .comments()
+                .iter()
+                .find(|comment| comment.id() == root)
+                .unwrap()
+                .resolved(),
+            Some(true)
+        );
+        assert_eq!(
+            document
+                .comments()
+                .iter()
+                .find(|comment| comment.id() == first)
+                .unwrap()
+                .resolved(),
+            Some(false)
+        );
+        assert!(document.move_comment_to_text(first, "thirty", 0).is_err());
+        let mut reopened = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+        assert_eq!(
+            issue434_reply_markers(&mut reopened, &part),
+            [
+                (0, root),
+                (0, sibling),
+                (0, first),
+                (1, root),
+                (2, root),
+                (1, sibling),
+                (2, sibling),
+                (1, first),
+                (2, first)
+            ]
+        );
+    }
+
+    #[test]
+    fn issue434_reply_missing_parent_range_refuses_atomically() {
+        for point in [false, true] {
+            let mut seed = Document::new();
+            seed.add_paragraph("anchor");
+            let root = seed
+                .add_comment_on_text("anchor", 0, "Ada", None, "root", None)
+                .unwrap();
+            seed.flush_to_package().unwrap();
+            let main = seed.doc_part_name.clone();
+            let raw = String::from_utf8(seed.package.get_part(&main).unwrap().to_vec()).unwrap();
+            let markers = comment_source_markers(raw.as_bytes()).unwrap();
+            let mut updated = raw.into_bytes();
+            for marker in markers.into_iter().rev() {
+                if marker.family < 2 || !point {
+                    updated.drain(marker.span);
+                }
+            }
+            seed.package.set_part(&main, updated);
+            let mut zip = std::io::Cursor::new(Vec::new());
+            seed.package.write_to(&mut zip).unwrap();
+            let mut document = Document::from_bytes(&zip.into_inner()).unwrap();
+            let before = document.to_bytes().unwrap();
+            let error = document.reply_to(root, "Ben", "reply").unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("comment id {root} has no range to reply to")
+            );
+            assert_eq!(document.to_bytes().unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn issue434_reply_multiparagraph_and_header_owner() {
+        for header in [false, true] {
+            let mut document = Document::new();
+            document.add_paragraph("first");
+            document.add_paragraph("last");
+            if header {
+                document.set_header("header anchor");
+            }
+            let root = if header {
+                let location = document
+                    .story_range_paragraphs()
+                    .unwrap()
+                    .into_iter()
+                    .find(|(location, _)| location.story().kind() == crate::StoryKind::Header)
+                    .unwrap()
+                    .0;
+                document
+                    .add_story_comment(
+                        StoryRunRange {
+                            start: StoryRunPosition {
+                                location: location.clone(),
+                                run_index: 0,
+                            },
+                            end: StoryRunPosition {
+                                location,
+                                run_index: 1,
+                            },
+                        },
+                        "Ada",
+                        None,
+                        "root",
+                    )
+                    .unwrap()
+            } else {
+                document
+                    .add_comment(
+                        RunRange {
+                            start: RunPosition {
+                                body_index: 0,
+                                run_index: 0,
+                            },
+                            end: RunPosition {
+                                body_index: 1,
+                                run_index: 1,
+                            },
+                        },
+                        "Ada",
+                        None,
+                        "root",
+                    )
+                    .unwrap()
+            };
+            let part = document
+                .comment_anchor(root)
+                .unwrap()
+                .unwrap()
+                .start
+                .location
+                .story()
+                .part_name()
+                .to_owned();
+            let reply = document.reply_to(root, "Ben", "one\ntwo").unwrap();
+            assert_eq!(
+                issue434_reply_markers(&mut document, &part),
+                [
+                    (0, root),
+                    (0, reply),
+                    (1, root),
+                    (2, root),
+                    (1, reply),
+                    (2, reply)
+                ]
+            );
+            assert_eq!(
+                document.comment_anchor_text(root).unwrap(),
+                document.comment_anchor_text(reply).unwrap()
+            );
+            let reread = Document::from_bytes(&document.to_bytes().unwrap()).unwrap();
+            assert_eq!(
+                reread
+                    .comments()
+                    .iter()
+                    .find(|item| item.id() == reply)
+                    .unwrap()
+                    .parent_id(),
+                Some(root)
+            );
+        }
+    }
+
+    #[test]
+    fn issue434_reply_duplicate_and_split_story_refusals_preserve_state() {
+        for mode in 0..4 {
+            let mut seed = Document::new();
+            seed.add_paragraph("thirty");
+            seed.set_header("header");
+            let root = seed
+                .add_comment_on_text("thirty", 0, "Ada", None, "root", None)
+                .unwrap();
+            seed.flush_to_package().unwrap();
+            let main = seed.doc_part_name.clone();
+            let raw = seed.package.get_part(&main).unwrap().to_vec();
+            let markers = comment_source_markers(&raw).unwrap();
+            let chosen = &markers[if mode < 3 { mode } else { 1 }];
+            let fragment = raw[chosen.span.clone()].to_vec();
+            let mut main_xml = raw.clone();
+            if mode < 3 {
+                main_xml.splice(chosen.span.end..chosen.span.end, fragment);
+            } else {
+                main_xml.drain(chosen.span.clone());
+                let header = seed
+                    .package
+                    .parts
+                    .keys()
+                    .find(|name| name.contains("header") && name.ends_with(".xml"))
+                    .unwrap()
+                    .clone();
+                let mut source =
+                    String::from_utf8(seed.package.get_part(&header).unwrap().to_vec()).unwrap();
+                source = source.replace(
+                    "</w:p>",
+                    &format!("{}</w:p>", String::from_utf8(fragment).unwrap()),
+                );
+                seed.package.set_part(&header, source.into_bytes());
+            }
+            seed.package.set_part(&main, main_xml);
+            let mut zip = std::io::Cursor::new(Vec::new());
+            seed.package.write_to(&mut zip).unwrap();
+            let mut document = Document::from_bytes(&zip.into_inner()).unwrap();
+            let parts = document.package.parts.clone();
+            let comments = document.comments.clone();
+            let styles = std::sync::Arc::clone(&document.styles);
+            let body = document.document.clone();
+            let next = document.identifiers.clone().reserve_comment_id().unwrap();
+            assert!(
+                document.reply_to(root, "Ben", "reply").is_err(),
+                "mode={mode}"
+            );
+            assert_eq!(document.package.parts, parts);
+            assert_eq!(document.comments, comments);
+            assert_eq!(document.styles, styles);
+            assert_eq!(document.document, body);
+            assert_eq!(
+                document.identifiers.clone().reserve_comment_id().unwrap(),
+                next
+            );
+        }
+    }
+
+    #[test]
+    fn issue434_reply_cell_owner_and_aliased_producer_source() {
+        let mut seed = Document::new();
+        seed.add_table(1, 1)
+            .row(0)
+            .unwrap()
+            .cell(0)
+            .unwrap()
+            .set_text("cell text");
+        let location = seed
+            .story_range_paragraphs()
+            .unwrap()
+            .into_iter()
+            .find(|(location, _)| location.story().kind() == crate::StoryKind::TableCell)
+            .unwrap()
+            .0;
+        let root = seed
+            .add_story_comment(
+                StoryRunRange {
+                    start: StoryRunPosition {
+                        location: location.clone(),
+                        run_index: 0,
+                    },
+                    end: StoryRunPosition {
+                        location,
+                        run_index: 1,
+                    },
+                },
+                "Ada",
+                None,
+                "root",
+            )
+            .unwrap();
+        seed.flush_to_package().unwrap();
+        let part = seed.doc_part_name.clone();
+        let raw = String::from_utf8(seed.package.get_part(&part).unwrap().to_vec()).unwrap();
+        let raw = raw
+            .replace("w:", "alias:")
+            .replace("xmlns:w=", "xmlns:alias=")
+            .replace(
+                "</alias:p>",
+                "<keep:opaque xmlns:keep=\"urn:producer\" keep:value=\"unchanged\"/></alias:p>",
+            );
+        seed.package.set_part(&part, raw.into_bytes());
+        let mut zip = std::io::Cursor::new(Vec::new());
+        seed.package.write_to(&mut zip).unwrap();
+        let mut document = Document::from_bytes(&zip.into_inner()).unwrap();
+        let reply = document.reply_to(root, "Ben", "reply").unwrap();
+        assert_eq!(
+            document.comment_anchor_text(reply).unwrap().as_deref(),
+            Some("cell text")
+        );
+        document.flush_to_package().unwrap();
+        let source = String::from_utf8(document.package.get_part(&part).unwrap().to_vec()).unwrap();
+        assert!(
+            source.contains("<keep:opaque xmlns:keep=\"urn:producer\" keep:value=\"unchanged\"/>")
+        );
+        assert_eq!(
+            issue434_reply_markers(&mut document, &part),
+            [
+                (0, root),
+                (0, reply),
+                (1, root),
+                (2, root),
+                (1, reply),
+                (2, reply)
+            ]
+        );
+    }
+
+    #[test]
+    fn issue434_reply_empty_word_text_metadata_keeps_namespace_identity() {
+        for local_alias in [false, true] {
+            for kind in 0..3 {
+                let mut seed = Document::new();
+                seed.add_paragraph("alpha beta");
+                let root = seed
+                    .add_comment_on_text("alpha beta", 0, "Ada", None, "root", None)
+                    .unwrap();
+                seed.flush_to_package().unwrap();
+                let part = seed.doc_part_name.clone();
+                let mut xml = seed.package.get_part(&part).unwrap().to_vec();
+                let reference = comment_source_markers(&xml)
+                    .unwrap()
+                    .into_iter()
+                    .find(|marker| marker.family == 2)
+                    .unwrap()
+                    .empty_run
+                    .unwrap();
+                let suffix = match kind {
+                    0 => "<d:t/>",
+                    1 => "<d:t></d:t>",
+                    _ => {
+                        if local_alias {
+                            "<m:t/>"
+                        } else {
+                            "<meta:t/>"
+                        }
+                    }
+                };
+                let source = if local_alias {
+                    format!(
+                        r#"<w:r xmlns:d="{}" xmlns:m="urn:producer" m:run="keep"><w:rPr><w:b/></w:rPr><d:commentReference d:id="{root}" m:reference="keep"/>{suffix}</w:r>"#,
+                        rdocx_oxml::namespace::W_NS
+                    )
+                } else {
+                    format!(
+                        r#"<w:r meta:run="keep"><w:rPr><w:b/></w:rPr><d:commentReference d:id="{root}" meta:reference="keep"/>{suffix}</w:r>"#
+                    )
+                };
+                xml.splice(reference, source.bytes());
+                if !local_alias {
+                    xml = String::from_utf8(xml)
+                        .unwrap()
+                        .replace("w:", "d:")
+                        .replace("xmlns:w=", "xmlns:d=")
+                        .replace("<d:document ", "<d:document xmlns:meta=\"urn:producer\" ")
+                        .into_bytes();
+                }
+                seed.package.set_part(&part, xml);
+                let mut zip = std::io::Cursor::new(Vec::new());
+                seed.package.write_to(&mut zip).unwrap();
+                let mut document = Document::from_bytes(&zip.into_inner()).unwrap();
+                let before = document.to_bytes().unwrap();
+                let result = document.reply_to(root, "Ben", "reply");
+                if local_alias || kind == 2 {
+                    // The unchanged namespace transport already refuses this
+                    // local-run alias form on the archived predecessor.
+                    assert!(result.is_err());
+                    assert_eq!(document.to_bytes().unwrap(), before);
+                } else {
+                    let reply = result.unwrap();
+                    assert_eq!(
+                        document.comment_anchor_text(reply).unwrap().as_deref(),
+                        Some("alpha beta")
+                    );
+                }
             }
         }
     }

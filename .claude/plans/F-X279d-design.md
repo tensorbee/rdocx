@@ -248,20 +248,21 @@ A self-hash or historical Word version cannot satisfy the final native gate.
 
 ## Implementation checklist
 
-- [ ] Independent split review, Root adoption/approval and clean normal claim.
-- [ ] Actual baseline authoring/anchor seam revalidated at claim, lease confirmed.
-- [ ] Batched RED/GREEN for complete A1 authoring/initials and refusal matrix.
-- [ ] Existing C2 neighbor and unrelated marker/opaque behavior preserved.
-- [ ] Fresh Python, CLI and lifecycle/held-state controls with source custody.
-- [ ] Narrow HLD changes, independent microscope and scoped handoff.
+- [x] Independent split review, Root adoption/approval and clean normal claim.
+- [x] Actual baseline authoring/anchor seam revalidated at claim, lease confirmed.
+- [x] Batched RED/GREEN for complete A1 authoring/initials and refusal matrix.
+- [x] Existing C2 neighbor and unrelated marker/opaque behavior preserved.
+- [x] Fresh Python, CLI and lifecycle/held-state controls with source custody.
+- [x] Narrow HLD changes, independent microscope and scoped handoff.
 - [ ] Serial integration and final native/installed/schema/hash/union riders.
 
 ## Open questions
 
-No new product choice is proposed. Technical split adoption and source lease
-await Root's independent review. If the baseline authoring helpers prove
-insufficient, report the concrete dependency before expanding scope. This draft
-is not approved, claimed, implemented, provider-complete or a review-cap reset.
+No new product choice remains. Root approved and clean-claimed the authoring
+split. Local implementation, scoped evidence and independent pass2 are complete.
+The plan stays approved and the feature stays in-progress until actual final
+integrated acceptance. Historical draft/proposed text above is preparation
+lineage and does not override the operative adoption. No review cap is reset.
 
 ## D1 projectable reference endpoint clarification
 

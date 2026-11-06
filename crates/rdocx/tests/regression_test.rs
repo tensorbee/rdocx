@@ -21233,6 +21233,38 @@ fn run_ranges_reject_reverse_missing_and_nonparagraph_positions() {
 }
 
 #[test]
+fn issue434_reply_range_and_initials() {
+    for initials in [None, Some(""), Some("B")] {
+        let mut document = Document::new();
+        document.add_paragraph("thirty");
+        let root = document
+            .add_comment_on_text("thirty", 0, "Ada", None, "root", None)
+            .unwrap();
+        let reply = document
+            .reply_to_with_initials(
+                root,
+                "Ben",
+                initials,
+                "reply\nline",
+                Some("2026-09-29T10:45:00Z"),
+            )
+            .unwrap();
+        let bytes = document.to_bytes().unwrap();
+        let reread = Document::from_bytes(&bytes).unwrap();
+        let comments = reread.comments();
+        let item = comments.iter().find(|item| item.id() == reply).unwrap();
+        assert_eq!(item.initials(), initials);
+        assert_eq!(item.date(), Some("2026-09-29T10:45:00Z"));
+        assert_eq!(item.parent_id(), Some(root));
+        assert_eq!(
+            reread.comment_anchor_text(reply).unwrap().as_deref(),
+            Some("thirty")
+        );
+        assert_eq!(item.text(), "reply\nline");
+    }
+}
+
+#[test]
 fn a_ranged_comment_reply_and_resolution_keep_one_intact_thread() {
     let mut document = Document::new();
     let mut paragraph = document.add_paragraph("");
@@ -61557,8 +61589,11 @@ fn comment_anchor_point_orphan_and_reply_states_remain_distinct() {
         )
         .unwrap();
     let reply = document.reply_to(root, "Ben", "reply").unwrap();
-    assert_eq!(document.comment_anchor(reply).unwrap(), None);
-    assert_eq!(document.comment_anchor_text(reply).unwrap(), None);
+    assert!(document.comment_anchor(reply).unwrap().is_some());
+    assert_eq!(
+        document.comment_anchor_text(reply).unwrap().as_deref(),
+        Some("root")
+    );
     let bytes = document.to_bytes().unwrap();
     for point in [true, false] {
         let mut package = oxml_opc::OpcPackage::from_reader(std::io::Cursor::new(&bytes)).unwrap();

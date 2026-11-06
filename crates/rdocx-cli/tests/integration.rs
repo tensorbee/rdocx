@@ -3740,6 +3740,71 @@ fn comment_anchor_selects_second_occurrence_and_reopens() {
 }
 
 #[test]
+fn issue434_reply_range_and_initials() {
+    let temp = TempWorkspace::new("issue434-reply");
+    let input = temp.path.join("input.docx");
+    let mut seed = Document::new();
+    seed.add_paragraph("thirty");
+    let root = seed
+        .add_comment_on_text("thirty", 0, "Ada", None, "root", None)
+        .unwrap();
+    seed.save(&input).unwrap();
+    for (label, initials) in [("omitted", None), ("empty", Some("")), ("value", Some("B"))] {
+        let output = temp.path.join(format!("{label}.docx"));
+        let parent_id = root.to_string();
+        let mut args = vec![
+            "comment",
+            "reply",
+            path_text(&input),
+            "--id",
+            &parent_id,
+            "--author",
+            "Ben",
+            "--text",
+            "reply",
+            "--output",
+            path_text(&output),
+            "--json",
+        ];
+        if let Some(value) = initials {
+            args.extend(["--initials", value]);
+        }
+        let actual = cli(&args);
+        assert_success(&actual, "reply initials");
+        let reread = Document::open(&output).unwrap();
+        let comments = reread.comments();
+        let reply = comments
+            .iter()
+            .find(|item| item.parent_id() == Some(root))
+            .unwrap();
+        assert_eq!(reply.initials(), initials);
+        assert_eq!(
+            reread.comment_anchor_text(reply.id()).unwrap().as_deref(),
+            Some("thirty")
+        );
+        let record: Value = serde_json::from_slice(&actual.stdout).unwrap();
+        assert_eq!(record["action"], "reply");
+    }
+    let output = temp.path.join("invalid.docx");
+    fs::write(&output, b"unchanged").unwrap();
+    let actual = cli(&[
+        "comment",
+        "reply",
+        path_text(&input),
+        "--id",
+        "999",
+        "--author",
+        "Ben",
+        "--text",
+        "reply",
+        "--output",
+        path_text(&output),
+    ]);
+    assert_eq!(actual.status.code(), Some(1));
+    assert_eq!(fs::read(output).unwrap(), b"unchanged");
+}
+
+#[test]
 fn comment_add_and_reply_write_the_given_rfc3339_date() {
     const ADDED: &str = "2026-09-29T08:30:00Z";
     const REPLIED: &str = "2026-09-29T10:45:00+02:00";

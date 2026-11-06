@@ -2425,6 +2425,16 @@ bytes and revisions. `rdocx comment move <file> <id> --text <anchor>
 --occurrence <n>` uses the existing required output, JSON and atomic save
 conventions. Unknown ids, replies, stale destinations and unsupported source
 ownership produce checked errors.
+Native `reply_to_with_initials(parent_id, author, initials, text, date)` adds
+optional initials without changing existing reply signatures. Python
+`reply_to(parent_id, *, author, text, date=None, initials=None)` and CLI
+`comment reply --initials` expose the same omission, empty and nonempty values.
+A reply writes its own crossing range immediately after the selected parent
+start and through its reference run. Known parents without a projectable
+range/reference refuse. Failures preserve held views and revision, while
+successful publication advances once and stales held views. Imported point,
+orphan and rangeless replies retain their saved shape.
+
 The Python `add_comment` and `reply_to` methods expose the same value as the
 optional `date` keyword, and `rdocx comment add` and `rdocx comment reply` as
 the optional `--date` flag. Omission writes no date and remains deterministic.

@@ -16743,3 +16743,158 @@ def test_issue434_comment_namespace_refusal_preserves_held_views(destination, pr
     assert document.to_bytes() == before
     assert held.text == run.text == "anchor"
     assert len(document.comments) == 1
+
+
+@pytest.mark.parametrize("initials", [None, "", "B"])
+def test_issue434_reply_range_and_initials(initials):
+    import rdocx
+    import inspect
+    import xml.etree.ElementTree as ET
+
+    document=rdocx.Document()
+    document.add_paragraph("thirty")
+    root=document.add_comment_on_text("thirty",author="Ada",text="root")
+    held=document.paragraphs[0]
+    signature=inspect.signature(document.reply_to)
+    assert signature.parameters["initials"].default is None
+    assert signature.parameters["date"].default is None
+    reply=document.reply_to(root,author="Ben",text="one\ntwo",initials=initials,date="2026-09-29T10:45:00Z")
+    with pytest.raises(rdocx.StaleElementError):
+        _=held.text
+    comments={comment.id:comment for comment in document.comments}
+    assert comments[reply].initials==initials
+    assert comments[reply].date=="2026-09-29T10:45:00Z"
+    assert comments[reply].anchor_text=="thirty"
+    assert comments[reply].parent_id==root
+    with zipfile.ZipFile(io.BytesIO(document.to_bytes())) as package:
+        w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        body=ET.fromstring(package.read("word/document.xml"))
+        markers=[(item.tag.rsplit("}",1)[-1],int(item.get(f"{{{w}}}id"))) for item in body.iter() if item.tag in [f"{{{w}}}commentRangeStart",f"{{{w}}}commentRangeEnd",f"{{{w}}}commentReference"]]
+        assert markers==[("commentRangeStart",root),("commentRangeStart",reply),("commentRangeEnd",root),("commentReference",root),("commentRangeEnd",reply),("commentReference",reply)]
+    reopened=rdocx.Document.from_bytes(document.to_bytes())
+    assert reopened.comments[-1].anchor_text=="thirty"
+    assert reopened.remove_comment(reply)
+    assert len(reopened.comments)==1 and reopened.comments[0].anchor_text=="thirty"
+
+
+@pytest.mark.parametrize("kwargs", [{"initials":"bad\x00"},{"text":"bad\x00"},{"author":"bad\x00"},{"date":"yesterday"},{"parent_id":999}])
+def test_issue434_reply_refusal_preserves_bytes_and_held_views(kwargs):
+    import rdocx
+    document=rdocx.Document();document.add_paragraph("thirty")
+    root=document.add_comment_on_text("thirty",author="Ada",text="root")
+    held=document.paragraphs[0];run=held.runs[0];before=document.to_bytes()
+    arguments={"parent_id":root,"author":"Ben","text":"reply"};arguments.update(kwargs)
+    with pytest.raises(rdocx.RdocxError):
+        document.reply_to(**arguments)
+    assert document.to_bytes()==before
+    assert held.text==run.text=="thirty"
+
+
+@pytest.mark.parametrize("point", [False,True])
+def test_issue434_reply_missing_range_keeps_import_and_held_views(point):
+    import rdocx
+    import xml.etree.ElementTree as ET
+    document=rdocx.Document();document.add_paragraph("thirty")
+    root=document.add_comment_on_text("thirty",author="Ada",text="root")
+    w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    def remove_pair(raw):
+        body=ET.fromstring(raw)
+        for parent in body.iter():
+            for child in list(parent):
+                if child.tag in [f"{{{w}}}commentRangeStart",f"{{{w}}}commentRangeEnd"] or (not point and child.tag==f"{{{w}}}commentReference"):
+                    parent.remove(child)
+        return ET.tostring(body)
+    document=_fx261_replace_part(document,"word/document.xml",remove_pair)
+    held=document.paragraphs[0];run=held.runs[0];before=document.to_bytes()
+    with pytest.raises(rdocx.RdocxError,match=f"comment id {root} has no range to reply to"):
+        document.reply_to(root,author="Ben",text="reply",initials="B")
+    assert document.to_bytes()==before
+    assert held.text==run.text=="thirty"
+    assert document.comments[0].anchor is None
+
+
+@pytest.mark.parametrize("table", [False,True])
+def test_issue434_reply_supported_block_control_and_cell_owner(table):
+    import rdocx
+    import xml.etree.ElementTree as ET
+    document=rdocx.Document()
+    if table:
+        document.add_table(1,1).cell(0,0).text="thirty"
+    else:
+        document.add_paragraph("thirty")
+    root=document.add_comment_on_text("thirty",author="Ada",text="root")
+    w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    def wrap_owner(raw):
+        part=ET.fromstring(raw);body=part.find(f"{{{w}}}body")
+        selected=next(child for child in body if child.tag==f"{{{w}}}{'tbl' if table else 'p'}")
+        position=list(body).index(selected);body.remove(selected)
+        wrapper=ET.Element(f"{{{w}}}sdt");content=ET.SubElement(wrapper,f"{{{w}}}sdtContent");content.append(selected)
+        body.insert(position,wrapper)
+        return ET.tostring(part)
+    document=_fx261_replace_part(document,"word/document.xml",wrap_owner)
+    reply=document.reply_to(root,author="Ben",text="reply",initials="B")
+    comments={item.id:item for item in document.comments}
+    assert comments[reply].anchor_text==comments[root].anchor_text=="thirty"
+    assert comments[reply].parent_id==root
+    reread=rdocx.Document.from_bytes(document.to_bytes())
+    assert reread.comments[-1].anchor_text=="thirty"
+
+
+@pytest.mark.parametrize("shape", ["early", "suffix", "gap", "opaque"])
+def test_issue434_reply_reference_admission_refuses_without_changing_import(shape):
+    import rdocx
+    import xml.etree.ElementTree as ET
+    document=rdocx.Document();paragraph=document.add_paragraph("")
+    paragraph.add_run("alpha ");paragraph.add_run("beta")
+    root=document.add_comment_on_text("alpha beta",author="Ada",text="root")
+    w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    def malformed_reference(raw):
+        part=ET.fromstring(raw);paragraph=part.find(f".//{{{w}}}p")
+        reference=next(child for child in paragraph if child.find(f"{{{w}}}commentReference") is not None)
+        if shape=="early":
+            beta=next(child for child in paragraph if any(item.text=="beta" for item in child.iter(f"{{{w}}}t")))
+            paragraph.remove(reference);paragraph.insert(list(paragraph).index(beta),reference)
+        elif shape=="suffix":
+            ET.SubElement(reference,f"{{{w}}}t").text="unrelated"
+        elif shape=="gap":
+            gap=ET.Element(f"{{{w}}}r");ET.SubElement(gap,f"{{{w}}}t").text="unrelated"
+            paragraph.insert(list(paragraph).index(reference),gap)
+        else:
+            ET.SubElement(reference,"{urn:producer}opaque").text="kept"
+        return ET.tostring(part)
+    document=_fx261_replace_part(document,"word/document.xml",malformed_reference)
+    assert document.comments[0].anchor_text=="alpha beta"
+    held=document.paragraphs[0];before=document.to_bytes()
+    with pytest.raises(rdocx.RdocxError,match=f"comment id {root} has no range to reply to"):
+        document.reply_to(root,author="Ben",text="reply",initials="B")
+    assert document.to_bytes()==before
+    assert held.text==document.paragraphs[0].text
+    assert len(document.comments)==1
+
+
+@pytest.mark.parametrize("empty_text", [False,True])
+def test_issue434_reply_reference_admission_preserves_formatted_alias_and_metadata(empty_text):
+    import rdocx
+    import xml.etree.ElementTree as ET
+    document=rdocx.Document();document.add_paragraph("alpha beta")
+    root=document.add_comment_on_text("alpha beta",author="Ada",text="root")
+    w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    def formatted_reference(raw):
+        part=ET.fromstring(raw);paragraph=part.find(f".//{{{w}}}p")
+        reference=next(child for child in paragraph if child.find(f"{{{w}}}commentReference") is not None)
+        reference.set("{urn:producer}run","keep")
+        reference.find(f"{{{w}}}commentReference").set("{urn:producer}reference","keep")
+        properties=ET.Element(f"{{{w}}}rPr");ET.SubElement(properties,f"{{{w}}}b")
+        reference.insert(0,properties)
+        if empty_text:
+            ET.SubElement(reference,f"{{{w}}}t")
+        return ET.tostring(part)
+    document=_fx261_replace_part(document,"word/document.xml",formatted_reference)
+    reply=document.reply_to(root,author="Ben",text="reply",initials="B")
+    assert document.comments[-1].anchor_text=="alpha beta"
+    with zipfile.ZipFile(io.BytesIO(document.to_bytes())) as package:
+        part=ET.fromstring(package.read("word/document.xml"))
+        original=next(item for item in part.iter(f"{{{w}}}r") if item.get("{urn:producer}run")=="keep")
+        assert original.find(f"{{{w}}}rPr/{{{w}}}b") is not None
+        assert original.find(f"{{{w}}}commentReference").get("{urn:producer}reference")=="keep"
+    assert rdocx.Document.from_bytes(document.to_bytes()).comments[-1].id==reply

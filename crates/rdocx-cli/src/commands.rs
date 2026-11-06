@@ -1712,17 +1712,19 @@ pub fn comment_move(
 }
 
 /// Add one reply and publish the complete mutated document atomically.
+#[allow(clippy::too_many_arguments)]
 pub fn comment_reply(
     file: &Path,
     parent_id: i32,
     author: &str,
+    initials: Option<&str>,
     text: &str,
     date: Option<&str>,
     output: &Path,
     json_output: bool,
 ) -> Result<()> {
     let mut doc = Document::open(file)?;
-    let id = doc.reply_to_with_date(parent_id, author, text, date)?;
+    let id = doc.reply_to_with_initials(parent_id, author, initials, text, date)?;
     publish_document(&mut doc, output)?;
     mutation_record(
         json_output,

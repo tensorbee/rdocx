@@ -573,6 +573,9 @@ enum CommentCommand {
         /// Reply text, one paragraph per line
         #[arg(long)]
         text: String,
+        /// Optional reply author initials
+        #[arg(long)]
+        initials: Option<String>,
         /// RFC 3339 reply timestamp, omitted from the reply when absent
         #[arg(long)]
         date: Option<String>,
@@ -990,9 +993,19 @@ fn run_cli() {
                 author,
                 text,
                 date,
+                initials,
                 output,
                 json,
-            } => commands::comment_reply(&file, id, &author, &text, date.as_deref(), &output, json),
+            } => commands::comment_reply(
+                &file,
+                id,
+                &author,
+                initials.as_deref(),
+                &text,
+                date.as_deref(),
+                &output,
+                json,
+            ),
             CommentCommand::Resolve {
                 file,
                 id,

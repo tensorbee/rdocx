@@ -967,7 +967,15 @@ the document-wide even-and-odd setting.
 Comment deletion uses namespace-qualified raw source markers across every
 relationship-resolved Word story, including preserved wrappers and revisions.
 The same inventory validates orphan roots without interpreting accepted-view
-ranges. Point references are valid and linked replies need no separate anchor.
+ranges. Point references and imported linked replies without anchors remain
+valid. Newly authored replies require a unique projectable parent range and
+reference in one story. Their start immediately follows its start, and their
+end plus separate reference follow its reference run. The crossing topology
+retains parent content and references, including multi-paragraph ranges.
+Ambiguous or missing parent anchors refuse before publication. The reference
+run must follow the parent end at the same checked boundary. Formatting, retained
+root attributes and empty text remain supported. Unrelated text, fields, drawings
+or opaque payload in the reference run refuse rather than enlarge the reply.
 Deletion of a demonstrably undefined marker follows the existing editing
 lifecycle because there is no definition to orphan. Absence is proved from
 qualified raw definition entries at the actual relationship target. Missing

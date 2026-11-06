@@ -2532,7 +2532,12 @@ is the strict collect wrapper over the same body, so one such error fails the
 whole map. Document-wide inventory and ownership failures still fail both
 calls. A known
 orphan returns no range or text, and a reference-only point returns no paired
-range with empty text. Replies do not inherit a fabricated parent range.
+range with empty text. Imported replies without anchors retain that shape.
+Authored replies require a projectable parent start/end/reference in one story.
+Their start immediately follows the selected parent start, and their end and
+separate reference follow its reference run, preserving crossing order.
+Multi-paragraph ranges keep their actual endpoint owners. Missing or ambiguous
+parent anchors refuse atomically rather than fabricating a range.
 Unknown identities and malformed, ambiguous or unprojectable selected sources
 return errors. Listing validates all owned definitions and companions, while
 raw marker ids proven absent from qualified definitions do not invent records
@@ -2584,6 +2589,11 @@ ids never join unrelated review parts. Imported retired section parts stay in
 the package. Their qualified markers are removed only after every modeled,
 inherited and proved opaque physical use disappears. Unknown incoming use
 refuses. Glossary raw edits refresh the typed model before a later flush.
+
+The additive `reply_to_with_initials` owns optional initials and date. The
+legacy reply methods delegate with absent initials. Empty initials remain an
+explicit empty attribute, while omission writes no attribute. Reply authoring
+shares the staged comment path and existing thread-root lifecycle.
 
 The additive `add_comment_with_date` and `reply_to_with_date` operations own
 validated optional timestamps. The original operations delegate with no date.
