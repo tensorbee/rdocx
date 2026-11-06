@@ -6474,3 +6474,154 @@ Same-operation caller pairing remains an explicit responsibility, as with the
 existing returned-model writers and the deferred pairing assessment. Extend the external compile inventory after
 source closure. This is functional producer closure, not completion or a
 waiver of deferred assessment and final riders.
+
+## Scoped revision installation and comments carrier closure
+
+Root technically approves the following additive closure of the existing C1
+consumer map. The signatures are unreleased doc-hidden Rust bridges. No budget,
+quota, input baseline, Python/CLI method or public context type is added. This
+supersedes earlier carrier totals only. The final inventory becomes46carrier
+names and7borrowed accessors. All existing42signatures remain unchanged.
+Implementation, external caller compilation, HLD reconciliation and every
+existing provider and final gate remain required. Approval of these contracts
+is not implementation completion and does not reset an exhausted peer cycle.
+
+### Actual prepared-run installer
+
+Native prepare_current_field_models currently installs a prepared run through
+the ordinary CT_P setter. Its Revision path creates local Work and discards
+returned XML correspondence. Existing prepare_template_field methods only
+return Fields and cannot own the containing run installation. Add:
+
+```rust,ignore
+pub fn install_template_prepared_fields(
+    &mut self,
+    paragraph: &mut CT_P,
+    path: &AcceptedRunPath,
+    fields: Vec<(usize, Field)>,
+    frozen: Option<&'a CT_P>,
+) -> Result<bool>;
+```
+
+The operation owns the actual current-run clone and Field-slot substitutions.
+Validate the selected path, unique existing Field slots, actual same-operation
+prepared facts and initial frozen paragraph membership before installing.
+Reuse the existing checked private accepted-run installer with the shared Work
+and emission context. Preserve the Native semantic-equality no-op decision and
+per-Field preflight/preparation order. Do not accept an arbitrary replacement
+run as evidence that its ordinary Text was cloned from the current run.
+
+The actual successful Revision factory may retain a private, numeric
+raw-coordinate and paragraph-read companion anchored weakly to the existing
+FieldOriginRegistry. This is an actual owner handback, not a global address
+catalog or a new input source. Stage it until the existing constructor succeeds.
+It contains no borrowed model, Source or Work reference. A dead or foreign
+registry supplies no authority. Clone forwarding follows the actual raw and
+paragraph clone, including Arc::make_mut before a scoped edit. Ordinary changes
+to raw or payload state invalidate the companion. Metadata-only source-ID
+rebinding must retain the actual successful constructor correspondence.
+
+Scoped refresh retains the full mapped paragraph writer result, combines the
+actual old root prefix and suffix with that produced body and feeds the same
+existing Revision factory with produced WordFieldInput and initial_delivery
+false. Materialize needed numeric publication coverage before old collectors
+disappear. Forward the actual fresh Field maps and facts through the existing
+registry-aware retain_ordered_field_source_identities_in handoff before source
+identity COW. Commit the updated revision and companion only after the same
+factory succeeds. Do not add another parser or normalize under a local Work.
+
+Initial clone lookup may remove its blanket Revision exclusion only once this
+installer and actual registry-aware handoff exist. Keep the prepared-state and
+exact replaced owner/path/slot exclusions. Untouched sibling slots after refresh
+rely on the existing validated accepted-path/content-slot relation, not equal
+text or a guessed later ordinal. Replaced slots never reacquire initial roles.
+Changed revision branches use their own actual returned companions. Unchanged
+branches keep their actual initial clone pairs and must not lose Word input
+because a different revision was changed.
+
+The decisive local control prepares two distinct Field runs inside one initial
+insertion with ordinary A&B Text. The first install forces refresh, the second
+still uses the same operation and its actual untouched slot relation, both
+changes survive and the next charged Text read succeeds. Include same-run
+multiple Field slots, a nested revision, semantic no-op retention, a repeated
+query of an already installed slot, ordinary mutation invalidation and foreign
+or dead companion refusal. Preserve exact error order and held input on failure.
+These are functional controls, not a replacement for deferred deeper checks.
+
+### Comments part reader and substantive writers
+
+The dirty comments flush and its later refresh currently use ordinary
+serialization and parsing. Paragraph serialization alone cannot preserve the
+comments headers, paragraph IDs, opaque owner order or whole-part factory
+handoff. Add these three operations on the existing ScopedWordOperation:
+
+```rust,ignore
+pub fn source_model_comments(
+    &mut self,
+    comments: &CT_Comments,
+    text_origins: &[(&CT_Text, &'a CT_Text)],
+    field_origins: &[(&Field, &'a Field)],
+    raw_origins: &[(&[u8], &'a [u8])],
+) -> Result<ScopedWordSource>;
+
+pub fn source_comments(
+    &mut self,
+    source: &ScopedWordSource,
+) -> Result<CT_Comments>;
+
+pub fn source_model_comments_from_read(
+    &mut self,
+    comments: &CT_Comments,
+    source: &ScopedWordSource,
+) -> Result<ScopedWordSource>;
+```
+
+Share the existing substantive comments writer. Preserve its validation order,
+conditional canonical w/w14 declarations, retained attributes, emitted binding
+scope, root/comment extra_xml order, author/date/initials/id and the real
+paragraph_ids argument to each paragraph writer. The ordinary Vec writer and
+the scoped normalized writer are two actual consumers. Use that same writer
+with the shared operation and emission context, then the existing checked w14
+root declaration policy. Do not serialize ordinary paragraphs and wrap their
+strings into a newly qualified comments part.
+
+At the existing comments factory, collect actual comment-vector and paragraph-
+vector companions only on successful pushes. Preserve its part admission,
+namespace/EOF/error behavior and paragraph-ID alignment. Empty owners supply no
+invented Text. Capture root and per-comment opaque XML maps at their actual
+capture and push events too. Opaque maps only forward selected ranges and do
+not certify ordinary or Field semantics. Commit the companion only after the
+same whole factory succeeds. No additional parser qualifies an ordinary result.
+
+Native dirty flush supplies the actual current/frozen clone pairs, including
+root and comment opaque slots. Capture a private frozen comments-root handle
+at the existing staging clone producer and include its actual root/owner raw
+records in existing operation membership without activating them. Preserve the
+actual drawing-namespace preparation producer and its returned correspondence.
+After refresh, retain the Source next to its actual installed package Arc and
+use the returned-model writer for that paired model. Do not introduce a second
+Document cache or recover provenance by comparing serialized bytes.
+
+The initial scoped fragment loader and the comments branch of the existing
+story setter also use source_comments at their existing factory call. Thread
+the actual related comments Source through the private loader context. Do not
+parse ordinarily and call the scoped reader afterward. Initial frozen authoring
+uses the model writer, and derived imported comments use their actual successful
+reader handback. These are current distinct consumers, not future routes.
+
+Local controls compare complete ordinary/scoped comments bytes and live model
+content with zero/one/many comments, paragraph IDs, retained root/owner XML,
+Fields, an inline control and a revision. Exercise initial frozen authoring,
+actual imported-fragment read, dirty flush, refresh and subsequent emission,
+including the next charged visible Text consumer. Preserve opaque content and
+caller-held input on refusal. Schema, bindings and native Word checks retain
+their final integrated timing. No selected-comment emitter or mode flag is added.
+
+### Inventory and HLD adoption
+
+Extend the existing single external caller inventory from42to46methods before
+its final compilation. Keep its earlier versions as historical evidence.
+HLD impact remains exactly03-architecture.md for shared operation and reader/
+writer lifecycle,04-opc-and-packaging.md for comments parts and opaque/namespace
+preservation, and10-bindings-spec.md for hidden Rust carrier inventory. There is
+no Python or CLI method addition. All prior C1 and provider residuals remain.
