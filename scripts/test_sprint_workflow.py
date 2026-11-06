@@ -926,24 +926,25 @@ class SprintWorkflowTests(unittest.TestCase):
 
     def test_s96_release_notes_keep_exact_family_contribution_inventory(self) -> None:
         changelog = (workflow.REPO / "CHANGELOG.md").read_text()
-        for tag, issues, pulls in (
-            ("v0.17.0", {423, 424, 425, 426, 429}, {427, 428}),
-            ("rpptx-v0.15.0", {429}, set()),
+        for tag, issues, pulls, users in (
+            ("v0.17.0", {423, 424, 425, 426, 429, 430, 432, 433, 434, 435, 436, 437, 445},
+             {427, 428, 439, 440, 441, 442, 443, 444},
+             {"set2374", "hadim", "arthrod", "lawrenceakka"}),
+            ("rpptx-v0.15.0", {429, 431, 433, 435, 436, 437},
+             {438, 439, 440, 442, 443}, {"hadim", "arthrod"}),
         ):
             with self.subTest(tag=tag):
                 self.assertIn(f"## {tag}\n", changelog)
                 notes = workflow.render_release_notes(changelog, tag)
                 self.assertEqual({int(n) for n in re.findall(r"rdocx/issues/(\d+)", notes)}, issues)
                 self.assertEqual({int(n) for n in re.findall(r"rdocx/pull/(\d+)", notes)}, pulls)
-        word = workflow.render_release_notes(changelog, "v0.17.0")
-        credits = word.split("### Contributors\n", 1)[1]
-        self.assertIn("[@set2374](https://github.com/set2374)", credits)
-        self.assertIn("[@hadim](https://github.com/hadim)", credits)
-        self.assertIn("[@arthrod](https://github.com/arthrod)", credits)
-        for number in (423, 424, 425, 426, 429):
-            self.assertIn(f"/issues/{number})", credits)
-        for number in (427, 428):
-            self.assertIn(f"/pull/{number})", credits)
+                credits = notes.split("### Contributors\n", 1)[1]
+                for user in users:
+                    self.assertIn(f"[@{user}](https://github.com/{user})", credits)
+                for number in issues:
+                    self.assertIn(f"/issues/{number})", credits)
+                for number in pulls:
+                    self.assertIn(f"/pull/{number})", credits)
 
     def test_s954_release_notes_preserve_published_history(self) -> None:
         # Published S95.3 changelog suffix at a57be365, not new release content.
